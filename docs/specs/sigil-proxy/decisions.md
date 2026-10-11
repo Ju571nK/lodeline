@@ -106,4 +106,9 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   전달하지 않고 401로 거절한다. "client 인증 없음 = 시작 실패"는 non-loopback인데 TLS가 없는 경우처럼 bootstrap만으로 판정되는 경우에 적용한다(T-12).
 - state_dir의 `binding.json`이 손상되면 새 epoch로 덮지 않고 시작을 거부한다(손상 ≠ 손실). 운영자가 명시적으로 지운 뒤에만 새 epoch이며, 기존 spool은 삭제하지 않고 격리한다.
 - bootstrap 후보 키 추가: `tls_cert_file`·`tls_key_file`(non-loopback 리스너 TLS, 함께 설정). 기본 listen은 `127.0.0.1:8480`(후보).
+- host route 교차 거절 응답(2026-10-11, T-11 S1 리뷰): proxy 인증서·판정 불가 인증서·mTLS 신원 없는 요청이 host route에 오면
+  `{"error":"host_unknown"}`(404)로 답하고 `host_id`를 되돌려주지 않는다. 본문을 parse하기 전에 거절하므로 기존 host route의
+  미등록 응답(`host_id` 포함)과 본문이 다르다. 값 미echo를 우선한 의도적 차이다(control-plane §1.2 "미등록 principal과 같은 답"의 예외).
+- 서버 proxy 등록 목록 파일: 중복 proxy_id·중복 fingerprint·group/world 쓰기 권한·symlink는 부팅 오류. 파일이 없으면 `registry_init: true`일 때만 빈 목록으로 시작한다.
+  client CA 묶음에 proxy CA 외 CA가 없으면 부팅을 거부한다(host 전체 거절 방지).
 - 착수 순서: PR0 `sigil-proxy-api` DTO crate(#244) → T-10 `sigil-proxy` 골격(#245)과 T-11 S1 신원·등록(#246) 병렬.
