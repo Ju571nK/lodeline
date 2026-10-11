@@ -219,7 +219,7 @@ schema에 해당 상수가 없으므로 이 문서는 상수를 만들지 않으
 후보는 D-02/D-03/D-05의 사용자 결정·독립 리뷰·실기 검증 전에는 확정이 아니다.
 남은 항목은 각 문서의 [OPEN] 표기를 따른다(control-plane.md §9·§10,
 ledger-and-query.md L0, registry.md R0·R8).
-이 목록이 남아 있는 동안 P0 완료나 P1 production 경로 준비 완료라고 표시하지 않는다.
+P0는 2026-10-11 계약 수준에서 종료했다. 남은 [OPEN]의 담당 P1 작업은 [decisions.md "P0 종료"](../decisions.md) 잔여 목록을 따른다.
 
 ## T-00 반영: 저장과 baseline 경계
 

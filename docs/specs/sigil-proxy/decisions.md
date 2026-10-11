@@ -5,11 +5,11 @@
 | 항목 | 현재 결정 | 상태/남은 증거 |
 |---|---|---|
 | 구현 언어 | proxy backend는 Rust/Tokio; manager 기존 stack 유지 | 확정. dependency/MSRV 선택은 D-01에서 별도 검증 |
-| D-01 | **2026-10-10 구조 결정:** relay-first. 원문 bytes를 그대로 중계하고 관찰·정책용으로만 사본을 parse한다. 전달 경로에 SDK typed message를 쓰지 않는다(rmcp 0.16.0 측정: unknown field 유실, version allowlist 없음, version header 미전송, cancel 지연). P1 지원 revision은 잠정 2025-11-25(legacy) 하나. proxy는 rmcp에 의존하지 않으므로 proxy 때문에 MSRV를 바꾸지 않는다 | 부분 결정. 근거: [T-01 probe](../../research/sigil-proxy-t01-probe-2026-10-10.md) + 독립 리뷰(T-01-review). 미결: 프록시 경유 B1 재측정(P1 검증), codex 인증 run. 나머지(B1·M2·M3·M4·m5)는 아래 "D-01 후속 결정"에서 확정. 기존 workspace MSRV 불일치는 별건 #240 |
+| D-01 | **2026-10-10 구조 결정:** relay-first. 원문 bytes를 그대로 중계하고 관찰·정책용으로만 사본을 parse한다. 전달 경로에 SDK typed message를 쓰지 않는다(rmcp 0.16.0 측정: unknown field 유실, version allowlist 없음, version header 미전송, cancel 지연). P1 지원 revision은 잠정 2025-11-25(legacy) 하나. proxy는 rmcp에 의존하지 않으므로 proxy 때문에 MSRV를 바꾸지 않는다 | 부분 결정. 근거: [T-01 probe](../../research/sigil-proxy-t01-probe-2026-10-10.md) + 독립 리뷰(T-01-review). 미결: 프록시 경유 B1 재측정(P1 검증), codex 인증 run. 나머지(B1·M2·M3·M4·m5)는 아래 "D-01 후속 결정"에서 확정. 기존 workspace MSRV 불일치는 별건 #240. **P0 종료(2026-10-11)**: 잔여는 아래 "P0 종료" 절 |
 | D-02 | client/proxy/upstream/manager identity 분리. 기존 fleet read token으로 관리 불가. **2026-10-10 사용자 결정(추천안 전부 채택):** 아래 "D-02 결정" 절 | 계약 결정(control-plane.md). 구현·실기 검증은 P1. sigil-manager 변경 요청은 issue로만 |
-| D-03 | host event와 별도 proxy ledger; 원자적 수집·event-ID dedup. **2026-10-10: ingest 하위 계약 동결**(schema v0.3 envelope·payload, 전체 event dedup, epoch, 422/403/409/424 batch error items; 2026-10-10 개정: identity 불일치·미등록 proxy는 선검사 404 `proxy_unknown`, integrity gap 보고, startup 규칙). 계약 수준·fixture/model 증거만이며 ledger 구현 시험은 P1 | 부분 결정. 남은 항목: retention·dedup tombstone 기간(최대 offline 재시도 기간 대비), invocation projection/query DTO(out-of-order·start-only 규칙), cross-event semantic validation 규칙·시험, 인증 실패·unmatched cancel aggregate 계약, 관리·등록·config·heartbeat DTO |
+| D-03 | host event와 별도 proxy ledger; 원자적 수집·event-ID dedup. **2026-10-10: ingest 하위 계약 동결**(schema v0.3 envelope·payload, 전체 event dedup, epoch, 422/403/409/424 batch error items; 2026-10-10 개정: identity 불일치·미등록 proxy는 선검사 404 `proxy_unknown`, integrity gap 보고, startup 규칙). 계약 수준·fixture/model 증거만이며 ledger 구현 시험은 P1 | 부분 결정. 남은 항목: retention·dedup tombstone 기간(최대 offline 재시도 기간 대비), invocation projection/query DTO(out-of-order·start-only 규칙), cross-event semantic validation 규칙·시험, 인증 실패·unmatched cancel aggregate 계약, 관리·등록·config·heartbeat DTO. **P0 종료(2026-10-11)**: 잔여는 아래 "P0 종료" 절 |
 | D-04 | **2026-10-10 사용자 결정:** 첫 production 검증 대상은 Rocky Linux 9(RHEL 계열, SELinux enforcing, rpm 배포). 아키텍처별 결과는 별도 baseline으로 기록한다(현재 실기 VM은 aarch64). macOS arm64는 개발 환경 | 대상 OS 확정. validation.md의 limits/benchmark 목표는 초기 시험 기준이며 성능 보장 아님. Ubuntu 24.04 x86_64 권고안은 대체됨 |
-| D-05 | daemon HOME baseline 파일 공유 금지; proxy 소유 scope별 snapshot. **2026-10-10:** metadata_ref는 proxy가 per-proxy 키로 로컬 발급(HMAC, UUIDv8), scope key·fingerprint `sigil-tooldef-fp-v1`·offline 해석·sync 순서·retryable 424·registry 동일성(불변 필드)·local entry hash 검사 계약화 | 부분 결정. 남은 항목: registry entry DTO·schema, key rotation 운영과 이력 연결, re-baseline marker projection, inventory/drift event 계약. M2 사용자 결정(2025-06-18 추가 시 scope key의 protocol_version 값 증가) |
+| D-05 | daemon HOME baseline 파일 공유 금지; proxy 소유 scope별 snapshot. **2026-10-10:** metadata_ref는 proxy가 per-proxy 키로 로컬 발급(HMAC, UUIDv8), scope key·fingerprint `sigil-tooldef-fp-v1`·offline 해석·sync 순서·retryable 424·registry 동일성(불변 필드)·local entry hash 검사 계약화 | 부분 결정. 남은 항목: registry entry DTO·schema, key rotation 운영과 이력 연결, re-baseline marker projection, inventory/drift event 계약. M2 사용자 결정(2025-06-18 추가 시 scope key의 protocol_version 값 증가). **P0 종료(2026-10-11)**: 잔여는 아래 "P0 종료" 절 |
 | D-06/07 | 승인 흐름·step-up/OAuth | 계획대로 P3 이전 확정 |
 
 ## D-02 결정 (2026-10-10, 사용자 결정: 추천안 전부 채택)
@@ -51,7 +51,7 @@ T-01 리뷰(B1, M2–M4, m5) 후속 결정. 독립 리뷰(review-lead, 2026-10-1
 
 D-04의 수치는 [검증 계획](validation.md)을 단일 참조로 사용한다. 프로토콜별
 세션/요청 차이에 따라 D-01 결정 시 적용 항목을 조정하고 변경 근거를 기록한다.
-이 문서의 부분 결정만으로 production 경로 구현 gate를 통과했다고 해석하지 않는다.
+P0 종료와 잔여 항목은 아래 "P0 종료" 절을 따른다. 계약 종료는 구현·실기 검증 완료가 아니다.
 
 ## P1 기능 범위 (2026-10-10, W5 조사 + 사용자 결정)
 
@@ -71,11 +71,30 @@ D-04의 수치는 [검증 계획](validation.md)을 단일 참조로 사용한�
 
 계약 반영(Traffic·오류 표의 405, -32601 subscribe, batch 거절, DELETE 규칙, method 없는 응답 처리)은 contracts/README.md v0.4에 반영됨.
 
-## 다음 실행 단위
+## P0 종료 (2026-10-11, 사용자 결정)
 
-1. T-01 결과 기반으로 SDK 의존 여부와 Rust 최소 버전의 실제 빌드 대안을 비교한다.
-2. fixture revision과 지원 대상 revision을 일치시키고 실제 client 1종의 안전한 HTTP 왕복을 측정한다.
-3. T-02에서 등록·인증·route config·inventory·heartbeat·조회 DTO까지 완성한다.
-4. 독립 계약 리뷰로 D-01–05를 닫은 뒤 P1 crate/서비스 구현을 시작한다.
+plan.md P0 완료 조건(D-01–05와 P1 지원 표 문서화, fixture 재현)을 계약 수준에서 충족했다고 보고 P0를 종료한다.
+근거: P0 종료 점검(spec-auditor, 2026-10-11), support-matrix undecided 0행, fixture 14 tests 재실행 통과(2026-10-11),
+checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기 검증 완료가 아니다.
+남은 [OPEN]은 아래 담당 P1 작업 안에서 확정하고, 실측 항목은 P1 인수 증거로 남긴다.
 
-임시 fixture나 schema 테스트는 위 실제 client 및 production 검증을 대신하지 않는다.
+| 잔여 항목 | 구분 | 담당 |
+|---|---|---|
+| 프록시 경유 B1 재측정, 400 뒤 Claude 대체 동작 | 실측 | T-12 / T-16 |
+| codex 인증 run·cancel·tool call, Linux probe | 실측 | T-12 / T-16 |
+| listChanged 기능 저하, cancel 후 HTTP 종료에 대한 client 재시도 | 실측 | T-12 |
+| 헤더 누락·legacy 값 400의 감사 reason 상수, batch 거절 client 응답 형태, -32603 고정 메시지 | 세부 | T-12 |
+| proxy SAN 정확한 형태, CA 키 위치, lifecycle 경로 이름, disabled/retired HTTP status, `proxy_unknown` 메시지 문구 | 세부 | T-11 (S1/S2) |
+| 새 고정 오류 코드 확정(`invocation_owner_conflict`, `semantic_invalid`, `invalid_cursor`, `invalid_filter`), SV-1/SV-3/SV-5, gap 목록·status·inventory endpoint 이름 | 세부 | T-11 (S3–S5) |
+| 비밀·origin 변경 적용 방식(reload/restart), rate limit, TTL 수치 | 세부 | T-10 / T-11 |
+| registry O-2–O-6, R6 scoped content 조회와 `proxy.metadata` 권한 | 세부 | T-13 / T-15 |
+| ledger SQLite 트랜잭션·재시작 내구성·성능 | 실측 | T-11 (S4) / T-16 |
+| 성능 목표(validation.md), x86_64 baseline, SELinux enforcing 실행 | 실측 | T-16 |
+
+추가 결정(2026-10-11):
+- 운영자 CLI: 등록·비활성·재활성·폐기·config 변경·proxy 인증서 서명은 `sigil-server proxy …` 하위 명령(T-11),
+  downstream 토큰 생성과 verifier 출력은 `sigil-proxy` CLI(T-10)가 맡는다.
+- 패키징: rpm·systemd unit은 T-10(설치만, 자동 활성화 없음, 별도 state_dir). 전용 SELinux 도메인 `sigil_proxy_t`는
+  Rocky 9 enforcing 실기 검증 단계에서 작성하며 그 전에는 unconfined로 실행한다.
+- 서버 측 관리·수신 API는 계약대로 sigil-server 안 `proxy/` 모듈에 격리하고 설정이 없으면 비활성이다. proxy는 별도 프로세스다.
+- 착수 순서: PR0 `sigil-proxy-api` DTO crate(#244) → T-10 `sigil-proxy` 골격(#245)과 T-11 S1 신원·등록(#246) 병렬.
