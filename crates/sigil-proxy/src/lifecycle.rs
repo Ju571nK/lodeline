@@ -201,6 +201,9 @@ pub async fn run(b: &Bootstrap) -> anyhow::Result<()> {
     sig.wait().await;
 
     lc.set_run_state(RunState::Stopping)?;
+    // NOTE: Signal handlers stay installed during drain, so a second SIGTERM is
+    // swallowed and only SIGKILL ends the process. Fine under systemd
+    // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
     // No in-flight calls exist yet; T-12 passes its drain future here.
     let outcome = drain(
         Duration::from_secs(b.limits.shutdown_grace_secs),
