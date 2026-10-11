@@ -122,4 +122,6 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   verifier 파일 재적재가 실패하면 모든 관리 자격증명을 끈다(fail closed).
 - 운영자 CLI(`sigil-server proxy …`)는 실행 중인 서버의 관리 API를 mTLS(관리 caller cert)+bearer로 호출하는 client다. 등록 목록 파일을 직접 쓰지 않는다
   (감사 선기록·동시성 유지). bearer는 소유자 전용 파일에서 읽고 CLI 인자로 받지 않는다.
+- proxy 패키징(2026-10-11, #253 리뷰): proxy는 전용 system 사용자·그룹 `sigil-proxy`(전용 sysusers 파일)로 실행해 다른 sigil 데몬이 upstream 자격증명을 읽지 못하게 한다.
+  proxy 패키지는 빌드하되 relay(T-12)가 생기기 전까지 릴리스에 공개하지 않는다(`release.yml`의 `rm -f pkgs/sigil-proxy*`).
 - 착수 순서: PR0 `sigil-proxy-api` DTO crate(#244) → T-10 `sigil-proxy` 골격(#245)과 T-11 S1 신원·등록(#246) 병렬.

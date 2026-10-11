@@ -19,7 +19,22 @@
 | T-10 A–D | sonnet (coder, worktree, PR0 브랜치 기반) | `sigil-proxy` 골격·bootstrap·limits·state_dir·rpm/systemd | PX-001/013/016, AC-07/12/14 | `crates/sigil-proxy/**`, `packaging/` proxy 파일 | #245 |
 | T-11 S1 | sonnet (coder, worktree, PR0 브랜치 기반) | server proxy 신원·등록, 404 `proxy_unknown` 선검사 | PX-008/009, AC-04 | `crates/sigil-server/src/proxy/**` 외 배정 시 명시 | #246 |
 
-진행: P0-exit-audit completed(코딩 착수 차단 항목 없음, 문서 gate 문구만 남음 → P0 종료 문서 반영). P1-plan completed(PR0 → T-10 갈래 A와 T-11 S1 병렬 → S2–S5 순차; app.rs·config.rs는 한 작성자). fixture 14 tests orchestrator 재실행 통과. PR0 coder completed → 독립 리뷰 needs_changes(M-1 serde 오류의 값 echo, M-2 validate 비재귀, L-1–L-4) → fix → 재확인 **approve**(차등 298건·canary 18건) → PR #248. T-10 A–D(#245): coder → 리뷰 accept with fixes(M1 origin 정규화·http 정책, M2 fd 기반 파일 검사) → fix(공유 verifier를 sigil-proxy-api로) → 재확인 accept → PR #249(#248 위 stacked). T-11 S1(#246): coder → 보안 리뷰 approve-with-fixes(M1 판정 불가 issuer, M2 e2e 격리, M3 registry 로드) → fix → 재확인 approve(release 빌드에 test seeding 없음 확인) → PR #250(#248 위 stacked). T-10 E 패키징은 후속. 후속: `parse_entry_view`, ParseError 분류 marker 위조(T-11 S4), upload proxy_id 대조(server).
+진행: P0-exit-audit completed(코딩 착수 차단 항목 없음, 문서 gate 문구만 남음 → P0 종료 문서 반영). P1-plan completed(PR0 → T-10 갈래 A와 T-11 S1 병렬 → S2–S5 순차; app.rs·config.rs는 한 작성자). fixture 14 tests orchestrator 재실행 통과. PR0 coder completed → 독립 리뷰 needs_changes(M-1 serde 오류의 값 echo, M-2 validate 비재귀, L-1–L-4) → fix → 재확인 **approve**(차등 298건·canary 18건) → PR #248. T-10 A–D(#245): coder → 리뷰 accept with fixes(M1 origin 정규화·http 정책, M2 fd 기반 파일 검사) → fix(공유 verifier를 sigil-proxy-api로) → 재확인 accept → PR #249(#248 위 stacked). T-11 S1(#246): coder → 보안 리뷰 approve-with-fixes(M1 판정 불가 issuer, M2 e2e 격리, M3 registry 로드) → fix → 재확인 approve(release 빌드에 test seeding 없음 확인) → PR #250(#248 위 stacked). T-10 E 패키징(#245): coder → 리뷰 request changes(H1 CI 포트 상수 오류, H2 릴리스가 미완성 binary 공개) → fix(전용 `sigil-proxy` 사용자, 릴리스 제외) → 재확인 approve → PR #253 머지. T-11 S2a(#251): coder → 보안 리뷰 approve with changes(M1 fsync 중 registry 잠금, M2 승격 감사 트랜잭션 밖) → fix → 재확인 approve → PR #255 머지(Windows 빌드 import 수정 포함). 후속 이슈 #252(deb sysusers 공유 파일 충돌), #254(감사 체인 helper 공유).
+
+### 1회차 머지 결과 (2026-10-11)
+
+| PR | 작업 | 이슈 |
+|---|---|---|
+| #247 | P0 종료 문서 | — |
+| #248 | PR0 `sigil-proxy-api` | #244 |
+| #249 | T-10 A–D `sigil-proxy` 골격 | #245 |
+| #250 | T-11 S1 신원·등록·404 guard | #246 |
+| #253 | T-10 E 패키징(설치만, 비활성, 릴리스 제외) | #245 |
+| #255 | T-11 S2a 관리 인증·감사·lifecycle·운영자 CLI | #251 |
+
+남은 P1: T-11 S2b(CSR 서명), S3(config·status), S4(ledger·ingest), S5(projection·조회), T-12 relay, T-13, T-14, T-15(manager, sigil-manager#37), T-16.
+실기 미검증: Rocky 9 SELinux enforcing·systemd `is-enabled`(컨테이너에 systemctl 없음), x86_64 baseline.
+교훈: unix 전용 코드의 import도 `cfg(unix)`로 막는다(Windows CI 실패 2회). 후속: `parse_entry_view`, ParseError 분류 marker 위조(T-11 S4), upload proxy_id 대조(server).
 
 ## 2026-10-10 3회차 배정 (기준 `46cc990`, 브랜치 `docs/proxy-p0-round3`)
 
