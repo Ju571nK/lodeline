@@ -27,7 +27,6 @@ time = { workspace = true }
 uuid = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
-sha2 = "0.10"
 getrandom = "0.2"
 
 [target.'cfg(unix)'.dependencies]

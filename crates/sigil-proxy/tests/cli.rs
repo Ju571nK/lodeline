@@ -9,6 +9,16 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_sigil-proxy");
 
+/// Kills and reaps a spawned child on drop, so a failed assertion cannot leak it.
+struct Kill(std::process::Child);
+
+impl Drop for Kill {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn write(dir: &Path, name: &str, mode: u32) {
     let p = dir.join(name);
     std::fs::write(&p, "x").unwrap();
@@ -114,7 +124,7 @@ fn token_new_prints_token_once_and_verifier() {
         "token printed exactly once"
     );
     assert!(!String::from_utf8_lossy(&out.stderr).contains(token));
-    assert_eq!(ver, sigil_proxy::token::verifier(token));
+    assert_eq!(ver, sigil_proxy_api::verifier_for(token));
 
     let bad = Command::new(BIN)
         .args(["token", "new", "--principal", "bad name", "--config"])
@@ -129,13 +139,15 @@ fn token_new_prints_token_once_and_verifier() {
 #[test]
 fn run_lock_signal_and_health() {
     let (t, cfg) = fixture();
-    let mut child = Command::new(BIN)
-        .args(["run", "--config"])
-        .arg(&cfg)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = Kill(
+        Command::new(BIN)
+            .args(["run", "--config"])
+            .arg(&cfg)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     assert!(
         wait_for(|| status_json(t.path()).is_some_and(|s| s["run_state"] == "running")),
         "status never became running"
@@ -151,6 +163,10 @@ fn run_lock_signal_and_health() {
         .output()
         .unwrap();
     assert!(!second.status.success(), "second instance must fail");
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("lock"),
+        "stderr should mention the lock"
+    );
 
     let health = Command::new(BIN)
         .args(["health", "--config"])
@@ -165,20 +181,22 @@ fn run_lock_signal_and_health() {
     );
 
     // SAFETY: signalling our own child.
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    let status = child.wait().unwrap();
+    unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) };
+    let status = child.0.wait().unwrap();
     assert!(status.success(), "{status:?}");
     let s = status_json(t.path()).unwrap();
     assert_eq!(s["run_state"], "stopped");
 
     // restart keeps the epoch and comes back not forwarding
-    let mut again = Command::new(BIN)
-        .args(["run", "--config"])
-        .arg(&cfg)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut again = Kill(
+        Command::new(BIN)
+            .args(["run", "--config"])
+            .arg(&cfg)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     assert!(wait_for(
         || status_json(t.path()).is_some_and(|s| s["run_state"] == "running")
     ));
@@ -186,8 +204,8 @@ fn run_lock_signal_and_health() {
     assert_eq!(s["epoch_id"], epoch.as_str());
     assert_eq!(s["forwarding"], false);
     // SAFETY: signalling our own child.
-    unsafe { libc::kill(again.id() as i32, libc::SIGINT) };
-    assert!(again.wait().unwrap().success());
+    unsafe { libc::kill(again.0.id() as i32, libc::SIGINT) };
+    assert!(again.0.wait().unwrap().success());
 
     let after = Command::new(BIN)
         .args(["health", "--config"])

@@ -6,6 +6,7 @@
 
 pub mod bootstrap;
 pub mod cli;
+pub mod fsutil;
 pub mod lifecycle;
 pub mod limits;
 pub mod state_dir;

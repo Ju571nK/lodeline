@@ -67,6 +67,7 @@ pub mod parse;
 pub mod registry;
 pub mod scalar;
 pub mod status;
+pub mod verifier;
 
 pub use canonical::{canonical_event_bytes, canonical_json, compare_for_dedup, DedupComparison};
 pub use error::{ApiError, ErrorBody, ErrorCode, ErrorItem, UnknownCode, ValidationError};
@@ -84,6 +85,7 @@ pub use scalar::{
     Timestamp, Uuid,
 };
 pub use status::{GapReport, ProxyStatus, StatusResponse};
+pub use verifier::{verifier_for, verify};
 
 /// Cross-field rules the JSON schemas express with `if/then`, array bounds and uniqueness.
 pub trait Validate {

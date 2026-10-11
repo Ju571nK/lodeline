@@ -3245,7 +3245,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
  "sigil-proxy-api",
  "tempfile",
  "thiserror 1.0.69",
@@ -3262,6 +3261,7 @@ version = "0.9.1"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

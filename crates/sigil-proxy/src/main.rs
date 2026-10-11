@@ -83,7 +83,7 @@ fn main() -> ExitCode {
             };
             // The token is printed exactly once and stored nowhere.
             println!("token: {t}");
-            println!("verifier_sha256: {}", token::verifier(&t));
+            println!("verifier_sha256: {}", sigil_proxy_api::verifier_for(&t));
             eprintln!(
                 "principal={principal}: submit only the verifier; the token cannot be shown again"
             );

@@ -69,6 +69,11 @@ impl Default for Limits {
     }
 }
 
+// NOTE: no cross-field check yet. Each value is only bounded by its own default,
+// so a config may lower a total below a sub-limit (for example
+// max_concurrent_calls below max_calls_per_route, or spool_max_bytes below
+// spool_gap_reserve_bytes). Cross-field validation is deliberately deferred.
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LimitsError {
     #[error("limits.{field} = {value} is out of bounds ({min}..={max}); config may only lower the default")]

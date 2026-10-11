@@ -163,13 +163,13 @@ impl Bootstrap {
         let client_cert_file = resolve(&raw.client_cert_file);
         let client_key_file = resolve(&raw.client_key_file);
         let ca_file = resolve(&raw.ca_file);
-        // cert and key are owner-only per the contract; the CA bundle is public
-        // material, so it only has to be a regular, non-symlink file.
-        check_private_file("client_cert_file", &client_cert_file)?;
+        // Keys and secrets are owner-only; certificates and the CA bundle are
+        // public material (regular, non-symlink file is enough).
+        check_public_file("client_cert_file", &client_cert_file)?;
         check_private_file("client_key_file", &client_key_file)?;
-        check_regular_file("ca_file", &ca_file)?;
+        check_public_file("ca_file", &ca_file)?;
         if let Some(t) = &listener_tls {
-            check_private_file("tls_cert_file", &t.cert_file)?;
+            check_public_file("tls_cert_file", &t.cert_file)?;
             check_private_file("tls_key_file", &t.key_file)?;
         }
 
@@ -302,8 +302,15 @@ fn split_host_port(authority: &str) -> Result<(String, Option<u16>), String> {
     Ok((host, port))
 }
 
-/// `scheme://host[:port]` with no path, query, fragment or userinfo. Returns
-/// the normalized form (lowercase scheme/host).
+/// The single origin matcher for the proxy. Later tasks (route apply, per
+/// request after DNS resolution) must compare origins only through this
+/// function, never by ad-hoc string handling.
+///
+/// Accepts `scheme://host[:port]` with no path, query, fragment or userinfo.
+/// Output is canonical: lowercase scheme and host, and the scheme's default port
+/// (`http` 80, `https` 443) dropped, so `https://a:443` equals `https://a`.
+/// `http://` is accepted only for loopback hosts (127.0.0.0/8, `::1`,
+/// `localhost`); any other plain-http origin is an error.
 pub fn normalize_origin(s: &str) -> Result<String, String> {
     let (scheme, rest) = s
         .split_once("://")
@@ -316,10 +323,27 @@ pub fn normalize_origin(s: &str) -> Result<String, String> {
         return Err("origin must not contain a path, query or fragment".into());
     }
     let (host, port) = split_host_port(rest)?;
+    if scheme == "http" && !is_loopback_host(&host) {
+        return Err("http:// origins are allowed only for loopback hosts".into());
+    }
+    let default_port = if scheme == "http" { 80 } else { 443 };
     Ok(match port {
-        Some(p) => format!("{scheme}://{host}:{p}"),
-        None => format!("{scheme}://{host}"),
+        Some(p) if p != default_port => format!("{scheme}://{host}:{p}"),
+        _ => format!("{scheme}://{host}"),
     })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host == "localhost" {
+        return true;
+    }
+    if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return v6
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|a| a.is_loopback());
+    }
+    host.parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|a| a.is_loopback())
 }
 
 fn file_err(field: &str, reason: impl Into<String>) -> BootstrapError {
@@ -329,47 +353,20 @@ fn file_err(field: &str, reason: impl Into<String>) -> BootstrapError {
     }
 }
 
-/// Regular file (not a symlink, not a directory).
-fn check_regular_file(field: &str, path: &Path) -> Result<std::fs::Metadata, BootstrapError> {
-    let md = std::fs::symlink_metadata(path).map_err(|e| {
-        file_err(
-            field,
-            format!("cannot stat {}: {}", path.display(), e.kind()),
-        )
-    })?;
-    if md.file_type().is_symlink() {
-        return Err(file_err(field, "must not be a symlink"));
-    }
-    if !md.is_file() {
-        return Err(file_err(field, "must be a regular file"));
-    }
-    Ok(md)
+/// Sensitive file (key, secret): `O_NOFOLLOW`, regular, owned by the current
+/// user, no group/other bits, checked on the opened descriptor. Parent
+/// directories are not walked (see [`crate::fsutil`]).
+pub fn check_private_file(field: &str, path: &Path) -> Result<(), BootstrapError> {
+    crate::fsutil::open_private_file(path)
+        .map(drop)
+        .map_err(|e| file_err(field, e.to_string()))
 }
 
-/// Sensitive file: regular, not a symlink, owned by the current user and (unix)
-/// without any group/other permission bit.
-// OPEN: only the final path component is checked for symlinks; parent
-// directories are not walked.
-pub fn check_private_file(field: &str, path: &Path) -> Result<(), BootstrapError> {
-    let md = check_regular_file(field, path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions.
-        let euid = unsafe { libc::geteuid() };
-        if md.uid() != euid {
-            return Err(file_err(field, "must be owned by the current user"));
-        }
-        if md.mode() & 0o077 != 0 {
-            return Err(file_err(
-                field,
-                "must not be accessible by group or others (chmod 600)",
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = md;
-    Ok(())
+/// Public material (certificate, CA bundle): `O_NOFOLLOW`, regular file only.
+pub fn check_public_file(field: &str, path: &Path) -> Result<(), BootstrapError> {
+    crate::fsutil::open_public_file(path)
+        .map(drop)
+        .map_err(|e| file_err(field, e.to_string()))
 }
 
 #[cfg(all(test, unix))]
@@ -477,10 +474,38 @@ mod tests {
         ] {
             assert!(normalize_origin(ok).is_ok(), "{ok}");
         }
+        // default ports are dropped, other ports kept, case folded
+        for (input, want) in [
+            ("HTTPS://API.Example.com:443", "https://api.example.com"),
+            ("https://api.example.com", "https://api.example.com"),
+            (
+                "https://api.example.com:8443",
+                "https://api.example.com:8443",
+            ),
+            ("http://127.0.0.1:80", "http://127.0.0.1"),
+            ("http://localhost:8080", "http://localhost:8080"),
+            ("http://LOCALHOST", "http://localhost"),
+            ("http://[::1]:80", "http://[::1]"),
+            ("https://[::1]:443", "https://[::1]"),
+            ("http://127.5.5.5:9", "http://127.5.5.5:9"),
+        ] {
+            assert_eq!(normalize_origin(input).unwrap(), want, "{input}");
+        }
         assert_eq!(
-            normalize_origin("HTTPS://API.Example.com:443").unwrap(),
-            "https://api.example.com:443"
+            normalize_origin("https://a.example:443"),
+            normalize_origin("https://a.example")
         );
+        // plain http only for loopback hosts
+        for bad in [
+            "http://api.example.com",
+            "http://192.0.2.1",
+            "http://10.0.0.1:80",
+            "http://[2001:db8::1]",
+            "http://localhost.example.com",
+            "http://128.0.0.1",
+        ] {
+            assert!(normalize_origin(bad).is_err(), "{bad}");
+        }
         for bad in [
             "https://api.example.com/",
             "https://api.example.com/path",
@@ -508,11 +533,7 @@ mod tests {
     #[test]
     fn secret_key_and_cert_files_are_checked() {
         // group/other permission bits
-        for (name, field) in [
-            ("secret.txt", "secret"),
-            ("key.pem", "key"),
-            ("cert.pem", "cert"),
-        ] {
+        for (name, field) in [("secret.txt", "secret"), ("key.pem", "key")] {
             let fx = Fx::new();
             let p = fx.dir.path().join(name);
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -520,6 +541,18 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o604)).unwrap();
             assert!(fx.load(CRED).is_err(), "{field} other-readable accepted");
         }
+        // certificates are public material: loose modes are accepted
+        for name in ["cert.pem", "ca.pem"] {
+            let fx = Fx::new();
+            let p = fx.dir.path().join(name);
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(fx.load(CRED).is_ok(), "{name} 0644 must be accepted");
+        }
+        // a symlinked certificate is still refused
+        let fx = Fx::new();
+        std::fs::rename(fx.dir.path().join("cert.pem"), fx.dir.path().join("c2")).unwrap();
+        symlink(fx.dir.path().join("c2"), fx.dir.path().join("cert.pem")).unwrap();
+        assert!(fx.load(CRED).is_err());
         // symlink
         let fx = Fx::new();
         let real = fx.dir.path().join("real-secret");

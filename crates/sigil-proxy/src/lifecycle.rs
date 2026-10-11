@@ -220,11 +220,12 @@ pub struct Health {
 }
 
 pub fn health(state_dir: &Path) -> Health {
+    let alive = lock_is_held(state_dir);
     Health {
-        alive: lock_is_held(state_dir),
+        alive,
         status: read_status(state_dir).map(|mut s| {
             // Never trust a stored flag: recompute.
-            s.forwarding = forwarding_allowed(s.run_state, s.config_state);
+            s.forwarding = alive && forwarding_allowed(s.run_state, s.config_state);
             s
         }),
     }

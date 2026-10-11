@@ -74,7 +74,7 @@ impl StateDir {
         let lock = acquire_lock(&dir.join(LOCK_FILE))?;
 
         let binding_path = dir.join(BINDING_FILE);
-        let (epoch_id, new_epoch) = match std::fs::read(&binding_path) {
+        let (epoch_id, new_epoch) = match crate::fsutil::read_private_file(&binding_path) {
             Ok(bytes) => {
                 let b: Binding = serde_json::from_slice(&bytes)
                     .map_err(|_| StateError::BadBinding("parse error".into()))?;
