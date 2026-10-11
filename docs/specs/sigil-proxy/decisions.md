@@ -111,4 +111,15 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   미등록 응답(`host_id` 포함)과 본문이 다르다. 값 미echo를 우선한 의도적 차이다(control-plane §1.2 "미등록 principal과 같은 답"의 예외).
 - 서버 proxy 등록 목록 파일: 중복 proxy_id·중복 fingerprint·group/world 쓰기 권한·symlink는 부팅 오류. 파일이 없으면 `registry_init: true`일 때만 빈 목록으로 시작한다.
   client CA 묶음에 proxy CA 외 CA가 없으면 부팅을 거부한다(host 전체 거절 방지).
+- 관리 lifecycle 경로(2026-10-11, T-11 S2, orchestrator 결정·후보 이름): `POST /v1/proxies`(등록, identity),
+  `POST /v1/proxies/{id}/fingerprints`(다음 fingerprint 등록, identity), `POST /v1/proxies/{id}/disable`(config),
+  `POST /v1/proxies/{id}/enable`·`/retire`(identity), `POST /v1/proxies/{id}/csr`(인증서 서명, identity, S2b), `GET /v1/proxy-management-audit`(proxy.read).
+  인증된 proxy 신원에 대한 `disabled`·`retired` 답의 HTTP status는 403으로 정한다(신원은 확인됐고 상태가 거절 사유이므로; 미등록·불일치는 계속 404).
+- 관리 구현 세부(2026-10-11, #251 보안 리뷰): scope는 정확히 일치해야 한다(identity ⊉ config, 긴급 disable에는 config 토큰이 따로 필요).
+  감사 조회 `GET /v1/proxy-management-audit`만 관리 caller cert를 받는다(CLI가 mTLS 전용이므로; 다른 host·read route는 계속 거절).
+  fingerprint 승격은 감사가 기록될 때만 일어나며, 감사 장애 중에는 이전 fingerprint가 계속 유효하다(회전 지연, 안전 방향 예외).
+  감사 파일 마지막 줄이 줄바꿈만 빠진 유효 기록이면 유지하고, 검증할 수 없는 조각만 `.torn.<epoch>`로 옮긴다. 다른 손상은 부팅 거부.
+  verifier 파일 재적재가 실패하면 모든 관리 자격증명을 끈다(fail closed).
+- 운영자 CLI(`sigil-server proxy …`)는 실행 중인 서버의 관리 API를 mTLS(관리 caller cert)+bearer로 호출하는 client다. 등록 목록 파일을 직접 쓰지 않는다
+  (감사 선기록·동시성 유지). bearer는 소유자 전용 파일에서 읽고 CLI 인자로 받지 않는다.
 - 착수 순서: PR0 `sigil-proxy-api` DTO crate(#244) → T-10 `sigil-proxy` 골격(#245)과 T-11 S1 신원·등록(#246) 병렬.

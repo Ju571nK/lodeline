@@ -15,6 +15,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+/// Unique certificate serial per leaf (hex with 0x prefix). Avoids the shared
+/// `ca.srl` file that `-CAcreateserial` races on when leaves are made in parallel.
+fn next_serial() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(1);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as u64);
+    format!("0x{:x}", (t << 20) | N.fetch_add(1, Ordering::Relaxed))
+}
+
 fn openssl() -> PathBuf {
     sigil_server::enroll::sign::resolve_openssl().expect("openssl must be installed")
 }
@@ -96,7 +107,8 @@ fn make_leaf(dir: &Path, name: &str, cn: &str, ext: &str) -> (PathBuf, PathBuf) 
         dir.join("ca.crt").as_os_str(),
         "-CAkey".as_ref(),
         dir.join("ca.key").as_os_str(),
-        "-CAcreateserial".as_ref(),
+        "-set_serial".as_ref(),
+        next_serial().as_str().as_ref(),
         "-days".as_ref(),
         "1".as_ref(),
         "-extfile".as_ref(),

@@ -108,11 +108,21 @@ pub enum ErrorCode {
     InvalidStatus,
     InvalidCursor,
     InvalidFilter,
+    /// Management routes: bearer missing, wrong, expired or not bound to the
+    /// presenting caller cert. 401.
+    Unauthorized,
+    /// Management routes: valid credential, insufficient scope. 403.
+    Forbidden,
+    /// Management routes: the `proxy_id` or fingerprint is already registered. 409.
+    AlreadyExists,
+    /// Management routes: the lifecycle transition is not allowed from the
+    /// current state. 409.
+    InvalidState,
     Unknown(UnknownCode),
 }
 
 impl ErrorCode {
-    const KNOWN: [(&'static str, ErrorCode); 14] = [
+    const KNOWN: [(&'static str, ErrorCode); 18] = [
         ("proxy_unknown", ErrorCode::ProxyUnknown),
         ("conflict", ErrorCode::Conflict),
         ("sequence_conflict", ErrorCode::SequenceConflict),
@@ -130,6 +140,10 @@ impl ErrorCode {
         ("invalid_status", ErrorCode::InvalidStatus),
         ("invalid_cursor", ErrorCode::InvalidCursor),
         ("invalid_filter", ErrorCode::InvalidFilter),
+        ("unauthorized", ErrorCode::Unauthorized),
+        ("forbidden", ErrorCode::Forbidden),
+        ("already_exists", ErrorCode::AlreadyExists),
+        ("invalid_state", ErrorCode::InvalidState),
     ];
 
     pub fn as_str(&self) -> &str {
@@ -166,7 +180,11 @@ impl ErrorCode {
             | ErrorCode::SequenceConflict
             | ErrorCode::RegistryConflict
             | ErrorCode::InvocationOwnerConflict
-            | ErrorCode::RevisionConflict => Some(409),
+            | ErrorCode::RevisionConflict
+            | ErrorCode::AlreadyExists
+            | ErrorCode::InvalidState => Some(409),
+            ErrorCode::Unauthorized => Some(401),
+            ErrorCode::Forbidden => Some(403),
             ErrorCode::MetadataRefPending => Some(424),
             ErrorCode::SemanticInvalid
             | ErrorCode::SchemaInvalid
@@ -195,6 +213,10 @@ impl ErrorCode {
             ErrorCode::InvalidStatus => "Status report is invalid.",
             ErrorCode::InvalidCursor => "Cursor is invalid.",
             ErrorCode::InvalidFilter => "Filter is invalid.",
+            ErrorCode::Unauthorized => "Missing or invalid credential.",
+            ErrorCode::Forbidden => "Credential scope is insufficient.",
+            ErrorCode::AlreadyExists => "Already registered.",
+            ErrorCode::InvalidState => "Not allowed in the current state.",
             ErrorCode::Unknown(_) => "Request failed.",
         }
     }

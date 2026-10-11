@@ -34,6 +34,12 @@ pub struct ProxyConfig {
     /// silently become an empty one).
     #[serde(default)]
     pub registry_init: bool,
+    /// Management verifier file (JSON, owner-only 0600, not a symlink). Absent
+    /// ⇒ the management routes and the audit read route are absent (404).
+    /// Present ⇒ it must load at boot or the server refuses to start. See
+    /// `proxy::verifiers` for the format and the fail-closed reload rule.
+    #[serde(default)]
+    pub management_verifiers: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

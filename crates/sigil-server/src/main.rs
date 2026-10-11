@@ -30,6 +30,12 @@ fn main() -> Result<()> {
                 .with_context(|| format!("load config {}", config.display()))?;
             enroll_token(&cfg, &host_id, &ttl)?;
         }
+        Command::Proxy { cmd } => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(sigil_server::proxy::cli::run(cmd))?;
+        }
     }
     Ok(())
 }
@@ -205,6 +211,12 @@ async fn run(cfg: ServerConfig) -> Result<()> {
             // not reachable today: replace() is infallible and the join is matched above.)
             boot_complete.store(true, Ordering::Relaxed);
         });
+    }
+
+    // SIGHUP re-reads the management verifier file (fail closed on error).
+    #[cfg(unix)]
+    if let Some(ctx) = proxy.clone().filter(|c| c.mgmt.is_some()) {
+        sigil_server::proxy::spawn_sighup_reload(ctx)?;
     }
 
     let app = build_router_with_proxy(state, proxy).layer(axum::middleware::from_fn_with_state(
