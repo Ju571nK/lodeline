@@ -232,7 +232,7 @@ impl Pki {
         let y = format!(
             "bind: \"127.0.0.1:0\"\ntls_cert_path: {c}\ntls_key_path: {k}\nclient_ca_path: {b}\n\
              events_out_dir: {e}\npolicy_bundle_path: {pb}\n\
-             proxy:\n  ca_path: {pca}\n  registry_path: {r}\n",
+             proxy:\n  ca_path: {pca}\n  registry_path: {r}\n  registry_init: true\n",
             c = self.p("server.crt").display(),
             k = self.p("server.key").display(),
             b = self.p("bundle.pem").display(),
@@ -276,17 +276,55 @@ impl Pki {
     }
 }
 
-async fn get(c: &reqwest::Client, port: u16, path: &str) -> (u16, Vec<u8>) {
-    let r = c
-        .get(format!("https://127.0.0.1:{port}{path}"))
-        .send()
-        .await
-        .unwrap();
-    (r.status().as_u16(), r.bytes().await.unwrap().to_vec())
+/// Everything compared byte-for-byte in the 404 assertions.
+#[derive(Debug, PartialEq, Eq)]
+struct Resp {
+    status: u16,
+    content_type: Option<String>,
+    content_length: Option<String>,
+    body: Vec<u8>,
 }
 
-fn proxy_unknown_bytes() -> Vec<u8> {
-    serde_json::to_vec(&ApiError::from_code(ErrorCode::ProxyUnknown)).unwrap()
+async fn to_resp(r: reqwest::Response) -> Resp {
+    let h = |n: &str| r.headers().get(n).map(|v| v.to_str().unwrap().to_string());
+    let (content_type, content_length) = (h("content-type"), h("content-length"));
+    let status = r.status().as_u16();
+    Resp {
+        status,
+        content_type,
+        content_length,
+        body: r.bytes().await.unwrap().to_vec(),
+    }
+}
+
+async fn get(c: &reqwest::Client, port: u16, path: &str) -> Resp {
+    to_resp(
+        c.get(format!("https://127.0.0.1:{port}{path}"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+fn json_resp(status: u16, body: Vec<u8>) -> Resp {
+    Resp {
+        status,
+        content_type: Some("application/json".into()),
+        content_length: Some(body.len().to_string()),
+        body,
+    }
+}
+
+fn proxy_unknown() -> Resp {
+    json_resp(
+        404,
+        serde_json::to_vec(&ApiError::from_code(ErrorCode::ProxyUnknown)).unwrap(),
+    )
+}
+
+fn host_unknown() -> Resp {
+    json_resp(404, br#"{"error":"host_unknown"}"#.to_vec())
 }
 
 #[tokio::test]
@@ -304,13 +342,13 @@ async fn proxy_cert_reaches_placeholder_after_passing_check() {
         ))
         .unwrap();
     let c = pki.client_for(&crt, &key);
-    let (s, _) = get(&c, port, "/v1/proxy-config").await;
-    assert_eq!(s, 501);
-    let (s, _) = get(&c, port, "/v1/proxies/px1/config").await;
-    assert_eq!(s, 501);
+    assert_eq!(get(&c, port, "/v1/proxy-config").await.status, 501);
+    assert_eq!(get(&c, port, "/v1/proxies/px1/config").await.status, 501);
     // Path id differing from the cert's proxy_id is an identity mismatch.
-    let (s, b) = get(&c, port, "/v1/proxies/other/config").await;
-    assert_eq!((s, b), (404, proxy_unknown_bytes()));
+    assert_eq!(
+        get(&c, port, "/v1/proxies/other/config").await,
+        proxy_unknown()
+    );
 }
 
 #[tokio::test]
@@ -322,8 +360,27 @@ async fn identity_failures_are_byte_identical_404() {
     let (fp_crt, fp_key) = proxy_leaf(d, "px2", "px2");
     let (pend_crt, pend_key) = proxy_leaf(d, "px3", "px3");
     let (hcrt, hkey) = host_leaf(d, "agent");
+    // Class confusion: a HOST-CA leaf carrying a valid-looking proxy SAN, and
+    // registered under that proxy_id.
+    let (cc_crt, cc_key) = make_leaf(
+        d,
+        "hostca",
+        "confused",
+        "px9",
+        &format!(
+            "subjectAltName=DNS:{}\nextendedKeyUsage=clientAuth\nbasicConstraints=CA:FALSE\n",
+            proxy_san("px9")
+        ),
+    );
     let (port, ctx) = pki.spawn(true).await;
     let reg = &ctx.unwrap().registry;
+    reg.seed_for_test(rec(
+        "px9",
+        ProxyState::Active,
+        Some(fingerprint(&cc_crt)),
+        None,
+    ))
+    .unwrap();
     reg.seed_for_test(rec(
         "px1",
         ProxyState::Active,
@@ -346,15 +403,23 @@ async fn identity_failures_are_byte_identical_404() {
         None,
     ))
     .unwrap();
-    let expect = (404, proxy_unknown_bytes());
     for (name, crt, key) in [
+        (
+            "host-CA leaf with proxy SAN + registered fp",
+            &cc_crt,
+            &cc_key,
+        ),
         ("unknown proxy", &un_crt, &un_key),
         ("fingerprint mismatch", &fp_crt, &fp_key),
         ("pending", &pend_crt, &pend_key),
         ("host cert", &hcrt, &hkey),
     ] {
         let c = pki.client_for(crt, key);
-        assert_eq!(get(&c, port, "/v1/proxy-config").await, expect, "{name}");
+        assert_eq!(
+            get(&c, port, "/v1/proxy-config").await,
+            proxy_unknown(),
+            "{name}"
+        );
     }
 }
 
@@ -374,17 +439,19 @@ async fn disabled_and_retired_answer_fixed_codes_and_next_fp_is_accepted() {
     ))
     .unwrap();
     // fp_next works.
-    let (s, _) = get(&pki.client_for(&ncrt, &nkey), port, "/v1/proxy-config").await;
-    assert_eq!(s, 501);
+    let r = get(&pki.client_for(&ncrt, &nkey), port, "/v1/proxy-config").await;
+    assert_eq!(r.status, 501);
     for (st, code) in [
         (ProxyState::Disabled, ErrorCode::Disabled),
         (ProxyState::Retired, ErrorCode::Retired),
     ] {
         reg.seed_for_test(rec("px1", st, Some(fingerprint(&crt)), None))
             .unwrap();
-        let (s, b) = get(&pki.client_for(&crt, &key), port, "/v1/proxy-config").await;
-        assert_eq!(s, 403);
-        assert_eq!(b, serde_json::to_vec(&ApiError::from_code(code)).unwrap());
+        let r = get(&pki.client_for(&crt, &key), port, "/v1/proxy-config").await;
+        assert_eq!(
+            r,
+            json_resp(403, serde_json::to_vec(&ApiError::from_code(code)).unwrap())
+        );
     }
 }
 
@@ -395,8 +462,8 @@ async fn proxy_cert_is_rejected_on_host_routes_and_host_cert_still_works() {
     let (pcrt, pkey) = proxy_leaf(d, "px1", "px1");
     let (hcrt, hkey) = host_leaf(d, "agent");
     let (port, ctx) = pki.spawn(true).await;
-    ctx.unwrap()
-        .registry
+    let ctx2 = ctx.unwrap();
+    ctx2.registry
         .seed_for_test(rec(
             "px1",
             ProxyState::Active,
@@ -406,16 +473,31 @@ async fn proxy_cert_is_rejected_on_host_routes_and_host_cert_still_works() {
         .unwrap();
     let pc = pki.client_for(&pcrt, &pkey);
     let hc = pki.client_for(&hcrt, &hkey);
-    let host_unknown = br#"{"error":"host_unknown"}"#.to_vec();
+    // Issuer-only rule: an UNREGISTERED proxy-CA leaf is rejected too.
+    let (ucrt, ukey) = proxy_leaf(d, "ghost", "ghost");
+    let uc = pki.client_for(&ucrt, &ukey);
+    // holds_fingerprint alone: a HOST-CA leaf whose fingerprint is registered.
+    let (rcrt, rkey) = host_leaf(d, "agent-registered");
+    ctx2.registry
+        .seed_for_test(rec(
+            "pxh",
+            ProxyState::Active,
+            Some(fingerprint(&rcrt)),
+            None,
+        ))
+        .unwrap();
+    let rc = pki.client_for(&rcrt, &rkey);
     for path in [
         format!("/v1/policy?host_id={HOST}"),
         format!("/v1/rule-packs?host_id={HOST}"),
     ] {
-        assert_eq!(
-            get(&pc, port, &path).await,
-            (404, host_unknown.clone()),
-            "{path}"
-        );
+        for (who, c) in [
+            ("proxy", &pc),
+            ("unregistered proxy", &uc),
+            ("registered host", &rc),
+        ] {
+            assert_eq!(get(c, port, &path).await, host_unknown(), "{who} {path}");
+        }
     }
     // POST /v1/events with a proxy cert: rejected before the body is parsed
     // (an empty/invalid body would otherwise be a 4xx from the extractor).
@@ -425,12 +507,11 @@ async fn proxy_cert_is_rejected_on_host_routes_and_host_cert_still_works() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 404);
-    assert_eq!(r.bytes().await.unwrap().to_vec(), host_unknown);
+    assert_eq!(to_resp(r).await, host_unknown());
     // A host cert passes the guard (reaches the handler: no policy bundle).
-    let (s, b) = get(&hc, port, &format!("/v1/policy?host_id={HOST}")).await;
-    assert_eq!(s, 404);
-    assert_eq!(b, br#"{"error":"no_policy"}"#.to_vec());
+    let r = get(&hc, port, &format!("/v1/policy?host_id={HOST}")).await;
+    assert_eq!(r.status, 404);
+    assert_eq!(r.body, br#"{"error":"no_policy"}"#.to_vec());
 }
 
 #[tokio::test]
@@ -442,11 +523,10 @@ async fn proxy_section_absent_means_no_proxy_routes() {
     assert!(ctx.is_none());
     let pc = pki.client_for(&pcrt, &pkey);
     // Same answer as any unknown route (axum's empty 404), not proxy_unknown.
-    let (s, b) = get(&pc, port, "/v1/proxy-config").await;
-    assert_eq!(s, 404);
-    assert!(b.is_empty(), "{:?}", String::from_utf8_lossy(&b));
-    let (s, b2) = get(&pc, port, "/v1/definitely-not-a-route").await;
-    assert_eq!((s, b2), (404, b));
+    let r = get(&pc, port, "/v1/proxy-config").await;
+    assert_eq!(r.status, 404);
+    assert!(r.body.is_empty(), "{:?}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r, get(&pc, port, "/v1/definitely-not-a-route").await);
 }
 
 #[test]
@@ -488,4 +568,49 @@ fn boot_refuses_proxy_ca_missing_from_client_bundle() {
     );
     let cfg: ServerConfig = serde_yaml::from_str(&y).unwrap();
     assert!(ProxyContext::load(&cfg).is_err());
+}
+
+#[test]
+fn boot_refuses_bundle_with_only_the_proxy_ca() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    make_ca(d, "proxyca", "proxy-ca");
+    let y = format!(
+        "bind: \"127.0.0.1:0\"\ntls_cert_path: /x/s.crt\ntls_key_path: /x/s.key\n\
+         client_ca_path: {b}\nevents_out_dir: /x/e\npolicy_bundle_path: /x/p.json\n\
+         proxy:\n  ca_path: {b}\n  registry_path: {r}\n  registry_init: true\n",
+        b = d.join("proxyca.crt").display(),
+        r = d.join("proxies.json").display(),
+    );
+    let cfg: ServerConfig = serde_yaml::from_str(&y).unwrap();
+    let err = ProxyContext::load(&cfg).err().expect("must refuse");
+    assert!(format!("{err:#}").contains("no CA other"), "{err:#}");
+}
+
+#[test]
+fn boot_refuses_missing_registry_unless_init() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    make_ca(d, "hostca", "host-ca");
+    make_ca(d, "proxyca", "proxy-ca");
+    let mut bundle = std::fs::read(d.join("hostca.crt")).unwrap();
+    bundle.extend(std::fs::read(d.join("proxyca.crt")).unwrap());
+    std::fs::write(d.join("bundle.pem"), bundle).unwrap();
+    let y = |init: &str| {
+        format!(
+            "bind: \"127.0.0.1:0\"\ntls_cert_path: /x/s.crt\ntls_key_path: /x/s.key\n\
+             client_ca_path: {b}\nevents_out_dir: /x/e\npolicy_bundle_path: /x/p.json\n\
+             proxy:\n  ca_path: {pca}\n  registry_path: {r}\n{init}",
+            b = d.join("bundle.pem").display(),
+            pca = d.join("proxyca.crt").display(),
+            r = d.join("proxies.json").display(),
+        )
+    };
+    let cfg: ServerConfig = serde_yaml::from_str(&y("")).unwrap();
+    assert!(ProxyContext::load(&cfg).is_err());
+    let cfg: ServerConfig = serde_yaml::from_str(&y("  registry_init: true\n")).unwrap();
+    assert!(ProxyContext::load(&cfg).unwrap().is_some());
+    // Now the file exists, so no init flag is needed.
+    let cfg: ServerConfig = serde_yaml::from_str(&y("")).unwrap();
+    assert!(ProxyContext::load(&cfg).unwrap().is_some());
 }

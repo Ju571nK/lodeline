@@ -106,6 +106,15 @@ pub async fn proxy_guard(
 ///
 /// Body is the non-revealing host-route shape (`host_unknown`, no host_id
 /// echo: the request is not parsed, and nothing about the registry leaks).
+/// DECIDED (orchestrator, L1): the no-echo body is deliberate; recorded in
+/// decisions.md. It differs from the handler's own `host_unknown` only by the
+/// missing `host_id` field.
+///
+/// A missing PeerIdentity is fail-closed: with `proxy:` configured mTLS is
+/// mandatory, so a request without an identity should not exist; if one
+/// appears (listener misconfiguration) it is rejected, never waved through.
+// NOTE (L5): only /v1/healthz is exempt; any new unauthenticated probe route
+// must be added here deliberately.
 pub async fn host_route_guard(
     State(ctx): State<Arc<ProxyContext>>,
     req: Request<Body>,
@@ -113,16 +122,19 @@ pub async fn host_route_guard(
 ) -> Response {
     let path = req.uri().path();
     if !is_proxy_path(path) && path != crate::app::HEALTHZ_PATH {
-        if let Some(peer) = req.extensions().get::<Arc<PeerIdentity>>() {
-            if ctx.ca.classify(peer) != PeerClass::Host
-                || ctx.registry.holds_fingerprint(&peer.fingerprint)
-            {
-                return (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(serde_json::json!({"error": "host_unknown"})),
-                )
-                    .into_response();
-            }
+        let allowed = req
+            .extensions()
+            .get::<Arc<PeerIdentity>>()
+            .is_some_and(|peer| {
+                ctx.ca.classify(peer) == PeerClass::Host
+                    && !ctx.registry.holds_fingerprint(&peer.fingerprint)
+            });
+        if !allowed {
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"error": "host_unknown"})),
+            )
+                .into_response();
         }
     }
     next.run(req).await

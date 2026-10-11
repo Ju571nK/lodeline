@@ -91,7 +91,9 @@ impl ProxyCaInfo {
         if !bundle.iter().any(|d| d == proxy_der) {
             bail!("proxy CA is not in client_ca_path; proxy leaves would fail the TLS handshake");
         }
+        let mut others = 0;
         for der in bundle.iter().filter(|d| *d != proxy_der) {
+            others += 1;
             let other = Self::from_der(der)?;
             if other.subject_dn == info.subject_dn {
                 bail!(
@@ -99,6 +101,10 @@ impl ProxyCaInfo {
                     info.subject_dn
                 );
             }
+        }
+        // L2: without a host CA there is nothing to tell proxy leaves from.
+        if others == 0 {
+            bail!("client_ca_path contains no CA other than the proxy CA");
         }
         Ok(info)
     }
@@ -122,7 +128,11 @@ impl ProxyCaInfo {
     /// Classify a verified peer. Host vs proxy is decided by the leaf issuer
     /// DN, tightened by the AKI when both sides carry a key id.
     pub fn classify(&self, peer: &PeerIdentity) -> PeerClass {
-        if peer.issuer_dn.as_deref() != Some(self.subject_dn.as_str()) {
+        // M1: an unparsable leaf/issuer cannot be classified; fail closed.
+        let Some(issuer) = peer.issuer_dn.as_deref() else {
+            return PeerClass::Ambiguous;
+        };
+        if issuer != self.subject_dn.as_str() {
             return PeerClass::Host;
         }
         match (&peer.issuer_aki, &self.ski) {
@@ -172,8 +182,8 @@ mod tests {
         assert_eq!(ca().classify(&peer("CN=host-ca", None)), PeerClass::Host);
         assert_eq!(
             ca().classify(&PeerIdentity::default()),
-            PeerClass::Host,
-            "unparsed issuer is never proxy"
+            PeerClass::Ambiguous,
+            "unparsed issuer is rejected on both route classes"
         );
     }
 

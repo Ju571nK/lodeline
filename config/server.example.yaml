@@ -80,4 +80,5 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 # host routes and host certs on proxy routes.
 # proxy:
 #   ca_path: "/etc/sigil/proxy-ca.pem"
-#   registry_path: "/var/lib/sigil-server/proxies.json"
+#   registry_path: "/var/lib/sigil-server/proxies.json"   # not group/world-writable, not a symlink
+#   registry_init: false   # true = create an empty registry if the file is missing (first boot only)

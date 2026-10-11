@@ -29,6 +29,11 @@ pub struct ProxyConfig {
     /// Durable proxy registry file (JSON, atomically written).
     // OPEN: moves to the S4 ledger DB.
     pub registry_path: PathBuf,
+    /// Allow creating an empty registry when `registry_path` does not exist.
+    /// Default false: a missing file is a boot error (a lost registry must not
+    /// silently become an empty one).
+    #[serde(default)]
+    pub registry_init: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

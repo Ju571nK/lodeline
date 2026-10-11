@@ -34,7 +34,7 @@ impl ProxyContext {
         let bundle_path = cfg.client_ca_path.as_ref().expect("mtls_enabled");
         let ca = ProxyCaInfo::from_files(&pc.ca_path, bundle_path)
             .with_context(|| format!("proxy CA {}", pc.ca_path.display()))?;
-        let registry = ProxyRegistry::open(&pc.registry_path)
+        let registry = ProxyRegistry::open(&pc.registry_path, pc.registry_init)
             .with_context(|| format!("proxy registry {}", pc.registry_path.display()))?;
         tracing::info!(
             ca_subject = %ca.subject_dn,
