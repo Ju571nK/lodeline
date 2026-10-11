@@ -39,12 +39,17 @@ fn openssl() -> PathBuf {
 }
 
 fn run(args: &[&std::ffi::OsStr]) {
-    let o = Command::new(openssl()).args(args).output().unwrap();
-    assert!(
-        o.status.success(),
-        "openssl {args:?}: {}",
-        String::from_utf8_lossy(&o.stderr)
-    );
+    // The system openssl occasionally exits non-zero without an error on
+    // `x509 -req`; retry before failing the test.
+    let mut last = None;
+    for _ in 0..3 {
+        let o = Command::new(openssl()).args(args).output().unwrap();
+        if o.status.success() {
+            return;
+        }
+        last = Some(String::from_utf8_lossy(&o.stderr).to_string());
+    }
+    panic!("openssl {args:?}: {}", last.unwrap_or_default());
 }
 
 fn genkey(path: &Path) {

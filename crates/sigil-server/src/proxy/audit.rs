@@ -11,7 +11,8 @@
 //! Boot (`MgmtAudit::open`) verifies the whole file: sequence, hash chain,
 //! content hash and (for records signed by this server's key) the signature.
 //! Any problem refuses boot, with one exception (DECIDED): an unterminated
-//! FINAL line is a torn append from a crash. It is moved byte for byte to
+//! FINAL line is a torn append from a crash: if it still parses and verifies as
+//! the next record it is kept (newline appended), otherwise it is moved byte for byte to
 //! `<file>.torn.<epoch-seconds>` (error-level log) and the chain continues
 //! from the last complete record. The file is opened with O_NOFOLLOW and must
 //! be owner-only and owned by the server user.
@@ -199,8 +200,17 @@ fn lines(complete: &[u8]) -> impl Iterator<Item = &[u8]> {
 
 /// Verify a whole (newline-terminated) file. Returns `(next_seq, prev_hash)`.
 fn verify_chain(complete: &[u8], key: &AuditKey) -> Result<(u64, String)> {
+    verify_chain_from(complete, key, 0, GENESIS_PREV_HASH.to_string())
+}
+
+/// Like [`verify_chain`], continuing from a known `(seq, prev_hash)`.
+fn verify_chain_from(
+    complete: &[u8],
+    key: &AuditKey,
+    mut seq: u64,
+    mut prev: String,
+) -> Result<(u64, String)> {
     let vk = key.signing_key.verifying_key();
-    let (mut seq, mut prev) = (0u64, GENESIS_PREV_HASH.to_string());
     for (i, line) in lines(complete).enumerate() {
         let n = i + 1;
         let rec: SignedMgmtRecord =
@@ -280,8 +290,20 @@ impl MgmtAudit {
         let ctx = || format!("proxy management audit {}", path.display());
         if let Some(bytes) = read_file(&path).with_context(ctx)? {
             let keep = complete_len(&bytes);
-            verify_chain(&bytes[..keep], &key).with_context(ctx)?;
-            if keep < bytes.len() {
+            let (seq, prev) = verify_chain(&bytes[..keep], &key).with_context(ctx)?;
+            if keep < bytes.len() && verify_chain_from(&bytes[keep..], &key, seq, prev).is_ok() {
+                // A complete, valid record that only lacks its newline: its
+                // effect may have happened, so it is kept.
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .with_context(ctx)?;
+                f.write_all(b"\n").with_context(ctx)?;
+                f.sync_all().with_context(ctx)?;
+                tracing::warn!(
+                    "proxy management audit: final record lacked its newline; kept and terminated"
+                );
+            } else if keep < bytes.len() {
                 let torn = move_torn_tail(&path, &bytes, keep).with_context(ctx)?;
                 tracing::error!(
                     moved_to = %torn.display(),
@@ -519,6 +541,30 @@ mod tests {
             .collect();
         assert_eq!(moved.len(), 1);
         assert_eq!(std::fs::read(&moved[0]).unwrap(), torn, "byte for byte");
+        let r2 = b.append(entry("proxy.enable")).unwrap();
+        assert_eq!((r2.record.seq, r2.record.prev_hash), (2, r1.hash));
+    }
+
+    #[test]
+    fn valid_record_missing_newline_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let a = open(d.path()).unwrap();
+        a.append(entry("proxy.register")).unwrap();
+        let r1 = a.append(entry("proxy.disable")).unwrap();
+        let path = d.path().join(AUDIT_FILE);
+        let mut bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        std::fs::write(&path, &bytes).unwrap();
+        let b = open(d.path()).unwrap();
+        assert!(
+            std::fs::read(&path).unwrap().ends_with(b"}\n"),
+            "newline restored"
+        );
+        assert_eq!(b.read(0, 10).unwrap().0.len(), 2, "record kept");
+        let torn = std::fs::read_dir(d.path())
+            .unwrap()
+            .any(|e| e.unwrap().path().to_string_lossy().contains(".torn."));
+        assert!(!torn, "nothing moved aside");
         let r2 = b.append(entry("proxy.enable")).unwrap();
         assert_eq!((r2.record.seq, r2.record.prev_hash), (2, r1.hash));
     }
