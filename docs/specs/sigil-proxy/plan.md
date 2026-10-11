@@ -1,6 +1,6 @@
 # 구현 작업과 검증 계획
 
-2026-09-27 · P0 조사·계약 후보·검증 fixture 작업 진행 중. 실제 배정과 증거는 [execution.md](execution.md)에 기록한다. P1 production 구현은 미착수다.
+2026-09-27 · 갱신 2026-10-11 · P0 종료(계약 수준, [decisions.md "P0 종료"](decisions.md)). P1 착수. 실제 배정과 증거는 [execution.md](execution.md)에 기록한다.
 
 ## 작업 흐름
 
@@ -26,8 +26,8 @@ manager 코드는 기존 manager 저장소에서 별도 PR로 작성하되 같�
 
 | 작업 | 구현 범위 | 요구사항 | 검증 |
 |---|---|---|---|
-| T-10 | crate/CLI/config/서비스 lifecycle, health와 limits | 001,013,016 | AC-07/12/14 |
-| T-11 | core DTO와 server 등록·설정·권한·이벤트 저장/조회 | 007–012,016 | AC-04/05/06/13 |
+| T-10 | crate/CLI/config/서비스 lifecycle, health와 limits, downstream 토큰 생성, rpm·systemd unit(SELinux 도메인은 실기 단계) | 001,013,016 | AC-07/12/14 |
+| T-11 | core DTO와 server 등록·설정·권한·이벤트 저장/조회, 운영자 CLI(`sigil-server proxy …`) | 007–012,016 | AC-04/05/06/13 |
 | T-12 | HTTP relay, protocol adapter, principal 격리, 목적지 보호 | 002–004,008/009,014/015 | AC-01/03/04/07/08/15 |
 | T-13 | inventory, 완전한 snapshot과 drift, 호출 lifecycle, privacy | 005–007,010 | AC-02/03/04/05 |
 | T-14 | durable spool·재전송·중복 제거·복구 | 011,013,016 | AC-06/12 |
@@ -77,3 +77,4 @@ T-32/33은 별도 출시 단위이며 인간 승인 기능 완료와 혼동하�
 |---|---|---|---|---|---|---|
 | 준비 문서 | 전체 설계 | `97db268` | sigil 24eddb2 기준 | 문서 연결·요구사항 점검 | D-01–07 | 커밋 |
 | P0 2026-10-10 회차 | PX-002–016, AC-01–08 계약·probe | 이 회차 커밋 | sigil cdd1d1d, macOS arm64, Claude Code 2.1.296, codex-cli 0.162.0, rustc 1.78–1.89 | T-01 probe + 독립 리뷰, contract v0.3 checker 53/271, fixture 14 tests | D-02, D-03·D-05 잔여, M2 사용자 결정, Linux 미검증 | P0 진행 |
+| P0 종료 | D-01–05 계약 수준 | 2026-10-11 문서 PR | sigil 2120415 | P0 종료 점검, fixture 14 tests 재실행 | decisions.md "P0 종료" 잔여 목록 | P0 종료 |

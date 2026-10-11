@@ -499,5 +499,6 @@ Proven by the checker: schema shape, the retention invariants as arithmetic, and
 the projection/semantic/cursor rules as fixture models (including all event
 permutations). Not proven: SQLite transaction behaviour, restart durability,
 ledger performance, real producer behaviour, manager rendering, or any hardware
-result. D-03 remains open until a ledger implementation and independent review
-cover these rules, and SV-5 is decided.
+result. The D-03 contract closed at P0 end (2026-10-11, decisions.md "P0 종료"). The
+unproven items above are P1 evidence: ledger tests in T-11 S4, and SV-5 is
+decided inside T-11.

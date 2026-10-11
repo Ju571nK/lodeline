@@ -336,7 +336,7 @@ Not immediate. **TLS connections outlive cert expiry** (M-7): an established con
 | Pre-dispatch refusals (`-32602`, `-32601`) | README m4 table | decided |
 | Cancel before dispatch HTTP shape | README M3 / N13 | decided, P1 to verify |
 
-## 8. sigil-manager change requests (to file later as one issue; **not filed**)
+## 8. sigil-manager change requests (filed as sigil-manager issue #37 for the M0 read-only scope)
 
 All items are conditional on the option noted. Manager's AGENTS.md requires user confirmation before expanding auth.
 
