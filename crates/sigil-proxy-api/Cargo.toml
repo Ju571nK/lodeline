@@ -10,3 +10,4 @@ description = "Wire DTOs and validation for the Sigil Proxy event, status and re
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
