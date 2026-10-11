@@ -47,8 +47,13 @@
 //! * `RegistryEntry::definition` is untrusted tool content for the access-controlled
 //!   metadata store only; it must not reach logs or ordinary audit reads.
 //!
-//! (Review notes L-5 and L-6 were referenced without text; the two notes above are
-//! the consumer-facing cautions this crate can state on its own.)
+//! * Nested parsing re-buffers subtrees: memory is linear in the input but several
+//!   copies of it are held. Callers must cap the transport body before calling any
+//!   `parse_*` function (for example axum `DefaultBodyLimit`).
+//!   [`parse_event_batch`] additionally enforces 1 MiB.
+//! * `UploadRequest::proxy_id` is not compared with `entries[].proxy_id` here,
+//!   because that is not a schema rule. sigil-server must check that every entry
+//!   belongs to the authenticated proxy.
 //!
 //! This crate has no I/O and no dependency beyond `serde`/`serde_json`.
 
