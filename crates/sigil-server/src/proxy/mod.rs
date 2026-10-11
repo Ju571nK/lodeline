@@ -23,6 +23,7 @@ use identity::{PeerClass, ProxyCaInfo};
 use parking_lot::Mutex;
 use registry::ProxyRegistry;
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use verifiers::MgmtAuth;
