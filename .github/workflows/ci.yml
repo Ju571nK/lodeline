@@ -87,10 +87,46 @@ jobs:
         run: |
           cargo install cargo-generate-rpm --locked
           packaging/build.sh rpm
-      - name: inspect & install-test .rpm (all 4 packages)
+      - name: inspect & install-test .rpm (all 5 packages)
         run: |
           set -eux
-          
+
+          # AC-14 checks shared with the deb leg. systemd is not running in the
+          # container, so assert on the missing wants symlink as well as
+          # `systemctl is-enabled`, and scan /proc for a process or a listener.
+          proxy_assert_disabled_and_silent() {
+            if command -v systemctl >/dev/null 2>&1; then
+              st=$(systemctl is-enabled sigil-proxy 2>&1 || true)
+              echo "systemctl is-enabled sigil-proxy: $st"
+              case "$st" in enabled*) echo "::error::sigil-proxy is enabled"; exit 1 ;; esac
+            fi
+            if ls /etc/systemd/system/*.wants/sigil-proxy.service >/dev/null 2>&1; then
+              echo "::error::sigil-proxy has a wants symlink (enabled)"
+              exit 1
+            fi
+            for c in /proc/[0-9]*/comm; do
+              if [ "$(cat "$c" 2>/dev/null)" = sigil-proxy ]; then
+                echo "::error::sigil-proxy process is running"
+                exit 1
+              fi
+            done
+            # `run` without --config must refuse to start (exit 2), never fall back
+            # to a default path.
+            rc=0
+            /usr/bin/sigil-proxy run >/dev/null 2>&1 || rc=$?
+            if [ "$rc" != 2 ]; then
+              echo "::error::sigil-proxy run without --config exited $rc, expected 2"
+              exit 1
+            fi
+            # The process and port scans are only a smoke test (the binary never
+            # starts here; the real guarantee is the package-content checks).
+            # No listener on the default port 8480 (0x2120), state LISTEN (0A).
+            if awk '$4 == "0A" && $2 ~ /:2120$/ { found = 1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+              echo "::error::something listens on 8480 after install"
+              exit 1
+            fi
+          }
+
           while IFS='|' read -r pkg bin unit example; do
             # Anchor on a digit after the dash so `sigil-*.rpm` doesn't match
             # sigil-sender / sigil-server / sigil-signer too (issue #7).
@@ -105,6 +141,23 @@ jobs:
               exit 1
             fi
             rpm -qpl "$rpm" | grep -qx "/usr/bin/${bin}"
+            if [ "$pkg" = sigil-proxy ]; then
+              # AC-14: installed disabled, no live config, no auto enable/start,
+              # no SELinux module load from this package.
+              if rpm -qpl "$rpm" | grep -qx '/etc/sigil/proxy.yaml'; then
+                echo "::error::sigil-proxy must not ship a live /etc/sigil/proxy.yaml"
+                exit 1
+              fi
+              scripts=$(rpm -qp --scripts "$rpm")
+              if grep -Eq 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(enable|start)([[:space:]]|$)' <<< "$scripts"; then
+                echo "::error::sigil-proxy scripts must not enable or start the service"
+                exit 1
+              fi
+              if grep -Eq 'semodule' <<< "$scripts"; then
+                echo "::error::sigil-proxy scripts must not load an SELinux module"
+                exit 1
+              fi
+            fi
             if [ -n "$unit" ]; then
               rpm -qpl "$rpm" | grep -qx "/usr/lib/systemd/system/${unit}"
             fi
@@ -114,6 +167,11 @@ jobs:
             echo "=== installing $rpm ==="
             rpm -i "$rpm"
             "/usr/bin/${bin}" --help >/dev/null
+            if [ "$pkg" = sigil-proxy ]; then
+              /usr/bin/sigil-proxy --version
+              /usr/bin/sigil-proxy version
+              proxy_assert_disabled_and_silent
+            fi
             if [ -n "$unit" ]; then
               test -f "/usr/lib/systemd/system/${unit}"
             fi
@@ -128,10 +186,11 @@ jobs:
           	sigil-sender|sigil-sender|sigil-sender.service|/etc/sigil/sender.yaml.example
           	sigil-server|sigil-server|sigil-server.service|/etc/sigil/server.yaml.example
           	sigil-signer|sigil-sign||
+          	sigil-proxy|sigil-proxy|sigil-proxy.service|/etc/sigil/proxy.yaml.example
           	TABLE
 
   # Debian/Ubuntu validation of the .deb packages. The rocky9 leg covers the
-  # RPM path; this covers .deb end-to-end: build all four, install each, smoke
+  # RPM path; this covers .deb end-to-end: build all five, install each, smoke
   # `--help`, then purge and verify cleanup. (#11)
   debian12:
     name: debian:12 / .deb install-test
@@ -147,19 +206,56 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: debian12
-      - name: build .deb (all 4 packages)
+      - name: build .deb (all 5 packages)
         run: |
           cargo install cargo-deb --locked
           packaging/build.sh deb
-      - name: inspect & install-test .deb (all 4 packages)
+      - name: inspect & install-test .deb (all 5 packages)
         shell: bash
         run: |
           set -eux
+          # AC-14 checks shared by the rpm and deb legs. systemd is not running in
+          # the container, so assert on the missing wants symlink as well as
+          # `systemctl is-enabled`, and scan /proc for a process or a listener.
+          proxy_assert_disabled_and_silent() {
+            if command -v systemctl >/dev/null 2>&1; then
+              st=$(systemctl is-enabled sigil-proxy 2>&1 || true)
+              echo "systemctl is-enabled sigil-proxy: $st"
+              case "$st" in enabled*) echo "::error::sigil-proxy is enabled"; exit 1 ;; esac
+            fi
+            if ls /etc/systemd/system/*.wants/sigil-proxy.service >/dev/null 2>&1; then
+              echo "::error::sigil-proxy has a wants symlink (enabled)"
+              exit 1
+            fi
+            for c in /proc/[0-9]*/comm; do
+              if [ "$(cat "$c" 2>/dev/null)" = sigil-proxy ]; then
+                echo "::error::sigil-proxy process is running"
+                exit 1
+              fi
+            done
+            # `run` without --config must refuse to start (exit 2), never fall back
+            # to a default path.
+            rc=0
+            /usr/bin/sigil-proxy run >/dev/null 2>&1 || rc=$?
+            if [ "$rc" != 2 ]; then
+              echo "::error::sigil-proxy run without --config exited $rc, expected 2"
+              exit 1
+            fi
+            # The process and port scans are only a smoke test (the binary never
+            # starts here; the real guarantee is the package-content checks).
+            # No listener on the default port 8480 (0x2120), state LISTEN (0A).
+            if awk '$4 == "0A" && $2 ~ /:2120$/ { found = 1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+              echo "::error::something listens on 8480 after install"
+              exit 1
+            fi
+          }
+
           for entry in \
             "sigil|sigil|sigil.service|/etc/sigil/policy.yaml.example" \
             "sigil-sender|sigil-sender|sigil-sender.service|/etc/sigil/sender.yaml.example" \
             "sigil-server|sigil-server|sigil-server.service|/etc/sigil/server.yaml.example" \
-            "sigil-signer|sigil-sign||"; do
+            "sigil-signer|sigil-sign||" \
+            "sigil-proxy|sigil-proxy|sigil-proxy.service|/etc/sigil/proxy.yaml.example"; do
             IFS='|' read -r pkg bin unit example <<< "$entry"
             # the `_` after the name keeps sigil_ from matching sigil-sender_ etc.
             deb=$(echo target/debian/${pkg}_[0-9]*.deb)
@@ -173,11 +269,36 @@ jobs:
             grep -qE "/usr/bin/${bin}$" <<< "$contents"
             [ -z "$unit" ]    || grep -qE "/systemd/system/${unit}$" <<< "$contents"
             [ -z "$example" ] || grep -qE "${example}$" <<< "$contents"
+            if [ "$pkg" = sigil-proxy ]; then
+              # AC-14: no live config shipped; maintainer scripts never enable or
+              # start the unit (debhelper's guarded was-enabled upgrade path and
+              # try-restart are the only systemd calls).
+              if grep -qE '/etc/sigil/proxy\.yaml$' <<< "$contents"; then
+                echo "::error::sigil-proxy must not ship a live /etc/sigil/proxy.yaml"
+                exit 1
+              fi
+              ctl=$(mktemp -d)
+              dpkg-deb -e "$deb" "$ctl"
+              scripts=$(cat "$ctl/postinst" "$ctl/prerm" "$ctl/postrm")
+              if grep -Eq 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(enable|start)([[:space:]]|$)|deb-systemd-invoke[[:space:]]+(start|restart)([[:space:]]|$)' <<< "$scripts"; then
+                echo "::error::sigil-proxy scripts must not enable or start the service"
+                exit 1
+              fi
+              if grep -Eq 'semodule' <<< "$scripts"; then
+                echo "::error::sigil-proxy scripts must not load an SELinux module"
+                exit 1
+              fi
+            fi
             # Use apt so the test also verifies that declared package
             # dependencies resolve in a minimal Debian installation.
             apt-get install -y "./$deb"
             "/usr/bin/${bin}" --help >/dev/null
             [ -z "$example" ] || test -f "$example"
+            if [ "$pkg" = sigil-proxy ]; then
+              /usr/bin/sigil-proxy --version
+              /usr/bin/sigil-proxy version
+              proxy_assert_disabled_and_silent
+            fi
             dpkg -P "$pkg"
             test ! -e "/usr/bin/${bin}"
           done

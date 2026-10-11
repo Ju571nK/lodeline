@@ -1,6 +1,6 @@
 # OS packages
 
-Sigil ships four `.deb` / `.rpm` packages — one per binary crate. They install
+Sigil ships five `.deb` / `.rpm` packages — one per binary crate. They install
 the binary, optional systemd unit, and example config to standard FHS paths.
 
 ## What's in each package
@@ -11,9 +11,20 @@ the binary, optional systemd unit, and example config to standard FHS paths.
 | `sigil-sender` | `/usr/bin/sigil-sender` | `sigil-sender.service` | `/etc/sigil/sender.yaml.example` |
 | `sigil-server` | `/usr/bin/sigil-server` | `sigil-server.service` | `/etc/sigil/server.yaml.example` |
 | `sigil-signer` | `/usr/bin/sigil-sign` | — | — |
+| `sigil-proxy` | `/usr/bin/sigil-proxy` | `sigil-proxy.service` | `/etc/sigil/proxy.yaml.example` |
 
 All systemd units are installed **disabled**. Nothing starts on install — the
 operator decides.
+
+`sigil-proxy` runs as its own `sigil-proxy` user and group (its own sysusers file),
+ships no live `/etc/sigil/proxy.yaml` (only the `.example`), its
+post-install does `daemon-reload` only (no enable, no start, no SELinux module),
+and it uses its own `StateDirectory=sigil-proxy` (`/var/lib/sigil-proxy`), never
+shared with another daemon. Copy the example, create the referenced certificate,
+key and secret files (private files owned by `sigil-proxy`, mode 0600), run
+`sigil-proxy check-config --config /etc/sigil/proxy.yaml`, then
+`systemctl enable --now sigil-proxy`. The SELinux domain for the proxy is
+deferred to hardware verification; until then it runs unconfined.
 
 ## Building
 
@@ -21,29 +32,30 @@ Pure-Rust packagers, so this runs on macOS or Linux:
 
 ```sh
 cargo install cargo-deb cargo-generate-rpm     # one-time
-packaging/build.sh                              # build all 4 packages, both formats
+packaging/build.sh                              # build all 5 packages, both formats
 packaging/build.sh sender                       # only sigil-sender, both formats
 packaging/build.sh signer rpm                   # only sigil-signer .rpm
-packaging/build.sh deb                          # all 4 packages, .deb only
+packaging/build.sh proxy                        # only sigil-proxy, both formats
+packaging/build.sh deb                          # all 5 packages, .deb only
 ```
 
 Args (any order, both optional):
 
 | Arg | Values | Default |
 | --- | --- | --- |
-| `<what>` | `agent`, `sender`, `server`, `signer`, `all` | `all` |
+| `<what>` | `agent`, `sender`, `server`, `signer`, `proxy`, `all` | `all` |
 | `<format>` | `deb`, `rpm` | both formats |
 
 **Build a release package on Linux** (or cross-compile) — the packagers just
 bundle whatever is at `target/release/<bin>`, so a package built on macOS
-contains a macOS binary. CI builds and install-tests all 4 `.rpm`s on the
-`rocky9` job (`rpm -qpl`, `rpm -i`, `<bin> --help`, `rpm -e`); the `.deb`s
-are not built in CI.
+contains a macOS binary. CI builds and install-tests all 5 `.rpm`s on the
+`rocky9` job (`rpm -qpl`, `rpm -i`, `<bin> --help`, `rpm -e`); the `debian12`
+job builds and install-tests the `.deb`s the same way.
 
 The metadata lives in `[package.metadata.deb]` / `[package.metadata.generate-rpm]`
 in each crate's `Cargo.toml`; the deb maintainer-script skeletons are in
 [`packaging/debian/`](debian/) (agent), [`packaging/debian-sender/`](debian-sender/),
-and [`packaging/debian-server/`](debian-server/). `sigil-signer` has no skeleton
+and [`packaging/debian-server/`](debian-server/), and [`packaging/debian-proxy/`](debian-proxy/). `sigil-signer` has no skeleton
 dir — operator CLI, no systemd integration.
 
 ## Installing

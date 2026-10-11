@@ -35,3 +35,63 @@ libc = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 libc = { workspace = true }
+
+# OS packages (#245). Build with `packaging/build.sh proxy`. See packaging/README.md.
+# Installed DISABLED: no live /etc/sigil/proxy.yaml is shipped (only .example),
+# post-install does daemon-reload only (no enable, no start, no semodule). The
+# SELinux domain is deferred to hardware verification; the proxy runs unconfined.
+
+[package.metadata.deb]
+name = "sigil-proxy"
+maintainer = "Sigil contributors <sigil@users.noreply.github.com>"
+section = "admin"
+priority = "optional"
+depends = "libc6, init-system-helpers (>= 1.52), systemd | systemd-standalone-sysusers | systemd-sysusers"
+maintainer-scripts = "../../packaging/debian-proxy"
+extended-description = """\
+Sigil Proxy: standalone MCP relay with audit. Ships a systemd unit (disabled by \
+default, no live config installed: copy /etc/sigil/proxy.yaml.example to \
+/etc/sigil/proxy.yaml, edit, then `systemctl enable --now sigil-proxy`)."""
+assets = [
+    ["../../target/release/sigil-proxy", "usr/bin/", "755"],
+    ["../../config/proxy.example.yaml", "etc/sigil/proxy.yaml.example", "644"],
+    ["../../README.md", "usr/share/doc/sigil-proxy/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/sigil-proxy/LICENSE", "644"],
+    # Creates the dedicated sigil-proxy group/user so User=sigil-proxy resolves. Idempotent.
+    ["../../packaging/sysusers.d/sigil-proxy.conf", "usr/lib/sysusers.d/sigil-proxy.conf", "644"],
+]
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "../../packaging/systemd"
+unit-name = "sigil-proxy"
+enable = false
+start = false
+
+[package.metadata.generate-rpm]
+name = "sigil-proxy"
+summary = "Standalone MCP relay with audit (installed disabled, no live config)"
+assets = [
+    { source = "../../target/release/sigil-proxy", dest = "/usr/bin/sigil-proxy", mode = "0755" },
+    { source = "../../packaging/systemd/sigil-proxy.service", dest = "/usr/lib/systemd/system/sigil-proxy.service", mode = "0644" },
+    { source = "../../config/proxy.example.yaml", dest = "/etc/sigil/proxy.yaml.example", mode = "0644" },
+    { source = "../../README.md", dest = "/usr/share/doc/sigil-proxy/README.md", mode = "0644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/doc/sigil-proxy/LICENSE", mode = "0644", doc = true },
+    { source = "../../packaging/sysusers.d/sigil-proxy.conf", dest = "/usr/lib/sysusers.d/sigil-proxy.conf", mode = "0644" },
+]
+# Create the sigil-proxy user/group (idempotent) and reload units. No enable, no
+# start, no semodule.
+post_install_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+command -v systemd-sysusers >/dev/null 2>&1 && systemd-sysusers /usr/lib/sysusers.d/sigil-proxy.conf >/dev/null 2>&1 || :
+"""
+pre_uninstall_script = """\
+if [ "$1" = 0 ] ; then
+    systemctl --no-reload disable --now sigil-proxy.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -ge 1 ] ; then
+    systemctl try-restart sigil-proxy.service >/dev/null 2>&1 || :
+fi
+"""

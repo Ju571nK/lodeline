@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+# Sigil hardening (#10 slice 2): create the sigil-proxy group/user so the proxy
+# unit's User=sigil-proxy resolves before start. Guarded so non-systemd hosts no-op.
+# Idempotent (sysusers is declarative; a no-op if the group/user already exist).
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers /usr/lib/sysusers.d/sigil-proxy.conf >/dev/null 2>&1 || true
+fi
+
+exit 0
