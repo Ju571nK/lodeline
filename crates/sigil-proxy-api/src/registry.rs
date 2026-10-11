@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ValidationError;
-use crate::helpers::check_array;
+use crate::helpers::{check_array, check_len};
 use crate::scalar::{Fingerprint, Id, KeyId, MetadataRef, SchemaVersion, Timestamp};
 use crate::Validate;
 
@@ -112,21 +112,14 @@ wire_struct! {
 
 impl Validate for UploadRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        check_array(
-            "entries",
-            &self
-                .entries
-                .iter()
-                .map(|e| e.metadata_ref.clone())
-                .collect::<Vec<_>>(),
-            1,
-            100,
-            false,
-        )
+        check_len("entries", self.entries.len(), 1, 100)?;
+        self.entries.iter().try_for_each(Validate::validate)
     }
 }
 
 wire_struct! {
+    lenient
+    /// Read by the proxy: unknown fields are ignored when parsing.
     pub struct UploadResponse {
         pub registered_metadata_refs: Vec<MetadataRef>,
         pub duplicate_metadata_refs: Vec<MetadataRef>,

@@ -27,6 +27,11 @@ use sigil_proxy_api::canonical::{canonical_event_bytes, compare_for_dedup, Dedup
 use sigil_proxy_api::event::{IngestRequest, IngestResponse};
 use sigil_proxy_api::registry::{UploadRequest, UploadResponse};
 use sigil_proxy_api::status::StatusResponse;
+use sigil_proxy_api::{
+    parse_api_error, parse_event, parse_event_batch, parse_ingest_response, parse_status,
+    parse_status_response, parse_upload, parse_upload_response, ErrorCategory, ParseError,
+    Validate,
+};
 use sigil_proxy_api::{ApiError, EntryView, ErrorCode, ProxyEvent, ProxyStatus, RegistryEntry};
 
 const EXAMPLE: &str =
@@ -1304,7 +1309,7 @@ fn error_object_round_trips_and_tolerates_unknown_codes() {
 
     let future = json!({"error": {"code": "brand_new_code", "message": "x"}});
     let e: ApiError = serde_json::from_value(future.clone()).unwrap();
-    assert_eq!(e.error.code, ErrorCode::Unknown("brand_new_code".into()));
+    assert_eq!(e.error.code, ErrorCode::parse("brand_new_code"));
     assert!(!e.error.code.is_known());
     assert_eq!(serde_json::to_value(&e).unwrap(), future);
 
@@ -1331,7 +1336,6 @@ fn error_object_round_trips_and_tolerates_unknown_codes() {
 fn error_object_rejects_malformed_shapes() {
     let bad = |v: Value| assert!(serde_json::from_value::<ApiError>(v).is_err());
     bad(json!({"error": {"code": "conflict"}}));
-    bad(json!({"error": {"code": "conflict", "message": "x", "raw_body": "canary"}}));
     bad(json!({"error": {"code": "conflict", "message": "x", "items": [{"code": "conflict"}]}}));
     bad(
         json!({"error": {"code": "conflict", "message": "x", "items": [{"index": -1, "code": "conflict"}]}}),
@@ -1360,4 +1364,451 @@ fn ingest_bodies() {
     let resp = json!({"accepted_event_ids": [uid(1)], "duplicate_event_ids": [uid(2)]});
     let parsed: IngestResponse = serde_json::from_value(resp.clone()).unwrap();
     assert_eq!(serde_json::to_value(&parsed).unwrap(), resp);
+}
+
+// ---------------------------------------------------------------- review fixes
+
+#[derive(Clone, Copy)]
+enum Seg {
+    K(&'static str),
+    I(usize),
+}
+
+fn set_deep(mut v: Value, path: &[Seg], new: Value) -> Value {
+    let mut cur = &mut v;
+    for seg in &path[..path.len() - 1] {
+        cur = match seg {
+            Seg::K(k) => cur.get_mut(*k).unwrap(),
+            Seg::I(i) => cur.get_mut(*i).unwrap(),
+        };
+    }
+    match path[path.len() - 1] {
+        Seg::K(k) => {
+            cur.as_object_mut().unwrap().insert(k.into(), new);
+        }
+        Seg::I(i) => cur[i] = new,
+    }
+    v
+}
+
+type Entry = fn(&[u8]) -> Result<(), ParseError>;
+
+struct Point {
+    name: &'static str,
+    parse: Entry,
+    doc: Value,
+    lenient: bool,
+    enum_slot: Option<Vec<Seg>>,
+    type_slot: Vec<Seg>,
+}
+
+fn points() -> Vec<Point> {
+    use Seg::{I, K};
+    vec![
+        Point {
+            name: "event",
+            parse: |b| parse_event(b).map(drop),
+            doc: example(),
+            lenient: false,
+            enum_slot: Some(vec![K("payload"), K("method")]),
+            type_slot: vec![K("sequence")],
+        },
+        Point {
+            name: "batch",
+            parse: |b| parse_event_batch(b).map(drop),
+            doc: json!({"events": [example()]}),
+            lenient: false,
+            enum_slot: Some(vec![K("events"), I(0), K("event_type")]),
+            type_slot: vec![K("events"), I(0), K("sequence")],
+        },
+        Point {
+            name: "status",
+            parse: |b| parse_status(b).map(drop),
+            doc: status(),
+            lenient: false,
+            enum_slot: Some(vec![K("spool"), K("state")]),
+            type_slot: vec![K("status_sequence")],
+        },
+        Point {
+            name: "upload",
+            parse: |b| parse_upload(b).map(drop),
+            doc: json!({"schema_version": 1, "proxy_id": "proxy-demo", "entries": [entry()]}),
+            lenient: false,
+            enum_slot: Some(vec![K("entries"), I(0), K("canon")]),
+            type_slot: vec![K("schema_version")],
+        },
+        Point {
+            name: "api_error",
+            parse: |b| parse_api_error(b).map(drop),
+            doc: json!({"error": {"code": "conflict", "message": "x"}}),
+            lenient: true,
+            enum_slot: None,
+            type_slot: vec![K("error"), K("items")],
+        },
+        Point {
+            name: "ingest_response",
+            parse: |b| parse_ingest_response(b).map(drop),
+            doc: json!({"accepted_event_ids": [], "duplicate_event_ids": []}),
+            lenient: true,
+            enum_slot: None,
+            type_slot: vec![K("accepted_event_ids")],
+        },
+        Point {
+            name: "status_response",
+            parse: |b| parse_status_response(b).map(drop),
+            doc: json!({"state_applied": true, "acknowledged_gap_ids": [], "duplicate_gap_ids": []}),
+            lenient: true,
+            enum_slot: None,
+            type_slot: vec![K("state_applied")],
+        },
+        Point {
+            name: "upload_response",
+            parse: |b| parse_upload_response(b).map(drop),
+            doc: json!({"registered_metadata_refs": [], "duplicate_metadata_refs": []}),
+            lenient: true,
+            enum_slot: None,
+            type_slot: vec![K("registered_metadata_refs")],
+        },
+    ]
+}
+
+const CANARY: &str = "CANARY-SECRET-42";
+
+fn assert_no_canary(name: &str, case: &str, e: &ParseError) {
+    for text in [format!("{e:?}"), format!("{e}")] {
+        assert!(!text.contains("CANARY"), "{name}/{case} leaked: {text}");
+    }
+}
+
+#[test]
+fn parse_entry_points_accept_valid_documents() {
+    for p in points() {
+        let bytes = serde_json::to_vec(&p.doc).unwrap();
+        (p.parse)(&bytes).unwrap_or_else(|e| panic!("{}: {e}", p.name));
+    }
+}
+
+#[test]
+fn parse_errors_never_echo_input() {
+    for p in points() {
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+        let mut with_extra = p.doc.clone();
+        with_extra
+            .as_object_mut()
+            .unwrap()
+            .insert(CANARY.into(), json!(CANARY));
+        cases.push(("unknown field", with_extra));
+        if let Some(slot) = &p.enum_slot {
+            cases.push((
+                "unknown variant",
+                set_deep(p.doc.clone(), slot, json!(CANARY)),
+            ));
+        }
+        cases.push((
+            "wrong type",
+            set_deep(p.doc.clone(), &p.type_slot, json!(CANARY)),
+        ));
+        cases.push(("float", set_deep(p.doc.clone(), &p.type_slot, json!(1.5))));
+        for (case, doc) in cases {
+            let bytes = serde_json::to_vec(&doc).unwrap();
+            match (p.parse)(&bytes) {
+                Ok(()) => assert!(
+                    p.lenient && case == "unknown field",
+                    "{}/{case} accepted",
+                    p.name
+                ),
+                Err(e) => {
+                    assert_ne!(e.category(), ErrorCategory::Syntax, "{}/{case}", p.name);
+                    assert_no_canary(p.name, case, &e);
+                }
+            }
+        }
+        let broken = format!("{{\"{CANARY}\": ");
+        let e = (p.parse)(broken.as_bytes()).unwrap_err();
+        assert_eq!(e.category(), ErrorCategory::Syntax);
+        assert_no_canary(p.name, "syntax", &e);
+        let e = (p.parse)(format!("[\"{CANARY}\"]").as_bytes()).unwrap_err();
+        assert_no_canary(p.name, "array", &e);
+        let e = (p.parse)(format!("{{}} {CANARY}").as_bytes()).unwrap_err();
+        assert_eq!(e.category(), ErrorCategory::Syntax);
+        assert_no_canary(p.name, "trailing", &e);
+    }
+}
+
+#[test]
+fn parse_rejects_duplicate_keys() {
+    for p in points() {
+        let text = serde_json::to_string(&p.doc).unwrap();
+        let rest = text.trim_start_matches('{');
+        let dup = format!("{{\"{CANARY}\":1,\"{CANARY}\":2,{rest}");
+        let e = (p.parse)(dup.as_bytes()).unwrap_err();
+        assert_eq!(e.category(), ErrorCategory::Schema, "{}", p.name);
+        assert_no_canary(p.name, "duplicate", &e);
+    }
+    // Nested duplicate inside an otherwise valid event.
+    let text = EXAMPLE.replacen(
+        "\"upstream_id\": \"fixture\",",
+        "\"upstream_id\": \"fixture\", \"upstream_id\": \"other\",",
+        1,
+    );
+    assert_ne!(text, EXAMPLE);
+    assert_eq!(
+        parse_event(text.as_bytes()).unwrap_err().category(),
+        ErrorCategory::Schema
+    );
+}
+
+#[test]
+fn parse_categories_and_indices() {
+    let bytes = |v: Value| serde_json::to_vec(&v).unwrap();
+    // Semantic: cross-field rule.
+    let bad_matrix = set(completion(), &["payload", "outcome"], json!("denied"));
+    assert_eq!(
+        parse_event(&bytes(bad_matrix)).unwrap_err().category(),
+        ErrorCategory::Semantic
+    );
+    let cfg = del(status()["config"].clone(), &["config_hash"]);
+    let s = set(status(), &["config"], cfg);
+    assert_eq!(
+        parse_status(&bytes(s)).unwrap_err().category(),
+        ErrorCategory::Semantic
+    );
+    // Limit: counts and sizes.
+    let many = json!({"events": vec![example(); 101]});
+    assert_eq!(
+        parse_event_batch(&bytes(many)).unwrap_err().category(),
+        ErrorCategory::Limit
+    );
+    let none = json!({"events": []});
+    assert_eq!(
+        parse_event_batch(&bytes(none)).unwrap_err().category(),
+        ErrorCategory::Limit
+    );
+    let huge = vec![b' '; 1024 * 1024 + 1];
+    assert_eq!(
+        parse_event_batch(&huge).unwrap_err().category(),
+        ErrorCategory::Limit
+    );
+    let too_many_gaps = set(
+        status(),
+        &["gaps"],
+        Value::Array(vec![gaps()[5].clone(); 101]),
+    );
+    assert_eq!(
+        parse_status(&bytes(too_many_gaps)).unwrap_err().category(),
+        ErrorCategory::Limit
+    );
+    // Schema with the index of the first bad element.
+    let batch =
+        json!({"events": [example(), set(example(), &["sequence"], json!(0)), completion()]});
+    let e = parse_event_batch(&bytes(batch)).unwrap_err();
+    assert_eq!((e.category(), e.index()), (ErrorCategory::Schema, Some(1)));
+    let up = json!({"schema_version": 1, "proxy_id": "p",
+        "entries": [entry(), set(entry(), &["canon"], json!("x"))]});
+    assert_eq!(parse_upload(&bytes(up)).unwrap_err().index(), Some(1));
+}
+
+#[test]
+fn validate_is_recursive_for_hand_built_values() {
+    use sigil_proxy_api::event::{DeliveryState, Outcome};
+    use sigil_proxy_api::status::ConfigState;
+    use sigil_proxy_api::{EventPayload, GapReport};
+
+    let good: ProxyStatus =
+        serde_json::from_value(set(status(), &["gaps"], Value::Array(gaps()))).unwrap();
+    assert!(good.validate().is_ok());
+
+    let mut s = good.clone();
+    s.config.config_hash = None; // state is valid
+    assert!(s.validate().is_err(), "config rule");
+
+    let mut s = good.clone();
+    s.config.state = ConfigState::Valid;
+    s.config.max_offline_retry_age_seconds = Some(1);
+    assert!(s.validate().is_err(), "config range");
+
+    let mut s = good.clone();
+    if let GapReport::RegistryConflict(g) = &mut s.gaps[0] {
+        g.event_ids.clear();
+    }
+    assert!(s.validate().is_err(), "gap rule through ProxyStatus");
+    assert!(s.gaps[0].validate().is_err(), "GapReport::validate");
+
+    let mut s = good.clone();
+    if let GapReport::LocalRecordFailed(g) = &mut s.gaps[2] {
+        let id = g.invocation_ids[0].clone();
+        g.invocation_ids.push(id);
+    }
+    assert!(s.validate().is_err(), "gap uniqueness");
+
+    let mut s = good.clone();
+    for _ in 0..1537 {
+        let c = s.counters.auth_failures[0].clone();
+        s.counters.auth_failures.push(c);
+    }
+    assert!(s.validate().is_err(), "counters limit");
+
+    let batch: IngestRequest =
+        serde_json::from_value(json!({"events": [example(), completion()]})).unwrap();
+    assert!(batch.validate().is_ok());
+    let mut b = batch.clone();
+    if let EventPayload::Completed(c) = &mut b.events[1].payload {
+        c.outcome = Outcome::Success;
+        c.delivery_state = DeliveryState::NotSent;
+    }
+    assert!(b.validate().is_err(), "event matrix through IngestRequest");
+    let mut b = batch;
+    b.events.clear();
+    assert!(b.validate().is_err(), "empty batch");
+
+    let up: UploadRequest =
+        serde_json::from_value(json!({"schema_version": 1, "proxy_id": "p", "entries": [entry()]}))
+            .unwrap();
+    assert!(up.validate().is_ok());
+    let mut u = up;
+    u.entries[0].definition = json!({});
+    assert!(u.validate().is_err(), "entry rule through UploadRequest");
+}
+
+#[test]
+fn timestamp_requires_year_one() {
+    rejected(
+        "year 0",
+        &set(example(), &["occurred_at"], json!("0000-01-01T00:00:00Z")),
+    );
+    accepted(&set(
+        example(),
+        &["occurred_at"],
+        json!("0001-01-01T00:00:00Z"),
+    ));
+}
+
+#[test]
+fn registry_conflict_gap_count_covers_listed_ids() {
+    let gap = |count: u64| {
+        let g = set(gaps()[0].clone(), &["event_ids"], json!([uid(1), uid(2)]));
+        set(
+            status(),
+            &["gaps"],
+            json!([set(g, &["affected_event_count"], json!(count))]),
+        )
+    };
+    status_bad("count 1 < 2 ids", gap(1));
+    status_ok(&gap(2));
+    status_ok(&gap(500));
+}
+
+#[test]
+fn unknown_error_codes_are_opaque_and_bounded() {
+    assert_eq!(ErrorCode::parse("conflict"), ErrorCode::Conflict);
+    assert_eq!(
+        ErrorCode::parse("registry_conflict"),
+        ErrorCode::RegistryConflict
+    );
+    let long = "a".repeat(65);
+    let max = "a".repeat(64);
+    assert_eq!(ErrorCode::parse(&max).as_str(), max);
+    for bad in [
+        long.as_str(),
+        "Conflict",
+        "bad-code",
+        "with space",
+        "",
+        "CANARY-SECRET-42",
+        "ünï",
+    ] {
+        let c = ErrorCode::parse(bad);
+        assert!(!c.is_known());
+        assert_eq!(c.as_str(), "unknown", "{bad:?}");
+        assert!(!format!("{c:?}").contains("CANARY"));
+    }
+    let body = json!({"error": {"code": "CANARY-SECRET-42", "message": "x"}});
+    let e = parse_api_error(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(e.error.code.as_str(), "unknown");
+    assert!(!serde_json::to_string(&e).unwrap().contains("CANARY"));
+}
+
+#[test]
+fn response_bodies_ignore_unknown_fields_but_emit_closed() {
+    let body = json!({"error": {"code": "conflict", "message": "m", "future": {"a": 1},
+        "items": [{"index": 0, "code": "conflict", "future": 1}]}, "trace": "t"});
+    let e = parse_api_error(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&e).unwrap(),
+        json!({"error": {"code": "conflict", "message": "m",
+            "items": [{"index": 0, "code": "conflict"}]}})
+    );
+    let r =
+        parse_ingest_response(br#"{"accepted_event_ids":[],"duplicate_event_ids":[],"extra":1}"#)
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&r).unwrap(),
+        json!({"accepted_event_ids": [], "duplicate_event_ids": []})
+    );
+    assert!(parse_status_response(
+        br#"{"state_applied":true,"acknowledged_gap_ids":[],"duplicate_gap_ids":[],"x":1}"#
+    )
+    .is_ok());
+    assert!(parse_upload_response(
+        br#"{"registered_metadata_refs":[],"duplicate_metadata_refs":[],"x":1}"#
+    )
+    .is_ok());
+    // Content rules still apply to lenient bodies.
+    assert!(
+        parse_ingest_response(br#"{"accepted_event_ids":["BAD"],"duplicate_event_ids":[]}"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn error_item_carries_at_most_one_id() {
+    let both = json!({"index": 0, "event_id": uid(1), "gap_id": uid(2), "code": "conflict"});
+    let body = json!({"error": {"code": "conflict", "message": "m", "items": [both]}});
+    assert_eq!(
+        parse_api_error(&serde_json::to_vec(&body).unwrap())
+            .unwrap_err()
+            .category(),
+        ErrorCategory::Semantic
+    );
+    let item: sigil_proxy_api::ErrorItem =
+        serde_json::from_value(json!({"index": 0, "event_id": uid(1), "code": "conflict"}))
+            .unwrap();
+    let mut two = item.clone();
+    two.gap_id = two.event_id.clone();
+    let e = ApiError::from_code(ErrorCode::Conflict).with_items(vec![item]);
+    assert!(e.validate().is_ok());
+    let e = e.with_items(vec![two]);
+    assert!(e.validate().is_err());
+}
+
+#[test]
+fn api_error_constructor_uses_fixed_messages() {
+    for code in [
+        "proxy_unknown",
+        "conflict",
+        "sequence_conflict",
+        "registry_conflict",
+        "invocation_owner_conflict",
+        "revision_conflict",
+        "disabled",
+        "retired",
+        "metadata_ref_pending",
+        "semantic_invalid",
+        "schema_invalid",
+        "invalid_status",
+        "invalid_cursor",
+        "invalid_filter",
+        "something_new",
+    ] {
+        let code = ErrorCode::parse(code);
+        let e = ApiError::from_code(code.clone());
+        assert_eq!(e.error.message, code.fixed_message());
+        assert!(!e.error.message.is_empty());
+        assert!(e.validate().is_ok());
+        let round: ApiError = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
+        assert_eq!(round, e);
+    }
+    let e = ApiError::from_code(ErrorCode::MetadataRefPending)
+        .with_pending_metadata_refs(vec![serde_json::from_value(json!(metadata_ref())).unwrap()]);
+    assert!(e.validate().is_ok());
 }

@@ -84,7 +84,7 @@ fn is_timestamp(s: &str) -> bool {
         2 => 28,
         _ => return false,
     };
-    (1..=days).contains(&day) && hour <= 23 && min <= 59 && sec <= 59
+    year >= 1 && (1..=days).contains(&day) && hour <= 23 && min <= 59 && sec <= 59
 }
 
 macro_rules! string_scalar {

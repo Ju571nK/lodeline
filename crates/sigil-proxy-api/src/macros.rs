@@ -1,7 +1,21 @@
-/// Defines a closed wire struct: `Serialize` derived, `Deserialize` strict
-/// (unknown fields rejected, objects only) followed by [`crate::Validate`].
+/// Defines a wire struct: `Serialize` derived, `Deserialize` through an object-only
+/// buffer followed by [`crate::Validate`].
+///
+/// * `wire_struct!` is closed: unknown fields are rejected.
+/// * `wire_struct!(lenient ...)` ignores unknown fields when parsing (bodies the proxy
+///   reads from the server) and still emits only the declared fields.
 macro_rules! wire_struct {
+    (lenient $($rest:tt)*) => {
+        wire_struct_impl!([] $($rest)*);
+    };
+    ($($rest:tt)*) => {
+        wire_struct_impl!([#[serde(deny_unknown_fields)]] $($rest)*);
+    };
+}
+
+macro_rules! wire_struct_impl {
     (
+        [$(#[$wa:meta])*]
         $(#[$m:meta])*
         pub struct $name:ident {
             $( $(#[$fm:meta])* pub $f:ident : $t:ty ),* $(,)?
@@ -15,7 +29,7 @@ macro_rules! wire_struct {
 
         const _: () = {
             #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
+            $(#[$wa])*
             struct Wire {
                 $( $(#[$fm])* $f : $t ),*
             }
@@ -26,7 +40,7 @@ macro_rules! wire_struct {
                         <$crate::helpers::ObjectOnly<Wire> as serde::Deserialize>::deserialize(d)?.0;
                     let value = $name { $($f),* };
                     $crate::Validate::validate(&value)
-                        .map_err(<D::Error as serde::de::Error>::custom)?;
+                        .map_err(|e| <D::Error as serde::de::Error>::custom(e.tagged()))?;
                     Ok(value)
                 }
             }

@@ -5,7 +5,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::ValidationError;
-use crate::helpers::{check_array, ObjectOnly};
+use crate::helpers::{check_len, ObjectOnly};
 use crate::scalar::{Id, MetadataRef, NonNegativeI64, PositiveI64, SchemaVersion, Timestamp, Uuid};
 use crate::Validate;
 
@@ -367,22 +367,15 @@ wire_struct! {
 
 impl Validate for IngestRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        check_array(
-            "events",
-            &self
-                .events
-                .iter()
-                .map(|e| e.event_id.clone())
-                .collect::<Vec<_>>(),
-            1,
-            100,
-            false,
-        )
+        check_len("events", self.events.len(), 1, 100)?;
+        self.events.iter().try_for_each(Validate::validate)
     }
 }
 
 wire_struct! {
-    /// 200 body of `POST /v1/proxy-events`.
+    lenient
+    /// 200 body of `POST /v1/proxy-events`. Read by the proxy: unknown fields are
+    /// ignored when parsing.
     pub struct IngestResponse {
         pub accepted_event_ids: Vec<Uuid>,
         pub duplicate_event_ids: Vec<Uuid>,

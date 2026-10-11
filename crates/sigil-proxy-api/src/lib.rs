@@ -17,6 +17,39 @@
 //!   enforced by [`Validate`], which the deserializers call. Hand-built values
 //!   can call `validate()` themselves.
 //!
+//! # Parsing untrusted input
+//!
+//! Raw `serde_json::from_*` errors name unknown fields, variants and sometimes
+//! values. **They must not be logged or returned to a peer.** Parse network input
+//! with the byte-level entry points in [`parse`] ([`parse_event_batch`],
+//! [`parse_status`], [`parse_upload`], ...). They return a [`ParseError`] that holds
+//! only a fixed [`ErrorCategory`] and an optional array index, and they also
+//! reject duplicate JSON object keys. Direct `serde` deserialization stays
+//! available for trusted data and tests.
+//!
+//! # Request versus response bodies
+//!
+//! Request bodies and stored documents are closed (unknown fields rejected).
+//! Bodies the proxy reads from the server ([`ApiError`], [`IngestResponse`],
+//! [`StatusResponse`], [`UploadResponse`]) ignore unknown fields when parsing so a
+//! newer server can add fields; they emit only the declared fields.
+//!
+//! # Validation
+//!
+//! [`Validate::validate`] is recursive: a hand-built [`ProxyStatus`],
+//! [`IngestRequest`] or [`UploadRequest`] validates every nested element.
+//!
+//! # Notes for consumers
+//!
+//! * Timestamps are kept as the exact received text: `08:00:00Z` and `08:00:00.0Z`
+//!   are different values for dedup, so never re-format them before storing or
+//!   retransmitting.
+//! * `RegistryEntry::definition` is untrusted tool content for the access-controlled
+//!   metadata store only; it must not reach logs or ordinary audit reads.
+//!
+//! (Review notes L-5 and L-6 were referenced without text; the two notes above are
+//! the consumer-facing cautions this crate can state on its own.)
+//!
 //! This crate has no I/O and no dependency beyond `serde`/`serde_json`.
 
 #[macro_use]
@@ -25,18 +58,27 @@ mod macros;
 pub mod canonical;
 pub mod error;
 pub mod event;
+pub mod parse;
 pub mod registry;
 pub mod scalar;
 pub mod status;
 
-pub use error::{ApiError, ErrorBody, ErrorCode, ErrorItem, ValidationError};
-pub use event::{EventPayload, ProxyEvent};
-pub use registry::{EntryView, RegistryEntry};
+pub use canonical::{canonical_event_bytes, canonical_json, compare_for_dedup, DedupComparison};
+pub use error::{ApiError, ErrorBody, ErrorCode, ErrorItem, UnknownCode, ValidationError};
+pub use event::{
+    EventPayload, IngestRequest, IngestResponse, InvocationCancelRequested, InvocationCompleted,
+    InvocationStarted, ProxyEvent,
+};
+pub use parse::{
+    parse_api_error, parse_event, parse_event_batch, parse_ingest_response, parse_status,
+    parse_status_response, parse_upload, parse_upload_response, ErrorCategory, ParseError,
+};
+pub use registry::{EntryView, RegistryEntry, UploadRequest, UploadResponse};
 pub use scalar::{
     ConfigHash, Fingerprint, Id, KeyId, MetadataRef, NonNegativeI64, PositiveI64, SchemaVersion,
     Timestamp, Uuid,
 };
-pub use status::ProxyStatus;
+pub use status::{GapReport, ProxyStatus, StatusResponse};
 
 /// Cross-field rules the JSON schemas express with `if/then`, array bounds and uniqueness.
 pub trait Validate {
@@ -86,6 +128,20 @@ pub(crate) mod helpers {
         }
     }
 
+    pub fn check_len(
+        field: &str,
+        len: usize,
+        min: usize,
+        max: usize,
+    ) -> Result<(), ValidationError> {
+        if len < min || len > max {
+            return Err(ValidationError::limit(format!(
+                "{field}: expected {min}..={max} items"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn check_array<T: Eq + Hash>(
         field: &str,
         items: &[T],
@@ -93,12 +149,7 @@ pub(crate) mod helpers {
         max: usize,
         unique: bool,
     ) -> Result<(), ValidationError> {
-        if items.len() < min || items.len() > max {
-            return Err(ValidationError::new(format!(
-                "{field}: expected {min}..={max} items, got {}",
-                items.len()
-            )));
-        }
+        check_len(field, items.len(), min, max)?;
         if unique {
             let mut seen = HashSet::with_capacity(items.len());
             if !items.iter().all(|i| seen.insert(i)) {

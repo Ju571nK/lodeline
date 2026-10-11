@@ -195,7 +195,9 @@ wire_struct! {
 impl Validate for Counters {
     fn validate(&self) -> Result<(), ValidationError> {
         if self.auth_failures.len() > 1536 || self.unmatched_cancels.len() > 1536 {
-            return Err(ValidationError::new("too many counter entries (max 1536)"));
+            return Err(ValidationError::limit(
+                "too many counter entries (max 1536)",
+            ));
         }
         Ok(())
     }
@@ -281,7 +283,15 @@ wire_struct! {
 
 impl Validate for RegistryConflictGap {
     fn validate(&self) -> Result<(), ValidationError> {
-        check_array("event_ids", &self.event_ids, 1, 100, true)
+        check_array("event_ids", &self.event_ids, 1, 100, true)?;
+        // The count covers every event depending on the entry, so it cannot be
+        // smaller than the ids listed in this chunk.
+        if (self.affected_event_count.get() as u64) < self.event_ids.len() as u64 {
+            return Err(ValidationError::new(
+                "affected_event_count is smaller than the number of event_ids",
+            ));
+        }
+        Ok(())
     }
 }
 impl Validate for EventQuarantinedGap {
@@ -305,6 +315,19 @@ no_rules!(
     UnrecordedCallsGap,
     CentralOutageGap
 );
+
+impl Validate for GapReport {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            GapReport::RegistryConflict(g) => g.validate(),
+            GapReport::EventQuarantined(g) => g.validate(),
+            GapReport::LocalRecordFailed(g) => g.validate(),
+            GapReport::SpoolExpired(g) => g.validate(),
+            GapReport::UnrecordedCalls(g) => g.validate(),
+            GapReport::CentralOutage(g) => g.validate(),
+        }
+    }
+}
 
 /// Gap report, discriminated by `kind`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -343,17 +366,30 @@ wire_struct! {
 impl Validate for ProxyStatus {
     fn validate(&self) -> Result<(), ValidationError> {
         if self.routes.len() > 256 {
-            return Err(ValidationError::new("too many routes (max 256)"));
+            return Err(ValidationError::limit("too many routes (max 256)"));
         }
         if self.gaps.len() > 100 {
-            return Err(ValidationError::new("too many gaps (max 100)"));
+            return Err(ValidationError::limit("too many gaps (max 100)"));
+        }
+        self.config.validate()?;
+        self.spool.validate()?;
+        self.registry.validate()?;
+        self.central.validate()?;
+        self.counters.validate()?;
+        for route in &self.routes {
+            route.validate()?;
+        }
+        for gap in &self.gaps {
+            gap.validate()?;
         }
         Ok(())
     }
 }
 
 wire_struct! {
-    /// 200 body of `POST /v1/proxy-status`.
+    lenient
+    /// 200 body of `POST /v1/proxy-status`. Read by the proxy: unknown fields are
+    /// ignored when parsing.
     pub struct StatusResponse {
         pub state_applied: bool,
         pub acknowledged_gap_ids: Vec<Uuid>,
