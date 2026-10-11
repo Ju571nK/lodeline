@@ -1,17 +1,25 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-10 · Claude Code orchestrator 세션 (기준 커밋 `cdd1d1d`)
+갱신: 2026-10-11 · Claude Code orchestrator 세션 (기준 커밋 `2120415`)
 
 ## 현재 상태
 
-- P0 부분 진행. Production proxy 및 manager 구현은 미착수.
-- 사용자 창구: 이 대화의 orchestrator.
-- 2026-10-10 회차 종료. 실행 중 작업자 없음(spec-auditor, review-lead, coding-lead, contract-coder 모두 완료).
-  위임 실적: coding-lead만 하위 모델 사용(sonnet: raw relay, haiku: MSRV 빌드). 나머지 lead는 작업 규모가 작아 직접 수행.
-- 회차 결과: D-01 구조 결정 + 후속 결정, D-03 ingest 하위 계약 동결, contract v0.3(checker PASS 53/271, orchestrator 재실행 확인),
-  T-01 probe 증거(독립 리뷰 통과), 기존 workspace MSRV 불일치 #240 등록.
-- P1 production 코드(`crates/`)와 공유 계약(`contracts/`)은 D-01–05 종료 전 배정하지 않는다.
-- 문서/fixture 통과를 P0 완료로 해석하지 않는다.
+- **P0 종료(2026-10-11, 계약 수준, 사용자 결정).** 잔여 항목과 담당 P1 작업은 [decisions.md "P0 종료"](decisions.md).
+  계약 종료는 구현·실기 검증 완료가 아니다.
+- P1 착수. 사용자 창구: 이 대화의 orchestrator. 하위 모델은 orchestrator가 작업별로 지정한다(판단 sonnet, 기계적 검증 haiku).
+- 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
+
+## 2026-10-11 P1 1회차 배정 (기준 `2120415`)
+
+| 작업 | 모델/역할 | 목표 | Spec | 소유 파일 | 이슈 |
+|---|---|---|---|---|---|
+| P0-exit-audit | sonnet (spec auditor, 읽기 전용) | P0 종료 조건·잔여 분류·추적성 | 전체 | 없음 | — |
+| P1-plan | sonnet (planner, 읽기 전용) | T-10/T-11 구현 계획·슬라이스 | T-10/T-11 | 없음 | — |
+| PR0 | sonnet (coder, worktree) | `sigil-proxy-api` wire DTO crate + golden 테스트 | PX-005/006/010/011/016, AC-05/06 | `crates/sigil-proxy-api/**`, workspace `members` | #244 |
+| T-10 A–D | sonnet (coder, worktree, PR0 브랜치 기반) | `sigil-proxy` 골격·bootstrap·limits·state_dir·rpm/systemd | PX-001/013/016, AC-07/12/14 | `crates/sigil-proxy/**`, `packaging/` proxy 파일 | #245 |
+| T-11 S1 | sonnet (coder, worktree, PR0 브랜치 기반) | server proxy 신원·등록, 404 `proxy_unknown` 선검사 | PX-008/009, AC-04 | `crates/sigil-server/src/proxy/**` 외 배정 시 명시 | #246 |
+
+진행: P0-exit-audit completed(코딩 착수 차단 항목 없음, 문서 gate 문구만 남음 → P0 종료 문서 반영). P1-plan completed(PR0 → T-10 갈래 A와 T-11 S1 병렬 → S2–S5 순차; app.rs·config.rs는 한 작성자). fixture 14 tests orchestrator 재실행 통과. PR0 coder completed → 독립 리뷰 needs_changes(M-1 serde 오류의 값 echo, M-2 validate 비재귀, L-1–L-4) → fix → 재확인 **approve**(차등 298건·canary 18건) → PR #248. T-10 A–D(#245): coder → 리뷰 accept with fixes(M1 origin 정규화·http 정책, M2 fd 기반 파일 검사) → fix(공유 verifier를 sigil-proxy-api로) → 재확인 accept → PR #249(#248 위 stacked). T-11 S1(#246): coder → 보안 리뷰 approve-with-fixes(M1 판정 불가 issuer, M2 e2e 격리, M3 registry 로드) → fix → 재확인 approve(release 빌드에 test seeding 없음 확인) → PR #250(#248 위 stacked). T-10 E 패키징은 후속. 후속: `parse_entry_view`, ParseError 분류 marker 위조(T-11 S4), upload proxy_id 대조(server).
 
 ## 2026-10-10 3회차 배정 (기준 `46cc990`, 브랜치 `docs/proxy-p0-round3`)
 
@@ -42,8 +50,8 @@ orchestrator가 작업별로 하위 모델을 직접 지정한다(판단 작업 
 | 작업 | 상태 | 산출물/증거 | 남은 조건 |
 |---|---|---|---|
 | T-00 | done: source survey | [저장소 조사](../../research/sigil-proxy-repository-survey-2026-09-27.md) | 실기 결과를 뜻하지 않음 |
-| T-01 | done: evidence (2026-10-10 coding-lead), review pending | [T-01 probe](../../research/sigil-proxy-t01-probe-2026-10-10.md): rmcp 0.16 typed 경로는 unknown field 유실·version allowlist 없음; raw hyper relay 10/10 byte 동일; Claude Code 2.1.296·codex 0.162.0 실제 HTTP 왕복(macOS loopback) | 독립 리뷰(T-01-review), -32022 반응·Linux 미검증. 기존 workspace는 선언 MSRV 1.78에서 빌드 불가(측정, 최저 1.88) → #240 |
-| T-02 | draft, review fixes applied | [계약](contracts/README.md), schema 정상24/거부60 통과 | 독립 재리뷰, 인증/API/ledger 계약 확정 |
+| T-01 | done: evidence + 독립 리뷰 + fix (2026-10-10) | [T-01 probe](../../research/sigil-proxy-t01-probe-2026-10-10.md): rmcp 0.16 typed 경로는 unknown field 유실·version allowlist 없음; raw hyper relay 10/10 byte 동일; Claude Code 2.1.296·codex 0.162.0 실제 HTTP 왕복(macOS loopback) | 프록시 경유 재측정·Linux는 P1 실측(decisions.md "P0 종료"). MSRV #240 해결(PR #241) |
+| T-02 | done: contracts v0.4 + control-plane·ledger·registry (독립 리뷰 approve, PR #243) | [계약](contracts/README.md), checker PASS 53/271 + W2 | 남은 [OPEN]은 P1 담당 작업에서 확정 |
 | T-03 | done: fixture preparation | [검증 계획](validation.md), smoke + 14 self-tests 통과 | T-01 revision 정합성, 실제 proxy benchmark/E2E |
 | P0-review | done: needs_changes | [초기 리뷰](review-p0.md), R1–R3 | 후속 수정 독립 검토 |
 | T-02-fix | done: coder report + tests | contracts/만 수정, coordinator checker 재실행 통과 | 독립 승인 아님 |
@@ -51,15 +59,12 @@ orchestrator가 작업별로 하위 모델을 직접 지정한다(판단 작업 
 
 ## 결정과 다음 작업
 
-[결정 기록](decisions.md)에 언어·배포·저장 경계와 미해결 항목을 기록했다.
-D-04의 시험 환경·초기 한도는 시험 기준으로 채택했으며 성능 보장이 아니다.
+[결정 기록](decisions.md)의 "P0 종료" 절이 잔여 항목과 담당 작업을 기록한다.
 
-1. 2026-10-10 사용자 결정 완료: M2=A(2025-11-25만 지원, codex 제한 명시), D-04 대상 OS=Rocky Linux 9, MSRV=1.88(#240, PR #241), AGENTS.md 버전 관리.
-2. D-02 계약: 인증 mapping, manager 권한(proxy.read/manage), CSRF/Origin, M3 header 정책, 런타임 route 거절 응답 반영.
-   manager 변경은 sigil-manager에 이슈로 요청한다.
-3. D-03 잔여(retention, projection/query DTO, semantic validation, aggregate 계약)와 D-05 잔여(registry DTO, key rotation, drift 이벤트).
-4. 추적성 보완: PX-001(기본 비활성) 시나리오, PX-004 capability/support 표 산출물, fixture N5/N6.
-5. D-01–05 인수 조건 확인 후 P1 crate와 서비스 구현으로 넘어간다.
+1. PR0 `sigil-proxy-api`(#244): coder → 독립 리뷰 → 검증 → PR.
+2. PR0 뒤 병렬: T-10 `sigil-proxy` 골격(#245), T-11 S1 신원·등록(#246). 파일 소유가 겹치지 않게 배정한다.
+3. 이후 T-11 S2(관리 인증·운영자 CLI) → S3(config·status) → S4(ledger·ingest) → S5(projection·조회). app.rs·config.rs는 한 작성자.
+4. T-12 relay는 T-10 골격 뒤. T-15 manager는 sigil-manager#37과 그 저장소 지침에 따른다.
 
 ## 실행 이력
 

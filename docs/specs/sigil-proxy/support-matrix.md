@@ -28,7 +28,7 @@ undecided 행이 남아 있으면 AC-15와 P1 완료 정의를 통과할 수 없
 | 2025-06-18 — (c) upstream이 2025-06-18로 응답 | 미지원. route unsupported, 런타임이면 M2 거절(아래 마지막 행). 2025-06-18 추가는 fixture·계약 상수·scope key·독립 리뷰를 갖춘 별도 작업 | decided | D-01 M2, D-05 |
 | 2026-07-28 modern 요청 (`server/discover`, `_meta`의 `io.modelcontextprotocol/protocolVersion`, 허용 목록 밖 `MCP-Protocol-Version`) | 인증 후 upstream에 전달하지 않고 HTTP 400 + empty body. `-32022`/`-32020`/`-32601`을 내보내지 않는다 | decided | D-01 B1. Claude Code가 fixture의 empty-body 400 뒤 `initialize` 2025-11-25로 대체함은 measured(proxy 경유 아님) |
 | initialize 이후 `MCP-Protocol-Version` 누락 | 400 거절(의도적 엄격성). rmcp 0.16 client는 P1 미지원. 감사는 protocol_error/not_sent, reason 상수 [OPEN](contracts/README.md "P1 method 범위와 route 거절 응답"에 반영) | decided | m5. Claude·codex는 이후 모든 요청에 헤더 전송(measured) |
-| upstream initialize 응답 revision이 허용 목록 밖 | route unsupported 표시. 런타임이면 downstream에 전달하지 않고 upstream session DELETE, initialize id에 고정 `-32603` (계약 미반영, decisions.md "런타임 route 거절 응답" 행이 근거) | decided | M2, "런타임 route 거절 응답" |
+| upstream initialize 응답 revision이 허용 목록 밖 | route unsupported 표시. 런타임이면 downstream에 전달하지 않고 upstream session DELETE, initialize id에 고정 `-32603` (contracts/README.md "P1 method 범위와 route 거절 응답"에 반영, decisions.md "런타임 route 거절 응답") | decided | M2, "런타임 route 거절 응답" |
 
 ## 2. 기능별 처리
 
