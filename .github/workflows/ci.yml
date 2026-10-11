@@ -110,8 +110,18 @@ jobs:
                 exit 1
               fi
             done
-            # No listener on the default port 8480 (0x2160), state LISTEN (0A).
-            if awk '$4 == "0A" && $2 ~ /:2160$/ { found = 1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+            # `run` without --config must refuse to start (exit 2), never fall back
+            # to a default path.
+            rc=0
+            /usr/bin/sigil-proxy run >/dev/null 2>&1 || rc=$?
+            if [ "$rc" != 2 ]; then
+              echo "::error::sigil-proxy run without --config exited $rc, expected 2"
+              exit 1
+            fi
+            # The process and port scans are only a smoke test (the binary never
+            # starts here; the real guarantee is the package-content checks).
+            # No listener on the default port 8480 (0x2120), state LISTEN (0A).
+            if awk '$4 == "0A" && $2 ~ /:2120$/ { found = 1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
               echo "::error::something listens on 8480 after install"
               exit 1
             fi
@@ -180,7 +190,7 @@ jobs:
           	TABLE
 
   # Debian/Ubuntu validation of the .deb packages. The rocky9 leg covers the
-  # RPM path; this covers .deb end-to-end: build all four, install each, smoke
+  # RPM path; this covers .deb end-to-end: build all five, install each, smoke
   # `--help`, then purge and verify cleanup. (#11)
   debian12:
     name: debian:12 / .deb install-test
@@ -223,8 +233,18 @@ jobs:
                 exit 1
               fi
             done
-            # No listener on the default port 8480 (0x2160), state LISTEN (0A).
-            if awk '$4 == "0A" && $2 ~ /:2160$/ { found = 1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+            # `run` without --config must refuse to start (exit 2), never fall back
+            # to a default path.
+            rc=0
+            /usr/bin/sigil-proxy run >/dev/null 2>&1 || rc=$?
+            if [ "$rc" != 2 ]; then
+              echo "::error::sigil-proxy run without --config exited $rc, expected 2"
+              exit 1
+            fi
+            # The process and port scans are only a smoke test (the binary never
+            # starts here; the real guarantee is the package-content checks).
+            # No listener on the default port 8480 (0x2120), state LISTEN (0A).
+            if awk '$4 == "0A" && $2 ~ /:2120$/ { found = 1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
               echo "::error::something listens on 8480 after install"
               exit 1
             fi

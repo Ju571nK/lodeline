@@ -16,11 +16,12 @@ the binary, optional systemd unit, and example config to standard FHS paths.
 All systemd units are installed **disabled**. Nothing starts on install — the
 operator decides.
 
-`sigil-proxy` ships no live `/etc/sigil/proxy.yaml` (only the `.example`), its
+`sigil-proxy` runs as its own `sigil-proxy` user and group (its own sysusers file),
+ships no live `/etc/sigil/proxy.yaml` (only the `.example`), its
 post-install does `daemon-reload` only (no enable, no start, no SELinux module),
 and it uses its own `StateDirectory=sigil-proxy` (`/var/lib/sigil-proxy`), never
 shared with another daemon. Copy the example, create the referenced certificate,
-key and secret files (private files owned by `sigil`, mode 0600), run
+key and secret files (private files owned by `sigil-proxy`, mode 0600), run
 `sigil-proxy check-config --config /etc/sigil/proxy.yaml`, then
 `systemctl enable --now sigil-proxy`. The SELinux domain for the proxy is
 deferred to hardware verification; until then it runs unconfined.
@@ -48,8 +49,8 @@ Args (any order, both optional):
 **Build a release package on Linux** (or cross-compile) — the packagers just
 bundle whatever is at `target/release/<bin>`, so a package built on macOS
 contains a macOS binary. CI builds and install-tests all 5 `.rpm`s on the
-`rocky9` job (`rpm -qpl`, `rpm -i`, `<bin> --help`, `rpm -e`); the `.deb`s
-are not built in CI.
+`rocky9` job (`rpm -qpl`, `rpm -i`, `<bin> --help`, `rpm -e`); the `debian12`
+job builds and install-tests the `.deb`s the same way.
 
 The metadata lives in `[package.metadata.deb]` / `[package.metadata.generate-rpm]`
 in each crate's `Cargo.toml`; the deb maintainer-script skeletons are in

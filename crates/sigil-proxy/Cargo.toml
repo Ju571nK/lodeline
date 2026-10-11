@@ -57,8 +57,8 @@ assets = [
     ["../../config/proxy.example.yaml", "etc/sigil/proxy.yaml.example", "644"],
     ["../../README.md", "usr/share/doc/sigil-proxy/README.md", "644"],
     ["../../LICENSE", "usr/share/doc/sigil-proxy/LICENSE", "644"],
-    # Creates the sigil group/user so User=sigil resolves. Idempotent.
-    ["../../packaging/sysusers.d/sigil.conf", "usr/lib/sysusers.d/sigil.conf", "644"],
+    # Creates the dedicated sigil-proxy group/user so User=sigil-proxy resolves. Idempotent.
+    ["../../packaging/sysusers.d/sigil-proxy.conf", "usr/lib/sysusers.d/sigil-proxy.conf", "644"],
 ]
 
 [package.metadata.deb.systemd-units]
@@ -76,13 +76,13 @@ assets = [
     { source = "../../config/proxy.example.yaml", dest = "/etc/sigil/proxy.yaml.example", mode = "0644" },
     { source = "../../README.md", dest = "/usr/share/doc/sigil-proxy/README.md", mode = "0644", doc = true },
     { source = "../../LICENSE", dest = "/usr/share/doc/sigil-proxy/LICENSE", mode = "0644", doc = true },
-    { source = "../../packaging/sysusers.d/sigil.conf", dest = "/usr/lib/sysusers.d/sigil.conf", mode = "0644" },
+    { source = "../../packaging/sysusers.d/sigil-proxy.conf", dest = "/usr/lib/sysusers.d/sigil-proxy.conf", mode = "0644" },
 ]
-# Create the sigil user/group (idempotent) and reload units. No enable, no
+# Create the sigil-proxy user/group (idempotent) and reload units. No enable, no
 # start, no semodule.
 post_install_script = """\
 systemctl daemon-reload >/dev/null 2>&1 || :
-command -v systemd-sysusers >/dev/null 2>&1 && systemd-sysusers /usr/lib/sysusers.d/sigil.conf >/dev/null 2>&1 || :
+command -v systemd-sysusers >/dev/null 2>&1 && systemd-sysusers /usr/lib/sysusers.d/sigil-proxy.conf >/dev/null 2>&1 || :
 """
 pre_uninstall_script = """\
 if [ "$1" = 0 ] ; then

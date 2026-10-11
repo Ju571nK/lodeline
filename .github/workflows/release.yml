@@ -122,6 +122,8 @@ jobs:
           mkdir -p pkgs
           cp target/${{ matrix.target }}/debian/*.deb pkgs/
           cp target/generate-rpm/*.rpm pkgs/
+          # #245: no relay until T-12; remove when the proxy is usable
+          rm -f pkgs/sigil-proxy*
           ls -l pkgs/
 
       - uses: actions/upload-artifact@v7
