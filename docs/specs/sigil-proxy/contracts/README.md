@@ -32,7 +32,8 @@ SDK 편의를 위해 자동으로 MSRV를 올리지 않는다. sigil-server와 �
 macOS 개발은 임시 디렉터리의 절대 경로를 사용한다. 비밀값 CLI 인자는 제공하지 않는다.
 
 로컬 bootstrap: proxy_id, listen, control_plane_url, state_dir,
-client_cert_file, client_key_file, ca_file, limits, credentials.
+client_cert_file, client_key_file, ca_file, limits, credentials,
+tls_cert_file·tls_key_file(non-loopback 리스너, 후보 2026-10-11). 인증서는 공개 자료이고 개인 키·비밀 파일만 소유자 전용이다([decisions.md "P0 종료"](../decisions.md)).
 상대 파일 경로는 설정 파일 디렉터리 기준이다.
 `credentials`는 credential_ref → `{secret source, upstream_origins}` 매핑이다.
 secret source는 소유자 읽기 전용 파일이다. 환경 변수 이름 참조는 [candidate, control-plane.md §5.5 U1]이며,
