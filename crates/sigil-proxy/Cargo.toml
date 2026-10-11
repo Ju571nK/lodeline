@@ -1,0 +1,38 @@
+[package]
+name = "sigil-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Sigil Proxy: standalone MCP relay with audit (skeleton: CLI, bootstrap, limits, lifecycle)."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sigil-proxy"
+path = "src/main.rs"
+
+[dependencies]
+sigil-proxy-api = { path = "../sigil-proxy-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+sha2 = "0.10"
+getrandom = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+libc = { workspace = true }
