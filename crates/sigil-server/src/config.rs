@@ -19,6 +19,18 @@ pub struct DeprecatedLicenseBlock {
     pub active_window_days: Option<u32>,
 }
 
+/// `proxy:` section (T-11 S1). See `docs/specs/sigil-proxy` control-plane §0.1/§1.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProxyConfig {
+    /// PEM of the proxy client CA. It must ALSO be present in `client_ca_path`
+    /// (the listener has one client-CA bundle) and its subject DN must differ
+    /// from every other CA in that bundle.
+    pub ca_path: PathBuf,
+    /// Durable proxy registry file (JSON, atomically written).
+    // OPEN: moves to the S4 ledger DB.
+    pub registry_path: PathBuf,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Address to bind. e.g. `0.0.0.0:8443`.
@@ -81,6 +93,11 @@ pub struct ServerConfig {
     /// is set without the full TLS triple. Default false (pre-#194 behavior).
     #[serde(default)]
     pub events_require_cert_host_match: bool,
+    /// T-11 — Sigil Proxy identity/registry. Absent ⇒ every proxy route is
+    /// absent (404 like any unknown route) and host behaviour is unchanged.
+    /// Requires mTLS (refuse-to-start otherwise).
+    #[serde(default)]
+    pub proxy: Option<ProxyConfig>,
     /// Path to the persisted per-host high-water-sequence map (for dedup
     /// across restarts). Defaults to `<events_out_dir>/.high-water.json`.
     #[serde(default)]
@@ -159,6 +176,15 @@ impl ServerConfig {
             return Err(ConfigError::Invalid {
                 path: path.to_path_buf(),
                 reason: "events_require_cert_host_match requires mTLS \
+                         (tls_cert_path + tls_key_path + client_ca_path)"
+                    .to_string(),
+            });
+        }
+        if self.proxy.is_some() && !self.mtls_enabled() {
+            // control-plane §0.1: proxy routes are not served without mTLS.
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: "proxy requires mTLS \
                          (tls_cert_path + tls_key_path + client_ca_path)"
                     .to_string(),
             });
@@ -245,6 +271,7 @@ mod tests {
         assert!(cfg.events_require_cert_host_match);
         assert!(cfg.artifacts_dir.is_some());
         assert!(cfg.active_window_days.is_some());
+        assert!(cfg.proxy.is_some());
         assert!(
             cfg.deprecated_license.is_none(),
             "example must not document `license:`"
@@ -383,6 +410,28 @@ events_require_cert_host_match: true
         .unwrap();
         let cfg = ServerConfig::load(&p).unwrap();
         assert!(cfg.events_require_cert_host_match && cfg.mtls_enabled());
+    }
+
+    /// T-11 — proxy section parses; absent ⇒ None; without mTLS it refuses.
+    #[test]
+    fn proxy_section_requires_mtls() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("server.yaml");
+        let proxy = "proxy:\n  ca_path: /e/proxy-ca.pem\n  registry_path: /d/proxies.json\n";
+        std::fs::write(&p, format!("{BASE}{proxy}")).unwrap();
+        assert!(matches!(
+            ServerConfig::load(&p).unwrap_err(),
+            ConfigError::Invalid { .. }
+        ));
+        let mtls = "tls_cert_path: /e/s.crt\ntls_key_path: /e/s.key\nclient_ca_path: /e/ca.pem\n";
+        std::fs::write(&p, format!("{BASE}{mtls}{proxy}")).unwrap();
+        let cfg = ServerConfig::load(&p).unwrap();
+        assert_eq!(
+            cfg.proxy.unwrap().registry_path,
+            PathBuf::from("/d/proxies.json")
+        );
+        std::fs::write(&p, format!("{BASE}{mtls}")).unwrap();
+        assert!(ServerConfig::load(&p).unwrap().proxy.is_none());
     }
 
     #[test]

@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 sigil-core = { path = "../sigil-core" }
+# T-11 — fixed ApiError bodies for the proxy routes (404 proxy_unknown etc.).
+sigil-proxy-api = { path = "../sigil-proxy-api" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

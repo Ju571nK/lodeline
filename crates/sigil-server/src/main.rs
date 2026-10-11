@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use sigil_server::allowlist;
-use sigil_server::app::{build_router, AppState, SharedState};
+use sigil_server::app::{build_router_with_proxy, AppState, SharedState};
 use sigil_server::cli::{Cli, Command};
 use sigil_server::config::ServerConfig;
 use sigil_server::persist::HighWater;
@@ -171,6 +171,8 @@ fn build_state(cfg: &ServerConfig) -> Result<SharedState> {
 
 async fn run(cfg: ServerConfig) -> Result<()> {
     let state = build_state(&cfg)?;
+    // T-11: refuses to start on a bad proxy CA/registry; None means proxy off.
+    let proxy = sigil_server::proxy::ProxyContext::load(&cfg)?.map(Arc::new);
 
     // Boot rebuild runs off-thread so the listener opens immediately; boot_gate
     // serves 503 + Retry-After until this flips boot_complete to true (#19).
@@ -205,7 +207,7 @@ async fn run(cfg: ServerConfig) -> Result<()> {
         });
     }
 
-    let app = build_router(state).layer(axum::middleware::from_fn_with_state(
+    let app = build_router_with_proxy(state, proxy).layer(axum::middleware::from_fn_with_state(
         boot_complete.clone(),
         sigil_server::app::boot_gate,
     ));

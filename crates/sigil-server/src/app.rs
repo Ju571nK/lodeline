@@ -152,3 +152,22 @@ pub async fn boot_gate(
     )
         .into_response()
 }
+
+/// [`build_router`] plus the optional Sigil Proxy surface (T-11). With
+/// `proxy == None` this is exactly `build_router`. With a context, the proxy
+/// routes are mounted and a layer rejects proxy certs on all host routes.
+pub fn build_router_with_proxy(
+    state: SharedState,
+    proxy: Option<Arc<crate::proxy::ProxyContext>>,
+) -> Router {
+    let router = build_router(state);
+    match proxy {
+        None => router,
+        Some(ctx) => router
+            .merge(crate::proxy::guard::router(ctx.clone()))
+            .layer(axum::middleware::from_fn_with_state(
+                ctx,
+                crate::proxy::guard::host_route_guard,
+            )),
+    }
+}

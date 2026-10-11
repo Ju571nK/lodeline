@@ -29,6 +29,7 @@ pub mod fleet_index_update;
 pub mod jsonl_scan;
 pub mod persist;
 pub mod policy_route;
+pub mod proxy;
 pub mod routes;
 pub mod rule_packs_route;
 pub mod tls_accept;

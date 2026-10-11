@@ -71,3 +71,13 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 # `active_window_days` is still honored when this key is absent, and its
 # `path` is ignored. Both log a warning at startup.)
 # active_window_days: 30
+
+# Optional (T-11, Sigil Proxy) — proxy identity + registry. Absent ⇒ every proxy
+# route is absent and host behaviour is unchanged. Requires mTLS (the server
+# refuses to start otherwise). `ca_path` is the proxy client CA (PEM); it must
+# ALSO be appended to `client_ca_path`, and its subject DN must differ from every
+# other CA in that bundle (boot refuses otherwise). Proxy certs are rejected on
+# host routes and host certs on proxy routes.
+# proxy:
+#   ca_path: "/etc/sigil/proxy-ca.pem"
+#   registry_path: "/var/lib/sigil-server/proxies.json"
