@@ -1,0 +1,68 @@
+# Sigil Proxy — example bootstrap config.
+# Packaged as /etc/sigil/proxy.yaml.example. Copy to /etc/sigil/proxy.yaml and
+# edit. All paths below are placeholders; no secret value ever lives in this
+# file (secrets are referenced by owner-only file). Validate with:
+#   sigil-proxy check-config --config /etc/sigil/proxy.yaml
+# Relative paths resolve against this file's directory. Unknown keys are errors.
+
+# Identity of this proxy (^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$).
+proxy_id: "proxy-example-01"
+
+# Downstream listener. Default 127.0.0.1:8480 (loopback). A non-loopback
+# address requires tls_cert_file and tls_key_file.
+listen: "127.0.0.1:8480"
+
+# Listener TLS material; set both or neither. The key must be owned by the
+# running user (sigil) with mode 0600; the certificate is public.
+tls_cert_file: "/etc/sigil/proxy/listener.crt"
+tls_key_file: "/etc/sigil/proxy/listener.key"
+
+# Control plane (sigil-server). https:// only; mTLS client auth.
+control_plane_url: "https://sigil-server.example.internal:8443"
+
+# Writable state directory, separate from every other sigil daemon. The
+# systemd unit creates it via StateDirectory=sigil-proxy.
+state_dir: "/var/lib/sigil-proxy"
+
+# mTLS client identity and the CA bundle used to verify the control plane.
+client_cert_file: "/etc/sigil/proxy/client.crt"
+client_key_file: "/etc/sigil/proxy/client.key"   # owner sigil, mode 0600
+ca_file: "/etc/sigil/proxy/ca.pem"
+
+# Optional limits. Every key is optional; config may only LOWER a value
+# (valid range 1..=default, queue_depth is fixed at 0). Values shown are the
+# defaults.
+limits:
+  max_request_body_bytes: 1048576
+  max_header_bytes: 32768
+  max_json_response_bytes: 8388608
+  max_sse_event_bytes: 1048576
+  max_call_response_bytes: 67108864
+  call_bandwidth_bytes_per_sec: 4194304
+  process_bandwidth_bytes_per_sec: 33554432
+  max_concurrent_calls: 64
+  max_calls_per_route: 16
+  max_calls_per_principal: 8
+  max_sessions: 256
+  max_sessions_per_principal: 32
+  session_idle_secs: 900
+  queue_depth: 0
+  connect_timeout_secs: 5
+  response_idle_timeout_secs: 30
+  call_timeout_secs: 120
+  shutdown_grace_secs: 30
+  inventory_max_pages: 100
+  inventory_max_tools: 10000
+  inventory_max_bytes: 16777216
+  event_max_bytes: 16384
+  spool_max_bytes: 1073741824
+  spool_gap_reserve_bytes: 16777216
+
+# Optional credential references. Each ref names an owner-only secret file and
+# MUST list the upstream origins it may be sent to (scheme://host[:port], no
+# path; http:// only for loopback). An unbound ref is a start error.
+credentials:
+  example-upstream-token:
+    secret_file: "/etc/sigil/proxy/example-upstream.secret"   # owner sigil, mode 0600
+    upstream_origins:
+      - "https://mcp.example.com"

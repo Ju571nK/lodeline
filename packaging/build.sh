@@ -11,11 +11,12 @@
 #   packaging/build.sh agent                    # sigil-agent, both formats
 #   packaging/build.sh sender rpm               # sigil-sender, .rpm only
 #   packaging/build.sh signer deb               # sigil-signer, .deb only
+#   packaging/build.sh proxy                    # sigil-proxy, both formats
 #   packaging/build.sh agent rpm --target aarch64-unknown-linux-gnu
 #                                               # cross-build an ARM64 .rpm (#12)
 #
 # Args (any order):
-#   <what>:   agent|sender|server|signer|all      (default: all)
+#   <what>:   agent|sender|server|signer|proxy|all      (default: all)
 #   <format>: deb|rpm|all                         (default: all)
 #   --target <triple>:  Rust target triple        (default: host arch)
 #                       e.g. aarch64-unknown-linux-gnu,
@@ -49,7 +50,7 @@ TARGET=""
 while [ $# -gt 0 ]; do
     arg="$1"
     case "$arg" in
-        agent|sender|server|signer|all) WHAT="$arg" ;;
+        agent|sender|server|signer|proxy|all) WHAT="$arg" ;;
         deb|rpm) FORMAT="$arg" ;;
         --target)
             shift
@@ -59,7 +60,7 @@ while [ $# -gt 0 ]; do
         --target=*) TARGET="${arg#--target=}" ;;
         *)
             echo "unknown arg: $arg" >&2
-            echo "usage: packaging/build.sh [agent|sender|server|signer|all] [deb|rpm] [--target <triple>]" >&2
+            echo "usage: packaging/build.sh [agent|sender|server|signer|proxy|all] [deb|rpm] [--target <triple>]" >&2
             exit 2
             ;;
     esac
@@ -67,11 +68,12 @@ while [ $# -gt 0 ]; do
 done
 
 case "$WHAT" in
-    all)    CRATES="sigil-agent sigil-sender sigil-server sigil-signer" ;;
+    all)    CRATES="sigil-agent sigil-sender sigil-server sigil-signer sigil-proxy" ;;
     agent)  CRATES="sigil-agent" ;;
     sender) CRATES="sigil-sender" ;;
     server) CRATES="sigil-server" ;;
     signer) CRATES="sigil-signer" ;;
+    proxy)  CRATES="sigil-proxy" ;;
 esac
 
 # BUILD_PKGS is a superset of CRATES: the sigil package (sigil-agent metadata)
@@ -91,6 +93,7 @@ bin_for() {
         sigil-sender) echo sigil-sender ;;
         sigil-server) echo sigil-server ;;
         sigil-signer) echo sigil-sign ;;
+        sigil-proxy)  echo sigil-proxy ;;
     esac
 }
 
