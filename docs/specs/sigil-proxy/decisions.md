@@ -88,6 +88,7 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
 | 새 고정 오류 코드 확정(`invocation_owner_conflict`, `semantic_invalid`, `invalid_cursor`, `invalid_filter`), SV-1/SV-3/SV-5, gap 목록·status·inventory endpoint 이름 | 세부 | T-11 (S3–S5) |
 | 비밀·origin 변경 적용 방식(reload/restart), rate limit, TTL 수치 | 세부 | T-10 / T-11 |
 | registry O-2–O-6, R6 scoped content 조회와 `proxy.metadata` 권한 | 세부 | T-13 / T-15 |
+| `POST /v1/proxy-events` 본문 형태: 후보 `{events:[…]}`(1–100개), 응답 `{accepted_event_ids, duplicate_event_ids}`. `sigil-proxy-api`(#244)가 이 후보를 쓴다 | 세부 | T-11 (S4) |
 | ledger SQLite 트랜잭션·재시작 내구성·성능 | 실측 | T-11 (S4) / T-16 |
 | 성능 목표(validation.md), x86_64 baseline, SELinux enforcing 실행 | 실측 | T-16 |
 
