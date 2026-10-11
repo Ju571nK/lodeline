@@ -34,22 +34,28 @@ const FP_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e
 
 // ---- PKI helpers (same approach as proxy_identity_e2e.rs) -------------------
 
+/// Unique certificate serial per leaf (hex with 0x prefix). Avoids the shared
+/// `ca.srl` file that `-CAcreateserial` races on when leaves are made in parallel.
+fn next_serial() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(1);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as u64);
+    format!("0x{:x}", (t << 20) | N.fetch_add(1, Ordering::Relaxed))
+}
+
 fn openssl() -> PathBuf {
     sigil_server::enroll::sign::resolve_openssl().expect("openssl must be installed")
 }
 
 fn run(args: &[&std::ffi::OsStr]) {
-    // The system openssl occasionally exits non-zero without an error on
-    // `x509 -req`; retry before failing the test.
-    let mut last = None;
-    for _ in 0..3 {
-        let o = Command::new(openssl()).args(args).output().unwrap();
-        if o.status.success() {
-            return;
-        }
-        last = Some(String::from_utf8_lossy(&o.stderr).to_string());
-    }
-    panic!("openssl {args:?}: {}", last.unwrap_or_default());
+    let o = Command::new(openssl()).args(args).output().unwrap();
+    assert!(
+        o.status.success(),
+        "openssl {args:?}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 fn genkey(path: &Path) {
@@ -114,7 +120,8 @@ fn make_leaf(dir: &Path, ca: &str, name: &str, cn: &str, ext: &str) -> (PathBuf,
         dir.join(format!("{ca}.crt")).as_os_str(),
         "-CAkey".as_ref(),
         dir.join(format!("{ca}.key")).as_os_str(),
-        "-CAcreateserial".as_ref(),
+        "-set_serial".as_ref(),
+        next_serial().as_str().as_ref(),
         "-days".as_ref(),
         "1".as_ref(),
         "-extfile".as_ref(),
