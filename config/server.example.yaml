@@ -82,3 +82,17 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   ca_path: "/etc/sigil/proxy-ca.pem"
 #   registry_path: "/var/lib/sigil-server/proxies.json"   # not group/world-writable, not a symlink
 #   registry_init: false   # true = create an empty registry if the file is missing (first boot only)
+#   # Management API (register / fingerprint / disable / enable / retire + audit read).
+#   # Absent = those routes do not exist (404). Present = must load at boot, or the
+#   # server refuses to start. JSON, mode 0600, owned by the server user, not a symlink:
+#   #   {"entries":[{"key_id":"op-1","name":"operator","verifier":"<sha256 hex of token>",
+#   #     "scope":"identity|config","caller_cert_fingerprint":"<blake3 hex of the caller cert DER>",
+#   #     "not_after":"2027-01-01T00:00:00Z"}]}
+#   # At most 2 non-expired entries per scope. Generate an entry with
+#   # `sigil-server proxy verifier-new --scope identity --caller-fingerprint <fp>`.
+#   # Reload: SIGHUP, or automatically when the file changes. A broken file on
+#   # reload denies ALL management requests (fail closed) until a valid one loads.
+#   # The caller cert must come from the host CA (never the proxy CA) and must
+#   # not be used for any other route; it is rejected on host and proxy routes.
+#   # Audit stream: <dir of high_water_path>/proxy-management-audit.jsonl (signed).
+#   management_verifiers: "/etc/sigil/proxy-management-verifiers.json"

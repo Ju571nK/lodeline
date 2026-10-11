@@ -36,4 +36,11 @@ pub enum Command {
         #[arg(long, default_value = "1h")]
         ttl: String,
     },
+    /// T-11 - operator commands for the Sigil Proxy management API. These are
+    /// HTTPS client calls to a RUNNING server (management-caller cert + bearer
+    /// file); `verifier-new` is local.
+    Proxy {
+        #[command(subcommand)]
+        cmd: crate::proxy::cli::ProxyCommand,
+    },
 }

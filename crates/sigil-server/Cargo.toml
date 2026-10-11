@@ -43,6 +43,8 @@ parking_lot = { workspace = true }
 ed25519-dalek = { workspace = true }
 data-encoding = { workspace = true }
 rand_core = { version = "0.6", features = ["std"] }
+# T-11 — operator CLI (`sigil-server proxy ...`) is an mTLS HTTPS client.
+reqwest = { workspace = true }
 # #184 — enrollment: runtime temp files (CSR/ext/cert, atomic writes) + flock.
 tempfile = { workspace = true }
 
@@ -57,7 +59,6 @@ test-support = []
 [dev-dependencies]
 sigil-server = { path = ".", features = ["test-support"] }
 http = { workspace = true }
-reqwest = { workspace = true }
 
 # -- OS packages -------------------------------------------------------------
 # Build with `packaging/build.sh server`. See packaging/README.md.

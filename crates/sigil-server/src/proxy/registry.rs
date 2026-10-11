@@ -1,7 +1,8 @@
 //! Proxy registry: `proxy_id` to fingerprints + state (control-plane §1.2/§1.3).
 //!
-//! S1 storage: one JSON file, loaded into memory at boot and rewritten
-//! atomically (tmp in same dir + fsync + rename) on every mutation.
+//! Storage: one JSON file, loaded into memory at boot and rewritten
+//! atomically (tmp in same dir + fsync + rename) on every mutation. Mutations
+//! are persist-first-then-swap: a failed write leaves memory unchanged.
 // OPEN: moves to the S4 ledger DB.
 
 use anyhow::{bail, Context, Result};
@@ -48,8 +49,6 @@ struct FileFormat {
 }
 
 pub struct ProxyRegistry {
-    // Only written to by seed_for_test in S1; the S2 management routes use it.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     path: PathBuf,
     inner: RwLock<BTreeMap<String, ProxyRecord>>,
 }
@@ -132,11 +131,43 @@ impl ProxyRegistry {
             .any(|r| r.matches_fingerprint(fp))
     }
 
+    /// Start a write transaction. Holds the registry write lock until the
+    /// returned value is committed or dropped, so the management handlers can
+    /// validate, append the audit record and commit atomically.
+    pub fn begin(&self) -> RegistryTxn<'_> {
+        RegistryTxn {
+            guard: self.inner.write(),
+            path: &self.path,
+        }
+    }
+
+    /// Promote `fp_next` to `fp_current` when `fp` is the (distinct) next
+    /// fingerprint of an active entry. Returns whether anything changed.
+    /// Persist-first-then-swap. This is the rotation rule: the old
+    /// fingerprint is dropped at the first request authenticated with `next`.
+    pub fn promote_next(&self, proxy_id: &str, fp: &str, now: &str) -> Result<bool> {
+        let txn = self.begin();
+        let Some(rec) = txn.get(proxy_id) else {
+            return Ok(false);
+        };
+        if rec.state != ProxyState::Active
+            || rec.fp_next.as_deref() != Some(fp)
+            || rec.fp_current.as_deref() == Some(fp)
+        {
+            return Ok(false);
+        }
+        let mut next = rec;
+        next.fp_current = next.fp_next.take();
+        next.updated_at = now.to_string();
+        txn.commit(next)?;
+        Ok(true)
+    }
+
     /// Insert or replace a record. Persists to disk first, then swaps the
     /// in-memory map, so a failed write leaves memory unchanged.
     ///
-    /// Test-only seeding helper for S1: there are no management routes yet
-    /// (S2). Compiled only for unit tests or with the `test-support` feature.
+    /// Test-only seeding helper (state setups the management routes cannot
+    /// reach). Compiled only for unit tests or with the `test-support` feature.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn seed_for_test(&self, record: ProxyRecord) -> Result<()> {
@@ -148,6 +179,39 @@ impl ProxyRegistry {
         };
         write_atomic(&self.path, &serde_json::to_vec_pretty(&file)?)?;
         *g = next;
+        Ok(())
+    }
+}
+
+/// Write transaction on the registry (see [`ProxyRegistry::begin`]).
+pub struct RegistryTxn<'a> {
+    guard: parking_lot::RwLockWriteGuard<'a, BTreeMap<String, ProxyRecord>>,
+    path: &'a Path,
+}
+
+impl RegistryTxn<'_> {
+    pub fn get(&self, proxy_id: &str) -> Option<ProxyRecord> {
+        self.guard.get(proxy_id).cloned()
+    }
+
+    /// The `proxy_id` that holds `fp` as current or next, in any state.
+    pub fn fingerprint_owner(&self, fp: &str) -> Option<String> {
+        self.guard
+            .values()
+            .find(|r| r.matches_fingerprint(fp))
+            .map(|r| r.proxy_id.clone())
+    }
+
+    /// Persist the record (insert or replace) and then swap it into memory.
+    /// On error nothing changed in memory.
+    pub fn commit(mut self, record: ProxyRecord) -> Result<()> {
+        let mut next = self.guard.clone();
+        next.insert(record.proxy_id.clone(), record);
+        let file = FileFormat {
+            proxies: next.values().cloned().collect(),
+        };
+        write_atomic(self.path, &serde_json::to_vec_pretty(&file)?)?;
+        *self.guard = next;
         Ok(())
     }
 }

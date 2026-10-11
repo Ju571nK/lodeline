@@ -6,6 +6,7 @@
 //! a layer BEFORE any body extraction.
 
 use super::identity::{proxy_id_from_san, PeerClass};
+use super::mgmt;
 use super::registry::{ProxyRecord, ProxyState};
 use super::ProxyContext;
 use crate::tls_accept::PeerIdentity;
@@ -38,8 +39,11 @@ pub fn proxy_unknown() -> Response {
     json_error(StatusCode::NOT_FOUND, ErrorCode::ProxyUnknown)
 }
 
+/// Paths with their own identity handling: proxy routes and the management
+/// routes (`POST /v1/proxies`, `/v1/proxies/{id}/...`). The host-route guard
+/// leaves them alone; unknown subpaths fall through to the empty router 404.
 fn is_proxy_path(path: &str) -> bool {
-    path == PROXY_CONFIG_PATH || path.starts_with(PROXIES_PREFIX)
+    path == PROXY_CONFIG_PATH || path == "/v1/proxies" || path.starts_with(PROXIES_PREFIX)
 }
 
 /// `Some(id)` for `/v1/proxies/{id}/...`.
@@ -74,8 +78,8 @@ fn check(
         ProxyState::Active => Ok(rec),
         // Pending: registered but not yet activated, so indistinguishable 404.
         ProxyState::Pending => Err(Box::new(proxy_unknown())),
-        // OPEN: control-plane §10 q4a — HTTP status of the disabled/retired
-        // answers is undecided; 403 is a placeholder.
+        // DECIDED (2026-10-11, decisions.md): the identity is verified, the
+        // state is the reason, so 403 with the fixed code.
         ProxyState::Disabled => Err(Box::new(json_error(
             StatusCode::FORBIDDEN,
             ErrorCode::Disabled,
@@ -96,8 +100,58 @@ pub async fn proxy_guard(
 ) -> Response {
     let peer = req.extensions().get::<Arc<PeerIdentity>>().cloned();
     match check(&ctx, peer.as_deref(), req.uri().path()) {
-        Ok(_) => next.run(req).await,
+        Ok(rec) => {
+            if let Some(p) = peer.as_deref() {
+                promote_on_first_use(&ctx, &rec, &p.fingerprint).await;
+            }
+            next.run(req).await
+        }
         Err(resp) => *resp,
+    }
+}
+
+/// Rotation rule (control-plane §1.3): the first request authenticated with
+/// `fp_next` promotes it to `fp_current` and drops the old fingerprint. The
+/// promotion is audited first; if the audit append or the registry write
+/// fails nothing changes (the old fingerprint stays valid, the request is
+/// still served because it authenticated with a registered fingerprint).
+async fn promote_on_first_use(ctx: &Arc<ProxyContext>, rec: &ProxyRecord, fp: &str) {
+    if rec.fp_next.as_deref() != Some(fp) || rec.fp_current.as_deref() == Some(fp) {
+        return;
+    }
+    let Some(_) = ctx.audit else {
+        return;
+    };
+    let (ctx, id, fp) = (ctx.clone(), rec.proxy_id.clone(), fp.to_string());
+    let done = tokio::task::spawn_blocking(move || {
+        let audit = ctx.audit.as_ref().expect("checked");
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let entry = super::audit::AuditEntry {
+            request_id: uuid::Uuid::now_v7().to_string(),
+            action: "proxy.fingerprint_promote".into(),
+            proxy_id: id.clone(),
+            result: "ok".into(),
+            http_status: 200,
+            reason: Some("first_use_of_next".into()),
+            from_state: Some("active".into()),
+            to_state: Some("active".into()),
+            subject_fingerprint: Some(fp.clone()),
+            caller_fingerprint: fp.clone(),
+            ..Default::default()
+        };
+        if let Err(e) = audit.append(entry) {
+            tracing::error!(error = %e, proxy_id = %id, "promotion skipped: audit append failed");
+            return;
+        }
+        if let Err(e) = ctx.registry.promote_next(&id, &fp, &now) {
+            tracing::error!(error = %e, proxy_id = %id, "promotion failed to persist");
+        }
+    })
+    .await;
+    if done.is_err() {
+        tracing::error!("promotion task panicked");
     }
 }
 
@@ -122,11 +176,17 @@ pub async fn host_route_guard(
 ) -> Response {
     let path = req.uri().path();
     if !is_proxy_path(path) && path != crate::app::HEALTHZ_PATH {
+        // A management-caller cert is a third class: rejected here exactly like
+        // a proxy cert (it never counts as `Host`). The one exception is the
+        // audit read route, which is a read-bearer route that the operator CLI
+        // (management cert) and manager (host-class cert) both use.
+        let audit_route = path == mgmt::AUDIT_PATH;
         let allowed = req
             .extensions()
             .get::<Arc<PeerIdentity>>()
             .is_some_and(|peer| {
-                ctx.ca.classify(peer) == PeerClass::Host
+                let class = ctx.peer_class(peer);
+                (class == PeerClass::Host || (audit_route && class == PeerClass::Management))
                     && !ctx.registry.holds_fingerprint(&peer.fingerprint)
             });
         if !allowed {

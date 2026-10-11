@@ -160,14 +160,26 @@ pub fn build_router_with_proxy(
     state: SharedState,
     proxy: Option<Arc<crate::proxy::ProxyContext>>,
 ) -> Router {
+    let read_token = state.read_token.clone();
     let router = build_router(state);
     match proxy {
         None => router,
-        Some(ctx) => router
-            .merge(crate::proxy::guard::router(ctx.clone()))
-            .layer(axum::middleware::from_fn_with_state(
+        Some(ctx) => {
+            let mut router = router.merge(crate::proxy::guard::router(ctx.clone()));
+            // Management routes exist only with a verifier file. The guard layer
+            // sits inside the host-route guard and acts on management paths only.
+            if ctx.mgmt.is_some() && ctx.audit.is_some() {
+                router = router
+                    .merge(crate::proxy::mgmt::router(ctx.clone(), read_token))
+                    .layer(axum::middleware::from_fn_with_state(
+                        ctx.clone(),
+                        crate::proxy::mgmt::mgmt_guard,
+                    ));
+            }
+            router.layer(axum::middleware::from_fn_with_state(
                 ctx,
                 crate::proxy::guard::host_route_guard,
-            )),
+            ))
+        }
     }
 }

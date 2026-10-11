@@ -30,6 +30,12 @@ fn main() -> Result<()> {
                 .with_context(|| format!("load config {}", config.display()))?;
             enroll_token(&cfg, &host_id, &ttl)?;
         }
+        Command::Proxy { cmd } => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(sigil_server::proxy::cli::run(cmd))?;
+        }
     }
     Ok(())
 }
@@ -204,6 +210,24 @@ async fn run(cfg: ServerConfig) -> Result<()> {
             // only way this is skipped is if the spawned task itself panics before here —
             // not reachable today: replace() is infallible and the join is matched above.)
             boot_complete.store(true, Ordering::Relaxed);
+        });
+    }
+
+    // SIGHUP re-reads the management verifier file (fail closed on error).
+    #[cfg(unix)]
+    if let Some(ctx) = proxy.clone().filter(|c| c.mgmt.is_some()) {
+        let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .context("install SIGHUP handler")?;
+        tokio::spawn(async move {
+            while hup.recv().await.is_some() {
+                let ctx = ctx.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Some(m) = ctx.mgmt.as_ref() {
+                        m.reload();
+                    }
+                })
+                .await;
+            }
         });
     }
 

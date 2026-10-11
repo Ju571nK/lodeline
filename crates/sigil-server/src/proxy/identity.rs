@@ -39,7 +39,7 @@ pub fn proxy_id_from_san(san_dns: &[String], cn: Option<&str>) -> Option<String>
     Some(id.to_string())
 }
 
-fn is_dns_label(s: &str) -> bool {
+pub(crate) fn is_dns_label(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
         && !s.starts_with('-')
@@ -57,8 +57,9 @@ pub enum PeerClass {
     /// Issuer DN equals the proxy CA but the AKI contradicts its key id.
     /// Rejected on every route class (fail closed).
     Ambiguous,
-    /// Management-caller class (host CA + verifier fingerprint list).
-    // OPEN: S2 — never produced by S1.
+    /// Management-caller class (host CA + verifier fingerprint list). Never
+    /// produced by [`ProxyCaInfo::classify`]: the fingerprint list lives in
+    /// the verifier file, so `ProxyContext::peer_class` adds it on top.
     Management,
 }
 
