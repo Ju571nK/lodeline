@@ -6,7 +6,10 @@
 //! * `binding.json`  `{schema_version, proxy_id, epoch_id}`
 //! * `status.json`   written by [`crate::lifecycle`]
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
