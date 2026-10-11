@@ -1,0 +1,305 @@
+//! Error object `{error:{code,message,items?,pending_metadata_refs?}}` and codes.
+//!
+//! Bodies the proxy reads from the server (`ApiError`, `ErrorBody`, `ErrorItem`)
+//! ignore unknown fields when parsing, so a newer server can add fields. They
+//! still emit only the declared fields.
+
+use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::scalar::{MetadataRef, Uuid};
+use crate::Validate;
+
+pub(crate) const MARK_SEMANTIC: &str = "\u{1}S";
+pub(crate) const MARK_LIMIT: &str = "\u{1}L";
+
+/// A contract rule was violated. The message is a fixed text and never contains
+/// the offending value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationError {
+    message: String,
+    limit: bool,
+}
+
+impl ValidationError {
+    /// A cross-field or uniqueness violation.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            limit: false,
+        }
+    }
+
+    /// A size or count bound violation.
+    pub fn limit(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            limit: true,
+        }
+    }
+
+    pub(crate) fn tagged(&self) -> String {
+        let mark = if self.limit {
+            MARK_LIMIT
+        } else {
+            MARK_SEMANTIC
+        };
+        format!("{mark}{}", self.message)
+    }
+}
+
+impl fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
+/// Text of an error code this crate does not know.
+///
+/// Opaque and constructible only through [`ErrorCode::parse`] / deserialization:
+/// at most 64 characters of `[a-z0-9_]` that are not a known code; anything else is
+/// the fixed marker `unknown`. `Unknown("conflict")` is therefore impossible.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnknownCode(String);
+
+impl UnknownCode {
+    pub const MARKER: &'static str = "unknown";
+    const MAX_LEN: usize = 64;
+
+    fn from_text(text: &str) -> Self {
+        let ok = !text.is_empty()
+            && text.len() <= Self::MAX_LEN
+            && text
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'));
+        Self(if ok { text } else { Self::MARKER }.to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Fixed error codes of the contracts README error table.
+///
+/// The contracts do not say how a reader treats a code it does not know, so
+/// unknown codes are preserved as [`ErrorCode::Unknown`] instead of failing the
+/// whole response. Treat `Unknown` as a generic failure of the HTTP status class.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ErrorCode {
+    ProxyUnknown,
+    Conflict,
+    SequenceConflict,
+    RegistryConflict,
+    InvocationOwnerConflict,
+    RevisionConflict,
+    Disabled,
+    Retired,
+    MetadataRefPending,
+    SemanticInvalid,
+    /// UNSTABLE: "checker-only" in the contracts README and still [OPEN] in the
+    /// contract files. The server must not emit it yet.
+    SchemaInvalid,
+    /// UNSTABLE: "checker-only" in the contracts README and still [OPEN] in the
+    /// contract files. The server must not emit it yet.
+    InvalidStatus,
+    InvalidCursor,
+    InvalidFilter,
+    Unknown(UnknownCode),
+}
+
+impl ErrorCode {
+    const KNOWN: [(&'static str, ErrorCode); 14] = [
+        ("proxy_unknown", ErrorCode::ProxyUnknown),
+        ("conflict", ErrorCode::Conflict),
+        ("sequence_conflict", ErrorCode::SequenceConflict),
+        ("registry_conflict", ErrorCode::RegistryConflict),
+        (
+            "invocation_owner_conflict",
+            ErrorCode::InvocationOwnerConflict,
+        ),
+        ("revision_conflict", ErrorCode::RevisionConflict),
+        ("disabled", ErrorCode::Disabled),
+        ("retired", ErrorCode::Retired),
+        ("metadata_ref_pending", ErrorCode::MetadataRefPending),
+        ("semantic_invalid", ErrorCode::SemanticInvalid),
+        ("schema_invalid", ErrorCode::SchemaInvalid),
+        ("invalid_status", ErrorCode::InvalidStatus),
+        ("invalid_cursor", ErrorCode::InvalidCursor),
+        ("invalid_filter", ErrorCode::InvalidFilter),
+    ];
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            ErrorCode::Unknown(u) => u.as_str(),
+            known => Self::KNOWN
+                .iter()
+                .find(|(_, c)| c == known)
+                .map(|(s, _)| *s)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Known codes map to their variant (so `"conflict"` is always `Conflict`);
+    /// everything else becomes a sanitised [`UnknownCode`].
+    pub fn parse(text: &str) -> Self {
+        Self::KNOWN
+            .iter()
+            .find(|(s, _)| *s == text)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_else(|| ErrorCode::Unknown(UnknownCode::from_text(text)))
+    }
+
+    pub fn is_known(&self) -> bool {
+        !matches!(self, ErrorCode::Unknown(_))
+    }
+
+    /// HTTP status of the README table, `None` where it is open (`disabled`,
+    /// `retired`) or the code is not an HTTP-level code of its own.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            ErrorCode::ProxyUnknown => Some(404),
+            ErrorCode::Conflict
+            | ErrorCode::SequenceConflict
+            | ErrorCode::RegistryConflict
+            | ErrorCode::InvocationOwnerConflict
+            | ErrorCode::RevisionConflict => Some(409),
+            ErrorCode::MetadataRefPending => Some(424),
+            ErrorCode::SemanticInvalid
+            | ErrorCode::SchemaInvalid
+            | ErrorCode::InvalidStatus
+            | ErrorCode::InvalidCursor
+            | ErrorCode::InvalidFilter => Some(422),
+            ErrorCode::Disabled | ErrorCode::Retired | ErrorCode::Unknown(_) => None,
+        }
+    }
+
+    /// Fixed safe message for this code. The README leaves the wording [OPEN];
+    /// these texts are provisional and never contain request data.
+    pub fn fixed_message(&self) -> &'static str {
+        match self {
+            ErrorCode::ProxyUnknown => "Proxy not found.",
+            ErrorCode::Conflict => "Event conflicts with a stored event.",
+            ErrorCode::SequenceConflict => "Sequence already used by another event.",
+            ErrorCode::RegistryConflict => "Registry entry conflicts with a stored entry.",
+            ErrorCode::InvocationOwnerConflict => "Invocation belongs to another proxy.",
+            ErrorCode::RevisionConflict => "Revision does not match.",
+            ErrorCode::Disabled => "Proxy is disabled.",
+            ErrorCode::Retired => "Proxy is retired.",
+            ErrorCode::MetadataRefPending => "Metadata reference is not registered yet.",
+            ErrorCode::SemanticInvalid => "Request is semantically invalid.",
+            ErrorCode::SchemaInvalid => "Request does not match the schema.",
+            ErrorCode::InvalidStatus => "Status report is invalid.",
+            ErrorCode::InvalidCursor => "Cursor is invalid.",
+            ErrorCode::InvalidFilter => "Filter is invalid.",
+            ErrorCode::Unknown(_) => "Request failed.",
+        }
+    }
+}
+
+impl Serialize for ErrorCode {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ErrorCode {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Self::parse(&String::deserialize(d)?))
+    }
+}
+
+wire_struct! {
+    lenient
+    /// Item of a batch error. 422 items carry `index` only; 409/424 carry the
+    /// validated `event_id`; status gap conflicts carry `gap_id`. At most one of
+    /// `event_id` and `gap_id` may be present.
+    pub struct ErrorItem {
+        pub index: u32,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub event_id: Option<Uuid>,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub gap_id: Option<Uuid>,
+        pub code: ErrorCode,
+    }
+}
+
+impl Validate for ErrorItem {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.event_id.is_some() && self.gap_id.is_some() {
+            return Err(ValidationError::new(
+                "an error item carries at most one of event_id and gap_id",
+            ));
+        }
+        Ok(())
+    }
+}
+
+wire_struct! {
+    lenient
+    /// Body of the `error` member. `message` is a fixed safe text; build it with
+    /// [`ApiError::from_code`] rather than by hand.
+    pub struct ErrorBody {
+        pub code: ErrorCode,
+        pub message: String,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub items: Option<Vec<ErrorItem>>,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub pending_metadata_refs: Option<Vec<MetadataRef>>,
+    }
+}
+
+wire_struct! {
+    lenient
+    /// `{error:{...}}`
+    pub struct ApiError {
+        pub error: ErrorBody,
+    }
+}
+
+impl Validate for ErrorBody {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.pending_metadata_refs.is_some() && self.code != ErrorCode::MetadataRefPending {
+            return Err(ValidationError::new(
+                "pending_metadata_refs requires code metadata_ref_pending",
+            ));
+        }
+        for item in self.items.iter().flatten() {
+            item.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl Validate for ApiError {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.error.validate()
+    }
+}
+
+impl ApiError {
+    /// Error with the fixed message of `code`; callers cannot inject a message.
+    pub fn from_code(code: ErrorCode) -> Self {
+        Self {
+            error: ErrorBody {
+                message: code.fixed_message().to_owned(),
+                code,
+                items: None,
+                pending_metadata_refs: None,
+            },
+        }
+    }
+
+    pub fn with_items(mut self, items: Vec<ErrorItem>) -> Self {
+        self.error.items = Some(items);
+        self
+    }
+
+    pub fn with_pending_metadata_refs(mut self, refs: Vec<MetadataRef>) -> Self {
+        self.error.pending_metadata_refs = Some(refs);
+        self
+    }
+}
