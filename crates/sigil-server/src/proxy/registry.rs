@@ -6,7 +6,7 @@
 // OPEN: moves to the S4 ledger DB.
 
 use anyhow::{bail, Context, Result};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -51,6 +51,10 @@ struct FileFormat {
 pub struct ProxyRegistry {
     path: PathBuf,
     inner: RwLock<BTreeMap<String, ProxyRecord>>,
+    /// Serializes writers (validate -> audit -> persist). The `inner` write
+    /// lock is taken only for the final in-memory swap, so readers on the
+    /// host and proxy routes never wait on an fsync.
+    writer: Mutex<()>,
 }
 
 impl ProxyRegistry {
@@ -75,6 +79,7 @@ impl ProxyRegistry {
             let reg = Self {
                 path: path.to_path_buf(),
                 inner: RwLock::new(BTreeMap::new()),
+                writer: Mutex::new(()),
             };
             write_atomic(path, &serde_json::to_vec_pretty(&FileFormat::default())?)?;
             return Ok(reg);
@@ -115,6 +120,7 @@ impl ProxyRegistry {
         Ok(Self {
             path: path.to_path_buf(),
             inner: RwLock::new(map),
+            writer: Mutex::new(()),
         })
     }
 
@@ -131,36 +137,15 @@ impl ProxyRegistry {
             .any(|r| r.matches_fingerprint(fp))
     }
 
-    /// Start a write transaction. Holds the registry write lock until the
-    /// returned value is committed or dropped, so the management handlers can
-    /// validate, append the audit record and commit atomically.
+    /// Start a write transaction. Takes the writer mutex (not the map lock):
+    /// concurrent writers queue here while readers keep reading the previous
+    /// map. The management handlers and the promotion path validate, append the
+    /// audit record and commit inside one transaction.
     pub fn begin(&self) -> RegistryTxn<'_> {
         RegistryTxn {
-            guard: self.inner.write(),
-            path: &self.path,
+            reg: self,
+            _writer: self.writer.lock(),
         }
-    }
-
-    /// Promote `fp_next` to `fp_current` when `fp` is the (distinct) next
-    /// fingerprint of an active entry. Returns whether anything changed.
-    /// Persist-first-then-swap. This is the rotation rule: the old
-    /// fingerprint is dropped at the first request authenticated with `next`.
-    pub fn promote_next(&self, proxy_id: &str, fp: &str, now: &str) -> Result<bool> {
-        let txn = self.begin();
-        let Some(rec) = txn.get(proxy_id) else {
-            return Ok(false);
-        };
-        if rec.state != ProxyState::Active
-            || rec.fp_next.as_deref() != Some(fp)
-            || rec.fp_current.as_deref() == Some(fp)
-        {
-            return Ok(false);
-        }
-        let mut next = rec;
-        next.fp_current = next.fp_next.take();
-        next.updated_at = now.to_string();
-        txn.commit(next)?;
-        Ok(true)
     }
 
     /// Insert or replace a record. Persists to disk first, then swaps the
@@ -171,47 +156,42 @@ impl ProxyRegistry {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn seed_for_test(&self, record: ProxyRecord) -> Result<()> {
-        let mut g = self.inner.write();
-        let mut next = g.clone();
-        next.insert(record.proxy_id.clone(), record);
-        let file = FileFormat {
-            proxies: next.values().cloned().collect(),
-        };
-        write_atomic(&self.path, &serde_json::to_vec_pretty(&file)?)?;
-        *g = next;
-        Ok(())
+        self.begin().commit(record)
     }
 }
 
 /// Write transaction on the registry (see [`ProxyRegistry::begin`]).
 pub struct RegistryTxn<'a> {
-    guard: parking_lot::RwLockWriteGuard<'a, BTreeMap<String, ProxyRecord>>,
-    path: &'a Path,
+    reg: &'a ProxyRegistry,
+    _writer: parking_lot::MutexGuard<'a, ()>,
 }
 
 impl RegistryTxn<'_> {
     pub fn get(&self, proxy_id: &str) -> Option<ProxyRecord> {
-        self.guard.get(proxy_id).cloned()
+        self.reg.get(proxy_id)
     }
 
     /// The `proxy_id` that holds `fp` as current or next, in any state.
     pub fn fingerprint_owner(&self, fp: &str) -> Option<String> {
-        self.guard
+        self.reg
+            .inner
+            .read()
             .values()
             .find(|r| r.matches_fingerprint(fp))
             .map(|r| r.proxy_id.clone())
     }
 
-    /// Persist the record (insert or replace) and then swap it into memory.
-    /// On error nothing changed in memory.
-    pub fn commit(mut self, record: ProxyRecord) -> Result<()> {
-        let mut next = self.guard.clone();
+    /// Persist the record (insert or replace), then swap it into memory under a
+    /// brief write lock. On error nothing changed in memory. The writer mutex
+    /// guarantees the map did not change since this transaction read it.
+    pub fn commit(self, record: ProxyRecord) -> Result<()> {
+        let mut next = self.reg.inner.read().clone();
         next.insert(record.proxy_id.clone(), record);
         let file = FileFormat {
             proxies: next.values().cloned().collect(),
         };
-        write_atomic(self.path, &serde_json::to_vec_pretty(&file)?)?;
-        *self.guard = next;
+        write_atomic(&self.reg.path, &serde_json::to_vec_pretty(&file)?)?;
+        *self.reg.inner.write() = next;
         Ok(())
     }
 }
@@ -312,5 +292,34 @@ mod tests {
         let l = d.path().join("link.json");
         std::os::unix::fs::symlink(&p, &l).unwrap();
         assert!(ProxyRegistry::open(&l, false).is_err());
+    }
+
+    #[test]
+    fn concurrent_writers_lose_no_update() {
+        let d = tempfile::tempdir().unwrap();
+        let r = std::sync::Arc::new(ProxyRegistry::open(&d.path().join("p.json"), true).unwrap());
+        let hs: Vec<_> = (0..8)
+            .map(|i| {
+                let r = r.clone();
+                std::thread::spawn(move || {
+                    for j in 0..5 {
+                        let id = format!("px{i}-{j}");
+                        let txn = r.begin();
+                        txn.commit(rec(&id, ProxyState::Active, None, None))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let reopened = ProxyRegistry::open(&d.path().join("p.json"), false).unwrap();
+        for i in 0..8 {
+            for j in 0..5 {
+                assert!(r.get(&format!("px{i}-{j}")).is_some());
+                assert!(reopened.get(&format!("px{i}-{j}")).is_some());
+            }
+        }
     }
 }

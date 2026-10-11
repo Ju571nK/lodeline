@@ -11,8 +11,12 @@
 //!
 //! Expiry is evaluated with the bearer (before scope) because an expired
 //! credential is not an authenticated principal. Steps 3 and 4 are audited
-//! (before the response); step 1 and 2 are not (an unauthenticated flood must
-//! not grow the audit file).
+//! (before the response), coalesced to one record per caller cert and reason
+//! per minute that carries a `count`. Steps 1 and 2 are not audited (an
+//! unauthenticated flood must not cost an fsync per request); a request that
+//! carries a bearer there only feeds a rate-limited warning. The verifier file
+//! is refreshed BEFORE the cert is classified, so a rotated caller list is
+//! honoured on the very next request.
 //!
 //! After the guard, handlers run in this order: unknown `proxy_id` (404
 //! `proxy_unknown`; the caller is already authenticated and scoped, so
@@ -168,11 +172,17 @@ pub async fn mgmt_guard(
     let (Some(auth), Some(_)) = (ctx.mgmt.as_ref(), ctx.audit.as_ref()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    auth.refresh_if_changed();
+    let has_bearer = req
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION);
     let peer = req.extensions().get::<Arc<PeerIdentity>>().cloned();
     let Some(peer) = peer.filter(|p| ctx.peer_class(p) == PeerClass::Management) else {
+        if has_bearer {
+            ctx.note_probe("not_a_management_caller_cert");
+        }
         return StatusCode::NOT_FOUND.into_response();
     };
-    auth.refresh_if_changed();
     let request_id = uuid::Uuid::now_v7().to_string();
     let asserted = requested_by(req.headers());
     let token = extract_bearer(req.headers()).filter(|t| !t.is_empty());
@@ -189,22 +199,35 @@ pub async fn mgmt_guard(
         ..Default::default()
     };
     match auth.authenticate(&peer.fingerprint, token, time::OffsetDateTime::now_utc()) {
-        AuthOutcome::Denied => StatusCode::NOT_FOUND.into_response(),
+        AuthOutcome::Denied => {
+            if has_bearer {
+                ctx.note_probe("verifier_file_unusable");
+            }
+            StatusCode::NOT_FOUND.into_response()
+        }
         AuthOutcome::Unauthorized(reason, key_id) => {
+            let Some(count) = ctx.deny_check(&peer.fingerprint, reason.as_str()) else {
+                return api_error(ErrorCode::Unauthorized);
+            };
             let entry = AuditEntry {
                 result: "unauthorized".into(),
                 http_status: 401,
                 reason: Some(reason.as_str().into()),
+                count: (count > 1).then_some(count),
                 management_key_id: key_id.unwrap_or_default(),
                 ..base
             };
             denied(ctx, entry, ErrorCode::Unauthorized).await
         }
         AuthOutcome::Ok(p) if p.scope != route.required_scope() => {
+            let Some(count) = ctx.deny_check(&peer.fingerprint, "scope_insufficient") else {
+                return api_error(ErrorCode::Forbidden);
+            };
             let entry = AuditEntry {
                 result: "forbidden".into(),
                 http_status: 403,
                 reason: Some("scope_insufficient".into()),
+                count: (count > 1).then_some(count),
                 management_key_id: p.key_id.clone(),
                 scope: p.scope.as_str().into(),
                 ..base
@@ -223,9 +246,17 @@ pub async fn mgmt_guard(
 }
 
 async fn denied(ctx: Arc<ProxyContext>, entry: AuditEntry, code: ErrorCode) -> Response {
-    let r = tokio::task::spawn_blocking(move || audit_of(&ctx).append(entry)).await;
+    let (fp, reason) = (
+        entry.caller_fingerprint.clone(),
+        entry.reason.clone().unwrap_or_default(),
+    );
+    let c2 = ctx.clone();
+    let r = tokio::task::spawn_blocking(move || audit_of(&c2).append(entry)).await;
     match r {
-        Ok(Ok(_)) => api_error(code),
+        Ok(Ok(_)) => {
+            ctx.deny_audited(&fp, &reason);
+            api_error(code)
+        }
         Ok(Err(e)) => {
             tracing::error!(error = %e, "management audit append failed");
             audit_unavailable()
@@ -334,8 +365,10 @@ impl Actor<'_> {
         old: Option<&ProxyRecord>,
         new: &ProxyRecord,
         fp: Option<&str>,
+        replaced: Option<String>,
     ) -> Result<(), Box<Response>> {
         let mut e = self.entry(&new.proxy_id, None, 200);
+        e.replaced_fingerprint = replaced;
         e.from_state = old.map(|r| state_str(r.state).into());
         e.to_state = Some(state_str(new.state).into());
         e.subject_fingerprint = fp.map(str::to_string);
@@ -402,7 +435,7 @@ fn perform(
             return actor.deny(&b.proxy_id, ErrorCode::AlreadyExists, Some(existing.state));
         }
         let new = lifecycle::new_pending(&b.proxy_id, &b.display_name, &now);
-        if let Err(r) = actor.pre_commit(None, &new, None) {
+        if let Err(r) = actor.pre_commit(None, &new, None, None) {
             return *r;
         }
         return actor.commit(txn, new, StatusCode::CREATED);
@@ -421,7 +454,13 @@ fn perform(
                 Ok(b) if is_hex64(&b.fingerprint) => b.fingerprint,
                 _ => return actor.deny(id, ErrorCode::SemanticInvalid, Some(cur.state)),
             };
-            let owner = txn.fingerprint_owner(&fp);
+            // A management-caller cert fingerprint can never be a proxy's.
+            let owner = txn.fingerprint_owner(&fp).or_else(|| {
+                ctx.mgmt
+                    .as_ref()
+                    .is_some_and(|m| m.is_caller(&fp))
+                    .then(|| "management-caller".to_string())
+            });
             (
                 lifecycle::add_fingerprint(&cur, &fp, owner.as_deref(), &now),
                 Some(fp),
@@ -436,7 +475,17 @@ fn perform(
         Err(Denied::InvalidState) => actor.deny(id, ErrorCode::InvalidState, Some(cur.state)),
         Err(Denied::FingerprintInUse) => actor.deny(id, ErrorCode::AlreadyExists, Some(cur.state)),
         Ok(new) => {
-            if let Err(r) = actor.pre_commit(Some(&cur), &new, fp.as_deref()) {
+            // A fingerprint replace on a disabled entry drops the old ones.
+            let replaced = (route == MgmtRoute::Fingerprints && cur.state == ProxyState::Disabled)
+                .then(|| {
+                    [cur.fp_current.as_deref(), cur.fp_next.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|s| !s.is_empty());
+            if let Err(r) = actor.pre_commit(Some(&cur), &new, fp.as_deref(), replaced) {
                 return *r;
             }
             actor.commit(txn, new, StatusCode::OK)

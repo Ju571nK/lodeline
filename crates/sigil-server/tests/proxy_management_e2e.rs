@@ -1299,6 +1299,8 @@ async fn operator_cli_end_to_end() {
     let fx = Fx::start(dir, mgmt, mgmt_fp).await;
     let d = fx.dir.path();
     let (pcrt, _pkey) = proxy_leaf(d, "pxcli", "pxcli");
+    // openssl leaves the key group/world readable here: the CLI refuses it.
+    std::fs::set_permissions(&fx.mgmt.1, std::fs::Permissions::from_mode(0o644)).unwrap();
 
     let write_secret = |name: &str, content: &str, mode: u32| {
         let p = fx.p(name);
@@ -1317,6 +1319,14 @@ async fn operator_cli_end_to_end() {
     let id_tok = write_secret("id.tok", &format!("{t_id}\n"), 0o600);
     let cfg_tok = write_secret("cfg.tok", &t_cfg, 0o600);
     let read_tok = write_secret("read.tok", READ_TOKEN, 0o600);
+
+    let refused = cli::run(ProxyCommand::Disable {
+        conn: conn(id_tok.clone()),
+        proxy_id: "pxcli".into(),
+    })
+    .await;
+    assert!(refused.is_err(), "group/world-readable --key is refused");
+    std::fs::set_permissions(&fx.mgmt.1, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     cli::run(ProxyCommand::Register {
         conn: conn(id_tok.clone()),
@@ -1417,4 +1427,309 @@ async fn operator_cli_end_to_end() {
     assert!(cli::run(cmd(id_tok, Some("http://127.0.0.1:1")))
         .await
         .is_err());
+}
+
+// ---- review-fix tests --------------------------------------------------------
+
+/// Register `id` and give it two proxy certs (current, next) through the API.
+async fn proxy_with_two_certs(fx: &Fx, id: &str) -> ((PathBuf, PathBuf), (PathBuf, PathBuf)) {
+    let d = fx.dir.path();
+    let a = proxy_leaf(d, &format!("{id}a"), id);
+    let b = proxy_leaf(d, &format!("{id}b"), id);
+    let mc = fx.mgmt_client();
+    let p = |path: String, body: Option<String>| {
+        let mc = mc.clone();
+        let port = fx.port;
+        async move { send(&mc, port, "POST", &path, Some(T_ID), body.as_deref()).await }
+    };
+    assert_eq!(
+        p("/v1/proxies".into(), Some(reg_body(id))).await.status,
+        201
+    );
+    for crt in [&a.0, &b.0] {
+        let r = p(
+            format!("/v1/proxies/{id}/fingerprints"),
+            Some(fp_body(&fingerprint(crt))),
+        )
+        .await;
+        assert_eq!(r.status, 200);
+    }
+    (a, b)
+}
+
+#[tokio::test]
+async fn management_cert_fingerprint_cannot_be_registered_as_a_proxy() {
+    let fx = Fx::new().await;
+    let mc = fx.mgmt_client();
+    assert_eq!(
+        send(
+            &mc,
+            fx.port,
+            "POST",
+            "/v1/proxies",
+            Some(T_ID),
+            Some(&reg_body("pxa"))
+        )
+        .await
+        .status,
+        201
+    );
+    let r = send(
+        &mc,
+        fx.port,
+        "POST",
+        "/v1/proxies/pxa/fingerprints",
+        Some(T_ID),
+        Some(&fp_body(&fx.mgmt_fp)),
+    )
+    .await;
+    assert_eq!((r.status, r.code().as_str()), (409, "already_exists"));
+    assert_eq!(
+        fx.ctx.registry.get("pxa").unwrap().state,
+        ProxyState::Pending
+    );
+}
+
+#[tokio::test]
+async fn auth_denials_are_coalesced_and_records_are_domain_separated() {
+    let fx = Fx::new().await;
+    let mc = fx.mgmt_client();
+    for _ in 0..5 {
+        let r = send(
+            &mc,
+            fx.port,
+            "POST",
+            "/v1/proxies",
+            Some("wrong"),
+            Some(&reg_body("pxa")),
+        )
+        .await;
+        assert_eq!(r.status, 401);
+    }
+    let lines = audit_lines(&fx);
+    let denials: Vec<_> = lines
+        .iter()
+        .filter(|l| l["reason"] == "bad_bearer")
+        .collect();
+    assert_eq!(
+        denials.len(),
+        1,
+        "one record per caller and reason per window"
+    );
+    assert!(lines.iter().all(|l| l["stream"] == "proxy-mgmt"));
+    // A different reason from the same caller is its own record.
+    let r = send(
+        &mc,
+        fx.port,
+        "POST",
+        "/v1/proxies",
+        None,
+        Some(&reg_body("pxa")),
+    )
+    .await;
+    assert_eq!(r.status, 401);
+    assert_eq!(audit_lines(&fx).len(), 2);
+}
+
+#[tokio::test]
+async fn disabled_fingerprint_replace_records_the_replaced_one() {
+    let fx = Fx::new().await;
+    let (a, b) = proxy_with_two_certs(&fx, "px1").await;
+    let mc = fx.mgmt_client();
+    let port = fx.port;
+    assert_eq!(
+        send(
+            &mc,
+            port,
+            "POST",
+            "/v1/proxies/px1/disable",
+            Some(T_CFG),
+            None
+        )
+        .await
+        .status,
+        200
+    );
+    let fresh = "e5".repeat(32);
+    assert_eq!(
+        send(
+            &mc,
+            port,
+            "POST",
+            "/v1/proxies/px1/fingerprints",
+            Some(T_ID),
+            Some(&fp_body(&fresh))
+        )
+        .await
+        .status,
+        200
+    );
+    let lines = audit_lines(&fx);
+    let last = lines
+        .iter()
+        .rfind(|l| l["action"] == "proxy.fingerprint_register")
+        .unwrap();
+    assert_eq!(
+        last["replaced_fingerprint"],
+        format!("{},{}", fingerprint(&a.0), fingerprint(&b.0))
+    );
+    assert_eq!(last["subject_fingerprint"], fresh.as_str());
+}
+
+#[tokio::test]
+async fn promotion_with_audit_down_is_served_but_not_promoted_and_no_false_record() {
+    let fx = Fx::new().await;
+    let (a, b) = proxy_with_two_certs(&fx, "px1").await;
+    let (a_fp, b_fp) = (fingerprint(&a.0), fingerprint(&b.0));
+    let pb = fx.client_for(&b.0, &b.1);
+    let before = audit_lines(&fx).len();
+
+    let af = fx.p(AUDIT_FILE);
+    let bak = fx.p("audit.bak");
+    std::fs::rename(&af, &bak).unwrap();
+    std::fs::create_dir(&af).unwrap();
+
+    // Served with the next fingerprint, but the old one stays current.
+    assert_eq!(
+        send(&pb, fx.port, "GET", "/v1/proxy-config", None, None)
+            .await
+            .status,
+        501
+    );
+    let rec = fx.ctx.registry.get("px1").unwrap();
+    assert_eq!(
+        (rec.fp_current.as_deref(), rec.fp_next.as_deref()),
+        (Some(a_fp.as_str()), Some(b_fp.as_str()))
+    );
+
+    std::fs::remove_dir(&af).unwrap();
+    std::fs::rename(&bak, &af).unwrap();
+    // No record was written for the failed attempt; the retry is rate limited,
+    // so an immediate second request does not promote either.
+    assert_eq!(audit_lines(&fx).len(), before);
+    assert_eq!(
+        send(&pb, fx.port, "GET", "/v1/proxy-config", None, None)
+            .await
+            .status,
+        501
+    );
+    let rec = fx.ctx.registry.get("px1").unwrap();
+    assert_eq!(rec.fp_current.as_deref(), Some(a_fp.as_str()));
+    assert_eq!(audit_lines(&fx).len(), before);
+}
+
+#[tokio::test]
+async fn concurrent_management_writes_and_promotions_lose_no_update() {
+    let fx = Fx::new().await;
+    let mut set = Vec::new();
+    for i in 0..3 {
+        let d = format!("pd{i}");
+        let certs = proxy_with_two_certs(&fx, &d).await;
+        set.push((d, true, certs));
+        let f = format!("pf{i}");
+        let certs = proxy_with_two_certs(&fx, &f).await;
+        set.push((f, false, certs));
+    }
+    let c_of = |id: &str| format!("c{}", &id[2..]).repeat(32);
+    let mut tasks = Vec::new();
+    for (id, is_disable, (_a, b)) in &set {
+        let pb = fx.client_for(&b.0, &b.1);
+        let mc = fx.mgmt_client();
+        let c_fp = c_of(id);
+        let (port, id, is_disable) = (fx.port, id.clone(), *is_disable);
+        tasks.push(tokio::spawn(async move {
+            let proxy = send(&pb, port, "GET", "/v1/proxy-config", None, None);
+            let mgmt = async {
+                if is_disable {
+                    send(
+                        &mc,
+                        port,
+                        "POST",
+                        &format!("/v1/proxies/{id}/disable"),
+                        Some(T_CFG),
+                        None,
+                    )
+                    .await
+                } else {
+                    send(
+                        &mc,
+                        port,
+                        "POST",
+                        &format!("/v1/proxies/{id}/fingerprints"),
+                        Some(T_ID),
+                        Some(&fp_body(&c_fp)),
+                    )
+                    .await
+                }
+            };
+            let (p, m) = tokio::join!(proxy, mgmt);
+            (p.status, m.status)
+        }));
+    }
+    for t in tasks {
+        let (_p, m) = t.await.unwrap();
+        assert_eq!(m, 200);
+    }
+    let reopened =
+        sigil_server::proxy::registry::ProxyRegistry::open(&fx.p("proxies.json"), false).unwrap();
+    for (id, is_disable, (a, b)) in &set {
+        let (a_fp, b_fp) = (fingerprint(&a.0), fingerprint(&b.0));
+        for reg in [&fx.ctx.registry, &reopened] {
+            let rec = reg.get(id).unwrap();
+            let cur = rec.fp_current.as_deref().unwrap().to_string();
+            if *is_disable {
+                assert_eq!(rec.state, ProxyState::Disabled, "{id}: disable not lost");
+                let ok = (cur == a_fp && rec.fp_next.as_deref() == Some(b_fp.as_str()))
+                    || (cur == b_fp && rec.fp_next.is_none());
+                assert!(ok, "{id}: inconsistent fingerprints {rec:?}");
+            } else {
+                assert_eq!(rec.state, ProxyState::Active);
+                assert_eq!(
+                    rec.fp_next.as_deref(),
+                    Some(c_of(id).as_str()),
+                    "{id}: new next lost"
+                );
+                assert!(cur == a_fp || cur == b_fp, "{id}: {rec:?}");
+            }
+        }
+    }
+    let lines = audit_lines(&fx);
+    for w in lines.windows(2) {
+        assert_eq!(
+            w[1]["prev_hash"], w[0]["hash"],
+            "audit chain intact under concurrency"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sighup_reloads_the_verifier_file() {
+    let fx = Fx::new().await;
+    sigil_server::proxy::spawn_sighup_reload(fx.ctx.clone()).unwrap();
+    let newcaller = "d9".repeat(32);
+    assert!(!fx.ctx.mgmt.as_ref().unwrap().is_caller(&newcaller));
+    let mut e = Fx::default_entries(&fx.mgmt_fp, &fx.mgmt_fp);
+    e.truncate(2);
+    e.push(entry(
+        "sighup",
+        "tok-sighup",
+        Scope::Config,
+        &newcaller,
+        None,
+    ));
+    write_verifiers(&fx.p("verifiers.json"), &e);
+    // SAFETY: plain kill(2) to our own pid; the handler above is installed.
+    unsafe { libc::kill(libc::getpid(), libc::SIGHUP) };
+    let mut seen = false;
+    for _ in 0..60 {
+        if fx.ctx.mgmt.as_ref().unwrap().is_caller(&newcaller) {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        seen,
+        "SIGHUP did not reload (no request triggered a lazy refresh)"
+    );
 }

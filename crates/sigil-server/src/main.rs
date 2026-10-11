@@ -216,19 +216,7 @@ async fn run(cfg: ServerConfig) -> Result<()> {
     // SIGHUP re-reads the management verifier file (fail closed on error).
     #[cfg(unix)]
     if let Some(ctx) = proxy.clone().filter(|c| c.mgmt.is_some()) {
-        let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            .context("install SIGHUP handler")?;
-        tokio::spawn(async move {
-            while hup.recv().await.is_some() {
-                let ctx = ctx.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Some(m) = ctx.mgmt.as_ref() {
-                        m.reload();
-                    }
-                })
-                .await;
-            }
-        });
+        sigil_server::proxy::spawn_sighup_reload(ctx)?;
     }
 
     let app = build_router_with_proxy(state, proxy).layer(axum::middleware::from_fn_with_state(

@@ -110,47 +110,18 @@ pub async fn proxy_guard(
     }
 }
 
-/// Rotation rule (control-plane §1.3): the first request authenticated with
-/// `fp_next` promotes it to `fp_current` and drops the old fingerprint. The
-/// promotion is audited first; if the audit append or the registry write
-/// fails nothing changes (the old fingerprint stays valid, the request is
-/// still served because it authenticated with a registered fingerprint).
+/// Promote `fp_next` on its first use (see `ProxyContext::promote_blocking`).
+/// The request is served either way: it authenticated with a registered
+/// fingerprint.
 async fn promote_on_first_use(ctx: &Arc<ProxyContext>, rec: &ProxyRecord, fp: &str) {
     if rec.fp_next.as_deref() != Some(fp) || rec.fp_current.as_deref() == Some(fp) {
         return;
     }
-    let Some(_) = ctx.audit else {
-        return;
-    };
     let (ctx, id, fp) = (ctx.clone(), rec.proxy_id.clone(), fp.to_string());
-    let done = tokio::task::spawn_blocking(move || {
-        let audit = ctx.audit.as_ref().expect("checked");
-        let now = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default();
-        let entry = super::audit::AuditEntry {
-            request_id: uuid::Uuid::now_v7().to_string(),
-            action: "proxy.fingerprint_promote".into(),
-            proxy_id: id.clone(),
-            result: "ok".into(),
-            http_status: 200,
-            reason: Some("first_use_of_next".into()),
-            from_state: Some("active".into()),
-            to_state: Some("active".into()),
-            subject_fingerprint: Some(fp.clone()),
-            caller_fingerprint: fp.clone(),
-            ..Default::default()
-        };
-        if let Err(e) = audit.append(entry) {
-            tracing::error!(error = %e, proxy_id = %id, "promotion skipped: audit append failed");
-            return;
-        }
-        if let Err(e) = ctx.registry.promote_next(&id, &fp, &now) {
-            tracing::error!(error = %e, proxy_id = %id, "promotion failed to persist");
-        }
-    })
-    .await;
-    if done.is_err() {
+    if tokio::task::spawn_blocking(move || ctx.promote_blocking(&id, &fp))
+        .await
+        .is_err()
+    {
         tracing::error!("promotion task panicked");
     }
 }

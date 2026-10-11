@@ -14,6 +14,12 @@
 //! direction), never to authenticate anything. A change is picked up on
 //! SIGHUP or, lazily, when the file's (mtime, length, inode) differs at the
 //! next management request. A boot-time error refuses to start.
+//!
+//! Editing the file: write a new file and `rename` it over the old one (tmp +
+//! rename), or send SIGHUP after an in-place edit. An in-place edit is also
+//! noticed lazily (mtime/length/ctime change), but a half-written file is read
+//! as broken and denies everything until the write completes. Reloads are
+//! serialized by a mutex.
 
 use anyhow::{bail, Context, Result};
 use parking_lot::RwLock;
@@ -136,6 +142,8 @@ struct State {
 pub struct MgmtAuth {
     path: PathBuf,
     state: RwLock<State>,
+    /// Serializes reloads (SIGHUP task and lazy refresh from requests).
+    reload_lock: parking_lot::Mutex<()>,
 }
 
 fn is_hex64(s: &str) -> bool {
@@ -195,23 +203,35 @@ pub fn read_owner_only_file(path: &Path, max: u64) -> Result<(Vec<u8>, Stamp)> {
     Ok((buf, stamp_of(&meta)))
 }
 
+/// `key_id` rule shared by the loader and `verifier-new`.
+pub fn validate_key_id(key_id: &str) -> Result<()> {
+    let ok = !key_id.is_empty()
+        && key_id.len() <= 64
+        && key_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if !ok {
+        bail!("invalid key_id (1..=64 of [A-Za-z0-9._-])");
+    }
+    Ok(())
+}
+
+/// `name` rule shared by the loader and `verifier-new`.
+pub fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+        bail!("invalid name (1..=128 bytes, no control characters)");
+    }
+    Ok(())
+}
+
 fn validate(file: FileFormat, now: time::OffsetDateTime) -> Result<Vec<Loaded>> {
     if file.entries.len() > MAX_ENTRIES {
         bail!("too many verifier entries (max {MAX_ENTRIES})");
     }
     let mut out: Vec<Loaded> = Vec::new();
     for e in file.entries {
-        let id_ok = !e.key_id.is_empty()
-            && e.key_id.len() <= 64
-            && e.key_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-        if !id_ok {
-            bail!("invalid key_id (1..=64 of [A-Za-z0-9._-])");
-        }
-        if e.name.is_empty() || e.name.len() > 128 || e.name.chars().any(char::is_control) {
-            bail!("invalid name for key_id {}", e.key_id);
-        }
+        validate_key_id(&e.key_id)?;
+        validate_name(&e.name).with_context(|| format!("key_id {}", e.key_id))?;
         if !is_hex64(&e.verifier) {
             bail!("verifier of key_id {} is not 64 lowercase hex", e.key_id);
         }
@@ -288,11 +308,13 @@ impl MgmtAuth {
                 ok: true,
                 stamp: Some(stamp),
             }),
+            reload_lock: parking_lot::Mutex::new(()),
         })
     }
 
     /// Re-read the file now (SIGHUP). Fail closed, see the module docs.
     pub fn reload(&self) {
+        let _serial = self.reload_lock.lock();
         let observed = observed_stamp(&self.path);
         match load_file(&self.path) {
             Ok((entries, stamp)) if !entries.is_empty() => {

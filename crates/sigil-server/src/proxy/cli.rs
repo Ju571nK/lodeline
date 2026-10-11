@@ -9,7 +9,9 @@
 
 use super::identity::is_dns_label;
 use super::mgmt::{AUDIT_PATH, REGISTER_PATH, REQUESTED_BY_HEADER};
-use super::verifiers::{read_owner_only_file, Scope, VerifierEntry};
+use super::verifiers::{
+    read_owner_only_file, validate_key_id, validate_name, Scope, VerifierEntry,
+};
 use anyhow::{bail, ensure, Context, Result};
 use clap::{ArgGroup, Args, Subcommand};
 use rand_core::{OsRng, RngCore};
@@ -261,6 +263,10 @@ pub fn new_verifier(
         || format!("mgmt-{}-{}", scope.as_str(), hex(&id_raw)),
         str::to_string,
     );
+    validate_key_id(&key_id)?;
+    if let Some(n) = name {
+        validate_name(n)?;
+    }
     let entry = VerifierEntry {
         name: name.map_or_else(|| key_id.clone(), str::to_string),
         key_id,
@@ -285,11 +291,15 @@ fn read_token(path: &Path) -> Result<String> {
 
 fn build_client(c: &ConnArgs) -> Result<reqwest::Client> {
     let ca = std::fs::read(&c.ca).with_context(|| format!("read {}", c.ca.display()))?;
-    let mut id = std::fs::read(&c.key).with_context(|| format!("read {}", c.key.display()))?;
+    // The private key goes through the same owner-only check as the token.
+    let (mut id, _) = read_owner_only_file(&c.key, 64 * 1024)
+        .with_context(|| format!("--key {}", c.key.display()))?;
     id.push(b'\n');
     id.extend(std::fs::read(&c.cert).with_context(|| format!("read {}", c.cert.display()))?);
     let mut b = reqwest::Client::builder()
         .use_rustls_tls()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
         .tls_built_in_root_certs(false)
         .identity(reqwest::Identity::from_pem(&id).context("client cert/key")?)
         .timeout(std::time::Duration::from_secs(30));
@@ -486,6 +496,8 @@ mod tests {
         assert_ne!(token, t2);
         assert!(e2.key_id.starts_with("mgmt-config-"));
         assert!(new_verifier(Scope::Config, "short", None, None, None).is_err());
+        assert!(new_verifier(Scope::Config, FP, Some("bad id"), None, None).is_err());
+        assert!(new_verifier(Scope::Config, FP, Some("ok"), Some("bad\nname"), None).is_err());
         assert!(new_verifier(Scope::Config, FP, None, None, Some("tomorrow")).is_err());
         let w = parse_vn(&[
             "verifier-new",

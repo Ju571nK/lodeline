@@ -90,7 +90,9 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   #     "not_after":"2027-01-01T00:00:00Z"}]}
 #   # At most 2 non-expired entries per scope. Generate an entry with
 #   # `sigil-server proxy verifier-new --scope identity --caller-fingerprint <fp>`.
-#   # Reload: SIGHUP, or automatically when the file changes. A broken file on
+#   # Edit it via a new file + rename over the old one (tmp + rename), or send SIGHUP
+#   # after an in-place edit. Changes are also picked up automatically; a half-written
+#   # file reads as broken. A broken file on
 #   # reload denies ALL management requests (fail closed) until a valid one loads.
 #   # The caller cert must come from the host CA (never the proxy CA) and must
 #   # not be used for any other route; it is rejected on host and proxy routes.
