@@ -98,4 +98,12 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
 - 패키징: rpm·systemd unit은 T-10(설치만, 자동 활성화 없음, 별도 state_dir). 전용 SELinux 도메인 `sigil_proxy_t`는
   Rocky 9 enforcing 실기 검증 단계에서 작성하며 그 전에는 unconfined로 실행한다.
 - 서버 측 관리·수신 API는 계약대로 sigil-server 안 `proxy/` 모듈에 격리하고 설정이 없으면 비활성이다. proxy는 별도 프로세스다.
+- downstream·관리 토큰 verifier 규칙(2026-10-11, T-10 리뷰): verifier = wire로 보내는 ASCII bearer 문자열("Bearer " 뒤 값)의
+  SHA-256 소문자 hex. 상수 시간 비교. 구현은 `sigil-proxy-api`의 단일 함수를 proxy·server가 함께 쓴다.
+- `upstream_origins` 정규화: 기본 포트(http 80, https 443)는 제거해 비교한다. `http://`는 loopback host에만 허용한다.
+- 인증서는 공개 자료로 취급한다(일반 파일·symlink 금지). 개인 키와 비밀 파일만 소유자 전용(0600 상당)이다. 파일은 O_NOFOLLOW로 열고 열린 fd로 검사한다.
+- downstream 리스너의 client 인증: bootstrap에는 principal이 없으므로 리스너는 바인드하되, 적용된 config에 verifier가 1개 이상 생기기 전에는 모든 요청을
+  전달하지 않고 401로 거절한다. "client 인증 없음 = 시작 실패"는 non-loopback인데 TLS가 없는 경우처럼 bootstrap만으로 판정되는 경우에 적용한다(T-12).
+- state_dir의 `binding.json`이 손상되면 새 epoch로 덮지 않고 시작을 거부한다(손상 ≠ 손실). 운영자가 명시적으로 지운 뒤에만 새 epoch이며, 기존 spool은 삭제하지 않고 격리한다.
+- bootstrap 후보 키 추가: `tls_cert_file`·`tls_key_file`(non-loopback 리스너 TLS, 함께 설정). 기본 listen은 `127.0.0.1:8480`(후보).
 - 착수 순서: PR0 `sigil-proxy-api` DTO crate(#244) → T-10 `sigil-proxy` 골격(#245)과 T-11 S1 신원·등록(#246) 병렬.
