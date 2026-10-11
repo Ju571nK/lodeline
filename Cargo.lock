@@ -3318,6 +3318,8 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sigil-core",
+ "sigil-proxy-api",
+ "sigil-server",
  "tempfile",
  "thiserror 1.0.69",
  "time",

@@ -100,6 +100,7 @@ fn peer(cn: Option<&str>, san: &[&str]) -> Arc<PeerIdentity> {
         fingerprint: "f".repeat(64),
         cn: cn.map(str::to_string),
         san_dns: san.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
     })
 }
 

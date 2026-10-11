@@ -41,7 +41,7 @@ use tokio_rustls::server::TlsStream;
 
 /// Identity of the TLS peer (client) on one connection, extracted from the
 /// leaf certificate rustls verified during the handshake.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PeerIdentity {
     /// blake3 hex (lowercase) of the leaf certificate DER bytes.
     pub fingerprint: String,
@@ -49,6 +49,11 @@ pub struct PeerIdentity {
     pub cn: Option<String>,
     /// SAN DNS entries, if the certificate parses and carries any.
     pub san_dns: Vec<String>,
+    /// Issuer subject DN of the leaf (x509-parser display form), if it parses.
+    /// Used to tell proxy-CA-issued leaves from host-CA-issued ones (D-02).
+    pub issuer_dn: Option<String>,
+    /// Authority Key Identifier (keyIdentifier, lowercase hex) when present.
+    pub issuer_aki: Option<String>,
 }
 
 impl PeerIdentity {
@@ -58,12 +63,42 @@ impl PeerIdentity {
     pub fn from_der(der: &[u8]) -> Self {
         let fingerprint = blake3::hash(der).to_hex().to_string();
         let (cn, san_dns) = parse_cn_san(der).unwrap_or((None, Vec::new()));
+        let (issuer_dn, issuer_aki) = parse_issuer(der).unwrap_or((None, None));
         PeerIdentity {
             fingerprint,
             cn,
             san_dns,
+            issuer_dn,
+            issuer_aki,
         }
     }
+}
+
+/// Lowercase hex of a byte slice.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Issuer DN + AKI keyIdentifier (hex) out of certificate DER. `None` when the
+/// certificate does not parse; the AKI alone may be absent.
+fn parse_issuer(der: &[u8]) -> Option<(Option<String>, Option<String>)> {
+    use x509_parser::extensions::ParsedExtension;
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let dn = cert.issuer().to_string();
+    let aki = cert
+        .iter_extensions()
+        .find_map(|ext| match ext.parsed_extension() {
+            ParsedExtension::AuthorityKeyIdentifier(a) => {
+                a.key_identifier.as_ref().map(|k| hex_lower(k.0))
+            }
+            _ => None,
+        });
+    Some((Some(dn), aki))
 }
 
 /// Parse subject CN + SAN DNS names out of certificate DER. `None` when the
@@ -286,6 +321,7 @@ mod tests {
             fingerprint: "ff".into(),
             cn: Some("c".into()),
             san_dns: vec![],
+            ..Default::default()
         });
         let mut with_id = InjectPeerIdentity {
             inner: probe,

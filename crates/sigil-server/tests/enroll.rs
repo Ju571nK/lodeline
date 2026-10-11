@@ -234,6 +234,7 @@ fn peer_with_fingerprint(fp: &str) -> Arc<PeerIdentity> {
         fingerprint: fp.to_string(),
         cn: Some("issuer-box".to_string()),
         san_dns: vec![],
+        ..Default::default()
     })
 }
 
