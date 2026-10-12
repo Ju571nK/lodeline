@@ -1,7 +1,7 @@
 //! Process lifecycle and the local status file.
 //!
-//! No network exists yet (T-12). The config state is therefore only modelled:
-//! a process that has not fetched a config from the server is never
+//! The config state is modelled here; the control-plane fetch is a later slice.
+//! A process that has not fetched a config from the server is never
 //! `forwarding` (control-plane.md §6.3 "Restart", decision D-02 item 5).
 
 use std::future::Future;
@@ -186,30 +186,51 @@ impl ShutdownSignal {
     }
 }
 
-/// `run` for T-10: no listener is opened (T-12 adds them). Take the lock,
-/// publish status, wait for a signal, drain within the configured grace, stop.
+/// `run`: take the lock, publish status, bind the downstream listener, serve
+/// until a signal, drain within the configured grace, stop.
+///
+/// No route table is applied here (the remote config fetch/apply is a later
+/// slice), so the listener answers 401 to everything and the status never
+/// reports `forwarding`.
 pub async fn run(b: &Bootstrap) -> anyhow::Result<()> {
+    run_with_table(b, crate::route::TableHandle::new()).await
+}
+
+/// Like [`run`], with the table holder the config-apply slice will own.
+pub async fn run_with_table(b: &Bootstrap, table: crate::route::TableHandle) -> anyhow::Result<()> {
     let mut sig = ShutdownSignal::install()?;
     let mut lc = Lifecycle::start(b)?;
+    let acceptor = match &b.listener_tls {
+        Some(t) => Some(crate::tls::load_acceptor(&t.cert_file, &t.key_file)?),
+        None => None,
+    };
+    // Fail before publishing `running` if the address cannot be bound.
+    let listener = tokio::net::TcpListener::bind(b.listen).await?;
     tracing::info!(
         proxy_id = b.proxy_id.as_str(),
         epoch_id = lc.epoch_id(),
         config_state = ?lc.status().config_state,
-        "sigil-proxy started (no listener in this build step; not forwarding)"
+        listen = %listener.local_addr()?,
+        tls = acceptor.is_some(),
+        "sigil-proxy listening (no applied config: every request is 401)"
     );
     lc.set_run_state(RunState::Running)?;
-    sig.wait().await;
 
-    lc.set_run_state(RunState::Stopping)?;
+    let proxy = crate::server::Proxy::new(
+        b.limits.clone(),
+        table,
+        std::sync::Arc::new(crate::dest::SystemResolver),
+    );
+    let served = proxy
+        .serve(listener, acceptor, async {
+            sig.wait().await;
+            let _ = lc.set_run_state(RunState::Stopping);
+        })
+        .await;
     // NOTE: Signal handlers stay installed during drain, so a second SIGTERM is
     // swallowed and only SIGKILL ends the process. Fine under systemd
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
-    // No in-flight calls exist yet; T-12 passes its drain future here.
-    let outcome = drain(
-        Duration::from_secs(b.limits.shutdown_grace_secs),
-        std::future::ready(()),
-    )
-    .await;
+    let outcome = served?;
     tracing::info!(?outcome, "shutdown");
     lc.set_run_state(RunState::Stopped)?;
     Ok(())

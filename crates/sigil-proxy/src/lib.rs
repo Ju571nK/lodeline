@@ -4,10 +4,16 @@
 //! (T-12); `run` only validates the bootstrap, takes the `state_dir` lock,
 //! writes the local status file and waits for a termination signal.
 
+pub mod body;
 pub mod bootstrap;
 pub mod cli;
+pub mod dest;
 pub mod fsutil;
+pub mod headers;
 pub mod lifecycle;
 pub mod limits;
+pub mod route;
+pub mod server;
 pub mod state_dir;
+pub mod tls;
 pub mod token;

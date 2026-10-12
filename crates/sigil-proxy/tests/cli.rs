@@ -36,6 +36,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         &cfg,
         "proxy_id: px-1\ncontrol_plane_url: https://server.example:8443\nstate_dir: state\n\
          client_cert_file: cert.pem\nclient_key_file: key.pem\nca_file: ca.pem\n\
+         listen: 127.0.0.1:0\n\
          limits:\n  shutdown_grace_secs: 2\n",
     )
     .unwrap();

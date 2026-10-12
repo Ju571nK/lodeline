@@ -220,7 +220,7 @@ impl Bootstrap {
     }
 }
 
-fn is_loopback(ip: IpAddr) -> bool {
+pub(crate) fn is_loopback(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
         IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
@@ -252,7 +252,7 @@ fn check_control_plane_url(url: &str) -> Result<(), BootstrapError> {
 }
 
 /// Validate `host[:port]` (no userinfo). Returns lowercase host and optional port.
-fn split_host_port(authority: &str) -> Result<(String, Option<u16>), String> {
+pub(crate) fn split_host_port(authority: &str) -> Result<(String, Option<u16>), String> {
     if authority.is_empty() {
         return Err("empty host".into());
     }
@@ -333,7 +333,7 @@ pub fn normalize_origin(s: &str) -> Result<String, String> {
     })
 }
 
-fn is_loopback_host(host: &str) -> bool {
+pub(crate) fn is_loopback_host(host: &str) -> bool {
     if host == "localhost" {
         return true;
     }
