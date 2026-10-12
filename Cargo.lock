@@ -3239,9 +3239,17 @@ name = "sigil-proxy"
 version = "0.9.1"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "getrandom 0.2.17",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
  "libc",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3250,9 +3258,11 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]
