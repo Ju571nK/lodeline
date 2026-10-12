@@ -1,6 +1,6 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-11 · Claude Code orchestrator 세션 (기준 커밋 `2120415`)
+갱신: 2026-10-12 · Claude Code orchestrator 세션 (기준 커밋 `bbe48c8`)
 
 ## 현재 상태
 
@@ -35,6 +35,28 @@
 남은 P1: T-11 S2b(CSR 서명), S3(config·status), S4(ledger·ingest), S5(projection·조회), T-12 relay, T-13, T-14, T-15(manager, sigil-manager#37), T-16.
 실기 미검증: Rocky 9 SELinux enforcing·systemd `is-enabled`(컨테이너에 systemctl 없음), x86_64 baseline.
 교훈: unix 전용 코드의 import도 `cfg(unix)`로 막는다(Windows CI 실패 2회). 후속: `parse_entry_view`, ParseError 분류 marker 위조(T-11 S4), upload proxy_id 대조(server).
+
+## 2026-10-11 P1 2회차 배정 (기준 `f656b5c`)
+
+| 작업 | 모델/역할 | 목표 | Spec | 소유 파일 | 이슈 |
+|---|---|---|---|---|---|
+| T-12a | sonnet (coder, worktree) | raw relay·목적지 검사·한도·listener TLS | PX-003/004/008/014/015, AC-07 | `crates/sigil-proxy/**` | #258 |
+| T-11 S3 | sonnet (coder, worktree) | server config 발급·status 수신 | PX-005/008/012, AC-04/12 | `crates/sigil-server/src/proxy/**` 외 배정 시 명시 | #257 |
+
+진행: 두 작업 모두 coder → 독립 리뷰(sonnet) → fix → 재확인 blocker 없음 → PR. CI 1차 실패 2건은 orchestrator가 수정했다.
+- #261(ubuntu): verifiers 파일 stamp가 ctime만으로 권한 변경을 감지해, 한 timestamp tick 안의 chmod 두 번이 구분되지 않았다(실제 결함). stamp에 mode·uid 추가.
+- #259(macOS): TLS 테스트 인증서를 runner의 PATH `openssl`이 만들면 webpki가 `ExtensionValueInvalid`로 거부. server e2e와 같은 openssl 탐색 순서·`OPENSSL_CONF` 제거·CA 서명 leaf(RSA, 고정 serial)로 수정. runner openssl의 정확한 원인은 미확정.
+
+### 2회차 머지 결과 (2026-10-12)
+
+| PR | 작업 | 이슈 |
+|---|---|---|
+| #259 | T-12a proxy relay | #258 |
+| #261 | T-11 S3 config·status | #257 |
+
+후속 #260: 한도 min(local, remote), verifier `not_after`, origin 함수 공유, SV-5 이전 scope id 허용, 503 storage_limit, 인코딩된 body 관측 불가, T-12b(session·DELETE·GET·cancel·batch), 대역폭·IP별 한도, https upstream 테스트.
+남은 P1: T-12c(proxy 측 config 적용), T-12b, T-11 S2b(CSR 서명), S4(ledger·ingest), S5, T-13–T-16.
+교훈: 테스트용 인증서는 openssl 구현(LibreSSL/OpenSSL)마다 결과가 다르다. 기존 server e2e helper 방식을 따른다.
 
 ## 2026-10-10 3회차 배정 (기준 `46cc990`, 브랜치 `docs/proxy-p0-round3`)
 
