@@ -18,10 +18,11 @@ use serde::de::{DeserializeOwned, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
 
+use crate::config::{ProxyConfig, PutConfigRequest};
 use crate::error::{ApiError, MARK_LIMIT, MARK_SEMANTIC};
 use crate::event::{IngestRequest, IngestResponse, ProxyEvent};
 use crate::registry::{RegistryEntry, UploadRequest, UploadResponse};
-use crate::status::{ProxyStatus, StatusResponse};
+use crate::status::{GapReport, ProxyStatus, StatusResponse};
 
 /// Largest accepted event batch body (README: 1 MiB).
 pub const MAX_EVENT_BATCH_BYTES: usize = 1024 * 1024;
@@ -209,8 +210,19 @@ pub fn parse_event_batch(bytes: &[u8]) -> Result<IngestRequest, ParseError> {
     parse_doc(bytes, Some(|v| first_bad::<ProxyEvent>(v, "events")))
 }
 
-/// Parses a `POST /v1/proxy-status` body.
+/// Parses a `POST /v1/proxy-status` body. `index` names the first gap that does
+/// not parse on its own; it is `None` when the failure is not inside `gaps`.
 pub fn parse_status(bytes: &[u8]) -> Result<ProxyStatus, ParseError> {
+    parse_doc(bytes, Some(|v| first_bad::<GapReport>(v, "gaps")))
+}
+
+/// Parses a `GET /v1/proxies/{id}/config` body (closed: see [`crate::config`]).
+pub fn parse_config(bytes: &[u8]) -> Result<ProxyConfig, ParseError> {
+    parse_doc(bytes, None)
+}
+
+/// Parses a `PUT /v1/proxies/{id}/config` body.
+pub fn parse_config_put(bytes: &[u8]) -> Result<PutConfigRequest, ParseError> {
     parse_doc(bytes, None)
 }
 

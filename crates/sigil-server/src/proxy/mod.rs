@@ -1,18 +1,21 @@
 //! T-11 — Sigil Proxy server side (identity, registry, guard, management).
 //! Isolated from the host paths and OFF unless `proxy:` is configured.
 //!
-//! Spec: PX-008/009/012, AC-04, AC-13; control-plane.md §0.1, §1, §2. Slices
-//! S1 (identity, registry, guard) and S2a (management auth, audit, lifecycle
-//! routes, operator CLI). No config PUT (S3), no ingest/ledger (S4), no CSR
-//! signing (S2b).
+//! Spec: PX-008/009/012/016, AC-04, AC-12, AC-13; control-plane.md §0.1, §1, §2,
+//! §6. Slices S1 (identity, registry, guard), S2a (management auth, audit,
+//! lifecycle routes, operator CLI) and S3 (config DTO, config PUT/GET, status
+//! ingest). No event ingest/ledger (S4), no CSR signing (S2b).
 
 pub mod audit;
 pub mod cli;
+pub mod config_api;
 pub mod guard;
 pub mod identity;
 pub mod lifecycle;
 pub mod mgmt;
 pub mod registry;
+pub mod status;
+pub mod store;
 pub mod verifiers;
 
 use crate::config::ServerConfig;
@@ -26,12 +29,19 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use store::ProxyStore;
 use verifiers::MgmtAuth;
 
 /// Everything the proxy routes and the host-route guard need.
 pub struct ProxyContext {
     pub ca: ProxyCaInfo,
     pub registry: ProxyRegistry,
+    /// Latest config, status snapshot and gap records per proxy.
+    pub store: ProxyStore,
+    /// TTL stamped on every served config (seconds).
+    pub config_ttl: u32,
+    /// `ack_loss_margin` M (seconds) for the E >= R + M check.
+    pub ack_loss_margin: u32,
     /// `Some` only when `proxy.management_verifiers` is configured. `None`
     /// means every management route and the audit read route are absent.
     pub mgmt: Option<MgmtAuth>,
@@ -41,6 +51,11 @@ pub struct ProxyContext {
     promote_backoff: Mutex<HashMap<String, Instant>>,
     /// Auth-denial audit coalescing, per (caller fingerprint, reason).
     deny_gate: Mutex<HashMap<(String, String), (Instant, u32)>>,
+    /// Proxies whose state the boot cross-check found behind the audit and that
+    /// `state_init` let through: proxy_id -> audited revision. Their config is
+    /// withheld (GET answers `config_unavailable`) and the next PUT must name the
+    /// audited revision as `expected_revision`. Cleared by that PUT.
+    pub withheld: Mutex<HashMap<String, u64>>,
     /// Rate limiter for the "probe with a bearer" warning.
     probe_warn: Mutex<(Option<Instant>, u32)>,
 }
@@ -68,6 +83,8 @@ impl ProxyContext {
             .with_context(|| format!("proxy CA {}", pc.ca_path.display()))?;
         let registry = ProxyRegistry::open(&pc.registry_path, pc.registry_init)
             .with_context(|| format!("proxy registry {}", pc.registry_path.display()))?;
+        let store = ProxyStore::open(&pc.state_path())
+            .with_context(|| format!("proxy state {}", pc.state_path().display()))?;
         let (mgmt, audit) = match pc.management_verifiers.as_deref() {
             None => (None, None),
             Some(vp) => {
@@ -88,17 +105,31 @@ impl ProxyContext {
                 (Some(m), Some(MgmtAudit::open(dir, key)?))
             }
         };
+        let withheld = match audit.as_ref() {
+            Some(a) => check_store_against_audit(&store, a, pc.state_init)?,
+            None => HashMap::new(),
+        };
+        for id in stale_retention(&store, pc.ack_loss_margin()) {
+            tracing::warn!(
+                proxy_id = %id,
+                "stored config has event_retention_seconds < max_offline_retry_age_seconds + ack_loss_margin under the current proxy.ack_loss_margin_seconds; PUT a new config to restore the ledger L1 invariant"
+            );
+        }
         tracing::info!(
             ca_subject = %ca.subject_dn,
             registry = %pc.registry_path.display(),
             management = mgmt.is_some(),
-            "proxy routes enabled (GET /v1/proxy-config placeholder)"
+            "proxy routes enabled"
         );
         Ok(Some(ProxyContext {
             ca,
             registry,
+            store,
+            config_ttl: pc.config_ttl(),
+            ack_loss_margin: pc.ack_loss_margin(),
             mgmt,
             audit,
+            withheld: Mutex::new(withheld),
             promote_backoff: Mutex::new(HashMap::new()),
             deny_gate: Mutex::new(HashMap::new()),
             probe_warn: Mutex::new((None, 0)),
@@ -241,6 +272,66 @@ impl ProxyContext {
             c => c,
         }
     }
+}
+
+/// Boot cross-check (S3): the management audit is written BEFORE the store, so
+/// it may be ahead of the store (a crash between the two, a lost or restored
+/// store file) but never legitimately behind it. For every proxy with an `ok`
+/// `proxy.config_put` to revision R in the audit, the store must hold a config
+/// with revision >= R. Otherwise boot is refused unless `state_init` is set,
+/// which downgrades it to a loud warning and returns the proxies whose config
+/// must then be withheld, with their audited revisions.
+pub fn check_store_against_audit(
+    store: &ProxyStore,
+    audit: &MgmtAudit,
+    state_init: bool,
+) -> Result<HashMap<String, u64>> {
+    let (records, _) = audit
+        .read(0, usize::MAX)
+        .context("read the management audit for the proxy state cross-check")?;
+    let mut latest: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for r in records {
+        let r = r.record;
+        if r.action == "proxy.config_put" && r.result == "ok" {
+            if let Some(to) = r.to_revision {
+                let e = latest.entry(r.proxy_id).or_insert(0);
+                *e = (*e).max(to);
+            }
+        }
+    }
+    let mut withheld = HashMap::new();
+    for (id, audited) in latest {
+        let held = store.entry(&id).map_or(0, |e| e.revision());
+        if held < audited {
+            if !state_init {
+                bail!(
+                    "proxy state for {id} holds revision {held} but the management audit records a config PUT to revision {audited}; \
+                     the state store is behind (lost, restored or a crash between audit and write). \
+                     Refusing to start; set proxy.state_init: true for one boot to accept it"
+                );
+            }
+            tracing::error!(
+                proxy_id = %id, held, audited,
+                "ALERT proxy state is behind the management audit; accepted because proxy.state_init is set; its config is withheld until a config is PUT with expected_revision = the audited revision"
+            );
+            withheld.insert(id, audited);
+        }
+    }
+    Ok(withheld)
+}
+
+/// Proxies whose stored config breaks `E >= R + M` under the CURRENT
+/// `ack_loss_margin` (the margin may have been raised since the PUT).
+pub fn stale_retention(store: &ProxyStore, margin_secs: u32) -> Vec<String> {
+    store
+        .configs()
+        .into_iter()
+        .filter(|(_, c)| {
+            c.config.event_retention_seconds
+                < c.config.max_offline_retry_age_seconds + i64::from(margin_secs)
+        })
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// Re-read the management verifier file on SIGHUP (fail closed on error).

@@ -17,7 +17,7 @@
 //!
 //! Editing the file: write a new file and `rename` it over the old one (tmp +
 //! rename), or send SIGHUP after an in-place edit. An in-place edit is also
-//! noticed lazily (mtime/length/ctime change), but a half-written file is read
+//! noticed lazily (mtime/length/ctime/mode change), but a half-written file is read
 //! as broken and denies everything until the write completes. Reloads are
 //! serialized by a mutex.
 
@@ -128,9 +128,11 @@ pub enum AuthOutcome {
     Ok(Principal),
 }
 
-/// (mtime, length, inode, ctime sec, ctime nsec). ctime moves on chmod/chown,
-/// so a permission change is noticed like a content change.
-pub type Stamp = (Option<SystemTime>, u64, u64, i64, i64);
+/// (mtime, length, inode, ctime sec, ctime nsec, mode, uid). ctime moves on
+/// chmod/chown, but two changes inside one filesystem timestamp tick can leave
+/// it equal, so mode and owner are part of the stamp too: a permission fix is
+/// always noticed.
+pub type Stamp = (Option<SystemTime>, u64, u64, i64, i64, u32, u32);
 
 struct State {
     entries: Vec<Loaded>,
@@ -152,13 +154,19 @@ fn is_hex64(s: &str) -> bool {
 
 fn stamp_of(meta: &std::fs::Metadata) -> Stamp {
     #[cfg(unix)]
-    let (ino, cs, cn) = {
+    let (ino, cs, cn, mode, uid) = {
         use std::os::unix::fs::MetadataExt;
-        (meta.ino(), meta.ctime(), meta.ctime_nsec())
+        (
+            meta.ino(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+            meta.mode(),
+            meta.uid(),
+        )
     };
     #[cfg(not(unix))]
-    let (ino, cs, cn) = (0, 0, 0);
-    (meta.modified().ok(), meta.len(), ino, cs, cn)
+    let (ino, cs, cn, mode, uid) = (0, 0, 0, 0, 0);
+    (meta.modified().ok(), meta.len(), ino, cs, cn, mode, uid)
 }
 
 /// Open `path` as a secret file: regular file, not a symlink (O_NOFOLLOW),

@@ -41,7 +41,7 @@ pub struct MgmtAuditRecord {
     pub request_id: String,
     /// The action of the route that was called (`proxy.register`,
     /// `proxy.fingerprint_register`, `proxy.disable`, `proxy.enable`,
-    /// `proxy.retire`), or `proxy.fingerprint_promote` for the server's own
+    /// `proxy.retire`, `proxy.config_put`), or `proxy.fingerprint_promote` for the server's own
     /// promotion on first use of `fp_next`.
     pub action: String,
     /// Empty when the request named none (or none valid).
@@ -61,7 +61,8 @@ pub struct MgmtAuditRecord {
     pub from_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_state: Option<String>,
-    /// Reserved for config PUT (S3).
+    /// Config PUT (`proxy.config_put`): revisions and the new config's hash.
+    /// Never the config body, verifiers included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +111,10 @@ pub struct AuditEntry {
     pub count: Option<u32>,
     pub from_state: Option<String>,
     pub to_state: Option<String>,
+    /// Config PUT: revision before and after, and the hash of the new config.
+    pub from_revision: Option<u64>,
+    pub to_revision: Option<u64>,
+    pub config_hash: Option<String>,
     pub subject_fingerprint: Option<String>,
     pub replaced_fingerprint: Option<String>,
     pub management_key_id: String,
@@ -363,9 +368,9 @@ impl MgmtAudit {
             count: e.count,
             from_state: e.from_state,
             to_state: e.to_state,
-            from_revision: None,
-            to_revision: None,
-            config_hash: None,
+            from_revision: e.from_revision,
+            to_revision: e.to_revision,
+            config_hash: e.config_hash,
             subject_fingerprint: e.subject_fingerprint,
             replaced_fingerprint: e.replaced_fingerprint,
             management_key_id: e.management_key_id,

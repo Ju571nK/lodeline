@@ -15,12 +15,13 @@ use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use sigil_proxy_api::{ApiError, ErrorCode};
 use std::sync::Arc;
 
 pub const PROXY_CONFIG_PATH: &str = "/v1/proxy-config";
+pub use super::status::STATUS_PATH;
 const PROXIES_PREFIX: &str = "/v1/proxies/";
 
 fn json_error(status: StatusCode, code: ErrorCode) -> Response {
@@ -43,7 +44,10 @@ pub fn proxy_unknown() -> Response {
 /// routes (`POST /v1/proxies`, `/v1/proxies/{id}/...`). The host-route guard
 /// leaves them alone; unknown subpaths fall through to the empty router 404.
 fn is_proxy_path(path: &str) -> bool {
-    path == PROXY_CONFIG_PATH || path == "/v1/proxies" || path.starts_with(PROXIES_PREFIX)
+    path == PROXY_CONFIG_PATH
+        || path == STATUS_PATH
+        || path == "/v1/proxies"
+        || path.starts_with(PROXIES_PREFIX)
 }
 
 /// `Some(id)` for `/v1/proxies/{id}/...`.
@@ -95,7 +99,7 @@ fn check(
 /// handler and its extractors).
 pub async fn proxy_guard(
     State(ctx): State<Arc<ProxyContext>>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     let peer = req.extensions().get::<Arc<PeerIdentity>>().cloned();
@@ -104,6 +108,9 @@ pub async fn proxy_guard(
             if let Some(p) = peer.as_deref() {
                 promote_on_first_use(&ctx, &rec, &p.fingerprint).await;
             }
+            req.extensions_mut().insert(VerifiedProxy {
+                proxy_id: rec.proxy_id.clone(),
+            });
             next.run(req).await
         }
         Err(resp) => *resp,
@@ -171,9 +178,11 @@ pub async fn host_route_guard(
     next.run(req).await
 }
 
-async fn not_implemented() -> StatusCode {
-    // Placeholder until the config DTO (S3). Reached only after a passing check.
-    StatusCode::NOT_IMPLEMENTED
+/// The proxy the guard verified (set as a request extension). Handlers use this
+/// and never an id from the path or the body.
+#[derive(Clone, Debug)]
+pub struct VerifiedProxy {
+    pub proxy_id: String,
 }
 
 /// Proxy routes, each behind [`proxy_guard`].
@@ -182,10 +191,21 @@ pub fn router(ctx: Arc<ProxyContext>) -> Router {
     Router::new()
         .route(
             PROXY_CONFIG_PATH,
-            get(not_implemented).route_layer(from_fn_with_state(ctx.clone(), proxy_guard)),
+            get(super::config_api::get_own_config)
+                .route_layer(from_fn_with_state(ctx.clone(), proxy_guard)),
         )
         .route(
             "/v1/proxies/:proxy_id/config",
-            get(not_implemented).route_layer(from_fn_with_state(ctx, proxy_guard)),
+            get(super::config_api::get_own_config)
+                .route_layer(from_fn_with_state(ctx.clone(), proxy_guard)),
         )
+        .route(
+            STATUS_PATH,
+            post(super::status::post_status)
+                .route_layer(from_fn_with_state(ctx.clone(), proxy_guard))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::status::MAX_STATUS_BODY,
+                )),
+        )
+        .with_state(ctx)
 }
