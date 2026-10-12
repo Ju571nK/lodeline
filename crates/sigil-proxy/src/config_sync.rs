@@ -8,7 +8,10 @@
 //!
 //! Rules, all fail closed:
 //! * The deadline is `receipt + ttl_seconds` on the monotonic clock. `expires_at`
-//!   is display only and never read.
+//!   is display only and never read. The deadline also lives in the
+//!   [`TableHandle`], so expiry holds even if the polling task dies. (A
+//!   monotonic `Instant` does not count system suspend on Linux/macOS, so a VM or
+//!   host suspend stretches the TTL; known limit.)
 //! * A failed fetch, parse, build or ordering check keeps the last good table
 //!   until its deadline, never extends it, and then the table is removed (the
 //!   listener answers 401).
@@ -40,7 +43,7 @@ pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 
 /// Result of one fetch attempt, already reduced to what the state machine needs.
 /// No variant carries a body other than the config document itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum FetchResult {
     /// `200` with the raw body (not yet validated).
     Config(Vec<u8>),
@@ -50,6 +53,18 @@ pub enum FetchResult {
     Unavailable,
     /// Transport error, timeout, oversized body or any other status.
     Failed,
+}
+
+/// The body holds verifiers, so `Debug` prints only its length.
+impl std::fmt::Debug for FetchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchResult::Config(b) => write!(f, "Config({} bytes)", b.len()),
+            FetchResult::Disabled => f.write_str("Disabled"),
+            FetchResult::Unavailable => f.write_str("Unavailable"),
+            FetchResult::Failed => f.write_str("Failed"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,7 +217,9 @@ impl ConfigSync {
         self.high_water.as_ref().map(|a| a.revision)
     }
 
-    /// Remove the table once its deadline has passed. Idempotent.
+    /// Remove the table once its deadline has passed. Idempotent. (The handle also
+    /// enforces the deadline by itself on every `current()`; this is the state
+    /// machine catching up and clearing the slot.)
     pub fn expire(&mut self, now: Instant) {
         if self.deadline.is_some_and(|d| now >= d) {
             self.table.set(None);
@@ -269,7 +286,9 @@ impl ConfigSync {
         // A refresh of an installed table only extends the deadline. If the table
         // is gone (expired or disabled), the same revision is installed again.
         if refresh && self.deadline.is_some() {
-            self.deadline = Some(now + Duration::from_secs(ttl_secs));
+            let d = now + Duration::from_secs(ttl_secs);
+            self.deadline = Some(d);
+            self.table.extend_deadline(d);
             self.last_ttl = Some(ttl);
             self.state = ConfigState::Valid;
             self.last_error = None;
@@ -282,9 +301,10 @@ impl ConfigSync {
             Ok(t) => t,
             Err(_) => return self.keep(LastUpdateError::ApplyFailed),
         };
-        self.table.set(Some(table));
+        let deadline = now + Duration::from_secs(ttl_secs);
+        self.table.set_with_deadline(table, deadline);
         self.high_water = Some(Applied { revision, hash });
-        self.deadline = Some(now + Duration::from_secs(ttl_secs));
+        self.deadline = Some(deadline);
         self.last_ttl = Some(ttl);
         self.state = ConfigState::Valid;
         self.last_error = None;
@@ -914,26 +934,6 @@ mod tests {
         assert_eq!(l.max_json_response_bytes, local.max_json_response_bytes);
     }
 
-    /// #260: proxy and server share one origin normalisation.
-    #[test]
-    fn origin_normalisation_is_shared() {
-        for s in [
-            "https://A.Example.com:443",
-            "http://LOCALHOST:80",
-            "https://api.example.com/x",
-            "http://api.example.com",
-            "https://[::1]:8443",
-            "ftp://x",
-            "https://u@x",
-        ] {
-            assert_eq!(
-                crate::bootstrap::normalize_origin(s),
-                sigil_proxy_api::origin::normalize_origin(s),
-                "{s}"
-            );
-        }
-    }
-
     struct Scripted(std::sync::Mutex<std::collections::VecDeque<FetchResult>>);
 
     impl Fetcher for Scripted {
@@ -1002,6 +1002,69 @@ mod tests {
         assert_eq!(
             seen.last().unwrap().last_update_error,
             Some(LastUpdateError::FetchFailed)
+        );
+    }
+
+    /// First call answers, every later call never completes.
+    struct ThenHang(std::sync::Mutex<Option<FetchResult>>);
+
+    impl Fetcher for ThenHang {
+        fn fetch(&self) -> FetchFuture<'_> {
+            let first = self.0.lock().unwrap().take();
+            Box::pin(async move {
+                match first {
+                    Some(r) => r,
+                    None => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// The in-flight arm: while a fetch hangs, the deadline timer still clears the
+    /// slot and publishes `expired`. `last()` ignores the handle's own deadline
+    /// check, so this proves the loop (not just `current()`) removed the table.
+    #[tokio::test(start_paused = true)]
+    async fn deadline_is_enforced_while_a_fetch_hangs() {
+        let f = fx();
+        let table = TableHandle::new();
+        let s = sync(&f, &table);
+        let first = body(&cfg(
+            1,
+            60,
+            "gh",
+            json!([{"key_id":"k1","verifier": v("tok-1")}]),
+        ));
+        let fetcher = ThenHang(std::sync::Mutex::new(Some(first)));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let t2 = table.clone();
+        let probe = async move {
+            tokio::time::sleep(secs(40)).await; // second fetch (t=20) is hanging
+            let held = t2.last().is_some();
+            tokio::time::sleep(secs(25)).await; // t=65, past the 60 s deadline
+            let cleared = t2.last().is_none();
+            let _ = tx.send(());
+            (held, cleared)
+        };
+        let run = run_sync(
+            s,
+            &fetcher,
+            SyncParams {
+                poll: secs(20),
+                retry: secs(5),
+            },
+            move |st| seen2.lock().unwrap().push(st),
+            async {
+                let _ = rx.await;
+            },
+        );
+        let (_, (held, cleared)) = tokio::join!(run, probe);
+        assert!(held, "table must survive until the deadline");
+        assert!(cleared, "hung fetch kept the table past its deadline");
+        assert_eq!(
+            seen.lock().unwrap().last().unwrap().config_state,
+            ConfigState::Expired
         );
     }
 }

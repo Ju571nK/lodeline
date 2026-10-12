@@ -211,6 +211,16 @@ fn lock(lc: &std::sync::Mutex<Lifecycle>) -> std::sync::MutexGuard<'_, Lifecycle
 /// Like [`run`], with a caller-provided table holder.
 pub async fn run_with_table(b: &Bootstrap, table: crate::route::TableHandle) -> anyhow::Result<()> {
     let mut sig = ShutdownSignal::install()?;
+    run_with_shutdown(b, table, async move { sig.wait().await }).await
+}
+
+/// Like [`run_with_table`], stopping when `shutdown` completes instead of on a
+/// process signal (embedding and tests).
+pub async fn run_with_shutdown(
+    b: &Bootstrap,
+    table: crate::route::TableHandle,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
     let lc = Lifecycle::start(b)?;
     let initial = lc.status().config_state;
     let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
@@ -273,7 +283,7 @@ pub async fn run_with_table(b: &Bootstrap, table: crate::route::TableHandle) -> 
     let lc3 = lc.clone();
     let served = proxy
         .serve(listener, acceptor, async {
-            sig.wait().await;
+            shutdown.await;
             let _ = lock(&lc3).set_run_state(RunState::Stopping);
         })
         .await;

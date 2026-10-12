@@ -109,6 +109,7 @@ pub struct Principal {
     verifiers: Vec<VerifierSpec>,
     /// Shared by every route that names the same principal id.
     pub(crate) sem: Arc<Semaphore>,
+    sem_cap: usize,
 }
 
 impl std::fmt::Debug for Principal {
@@ -129,6 +130,7 @@ pub struct Route {
     pub(crate) allowed_origins: Vec<String>,
     pub(crate) allow_private: bool,
     pub(crate) sem: Arc<Semaphore>,
+    sem_cap: usize,
     /// Effective limits of this route: `min(local, remote)` per field.
     pub(crate) limits: Limits,
 }
@@ -202,6 +204,22 @@ impl RouteTable {
         credentials: &BTreeMap<String, Credential>,
         limits: &Limits,
     ) -> Result<RouteTable, RouteError> {
+        Self::build_carrying(specs, credentials, limits, None)
+    }
+
+    /// [`RouteTable::build`], reusing the admission semaphores of `prev` for every
+    /// route and principal that keeps its id and its limit. Without this, an apply
+    /// (including a same-revision rebuild) would give each route a fresh set of
+    /// permits while calls admitted under the old table still hold theirs, so a
+    /// route could briefly run up to twice `max_calls_per_route`.
+    pub fn build_carrying(
+        specs: &[RouteSpec],
+        credentials: &BTreeMap<String, Credential>,
+        limits: &Limits,
+        prev: Option<&RouteTable>,
+    ) -> Result<RouteTable, RouteError> {
+        let route_cap = limits.max_calls_per_route as usize;
+        let principal_cap = limits.max_calls_per_principal as usize;
         let mut secrets: HashMap<&str, Vec<u8>> = HashMap::new();
         let mut principal_sems: HashMap<String, Arc<Semaphore>> = HashMap::new();
         let mut routes = HashMap::new();
@@ -270,13 +288,15 @@ impl RouteTable {
                 let sem = principal_sems
                     .entry(p.principal_id.as_str().to_string())
                     .or_insert_with(|| {
-                        Arc::new(Semaphore::new(limits.max_calls_per_principal as usize))
+                        prev.and_then(|t| t.principal_sem(p.principal_id.as_str(), principal_cap))
+                            .unwrap_or_else(|| Arc::new(Semaphore::new(principal_cap)))
                     })
                     .clone();
                 principals.push(Principal {
                     id: p.principal_id.clone(),
                     verifiers: p.verifiers.clone(),
                     sem,
+                    sem_cap: principal_cap,
                 });
             }
 
@@ -289,7 +309,11 @@ impl RouteTable {
                     principals,
                     allowed_origins,
                     allow_private: spec.allow_private_destination,
-                    sem: Arc::new(Semaphore::new(limits.max_calls_per_route as usize)),
+                    sem: prev
+                        .and_then(|t| t.routes.get(spec.route_id.as_str()))
+                        .filter(|r| r.sem_cap == route_cap)
+                        .map_or_else(|| Arc::new(Semaphore::new(route_cap)), |r| r.sem.clone()),
+                    sem_cap: route_cap,
                     limits: limits.lowered_by(&spec.limits),
                 },
             );
@@ -298,6 +322,15 @@ impl RouteTable {
             routes,
             has_verifier,
         })
+    }
+
+    /// The semaphore of principal `id` in this table, if its capacity is `cap`.
+    fn principal_sem(&self, id: &str, cap: usize) -> Option<Arc<Semaphore>> {
+        self.routes
+            .values()
+            .flat_map(|r| r.principals.iter())
+            .find(|p| p.id.as_str() == id && p.sem_cap == cap)
+            .map(|p| p.sem.clone())
     }
 
     pub fn route(&self, id: &str) -> Option<&Route> {
@@ -384,18 +417,65 @@ fn parse_upstream(url: &str) -> Result<(Upstream, String), String> {
 
 /// Holder for the applied table. The config slice swaps it atomically; `None`
 /// means no config has been applied, and every request is answered 401.
+///
+/// The table carries its own expiry deadline (a monotonic instant), checked on
+/// every [`TableHandle::current`]. Expiry therefore does not depend on any
+/// background task: if the sync task dies, the last table still stops serving at
+/// its deadline (fail closed, control-plane.md §6.3).
 #[derive(Clone, Default)]
-pub struct TableHandle(Arc<RwLock<Option<Arc<RouteTable>>>>);
+pub struct TableHandle(Arc<RwLock<Slot>>);
+
+#[derive(Default)]
+struct Slot {
+    table: Option<Arc<RouteTable>>,
+    /// `None`: no expiry (tests and callers that manage expiry themselves).
+    deadline: Option<tokio::time::Instant>,
+}
 
 impl TableHandle {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Install (or remove) a table without an expiry deadline.
     pub fn set(&self, table: Option<RouteTable>) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = table.map(Arc::new);
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Slot {
+            table: table.map(Arc::new),
+            deadline: None,
+        };
     }
+    /// Install a table that stops being returned by [`TableHandle::current`] at
+    /// `deadline`.
+    pub fn set_with_deadline(&self, table: RouteTable, deadline: tokio::time::Instant) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Slot {
+            table: Some(Arc::new(table)),
+            deadline: Some(deadline),
+        };
+    }
+    /// Move the deadline of the installed table (a TTL refresh). No-op when no
+    /// table is installed.
+    pub fn extend_deadline(&self, deadline: tokio::time::Instant) {
+        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
+        if g.table.is_some() {
+            g.deadline = Some(deadline);
+        }
+    }
+    /// The table to serve with, or `None` when there is none or its deadline has
+    /// been reached.
     pub fn current(&self) -> Option<Arc<RouteTable>> {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+        let g = self.0.read().unwrap_or_else(|e| e.into_inner());
+        if g.deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+            return None;
+        }
+        g.table.clone()
+    }
+    /// The installed table regardless of its deadline. Only for carrying
+    /// admission state over to the next table; never for serving.
+    pub fn last(&self) -> Option<Arc<RouteTable>> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .table
+            .clone()
     }
 }
 
@@ -609,5 +689,71 @@ mod tests {
         assert_eq!(l.max_request_body_bytes, 50);
         assert_eq!(l.call_timeout_secs, 60);
         assert_eq!(l.max_json_response_bytes, local.max_json_response_bytes);
+    }
+
+    /// Expiry does not depend on a background task: `current()` itself stops
+    /// returning the table at its deadline.
+    #[test]
+    fn current_returns_none_after_the_deadline_without_any_task() {
+        let t = RouteTable::build(&[], &BTreeMap::new(), &Limits::default()).unwrap();
+        let h = TableHandle::new();
+        let d = tokio::time::Instant::now() + std::time::Duration::from_millis(60);
+        h.set_with_deadline(t, d);
+        assert!(h.current().is_some());
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(h.current().is_none(), "served past its deadline");
+        // the slot still holds it for admission carry-over, never for serving
+        assert!(h.last().is_some());
+        // extending a held table does not resurrect an expired view unless the
+        // deadline moves past now
+        h.extend_deadline(tokio::time::Instant::now() + std::time::Duration::from_secs(60));
+        assert!(h.current().is_some());
+        // no table: extend is a no-op
+        let e = TableHandle::new();
+        e.extend_deadline(tokio::time::Instant::now() + std::time::Duration::from_secs(60));
+        assert!(e.current().is_none());
+    }
+
+    /// A rebuild keeps the permits of unchanged routes and principals, so an
+    /// apply cannot double the admission limits.
+    #[test]
+    fn rebuild_carries_semaphores_over() {
+        let d = tempfile::tempdir().unwrap();
+        let c = cred(d.path(), 0o600, &["https://api.example.com"]);
+        let local = Limits::default();
+        let a = RouteTable::build(&[spec("https://api.example.com/m")], &c, &local).unwrap();
+        let b =
+            RouteTable::build_carrying(&[spec("https://api.example.com/m")], &c, &local, Some(&a))
+                .unwrap();
+        let (ra, rb) = (a.route("a").unwrap(), b.route("a").unwrap());
+        assert!(Arc::ptr_eq(&ra.sem, &rb.sem), "route semaphore not carried");
+        assert!(
+            Arc::ptr_eq(&ra.principals[0].sem, &rb.principals[0].sem),
+            "principal semaphore not carried"
+        );
+        // a held permit is visible through the new table
+        let _held = ra.sem.clone().try_acquire_owned().unwrap();
+        assert_eq!(
+            rb.sem.available_permits(),
+            local.max_calls_per_route as usize - 1
+        );
+        // a changed limit gets a fresh semaphore
+        let lower = Limits {
+            max_calls_per_route: 2,
+            max_calls_per_principal: 2,
+            ..Limits::default()
+        };
+        let n =
+            RouteTable::build_carrying(&[spec("https://api.example.com/m")], &c, &lower, Some(&a))
+                .unwrap();
+        let rn = n.route("a").unwrap();
+        assert!(!Arc::ptr_eq(&ra.sem, &rn.sem));
+        assert!(!Arc::ptr_eq(&ra.principals[0].sem, &rn.principals[0].sem));
+        assert_eq!(rn.sem.available_permits(), 2);
+        // a different route id gets a fresh one
+        let mut other = spec("https://api.example.com/m");
+        other.route_id = Id::new("b").unwrap();
+        let o = RouteTable::build_carrying(&[other], &c, &local, Some(&a)).unwrap();
+        assert!(!Arc::ptr_eq(&ra.sem, &o.route("b").unwrap().sem));
     }
 }

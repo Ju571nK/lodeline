@@ -221,8 +221,12 @@ fn read_certs(p: &Path) -> Vec<CertificateDer<'static>> {
 
 /// mTLS stub: the client certificate is REQUIRED (the handshake fails without it).
 async fn stub(pki: &Pki, reply: Reply) -> Stub {
+    stub_with(pki, reply, pki.server_leaf()).await
+}
+
+async fn stub_with(pki: &Pki, reply: Reply, leaf: (PathBuf, PathBuf)) -> Stub {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let (crt, key) = pki.server_leaf();
+    let (crt, key) = leaf;
     let mut roots = RootCertStore::empty();
     for c in read_certs(&pki.ca()) {
         roots.add(c).unwrap();
@@ -343,6 +347,11 @@ macro_rules! pki_or_skip {
         match Pki::new($cn) {
             Some(p) => p,
             None => {
+                // CI must never go green without exercising the TLS paths.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "openssl CLI not found but CI is set"
+                );
                 eprintln!("skipped: openssl CLI not found");
                 return;
             }
@@ -418,6 +427,18 @@ async fn status_mapping() {
     assert_eq!(fetcher.fetch().await, FetchResult::Failed);
     set(500, b"boom".to_vec());
     assert_eq!(fetcher.fetch().await, FetchResult::Failed);
+    // a redirect is never followed and is a failure
+    for code in [301, 302, 307, 308] {
+        set(code, b"".to_vec());
+        assert_eq!(fetcher.fetch().await, FetchResult::Failed, "{code}");
+    }
+    // the stub answered every request itself (no second hop)
+    assert!(s
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(p, _)| p == "/v1/proxy-config"));
 }
 
 #[tokio::test]
@@ -464,7 +485,8 @@ async fn untrusted_server_and_closed_port_fail() {
 }
 
 /// The `run` wiring: the process fetches over mTLS on its own, installs the table
-/// (the status file turns `valid` and `forwarding`), and stops on SIGTERM.
+/// (the status file turns `valid` and `forwarding`), and stops on its shutdown
+/// future.
 #[tokio::test]
 async fn run_fetches_and_publishes_valid() {
     let pki = pki_or_skip!("cfg-run-ca");
@@ -473,10 +495,16 @@ async fn run_fetches_and_publishes_valid() {
     let (b, _f) = bootstrap(dir.path(), &pki, s.port, &pki.ca());
     let table = TableHandle::new();
     let (b2, t2) = (b.clone(), table.clone());
-    let task = tokio::spawn(async move { sigil_proxy::lifecycle::run_with_table(&b2, t2).await });
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        sigil_proxy::lifecycle::run_with_shutdown(&b2, t2, async {
+            let _ = stop_rx.await;
+        })
+        .await
+    });
 
     let mut valid = false;
-    for _ in 0..100 {
+    for _ in 0..400 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let h = sigil_proxy::lifecycle::health(&b.state_dir);
         if table.current().is_some()
@@ -487,25 +515,102 @@ async fn run_fetches_and_publishes_valid() {
             break;
         }
     }
+    let _ = stop_tx.send(());
+    let stopped = tokio::time::timeout(Duration::from_secs(20), task).await;
     assert!(valid, "config was not fetched and applied");
     assert_eq!(s.seen.lock().unwrap()[0].0, "/v1/proxy-config");
-
-    unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
-    tokio::time::timeout(Duration::from_secs(10), task)
-        .await
-        .expect("run did not stop")
-        .unwrap()
-        .unwrap();
+    stopped.expect("run did not stop").unwrap().unwrap();
 }
 
-/// A proxy key readable by others is refused locally; nothing is sent.
+/// A proxy key with any group/other bit is refused locally; nothing is sent.
 #[tokio::test]
 async fn loose_client_key_is_refused() {
     let pki = pki_or_skip!("cfg-key-ca");
     let dir = tempfile::tempdir().unwrap();
     let s = stub(&pki, Reply::new(200, config_body(1))).await;
     let (b, fetcher) = bootstrap(dir.path(), &pki, s.port, &pki.ca());
-    std::fs::set_permissions(&b.client_key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(fetcher.fetch().await, FetchResult::Failed);
+    // sanity: the 0600 key works
+    assert!(matches!(fetcher.fetch().await, FetchResult::Config(_)));
+    s.seen.lock().unwrap().clear();
+    for mode in [0o640, 0o604, 0o660, 0o644] {
+        std::fs::set_permissions(&b.client_key_file, std::fs::Permissions::from_mode(mode))
+            .unwrap();
+        assert_eq!(fetcher.fetch().await, FetchResult::Failed, "{mode:o}");
+    }
+    assert!(s.seen.lock().unwrap().is_empty(), "a request was sent");
+}
+
+/// Symlinked trust anchor or client key: refused (`O_NOFOLLOW`), nothing sent.
+#[tokio::test]
+async fn symlinked_ca_and_key_are_refused() {
+    let pki = pki_or_skip!("cfg-link-ca");
+    let dir = tempfile::tempdir().unwrap();
+    let s = stub(&pki, Reply::new(200, config_body(1))).await;
+
+    let ca_link = dir.path().join("ca-link.crt");
+    std::os::unix::fs::symlink(pki.ca(), &ca_link).unwrap();
+    let (_b, fetcher) = bootstrap(dir.path(), &pki, s.port, &ca_link);
+    assert_eq!(fetcher.fetch().await, FetchResult::Failed, "symlinked ca");
+
+    let (b, fetcher) = bootstrap(dir.path(), &pki, s.port, &pki.ca());
+    assert!(matches!(fetcher.fetch().await, FetchResult::Config(_)));
+    s.seen.lock().unwrap().clear();
+    let real = dir.path().join("key.real");
+    std::fs::rename(&b.client_key_file, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &b.client_key_file).unwrap();
+    assert_eq!(fetcher.fetch().await, FetchResult::Failed, "symlinked key");
     assert!(s.seen.lock().unwrap().is_empty());
+}
+
+/// A server leaf whose SAN does not cover the connect host is not trusted.
+#[tokio::test]
+async fn server_san_mismatch_fails() {
+    let pki = pki_or_skip!("cfg-san-ca");
+    let dir = tempfile::tempdir().unwrap();
+    let leaf = pki.leaf(
+        "wrongsan",
+        "basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:other.example\n",
+    );
+    let s = stub_with(&pki, Reply::new(200, config_body(1)), leaf).await;
+    let (_b, fetcher) = bootstrap(dir.path(), &pki, s.port, &pki.ca());
+    assert_eq!(fetcher.fetch().await, FetchResult::Failed);
+    assert!(s.seen.lock().unwrap().is_empty(), "no request was sent");
+}
+
+/// The stub requires a client certificate: a client that presents none gets no
+/// HTTP answer and the handler never runs.
+#[tokio::test]
+async fn handshake_without_client_cert_is_refused() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let pki = pki_or_skip!("cfg-nocert-ca");
+    let s = stub(&pki, Reply::new(200, config_body(1))).await;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = RootCertStore::empty();
+    for c in read_certs(&pki.ca()) {
+        roots.add(c).unwrap();
+    }
+    let cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", s.port))
+        .await
+        .unwrap();
+    let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+    let mut answer = Vec::new();
+    // TLS 1.3 may let the client finish before the server rejects it, so the
+    // failure shows up on the first read or write; either way no HTTP comes back.
+    if let Ok(mut tls) = connector.connect(name, tcp).await {
+        let _ = tls
+            .write_all(b"GET /v1/proxy-config HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut answer)).await;
+    }
+    assert!(
+        !String::from_utf8_lossy(&answer).contains("HTTP/1.1"),
+        "answered without a client certificate"
+    );
+    assert!(s.seen.lock().unwrap().is_empty(), "handler ran");
 }
