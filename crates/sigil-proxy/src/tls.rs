@@ -54,6 +54,40 @@ mod unix {
         Connector::from(Arc::new(cfg))
     }
 
+    /// Control-plane client TLS: trust only the operator-provided CA bundle
+    /// (`ca_file`), present the proxy identity (`client_cert_file` chain and the
+    /// owner-only `client_key_file`). The files are read on every call, so a
+    /// renewed cert is picked up without a restart.
+    pub fn control_plane_connector(
+        ca_file: &Path,
+        cert_file: &Path,
+        key_file: &Path,
+    ) -> anyhow::Result<Connector> {
+        let ca_f = crate::fsutil::open_public_file(ca_file)?;
+        let mut roots = RootCertStore::empty();
+        for c in rustls_pemfile::certs(&mut BufReader::new(ca_f)) {
+            roots.add(c?)?;
+        }
+        if roots.is_empty() {
+            anyhow::bail!("ca_file holds no certificate");
+        }
+        let cert_f = crate::fsutil::open_public_file(cert_file)?;
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(cert_f)).collect::<Result<_, _>>()?;
+        if certs.is_empty() {
+            anyhow::bail!("client_cert_file holds no certificate");
+        }
+        let key_bytes = crate::fsutil::read_private_file(key_file)?;
+        let key = rustls_pemfile::private_key(&mut BufReader::new(&key_bytes[..]))?
+            .ok_or_else(|| anyhow::anyhow!("client_key_file holds no private key"))?;
+        let mut cfg = ClientConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certs, key)?;
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(Connector::from(Arc::new(cfg)))
+    }
+
     pub fn server_name(host: &str) -> Option<ServerName<'static>> {
         ServerName::try_from(host.to_string()).ok()
     }

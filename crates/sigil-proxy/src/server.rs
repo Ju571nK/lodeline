@@ -477,7 +477,8 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
         _ => return fixed(StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
     };
 
-    let lim = &sh.limits;
+    // Effective per-route limits: min(local, remote) (#260).
+    let lim = route.limits();
     let call_deadline = Instant::now() + Duration::from_secs(lim.call_timeout_secs);
 
     // The request body is read in full under the request limit BEFORE any

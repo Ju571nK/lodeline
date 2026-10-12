@@ -7,6 +7,7 @@
 pub mod body;
 pub mod bootstrap;
 pub mod cli;
+pub mod config_sync;
 pub mod dest;
 pub mod fsutil;
 pub mod headers;

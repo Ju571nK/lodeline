@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 
 use crate::bootstrap::{normalize_origin, split_host_port, Credential};
-use crate::limits::Limits;
+use crate::limits::{Limits, RemoteLimits};
 
 /// One principal as the later config slice will describe it. The token itself
 /// never appears here, only SHA-256 verifiers (control-plane.md §5.2).
@@ -24,9 +24,34 @@ use crate::limits::Limits;
 pub struct PrincipalSpec {
     pub principal_id: Id,
     /// Lowercase-hex SHA-256 verifiers (at most two for overlap).
-    // OPEN: `not_after` of a verifier is not modelled in slice A; the config
-    // slice must carry it and refuse expired verifiers at authenticate time.
-    pub verifiers: Vec<String>,
+    pub verifiers: Vec<VerifierSpec>,
+}
+
+/// One verifier with its optional expiry (control-plane.md §5.2). `not_after` is
+/// enforced per verifier at authenticate time, so during a rotation the old
+/// verifier stops working on its own while the new one keeps working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierSpec {
+    /// Lowercase-hex SHA-256 of the token.
+    pub verifier: String,
+    /// Unix seconds. The verifier is usable only while `now < not_after`
+    /// (fail-closed reading: the instant itself is already expired).
+    pub not_after: Option<i64>,
+}
+
+impl From<String> for VerifierSpec {
+    fn from(verifier: String) -> Self {
+        VerifierSpec {
+            verifier,
+            not_after: None,
+        }
+    }
+}
+
+impl From<&str> for VerifierSpec {
+    fn from(verifier: &str) -> Self {
+        verifier.to_string().into()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +67,8 @@ pub struct RouteSpec {
     /// §6.1 "private destinations need an explicit management flag").
     // OPEN: the DTO field name for this flag is not defined by the contract.
     pub allow_private_destination: bool,
+    /// Remote per-route limits; they can only lower the local ones.
+    pub limits: RemoteLimits,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -79,7 +106,7 @@ pub struct Upstream {
 
 pub struct Principal {
     pub id: Id,
-    verifiers: Vec<String>,
+    verifiers: Vec<VerifierSpec>,
     /// Shared by every route that names the same principal id.
     pub(crate) sem: Arc<Semaphore>,
 }
@@ -102,6 +129,8 @@ pub struct Route {
     pub(crate) allowed_origins: Vec<String>,
     pub(crate) allow_private: bool,
     pub(crate) sem: Arc<Semaphore>,
+    /// Effective limits of this route: `min(local, remote)` per field.
+    pub(crate) limits: Limits,
 }
 
 impl std::fmt::Debug for Route {
@@ -120,11 +149,19 @@ impl Route {
     /// route (PX-008, AC-04). The work does not depend on which verifier
     /// matches or on whether any does: no early exit.
     pub fn authenticate(&self, token: &str) -> Option<&Principal> {
+        self.authenticate_at(token, unix_now())
+    }
+
+    /// [`Route::authenticate`] with an explicit clock (unix seconds). A verifier
+    /// whose `not_after` has been reached never matches; the hash work is done
+    /// for it anyway so expiry is not a timing signal.
+    pub fn authenticate_at(&self, token: &str, now: i64) -> Option<&Principal> {
         let mut matched = 0u8;
         let mut idx = 0usize;
         for (i, p) in self.principals.iter().enumerate() {
             for v in &p.verifiers {
-                let ok = sigil_proxy_api::verify(token, v) as u8;
+                let live = v.not_after.is_none_or(|t| now < t) as u8;
+                let ok = sigil_proxy_api::verify(token, &v.verifier) as u8 & live;
                 // Keep the first match without a secret-dependent branch.
                 let take = ok & (1 ^ matched);
                 let mask = 0usize.wrapping_sub(take as usize);
@@ -137,6 +174,11 @@ impl Route {
         } else {
             None
         }
+    }
+
+    /// Effective per-route limits.
+    pub fn limits(&self) -> &Limits {
+        &self.limits
     }
 
     pub fn origin_allowed(&self, normalized_origin: &str) -> bool {
@@ -217,6 +259,7 @@ impl RouteTable {
             let mut principals = Vec::new();
             for p in &spec.principals {
                 for v in &p.verifiers {
+                    let v = &v.verifier;
                     if v.len() != 64 || !v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
                         return Err(RouteError::Verifier { route: rid.clone() });
                     }
@@ -247,6 +290,7 @@ impl RouteTable {
                     allowed_origins,
                     allow_private: spec.allow_private_destination,
                     sem: Arc::new(Semaphore::new(limits.max_calls_per_route as usize)),
+                    limits: limits.lowered_by(&spec.limits),
                 },
             );
         }
@@ -265,6 +309,12 @@ impl RouteTable {
     pub fn has_verifier(&self) -> bool {
         self.has_verifier
     }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 fn bearer_value(secret: &[u8]) -> Option<HeaderValue> {
@@ -374,10 +424,11 @@ mod tests {
             credential_ref: "ref1".into(),
             principals: vec![PrincipalSpec {
                 principal_id: Id::new("p1").unwrap(),
-                verifiers: vec![sigil_proxy_api::verifier_for("tok-1")],
+                verifiers: vec![sigil_proxy_api::verifier_for("tok-1").into()],
             }],
             allowed_origins: vec![],
             allow_private_destination: false,
+            limits: RemoteLimits::default(),
         }
     }
 
@@ -491,5 +542,72 @@ mod tests {
         assert!(r.authenticate("tok-2").is_none());
         assert!(r.authenticate("").is_none());
         assert!(t.has_verifier());
+    }
+
+    /// #260: `not_after` is enforced per verifier, so a two-verifier overlap
+    /// works: the old one stops at its deadline, the new one keeps working.
+    #[test]
+    fn not_after_is_enforced_per_verifier() {
+        let d = tempfile::tempdir().unwrap();
+        let c = cred(d.path(), 0o600, &["https://api.example.com"]);
+        let mut s = spec("https://api.example.com/m");
+        s.principals[0].verifiers = vec![
+            VerifierSpec {
+                verifier: sigil_proxy_api::verifier_for("old"),
+                not_after: Some(1_000),
+            },
+            VerifierSpec {
+                verifier: sigil_proxy_api::verifier_for("new"),
+                not_after: None,
+            },
+        ];
+        let t = RouteTable::build(&[s], &c, &Limits::default()).unwrap();
+        let r = t.route("a").unwrap();
+        // overlap: both work
+        assert!(r.authenticate_at("old", 999).is_some());
+        assert!(r.authenticate_at("new", 999).is_some());
+        // at the deadline the old one is already expired; the new one stays
+        assert!(r.authenticate_at("old", 1_000).is_none());
+        assert!(r.authenticate_at("old", 5_000).is_none());
+        assert!(r.authenticate_at("new", 5_000).is_some());
+        // real clock: a deadline in the past rejects, a far one accepts
+        let mut s = spec("https://api.example.com/m");
+        s.principals[0].verifiers = vec![
+            VerifierSpec {
+                verifier: sigil_proxy_api::verifier_for("gone"),
+                not_after: Some(1),
+            },
+            VerifierSpec {
+                verifier: sigil_proxy_api::verifier_for("live"),
+                not_after: Some(i64::MAX),
+            },
+        ];
+        let t = RouteTable::build(&[s], &c, &Limits::default()).unwrap();
+        let r = t.route("a").unwrap();
+        assert!(r.authenticate("gone").is_none());
+        assert!(r.authenticate("live").is_some());
+    }
+
+    /// #260: remote route limits only lower the local ones.
+    #[test]
+    fn route_limits_are_min_of_local_and_remote() {
+        let d = tempfile::tempdir().unwrap();
+        let c = cred(d.path(), 0o600, &["https://api.example.com"]);
+        let local = Limits {
+            max_request_body_bytes: 1000,
+            call_timeout_secs: 60,
+            ..Limits::default()
+        };
+        let mut s = spec("https://api.example.com/m");
+        s.limits = RemoteLimits {
+            max_request_bytes: Some(50),
+            max_response_bytes: None,
+            request_timeout_seconds: Some(600),
+        };
+        let t = RouteTable::build(&[s], &c, &local).unwrap();
+        let l = t.route("a").unwrap().limits();
+        assert_eq!(l.max_request_body_bytes, 50);
+        assert_eq!(l.call_timeout_secs, 60);
+        assert_eq!(l.max_json_response_bytes, local.max_json_response_bytes);
     }
 }

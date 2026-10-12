@@ -50,6 +50,8 @@ webpki-roots = "1"
 [dev-dependencies]
 tempfile = { workspace = true }
 libc = { workspace = true }
+# Paused clock for the poll-loop TTL test (same crate as the runtime dependency).
+tokio = { workspace = true, features = ["test-util"] }
 
 # OS packages (#245). Build with `packaging/build.sh proxy`. See packaging/README.md.
 # Installed DISABLED: no live /etc/sigil/proxy.yaml is shipped (only .example),
