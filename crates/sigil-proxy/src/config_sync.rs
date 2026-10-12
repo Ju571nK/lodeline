@@ -318,8 +318,11 @@ impl ConfigSync {
             return SyncOutcome::Refreshed;
         }
 
+        // Admission state of the installed table carries over (M4).
+        let prev = self.table.last();
         let table = match route_specs(&cfg).and_then(|s| {
-            RouteTable::build(&s, &self.credentials, &self.limits).map_err(|_| BuildError)
+            RouteTable::build_carrying(&s, &self.credentials, &self.limits, prev.as_deref())
+                .map_err(|_| BuildError)
         }) {
             Ok(t) => t,
             Err(_) => return self.keep(LastUpdateError::ApplyFailed),
@@ -1162,6 +1165,79 @@ mod tests {
             s.on_fetch(t0, body(&std_cfg(6))),
             SyncOutcome::Applied { revision: 6 }
         );
+    }
+
+    /// M4 through the real apply path: a permit held on the installed table is
+    /// still counted after a new revision with the same route id and limit; a
+    /// changed limit gets a fresh semaphore.
+    #[test]
+    fn apply_carries_admission_permits() {
+        let f = fx();
+        let table = TableHandle::new();
+        let mut s = sync(&f, &table);
+        let t0 = Instant::now();
+        s.on_fetch(t0, body(&std_cfg(1)));
+        let old = table.current().unwrap();
+        let cap = Limits::default().max_calls_per_route as usize;
+        let route_permit = old
+            .route("r1")
+            .unwrap()
+            .sem
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+        let principal_permit = old
+            .route("r1")
+            .unwrap()
+            .authenticate("tok-1")
+            .unwrap()
+            .sem
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+
+        // new revision (different verifier set, same route id and limits)
+        let next = cfg(
+            2,
+            300,
+            "gh",
+            json!([{"key_id":"k1","verifier": v("tok-1")},{"key_id":"k2","verifier": v("tok-2")}]),
+        );
+        assert_eq!(
+            s.on_fetch(t0, body(&next)),
+            SyncOutcome::Applied { revision: 2 }
+        );
+        let new = table.current().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&old, &new), "a new table was built");
+        let r = new.route("r1").unwrap();
+        assert_eq!(r.sem.available_permits(), cap - 1, "route permit lost");
+        assert_eq!(
+            r.authenticate("tok-1").unwrap().sem.available_permits(),
+            Limits::default().max_calls_per_principal as usize - 1,
+            "principal permit lost"
+        );
+        drop((route_permit, principal_permit));
+        assert_eq!(r.sem.available_permits(), cap);
+
+        // changed local limit: fresh semaphore, old permits not shared
+        let _held = r.sem.clone().try_acquire_owned().unwrap();
+        let lower = Limits {
+            max_calls_per_route: 2,
+            ..Limits::default()
+        };
+        let mut s2 = ConfigSync::new(
+            "px-1",
+            f.creds.clone(),
+            lower,
+            table.clone(),
+            ConfigState::Expired,
+        );
+        assert_eq!(
+            s2.on_fetch(t0, body(&std_cfg(1))),
+            SyncOutcome::Applied { revision: 1 }
+        );
+        let fresh = table.current().unwrap();
+        assert_eq!(fresh.route("r1").unwrap().sem.available_permits(), 2);
     }
 
     /// If the mark cannot be written, the new config is NOT applied.

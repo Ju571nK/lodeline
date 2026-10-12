@@ -470,7 +470,7 @@ impl TableHandle {
     }
     /// The installed table regardless of its deadline. Only for carrying
     /// admission state over to the next table; never for serving.
-    pub fn last(&self) -> Option<Arc<RouteTable>> {
+    pub(crate) fn last(&self) -> Option<Arc<RouteTable>> {
         self.0
             .read()
             .unwrap_or_else(|e| e.into_inner())
