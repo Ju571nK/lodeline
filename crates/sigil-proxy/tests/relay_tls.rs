@@ -19,13 +19,17 @@ async fn tls_listener_relays() {
         .args([
             "req",
             "-x509",
+            // RSA, not EC: LibreSSL (macOS) writes EC keys with explicit
+            // curve parameters, which rustls cannot load.
             "-newkey",
-            "ec",
-            "-pkeyopt",
-            "ec_paramgen_curve:prime256v1",
+            "rsa:2048",
             "-nodes",
             "-days",
             "2",
+            // LibreSSL (macOS) picks a random 8-byte serial that can encode as
+            // a negative INTEGER, which webpki rejects.
+            "-set_serial",
+            "1",
         ])
         .args([
             "-subj",
