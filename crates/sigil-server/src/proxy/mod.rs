@@ -1,18 +1,21 @@
 //! T-11 — Sigil Proxy server side (identity, registry, guard, management).
 //! Isolated from the host paths and OFF unless `proxy:` is configured.
 //!
-//! Spec: PX-008/009/012, AC-04, AC-13; control-plane.md §0.1, §1, §2. Slices
-//! S1 (identity, registry, guard) and S2a (management auth, audit, lifecycle
-//! routes, operator CLI). No config PUT (S3), no ingest/ledger (S4), no CSR
-//! signing (S2b).
+//! Spec: PX-008/009/012/016, AC-04, AC-12, AC-13; control-plane.md §0.1, §1, §2,
+//! §6. Slices S1 (identity, registry, guard), S2a (management auth, audit,
+//! lifecycle routes, operator CLI) and S3 (config DTO, config PUT/GET, status
+//! ingest). No event ingest/ledger (S4), no CSR signing (S2b).
 
 pub mod audit;
 pub mod cli;
+pub mod config_api;
 pub mod guard;
 pub mod identity;
 pub mod lifecycle;
 pub mod mgmt;
 pub mod registry;
+pub mod status;
+pub mod store;
 pub mod verifiers;
 
 use crate::config::ServerConfig;
@@ -26,12 +29,19 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use store::ProxyStore;
 use verifiers::MgmtAuth;
 
 /// Everything the proxy routes and the host-route guard need.
 pub struct ProxyContext {
     pub ca: ProxyCaInfo,
     pub registry: ProxyRegistry,
+    /// Latest config, status snapshot and gap records per proxy.
+    pub store: ProxyStore,
+    /// TTL stamped on every served config (seconds).
+    pub config_ttl: u32,
+    /// `ack_loss_margin` M (seconds) for the E >= R + M check.
+    pub ack_loss_margin: u32,
     /// `Some` only when `proxy.management_verifiers` is configured. `None`
     /// means every management route and the audit read route are absent.
     pub mgmt: Option<MgmtAuth>,
@@ -68,6 +78,8 @@ impl ProxyContext {
             .with_context(|| format!("proxy CA {}", pc.ca_path.display()))?;
         let registry = ProxyRegistry::open(&pc.registry_path, pc.registry_init)
             .with_context(|| format!("proxy registry {}", pc.registry_path.display()))?;
+        let store = ProxyStore::open(&pc.state_path())
+            .with_context(|| format!("proxy state {}", pc.state_path().display()))?;
         let (mgmt, audit) = match pc.management_verifiers.as_deref() {
             None => (None, None),
             Some(vp) => {
@@ -92,11 +104,14 @@ impl ProxyContext {
             ca_subject = %ca.subject_dn,
             registry = %pc.registry_path.display(),
             management = mgmt.is_some(),
-            "proxy routes enabled (GET /v1/proxy-config placeholder)"
+            "proxy routes enabled"
         );
         Ok(Some(ProxyContext {
             ca,
             registry,
+            store,
+            config_ttl: pc.config_ttl(),
+            ack_loss_margin: pc.ack_loss_margin(),
             mgmt,
             audit,
             promote_backoff: Mutex::new(HashMap::new()),

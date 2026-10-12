@@ -118,11 +118,14 @@ pub enum ErrorCode {
     /// Management routes: the lifecycle transition is not allowed from the
     /// current state. 409.
     InvalidState,
+    /// `GET` config before any configuration was issued for the proxy. 404.
+    /// Distinct from `proxy_unknown`: the identity is valid.
+    ConfigUnavailable,
     Unknown(UnknownCode),
 }
 
 impl ErrorCode {
-    const KNOWN: [(&'static str, ErrorCode); 18] = [
+    const KNOWN: [(&'static str, ErrorCode); 19] = [
         ("proxy_unknown", ErrorCode::ProxyUnknown),
         ("conflict", ErrorCode::Conflict),
         ("sequence_conflict", ErrorCode::SequenceConflict),
@@ -144,6 +147,7 @@ impl ErrorCode {
         ("forbidden", ErrorCode::Forbidden),
         ("already_exists", ErrorCode::AlreadyExists),
         ("invalid_state", ErrorCode::InvalidState),
+        ("config_unavailable", ErrorCode::ConfigUnavailable),
     ];
 
     pub fn as_str(&self) -> &str {
@@ -175,7 +179,7 @@ impl ErrorCode {
     /// `retired`) or the code is not an HTTP-level code of its own.
     pub fn http_status(&self) -> Option<u16> {
         match self {
-            ErrorCode::ProxyUnknown => Some(404),
+            ErrorCode::ProxyUnknown | ErrorCode::ConfigUnavailable => Some(404),
             ErrorCode::Conflict
             | ErrorCode::SequenceConflict
             | ErrorCode::RegistryConflict
@@ -217,6 +221,7 @@ impl ErrorCode {
             ErrorCode::Forbidden => "Credential scope is insufficient.",
             ErrorCode::AlreadyExists => "Already registered.",
             ErrorCode::InvalidState => "Not allowed in the current state.",
+            ErrorCode::ConfigUnavailable => "No configuration has been issued.",
             ErrorCode::Unknown(_) => "Request failed.",
         }
     }

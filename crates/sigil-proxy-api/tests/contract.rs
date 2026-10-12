@@ -1324,6 +1324,7 @@ fn error_object_round_trips_and_tolerates_unknown_codes() {
         "invalid_status",
         "invalid_cursor",
         "invalid_filter",
+        "config_unavailable",
     ] {
         assert_eq!(ErrorCode::parse(code).as_str(), code);
         assert!(ErrorCode::parse(code).is_known());

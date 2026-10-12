@@ -340,7 +340,7 @@ fn host_unknown() -> Resp {
 }
 
 #[tokio::test]
-async fn proxy_cert_reaches_placeholder_after_passing_check() {
+async fn proxy_cert_reaches_config_after_passing_check() {
     let pki = Pki::new();
     let (crt, key) = proxy_leaf(pki.dir.path(), "px1", "px1");
     let (port, ctx) = pki.spawn(true).await;
@@ -354,8 +354,8 @@ async fn proxy_cert_reaches_placeholder_after_passing_check() {
         ))
         .unwrap();
     let c = pki.client_for(&crt, &key);
-    assert_eq!(get(&c, port, "/v1/proxy-config").await.status, 501);
-    assert_eq!(get(&c, port, "/v1/proxies/px1/config").await.status, 501);
+    assert_eq!(get(&c, port, "/v1/proxy-config").await.status, 404);
+    assert_eq!(get(&c, port, "/v1/proxies/px1/config").await.status, 404);
     // Path id differing from the cert's proxy_id is an identity mismatch.
     assert_eq!(
         get(&c, port, "/v1/proxies/other/config").await,
@@ -452,7 +452,7 @@ async fn disabled_and_retired_answer_fixed_codes_and_next_fp_is_accepted() {
     .unwrap();
     // fp_next works.
     let r = get(&pki.client_for(&ncrt, &nkey), port, "/v1/proxy-config").await;
-    assert_eq!(r.status, 501);
+    assert_eq!(r.status, 404);
     for (st, code) in [
         (ProxyState::Disabled, ErrorCode::Disabled),
         (ProxyState::Retired, ErrorCode::Retired),

@@ -61,8 +61,10 @@
 mod macros;
 
 pub mod canonical;
+pub mod config;
 pub mod error;
 pub mod event;
+pub mod origin;
 pub mod parse;
 pub mod registry;
 pub mod scalar;
@@ -70,14 +72,16 @@ pub mod status;
 pub mod verifier;
 
 pub use canonical::{canonical_event_bytes, canonical_json, compare_for_dedup, DedupComparison};
+pub use config::{ConfigPrincipal, ConfigRoute, ConfigSpec, ProxyConfig, PutConfigRequest};
 pub use error::{ApiError, ErrorBody, ErrorCode, ErrorItem, UnknownCode, ValidationError};
 pub use event::{
     EventPayload, IngestRequest, IngestResponse, InvocationCancelRequested, InvocationCompleted,
     InvocationStarted, ProxyEvent,
 };
 pub use parse::{
-    parse_api_error, parse_event, parse_event_batch, parse_ingest_response, parse_status,
-    parse_status_response, parse_upload, parse_upload_response, ErrorCategory, ParseError,
+    parse_api_error, parse_config, parse_config_put, parse_event, parse_event_batch,
+    parse_ingest_response, parse_status, parse_status_response, parse_upload,
+    parse_upload_response, ErrorCategory, ParseError,
 };
 pub use registry::{EntryView, RegistryEntry, UploadRequest, UploadResponse};
 pub use scalar::{

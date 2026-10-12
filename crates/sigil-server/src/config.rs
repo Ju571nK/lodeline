@@ -40,6 +40,47 @@ pub struct ProxyConfig {
     /// `proxy::verifiers` for the format and the fail-closed reload rule.
     #[serde(default)]
     pub management_verifiers: Option<PathBuf>,
+    /// Durable proxy config/status store (JSON, owner-only, atomically
+    /// written). Default: `proxy-state.json` next to `registry_path`. A missing
+    /// file starts empty (warning); a corrupt, symlinked or group/world
+    /// accessible one is a boot error.
+    // OPEN: moves to the S4 ledger DB.
+    #[serde(default)]
+    pub state_path: Option<PathBuf>,
+    /// TTL stamped on every served config (control-plane §6.3). Default 300 s,
+    /// bounds 60-900 s. unmeasured: a proposal, not a promise.
+    #[serde(default)]
+    pub config_ttl_seconds: Option<u32>,
+    /// `ack_loss_margin` M (ledger L1). A config PUT is refused (422) unless
+    /// `event_retention_seconds >= max_offline_retry_age_seconds + M`.
+    /// Default 7 days, bounds 1 hour - 30 days.
+    #[serde(default)]
+    pub ack_loss_margin_seconds: Option<u32>,
+}
+
+impl ProxyConfig {
+    pub const DEFAULT_CONFIG_TTL_SECONDS: u32 = 300;
+    pub const DEFAULT_ACK_LOSS_MARGIN_SECONDS: u32 = 7 * 24 * 3600;
+
+    pub fn config_ttl(&self) -> u32 {
+        self.config_ttl_seconds
+            .unwrap_or(Self::DEFAULT_CONFIG_TTL_SECONDS)
+    }
+
+    pub fn ack_loss_margin(&self) -> u32 {
+        self.ack_loss_margin_seconds
+            .unwrap_or(Self::DEFAULT_ACK_LOSS_MARGIN_SECONDS)
+    }
+
+    /// Effective store path.
+    pub fn state_path(&self) -> PathBuf {
+        self.state_path.clone().unwrap_or_else(|| {
+            self.registry_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("proxy-state.json")
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -199,6 +240,20 @@ impl ServerConfig {
                          (tls_cert_path + tls_key_path + client_ca_path)"
                     .to_string(),
             });
+        }
+        if let Some(p) = &self.proxy {
+            let bad = |reason: &str| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: reason.to_string(),
+            };
+            if !(60..=900).contains(&p.config_ttl()) {
+                return Err(bad("proxy.config_ttl_seconds must be within 60..=900"));
+            }
+            if !(3600..=30 * 24 * 3600).contains(&p.ack_loss_margin()) {
+                return Err(bad(
+                    "proxy.ack_loss_margin_seconds must be within 3600..=2592000",
+                ));
+            }
         }
         Ok(())
     }

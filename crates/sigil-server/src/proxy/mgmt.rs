@@ -38,7 +38,7 @@ use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sigil_proxy_api::{ApiError, ErrorCode};
@@ -57,12 +57,14 @@ pub enum MgmtRoute {
     Disable,
     Enable,
     Retire,
+    /// `PUT /v1/proxies/{id}/config` (`GET` on the same path is a proxy route).
+    ConfigPut,
 }
 
 impl MgmtRoute {
     pub fn required_scope(self) -> Scope {
         match self {
-            MgmtRoute::Disable => Scope::Config,
+            MgmtRoute::Disable | MgmtRoute::ConfigPut => Scope::Config,
             _ => Scope::Identity,
         }
     }
@@ -74,6 +76,7 @@ impl MgmtRoute {
             MgmtRoute::Disable => "proxy.disable",
             MgmtRoute::Enable => "proxy.enable",
             MgmtRoute::Retire => "proxy.retire",
+            MgmtRoute::ConfigPut => "proxy.config_put",
         }
     }
 }
@@ -90,6 +93,7 @@ pub fn route_of(path: &str) -> Option<(MgmtRoute, Option<&str>)> {
         "disable" => MgmtRoute::Disable,
         "enable" => MgmtRoute::Enable,
         "retire" => MgmtRoute::Retire,
+        "config" => MgmtRoute::ConfigPut,
         _ => return None,
     };
     Some((route, Some(id)))
@@ -110,7 +114,7 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
-fn api_error(code: ErrorCode) -> Response {
+pub(super) fn api_error(code: ErrorCode) -> Response {
     let status = code
         .http_status()
         .and_then(|s| StatusCode::from_u16(s).ok())
@@ -123,7 +127,7 @@ fn api_error(code: ErrorCode) -> Response {
 }
 
 /// 503 when the audit record cannot be written; nothing else happened.
-fn audit_unavailable() -> Response {
+pub(super) fn audit_unavailable() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(
@@ -134,7 +138,7 @@ fn audit_unavailable() -> Response {
         .into_response()
 }
 
-fn internal() -> Response {
+pub(super) fn internal() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(
@@ -156,7 +160,7 @@ fn requested_by(headers: &HeaderMap) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-fn audit_of(ctx: &ProxyContext) -> &MgmtAudit {
+pub(super) fn audit_of(ctx: &ProxyContext) -> &MgmtAudit {
     ctx.audit.as_ref().expect("management implies audit")
 }
 
@@ -169,6 +173,12 @@ pub async fn mgmt_guard(
     let Some((route, path_id)) = route_of(req.uri().path()) else {
         return next.run(req).await;
     };
+    // `/v1/proxies/{id}/config` is shared with the proxy-identity GET: only PUT
+    // is a management request, every other method goes to the router (the GET
+    // handler sits behind the proxy guard, anything else is a 405).
+    if route == MgmtRoute::ConfigPut && req.method() != axum::http::Method::PUT {
+        return next.run(req).await;
+    }
     let (Some(auth), Some(_)) = (ctx.mgmt.as_ref(), ctx.audit.as_ref()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -307,7 +317,7 @@ impl From<&ProxyRecord> for ProxyView {
     }
 }
 
-fn state_str(s: ProxyState) -> &'static str {
+pub(super) fn state_str(s: ProxyState) -> &'static str {
     match s {
         ProxyState::Pending => "pending",
         ProxyState::Active => "active",
@@ -323,14 +333,14 @@ fn is_hex64(s: &str) -> bool {
 // ---- handlers ------------------------------------------------------------
 
 /// Per-request audit helper bound to the verified principal.
-struct Actor<'a> {
-    ctx: &'a ProxyContext,
-    req: &'a MgmtRequest,
-    route: MgmtRoute,
+pub(super) struct Actor<'a> {
+    pub(super) ctx: &'a ProxyContext,
+    pub(super) req: &'a MgmtRequest,
+    pub(super) route: MgmtRoute,
 }
 
 impl Actor<'_> {
-    fn entry(&self, proxy_id: &str, code: Option<ErrorCode>, status: u16) -> AuditEntry {
+    pub(super) fn entry(&self, proxy_id: &str, code: Option<ErrorCode>, status: u16) -> AuditEntry {
         AuditEntry {
             request_id: self.req.request_id.clone(),
             action: self.route.action().into(),
@@ -469,7 +479,7 @@ fn perform(
         MgmtRoute::Disable => (lifecycle::disable(&cur, &now), None),
         MgmtRoute::Enable => (lifecycle::enable(&cur, &now), None),
         MgmtRoute::Retire => (lifecycle::retire(&cur, &now), None),
-        MgmtRoute::Register => unreachable!(),
+        MgmtRoute::Register | MgmtRoute::ConfigPut => unreachable!(),
     };
     match result {
         Err(Denied::InvalidState) => actor.deny(id, ErrorCode::InvalidState, Some(cur.state)),
@@ -570,13 +580,20 @@ pub fn router(ctx: Arc<ProxyContext>, read_token: ReadToken) -> Router {
         .route("/v1/proxies/:proxy_id/retire", post(retire))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(ctx.clone());
+    let config = Router::new()
+        .route(
+            "/v1/proxies/:proxy_id/config",
+            put(super::config_api::put_config_handler),
+        )
+        .layer(DefaultBodyLimit::max(super::config_api::MAX_PUT_BODY))
+        .with_state(ctx.clone());
     let audit = Router::new()
         .route(
             AUDIT_PATH,
             get(get_audit).route_layer(from_fn_with_state(read_token, require_bearer)),
         )
         .with_state(ctx);
-    mgmt.merge(audit)
+    mgmt.merge(config).merge(audit)
 }
 
 #[cfg(test)]
@@ -590,11 +607,16 @@ mod tests {
             route_of("/v1/proxies/px-1/disable"),
             Some((MgmtRoute::Disable, Some("px-1")))
         );
-        assert_eq!(route_of("/v1/proxies/px/config"), None);
+        assert_eq!(
+            route_of("/v1/proxies/px/config"),
+            Some((MgmtRoute::ConfigPut, Some("px")))
+        );
         assert_eq!(route_of("/v1/proxies/px/disable/x"), None);
         assert_eq!(route_of("/v1/proxies/"), None);
         assert_eq!(route_of("/v1/proxy-config"), None);
         assert_eq!(MgmtRoute::Disable.required_scope(), Scope::Config);
+        assert_eq!(MgmtRoute::ConfigPut.required_scope(), Scope::Config);
+        assert_eq!(MgmtRoute::ConfigPut.action(), "proxy.config_put");
         for r in [
             MgmtRoute::Register,
             MgmtRoute::Fingerprints,

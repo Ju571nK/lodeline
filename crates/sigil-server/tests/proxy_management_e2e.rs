@@ -618,7 +618,7 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
         send(&pa, port, "GET", "/v1/proxy-config", None, None)
             .await
             .status,
-        501
+        404
     );
 
     // Fingerprint validation and uniqueness (own, and another id's).
@@ -655,7 +655,7 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
         send(&pa, port, "GET", "/v1/proxy-config", None, None)
             .await
             .status,
-        501
+        404
     );
     assert_eq!(
         fx.ctx.registry.get("px1").unwrap().fp_next.as_deref(),
@@ -665,7 +665,7 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
         send(&pb, port, "GET", "/v1/proxy-config", None, None)
             .await
             .status,
-        501
+        404
     );
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(
@@ -705,7 +705,7 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
         send(&pb, port, "GET", "/v1/proxy-config", None, None)
             .await
             .status,
-        501
+        404
     );
     assert_eq!(
         id("/v1/proxies/px1/enable", None).await.code(),
@@ -1606,7 +1606,7 @@ async fn promotion_with_audit_down_is_served_but_not_promoted_and_no_false_recor
         send(&pb, fx.port, "GET", "/v1/proxy-config", None, None)
             .await
             .status,
-        501
+        404
     );
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(
@@ -1623,7 +1623,7 @@ async fn promotion_with_audit_down_is_served_but_not_promoted_and_no_false_recor
         send(&pb, fx.port, "GET", "/v1/proxy-config", None, None)
             .await
             .status,
-        501
+        404
     );
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(rec.fp_current.as_deref(), Some(a_fp.as_str()));

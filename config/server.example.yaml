@@ -98,3 +98,12 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # not be used for any other route; it is rejected on host and proxy routes.
 #   # Audit stream: <dir of high_water_path>/proxy-management-audit.jsonl (signed).
 #   management_verifiers: "/etc/sigil/proxy-management-verifiers.json"
+#   # Config/status store (S3): latest config, status snapshot and gaps per proxy.
+#   # JSON, owner-only 0600, not a symlink. Default: proxy-state.json next to registry_path.
+#   # A missing file starts empty (warning); a corrupt or group/world-accessible one refuses boot.
+#   # state_path: "/var/lib/sigil-server/proxy-state.json"
+#   # TTL stamped on every served config (seconds, 60..900, default 300). Each fetch refreshes it.
+#   # config_ttl_seconds: 300
+#   # ack_loss_margin M (seconds, 3600..2592000, default 604800). A config PUT is refused (422)
+#   # unless event_retention_seconds >= max_offline_retry_age_seconds + M.
+#   # ack_loss_margin_seconds: 604800
