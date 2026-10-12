@@ -1,8 +1,9 @@
 //! Process lifecycle and the local status file.
 //!
-//! The config state is modelled here; the control-plane fetch is a later slice.
-//! A process that has not fetched a config from the server is never
-//! `forwarding` (control-plane.md §6.3 "Restart", decision D-02 item 5).
+//! The config state is published here; the control-plane fetch and apply live in
+//! [`crate::config_sync`]. A process that has not fetched a config from the
+//! server is never `forwarding` (control-plane.md §6.3 "Restart", decision D-02
+//! item 5).
 
 use std::future::Future;
 use std::path::Path;
@@ -74,6 +75,7 @@ pub fn read_status(dir: &Path) -> Option<LocalStatus> {
 pub struct Lifecycle {
     state: StateDir,
     status: LocalStatus,
+    applied: Option<crate::state_dir::AppliedMark>,
 }
 
 impl Lifecycle {
@@ -84,6 +86,8 @@ impl Lifecycle {
         } else {
             read_status(state.dir())
         };
+        // A corrupt or foreign mark refuses the start (fail closed).
+        let applied = state.read_applied()?;
         let config_state = startup_config_state(previous.as_ref());
         let status = LocalStatus {
             schema_version: 1,
@@ -96,9 +100,23 @@ impl Lifecycle {
             forwarding: false,
             updated_at: now_rfc3339(),
         };
-        let mut lc = Lifecycle { state, status };
+        let mut lc = Lifecycle {
+            state,
+            status,
+            applied,
+        };
         lc.publish()?;
         Ok(lc)
+    }
+
+    /// The revision high-water mark loaded at start.
+    pub fn applied_mark(&self) -> Option<&crate::state_dir::AppliedMark> {
+        self.applied.as_ref()
+    }
+
+    /// Persist the high-water mark of a revision about to be applied.
+    pub fn persist_applied(&mut self, revision: i64, config_hash: &str) -> Result<(), StateError> {
+        self.state.write_applied(revision, config_hash)
     }
 
     pub fn status(&self) -> &LocalStatus {
@@ -119,6 +137,14 @@ impl Lifecycle {
 
     pub fn set_run_state(&mut self, s: RunState) -> Result<(), StateError> {
         self.status.run_state = s;
+        self.publish()
+    }
+
+    /// Publish the config state and last update error reported by the config
+    /// sync. `forwarding` is recomputed by `publish`.
+    pub fn set_config(&mut self, s: crate::config_sync::SyncStatus) -> Result<(), StateError> {
+        self.status.config_state = s.config_state;
+        self.status.last_update_error = s.last_update_error;
         self.publish()
     }
 
@@ -186,20 +212,36 @@ impl ShutdownSignal {
     }
 }
 
-/// `run`: take the lock, publish status, bind the downstream listener, serve
-/// until a signal, drain within the configured grace, stop.
+/// `run`: take the lock, publish status, bind the downstream listener, start the
+/// config sync, serve until a signal, drain within the configured grace, stop.
 ///
-/// No route table is applied here (the remote config fetch/apply is a later
-/// slice), so the listener answers 401 to everything and the status never
-/// reports `forwarding`.
+/// Until the first config is fetched and applied there is no route table, so the
+/// listener answers 401 to everything and the status never reports `forwarding`.
 pub async fn run(b: &Bootstrap) -> anyhow::Result<()> {
     run_with_table(b, crate::route::TableHandle::new()).await
 }
 
-/// Like [`run`], with the table holder the config-apply slice will own.
+fn lock(lc: &std::sync::Mutex<Lifecycle>) -> std::sync::MutexGuard<'_, Lifecycle> {
+    lc.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Like [`run`], with a caller-provided table holder.
 pub async fn run_with_table(b: &Bootstrap, table: crate::route::TableHandle) -> anyhow::Result<()> {
     let mut sig = ShutdownSignal::install()?;
-    let mut lc = Lifecycle::start(b)?;
+    run_with_shutdown(b, table, async move { sig.wait().await }).await
+}
+
+/// Like [`run_with_table`], stopping when `shutdown` completes instead of on a
+/// process signal (embedding and tests).
+pub async fn run_with_shutdown(
+    b: &Bootstrap,
+    table: crate::route::TableHandle,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
+    let lc = Lifecycle::start(b)?;
+    let initial = lc.status().config_state;
+    let mark = lc.applied_mark().cloned();
+    let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
     let acceptor = match &b.listener_tls {
         Some(t) => Some(crate::tls::load_acceptor(&t.cert_file, &t.key_file)?),
         None => None,
@@ -208,31 +250,84 @@ pub async fn run_with_table(b: &Bootstrap, table: crate::route::TableHandle) -> 
     let listener = tokio::net::TcpListener::bind(b.listen).await?;
     tracing::info!(
         proxy_id = b.proxy_id.as_str(),
-        epoch_id = lc.epoch_id(),
-        config_state = ?lc.status().config_state,
+        epoch_id = lock(&lc).epoch_id(),
+        config_state = ?initial,
         listen = %listener.local_addr()?,
         tls = acceptor.is_some(),
         "sigil-proxy listening (no applied config: every request is 401)"
     );
-    lc.set_run_state(RunState::Running)?;
+    lock(&lc).set_run_state(RunState::Running)?;
+
+    // Config sync: fetch over mTLS, apply, keep the TTL deadline.
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let sync_task = match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
+        Some(fetcher) => {
+            let lc2 = lc.clone();
+            let lc4 = lc.clone();
+            let mut sync = crate::config_sync::ConfigSync::new(
+                b.proxy_id.as_str(),
+                b.credentials.clone(),
+                b.limits.clone(),
+                table.clone(),
+                initial,
+            )
+            .with_persister(Box::new(move |rev, hash| {
+                match lock(&lc4).persist_applied(rev, hash) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(error = %e, "cannot persist the applied revision");
+                        false
+                    }
+                }
+            }));
+            if let Some(m) = mark {
+                sync = sync.with_high_water(m.revision, m.config_hash);
+            }
+            Some(tokio::spawn(async move {
+                crate::config_sync::run_sync(
+                    sync,
+                    &fetcher,
+                    crate::config_sync::SyncParams::default(),
+                    |s| {
+                        if let Err(e) = lock(&lc2).set_config(s) {
+                            tracing::error!(error = %e, "cannot publish config status");
+                        }
+                    },
+                    async move {
+                        let _ = stop_rx.wait_for(|v| *v).await;
+                    },
+                )
+                .await;
+            }))
+        }
+        None => {
+            tracing::error!("control_plane_url unusable: no config will be fetched");
+            None
+        }
+    };
 
     let proxy = crate::server::Proxy::new(
         b.limits.clone(),
         table,
         std::sync::Arc::new(crate::dest::SystemResolver),
     );
+    let lc3 = lc.clone();
     let served = proxy
         .serve(listener, acceptor, async {
-            sig.wait().await;
-            let _ = lc.set_run_state(RunState::Stopping);
+            shutdown.await;
+            let _ = lock(&lc3).set_run_state(RunState::Stopping);
         })
         .await;
     // NOTE: Signal handlers stay installed during drain, so a second SIGTERM is
     // swallowed and only SIGKILL ends the process. Fine under systemd
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
+    let _ = stop_tx.send(true);
+    if let Some(t) = sync_task {
+        let _ = t.await;
+    }
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
-    lc.set_run_state(RunState::Stopped)?;
+    lock(&lc).set_run_state(RunState::Stopped)?;
     Ok(())
 }
 
@@ -375,5 +470,21 @@ mod tests {
         assert_eq!(o, DrainOutcome::Drained);
         let o = drain(Duration::from_millis(30), std::future::pending::<()>()).await;
         assert_eq!(o, DrainOutcome::GraceExpired);
+    }
+
+    /// A corrupt revision mark refuses the start; a missing one is a first start.
+    #[test]
+    fn corrupt_applied_mark_refuses_start() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        {
+            let lc = Lifecycle::start(&b).unwrap();
+            assert!(lc.applied_mark().is_none(), "missing file is a first start");
+        }
+        let p = b.state_dir.join(crate::state_dir::APPLIED_FILE);
+        std::fs::write(&p, "garbage").unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let e = Lifecycle::start(&b).err().expect("must refuse");
+        assert!(matches!(e, StateError::BadAppliedRevision(_)), "{e}");
     }
 }

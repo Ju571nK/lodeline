@@ -303,11 +303,12 @@ pub fn try_table(rs: &[R], limits: &Limits) -> Result<RouteTable, sigil_proxy::r
                 .iter()
                 .map(|(p, t)| PrincipalSpec {
                     principal_id: Id::new(*p).unwrap(),
-                    verifiers: vec![sigil_proxy_api::verifier_for(t)],
+                    verifiers: vec![sigil_proxy_api::verifier_for(t).into()],
                 })
                 .collect(),
             allowed_origins: r.origins.iter().map(|s| s.to_string()).collect(),
             allow_private_destination: r.allow_private,
+            limits: Default::default(),
         })
         .collect();
     RouteTable::build(&specs, &creds, limits)

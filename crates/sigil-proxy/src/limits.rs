@@ -69,6 +69,37 @@ impl Default for Limits {
     }
 }
 
+/// Per-route limits from the remote config (`ConfigLimits`), already validated
+/// as positive by the parser. They can only LOWER the local values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RemoteLimits {
+    pub max_request_bytes: Option<u64>,
+    pub max_response_bytes: Option<u64>,
+    pub request_timeout_seconds: Option<u64>,
+}
+
+impl Limits {
+    /// Effective limits of a route: `min(local, remote)` per field (#260). A
+    /// remote value above the local one has no effect, and a missing remote value
+    /// leaves the local one. The response cap applies to the JSON body, the
+    /// accumulated call and (so it cannot be a larger window than the call) the
+    /// SSE event; the timeout applies to the whole call.
+    pub fn lowered_by(&self, remote: &RemoteLimits) -> Limits {
+        let mut out = self.clone();
+        let low = |local: &mut u64, r: Option<u64>| {
+            if let Some(r) = r {
+                *local = (*local).min(r);
+            }
+        };
+        low(&mut out.max_request_body_bytes, remote.max_request_bytes);
+        low(&mut out.max_json_response_bytes, remote.max_response_bytes);
+        low(&mut out.max_call_response_bytes, remote.max_response_bytes);
+        low(&mut out.max_sse_event_bytes, remote.max_response_bytes);
+        low(&mut out.call_timeout_secs, remote.request_timeout_seconds);
+        out
+    }
+}
+
 // NOTE: no cross-field check yet. Each value is only bounded by its own default,
 // so a config may lower a total below a sub-limit (for example
 // max_concurrent_calls below max_calls_per_route, or spool_max_bytes below
@@ -238,5 +269,41 @@ mod tests {
     #[test]
     fn unknown_limit_key_is_rejected() {
         assert!(serde_yaml::from_str::<LimitsOverrides>("bogus: 1").is_err());
+    }
+
+    /// #260: remote limits only lower the local values (min per field).
+    #[test]
+    fn remote_limits_only_lower() {
+        let local = Limits {
+            max_request_body_bytes: 1000,
+            max_json_response_bytes: 2000,
+            max_call_response_bytes: 3000,
+            max_sse_event_bytes: 500,
+            call_timeout_secs: 60,
+            ..Limits::default()
+        };
+        // lower: wins
+        let low = RemoteLimits {
+            max_request_bytes: Some(10),
+            max_response_bytes: Some(100),
+            request_timeout_seconds: Some(5),
+        };
+        let e = local.lowered_by(&low);
+        assert_eq!(e.max_request_body_bytes, 10);
+        assert_eq!(e.max_json_response_bytes, 100);
+        assert_eq!(e.max_call_response_bytes, 100);
+        assert_eq!(e.max_sse_event_bytes, 100);
+        assert_eq!(e.call_timeout_secs, 5);
+        // higher: ignored
+        let high = RemoteLimits {
+            max_request_bytes: Some(1_000_000),
+            max_response_bytes: Some(1_000_000),
+            request_timeout_seconds: Some(600),
+        };
+        assert_eq!(local.lowered_by(&high), local);
+        // absent: unchanged
+        assert_eq!(local.lowered_by(&RemoteLimits::default()), local);
+        // fields the remote cannot name stay local
+        assert_eq!(e.max_header_bytes, local.max_header_bytes);
     }
 }

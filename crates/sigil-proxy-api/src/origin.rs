@@ -2,8 +2,8 @@
 //!
 //! [`normalize_origin`] has the SAME rules as `sigil_proxy::bootstrap::normalize_origin`
 //! (decisions.md "P0 종료": default ports dropped, `http` only for loopback,
-//! lowercase, no path, query, fragment or userinfo). The proxy switches to this
-//! function later; until then both copies carry the same tests.
+//! lowercase, no path, query, fragment or userinfo). `sigil-proxy` re-exports this
+//! function as `bootstrap::normalize_origin`, so there is one implementation.
 //!
 //! [`parse_upstream_url`] adds the config-PUT rules of control-plane.md §6.1 (M-6)
 //! and a literal-address SSRF screen (PX-014). The SSRF screen is a rule on the
@@ -38,7 +38,7 @@ pub fn normalize_origin(s: &str) -> Result<String, String> {
     })
 }
 
-fn split_host_port(authority: &str) -> Result<(String, Option<u16>), String> {
+pub fn split_host_port(authority: &str) -> Result<(String, Option<u16>), String> {
     if authority.is_empty() {
         return Err("empty host".into());
     }

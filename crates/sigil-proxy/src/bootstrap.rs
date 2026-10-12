@@ -251,100 +251,14 @@ fn check_control_plane_url(url: &str) -> Result<(), BootstrapError> {
     Ok(())
 }
 
-/// Validate `host[:port]` (no userinfo). Returns lowercase host and optional port.
-pub(crate) fn split_host_port(authority: &str) -> Result<(String, Option<u16>), String> {
-    if authority.is_empty() {
-        return Err("empty host".into());
-    }
-    if authority.contains('@') {
-        return Err("userinfo is not allowed".into());
-    }
-    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
-        let end = rest.find(']').ok_or("unterminated IPv6 literal")?;
-        let host = &rest[..end];
-        host.parse::<std::net::Ipv6Addr>()
-            .map_err(|_| "invalid IPv6 literal")?;
-        let after = &rest[end + 1..];
-        let port = match after {
-            "" => None,
-            _ => Some(after.strip_prefix(':').ok_or("invalid authority")?),
-        };
-        (format!("[{}]", host.to_ascii_lowercase()), port)
-    } else {
-        let (h, p) = match authority.rsplit_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (authority, None),
-        };
-        if h.is_empty()
-            || !h
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-            || h.starts_with(['.', '-'])
-            || h.ends_with(['.', '-'])
-        {
-            return Err("invalid host".into());
-        }
-        (h.to_ascii_lowercase(), p)
-    };
-    let port = match port {
-        None => None,
-        Some(p) => {
-            if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("invalid port".into());
-            }
-            let n: u16 = p.parse().map_err(|_| "invalid port")?;
-            if n == 0 {
-                return Err("invalid port".into());
-            }
-            Some(n)
-        }
-    };
-    Ok((host, port))
-}
-
-/// The single origin matcher for the proxy. Later tasks (route apply, per
-/// request after DNS resolution) must compare origins only through this
-/// function, never by ad-hoc string handling.
+/// The single origin matcher and host helpers, shared with the server. These are
+/// re-exports of `sigil_proxy_api::origin`, so proxy and server cannot drift
+/// (#260). Later code must compare origins only through [`normalize_origin`].
 ///
-/// Accepts `scheme://host[:port]` with no path, query, fragment or userinfo.
-/// Output is canonical: lowercase scheme and host, and the scheme's default port
-/// (`http` 80, `https` 443) dropped, so `https://a:443` equals `https://a`.
-/// `http://` is accepted only for loopback hosts (127.0.0.0/8, `::1`,
-/// `localhost`); any other plain-http origin is an error.
-pub fn normalize_origin(s: &str) -> Result<String, String> {
-    let (scheme, rest) = s
-        .split_once("://")
-        .ok_or("origin must be scheme://host[:port]")?;
-    let scheme = scheme.to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return Err("origin scheme must be http or https".into());
-    }
-    if rest.contains(['/', '?', '#']) {
-        return Err("origin must not contain a path, query or fragment".into());
-    }
-    let (host, port) = split_host_port(rest)?;
-    if scheme == "http" && !is_loopback_host(&host) {
-        return Err("http:// origins are allowed only for loopback hosts".into());
-    }
-    let default_port = if scheme == "http" { 80 } else { 443 };
-    Ok(match port {
-        Some(p) if p != default_port => format!("{scheme}://{host}:{p}"),
-        _ => format!("{scheme}://{host}"),
-    })
-}
-
-pub(crate) fn is_loopback_host(host: &str) -> bool {
-    if host == "localhost" {
-        return true;
-    }
-    if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-        return v6
-            .parse::<std::net::Ipv6Addr>()
-            .is_ok_and(|a| a.is_loopback());
-    }
-    host.parse::<std::net::Ipv4Addr>()
-        .is_ok_and(|a| a.is_loopback())
-}
+/// `normalize_origin` accepts `scheme://host[:port]` with no path, query,
+/// fragment or userinfo and returns the canonical form (lowercase scheme and
+/// host, default port dropped); `http://` is accepted only for loopback hosts.
+pub use sigil_proxy_api::origin::{is_loopback_host, normalize_origin, split_host_port};
 
 fn file_err(field: &str, reason: impl Into<String>) -> BootstrapError {
     BootstrapError::File {
