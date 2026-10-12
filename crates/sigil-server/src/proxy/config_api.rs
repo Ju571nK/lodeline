@@ -7,6 +7,13 @@
 //! 503 and stores nothing. The revision is assigned by the server
 //! (`expected_revision + 1`), the operator cannot choose it.
 //!
+//! `persist_failed` follow-up (best effort): the success audit record is written
+//! before the store write. If the write then fails, the handler answers 500 and
+//! TRIES to append a `persist_failed` record; that append can fail too (the audit
+//! is the thing that may be down), in which case the log line is the only trace
+//! and the audit shows an `ok` record for a revision the store does not hold.
+//! Boot detects that state (`state_init`, see `ProxyContext::load`).
+//!
 //! GET restamps `issued_at`/`expires_at`/`ttl_seconds` on every fetch. That is
 //! the TTL refresh of control-plane §6.2 (M-1); the stamps are excluded from
 //! `config_hash`, so a refresh never looks like a new config.
@@ -27,9 +34,11 @@ use sigil_proxy_api::{parse_config_put, ErrorCode, PositiveI64, Timestamp};
 use std::sync::Arc;
 use time::OffsetDateTime;
 
-/// Body cap of the config PUT: 256 routes with up to 1024 principals in total
-/// stay far below it.
-pub const MAX_PUT_BODY: usize = 256 * 1024;
+/// Body cap of the config PUT: 1 MiB. A realistic config is a few KiB; the cap
+/// bounds the memory of one authenticated request. The count bounds of the DTO
+/// (256 routes, 1024 principals) can describe a larger document, which then
+/// fails with 413 before it is parsed.
+pub const MAX_PUT_BODY: usize = 1024 * 1024;
 
 /// UTC RFC 3339 at second resolution, the shape `Timestamp` accepts.
 fn stamp(t: OffsetDateTime) -> Timestamp {

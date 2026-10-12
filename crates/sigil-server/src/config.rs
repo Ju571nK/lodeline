@@ -47,6 +47,14 @@ pub struct ProxyConfig {
     // OPEN: moves to the S4 ledger DB.
     #[serde(default)]
     pub state_path: Option<PathBuf>,
+    /// Accept a state store that is behind the management audit (the audit
+    /// records a `proxy.config_put` to a revision the store does not hold, e.g.
+    /// the store file was lost or restored from a backup). Default false: boot
+    /// refuses, because proxies would see a revision lower than the one they
+    /// applied (`stale_revision`) and an operator must decide. Set it once, for
+    /// the boot that accepts the loss, then remove it (mirrors `registry_init`).
+    #[serde(default)]
+    pub state_init: bool,
     /// TTL stamped on every served config (control-plane §6.3). Default 300 s,
     /// bounds 60-900 s. unmeasured: a proposal, not a promise.
     #[serde(default)]

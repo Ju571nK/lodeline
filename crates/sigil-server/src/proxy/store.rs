@@ -16,11 +16,28 @@ use sigil_proxy_api::{GapReport, ProxyConfig, ProxyStatus};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Gap records kept per proxy. Reports that would exceed it are refused (503)
-/// rather than dropping a gap silently.
+/// Gap records kept per proxy. A new gap that would exceed the count or the byte
+/// cap is refused (503, see `status`) rather than dropping a stored gap.
 pub const MAX_GAPS_PER_PROXY: usize = 10_000;
-/// Epoch ids remembered per proxy to tell a replayed old epoch from a new one.
+/// Serialized size of the gap records of one proxy.
+pub const MAX_GAPS_BYTES_PER_PROXY: usize = 8 * 1024 * 1024;
+/// Epoch ids and per-epoch counter totals remembered per proxy (a replayed old
+/// epoch is told from a new one by this list; an epoch that fell off counts as
+/// new).
 pub const MAX_EPOCHS_SEEN: usize = 64;
+/// Distinct `(kind, upstream_id, reason)` counter keys kept for the current
+/// epoch (routes x reasons stays far below it).
+pub const MAX_COUNTER_KEYS: usize = 4096;
+/// Format version of the state file.
+pub const FILE_VERSION: u8 = 1;
+
+/// Counter totals of a finished epoch (ledger L6 `previous_epoch_totals`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochTotals {
+    pub epoch_id: String,
+    pub auth_failures: i64,
+    pub unmatched_cancels: i64,
+}
 
 /// The accepted config of a proxy.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,6 +65,16 @@ pub struct ProxyEntry {
     pub epochs_seen: Vec<String>,
     #[serde(default)]
     pub gaps: Vec<GapReport>,
+    /// Epoch the `counter_max` values belong to.
+    #[serde(default)]
+    pub counters_epoch: Option<String>,
+    /// Maximum seen per `(kind, upstream_id, reason)` in `counters_epoch`; key is
+    /// `a|c`, upstream id (empty = none), reason, separated by U+001F.
+    #[serde(default)]
+    pub counter_max: BTreeMap<String, i64>,
+    /// Totals of earlier epochs, oldest first (bounded).
+    #[serde(default)]
+    pub previous_epoch_totals: Vec<EpochTotals>,
 }
 
 impl ProxyEntry {
@@ -110,6 +137,9 @@ impl ProxyStore {
                 }
                 let b = std::fs::read(path).context("read proxy state")?;
                 let f: FileFormat = serde_json::from_slice(&b).context("parse proxy state JSON")?;
+                if f.v != FILE_VERSION {
+                    bail!("proxy state has an unknown format version");
+                }
                 for (id, e) in &f.proxies {
                     if let Some(c) = &e.config {
                         if c.config.proxy_id.as_str() != id {
@@ -191,7 +221,7 @@ impl StoreTxn<'_> {
                 v: u8,
                 proxies: &'a BTreeMap<&'a str, &'a ProxyEntry>,
             }
-            let bytes = serde_json::to_vec_pretty(&Out {
+            let bytes = serde_json::to_vec(&Out {
                 v: 1,
                 proxies: &view,
             })?;
@@ -228,14 +258,18 @@ mod tests {
     pub(crate) fn sample_config(id: &str, revision: u64) -> ProxyConfig {
         parse_config(
             serde_json::to_vec(&json!({
+                "schema_version": 1, "mode": "observe",
                 "proxy_id": id, "revision": revision,
                 "issued_at": "2026-10-11T00:00:00Z", "expires_at": "2026-10-11T00:05:00Z",
                 "ttl_seconds": 300,
                 "max_offline_retry_age_seconds": 2592000, "event_retention_seconds": 7776000,
                 "allowed_origins": [],
-                "routes": [{"route_id": "r1", "upstream_url": "https://a.example/mcp",
-                    "credential_ref": "gh", "principals": [
-                    {"principal_id": "p", "verifier": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}],
+                "routes": [{"route_id": "r1", "upstream_id": "up1",
+                    "upstream_url": "https://a.example/mcp",
+                    "upstream_protocol": "2025-11-25", "credential_ref": "gh",
+                    "credential_scope_id": "cs-00000000000000000000000000000001"}],
+                "principals": [{"principal_id": "p", "routes": ["r1"], "verifiers": [
+                    {"key_id": "k1", "verifier": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}],
             }))
             .unwrap()
             .as_slice(),
@@ -253,6 +287,25 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn unknown_or_missing_format_version_refuses_boot() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("proxy-state.json");
+        let s = ProxyStore::open(&p).unwrap();
+        s.begin().commit("a", entry_with("a", 1)).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("{\"v\":1,"), "compact JSON with a version");
+        assert!(!text.contains('\n'), "compact");
+        for bad in ["\"v\":2", "\"v\":0", "\"v\":255"] {
+            std::fs::write(&p, text.replacen("\"v\":1", bad, 1)).unwrap();
+            assert!(ProxyStore::open(&p).is_err(), "{bad}");
+        }
+        std::fs::write(&p, text.replacen("\"v\":1,", "", 1)).unwrap();
+        assert!(ProxyStore::open(&p).is_err(), "missing version");
+        std::fs::write(&p, &text).unwrap();
+        assert!(ProxyStore::open(&p).is_ok());
     }
 
     #[test]
@@ -305,7 +358,7 @@ mod tests {
         let s = ProxyStore::open(&d.path().join("ok.json")).unwrap();
         s.begin().commit("a", entry_with("a", 1)).unwrap();
         let text = std::fs::read_to_string(d.path().join("ok.json")).unwrap();
-        let swapped = text.replacen("\"a\": {", "\"zz\": {", 1);
+        let swapped = text.replacen("\"a\":{", "\"zz\":{", 1);
         let q = d.path().join("swapped.json");
         std::fs::write(&q, swapped).unwrap();
         #[cfg(unix)]

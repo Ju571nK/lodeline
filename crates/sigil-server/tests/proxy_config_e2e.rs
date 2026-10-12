@@ -31,8 +31,8 @@ const HOST: &str = "018f9c1a-0000-7000-8000-0000000000e2";
 
 // ---- PKI helpers (same approach as proxy_identity_e2e.rs) -------------------
 
-/// Unique certificate serial per leaf (hex with 0x prefix). Avoids the shared
-/// `ca.srl` file that `-CAcreateserial` races on when leaves are made in parallel.
+/// Unique certificate serial per leaf (hex with 0x prefix). Passing `-set_serial`
+/// avoids the shared `ca.srl` state file of `-CAcreateserial`.
 fn next_serial() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(1);
@@ -454,13 +454,20 @@ async fn proxy(fx: &Fx, id: &str) -> Px {
 
 fn spec(proxy_id: &str, token: &str) -> serde_json::Value {
     serde_json::json!({
+        "schema_version": 1,
         "proxy_id": proxy_id,
         "allowed_origins": ["https://app.example.com"],
         "routes": [{
             "route_id": "r1",
+            "upstream_id": "up1",
             "upstream_url": "https://api.example.com/mcp",
+            "upstream_protocol": "2025-11-25",
             "credential_ref": "gh",
-            "principals": [{"principal_id": "claude", "verifier": verifier_for(token)}],
+        }],
+        "principals": [{
+            "principal_id": "claude",
+            "verifiers": [{"key_id": "k1", "verifier": verifier_for(token)}],
+            "routes": ["r1"],
         }],
     })
 }
@@ -679,7 +686,26 @@ async fn invalid_configs_are_422_and_store_nothing() {
     ));
     cases.push((
         "unknown field",
-        mk(&|s| s["routes"][0]["upstream_id"] = "u".into()),
+        mk(&|s| s["routes"][0]["surprise"] = "u".into()),
+    ));
+    cases.push((
+        "client-supplied credential_scope_id",
+        mk(&|s| s["routes"][0]["credential_scope_id"] = "cs-mine".into()),
+    ));
+    cases.push((
+        "unsupported schema_version",
+        mk(&|s| s["schema_version"] = 2.into()),
+    ));
+    cases.push((
+        "principal on an undefined route",
+        mk(&|s| s["principals"][0]["routes"] = serde_json::json!(["nope"])),
+    ));
+    cases.push((
+        "three verifiers",
+        mk(&|s| {
+            let v = |n: u32| serde_json::json!({"key_id": format!("k{n}"), "verifier": verifier_for(&format!("t{n}"))});
+            s["principals"][0]["verifiers"] = serde_json::json!([v(1), v(2), v(3)]);
+        }),
     ));
     cases.push(("server-stamped field", mk(&|s| s["revision"] = 9.into())));
     cases.push((
@@ -692,13 +718,13 @@ async fn invalid_configs_are_422_and_store_nothing() {
     cases.push((
         "duplicate principal",
         mk(&|s| {
-            let p = s["routes"][0]["principals"][0].clone();
-            s["routes"][0]["principals"] = serde_json::json!([p.clone(), p]);
+            let p = s["principals"][0].clone();
+            s["principals"] = serde_json::json!([p.clone(), p]);
         }),
     ));
     cases.push((
         "verifier not hex64",
-        mk(&|s| s["routes"][0]["principals"][0]["verifier"] = "abc".into()),
+        mk(&|s| s["principals"][0]["verifiers"][0]["verifier"] = "abc".into()),
     ));
     cases.push((
         "E below R + M",
@@ -737,7 +763,7 @@ async fn invalid_configs_are_422_and_store_nothing() {
         assert_eq!(r.status, 422, "{raw:?}");
     }
     // oversize body: 413 from the body limit
-    let big = format!("{{\"pad\":\"{}\"}}", "x".repeat(300 * 1024));
+    let big = format!("{{\"pad\":\"{}\"}}", "x".repeat(1100 * 1024));
     assert_eq!(put(&fx, "pxa", Some(T_CFG), &big).await.status, 413);
 
     // nothing was stored; the revision counter did not move
@@ -762,6 +788,8 @@ async fn invalid_configs_are_422_and_store_nothing() {
     let ok = mk(&|s| {
         s["routes"][0]["upstream_url"] = "http://127.0.0.1:9000/mcp".into();
         s["routes"][0]["route_id"] = "r2".into();
+        s["routes"][0]["upstream_id"] = "up2".into();
+        s["principals"][0]["routes"] = serde_json::json!(["r2"]);
     });
     assert_eq!(
         put(&fx, "pxa", Some(T_CFG), &put_body(1, &ok)).await.status,
@@ -1282,6 +1310,14 @@ fn ttl_and_margin_bounds_are_boot_checked() {
         (300, 7 * 24 * 3600)
     );
     assert_eq!(ok.state_path(), std::path::Path::new("/d/proxy-state.json"));
+    assert!(!ok.state_init);
+    assert!(
+        load("  state_init: true\n")
+            .unwrap()
+            .proxy
+            .unwrap()
+            .state_init
+    );
     assert!(load("  config_ttl_seconds: 60\n").is_ok());
     assert!(load("  config_ttl_seconds: 900\n").is_ok());
     for bad in [
@@ -1292,4 +1328,148 @@ fn ttl_and_margin_bounds_are_boot_checked() {
     ] {
         assert!(load(bad).is_err(), "{bad}");
     }
+}
+
+#[tokio::test]
+async fn status_persist_failure_is_a_retryable_503() {
+    let fx = Fx::new().await;
+    let a = proxy(&fx, "pxa").await;
+    assert_eq!(
+        post_status(&fx, &a, &status_body("pxa", EPOCH, 1, vec![]))
+            .await
+            .status,
+        200
+    );
+    let sf = fx.p("proxy-state.json");
+    std::fs::remove_file(&sf).unwrap();
+    std::fs::create_dir(&sf).unwrap();
+    std::fs::write(sf.join("x"), b"x").unwrap();
+    let r = post_status(
+        &fx,
+        &a,
+        &status_body("pxa", EPOCH, 2, vec![quarantine(1, "conflict")]),
+    )
+    .await;
+    assert_eq!(r.status, 503);
+    // nothing acknowledged, nothing applied in memory
+    let e = fx.ctx.store.entry("pxa").unwrap();
+    assert!(e.gaps.is_empty());
+    assert_eq!(e.status.unwrap().status_sequence.get(), 1);
+}
+
+#[tokio::test]
+async fn full_gap_store_answers_503_for_the_new_gaps_but_applies_the_snapshot() {
+    let fx = Fx::new().await;
+    let a = proxy(&fx, "pxa").await;
+    // fill the proxy's gap records to the count cap
+    let mut entry = sigil_server::proxy::store::ProxyEntry::default();
+    for n in 0..sigil_server::proxy::store::MAX_GAPS_PER_PROXY as u32 {
+        entry
+            .gaps
+            .push(serde_json::from_value(quarantine(10_000 + n, "conflict")).unwrap());
+    }
+    fx.ctx.store.begin().commit("pxa", entry).unwrap();
+    let r = post_status(
+        &fx,
+        &a,
+        &status_body(
+            "pxa",
+            EPOCH,
+            4,
+            vec![quarantine(1, "conflict"), quarantine(10_000, "conflict")],
+        ),
+    )
+    .await;
+    assert_eq!((r.status, r.code().as_str()), (503, "storage_limit"));
+    let items = r.json()["error"]["items"].clone();
+    assert_eq!(items.as_array().unwrap().len(), 1);
+    assert_eq!(items[0]["index"], 0);
+    assert_eq!(items[0]["gap_id"], uid(1).as_str());
+    let e = fx.ctx.store.entry("pxa").unwrap();
+    assert_eq!(
+        e.status.unwrap().status_sequence.get(),
+        4,
+        "snapshot applied"
+    );
+    assert!(e.last_seen.is_some());
+    assert_eq!(e.gaps.len(), sigil_server::proxy::store::MAX_GAPS_PER_PROXY);
+}
+
+#[tokio::test]
+async fn epoch_change_folds_counters_into_previous_epoch_totals() {
+    let fx = Fx::new().await;
+    let a = proxy(&fx, "pxa").await;
+    let with_counts = |epoch: &str, seq: u32, n: u32| {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&status_body("pxa", epoch, seq, vec![])).unwrap();
+        v["counters"] = serde_json::json!({
+            "auth_failures": [{"upstream_id": null, "reason": "credential_invalid", "count": n}],
+            "unmatched_cancels": []});
+        v.to_string()
+    };
+    for (seq, n) in [(1, 3), (2, 7), (3, 5)] {
+        assert_eq!(
+            post_status(&fx, &a, &with_counts(EPOCH, seq, n))
+                .await
+                .status,
+            200
+        );
+    }
+    let e2 = "00000000-0000-4000-8000-0000000000e2";
+    assert_eq!(
+        post_status(&fx, &a, &with_counts(e2, 1, 2)).await.status,
+        200
+    );
+    let e = fx.ctx.store.entry("pxa").unwrap();
+    assert_eq!(e.previous_epoch_totals.len(), 1);
+    assert_eq!(e.previous_epoch_totals[0].epoch_id, EPOCH);
+    assert_eq!(e.previous_epoch_totals[0].auth_failures, 7, "max, not last");
+    assert_eq!(e.counters_epoch.as_deref(), Some(e2));
+    assert_eq!(e.counter_max.values().sum::<i64>(), 2);
+}
+
+#[tokio::test]
+async fn boot_refuses_a_state_store_that_is_behind_the_audit_unless_state_init() {
+    let fx = Fx::new().await;
+    let _a = proxy(&fx, "pxa").await;
+    assert_eq!(
+        put(&fx, "pxa", Some(T_CFG), &put_body(0, &spec("pxa", "tok-a")))
+            .await
+            .status,
+        200
+    );
+    let s = spec("pxa", "tok-a");
+    assert_eq!(
+        put(&fx, "pxa", Some(T_CFG), &put_body(1, &s)).await.status,
+        200
+    );
+
+    // a healthy restart boots
+    let cfg = Fx::config(fx.dir.path());
+    assert!(ProxyContext::load(&cfg).unwrap().is_some());
+
+    // lost store file: refused, naming the proxy and both revisions
+    let sf = fx.p("proxy-state.json");
+    let saved = std::fs::read(&sf).unwrap();
+    std::fs::remove_file(&sf).unwrap();
+    let err = ProxyContext::load(&cfg)
+        .err()
+        .expect("must refuse")
+        .to_string();
+    assert!(
+        err.contains("pxa") && err.contains("revision 0") && err.contains("revision 2"),
+        "{err}"
+    );
+    assert!(err.contains("state_init"));
+
+    // explicit flag: boots, with the loss accepted
+    let mut cfg2 = Fx::config(fx.dir.path());
+    cfg2.proxy.as_mut().unwrap().state_init = true;
+    let ctx = ProxyContext::load(&cfg2).unwrap().unwrap();
+    assert!(ctx.store.config("pxa").is_none());
+
+    // an intact store (same revision as the audit) needs no flag
+    std::fs::write(&sf, &saved).unwrap();
+    std::fs::set_permissions(&sf, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(ProxyContext::load(&cfg).unwrap().is_some());
 }

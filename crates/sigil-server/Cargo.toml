@@ -25,7 +25,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-time = { workspace = true }
+time = { workspace = true, features = ["parsing"] }
 uuid = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

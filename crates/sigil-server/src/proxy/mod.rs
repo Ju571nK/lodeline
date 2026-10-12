@@ -100,6 +100,9 @@ impl ProxyContext {
                 (Some(m), Some(MgmtAudit::open(dir, key)?))
             }
         };
+        if let Some(a) = audit.as_ref() {
+            check_store_against_audit(&store, a, pc.state_init)?;
+        }
         tracing::info!(
             ca_subject = %ca.subject_dn,
             registry = %pc.registry_path.display(),
@@ -256,6 +259,49 @@ impl ProxyContext {
             c => c,
         }
     }
+}
+
+/// Boot cross-check (S3): the management audit is written BEFORE the store, so
+/// it may be ahead of the store (a crash between the two, a lost or restored
+/// store file) but never legitimately behind it. For every proxy with an `ok`
+/// `proxy.config_put` to revision R in the audit, the store must hold a config
+/// with revision >= R. Otherwise boot is refused unless `state_init` is set,
+/// which downgrades it to a loud warning.
+pub fn check_store_against_audit(
+    store: &ProxyStore,
+    audit: &MgmtAudit,
+    state_init: bool,
+) -> Result<()> {
+    let (records, _) = audit
+        .read(0, usize::MAX)
+        .context("read the management audit for the proxy state cross-check")?;
+    let mut latest: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for r in records {
+        let r = r.record;
+        if r.action == "proxy.config_put" && r.result == "ok" {
+            if let Some(to) = r.to_revision {
+                let e = latest.entry(r.proxy_id).or_insert(0);
+                *e = (*e).max(to);
+            }
+        }
+    }
+    for (id, audited) in latest {
+        let held = store.entry(&id).map_or(0, |e| e.revision());
+        if held < audited {
+            if !state_init {
+                bail!(
+                    "proxy state for {id} holds revision {held} but the management audit records a config PUT to revision {audited}; \
+                     the state store is behind (lost, restored or a crash between audit and write). \
+                     Refusing to start; set proxy.state_init: true for one boot to accept it"
+                );
+            }
+            tracing::error!(
+                proxy_id = %id, held, audited,
+                "ALERT proxy state is behind the management audit; accepted because proxy.state_init is set (proxies may report stale_revision until a config is PUT again)"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Re-read the management verifier file on SIGHUP (fail closed on error).

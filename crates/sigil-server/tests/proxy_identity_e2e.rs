@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-/// Unique certificate serial per leaf (hex with 0x prefix). Avoids the shared
-/// `ca.srl` file that `-CAcreateserial` races on when leaves are made in parallel.
+/// Unique certificate serial per leaf (hex with 0x prefix). Passing `-set_serial`
+/// avoids the shared `ca.srl` state file of `-CAcreateserial`.
 fn next_serial() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(1);
@@ -319,6 +319,16 @@ async fn get(c: &reqwest::Client, port: u16, path: &str) -> Resp {
     .await
 }
 
+/// Identity passed, no config issued yet: 404 with the `config_unavailable` body,
+/// which must not be mistaken for `proxy_unknown`.
+fn assert_config_unavailable(r: &Resp) {
+    assert_eq!(r.status, 404);
+    assert_eq!(
+        r.body,
+        serde_json::to_vec(&ApiError::from_code(ErrorCode::ConfigUnavailable)).unwrap()
+    );
+}
+
 fn json_resp(status: u16, body: Vec<u8>) -> Resp {
     Resp {
         status,
@@ -354,8 +364,8 @@ async fn proxy_cert_reaches_config_after_passing_check() {
         ))
         .unwrap();
     let c = pki.client_for(&crt, &key);
-    assert_eq!(get(&c, port, "/v1/proxy-config").await.status, 404);
-    assert_eq!(get(&c, port, "/v1/proxies/px1/config").await.status, 404);
+    assert_config_unavailable(&get(&c, port, "/v1/proxy-config").await);
+    assert_config_unavailable(&get(&c, port, "/v1/proxies/px1/config").await);
     // Path id differing from the cert's proxy_id is an identity mismatch.
     assert_eq!(
         get(&c, port, "/v1/proxies/other/config").await,
@@ -452,7 +462,7 @@ async fn disabled_and_retired_answer_fixed_codes_and_next_fp_is_accepted() {
     .unwrap();
     // fp_next works.
     let r = get(&pki.client_for(&ncrt, &nkey), port, "/v1/proxy-config").await;
-    assert_eq!(r.status, 404);
+    assert_config_unavailable(&r);
     for (st, code) in [
         (ProxyState::Disabled, ErrorCode::Disabled),
         (ProxyState::Retired, ErrorCode::Retired),

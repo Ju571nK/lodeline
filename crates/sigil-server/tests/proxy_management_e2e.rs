@@ -34,8 +34,8 @@ const FP_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e
 
 // ---- PKI helpers (same approach as proxy_identity_e2e.rs) -------------------
 
-/// Unique certificate serial per leaf (hex with 0x prefix). Avoids the shared
-/// `ca.srl` file that `-CAcreateserial` races on when leaves are made in parallel.
+/// Unique certificate serial per leaf (hex with 0x prefix). Passing `-set_serial`
+/// avoids the shared `ca.srl` state file of `-CAcreateserial`.
 fn next_serial() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(1);
@@ -403,6 +403,18 @@ fn err_body(code: ErrorCode) -> Vec<u8> {
     serde_json::to_vec(&ApiError::from_code(code)).unwrap()
 }
 
+/// Identity passed, no config issued yet: 404 `config_unavailable`.
+fn assert_config_unavailable(r: &Resp) {
+    assert_eq!(r.status, 404);
+    assert_eq!(r.body, err_body(ErrorCode::ConfigUnavailable));
+}
+
+/// No usable identity: the byte-identical 404 `proxy_unknown`.
+fn assert_proxy_unknown(r: &Resp) {
+    assert_eq!(r.status, 404);
+    assert_eq!(r.body, err_body(ErrorCode::ProxyUnknown));
+}
+
 fn audit_lines(fx: &Fx) -> Vec<serde_json::Value> {
     std::fs::read_to_string(fx.p(AUDIT_FILE))
         .unwrap_or_default()
@@ -594,12 +606,7 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
         assert_eq!((r.status, r.code().as_str()), (422, "semantic_invalid"));
     }
     // A pending proxy has no usable identity yet: proxy_unknown.
-    assert_eq!(
-        send(&pa, port, "GET", "/v1/proxy-config", None, None)
-            .await
-            .status,
-        404
-    );
+    assert_proxy_unknown(&send(&pa, port, "GET", "/v1/proxy-config", None, None).await);
 
     // Illegal while pending: disable and enable.
     assert_eq!(cfg("/v1/proxies/px1/disable").await.code(), "invalid_state");
@@ -614,12 +621,7 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(rec.state, ProxyState::Active);
     assert_eq!(rec.fp_current.as_deref(), Some(a_fp.as_str()));
-    assert_eq!(
-        send(&pa, port, "GET", "/v1/proxy-config", None, None)
-            .await
-            .status,
-        404
-    );
+    assert_config_unavailable(&send(&pa, port, "GET", "/v1/proxy-config", None, None).await);
 
     // Fingerprint validation and uniqueness (own, and another id's).
     assert_eq!(
@@ -651,22 +653,12 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
     );
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(rec.fp_next.as_deref(), Some(b_fp.as_str()));
-    assert_eq!(
-        send(&pa, port, "GET", "/v1/proxy-config", None, None)
-            .await
-            .status,
-        404
-    );
+    assert_config_unavailable(&send(&pa, port, "GET", "/v1/proxy-config", None, None).await);
     assert_eq!(
         fx.ctx.registry.get("px1").unwrap().fp_next.as_deref(),
         Some(b_fp.as_str())
     );
-    assert_eq!(
-        send(&pb, port, "GET", "/v1/proxy-config", None, None)
-            .await
-            .status,
-        404
-    );
+    assert_config_unavailable(&send(&pb, port, "GET", "/v1/proxy-config", None, None).await);
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(
         (rec.fp_current.as_deref(), rec.fp_next),
@@ -701,12 +693,7 @@ async fn lifecycle_transitions_rotation_and_illegal_moves() {
         ProxyState::Disabled
     );
     assert_eq!(id("/v1/proxies/px1/enable", None).await.status, 200);
-    assert_eq!(
-        send(&pb, port, "GET", "/v1/proxy-config", None, None)
-            .await
-            .status,
-        404
-    );
+    assert_config_unavailable(&send(&pb, port, "GET", "/v1/proxy-config", None, None).await);
     assert_eq!(
         id("/v1/proxies/px1/enable", None).await.code(),
         "invalid_state"
@@ -1602,12 +1589,7 @@ async fn promotion_with_audit_down_is_served_but_not_promoted_and_no_false_recor
     std::fs::create_dir(&af).unwrap();
 
     // Served with the next fingerprint, but the old one stays current.
-    assert_eq!(
-        send(&pb, fx.port, "GET", "/v1/proxy-config", None, None)
-            .await
-            .status,
-        404
-    );
+    assert_config_unavailable(&send(&pb, fx.port, "GET", "/v1/proxy-config", None, None).await);
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(
         (rec.fp_current.as_deref(), rec.fp_next.as_deref()),
@@ -1619,12 +1601,7 @@ async fn promotion_with_audit_down_is_served_but_not_promoted_and_no_false_recor
     // No record was written for the failed attempt; the retry is rate limited,
     // so an immediate second request does not promote either.
     assert_eq!(audit_lines(&fx).len(), before);
-    assert_eq!(
-        send(&pb, fx.port, "GET", "/v1/proxy-config", None, None)
-            .await
-            .status,
-        404
-    );
+    assert_config_unavailable(&send(&pb, fx.port, "GET", "/v1/proxy-config", None, None).await);
     let rec = fx.ctx.registry.get("px1").unwrap();
     assert_eq!(rec.fp_current.as_deref(), Some(a_fp.as_str()));
     assert_eq!(audit_lines(&fx).len(), before);

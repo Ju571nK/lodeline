@@ -102,6 +102,12 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # JSON, owner-only 0600, not a symlink. Default: proxy-state.json next to registry_path.
 #   # A missing file starts empty (warning); a corrupt or group/world-accessible one refuses boot.
 #   # state_path: "/var/lib/sigil-server/proxy-state.json"
+#   # Boot cross-check: the management audit is written before the state store. If the audit
+#   # records a config PUT to a revision the store does not hold (store file lost, restored from
+#   # a backup, or a crash between audit and write), boot is REFUSED. Set state_init: true for
+#   # one boot to accept it (proxies may then report stale_revision until a config is PUT
+#   # again), then remove it. Default false, like registry_init.
+#   # state_init: false
 #   # TTL stamped on every served config (seconds, 60..900, default 300). Each fetch refreshes it.
 #   # config_ttl_seconds: 300
 #   # ack_loss_margin M (seconds, 3600..2592000, default 604800). A config PUT is refused (422)

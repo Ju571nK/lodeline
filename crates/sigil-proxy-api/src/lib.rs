@@ -72,7 +72,10 @@ pub mod status;
 pub mod verifier;
 
 pub use canonical::{canonical_event_bytes, canonical_json, compare_for_dedup, DedupComparison};
-pub use config::{ConfigPrincipal, ConfigRoute, ConfigSpec, ProxyConfig, PutConfigRequest};
+pub use config::{
+    credential_scope_id_for, ConfigPrincipal, ConfigRoute, ConfigSpec, ConfigVerifier, ProxyConfig,
+    PutConfigRequest, RouteSpec,
+};
 pub use error::{ApiError, ErrorBody, ErrorCode, ErrorItem, UnknownCode, ValidationError};
 pub use event::{
     EventPayload, IngestRequest, IngestResponse, InvocationCancelRequested, InvocationCompleted,

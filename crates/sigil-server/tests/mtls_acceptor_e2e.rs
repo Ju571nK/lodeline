@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-/// Unique certificate serial per leaf (hex with 0x prefix). Avoids the shared
-/// `ca.srl` file that `-CAcreateserial` races on when leaves are made in parallel.
+/// Unique certificate serial per leaf (hex with 0x prefix). Passing `-set_serial`
+/// avoids the shared `ca.srl` state file of `-CAcreateserial`.
 fn next_serial() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(1);
