@@ -5,6 +5,10 @@
 //! * `lock`          flock(LOCK_EX) held for the process lifetime
 //! * `binding.json`  `{schema_version, proxy_id, epoch_id}`
 //! * `status.json`   written by [`crate::lifecycle`]
+//! * `applied.json`  `{schema_version, proxy_id, revision, config_hash}`: the
+//!   revision high-water mark ONLY (never the config itself, which needs a fresh
+//!   fetch after a restart, control-plane.md §6.3). It stops a restarted proxy
+//!   from accepting a rolled-back server revision.
 
 use std::fs::File;
 #[cfg(unix)]
@@ -20,6 +24,7 @@ use thiserror::Error;
 pub const LOCK_FILE: &str = "lock";
 pub const BINDING_FILE: &str = "binding.json";
 pub const STATUS_FILE: &str = "status.json";
+pub const APPLIED_FILE: &str = "applied.json";
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -37,6 +42,14 @@ pub enum StateError {
     // operator must delete binding.json deliberately.
     #[error("binding file is unreadable or invalid ({0}); delete it to start a new epoch")]
     BadBinding(String),
+    // Same stance as the binding: an unreadable mark is refused, not ignored.
+    // Ignoring it would silently allow a rollback; the operator deletes the file
+    // deliberately to accept any revision.
+    #[error(
+        "applied revision file is unreadable or invalid ({0}); delete applied.json to accept any \
+         revision"
+    )]
+    BadAppliedRevision(String),
     #[error("i/o error on {path}: {source}")]
     Io {
         path: String,
@@ -59,6 +72,17 @@ struct Binding {
     schema_version: u32,
     proxy_id: String,
     epoch_id: String,
+}
+
+/// The persisted revision high-water mark.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedMark {
+    pub schema_version: u32,
+    pub proxy_id: String,
+    pub revision: i64,
+    /// Lowercase hex SHA-256 `config_hash` of that revision.
+    pub config_hash: String,
 }
 
 /// An opened, locked state directory. The lock is released when dropped.
@@ -129,6 +153,43 @@ impl StateDir {
     /// True when this open created the epoch (state was new or lost).
     pub fn is_new_epoch(&self) -> bool {
         self.new_epoch
+    }
+
+    /// The persisted high-water mark. `Ok(None)` is a normal first start. A
+    /// corrupt, foreign, symlinked or loose-permission file is an error (fail
+    /// closed).
+    pub fn read_applied(&self) -> Result<Option<AppliedMark>, StateError> {
+        let path = self.dir.join(APPLIED_FILE);
+        let bytes = match crate::fsutil::read_private_file(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let m: AppliedMark = serde_json::from_slice(&bytes)
+            .map_err(|_| StateError::BadAppliedRevision("parse error".into()))?;
+        let hash_ok = m.config_hash.len() == 64
+            && m.config_hash
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if m.schema_version != 1 || m.revision < 1 || !hash_ok {
+            return Err(StateError::BadAppliedRevision("unexpected content".into()));
+        }
+        if m.proxy_id != self.proxy_id.as_str() {
+            return Err(StateError::BadAppliedRevision("other proxy_id".into()));
+        }
+        Ok(Some(m))
+    }
+
+    /// Persist the high-water mark (owner-only, tmp + fsync + rename + dir fsync).
+    pub fn write_applied(&self, revision: i64, config_hash: &str) -> Result<(), StateError> {
+        let m = AppliedMark {
+            schema_version: 1,
+            proxy_id: self.proxy_id.as_str().to_string(),
+            revision,
+            config_hash: config_hash.to_string(),
+        };
+        let bytes = serde_json::to_vec_pretty(&m).expect("mark serializes");
+        write_atomic(&self.dir, APPLIED_FILE, &bytes)
     }
 
     /// Atomically replace a file in the state directory.
@@ -363,5 +424,58 @@ mod tests {
             StateDir::open(&d, &id("px-1")),
             Err(StateError::Dir { .. })
         ));
+    }
+
+    const H: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn applied_mark_roundtrip_missing_and_bad() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("st");
+        let id = Id::new("px-1").unwrap();
+        let sd = StateDir::open(&dir, &id).unwrap();
+        // missing file: normal first start
+        assert_eq!(sd.read_applied().unwrap(), None);
+        // round trip, owner-only
+        sd.write_applied(7, H).unwrap();
+        let m = sd.read_applied().unwrap().unwrap();
+        assert_eq!((m.revision, m.config_hash.as_str()), (7, H));
+        let mode = std::fs::metadata(dir.join(APPLIED_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let path = dir.join(APPLIED_FILE);
+        // corrupt / foreign / out of range: refused
+        for bad in [
+            "not json".to_string(),
+            r#"{"schema_version":1,"proxy_id":"px-1","revision":0,"config_hash":""#.to_string()
+                + H
+                + r#""}"#,
+            r#"{"schema_version":2,"proxy_id":"px-1","revision":3,"config_hash":""#.to_string()
+                + H
+                + r#""}"#,
+            r#"{"schema_version":1,"proxy_id":"px-1","revision":3,"config_hash":"zz"}"#.to_string(),
+            r#"{"schema_version":1,"proxy_id":"other","revision":3,"config_hash":""#.to_string()
+                + H
+                + r#""}"#,
+            r#"{"schema_version":1,"proxy_id":"px-1","revision":3,"config_hash":""#.to_string()
+                + H
+                + r#"","x":1}"#,
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(
+                matches!(sd.read_applied(), Err(StateError::BadAppliedRevision(_))),
+                "accepted a bad mark"
+            );
+        }
+        // loose permissions and a symlink: refused
+        sd.write_applied(7, H).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(sd.read_applied().is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.join(LOCK_FILE), &path).unwrap();
+        assert!(sd.read_applied().is_err());
     }
 }

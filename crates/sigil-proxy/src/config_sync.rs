@@ -17,8 +17,11 @@
 //!   listener answers 401).
 //! * A revision below the highest one ever applied (the high-water mark, kept
 //!   after expiry) is never applied.
-//! * Nothing is persisted: a restarted proxy needs a fresh fetch (§6.3 "Restart",
-//!   decided 2026-10-10). The high-water mark is therefore per process.
+//! * The config itself is never persisted: a restarted proxy needs a fresh fetch
+//!   (§6.3 "Restart", decided 2026-10-10). Only the `{revision, config_hash}`
+//!   high-water mark is persisted (through [`Persister`], written after the new
+//!   table is built and before it is installed), so a restart cannot accept a
+//!   rolled-back revision.
 //! * The remote config is never merged with the local bootstrap. The local
 //!   credentials and limits are constraints: an unknown `credential_ref` or an
 //!   origin outside its binding fails the whole apply, and remote limits can only
@@ -155,8 +158,14 @@ struct Applied {
     hash: String,
 }
 
-/// The apply state machine. Owns no I/O.
+/// Called with `(revision, config_hash)` after a new config has been built and
+/// before it is installed. `false` (persist failed) aborts the apply: without a
+/// durable high-water mark a restart could accept a rollback, so fail closed.
+pub type Persister = Box<dyn FnMut(i64, &str) -> bool + Send>;
+
+/// The apply state machine. Its only I/O is the optional [`Persister`].
 pub struct ConfigSync {
+    persister: Option<Persister>,
     proxy_id: String,
     credentials: BTreeMap<String, Credential>,
     limits: Limits,
@@ -182,6 +191,7 @@ impl ConfigSync {
         initial: ConfigState,
     ) -> ConfigSync {
         ConfigSync {
+            persister: None,
             proxy_id: proxy_id.to_string(),
             credentials,
             limits,
@@ -196,6 +206,19 @@ impl ConfigSync {
             },
             last_error: None,
         }
+    }
+
+    /// Persist the high-water mark on every new apply.
+    pub fn with_persister(mut self, p: Persister) -> ConfigSync {
+        self.persister = Some(p);
+        self
+    }
+
+    /// Seed the high-water mark loaded from `state_dir` at start. Nothing is
+    /// installed: the table still needs a fresh fetch (§6.3 "Restart").
+    pub fn with_high_water(mut self, revision: i64, hash: String) -> ConfigSync {
+        self.high_water = Some(Applied { revision, hash });
+        self
     }
 
     pub fn status(&self) -> SyncStatus {
@@ -301,6 +324,13 @@ impl ConfigSync {
             Ok(t) => t,
             Err(_) => return self.keep(LastUpdateError::ApplyFailed),
         };
+        if !refresh {
+            if let Some(p) = self.persister.as_mut() {
+                if !p(revision, &hash) {
+                    return self.keep(LastUpdateError::ApplyFailed);
+                }
+            }
+        }
         let deadline = now + Duration::from_secs(ttl_secs);
         self.table.set_with_deadline(table, deadline);
         self.high_water = Some(Applied { revision, hash });
@@ -1066,5 +1096,94 @@ mod tests {
             seen.lock().unwrap().last().unwrap().config_state,
             ConfigState::Expired
         );
+    }
+
+    /// M3: the high-water mark survives a restart (new process, new state), a
+    /// lower revision is refused, and the same revision is installed again.
+    #[test]
+    fn restart_refuses_a_rolled_back_revision() {
+        let f = fx();
+        let dir = tempfile::tempdir().unwrap();
+        let sd_path = dir.path().join("st");
+        let id = sigil_proxy_api::Id::new("px-1").unwrap();
+        let hash;
+        {
+            let sd = crate::state_dir::StateDir::open(&sd_path, &id).unwrap();
+            let sd = std::sync::Arc::new(std::sync::Mutex::new(sd));
+            let sd2 = sd.clone();
+            let table = TableHandle::new();
+            let mut s = sync(&f, &table).with_persister(Box::new(move |r, h| {
+                sd2.lock().unwrap().write_applied(r, h).is_ok()
+            }));
+            s.on_fetch(Instant::now(), body(&std_cfg(5)));
+            // a refresh does not write
+            s.on_fetch(Instant::now(), body(&std_cfg(5)));
+            hash = sd
+                .lock()
+                .unwrap()
+                .read_applied()
+                .unwrap()
+                .unwrap()
+                .config_hash;
+            assert_eq!(
+                sd.lock().unwrap().read_applied().unwrap().unwrap().revision,
+                5
+            );
+        }
+        // "restart": a new state handle and a new sync seeded from the file
+        let sd = crate::state_dir::StateDir::open(&sd_path, &id).unwrap();
+        let mark = sd.read_applied().unwrap().unwrap();
+        let table = TableHandle::new();
+        let mut s = ConfigSync::new(
+            "px-1",
+            f.creds.clone(),
+            Limits::default(),
+            table.clone(),
+            ConfigState::Expired,
+        )
+        .with_high_water(mark.revision, mark.config_hash);
+        // nothing is served before a fresh fetch
+        assert!(table.current().is_none());
+        let t0 = Instant::now();
+        assert_eq!(
+            s.on_fetch(t0, body(&std_cfg(4))),
+            SyncOutcome::Kept(LastUpdateError::StaleRevision)
+        );
+        assert!(table.current().is_none());
+        // same revision and hash: installed again from the fresh fetch
+        assert_eq!(s.on_fetch(t0, body(&std_cfg(5))), SyncOutcome::Refreshed);
+        assert!(authenticates(&table, "tok-1"));
+        // the persisted hash is the config hash
+        let parsed =
+            sigil_proxy_api::parse_config(&serde_json::to_vec(&std_cfg(5)).unwrap()).unwrap();
+        assert_eq!(parsed.config_hash().as_str(), hash);
+        // a newer one applies
+        assert_eq!(
+            s.on_fetch(t0, body(&std_cfg(6))),
+            SyncOutcome::Applied { revision: 6 }
+        );
+    }
+
+    /// If the mark cannot be written, the new config is NOT applied.
+    #[test]
+    fn persist_failure_keeps_the_old_config() {
+        let f = fx();
+        let table = TableHandle::new();
+        let mut s = sync(&f, &table);
+        s.on_fetch(Instant::now(), body(&std_cfg(1)));
+        let mut s = s.with_persister(Box::new(|_, _| false));
+        let next = cfg(
+            2,
+            300,
+            "gh",
+            json!([{"key_id":"k2","verifier": v("tok-2")}]),
+        );
+        assert_eq!(
+            s.on_fetch(Instant::now(), body(&next)),
+            SyncOutcome::Kept(LastUpdateError::ApplyFailed)
+        );
+        assert!(authenticates(&table, "tok-1"));
+        assert!(!authenticates(&table, "tok-2"));
+        assert_eq!(s.applied_revision(), Some(1));
     }
 }

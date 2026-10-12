@@ -75,6 +75,7 @@ pub fn read_status(dir: &Path) -> Option<LocalStatus> {
 pub struct Lifecycle {
     state: StateDir,
     status: LocalStatus,
+    applied: Option<crate::state_dir::AppliedMark>,
 }
 
 impl Lifecycle {
@@ -85,6 +86,8 @@ impl Lifecycle {
         } else {
             read_status(state.dir())
         };
+        // A corrupt or foreign mark refuses the start (fail closed).
+        let applied = state.read_applied()?;
         let config_state = startup_config_state(previous.as_ref());
         let status = LocalStatus {
             schema_version: 1,
@@ -97,9 +100,23 @@ impl Lifecycle {
             forwarding: false,
             updated_at: now_rfc3339(),
         };
-        let mut lc = Lifecycle { state, status };
+        let mut lc = Lifecycle {
+            state,
+            status,
+            applied,
+        };
         lc.publish()?;
         Ok(lc)
+    }
+
+    /// The revision high-water mark loaded at start.
+    pub fn applied_mark(&self) -> Option<&crate::state_dir::AppliedMark> {
+        self.applied.as_ref()
+    }
+
+    /// Persist the high-water mark of a revision about to be applied.
+    pub fn persist_applied(&mut self, revision: i64, config_hash: &str) -> Result<(), StateError> {
+        self.state.write_applied(revision, config_hash)
     }
 
     pub fn status(&self) -> &LocalStatus {
@@ -223,6 +240,7 @@ pub async fn run_with_shutdown(
 ) -> anyhow::Result<()> {
     let lc = Lifecycle::start(b)?;
     let initial = lc.status().config_state;
+    let mark = lc.applied_mark().cloned();
     let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
     let acceptor = match &b.listener_tls {
         Some(t) => Some(crate::tls::load_acceptor(&t.cert_file, &t.key_file)?),
@@ -244,14 +262,27 @@ pub async fn run_with_shutdown(
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let sync_task = match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
         Some(fetcher) => {
-            let sync = crate::config_sync::ConfigSync::new(
+            let lc2 = lc.clone();
+            let lc4 = lc.clone();
+            let mut sync = crate::config_sync::ConfigSync::new(
                 b.proxy_id.as_str(),
                 b.credentials.clone(),
                 b.limits.clone(),
                 table.clone(),
                 initial,
-            );
-            let lc2 = lc.clone();
+            )
+            .with_persister(Box::new(move |rev, hash| {
+                match lock(&lc4).persist_applied(rev, hash) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(error = %e, "cannot persist the applied revision");
+                        false
+                    }
+                }
+            }));
+            if let Some(m) = mark {
+                sync = sync.with_high_water(m.revision, m.config_hash);
+            }
             Some(tokio::spawn(async move {
                 crate::config_sync::run_sync(
                     sync,
@@ -439,5 +470,21 @@ mod tests {
         assert_eq!(o, DrainOutcome::Drained);
         let o = drain(Duration::from_millis(30), std::future::pending::<()>()).await;
         assert_eq!(o, DrainOutcome::GraceExpired);
+    }
+
+    /// A corrupt revision mark refuses the start; a missing one is a first start.
+    #[test]
+    fn corrupt_applied_mark_refuses_start() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        {
+            let lc = Lifecycle::start(&b).unwrap();
+            assert!(lc.applied_mark().is_none(), "missing file is a first start");
+        }
+        let p = b.state_dir.join(crate::state_dir::APPLIED_FILE);
+        std::fs::write(&p, "garbage").unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let e = Lifecycle::start(&b).err().expect("must refuse");
+        assert!(matches!(e, StateError::BadAppliedRevision(_)), "{e}");
     }
 }
