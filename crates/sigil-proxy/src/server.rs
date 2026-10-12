@@ -40,7 +40,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::body::{MeteredBody, Permits};
+use crate::body::{BodyMode, MeteredBody, Permits};
 use crate::bootstrap::{is_loopback, is_loopback_host, normalize_origin};
 use crate::dest::{resolve_checked, DestError, Resolver};
 use crate::headers::{downstream_response_headers, upstream_request_headers};
@@ -57,10 +57,24 @@ pub type RespBody = BoxBody<Bytes, BoxError>;
 // open question 3). This wording is a placeholder.
 pub const UPSTREAM_REJECTED_MESSAGE: &str = "upstream request failed";
 
-/// Idle limit for a client that has connected but not finished its headers.
+/// Default idle limit for a client that has connected but not finished its
+/// headers (slowloris). Also bounds a TLS handshake.
 // OPEN: not in the D-04 table; a fixed value so a stalled client cannot hold a
 // connection open forever.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Open connections allowed per unit of `max_concurrent_calls`. A connection
+/// (including one still in its TLS handshake) holds a slot, so idle or
+/// handshaking sockets cannot exhaust file descriptors.
+// OPEN: the factor 4 is a review-chosen value, not a D-04 number.
+const CONNECTIONS_PER_CALL: usize = 4;
+
+// OPEN: D-04 per-call (4 MiB/s) and process (32 MiB/s) response bandwidth are
+// NOT enforced in this slice; no backpressure shaping exists yet.
+
+/// Never matches a real token; only used to spend the same hashing work as a
+/// real verification when the route is unknown.
+const DUMMY_VERIFIER: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 // OPEN: the route path shape `/mcp/{route_id}` is a candidate (task T-12a).
 const ROUTE_PREFIX: &str = "/mcp/";
@@ -70,7 +84,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 #[derive(Clone, Copy)]
 enum HostPolicy {
-    /// Loopback listener: `Host` must be a loopback name or literal with this port.
+    /// Loopback listener: `Host` must be a loopback name or literal with this
+    /// port. A `Host` without a port is read as port 80, so it matches only a
+    /// listener bound to 80.
+    // OPEN: caveat: behind a port mapping (container `-p 9000:8480`, SSH or
+    // reverse-proxy forwarding) the client's `Host` port differs from the bound
+    // port and is refused with 403. Use a matching port or a non-loopback
+    // listener (TLS) for such setups.
     Loopback {
         port: u16,
     },
@@ -85,6 +105,7 @@ struct Shared {
     resolver: Arc<dyn Resolver>,
     total: Arc<Semaphore>,
     host: HostPolicy,
+    header_read_timeout: Duration,
     #[cfg(unix)]
     upstream_tls: tls::Connector,
 }
@@ -93,6 +114,7 @@ pub struct Proxy {
     limits: Limits,
     table: TableHandle,
     resolver: Arc<dyn Resolver>,
+    header_read_timeout: Duration,
 }
 
 impl Proxy {
@@ -101,7 +123,14 @@ impl Proxy {
             limits,
             table,
             resolver,
+            header_read_timeout: HEADER_READ_TIMEOUT,
         }
+    }
+
+    /// Override the header-read (and TLS handshake) timeout; used by tests.
+    pub fn with_header_read_timeout(mut self, d: Duration) -> Proxy {
+        self.header_read_timeout = d;
+        self
     }
 
     /// Accept until `shutdown` resolves, then stop accepting and drain
@@ -121,6 +150,7 @@ impl Proxy {
             } else {
                 HostPolicy::Any
             },
+            header_read_timeout: self.header_read_timeout,
             limits: self.limits,
             table: self.table,
             resolver: self.resolver,
@@ -128,6 +158,9 @@ impl Proxy {
             upstream_tls: tls::upstream_connector(),
         });
         let graceful = GracefulShutdown::new();
+        let conn_slots = Arc::new(Semaphore::new(
+            (shared.limits.max_concurrent_calls as usize).saturating_mul(CONNECTIONS_PER_CALL),
+        ));
         let acceptor = acceptor.map(Arc::new);
         tokio::pin!(shutdown);
         loop {
@@ -142,22 +175,31 @@ impl Proxy {
                             continue;
                         }
                     };
+                    // Connection cap: refuse at accept, before any bytes are read.
+                    let Ok(slot) = conn_slots.clone().try_acquire_owned() else {
+                        drop(sock);
+                        continue;
+                    };
                     let _ = sock.set_nodelay(true);
                     let shared = shared.clone();
                     match &acceptor {
                         None => {
                             let conn = graceful.watcher().watch(connection(sock, shared));
-                            tokio::spawn(async move { let _ = conn.await; });
+                            tokio::spawn(async move {
+                                let _ = conn.await;
+                                drop(slot);
+                            });
                         }
                         Some(a) => {
                             let a = a.clone();
                             // The handshake runs inside the spawned task, so a slow
                             // TLS client cannot stall the accept loop. It is not
                             // tracked by `graceful` until established.
-                            // OPEN: handshake time is bounded by HEADER_READ_TIMEOUT only.
+                            // The connection slot covers the handshake.
                             let watch = graceful.watcher();
                             tokio::spawn(async move {
                                 handshake_and_serve(a, sock, shared, watch).await;
+                                drop(slot);
                             });
                         }
                     }
@@ -179,7 +221,7 @@ async fn handshake_and_serve(
 ) {
     #[cfg(unix)]
     {
-        match tokio::time::timeout(HEADER_READ_TIMEOUT, a.accept(sock)).await {
+        match tokio::time::timeout(shared.header_read_timeout, a.accept(sock)).await {
             Ok(Ok(tls_stream)) => {
                 let conn = connection(tls_stream, shared);
                 let _ = watch.watch(conn).await;
@@ -201,10 +243,11 @@ where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let max_buf = (shared.limits.max_header_bytes as usize).max(8192);
+    let timeout = shared.header_read_timeout;
     let svc = service_fn(move |req| handle(req, shared.clone()));
     hyper::server::conn::http1::Builder::new()
         .timer(TokioTimer::new())
-        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .header_read_timeout(timeout)
         .max_buf_size(max_buf)
         .serve_connection(TokioIo::new(io), svc)
 }
@@ -310,11 +353,18 @@ fn is_sse(h: &http::HeaderMap) -> bool {
         })
 }
 
-/// The request's JSON-RPC `id`, from the parse COPY only (string or number).
-fn request_id(body: &[u8]) -> Option<serde_json::Value> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    match v.get("id")? {
-        id @ (serde_json::Value::String(_) | serde_json::Value::Number(_)) => Some(id.clone()),
+/// The request's JSON-RPC `id` exactly as written (string or number), from the
+/// parse COPY only. Kept as raw JSON so large integers and escapes are echoed
+/// verbatim. A duplicate `id` key, a non-object body (batch) or any other type
+/// gives `None`.
+fn request_id(body: &[u8]) -> Option<Box<serde_json::value::RawValue>> {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        id: Option<Box<serde_json::value::RawValue>>,
+    }
+    let id = serde_json::from_slice::<Probe>(body).ok()?.id?;
+    match id.get().as_bytes().first()? {
+        b'"' | b'-' | b'0'..=b'9' => Some(id),
         _ => None,
     }
 }
@@ -326,12 +376,13 @@ fn request_id(body: &[u8]) -> Option<serde_json::Value> {
 fn upstream_auth_rejected(request_body: &[u8]) -> Response<RespBody> {
     match request_id(request_body) {
         Some(id) => {
-            let v = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {"code": -32603, "message": UPSTREAM_REJECTED_MESSAGE},
-            });
-            let mut r = Response::new(boxed_full(Bytes::from(v.to_string())));
+            // `id` is validated JSON; the message is a constant without quotes.
+            let v = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"error\":{{\"code\":-32603,\"message\":\"{}\"}}}}",
+                id.get(),
+                UPSTREAM_REJECTED_MESSAGE
+            );
+            let mut r = Response::new(boxed_full(Bytes::from(v)));
             r.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
@@ -385,10 +436,16 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
         Some(t) if t.has_verifier() => t,
         _ => return unauthorized(),
     };
-    // OPEN: an unknown route is 404 before authentication, which tells an
-    // unauthenticated caller which route ids exist (the task fixes 404).
+    // An unknown route answers exactly like a failed authentication on a known
+    // route (same status, body and headers), after the same kind of hashing
+    // work, so route ids are not an oracle. Only a path that is not shaped
+    // `/mcp/{id}` at all is a 404.
     let Some(route) = table.route(route_id) else {
-        return fixed(StatusCode::NOT_FOUND, "not_found");
+        let _ = std::hint::black_box(sigil_proxy_api::verify(
+            bearer_token(&parts.headers).unwrap_or(""),
+            DUMMY_VERIFIER,
+        ));
+        return unauthorized();
     };
     let principal = bearer_token(&parts.headers).and_then(|t| route.authenticate(t));
     // `authenticate("")` is never a match, so a missing header needs no
@@ -447,10 +504,19 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     };
 
     // Destination: resolve once, check every address, connect to a checked one.
-    let addrs = match resolve_checked(&*sh.resolver, &route.upstream, route.allow_private).await {
-        Ok(a) => a,
-        Err(DestError::Unresolved) => return fixed(StatusCode::BAD_GATEWAY, "upstream_unresolved"),
-        Err(DestError::Refused(why)) => {
+    // Resolution is bounded by the connect timeout (a hanging resolver is a 504).
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(lim.connect_timeout_secs),
+        resolve_checked(&*sh.resolver, &route.upstream, route.allow_private),
+    )
+    .await;
+    let addrs = match resolved {
+        Err(_) => return fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+        Ok(Ok(a)) => a,
+        Ok(Err(DestError::Unresolved)) => {
+            return fixed(StatusCode::BAD_GATEWAY, "upstream_unresolved")
+        }
+        Ok(Err(DestError::Refused(why))) => {
             tracing::warn!(
                 route = route.id.as_str(),
                 class = why,
@@ -513,12 +579,29 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     }
 
     let sse = is_sse(&rparts.headers);
+    // A content-encoded stream is opaque to the proxy: the event tracker cannot
+    // see event boundaries in compressed bytes, so only the call cap applies.
+    // OPEN: T-12b must treat encoded bodies as unobservable and must never
+    // decode them without a size cap.
+    let encoded = rparts
+        .headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            let v = v.trim();
+            !v.is_empty() && !v.eq_ignore_ascii_case("identity")
+        });
+    let mode = match (sse, encoded) {
+        (true, false) => BodyMode::Sse,
+        (true, true) => BodyMode::Opaque,
+        (false, _) => BodyMode::Json,
+    };
     // A declared length over the limit is refused while the status line can
     // still be replaced.
-    let declared_cap = if sse {
-        lim.max_call_response_bytes
-    } else {
+    let declared_cap = if mode == BodyMode::Json {
         lim.max_json_response_bytes.min(lim.max_call_response_bytes)
+    } else {
+        lim.max_call_response_bytes
     };
     if content_length(&rparts.headers).is_some_and(|n| n > declared_cap) {
         return fixed(StatusCode::BAD_GATEWAY, "upstream_response_too_large");
@@ -527,7 +610,7 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     let metered = MeteredBody::new(
         rbody,
         crate::body::Limits {
-            sse,
+            mode,
             max_json_bytes: lim.max_json_response_bytes,
             max_sse_event_bytes: lim.max_sse_event_bytes,
             max_call_bytes: lim.max_call_response_bytes,

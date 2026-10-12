@@ -32,6 +32,8 @@ const REQUEST_STRIP: &[&str] = &[
     "origin",
     // rewritten to the upstream authority
     "host",
+    // the proxy answers the client's 100-continue itself and buffers the body
+    "expect",
     // length is recomputed from the buffered body
     "content-length",
     // proxy-added forwarding metadata is not synthesised and inbound is removed
@@ -140,6 +142,7 @@ mod tests {
     fn request_strip_rows() {
         for name in [
             "cookie",
+            "expect",
             "proxy-authorization",
             "proxy-authenticate",
             "origin",

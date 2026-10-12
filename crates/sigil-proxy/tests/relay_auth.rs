@@ -132,13 +132,12 @@ async fn several_principals_on_one_route() {
     assert_unauthorized(&px.post("/mcp/a", Some("tok-3"), &[], BODY).await);
 }
 
-/// PX-002: only `/mcp/{route_id}` routes; anything else is a fixed 404.
+/// PX-002: a path that is not shaped `/mcp/{id}` is a fixed 404.
 #[tokio::test]
-async fn unknown_routes_are_404() {
+async fn paths_outside_the_route_shape_are_404() {
     let up = ok_upstream().await;
     let px = simple(&up, limits()).await;
     for path in [
-        "/mcp/zzz",
         "/mcp/",
         "/mcp",
         "/mcp/a/extra",
@@ -151,6 +150,37 @@ async fn unknown_routes_are_404() {
         assert_eq!(r.status, 404, "{path}");
         assert_eq!(r.text(), "{\"error\":\"not_found\"}", "{path}");
     }
+    assert_eq!(up.conns(), 0);
+}
+
+/// L1 / AC-04 (no oracle): an unknown route id answers exactly like a failed
+/// authentication on a known route: same status, headers (except Date) and body.
+#[tokio::test]
+async fn unknown_route_is_indistinguishable_from_auth_failure() {
+    let up = ok_upstream().await;
+    let px = simple(&up, limits()).await;
+    let norm = |r: &Raw| {
+        let mut h: Vec<_> = r
+            .headers
+            .iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("date"))
+            .cloned()
+            .collect();
+        h.sort();
+        (r.status, h, r.body())
+    };
+    let known_bad = norm(&px.post("/mcp/a", Some("wrong"), &[], BODY).await);
+    assert_eq!(known_bad.0, 401);
+    for token in [Some("tok-a"), Some("wrong"), None] {
+        let r = px.post("/mcp/zzz", token, &[], BODY).await;
+        assert_unauthorized(&r);
+        assert_eq!(norm(&r), known_bad, "token {token:?}");
+    }
+    let known_missing = norm(&px.post("/mcp/a", None, &[], BODY).await);
+    assert_eq!(
+        norm(&px.post("/mcp/zzz", None, &[], BODY).await),
+        known_missing
+    );
     assert_eq!(up.conns(), 0);
 }
 

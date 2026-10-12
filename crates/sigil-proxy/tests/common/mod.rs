@@ -362,12 +362,24 @@ impl Px {
         limits: Limits,
         resolver: Arc<dyn Resolver>,
     ) -> Px {
+        Self::start_full(table, limits, resolver, None).await
+    }
+
+    pub async fn start_full(
+        table: Option<RouteTable>,
+        limits: Limits,
+        resolver: Arc<dyn Resolver>,
+        header_read_timeout: Option<Duration>,
+    ) -> Px {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = TableHandle::new();
         handle.set(table);
         let (stop, rx) = oneshot::channel::<()>();
-        let proxy = Proxy::new(limits, handle.clone(), resolver);
+        let mut proxy = Proxy::new(limits, handle.clone(), resolver);
+        if let Some(d) = header_read_timeout {
+            proxy = proxy.with_header_read_timeout(d);
+        }
         let join = tokio::spawn(async move {
             proxy
                 .serve(listener, None, async {
@@ -504,7 +516,12 @@ pub fn dechunk(mut b: &[u8]) -> (Vec<Vec<u8>>, bool) {
     }
 }
 
-pub fn parse_response(all: Vec<u8>) -> Raw {
+pub fn parse_response(mut all: Vec<u8>) -> Raw {
+    // Skip interim `100 Continue` blocks (answered for `Expect: 100-continue`).
+    while all.starts_with(b"HTTP/1.1 100") {
+        let e = all.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        all.drain(..e + 4);
+    }
     let end = all
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -582,4 +599,17 @@ pub fn limits() -> Limits {
 pub async fn simple(up: &Up, limits: Limits) -> Px {
     let t = table(&[R::new("a", up.url("/up"), &[("pa", "tok-a")])], &limits);
     Px::start(Some(t), limits).await
+}
+
+/// A resolver that never answers.
+pub struct HangResolver;
+
+impl Resolver for HangResolver {
+    fn resolve<'a>(
+        &'a self,
+        _host: &'a str,
+        _port: u16,
+    ) -> Pin<Box<dyn std::future::Future<Output = std::io::Result<Vec<IpAddr>>> + Send + 'a>> {
+        Box::pin(std::future::pending())
+    }
 }

@@ -395,3 +395,203 @@ async fn no_accept_after_shutdown() {
     .await;
     assert_eq!(r, Ok(true));
 }
+
+/// L2: a content-encoded SSE stream is opaque. The per-event tracker is
+/// skipped (a long "event" is not cut) but the call cap still applies.
+#[tokio::test]
+async fn encoded_stream_skips_the_event_tracker_but_keeps_the_call_cap() {
+    let mk = || {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let reply = Reply::Stream {
+            status: 200,
+            headers: vec![
+                ("content-type".into(), "text/event-stream".into()),
+                ("content-encoding".into(), "gzip".into()),
+            ],
+            rx,
+        };
+        (tx, Mutex::new(Some(reply)))
+    };
+    // 3 x 200 bytes with no event boundary: over a 100 byte event limit, under the call cap
+    let (tx, slot) = mk();
+    let up = Up::start(move |_| slot.lock().unwrap().take().unwrap()).await;
+    let px = simple(
+        &up,
+        lim(|l| {
+            l.max_sse_event_bytes = 100;
+            l.max_call_response_bytes = 10_000;
+        }),
+    )
+    .await;
+    tokio::spawn(async move {
+        for _ in 0..3 {
+            tx.send(Bytes::from(vec![0x1fu8; 200])).await.unwrap();
+        }
+    });
+    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let (chunks, complete) = r.chunks();
+    assert!(
+        complete,
+        "encoded stream must not be cut by the event limit"
+    );
+    assert_eq!(chunks.concat().len(), 600);
+
+    // the call cap still cuts it
+    let (tx, slot) = mk();
+    let up = Up::start(move |_| slot.lock().unwrap().take().unwrap()).await;
+    let px = simple(&up, lim(|l| l.max_call_response_bytes = 500)).await;
+    let t = tokio::spawn(async move {
+        for _ in 0..10 {
+            if tx.send(Bytes::from(vec![0x1fu8; 200])).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    t.abort();
+    let (chunks, complete) = r.chunks();
+    assert!(!complete);
+    assert!(chunks.concat().len() <= 500);
+}
+
+/// L3: connections are capped at 4 x max_concurrent_calls at accept. Idle
+/// sockets beyond the cap are closed at once; closing one frees a slot.
+#[tokio::test]
+async fn connection_cap_at_accept() {
+    use tokio::io::AsyncReadExt;
+    let up = ok_upstream().await;
+    let px = simple(&up, lim(|l| l.max_concurrent_calls = 1)).await; // cap 4
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(TcpStream::connect(px.addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut extra = TcpStream::connect(px.addr).await.unwrap();
+    let _ = extra.write_all(b"GET / HTTP/1.1\r\n\r\n").await;
+    let mut b = [0u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(3), extra.read(&mut b))
+        .await
+        .expect("over-cap connection must be closed promptly");
+    assert!(
+        matches!(n, Ok(0) | Err(_)),
+        "no HTTP answer for an over-cap connection"
+    );
+    // free a slot: a real request now succeeds
+    held.pop();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        200
+    );
+}
+
+/// L3: slowloris. A client that never finishes its headers is dropped after the
+/// header-read timeout (shortened here).
+#[tokio::test]
+async fn slowloris_is_dropped_by_header_read_timeout() {
+    use tokio::io::AsyncReadExt;
+    let up = ok_upstream().await;
+    let l = limits();
+    let t = table(&[R::new("a", up.url("/up"), &[("pa", "tok-a")])], &l);
+    let px = Px::start_full(
+        Some(t),
+        l,
+        std::sync::Arc::new(sigil_proxy::dest::SystemResolver),
+        Some(Duration::from_secs(1)),
+    )
+    .await;
+    let mut s = TcpStream::connect(px.addr).await.unwrap();
+    s.write_all(b"POST /mcp/a HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: ")
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut buf = Vec::new();
+    let r = tokio::time::timeout(Duration::from_secs(8), s.read_to_end(&mut buf)).await;
+    assert!(r.is_ok(), "stalled client was never dropped");
+    assert!(
+        start.elapsed() >= Duration::from_millis(800),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(start.elapsed() < Duration::from_secs(6));
+    assert_eq!(up.conns(), 0);
+}
+
+/// L7: when the client disconnects mid-stream the upstream request is
+/// cancelled: the fixture observes its response channel closing, and the
+/// admission slot is released.
+#[tokio::test]
+async fn client_disconnect_cancels_the_upstream_stream() {
+    let (up, senders) = gated_upstream().await;
+    let px = simple(&up, lim(|l| l.max_calls_per_route = 1)).await;
+    let mut s = TcpStream::connect(px.addr).await.unwrap();
+    s.write_all(&px.request("POST", "/mcp/a", Some("tok-a"), &[], b"{}"))
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let tx = loop {
+        if let Some(tx) = senders.lock().unwrap().first().cloned() {
+            break tx;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    tx.send(Bytes::from_static(b"data: 1\n\n")).await.unwrap();
+    assert!(read_until(&mut s, &mut buf, b"data: 1", Duration::from_secs(5)).await);
+    drop(s); // client goes away
+    tokio::time::timeout(Duration::from_secs(5), tx.closed())
+        .await
+        .expect("upstream request was not cancelled after the client left");
+    // the slot is free again
+    let (h, _) = hold(&px, &up, "/mcp/a", "tok-a").await;
+    senders.lock().unwrap().clear();
+    drop(tx);
+    let _ = h.await;
+}
+
+/// L7: a client that leaves while upstream has not answered yet also cancels
+/// the upstream exchange (the upstream connection is closed).
+#[tokio::test]
+async fn client_disconnect_before_headers_cancels_the_upstream_exchange() {
+    let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // a raw upstream that accepts, reads the request, then waits for EOF
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let c2 = closed.clone();
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut b = [0u8; 4096];
+        loop {
+            match sock.read(&mut b).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        c2.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let l = limits();
+    let t = table(
+        &[R::new(
+            "a",
+            format!("http://127.0.0.1:{}/up", addr.port()),
+            &[("pa", "tok-a")],
+        )],
+        &l,
+    );
+    let px = Px::start(Some(t), l).await;
+    let mut s = TcpStream::connect(px.addr).await.unwrap();
+    s.write_all(&px.request("POST", "/mcp/a", Some("tok-a"), &[], b"{}"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(s);
+    let end = Instant::now() + Duration::from_secs(5);
+    while !closed.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        closed.load(std::sync::atomic::Ordering::SeqCst),
+        "upstream connection stayed open"
+    );
+}

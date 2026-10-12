@@ -75,7 +75,12 @@ fn classify_v4(a: Ipv4Addr) -> AddrClass {
         AddrClass::Loopback
     } else if a.is_link_local() {
         AddrClass::LinkLocal
-    } else if a.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64) {
+    } else if a.is_private()
+        || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64.0.0/10 CGNAT
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24 IETF protocol assignments
+        || (o[0] == 198 && (o[1] & 0xfe) == 18)
+    // 198.18.0.0/15 benchmarking
+    {
         AddrClass::Private
     } else {
         AddrClass::Public
@@ -84,12 +89,31 @@ fn classify_v4(a: Ipv4Addr) -> AddrClass {
 
 fn classify_v6(a: Ipv6Addr) -> AddrClass {
     let s = a.segments();
+    let v4_from =
+        |hi: u16, lo: u16| Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
     if a.is_unspecified() || a.is_multicast() {
         AddrClass::Never
     } else if a.is_loopback() {
         AddrClass::Loopback
+    } else if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        // NAT64 64:ff9b::/96: the embedded IPv4 decides.
+        classify_v4(v4_from(s[6], s[7]))
+    } else if s[0] == 0x2002 {
+        // 6to4 2002::/16: the embedded IPv4 decides.
+        classify_v4(v4_from(s[1], s[2]))
+    } else if s[..6] == [0, 0, 0, 0, 0, 0] {
+        // IPv4-compatible ::/96 (deprecated): the embedded IPv4 decides.
+        classify_v4(v4_from(s[6], s[7]))
+    } else if (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1) // 64:ff9b:1::/48 local-use NAT64
+        || (s[0] == 0x2001 && s[1] == 0) // 2001::/32 Teredo
+        || (s[0] == 0x2001 && s[1] == 0x0db8)
+    // 2001:db8::/32 documentation
+    {
+        AddrClass::Never
     } else if (s[0] & 0xffc0) == 0xfe80 {
         AddrClass::LinkLocal
+    } else if (s[0] & 0xffc0) == 0xfec0 {
+        AddrClass::Private // fec0::/10 deprecated site-local
     } else if (s[0] & 0xff00) == 0xfd00 {
         AddrClass::UlaMetadata
     } else if (s[0] & 0xfe00) == 0xfc00 {
@@ -206,6 +230,30 @@ mod tests {
             ("100.128.0.1", Public),
             ("8.8.8.8", Public),
             ("2606:4700::1111", Public),
+            ("192.0.0.1", Private),
+            ("192.0.1.1", Public),
+            ("198.18.0.1", Private),
+            ("198.19.255.255", Private),
+            ("198.20.0.1", Public),
+            // NAT64 / 6to4 / IPv4-compatible: the embedded v4 decides
+            ("64:ff9b::7f00:1", Loopback),
+            ("64:ff9b::a9fe:a9fe", LinkLocal),
+            ("64:ff9b::a00:5", Private),
+            ("64:ff9b::808:808", Public),
+            ("2002:7f00:1::", Loopback),
+            ("2002:a9fe:a9fe::1", LinkLocal),
+            ("2002:0a00:0005::1", Private),
+            ("2002:0808:0808::1", Public),
+            ("::7f00:1", Loopback),
+            ("::a9fe:a9fe", LinkLocal),
+            ("::a00:5", Private),
+            ("::808:808", Public),
+            ("64:ff9b:1::1", Never),
+            ("2001::1", Never),
+            ("2001:0:4136:e378:8000:63bf:3fff:fdd2", Never),
+            ("2001:db8::1", Never),
+            ("fec0::1", Private),
+            ("2001:4860:4860::8888", Public),
             ("0.0.0.0", Never),
             ("::", Never),
             ("224.0.0.1", Never),

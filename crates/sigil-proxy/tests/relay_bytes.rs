@@ -495,3 +495,58 @@ async fn redirects_are_not_followed_or_relayed() {
     }
     assert_eq!(target.conns(), 0, "the Location target was never contacted");
 }
+
+/// L5: the JSON-RPC id is echoed exactly as written (large integers, floats,
+/// escapes), not re-serialised through a number type.
+#[tokio::test]
+async fn upstream_rejection_echoes_the_id_verbatim() {
+    let up = Up::start(|_| full(401, "text/plain", b"no")).await;
+    let px = simple(&up, limits()).await;
+    for id in [
+        "12345678901234567890123456789",
+        "-9223372036854775809",
+        "1.0e5",
+        "0",
+        r#""a\u00e9\n/b""#,
+        r#""""#,
+    ] {
+        let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call"}}"#);
+        let r = px.post("/mcp/a", Some("tok-a"), &[], body.as_bytes()).await;
+        assert_eq!(r.status, 200, "{id}");
+        assert!(
+            r.text().contains(&format!(r#""id":{id},"error""#)),
+            "{id} not echoed verbatim: {}",
+            r.text()
+        );
+    }
+    // not string/number, duplicate key, batch: no reply is possible
+    for body in [
+        r#"{"jsonrpc":"2.0","id":null,"method":"x"}"#,
+        r#"{"jsonrpc":"2.0","id":{"a":1},"method":"x"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"id":2,"method":"x"}"#,
+        r#"[{"jsonrpc":"2.0","id":1,"method":"x"}]"#,
+        "not json",
+    ] {
+        let r = px.post("/mcp/a", Some("tok-a"), &[], body.as_bytes()).await;
+        assert_eq!(r.status, 502, "{body}");
+    }
+}
+
+/// L5: `Expect` is not forwarded (the proxy buffers the body and answers the
+/// client's 100-continue itself) and the call still succeeds.
+#[tokio::test]
+async fn request_expect_is_stripped() {
+    let up = ok_upstream().await;
+    let px = simple(&up, limits()).await;
+    let r = px
+        .post(
+            "/mcp/a",
+            Some("tok-a"),
+            &[("Expect", "100-continue")],
+            b"{}",
+        )
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(!up.last().has("expect"), "{:?}", up.last().headers);
+    assert_eq!(up.last().body, b"{}");
+}

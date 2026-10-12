@@ -24,7 +24,8 @@ use crate::limits::Limits;
 pub struct PrincipalSpec {
     pub principal_id: Id,
     /// Lowercase-hex SHA-256 verifiers (at most two for overlap).
-    // OPEN: `not_after` of a verifier is not modelled in slice A.
+    // OPEN: `not_after` of a verifier is not modelled in slice A; the config
+    // slice must carry it and refuse expired verifiers at authenticate time.
     pub verifiers: Vec<String>,
 }
 

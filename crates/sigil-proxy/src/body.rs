@@ -84,8 +84,21 @@ impl SseEventTracker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyMode {
+    /// Plain response: the JSON response limit applies.
+    Json,
+    /// Observable SSE: the per-event limit applies.
+    Sse,
+    /// A content-encoded stream: the bytes are opaque, so neither the JSON
+    /// nor the event limit can be applied. Only the call cap and timeouts.
+    // OPEN: T-12b must treat encoded bodies as unobservable and must never
+    // decode them without a size cap (decompression bomb).
+    Opaque,
+}
+
 pub struct Limits {
-    pub sse: bool,
+    pub mode: BodyMode,
     pub max_json_bytes: u64,
     pub max_sse_event_bytes: u64,
     pub max_call_bytes: u64,
@@ -150,12 +163,16 @@ impl Body for MeteredBody {
                     if this.total > this.lim.max_call_bytes {
                         return Poll::Ready(Some(Err(BodyLimit::CallTooLarge.into())));
                     }
-                    if this.lim.sse {
-                        if let Err(e) = this.sse.feed(d, this.lim.max_sse_event_bytes) {
-                            return Poll::Ready(Some(Err(e.into())));
+                    match this.lim.mode {
+                        BodyMode::Sse => {
+                            if let Err(e) = this.sse.feed(d, this.lim.max_sse_event_bytes) {
+                                return Poll::Ready(Some(Err(e.into())));
+                            }
                         }
-                    } else if this.total > this.lim.max_json_bytes {
-                        return Poll::Ready(Some(Err(BodyLimit::ResponseTooLarge.into())));
+                        BodyMode::Json if this.total > this.lim.max_json_bytes => {
+                            return Poll::Ready(Some(Err(BodyLimit::ResponseTooLarge.into())));
+                        }
+                        BodyMode::Json | BodyMode::Opaque => {}
                     }
                 }
                 Poll::Ready(Some(Ok(frame)))

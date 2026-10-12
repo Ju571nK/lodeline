@@ -180,3 +180,27 @@ async fn ip_literal_skips_dns() {
         200
     );
 }
+
+/// M2: a resolver that never answers is bounded by the connect timeout: fixed
+/// 504, no upstream contact.
+#[tokio::test]
+async fn hanging_resolver_is_a_504() {
+    let up = ok_upstream().await;
+    let mut l = limits();
+    l.connect_timeout_secs = 1;
+    let t = table(
+        &[R::new(
+            "a",
+            format!("http://localhost:{}/up", up.addr.port()),
+            &[("pa", "tok-a")],
+        )],
+        &l,
+    );
+    let px = Px::start_with(Some(t), l, std::sync::Arc::new(HangResolver)).await;
+    let start = std::time::Instant::now();
+    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    assert_eq!(r.status, 504);
+    assert_eq!(r.text(), "{\"error\":\"upstream_timeout\"}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(up.conns(), 0);
+}
