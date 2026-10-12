@@ -51,6 +51,11 @@ pub struct ProxyContext {
     promote_backoff: Mutex<HashMap<String, Instant>>,
     /// Auth-denial audit coalescing, per (caller fingerprint, reason).
     deny_gate: Mutex<HashMap<(String, String), (Instant, u32)>>,
+    /// Proxies whose state the boot cross-check found behind the audit and that
+    /// `state_init` let through: proxy_id -> audited revision. Their config is
+    /// withheld (GET answers `config_unavailable`) and the next PUT must name the
+    /// audited revision as `expected_revision`. Cleared by that PUT.
+    pub withheld: Mutex<HashMap<String, u64>>,
     /// Rate limiter for the "probe with a bearer" warning.
     probe_warn: Mutex<(Option<Instant>, u32)>,
 }
@@ -100,8 +105,15 @@ impl ProxyContext {
                 (Some(m), Some(MgmtAudit::open(dir, key)?))
             }
         };
-        if let Some(a) = audit.as_ref() {
-            check_store_against_audit(&store, a, pc.state_init)?;
+        let withheld = match audit.as_ref() {
+            Some(a) => check_store_against_audit(&store, a, pc.state_init)?,
+            None => HashMap::new(),
+        };
+        for id in stale_retention(&store, pc.ack_loss_margin()) {
+            tracing::warn!(
+                proxy_id = %id,
+                "stored config has event_retention_seconds < max_offline_retry_age_seconds + ack_loss_margin under the current proxy.ack_loss_margin_seconds; PUT a new config to restore the ledger L1 invariant"
+            );
         }
         tracing::info!(
             ca_subject = %ca.subject_dn,
@@ -117,6 +129,7 @@ impl ProxyContext {
             ack_loss_margin: pc.ack_loss_margin(),
             mgmt,
             audit,
+            withheld: Mutex::new(withheld),
             promote_backoff: Mutex::new(HashMap::new()),
             deny_gate: Mutex::new(HashMap::new()),
             probe_warn: Mutex::new((None, 0)),
@@ -266,12 +279,13 @@ impl ProxyContext {
 /// store file) but never legitimately behind it. For every proxy with an `ok`
 /// `proxy.config_put` to revision R in the audit, the store must hold a config
 /// with revision >= R. Otherwise boot is refused unless `state_init` is set,
-/// which downgrades it to a loud warning.
+/// which downgrades it to a loud warning and returns the proxies whose config
+/// must then be withheld, with their audited revisions.
 pub fn check_store_against_audit(
     store: &ProxyStore,
     audit: &MgmtAudit,
     state_init: bool,
-) -> Result<()> {
+) -> Result<HashMap<String, u64>> {
     let (records, _) = audit
         .read(0, usize::MAX)
         .context("read the management audit for the proxy state cross-check")?;
@@ -285,6 +299,7 @@ pub fn check_store_against_audit(
             }
         }
     }
+    let mut withheld = HashMap::new();
     for (id, audited) in latest {
         let held = store.entry(&id).map_or(0, |e| e.revision());
         if held < audited {
@@ -297,11 +312,26 @@ pub fn check_store_against_audit(
             }
             tracing::error!(
                 proxy_id = %id, held, audited,
-                "ALERT proxy state is behind the management audit; accepted because proxy.state_init is set (proxies may report stale_revision until a config is PUT again)"
+                "ALERT proxy state is behind the management audit; accepted because proxy.state_init is set; its config is withheld until a config is PUT with expected_revision = the audited revision"
             );
+            withheld.insert(id, audited);
         }
     }
-    Ok(())
+    Ok(withheld)
+}
+
+/// Proxies whose stored config breaks `E >= R + M` under the CURRENT
+/// `ack_loss_margin` (the margin may have been raised since the PUT).
+pub fn stale_retention(store: &ProxyStore, margin_secs: u32) -> Vec<String> {
+    store
+        .configs()
+        .into_iter()
+        .filter(|(_, c)| {
+            c.config.event_retention_seconds
+                < c.config.max_offline_retry_age_seconds + i64::from(margin_secs)
+        })
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// Re-read the management verifier file on SIGHUP (fail closed on error).

@@ -96,7 +96,9 @@ pub fn put_config(ctx: &ProxyContext, req: &MgmtRequest, path_id: &str, body: &[
     }
     let stxn = ctx.store.begin();
     let cur = stxn.entry(id);
-    let cur_rev = cur.revision();
+    // A proxy the boot cross-check found behind the audit has a revision floor.
+    let floor = ctx.withheld.lock().get(id).copied().unwrap_or(0);
+    let cur_rev = cur.revision().max(floor);
     let expected = parsed.expected_revision.get() as u64;
 
     let Some(next_rev) = cur_rev
@@ -151,15 +153,18 @@ pub fn put_config(ctx: &ProxyContext, req: &MgmtRequest, path_id: &str, body: &[
         ..cur
     };
     match stxn.commit(id, new) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "request_id": req.request_id,
-                "revision": next_rev.get(),
-                "config_hash": hash,
-            })),
-        )
-            .into_response(),
+        Ok(()) => {
+            ctx.withheld.lock().remove(id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "request_id": req.request_id,
+                    "revision": next_rev.get(),
+                    "config_hash": hash,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "proxy state persist failed after audit");
             let mut f = actor.entry(id, Some(ErrorCode::parse("persist_failed")), 500);
@@ -191,7 +196,11 @@ pub async fn get_own_config(
     State(ctx): State<Arc<ProxyContext>>,
     Extension(who): Extension<VerifiedProxy>,
 ) -> Response {
-    let Some(stored) = ctx.store.config(&who.proxy_id) else {
+    // A withheld proxy (boot cross-check: store behind the audit) has no
+    // servable config until an operator PUTs a new one.
+    let withheld = ctx.withheld.lock().contains_key(&who.proxy_id);
+    let stored = ctx.store.config(&who.proxy_id).filter(|_| !withheld);
+    let Some(stored) = stored else {
         return (
             StatusCode::NOT_FOUND,
             [(header::CACHE_CONTROL, "no-store")],

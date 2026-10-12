@@ -786,6 +786,28 @@ fn gaps() -> Vec<Value> {
     ]
 }
 
+#[test]
+fn parse_status_reports_the_first_bad_gap_index() {
+    let mut v = status();
+    let mut g = gaps();
+    g[2]["count"] = json!(0); // local_record_failed needs count >= 1
+    g[4]["surprise"] = json!(1);
+    v["gaps"] = json!(g);
+    let e = sigil_proxy_api::parse_status(v.to_string().as_bytes()).unwrap_err();
+    assert_eq!(e.index(), Some(2), "first bad gap");
+    // a failure elsewhere has no index
+    let mut v = status();
+    v["gaps"] = json!(gaps());
+    v["spool"]["bytes"] = json!(-1);
+    let e = sigil_proxy_api::parse_status(v.to_string().as_bytes()).unwrap_err();
+    assert_eq!(e.index(), None);
+    // an unknown gap kind is attributable too
+    let mut v = status();
+    v["gaps"] = json!([gaps()[0].clone(), {"gap_id": uid(40), "kind": "nope"}]);
+    let e = sigil_proxy_api::parse_status(v.to_string().as_bytes()).unwrap_err();
+    assert_eq!(e.index(), Some(1));
+}
+
 fn status_ok(v: &Value) {
     let s: ProxyStatus = serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("{e}: {v}"));
     assert_eq!(&serde_json::to_value(&s).unwrap(), v);

@@ -310,8 +310,18 @@ impl Fx {
     }
 
     async fn start(dir: tempfile::TempDir, mgmt: (PathBuf, PathBuf), mgmt_fp: String) -> Fx {
+        let cfg = Self::config(dir.path());
+        Self::start_with(dir, mgmt, mgmt_fp, cfg).await
+    }
+
+    async fn start_with(
+        dir: tempfile::TempDir,
+        mgmt: (PathBuf, PathBuf),
+        mgmt_fp: String,
+        cfg: ServerConfig,
+    ) -> Fx {
         let d = dir.path();
-        let ctx = Arc::new(ProxyContext::load(&Self::config(d)).unwrap().unwrap());
+        let ctx = Arc::new(ProxyContext::load(&cfg).unwrap().unwrap());
         let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config(
             &d.join("server.crt"),
             &d.join("server.key"),
@@ -1472,4 +1482,116 @@ async fn boot_refuses_a_state_store_that_is_behind_the_audit_unless_state_init()
     std::fs::write(&sf, &saved).unwrap();
     std::fs::set_permissions(&sf, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(ProxyContext::load(&cfg).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_proxy_behind_the_audit_is_withheld_until_the_next_put() {
+    let fx = Fx::new().await;
+    let _a = proxy(&fx, "pxa").await;
+    let s = spec("pxa", "tok-a");
+    assert_eq!(
+        put(&fx, "pxa", Some(T_CFG), &put_body(0, &s)).await.status,
+        200
+    );
+    assert_eq!(
+        put(&fx, "pxa", Some(T_CFG), &put_body(1, &s)).await.status,
+        200
+    );
+    // lose the store file, then boot a new server on the same directory with
+    // state_init (the old one keeps running, harmlessly)
+    let Fx {
+        dir, mgmt, mgmt_fp, ..
+    } = fx;
+    std::fs::remove_file(dir.path().join("proxy-state.json")).unwrap();
+    let mut cfg = Fx::config(dir.path());
+    cfg.proxy.as_mut().unwrap().state_init = true;
+    let fx = Fx::start_with(dir, mgmt, mgmt_fp, cfg).await;
+    assert_eq!(fx.ctx.withheld.lock().get("pxa"), Some(&2));
+    let a = Px {
+        id: "pxa".into(),
+        client: fx.client_for(&fx.p("pxa.crt"), &fx.p("pxa.key")),
+    };
+
+    // GET: nothing is served for the withheld proxy
+    for path in [None, Some("/v1/proxy-config")] {
+        let r = get_cfg(&fx, &a, path).await;
+        assert_eq!(r.status, 404);
+        assert_eq!(r.body, err_body(ErrorCode::ConfigUnavailable));
+    }
+    // PUT: the floor is the audited revision, not 0
+    for expected in [0u64, 1, 3] {
+        let r = put(&fx, "pxa", Some(T_CFG), &put_body(expected, &s)).await;
+        assert_eq!(
+            (r.status, r.code().as_str()),
+            (409, "revision_conflict"),
+            "{expected}"
+        );
+    }
+    assert!(fx.ctx.store.config("pxa").is_none());
+    let r = put(&fx, "pxa", Some(T_CFG), &put_body(2, &s)).await;
+    assert_eq!((r.status, r.json()["revision"].clone()), (200, 3.into()));
+    assert!(fx.ctx.withheld.lock().is_empty());
+    let r = get_cfg(&fx, &a, None).await;
+    assert_eq!((r.status, r.json()["revision"].clone()), (200, 3.into()));
+    // the audit records the floor as the from-revision of that PUT
+    let last = config_puts(&fx)
+        .into_iter()
+        .rfind(|l| l["result"] == "ok")
+        .unwrap();
+    assert_eq!(
+        (last["from_revision"].clone(), last["to_revision"].clone()),
+        (2.into(), 3.into())
+    );
+    // and a restart now needs no flag: store (3) is not behind the audit (3)
+    assert!(ProxyContext::load(&Fx::config(fx.dir.path()))
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn stale_retention_is_found_under_a_raised_margin() {
+    let fx = Fx::new().await;
+    let _a = proxy(&fx, "pxa").await;
+    assert_eq!(
+        put(&fx, "pxa", Some(T_CFG), &put_body(0, &spec("pxa", "tok-a")))
+            .await
+            .status,
+        200
+    );
+    // defaults: R = 30 d, E = 90 d
+    assert!(sigil_server::proxy::stale_retention(&fx.ctx.store, 7 * 86_400).is_empty());
+    assert_eq!(
+        sigil_server::proxy::stale_retention(&fx.ctx.store, 70 * 86_400),
+        vec!["pxa".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn a_bad_gap_in_a_status_report_is_named_by_index() {
+    let fx = Fx::new().await;
+    let a = proxy(&fx, "pxa").await;
+    let mut bad = quarantine(2, "conflict");
+    bad["code"] = "nope".into();
+    let r = post_status(
+        &fx,
+        &a,
+        &status_body("pxa", EPOCH, 1, vec![quarantine(1, "conflict"), bad]),
+    )
+    .await;
+    assert_eq!((r.status, r.code().as_str()), (422, "semantic_invalid"));
+    let items = r.json()["error"]["items"].clone();
+    assert_eq!(items.as_array().unwrap().len(), 1);
+    assert_eq!(items[0]["index"], 1);
+    assert_eq!(items[0]["code"], "semantic_invalid");
+    assert!(items[0].get("gap_id").is_none() && items[0].get("event_id").is_none());
+    // not attributable to a gap: no items
+    let r = post_status(
+        &fx,
+        &a,
+        &status_body("pxa", EPOCH, 1, vec![]).replace("\"bytes\":0", "\"bytes\":-1"),
+    )
+    .await;
+    assert_eq!(r.status, 422);
+    assert!(r.json()["error"].get("items").is_none());
+    assert!(fx.ctx.store.entry("pxa").is_none());
 }

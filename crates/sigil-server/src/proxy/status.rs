@@ -162,6 +162,7 @@ fn reason_text<T: serde::Serialize>(r: &T) -> String {
 }
 
 fn merge_counters(entry: &mut ProxyEntry, st: &ProxyStatus, state_applied: bool) {
+    let mut dropped = 0usize;
     let epoch = st.epoch_id.as_str().to_string();
     match entry.counters_epoch.clone() {
         None => entry.counters_epoch = Some(epoch),
@@ -210,7 +211,18 @@ fn merge_counters(entry: &mut ProxyEntry, st: &ProxyStatus, state_applied: bool)
             *slot = (*slot).max(v);
         } else if entry.counter_max.len() < MAX_COUNTER_KEYS {
             entry.counter_max.insert(k, v);
+        } else {
+            dropped += 1;
         }
+    }
+    if dropped > 0 {
+        // Counters are aggregates, so a dropped key is a lost count, not a lost
+        // event; it is reported rather than silent.
+        tracing::warn!(
+            dropped,
+            limit = MAX_COUNTER_KEYS,
+            "proxy status counter keys beyond the per-proxy limit were dropped"
+        );
     }
 }
 
@@ -350,8 +362,18 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
     }
     let st = match parse_status(body) {
         Ok(s) => s,
-        Err(_) => {
-            return fixed(ErrorCode::SemanticInvalid, StatusCode::UNPROCESSABLE_ENTITY);
+        Err(e) => {
+            // The index of a bad gap is attributable; nothing else is.
+            let mut err = ApiError::from_code(ErrorCode::SemanticInvalid);
+            if let Some(i) = e.index() {
+                err = err.with_items(vec![ErrorItem {
+                    index: u32::try_from(i).unwrap_or(u32::MAX),
+                    event_id: None,
+                    gap_id: None,
+                    code: ErrorCode::SemanticInvalid,
+                }]);
+            }
+            return json_error(StatusCode::UNPROCESSABLE_ENTITY, err);
         }
     };
     if st.proxy_id.as_str() != peer_id {

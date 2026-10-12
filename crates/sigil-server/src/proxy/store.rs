@@ -180,6 +180,15 @@ impl ProxyStore {
         self.inner.read().get(proxy_id).cloned()
     }
 
+    /// `(proxy_id, stored config)` for every proxy that has one.
+    pub fn configs(&self) -> Vec<(String, StoredConfig)> {
+        self.inner
+            .read()
+            .iter()
+            .filter_map(|(k, e)| e.config.clone().map(|c| (k.clone(), c)))
+            .collect()
+    }
+
     pub fn last_seen(&self, proxy_id: &str) -> Option<String> {
         self.inner
             .read()
