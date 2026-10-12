@@ -15,43 +15,88 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn tls_listener_relays() {
     let dir = tempfile::tempdir().unwrap();
     let (c, k) = (dir.path().join("c.pem"), dir.path().join("k.pem"));
-    let ok = std::process::Command::new("openssl")
-        .args([
-            "req",
-            "-x509",
-            // RSA, not EC: LibreSSL (macOS) writes EC keys with explicit
-            // curve parameters, which rustls cannot load.
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-days",
-            "2",
-            // LibreSSL (macOS) picks a random 8-byte serial that can encode as
-            // a negative INTEGER, which webpki rejects.
-            "-set_serial",
-            "1",
-        ])
-        .args([
-            "-subj",
-            "/CN=localhost",
-            "-addext",
-            "subjectAltName=DNS:localhost,IP:127.0.0.1",
-        ])
-        .args(["-addext", "basicConstraints=critical,CA:FALSE"])
-        .arg("-keyout")
-        .arg(&k)
-        .arg("-out")
-        .arg(&c)
-        .output();
-    let Ok(out) = ok else {
-        eprintln!("SKIPPED: openssl CLI not available");
-        return;
-    };
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // A CA plus a CA-signed leaf (RSA, fixed serials): the profile webpki
+    // accepts across OpenSSL and LibreSSL. A self-signed leaf used as its own
+    // trust anchor is rejected by some LibreSSL builds' extension output.
+    let ca = dir.path().join("ca.pem");
+    let ca_key = dir.path().join("ca.key");
+    let csr = dir.path().join("c.csr");
+    let ext = dir.path().join("c.ext");
+    std::fs::write(
+        &ext,
+        "basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n",
+    )
+    .unwrap();
+    let steps: [Vec<&std::ffi::OsStr>; 4] = [
+        vec![
+            "genpkey".as_ref(),
+            "-algorithm".as_ref(),
+            "RSA".as_ref(),
+            "-pkeyopt".as_ref(),
+            "rsa_keygen_bits:2048".as_ref(),
+            "-out".as_ref(),
+            ca_key.as_os_str(),
+        ],
+        vec![
+            "req".as_ref(),
+            "-x509".as_ref(),
+            "-new".as_ref(),
+            "-key".as_ref(),
+            ca_key.as_os_str(),
+            "-days".as_ref(),
+            "2".as_ref(),
+            "-set_serial".as_ref(),
+            "1".as_ref(),
+            "-subj".as_ref(),
+            "/CN=relay-tls-test-ca".as_ref(),
+            "-addext".as_ref(),
+            "basicConstraints=critical,CA:TRUE".as_ref(),
+            "-out".as_ref(),
+            ca.as_os_str(),
+        ],
+        vec![
+            "req".as_ref(),
+            "-new".as_ref(),
+            "-newkey".as_ref(),
+            "rsa:2048".as_ref(),
+            "-nodes".as_ref(),
+            "-keyout".as_ref(),
+            k.as_os_str(),
+            "-subj".as_ref(),
+            "/CN=localhost".as_ref(),
+            "-out".as_ref(),
+            csr.as_os_str(),
+        ],
+        vec![
+            "x509".as_ref(),
+            "-req".as_ref(),
+            "-in".as_ref(),
+            csr.as_os_str(),
+            "-CA".as_ref(),
+            ca.as_os_str(),
+            "-CAkey".as_ref(),
+            ca_key.as_os_str(),
+            "-set_serial".as_ref(),
+            "2".as_ref(),
+            "-days".as_ref(),
+            "2".as_ref(),
+            "-extfile".as_ref(),
+            ext.as_os_str(),
+            "-out".as_ref(),
+            c.as_os_str(),
+        ],
+    ];
+    for args in &steps {
+        let Ok(out) = std::process::Command::new("openssl").args(args).output() else {
+            eprintln!("SKIPPED: openssl CLI not available");
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "openssl {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     std::fs::set_permissions(&k, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let acceptor = sigil_proxy::tls::load_acceptor(&c, &k).unwrap();
@@ -71,7 +116,7 @@ async fn tls_listener_relays() {
     });
 
     let mut roots = rustls::RootCertStore::empty();
-    let pem = std::fs::read(&c).unwrap();
+    let pem = std::fs::read(&ca).unwrap();
     for cert in rustls_pemfile::certs(&mut &pem[..]) {
         roots.add(cert.unwrap()).unwrap();
     }
