@@ -86,8 +86,23 @@ async fn tls_listener_relays() {
             c.as_os_str(),
         ],
     ];
+    // Same probe order as the server e2e tests (proven on the macOS runner,
+    // whose PATH openssl emits certificates webpki rejects).
+    let openssl = [
+        "/usr/bin/openssl",
+        "/opt/homebrew/bin/openssl",
+        "/usr/local/bin/openssl",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .find(|p| p.is_file())
+    .unwrap_or_else(|| "openssl".into());
     for args in &steps {
-        let Ok(out) = std::process::Command::new("openssl").args(args).output() else {
+        let Ok(out) = std::process::Command::new(&openssl)
+            .env_remove("OPENSSL_CONF")
+            .args(args)
+            .output()
+        else {
             eprintln!("SKIPPED: openssl CLI not available");
             return;
         };
