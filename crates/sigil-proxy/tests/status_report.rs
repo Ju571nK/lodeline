@@ -553,7 +553,8 @@ async fn every_response_class_is_handled() {
     assert_eq!(q.quarantined_ids(), ids(&[1]));
     assert_eq!(q.pending_ids(), ids(&[2, 3]));
 
-    // 422 without items: the whole report.
+    // 422 without items: unattributed. Nothing is quarantined; the gaps stay
+    // pending and the next report is a snapshot-only probe.
     let q = GapQueue::new();
     for n in 1..=3 {
         q.push(gap(n)).unwrap();
@@ -564,15 +565,17 @@ async fn every_response_class_is_handled() {
         json!({"error": {"code": "semantic_invalid", "message": "fixed"}}),
     ));
     let o = r.send_once(&fetcher, &v).await.unwrap();
-    assert!(matches!(
-        o,
-        ReportOutcome::Quarantine {
-            whole_report: true,
-            ..
-        }
-    ));
-    assert_eq!(q.quarantined_ids(), ids(&[1, 2, 3]));
-    assert!(q.pending_ids().is_empty());
+    assert_eq!(o, ReportOutcome::Ambiguous);
+    assert!(q.quarantined_ids().is_empty());
+    assert_eq!(q.pending_ids(), ids(&[1, 2, 3]));
+    r.send_once(&fetcher, &v).await.unwrap();
+    let last = sigil_proxy_api::parse_status(&s.status_posts().last().unwrap().body).unwrap();
+    assert!(last.gaps.is_empty(), "probe carries no gaps");
+    assert_eq!(
+        q.pending_ids(),
+        ids(&[1, 2, 3]),
+        "snapshot also 422: gaps stay"
+    );
 
     // 409: the named gap is quarantined, the rest resent.
     let q = GapQueue::new();
@@ -732,6 +735,17 @@ async fn run_reports_the_applied_config() {
     assert_eq!(st.config.event_retention_seconds, Some(7_776_000));
     assert_eq!(st.proxy_id.as_str(), "px-1");
     assert!(s.status_posts().iter().all(|p| p.has_cert));
+    // The sequence bound is persisted on the production path, above what was sent.
+    let bound: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(b.state_dir.join("sequence.json")).unwrap()).unwrap();
+    let max_sent = s
+        .status_posts()
+        .iter()
+        .filter_map(|p| sigil_proxy_api::parse_status(&p.body).ok())
+        .map(|st| st.status_sequence.get())
+        .max()
+        .unwrap();
+    assert!(bound["bound"].as_i64().unwrap() > max_sent);
     stopped.expect("run did not stop").unwrap().unwrap();
     let _ = &s.config;
     let _ = &s.status_replies;
