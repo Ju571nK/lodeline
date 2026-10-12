@@ -260,8 +260,11 @@ pub async fn run_with_shutdown(
 
     // Config sync: fetch over mTLS, apply, keep the TTL deadline.
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let mut report_task = None;
     let sync_task = match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
         Some(fetcher) => {
+            // One mTLS client serves the config fetch and the status report.
+            let fetcher = std::sync::Arc::new(fetcher);
             let lc2 = lc.clone();
             let lc4 = lc.clone();
             let mut sync = crate::config_sync::ConfigSync::new(
@@ -283,10 +286,30 @@ pub async fn run_with_shutdown(
             if let Some(m) = mark {
                 sync = sync.with_high_water(m.revision, m.config_hash);
             }
+            // Status report and heartbeat (T-12c2): follows the config view.
+            let (sync, view_rx) = sync.with_view_channel();
+            let reporter = crate::status_report::Reporter::new(
+                b.proxy_id.as_str(),
+                lock(&lc).epoch_id(),
+                crate::status_report::GapQueue::new(),
+                crate::status_report::ReporterParams::default(),
+            );
+            let (report_fetcher, mut report_stop) = (fetcher.clone(), stop_rx.clone());
+            report_task = Some(tokio::spawn(async move {
+                crate::status_report::run_status_reporter(
+                    &*report_fetcher,
+                    reporter,
+                    view_rx,
+                    async move {
+                        let _ = report_stop.wait_for(|v| *v).await;
+                    },
+                )
+                .await;
+            }));
             Some(tokio::spawn(async move {
                 crate::config_sync::run_sync(
                     sync,
-                    &fetcher,
+                    &*fetcher,
                     crate::config_sync::SyncParams::default(),
                     |s| {
                         if let Err(e) = lock(&lc2).set_config(s) {
@@ -323,6 +346,9 @@ pub async fn run_with_shutdown(
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
     let _ = stop_tx.send(true);
     if let Some(t) = sync_task {
+        let _ = t.await;
+    }
+    if let Some(t) = report_task {
         let _ = t.await;
     }
     let outcome = served?;
