@@ -254,6 +254,28 @@ pub async fn run_with_shutdown(
     table: crate::route::TableHandle,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    run_tuned(b, table, shutdown, RunTuning::default()).await
+}
+
+/// Pacing of the config poll and the status report. TEST-ONLY knob: production
+/// callers use [`RunTuning::default`] (the proposed 30 s values); nothing reads it
+/// from the environment or from `proxy.yaml`. It exists so an integration test
+/// against a real server can observe a revision change within seconds.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunTuning {
+    pub sync: crate::config_sync::SyncParams,
+    pub report: crate::status_report::ReporterParams,
+}
+
+/// [`run_with_shutdown`] with explicit pacing. `#[doc(hidden)]`, tests only.
+#[doc(hidden)]
+pub async fn run_tuned(
+    b: &Bootstrap,
+    table: crate::route::TableHandle,
+    shutdown: impl Future<Output = ()>,
+    tuning: RunTuning,
+) -> anyhow::Result<()> {
     let lc = Lifecycle::start(b)?;
     let initial = lc.status().config_state;
     let mark = lc.applied_mark().cloned();
@@ -312,7 +334,7 @@ pub async fn run_with_shutdown(
                 b.proxy_id.as_str(),
                 &epoch,
                 crate::status_report::GapQueue::new(),
-                crate::status_report::ReporterParams::default(),
+                tuning.report,
             )
             .with_sequence_persistence(
                 seq_floor,
@@ -340,7 +362,7 @@ pub async fn run_with_shutdown(
                     crate::config_sync::run_sync(
                         sync,
                         &*fetcher,
-                        crate::config_sync::SyncParams::default(),
+                        tuning.sync,
                         |s| {
                             if let Err(e) = lock(&lc2).set_config(s) {
                                 tracing::error!(error = %e, "cannot publish config status");
