@@ -76,6 +76,7 @@ pub struct Lifecycle {
     state: StateDir,
     status: LocalStatus,
     applied: Option<crate::state_dir::AppliedMark>,
+    sequence_bound: Option<i64>,
 }
 
 impl Lifecycle {
@@ -88,6 +89,8 @@ impl Lifecycle {
         };
         // A corrupt or foreign mark refuses the start (fail closed).
         let applied = state.read_applied()?;
+        // A corrupt sequence file refuses the start too.
+        let sequence_bound = state.read_sequence_bound()?;
         let config_state = startup_config_state(previous.as_ref());
         let status = LocalStatus {
             schema_version: 1,
@@ -104,6 +107,7 @@ impl Lifecycle {
             state,
             status,
             applied,
+            sequence_bound,
         };
         lc.publish()?;
         Ok(lc)
@@ -112,6 +116,18 @@ impl Lifecycle {
     /// The revision high-water mark loaded at start.
     pub fn applied_mark(&self) -> Option<&crate::state_dir::AppliedMark> {
         self.applied.as_ref()
+    }
+
+    /// Upper bound of the status sequences sent in this epoch, loaded at start.
+    pub fn sequence_bound(&self) -> Option<i64> {
+        self.sequence_bound
+    }
+
+    /// Persist a new status-sequence bound before sequences up to it are used.
+    pub fn persist_sequence_bound(&mut self, bound: i64) -> Result<(), StateError> {
+        self.state.write_sequence_bound(bound)?;
+        self.sequence_bound = Some(bound);
+        Ok(())
     }
 
     /// Persist the high-water mark of a revision about to be applied.
@@ -241,6 +257,7 @@ pub async fn run_with_shutdown(
     let lc = Lifecycle::start(b)?;
     let initial = lc.status().config_state;
     let mark = lc.applied_mark().cloned();
+    let seq_floor = lc.sequence_bound();
     let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
     let acceptor = match &b.listener_tls {
         Some(t) => Some(crate::tls::load_acceptor(&t.cert_file, &t.key_file)?),
@@ -260,51 +277,87 @@ pub async fn run_with_shutdown(
 
     // Config sync: fetch over mTLS, apply, keep the TTL deadline.
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
-    let sync_task = match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
-        Some(fetcher) => {
-            let lc2 = lc.clone();
-            let lc4 = lc.clone();
-            let mut sync = crate::config_sync::ConfigSync::new(
+    let mut report_task = None;
+    let sync_task =
+        match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
+            Some(fetcher) => {
+                // One mTLS client serves the config fetch and the status report.
+                let fetcher = std::sync::Arc::new(fetcher);
+                let lc2 = lc.clone();
+                let lc4 = lc.clone();
+                let mut sync = crate::config_sync::ConfigSync::new(
+                    b.proxy_id.as_str(),
+                    b.credentials.clone(),
+                    b.limits.clone(),
+                    table.clone(),
+                    initial,
+                )
+                .with_persister(Box::new(move |rev, hash| {
+                    match lock(&lc4).persist_applied(rev, hash) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!(error = %e, "cannot persist the applied revision");
+                            false
+                        }
+                    }
+                }));
+                if let Some(m) = mark {
+                    sync = sync.with_high_water(m.revision, m.config_hash);
+                }
+                // Status report and heartbeat (T-12c2): follows the config view.
+                let (sync, view_rx) = sync.with_view_channel();
+                let lc5 = lc.clone();
+                let epoch = lock(&lc).epoch_id().to_string();
+                let reporter = crate::status_report::Reporter::new(
                 b.proxy_id.as_str(),
-                b.credentials.clone(),
-                b.limits.clone(),
-                table.clone(),
-                initial,
+                &epoch,
+                crate::status_report::GapQueue::new(),
+                crate::status_report::ReporterParams::default(),
             )
-            .with_persister(Box::new(move |rev, hash| {
-                match lock(&lc4).persist_applied(rev, hash) {
+            .with_sequence_persistence(
+                seq_floor,
+                Box::new(move |bound| match lock(&lc5).persist_sequence_bound(bound) {
                     Ok(()) => true,
                     Err(e) => {
-                        tracing::error!(error = %e, "cannot persist the applied revision");
+                        tracing::error!(error = %e, "cannot persist the status sequence bound");
                         false
                     }
-                }
-            }));
-            if let Some(m) = mark {
-                sync = sync.with_high_water(m.revision, m.config_hash);
+                }),
+            );
+                let (report_fetcher, mut report_stop) = (fetcher.clone(), stop_rx.clone());
+                report_task = Some(tokio::spawn(async move {
+                    crate::status_report::run_status_reporter(
+                        &*report_fetcher,
+                        reporter,
+                        view_rx,
+                        async move {
+                            let _ = report_stop.wait_for(|v| *v).await;
+                        },
+                    )
+                    .await;
+                }));
+                Some(tokio::spawn(async move {
+                    crate::config_sync::run_sync(
+                        sync,
+                        &*fetcher,
+                        crate::config_sync::SyncParams::default(),
+                        |s| {
+                            if let Err(e) = lock(&lc2).set_config(s) {
+                                tracing::error!(error = %e, "cannot publish config status");
+                            }
+                        },
+                        async move {
+                            let _ = stop_rx.wait_for(|v| *v).await;
+                        },
+                    )
+                    .await;
+                }))
             }
-            Some(tokio::spawn(async move {
-                crate::config_sync::run_sync(
-                    sync,
-                    &fetcher,
-                    crate::config_sync::SyncParams::default(),
-                    |s| {
-                        if let Err(e) = lock(&lc2).set_config(s) {
-                            tracing::error!(error = %e, "cannot publish config status");
-                        }
-                    },
-                    async move {
-                        let _ = stop_rx.wait_for(|v| *v).await;
-                    },
-                )
-                .await;
-            }))
-        }
-        None => {
-            tracing::error!("control_plane_url unusable: no config will be fetched");
-            None
-        }
-    };
+            None => {
+                tracing::error!("control_plane_url unusable: no config will be fetched");
+                None
+            }
+        };
 
     let proxy = crate::server::Proxy::new(
         b.limits.clone(),
@@ -323,6 +376,9 @@ pub async fn run_with_shutdown(
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
     let _ = stop_tx.send(true);
     if let Some(t) = sync_task {
+        let _ = t.await;
+    }
+    if let Some(t) = report_task {
         let _ = t.await;
     }
     let outcome = served?;
@@ -486,5 +542,21 @@ mod tests {
         std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let e = Lifecycle::start(&b).err().expect("must refuse");
         assert!(matches!(e, StateError::BadAppliedRevision(_)), "{e}");
+    }
+
+    /// A corrupt sequence file refuses the start, like a corrupt applied mark.
+    #[test]
+    fn corrupt_sequence_file_refuses_start() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        {
+            let lc = Lifecycle::start(&b).unwrap();
+            assert!(lc.sequence_bound().is_none());
+        }
+        let p = b.state_dir.join(crate::state_dir::SEQUENCE_FILE);
+        std::fs::write(&p, "garbage").unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let e = Lifecycle::start(&b).err().expect("must refuse");
+        assert!(matches!(e, StateError::BadSequence(_)), "{e}");
     }
 }

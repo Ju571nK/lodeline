@@ -89,6 +89,26 @@ pub struct SyncStatus {
     pub last_update_error: Option<LastUpdateError>,
 }
 
+/// The config facts a status report needs (control-plane.md section 6.2 "Status
+/// report"). Identifiers, counts and the hash only: no route, principal, verifier
+/// or credential content. Published through a watch channel so the status
+/// reporter sees every change without sharing the state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigView {
+    pub state: ConfigState,
+    pub last_update_error: Option<LastUpdateError>,
+    /// Highest revision applied (survives expiry, disable and restart).
+    pub applied_revision: Option<i64>,
+    pub config_hash: Option<String>,
+    /// Latest revision the server offered, applied or not.
+    pub observed_revision: Option<i64>,
+    /// Display values of the last applied document; `None` before the first
+    /// apply of this process.
+    pub expires_at: Option<String>,
+    pub max_offline_retry_age_seconds: Option<i64>,
+    pub event_retention_seconds: Option<i64>,
+}
+
 /// Why a parsed config could not become a table. Fixed categories only.
 struct BuildError;
 
@@ -153,6 +173,14 @@ fn route_specs(cfg: &ProxyConfig) -> Result<Vec<RouteSpec>, BuildError> {
     Ok(out)
 }
 
+fn meta_of(cfg: &ProxyConfig) -> (String, i64, i64) {
+    (
+        cfg.expires_at.as_str().to_string(),
+        cfg.max_offline_retry_age_seconds,
+        cfg.event_retention_seconds,
+    )
+}
+
 struct Applied {
     revision: i64,
     hash: String,
@@ -178,6 +206,10 @@ pub struct ConfigSync {
     last_ttl: Option<i64>,
     state: ConfigState,
     last_error: Option<LastUpdateError>,
+    observed_revision: Option<i64>,
+    /// `(expires_at, R, E)` of the last applied document, display only.
+    applied_meta: Option<(String, i64, i64)>,
+    view_tx: Option<tokio::sync::watch::Sender<ConfigView>>,
 }
 
 impl ConfigSync {
@@ -205,6 +237,46 @@ impl ConfigSync {
                 initial
             },
             last_error: None,
+            observed_revision: None,
+            applied_meta: None,
+            view_tx: None,
+        }
+    }
+
+    /// Current facts for a status report.
+    pub fn view(&self) -> ConfigView {
+        let meta = self.applied_meta.as_ref();
+        ConfigView {
+            state: self.state,
+            last_update_error: self.last_error,
+            applied_revision: self.high_water.as_ref().map(|a| a.revision),
+            config_hash: self.high_water.as_ref().map(|a| a.hash.clone()),
+            observed_revision: self.observed_revision,
+            expires_at: meta.map(|m| m.0.clone()),
+            max_offline_retry_age_seconds: meta.map(|m| m.1),
+            event_retention_seconds: meta.map(|m| m.2),
+        }
+    }
+
+    /// Publish every change of [`ConfigSync::view`] on the returned receiver. The
+    /// receiver starts with the current view.
+    pub fn with_view_channel(mut self) -> (ConfigSync, tokio::sync::watch::Receiver<ConfigView>) {
+        let (tx, rx) = tokio::sync::watch::channel(self.view());
+        self.view_tx = Some(tx);
+        (self, rx)
+    }
+
+    fn notify_view(&self) {
+        if let Some(tx) = &self.view_tx {
+            let v = self.view();
+            tx.send_if_modified(|cur| {
+                if *cur == v {
+                    false
+                } else {
+                    *cur = v;
+                    true
+                }
+            });
         }
     }
 
@@ -244,6 +316,11 @@ impl ConfigSync {
     /// enforces the deadline by itself on every `current()`; this is the state
     /// machine catching up and clearing the slot.)
     pub fn expire(&mut self, now: Instant) {
+        self.expire_inner(now);
+        self.notify_view();
+    }
+
+    fn expire_inner(&mut self, now: Instant) {
         if self.deadline.is_some_and(|d| now >= d) {
             self.table.set(None);
             self.deadline = None;
@@ -258,7 +335,13 @@ impl ConfigSync {
 
     /// Feed one fetch result received at `now` (monotonic, the receipt time).
     pub fn on_fetch(&mut self, now: Instant, result: FetchResult) -> SyncOutcome {
-        self.expire(now);
+        let outcome = self.on_fetch_inner(now, result);
+        self.notify_view();
+        outcome
+    }
+
+    fn on_fetch_inner(&mut self, now: Instant, result: FetchResult) -> SyncOutcome {
+        self.expire_inner(now);
         match result {
             FetchResult::Failed | FetchResult::Unavailable => {
                 self.keep(LastUpdateError::FetchFailed)
@@ -283,6 +366,7 @@ impl ConfigSync {
         if cfg.proxy_id.as_str() != self.proxy_id {
             return self.keep(LastUpdateError::ValidationFailed);
         }
+        self.observed_revision = Some(cfg.revision.get());
         let revision = cfg.revision.get();
         let hash = cfg.config_hash().as_str().to_string();
         let ttl = cfg.ttl_seconds;
@@ -313,6 +397,7 @@ impl ConfigSync {
             self.deadline = Some(d);
             self.table.extend_deadline(d);
             self.last_ttl = Some(ttl);
+            self.applied_meta = Some(meta_of(&cfg));
             self.state = ConfigState::Valid;
             self.last_error = None;
             return SyncOutcome::Refreshed;
@@ -339,6 +424,7 @@ impl ConfigSync {
         self.high_water = Some(Applied { revision, hash });
         self.deadline = Some(deadline);
         self.last_ttl = Some(ttl);
+        self.applied_meta = Some(meta_of(&cfg));
         self.state = ConfigState::Valid;
         self.last_error = None;
         if refresh {
@@ -377,7 +463,7 @@ impl Default for SyncParams {
 
 /// `d` scaled by a random factor in `[0.8, 1.2]`. Without OS randomness there is
 /// no jitter (the interval is still bounded).
-fn jitter(d: Duration) -> Duration {
+pub(crate) fn jitter(d: Duration) -> Duration {
     let mut b = [0u8; 2];
     if getrandom::getrandom(&mut b).is_err() {
         return d;
@@ -495,7 +581,7 @@ mod mtls {
     use super::*;
     use crate::bootstrap::{split_host_port, Bootstrap};
     use bytes::Bytes;
-    use http_body_util::{BodyExt, Empty, Limited};
+    use http_body_util::{BodyExt, Full, Limited};
     use hyper_util::rt::TokioIo;
     use std::path::PathBuf;
 
@@ -507,6 +593,7 @@ mod mtls {
         port: u16,
         authority: String,
         path: String,
+        status_path: String,
         ca_file: PathBuf,
         cert_file: PathBuf,
         key_file: PathBuf,
@@ -533,6 +620,7 @@ mod mtls {
                 host,
                 port: port.unwrap_or(443),
                 path: format!("{prefix}/v1/proxy-config"),
+                status_path: format!("{prefix}/v1/proxy-status"),
                 ca_file: b.ca_file.clone(),
                 cert_file: b.client_cert_file.clone(),
                 key_file: b.client_key_file.clone(),
@@ -546,7 +634,17 @@ mod mtls {
             self
         }
 
-        async fn get(&self) -> Option<FetchResult> {
+        /// One request over a fresh mTLS connection (`Connection: close`). Shared
+        /// by the config fetch and the status report, so there is a single client
+        /// and a single set of key/CA checks. The body is `None` when it exceeds
+        /// `max_body` or cannot be read.
+        pub(crate) async fn exchange(
+            &self,
+            method: http::Method,
+            path: &str,
+            payload: Option<Vec<u8>>,
+            max_body: usize,
+        ) -> Option<(http::StatusCode, Option<Bytes>)> {
             let connector =
                 crate::tls::control_plane_connector(&self.ca_file, &self.cert_file, &self.key_file)
                     .ok()?;
@@ -562,25 +660,36 @@ mod mtls {
             tokio::spawn(async move {
                 let _ = conn.await;
             });
-            let req = http::Request::builder()
-                .method(http::Method::GET)
-                .uri(&self.path)
+            let mut req = http::Request::builder()
+                .method(method)
+                .uri(path)
                 .header(http::header::HOST, self.authority.as_str())
                 .header(http::header::ACCEPT, "application/json")
-                .header(http::header::CONNECTION, "close")
-                .body(Empty::<Bytes>::new())
+                .header(http::header::CONNECTION, "close");
+            if payload.is_some() {
+                req = req.header(http::header::CONTENT_TYPE, "application/json");
+            }
+            let req = req
+                .body(Full::new(Bytes::from(payload.unwrap_or_default())))
                 .ok()?;
             let resp = sender.send_request(req).await.ok()?;
             let (parts, body) = resp.into_parts();
-            let status = parts.status;
+            let bytes = Limited::new(body, max_body)
+                .collect()
+                .await
+                .ok()
+                .map(|c| c.to_bytes());
+            Some((parts.status, bytes))
+        }
+
+        async fn get(&self) -> Option<FetchResult> {
+            let (status, bytes) = self
+                .exchange(http::Method::GET, &self.path, None, MAX_CONFIG_BYTES)
+                .await?;
             if status == http::StatusCode::SERVICE_UNAVAILABLE {
                 return Some(FetchResult::Unavailable);
             }
-            let bytes = Limited::new(body, MAX_CONFIG_BYTES)
-                .collect()
-                .await
-                .ok()?
-                .to_bytes();
+            let bytes = bytes?;
             Some(match status {
                 s if s == http::StatusCode::OK => FetchResult::Config(bytes.to_vec()),
                 s if s == http::StatusCode::FORBIDDEN => {
@@ -598,6 +707,27 @@ mod mtls {
                     }
                 }
                 _ => FetchResult::Failed,
+            })
+        }
+    }
+
+    impl crate::status_report::StatusTransport for MtlsFetcher {
+        fn post_status(&self, body: Vec<u8>) -> crate::status_report::PostFuture<'_> {
+            Box::pin(async move {
+                let work = self.exchange(
+                    http::Method::POST,
+                    &self.status_path,
+                    Some(body),
+                    crate::status_report::MAX_STATUS_RESPONSE_BYTES,
+                );
+                match tokio::time::timeout(self.timeout, work).await {
+                    Ok(Some((status, body))) => Some(crate::status_report::StatusReply {
+                        status: status.as_u16(),
+                        body: body.map(|b| b.to_vec()).unwrap_or_default(),
+                    }),
+                    // Transport error, timeout, bad TLS material: no answer.
+                    _ => None,
+                }
             })
         }
     }
@@ -625,6 +755,13 @@ pub struct MtlsFetcher;
 impl MtlsFetcher {
     pub fn from_bootstrap(_: &crate::bootstrap::Bootstrap) -> Option<MtlsFetcher> {
         Some(MtlsFetcher)
+    }
+}
+
+#[cfg(not(unix))]
+impl crate::status_report::StatusTransport for MtlsFetcher {
+    fn post_status(&self, _: Vec<u8>) -> crate::status_report::PostFuture<'_> {
+        Box::pin(async { None })
     }
 }
 

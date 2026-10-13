@@ -25,6 +25,7 @@ pub const LOCK_FILE: &str = "lock";
 pub const BINDING_FILE: &str = "binding.json";
 pub const STATUS_FILE: &str = "status.json";
 pub const APPLIED_FILE: &str = "applied.json";
+pub const SEQUENCE_FILE: &str = "sequence.json";
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -50,6 +51,13 @@ pub enum StateError {
          revision"
     )]
     BadAppliedRevision(String),
+    // Same stance as the applied mark: a reported sequence below the server's
+    // stored one would silently stop snapshots, so an unreadable file is refused.
+    #[error(
+        "status sequence file is unreadable or invalid ({0}); delete sequence.json to reseed \
+         from the clock"
+    )]
+    BadSequence(String),
     #[error("i/o error on {path}: {source}")]
     Io {
         path: String,
@@ -83,6 +91,17 @@ pub struct AppliedMark {
     pub revision: i64,
     /// Lowercase hex SHA-256 `config_hash` of that revision.
     pub config_hash: String,
+}
+
+/// Upper bound of the status sequences handed out in this epoch: every
+/// `status_sequence` sent so far is `<= bound`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceBound {
+    schema_version: u32,
+    proxy_id: String,
+    epoch_id: String,
+    bound: i64,
 }
 
 /// An opened, locked state directory. The lock is released when dropped.
@@ -190,6 +209,42 @@ impl StateDir {
         };
         let bytes = serde_json::to_vec_pretty(&m).expect("mark serializes");
         write_atomic(&self.dir, APPLIED_FILE, &bytes)
+    }
+
+    /// The persisted status-sequence bound of this epoch. `Ok(None)` is a first
+    /// start (or a bound left by an earlier epoch, which restarted its sequence).
+    /// Corrupt, foreign, symlinked or loose-permission content is an error.
+    pub fn read_sequence_bound(&self) -> Result<Option<i64>, StateError> {
+        let path = self.dir.join(SEQUENCE_FILE);
+        let bytes = match crate::fsutil::read_private_file(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let m: SequenceBound = serde_json::from_slice(&bytes)
+            .map_err(|_| StateError::BadSequence("parse error".into()))?;
+        if m.schema_version != 1 || m.bound < 1 {
+            return Err(StateError::BadSequence("unexpected content".into()));
+        }
+        if m.proxy_id != self.proxy_id.as_str() {
+            return Err(StateError::BadSequence("other proxy_id".into()));
+        }
+        if m.epoch_id != self.epoch_id {
+            return Ok(None);
+        }
+        Ok(Some(m.bound))
+    }
+
+    /// Persist the sequence bound (owner-only, tmp + fsync + rename + dir fsync).
+    pub fn write_sequence_bound(&self, bound: i64) -> Result<(), StateError> {
+        let m = SequenceBound {
+            schema_version: 1,
+            proxy_id: self.proxy_id.as_str().to_string(),
+            epoch_id: self.epoch_id.clone(),
+            bound,
+        };
+        let bytes = serde_json::to_vec_pretty(&m).expect("bound serializes");
+        write_atomic(&self.dir, SEQUENCE_FILE, &bytes)
     }
 
     /// Atomically replace a file in the state directory.
@@ -477,5 +532,46 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(dir.join(LOCK_FILE), &path).unwrap();
         assert!(sd.read_applied().is_err());
+    }
+
+    #[test]
+    fn sequence_bound_roundtrip_and_bad_files() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("st");
+        let id = Id::new("px-1").unwrap();
+        let sd = StateDir::open(&dir, &id).unwrap();
+        assert_eq!(sd.read_sequence_bound().unwrap(), None);
+        sd.write_sequence_bound(5000).unwrap();
+        assert_eq!(sd.read_sequence_bound().unwrap(), Some(5000));
+        let path = dir.join(SEQUENCE_FILE);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let good = std::fs::read_to_string(&path).unwrap();
+        for bad in [
+            "not json".to_string(),
+            good.replace("5000", "0"),
+            good.replace("\"schema_version\": 1", "\"schema_version\": 2"),
+            good.replace("px-1", "other"),
+            good.replace("\"bound\"", "\"x\": 1, \"bound\""),
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(
+                matches!(sd.read_sequence_bound(), Err(StateError::BadSequence(_))),
+                "accepted a bad sequence file"
+            );
+        }
+        // a bound of another epoch is not this epoch's
+        let other = good.replace(sd.epoch_id(), "00000000-0000-4000-8000-00000000ffff");
+        std::fs::write(&path, other).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(sd.read_sequence_bound().unwrap(), None);
+        // loose permissions and a symlink: refused
+        sd.write_sequence_bound(5000).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(sd.read_sequence_bound().is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.join(LOCK_FILE), &path).unwrap();
+        assert!(sd.read_sequence_bound().is_err());
     }
 }

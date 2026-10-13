@@ -16,5 +16,6 @@ pub mod limits;
 pub mod route;
 pub mod server;
 pub mod state_dir;
+pub mod status_report;
 pub mod tls;
 pub mod token;
