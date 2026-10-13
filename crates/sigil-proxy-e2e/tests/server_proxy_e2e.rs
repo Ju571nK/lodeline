@@ -423,11 +423,6 @@ async fn upstream() -> Upstream {
 
 // ------------------------------------------------------------------ proxy
 
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
 fn spec(up_port: u16, tokens: &[(&str, &str)], limit_bytes: i64) -> serde_json::Value {
     let principals: Vec<_> = tokens
         .iter()
@@ -488,8 +483,11 @@ impl RunningProxy {
 }
 
 /// Fast pacing so the whole flow takes seconds (test-only knob).
-fn tuning() -> RunTuning {
-    let mut t = RunTuning::default();
+fn tuning(listener: std::net::TcpListener) -> RunTuning {
+    let mut t = RunTuning {
+        listener: Some(listener),
+        ..RunTuning::default()
+    };
     t.sync.poll = Duration::from_millis(150);
     t.sync.retry = Duration::from_millis(150);
     t.report.heartbeat = Duration::from_millis(200);
@@ -510,9 +508,12 @@ fn start_proxy(
     let secret = d.join("upstream-secret");
     std::fs::write(&secret, "UPSTREAM-SECRET-VALUE\n").unwrap();
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let listen = free_port();
+    // Bound here and handed to the proxy (test-util `RunTuning::listener`), so
+    // there is no bind-then-release port race. The bootstrap `listen` is unused.
+    let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen = sock.local_addr().unwrap().port();
     let yaml = format!(
-        "proxy_id: {PROXY_ID}\nlisten: \"127.0.0.1:{listen}\"\n\
+        "proxy_id: {PROXY_ID}\nlisten: \"127.0.0.1:0\"\n\
          control_plane_url: \"https://127.0.0.1:{server_port}\"\n\
          state_dir: {}\nclient_cert_file: {}\nclient_key_file: {}\nca_file: {}\n\
          credentials:\n  gh:\n    secret_file: {}\n    upstream_origins: [\"http://127.0.0.1:{up_port}\"]\n",
@@ -531,7 +532,7 @@ fn start_proxy(
             async move {
                 let _ = rx.await;
             },
-            tuning(),
+            tuning(sock),
         )
         .await
     });
@@ -694,6 +695,8 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
     })
     .await;
 
+    // Scope rule (control-plane.md section 1.3 / H3): disable is safe-direction and
+    // needs the `config` scope; enable restores trust and needs `identity`.
     // 6. Disable: forwarding stops on the next fetch; the report is refused.
     let (st, _) = srv
         .mgmt(
@@ -714,15 +717,27 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
         read_status(&sd).is_some_and(|s| s.config_state == ConfigState::Disabled && !s.forwarding)
     })
     .await;
-    // Reports are refused: last_seen is frozen across several heartbeats, and a
-    // direct report with the proxy's own certificate gets the fixed 403.
+    // What this proves: (a) once its view is `disabled` the proxy sends no report
+    // by design, so `last_seen` stays frozen across several heartbeats (the proxy
+    // goes silent); (b) the server refuses a status POST that carries the proxy
+    // certificate (403 `disabled`). It does NOT exercise the proxy's own Rejected
+    // path: a proxy-sent report can only be refused in the race window between the
+    // server-side disable and the proxy's next fetch, which cannot be made
+    // deterministic here. The status_report unit test covers Rejected.
+    let local = read_status(&px.state_dir).expect("local status file");
+    assert_eq!(local.config_state, ConfigState::Disabled);
+    assert!(!local.forwarding);
+    assert_eq!(
+        local.last_update_error, None,
+        "a disabled answer is not an update error"
+    );
     tokio::time::sleep(Duration::from_millis(600)).await;
     let frozen = srv.ctx.store.last_seen(PROXY_ID);
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert_eq!(
         srv.ctx.store.last_seen(PROXY_ID),
         frozen,
-        "no report is accepted while disabled"
+        "the proxy sends no report while disabled"
     );
     let direct = mtls_client(&pki.p("hostca.crt"), &proxy_cert.0, &proxy_cert.1)
         .post(srv.url("/v1/proxy-status"))
@@ -756,6 +771,33 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
         ctx.store.last_seen(PROXY_ID) != before_seen
     })
     .await;
+
+    // The server exposes no per-proxy read DTO (no GET /v1/proxies/{id}); its only
+    // read route for this plane is the management audit stream. Check it records
+    // the lifecycle the test drove, through the HTTP route a manager would use.
+    let r = srv
+        .mgmt
+        .get(srv.url("/v1/proxy-management-audit"))
+        .bearer_auth("read-bearer")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let audit: serde_json::Value = r.json().await.unwrap();
+    let actions: Vec<&str> = audit["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x["action"].as_str())
+        .collect();
+    for want in [
+        "proxy.register",
+        "proxy.config_put",
+        "proxy.disable",
+        "proxy.enable",
+    ] {
+        assert!(actions.contains(&want), "audit lacks {want}: {actions:?}");
+    }
 
     px.shutdown().await;
     srv.handle.graceful_shutdown(Some(Duration::from_secs(1)));

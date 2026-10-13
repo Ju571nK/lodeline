@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 sigil-server = { path = "../sigil-server" }
-sigil-proxy = { path = "../sigil-proxy" }
+sigil-proxy = { path = "../sigil-proxy", features = ["test-util"] }
 sigil-proxy-api = { path = "../sigil-proxy-api" }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

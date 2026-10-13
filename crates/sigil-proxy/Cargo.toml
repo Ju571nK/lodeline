@@ -47,6 +47,11 @@ rustls-pemfile = { workspace = true }
 tokio-rustls = { workspace = true }
 webpki-roots = "1"
 
+[features]
+# Test-only pacing knob and pre-bound listener (`lifecycle::RunTuning`). Enabled
+# only by the sigil-proxy-e2e dev-dependency; never in release builds.
+test-util = []
+
 [dev-dependencies]
 tempfile = { workspace = true }
 libc = { workspace = true }
