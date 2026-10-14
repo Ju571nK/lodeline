@@ -785,3 +785,36 @@ fn ledger_sweep_helper_uses_default_retention_without_stored_config() {
     let s = sigil_server::proxy::sweep_ledger(&l, &store, 1_000 + e + 1).unwrap();
     assert_eq!(s.events, 1);
 }
+
+#[test]
+fn with_many_open_gaps_only_the_containing_gap_advances() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    // sequences 1,4,7,...: gaps [2,3],[5,6],[8,9],...
+    let batch: Vec<_> = (0..300i64).map(|i| ev("px", 1 + 3 * i)).collect();
+    for c in batch.chunks(100) {
+        l.insert_batch("px", c, 10).unwrap();
+    }
+    assert_eq!(l.gaps("px").unwrap().len(), 299);
+    // 5 is in gap [5,6]: it stays open (1 of 2), and so do all the others
+    l.insert_batch("px", &[ev("px", 5)], 11).unwrap();
+    assert!(l.gaps("px").unwrap().iter().all(|g| g.open));
+    // 6 completes exactly that gap
+    l.insert_batch("px", &[ev("px", 6)], 12).unwrap();
+    let closed: Vec<_> = l
+        .gaps("px")
+        .unwrap()
+        .into_iter()
+        .filter(|g| !g.open)
+        .collect();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        (closed[0].from_sequence, closed[0].to_sequence),
+        (Some(5), Some(6))
+    );
+    // a sequence in the next gap closes only after both of its sequences
+    l.insert_batch("px", &[ev("px", 3)], 13).unwrap();
+    assert_eq!(l.gaps("px").unwrap().iter().filter(|g| !g.open).count(), 1);
+    l.insert_batch("px", &[ev("px", 2)], 14).unwrap();
+    assert_eq!(l.gaps("px").unwrap().iter().filter(|g| !g.open).count(), 2);
+}

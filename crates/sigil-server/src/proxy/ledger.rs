@@ -879,22 +879,35 @@ fn derive_gaps(
         // (epoch, sequence) while its tombstone lives, so counts cannot double.
         // Gaps older than T stop counting: a replay of an already-filled
         // sequence (tombstone expired) must not close a gap wrongly, so such a
-        // gap can only stay open (safe direction). Overlapping gaps (possible
-        // only when an epoch row was swept and the epoch reappeared) each
-        // count the arrival.
-        tx.execute(
-            "UPDATE gaps SET present = present + 1
-             WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND kind = 'sequence_gap'
-               AND from_sequence <= ?3 AND to_sequence >= ?3 AND detected_at >= ?4",
-            params![proxy_id, epoch, seq, now.saturating_sub(tombstone_secs)],
-        )?;
-        tx.execute(
-            "UPDATE gaps SET open = 0, closed_at = ?3
-             WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND kind = 'sequence_gap'
-               AND from_sequence <= ?4 AND to_sequence >= ?4
-               AND present >= to_sequence - from_sequence + 1",
-            params![proxy_id, epoch, now, seq],
-        )?;
+        // gap can only stay open (safe direction).
+        // Gaps within an epoch are disjoint (a gap always starts above the
+        // highest accepted sequence), so at most one open gap contains `seq`:
+        // the one with the greatest start <= seq. Index range lookup, O(log n).
+        let cand: Option<(String, i64, i64, i64, i64)> = tx
+            .query_row(
+                "SELECT gap_id, from_sequence, to_sequence, present, detected_at FROM gaps
+                 WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND from_sequence <= ?3
+                 ORDER BY from_sequence DESC LIMIT 1",
+                params![proxy_id, epoch, seq],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        if let Some((gap_id, from, to, present, detected_at)) = cand {
+            if to >= seq && detected_at >= now.saturating_sub(tombstone_secs) {
+                let present = present + 1;
+                if present > to - from {
+                    tx.execute(
+                        "UPDATE gaps SET present = ?2, open = 0, closed_at = ?3 WHERE gap_id = ?1",
+                        params![gap_id, present, now],
+                    )?;
+                } else {
+                    tx.execute(
+                        "UPDATE gaps SET present = ?2 WHERE gap_id = ?1",
+                        params![gap_id, present],
+                    )?;
+                }
+            }
+        }
     }
     Ok(added)
 }
