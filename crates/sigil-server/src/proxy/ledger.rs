@@ -429,6 +429,28 @@ impl Ledger {
             .map(|_| ())
     }
 
+    /// Per event: is it already stored byte-equal (live row or tombstone)?
+    /// Read only; the ingest handler skips registry validation for these.
+    pub fn existing_equal(
+        &self,
+        proxy_id: &str,
+        events: &[ProxyEvent],
+    ) -> Result<Vec<bool>, LedgerError> {
+        let conn = self.conn.lock();
+        let mut out = Vec::with_capacity(events.len());
+        for ev in events {
+            let digest = Prepared::new(ev).digest;
+            let hit: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE proxy_id = ?1 AND event_id = ?2 AND sha256 = ?3)
+                     OR EXISTS(SELECT 1 FROM tombstones WHERE proxy_id = ?1 AND event_id = ?2 AND sha256 = ?3)",
+                params![proxy_id, ev.event_id.as_str(), digest],
+                |r| r.get(0),
+            )?;
+            out.push(hit);
+        }
+        Ok(out)
+    }
+
     fn insert_inner(
         &self,
         proxy_id: &str,

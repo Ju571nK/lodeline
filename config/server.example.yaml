@@ -131,9 +131,12 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # Registry-entry store for POST /v1/proxy-metadata (SQLite, 0600). Default:
 #   # proxy-metadata.sqlite next to state_path. Caps answer 503 storage_limit (unmeasured values).
 #   # metadata_path: /var/lib/sigil-server/proxy-metadata.sqlite
-#   # metadata_max_entries_per_proxy: 20000       # 1..10000000
+#   # metadata_max_entries_per_proxy: 10000       # 1..10000000
+#   # metadata_max_bytes_per_proxy: 134217728     # <= metadata_max_bytes_total
 #   # metadata_max_bytes_total: 1073741824        # 1048576..1099511627776
-#   # Concurrent POST /v1/proxy-events (1..1024, default 16); above it: 429 rate_limited.
+#   # Concurrent ingest/upload requests (1..256, default 16); above it: 429 rate_limited.
+#   # One proxy may hold at most max(1, N/4). Unmeasured test values.
+#   # ingest_body_timeout_seconds: 20   # 1..300; a slower body is answered 429 and frees its slot
 #   # ingest_max_concurrent: 16
 #   # Seconds between ledger retention sweeps (60..86400, default 3600).
 #   # ledger_sweep_interval_seconds: 3600

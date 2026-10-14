@@ -48,6 +48,11 @@ pub struct ProxyContext {
     pub metadata: metadata::MetadataStore,
     /// Concurrent ingest/upload requests allowed (429 `rate_limited` above).
     pub ingest_slots: Arc<tokio::sync::Semaphore>,
+    /// Slots held per proxy (see `ingest::acquire_slot`) and the cap per proxy.
+    pub ingest_per_proxy: Mutex<HashMap<String, u32>>,
+    pub ingest_per_proxy_cap: u32,
+    /// Time allowed to read one ingest/upload body.
+    pub ingest_body_timeout: Duration,
     /// Rate-limited refusal logging for the ingest and upload routes.
     pub ingest_log: ingest::DenyLog,
     /// Seconds between ledger retention sweeps.
@@ -119,6 +124,7 @@ impl ProxyContext {
             &pc.metadata_path(),
             metadata::MetadataCaps {
                 entries_per_proxy: pc.metadata_max_entries_per_proxy(),
+                bytes_per_proxy: pc.metadata_max_bytes_per_proxy(),
                 bytes_total: pc.metadata_max_bytes_total(),
             },
         )
@@ -168,6 +174,9 @@ impl ProxyContext {
             ingest_slots: Arc::new(tokio::sync::Semaphore::new(
                 pc.ingest_max_concurrent() as usize
             )),
+            ingest_per_proxy: Mutex::new(HashMap::new()),
+            ingest_per_proxy_cap: (pc.ingest_max_concurrent() / 4).max(1),
+            ingest_body_timeout: Duration::from_secs(u64::from(pc.ingest_body_timeout())),
             ingest_log: ingest::DenyLog::default(),
             sweep_interval_secs: pc.ledger_sweep_interval(),
             config_ttl: pc.config_ttl(),

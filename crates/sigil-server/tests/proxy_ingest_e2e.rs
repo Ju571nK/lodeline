@@ -370,6 +370,20 @@ async fn send(
     bearer: Option<&str>,
     body: Option<&str>,
 ) -> Resp {
+    try_send(c, port, method, path, bearer, body).await.unwrap()
+}
+
+/// Like `send`, but a transport error is returned. The server answers before it
+/// reads a big body, so the client may see the connection close while it is
+/// still writing (broken pipe) instead of the response: both are a refusal.
+async fn try_send(
+    c: &reqwest::Client,
+    port: u16,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: Option<&str>,
+) -> Result<Resp, reqwest::Error> {
     let url = format!("https://127.0.0.1:{port}{path}");
     let mut rb = c.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url);
     if let Some(b) = bearer {
@@ -380,16 +394,16 @@ async fn send(
             .header("content-type", "application/json")
             .body(b.to_string());
     }
-    let r = rb.send().await.unwrap();
+    let r = rb.send().await?;
     let content_type = r
         .headers()
         .get("content-type")
         .map(|v| v.to_str().unwrap().to_string());
-    Resp {
+    Ok(Resp {
         status: r.status().as_u16(),
         content_type,
-        body: r.bytes().await.unwrap().to_vec(),
-    }
+        body: r.bytes().await?.to_vec(),
+    })
 }
 
 /// A proxy with one active certificate and its client.
@@ -694,11 +708,15 @@ async fn identity_is_checked_before_the_body_is_read() {
     for c in &clients {
         for path in ["/v1/proxy-events", "/v1/proxy-metadata"] {
             for body in [big.as_str(), "{", ""] {
-                let r = send(c, fx.port, "POST", path, None, Some(body)).await;
-                assert_eq!(
-                    (r.status, r.body.clone()),
-                    (404, err_body(ErrorCode::ProxyUnknown))
-                );
+                // A transport error is only acceptable for the big body: the
+                // server refused before reading it.
+                match try_send(c, fx.port, "POST", path, None, Some(body)).await {
+                    Ok(r) => assert_eq!(
+                        (r.status, r.body.clone()),
+                        (404, err_body(ErrorCode::ProxyUnknown))
+                    ),
+                    Err(_) => assert_eq!(body.len(), big.len(), "small bodies must get the 404"),
+                }
             }
         }
     }
@@ -716,8 +734,10 @@ async fn identity_is_checked_before_the_body_is_read() {
     assert_eq!(r.status, 200);
     for path in ["/v1/proxy-events", "/v1/proxy-metadata"] {
         for body in [big.as_str(), "{"] {
-            let r = send(&env.a.client, fx.port, "POST", path, None, Some(body)).await;
-            assert_eq!((r.status, r.body), (403, err_body(ErrorCode::Disabled)));
+            match try_send(&env.a.client, fx.port, "POST", path, None, Some(body)).await {
+                Ok(r) => assert_eq!((r.status, r.body), (403, err_body(ErrorCode::Disabled))),
+                Err(_) => assert_eq!(body.len(), big.len(), "small bodies must get the 403"),
+            }
         }
     }
     assert!(!env.stored("pxa", 1));
@@ -1203,4 +1223,135 @@ async fn the_retention_sweep_runs_on_a_schedule() {
     // The sweep did not stop the server from ingesting.
     let r = events(fx, a, &batch(&[ping("pxa", 3)])).await;
     assert_eq!(r.status, 200);
+}
+
+#[tokio::test]
+async fn a_slow_body_frees_its_slot_and_one_proxy_cannot_take_them_all() {
+    // N = 4 slots, so one proxy may hold max(1, 4/4) = 1. Body timeout 1 s.
+    let env = Env::with(|p| {
+        p.ingest_max_concurrent = Some(4);
+        p.ingest_body_timeout_seconds = Some(1);
+    })
+    .await;
+    let (fx, a, b) = (&env.fx, &env.a, &env.b);
+
+    // pxa starts a request and never finishes the body.
+    let (mut w, rd) = tokio::io::duplex(64);
+    let stream = tokio_util::io::ReaderStream::new(rd);
+    let url = format!("https://127.0.0.1:{}/v1/proxy-events", fx.port);
+    let client = a.client.clone();
+    let slow = tokio::spawn(async move {
+        client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+    });
+    tokio::io::AsyncWriteExt::write_all(&mut w, b"{\"events\":[")
+        .await
+        .unwrap();
+    // Wait until the server holds the slot.
+    for _ in 0..100 {
+        if fx.ctx.ingest_slots.available_permits() < 4 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(fx.ctx.ingest_slots.available_permits(), 3);
+
+    // Per-proxy cap: a second request of pxa is refused at once, while pxb
+    // still gets through.
+    let r = events(fx, a, &batch(&[ping("pxa", 1)])).await;
+    assert_eq!((r.status, r.body), (429, err_body(ErrorCode::RateLimited)));
+    let r = events(fx, b, &batch(&[ping("pxb", 2)])).await;
+    assert_eq!(r.status, 200);
+
+    // After the timeout the slow request is answered 429 and the slot is free.
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(10), slow)
+        .await
+        .expect("the server must end the slow request")
+        .unwrap()
+        .expect("a response, not a transport error");
+    assert_eq!(resp.status().as_u16(), 429);
+    assert_eq!(fx.ctx.ingest_slots.available_permits(), 4);
+    assert!(fx.ctx.ingest_per_proxy.lock().is_empty());
+    let r = events(fx, a, &batch(&[ping("pxa", 1)])).await;
+    assert_eq!(r.status, 200);
+    drop(w);
+}
+
+#[tokio::test]
+async fn a_retransmission_after_route_edits_is_a_duplicate_not_a_422() {
+    let env = Env::new().await;
+    let (fx, a) = (&env.fx, &env.a);
+    let s1 = env.scope("pxa");
+    env.register(a, &mref(1)).await;
+    let ev = batch(&[call("pxa", 1, &mref(1))]);
+    let up = upload_body("pxa", &[entry_json("pxa", &mref(1), &s1, 'a')]);
+    assert_eq!(events(fx, a, &ev).await.status, 200);
+
+    // Two route edits: s1 is now two revisions back.
+    for (rev, cred) in [(1, "gh2"), (2, "gh3")] {
+        let mut s = spec("pxa", "tok-a");
+        s["routes"][0]["credential_ref"] = cred.into();
+        assert_eq!(
+            put(fx, "pxa", Some(T_CFG), &put_body(rev, &s)).await.status,
+            200
+        );
+    }
+    // A new event naming the old entry is a 422 ...
+    let r = events(fx, a, &batch(&[call("pxa", 2, &mref(1))])).await;
+    assert_eq!(r.status, 422);
+    // ... but the ack-lost retransmission of the stored one is a duplicate.
+    let r = events(fx, a, &ev).await;
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(ids(&r.json()["duplicate_event_ids"]), [uid(1)]);
+    assert!(ids(&r.json()["accepted_event_ids"]).is_empty());
+
+    // Same for the upload: the equal entry is a duplicate, a new one with the
+    // stale scope is a 422.
+    let r = upload(fx, a, &up).await;
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(ids(&r.json()["duplicate_metadata_refs"]), [mref(1)]);
+    let r = upload(
+        fx,
+        a,
+        &upload_body("pxa", &[entry_json("pxa", &mref(2), &s1, 'b')]),
+    )
+    .await;
+    assert_eq!(r.status, 422);
+}
+
+#[tokio::test]
+async fn metadata_bytes_are_capped_per_proxy_on_the_full_row_size() {
+    let env = Env::with(|p| p.metadata_max_bytes_per_proxy = Some(1024 * 1024)).await;
+    let (fx, a, b) = (&env.fx, &env.a, &env.b);
+    let sa = env.scope("pxa");
+    let big = |n: u32| {
+        let mut e = entry_json("pxa", &mref(n), &sa, 'a');
+        e["definition"] = json!({"pad": "x".repeat(250 * 1024)});
+        e
+    };
+    // 4 x ~250 KiB fit in 1 MiB; the 5th does not.
+    for n in 1..=4 {
+        let r = upload(fx, a, &upload_body("pxa", &[big(n)])).await;
+        assert_eq!(r.status, 200, "{n}: {}", String::from_utf8_lossy(&r.body));
+    }
+    let r = upload(fx, a, &upload_body("pxa", &[big(5)])).await;
+    assert_eq!((r.status, r.body), (503, err_body(ErrorCode::StorageLimit)));
+    assert_eq!(fx.ctx.metadata.count("pxa").unwrap(), 4);
+    // The cap is per proxy: pxb is unaffected.
+    env.register(b, &mref(1)).await;
+}
+
+#[tokio::test]
+async fn get_on_the_new_routes_does_not_reach_the_handlers() {
+    let env = Env::new().await;
+    let (fx, a) = (&env.fx, &env.a);
+    for path in ["/v1/proxy-events", "/v1/proxy-metadata"] {
+        let r = send(&a.client, fx.port, "GET", path, None, None).await;
+        assert_eq!(r.status, 405, "{path}");
+    }
+    assert_eq!(fx.ctx.ingest_slots.available_permits(), 16);
 }

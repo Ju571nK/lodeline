@@ -31,7 +31,9 @@
 //! volatile: first write wins. Nothing submitted is echoed.
 
 use super::guard::{proxy_unknown, VerifiedProxy};
-use super::ingest::{api_response, differs, fixed, index_u32, read_capped, semantic_422};
+use super::ingest::{
+    acquire_slot, api_response, differs, fixed, index_u32, read_body, semantic_422,
+};
 use super::ProxyContext;
 use anyhow::{bail, Context, Result};
 use axum::body::Body;
@@ -47,7 +49,6 @@ use sigil_proxy_api::{
 };
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::TryAcquireError;
 
 pub const METADATA_PATH: &str = "/v1/proxy-metadata";
 /// Request body cap (registry.md R2: 4 MiB).
@@ -140,7 +141,23 @@ pub struct UploadOutcome {
 #[derive(Clone, Copy, Debug)]
 pub struct MetadataCaps {
     pub entries_per_proxy: u64,
+    pub bytes_per_proxy: u64,
     pub bytes_total: u64,
+}
+
+/// Stored size of one entry: the definition plus every other stored column
+/// (text lengths and a fixed allowance for row/index overhead).
+fn row_size(e: &RegistryEntry, def_len: usize) -> i64 {
+    let fixed = e.proxy_id.as_str().len()
+        + e.metadata_ref.as_str().len() * 2
+        + e.upstream_id.as_str().len()
+        + e.credential_scope_id.as_str().len()
+        + e.key_id.as_str().len()
+        + e.fingerprint.as_str().len()
+        + e.observed_at.as_str().len()
+        + 64
+        + 256;
+    i64::try_from(def_len + fixed).unwrap_or(i64::MAX)
 }
 
 pub struct MetadataStore {
@@ -278,12 +295,12 @@ impl MetadataStore {
                             mine.6,
                             e.observed_at.as_str(),
                             def,
-                            def.len() as i64,
+                            row_size(e, def.len()),
                             now,
                         ],
                     )?;
                     new_entries += 1;
-                    new_bytes += def.len() as i64;
+                    new_bytes += row_size(e, def.len());
                     out.registered.push(e.metadata_ref.clone());
                 }
             }
@@ -298,21 +315,46 @@ impl MetadataStore {
                      entries = entries + excluded.entries, bytes = bytes + excluded.bytes",
                 params![proxy_id, new_entries, new_bytes],
             )?;
-            let mine: i64 = tx.query_row(
-                "SELECT entries FROM usage WHERE proxy_id = ?1",
+            let (mine, mine_bytes): (i64, i64) = tx.query_row(
+                "SELECT entries, bytes FROM usage WHERE proxy_id = ?1",
                 params![proxy_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let total: i64 =
                 tx.query_row("SELECT COALESCE(SUM(bytes), 0) FROM usage", [], |r| {
                     r.get(0)
                 })?;
             let over = |v: i64, cap: u64| u64::try_from(v).is_ok_and(|v| v > cap);
-            if over(mine, self.caps.entries_per_proxy) || over(total, self.caps.bytes_total) {
+            if over(mine, self.caps.entries_per_proxy)
+                || over(mine_bytes, self.caps.bytes_per_proxy)
+                || over(total, self.caps.bytes_total)
+            {
                 return Err(UploadError::StorageLimit);
             }
         }
         tx.commit()?;
+        Ok(out)
+    }
+
+    /// Per entry: is an entry with equal immutable fields already stored?
+    pub fn existing_equal(
+        &self,
+        proxy_id: &str,
+        entries: &[RegistryEntry],
+    ) -> Result<Vec<bool>, UploadError> {
+        let conn = self.conn.lock();
+        let mut out = Vec::with_capacity(entries.len());
+        for e in entries {
+            let m = immutable_of(e);
+            let hit: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE proxy_id = ?1 AND metadata_ref = ?2
+                     AND upstream_id = ?3 AND credential_scope_id = ?4 AND protocol_version = ?5
+                     AND observation_source = ?6 AND canon = ?7 AND key_id = ?8 AND fingerprint = ?9)",
+                params![proxy_id, e.metadata_ref.as_str(), m.0, m.1, m.2, m.3, m.4, m.5, m.6],
+                |r| r.get(0),
+            )?;
+            out.push(hit);
+        }
         Ok(out)
     }
 
@@ -377,18 +419,25 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
         return proxy_unknown();
     }
 
-    // 422: oversized definition, or a scope the server did not assign.
+    // 422: oversized definition, or a scope the server did not assign. An
+    // entry equal to a stored one is a duplicate and skips the scope check
+    // (a retry after the scope window moved on must not turn into a 422).
+    let stored_equal = match ctx.metadata.existing_equal(peer_id, &req.entries) {
+        Ok(v) => v,
+        Err(_) => return fixed(ErrorCode::StorageUnavailable),
+    };
     let invalid: Vec<usize> = req
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| {
+        .filter(|(i, e)| {
             serde_json::to_vec(&e.definition).map_or(usize::MAX, |d| d.len()) > MAX_DEFINITION_BYTES
-                || !ctx.store.scope_assigned(
-                    peer_id,
-                    e.upstream_id.as_str(),
-                    e.credential_scope_id.as_str(),
-                )
+                || (!stored_equal[*i]
+                    && !ctx.store.scope_assigned(
+                        peer_id,
+                        e.upstream_id.as_str(),
+                        e.credential_scope_id.as_str(),
+                    ))
         })
         .map(|(i, _)| i)
         .collect();
@@ -441,21 +490,17 @@ pub async fn post_metadata(
     Extension(id): Extension<VerifiedProxy>,
     req: Request<Body>,
 ) -> Response {
-    let permit = match ctx.ingest_slots.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(TryAcquireError::NoPermits) => {
-            ctx.ingest_log.note("metadata", "rate_limited");
-            return fixed(ErrorCode::RateLimited);
-        }
-        Err(TryAcquireError::Closed) => return fixed(ErrorCode::StorageUnavailable),
+    let slot = match acquire_slot(&ctx, &id.proxy_id, "metadata") {
+        Ok(s) => s,
+        Err(r) => return *r,
     };
-    let Some(body) = read_capped(req.into_body(), MAX_UPLOAD_BODY).await else {
-        ctx.ingest_log.note("metadata", "payload_too_large");
-        return fixed(ErrorCode::PayloadTooLarge);
+    let body = match read_body(&ctx, req.into_body(), MAX_UPLOAD_BODY, "metadata").await {
+        Ok(b) => b,
+        Err(r) => return *r,
     };
     let r = tokio::task::spawn_blocking(move || {
         let r = handle(&ctx, &id.proxy_id, &body);
-        drop(permit);
+        drop(slot);
         r
     })
     .await;

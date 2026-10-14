@@ -214,6 +214,14 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
         return proxy_unknown();
     }
 
+    // An event already stored byte-equal is a duplicate: it is not re-judged
+    // against the registry or the (since changed) route scopes, so an
+    // ack-lost retransmission after route edits is still a duplicate.
+    let stored_equal = match ctx.ledger.existing_equal(peer_id, &events) {
+        Ok(v) => v,
+        Err(e) => return storage_error(&e),
+    };
+
     // SV-2..SV-5 over every start that names a ref.
     let mut invalid: Vec<usize> = Vec::new();
     let mut pending: Vec<(usize, MetadataRef)> = Vec::new();
@@ -221,6 +229,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
         let wanted: Vec<(usize, &MetadataRef)> = events
             .iter()
             .enumerate()
+            .filter(|(i, _)| !stored_equal[*i])
             .filter_map(|(i, e)| match &e.payload {
                 EventPayload::Started(s) => match &s.tool {
                     Some(Tool::Identified(t)) => Some((i, &t.metadata_ref)),
@@ -335,28 +344,96 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
     }
 }
 
-/// Handler: take an ingest slot, read the capped body, run [`handle`] on the
-/// blocking pool while holding the slot.
+/// One ingest/upload slot: a global permit plus a per-proxy count, both
+/// released on drop (also when the request is cancelled mid-read).
+pub(super) struct Slot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    ctx: Arc<ProxyContext>,
+    id: String,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut g = self.ctx.ingest_per_proxy.lock();
+        if let Some(n) = g.get_mut(&self.id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                g.remove(&self.id);
+            }
+        }
+    }
+}
+
+/// Take a slot for `proxy_id`, or the 429 to send. One identity may hold at
+/// most `ingest_per_proxy_cap` slots (max(1, N/4)), so it cannot starve the
+/// others; the global semaphore bounds the total.
+pub(super) fn acquire_slot(
+    ctx: &Arc<ProxyContext>,
+    proxy_id: &str,
+    route: &'static str,
+) -> Result<Slot, Box<Response>> {
+    let busy = |reason: &'static str| {
+        ctx.ingest_log.note(route, reason);
+        fixed(ErrorCode::RateLimited)
+    };
+    let mut g = ctx.ingest_per_proxy.lock();
+    if g.get(proxy_id).copied().unwrap_or(0) >= ctx.ingest_per_proxy_cap {
+        return Err(Box::new(busy("rate_limited_proxy")));
+    }
+    let permit = match ctx.ingest_slots.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(TryAcquireError::NoPermits) => return Err(Box::new(busy("rate_limited"))),
+        Err(TryAcquireError::Closed) => return Err(Box::new(fixed(ErrorCode::StorageUnavailable))),
+    };
+    *g.entry(proxy_id.to_string()).or_insert(0) += 1;
+    Ok(Slot {
+        _permit: permit,
+        ctx: ctx.clone(),
+        id: proxy_id.to_string(),
+    })
+}
+
+/// Read the capped body within the body timeout (a trickling client must not
+/// hold a slot). There is no 408 error code in the contract, so a timeout is
+/// answered 429 `rate_limited`: the request was not processed, nothing was
+/// stored, and the producer's reaction (back off, retry) is the right one.
+pub(super) async fn read_body(
+    ctx: &ProxyContext,
+    body: Body,
+    limit: usize,
+    route: &'static str,
+) -> Result<Bytes, Box<Response>> {
+    match tokio::time::timeout(ctx.ingest_body_timeout, read_capped(body, limit)).await {
+        Ok(Some(b)) => Ok(b),
+        Ok(None) => {
+            ctx.ingest_log.note(route, "payload_too_large");
+            Err(Box::new(fixed(ErrorCode::PayloadTooLarge)))
+        }
+        Err(_) => {
+            ctx.ingest_log.note(route, "body_timeout");
+            Err(Box::new(fixed(ErrorCode::RateLimited)))
+        }
+    }
+}
+
+/// Handler: take an ingest slot, read the capped body (with timeout), run
+/// [`handle`] on the blocking pool while holding the slot.
 pub async fn post_events(
     State(ctx): State<Arc<ProxyContext>>,
     Extension(id): Extension<VerifiedProxy>,
     req: Request<Body>,
 ) -> Response {
-    let permit = match ctx.ingest_slots.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(TryAcquireError::NoPermits) => {
-            ctx.ingest_log.note("events", "rate_limited");
-            return fixed(ErrorCode::RateLimited);
-        }
-        Err(TryAcquireError::Closed) => return fixed(ErrorCode::StorageUnavailable),
+    let slot = match acquire_slot(&ctx, &id.proxy_id, "events") {
+        Ok(s) => s,
+        Err(r) => return *r,
     };
-    let Some(body) = read_capped(req.into_body(), MAX_INGEST_BODY).await else {
-        ctx.ingest_log.note("events", "payload_too_large");
-        return fixed(ErrorCode::PayloadTooLarge);
+    let body = match read_body(&ctx, req.into_body(), MAX_INGEST_BODY, "events").await {
+        Ok(b) => b,
+        Err(r) => return *r,
     };
     let r = tokio::task::spawn_blocking(move || {
         let r = handle(&ctx, &id.proxy_id, &body);
-        drop(permit);
+        drop(slot);
         r
     })
     .await;
