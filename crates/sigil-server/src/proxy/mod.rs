@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config_api;
 pub mod guard;
 pub mod identity;
+pub mod ledger;
 pub mod lifecycle;
 pub mod mgmt;
 pub mod registry;
@@ -38,10 +39,15 @@ pub struct ProxyContext {
     pub registry: ProxyRegistry,
     /// Latest config, status snapshot and gap records per proxy.
     pub store: ProxyStore,
+    /// Event ledger (T-11 S4 B1): storage only, no route yet. Blocking API;
+    /// call from `spawn_blocking`.
+    pub ledger: ledger::Ledger,
     /// TTL stamped on every served config (seconds).
     pub config_ttl: u32,
     /// `ack_loss_margin` M (seconds) for the E >= R + M check.
     pub ack_loss_margin: u32,
+    /// `dedup_tombstone_retention` T (seconds) for the T >= R + M check.
+    pub tombstone_retention: i64,
     /// `Some` only when `proxy.management_verifiers` is configured. `None`
     /// means every management route and the audit read route are absent.
     pub mgmt: Option<MgmtAuth>,
@@ -85,6 +91,20 @@ impl ProxyContext {
             .with_context(|| format!("proxy registry {}", pc.registry_path.display()))?;
         let store = ProxyStore::open(&pc.state_path())
             .with_context(|| format!("proxy state {}", pc.state_path().display()))?;
+        // Ledger L1 startup invariant T >= R + M, checked against every stored
+        // config before the ledger file is created or opened.
+        ledger::check_tombstone_invariant(
+            i64::from(pc.dedup_tombstone_retention()),
+            pc.ack_loss_margin(),
+            store
+                .configs()
+                .iter()
+                .map(|(id, c)| (id.as_str(), c.config.max_offline_retry_age_seconds))
+                .collect::<Vec<_>>(),
+        )?;
+        let ledger =
+            ledger::Ledger::open(&pc.ledger_path(), ledger::LedgerOptions::from_config(pc))
+                .with_context(|| format!("proxy ledger {}", pc.ledger_path().display()))?;
         let (mgmt, audit) = match pc.management_verifiers.as_deref() {
             None => (None, None),
             Some(vp) => {
@@ -125,8 +145,10 @@ impl ProxyContext {
             ca,
             registry,
             store,
+            ledger,
             config_ttl: pc.config_ttl(),
             ack_loss_margin: pc.ack_loss_margin(),
+            tombstone_retention: i64::from(pc.dedup_tombstone_retention()),
             mgmt,
             audit,
             withheld: Mutex::new(withheld),
@@ -134,6 +156,13 @@ impl ProxyContext {
             deny_gate: Mutex::new(HashMap::new()),
             probe_warn: Mutex::new((None, 0)),
         }))
+    }
+
+    /// Run the ledger retention sweep at `now` (unix seconds). Each proxy's
+    /// event retention E is its stored config value, or the default when none
+    /// is stored. Not scheduled yet: slice B2 owns the periodic call.
+    pub fn ledger_sweep(&self, now: i64) -> Result<ledger::SweepStats, ledger::LedgerError> {
+        sweep_ledger(&self.ledger, &self.store, now)
     }
 
     /// Decide whether an auth denial gets its own audit record now. `Some(n)`:
@@ -318,6 +347,21 @@ pub fn check_store_against_audit(
         }
     }
     Ok(withheld)
+}
+
+/// Retention sweep with each proxy's E taken from its stored config (the
+/// default E when none is stored).
+pub fn sweep_ledger(
+    ledger: &ledger::Ledger,
+    store: &ProxyStore,
+    now: i64,
+) -> Result<ledger::SweepStats, ledger::LedgerError> {
+    ledger.sweep(now, &|id| {
+        store.config(id).map_or(
+            sigil_proxy_api::config::DEFAULT_EVENT_RETENTION_SECONDS,
+            |c| c.config.event_retention_seconds,
+        )
+    })
 }
 
 /// Proxies whose stored config breaks `E >= R + M` under the CURRENT

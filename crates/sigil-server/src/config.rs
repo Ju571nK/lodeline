@@ -64,9 +64,43 @@ pub struct ProxyConfig {
     /// Default 7 days, bounds 1 hour - 30 days.
     #[serde(default)]
     pub ack_loss_margin_seconds: Option<u32>,
+    /// Event ledger SQLite file (T-11 S4). Default `proxy-ledger.sqlite` next to
+    /// the effective `state_path`. Created owner-only (0600); a symlink or a
+    /// group/world accessible existing file is a boot error.
+    #[serde(default)]
+    pub ledger_path: Option<PathBuf>,
+    /// `server.dedup_tombstone_retention` T (ledger L1): how long a dedup
+    /// tombstone is kept after acceptance. Boot refuses unless
+    /// `T >= max_offline_retry_age + ack_loss_margin` for every stored proxy
+    /// config. Default 90 days (= the default E), bounds 1 hour - 730 days.
+    /// unmeasured: an initial test value (D-04), not a retention guarantee.
+    #[serde(default)]
+    pub dedup_tombstone_retention_seconds: Option<u32>,
+    /// Ledger storage caps. Exceeding one gives 503 `storage_limit` and stores
+    /// nothing. Defaults are conservative, unmeasured test values (D-04).
+    /// Rows: 1 - 1e9. Bytes: 1 MiB - 1 TiB. Per-proxy must not exceed total.
+    #[serde(default)]
+    pub ledger_max_rows_per_proxy: Option<u64>,
+    #[serde(default)]
+    pub ledger_max_bytes_per_proxy: Option<u64>,
+    #[serde(default)]
+    pub ledger_max_rows_total: Option<u64>,
+    #[serde(default)]
+    pub ledger_max_bytes_total: Option<u64>,
 }
 
 impl ProxyConfig {
+    pub const DEFAULT_TOMBSTONE_RETENTION_SECONDS: u32 = 90 * 24 * 3600;
+    pub const MIN_TOMBSTONE_RETENTION_SECONDS: u32 = 3600;
+    pub const MAX_TOMBSTONE_RETENTION_SECONDS: u32 = 730 * 24 * 3600;
+    pub const DEFAULT_LEDGER_ROWS_PER_PROXY: u64 = 1_000_000;
+    pub const DEFAULT_LEDGER_BYTES_PER_PROXY: u64 = 512 * 1024 * 1024;
+    pub const DEFAULT_LEDGER_ROWS_TOTAL: u64 = 5_000_000;
+    pub const DEFAULT_LEDGER_BYTES_TOTAL: u64 = 4 * 1024 * 1024 * 1024;
+    pub const MAX_LEDGER_ROWS: u64 = 1_000_000_000;
+    pub const MIN_LEDGER_BYTES: u64 = 1024 * 1024;
+    pub const MAX_LEDGER_BYTES: u64 = 1 << 40;
+
     pub const DEFAULT_CONFIG_TTL_SECONDS: u32 = 300;
     pub const DEFAULT_ACK_LOSS_MARGIN_SECONDS: u32 = 7 * 24 * 3600;
 
@@ -78,6 +112,42 @@ impl ProxyConfig {
     pub fn ack_loss_margin(&self) -> u32 {
         self.ack_loss_margin_seconds
             .unwrap_or(Self::DEFAULT_ACK_LOSS_MARGIN_SECONDS)
+    }
+
+    pub fn dedup_tombstone_retention(&self) -> u32 {
+        self.dedup_tombstone_retention_seconds
+            .unwrap_or(Self::DEFAULT_TOMBSTONE_RETENTION_SECONDS)
+    }
+
+    pub fn ledger_max_rows_per_proxy(&self) -> u64 {
+        self.ledger_max_rows_per_proxy
+            .unwrap_or(Self::DEFAULT_LEDGER_ROWS_PER_PROXY)
+    }
+
+    pub fn ledger_max_bytes_per_proxy(&self) -> u64 {
+        self.ledger_max_bytes_per_proxy
+            .unwrap_or(Self::DEFAULT_LEDGER_BYTES_PER_PROXY)
+    }
+
+    pub fn ledger_max_rows_total(&self) -> u64 {
+        self.ledger_max_rows_total
+            .unwrap_or(Self::DEFAULT_LEDGER_ROWS_TOTAL)
+    }
+
+    pub fn ledger_max_bytes_total(&self) -> u64 {
+        self.ledger_max_bytes_total
+            .unwrap_or(Self::DEFAULT_LEDGER_BYTES_TOTAL)
+    }
+
+    /// Effective ledger path.
+    pub fn ledger_path(&self) -> PathBuf {
+        self.ledger_path.clone().unwrap_or_else(|| {
+            self.state_path()
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .join("proxy-ledger.sqlite")
+        })
     }
 
     /// Effective store path.
@@ -260,6 +330,37 @@ impl ServerConfig {
             if !(3600..=30 * 24 * 3600).contains(&p.ack_loss_margin()) {
                 return Err(bad(
                     "proxy.ack_loss_margin_seconds must be within 3600..=2592000",
+                ));
+            }
+            if !(ProxyConfig::MIN_TOMBSTONE_RETENTION_SECONDS
+                ..=ProxyConfig::MAX_TOMBSTONE_RETENTION_SECONDS)
+                .contains(&p.dedup_tombstone_retention())
+            {
+                return Err(bad(
+                    "proxy.dedup_tombstone_retention_seconds must be within 3600..=63072000",
+                ));
+            }
+            let rows = 1..=ProxyConfig::MAX_LEDGER_ROWS;
+            let bytes = ProxyConfig::MIN_LEDGER_BYTES..=ProxyConfig::MAX_LEDGER_BYTES;
+            if !rows.contains(&p.ledger_max_rows_per_proxy())
+                || !rows.contains(&p.ledger_max_rows_total())
+            {
+                return Err(bad(
+                    "proxy.ledger_max_rows_per_proxy and ledger_max_rows_total must be within 1..=1000000000",
+                ));
+            }
+            if !bytes.contains(&p.ledger_max_bytes_per_proxy())
+                || !bytes.contains(&p.ledger_max_bytes_total())
+            {
+                return Err(bad(
+                    "proxy.ledger_max_bytes_per_proxy and ledger_max_bytes_total must be within 1048576..=1099511627776",
+                ));
+            }
+            if p.ledger_max_rows_per_proxy() > p.ledger_max_rows_total()
+                || p.ledger_max_bytes_per_proxy() > p.ledger_max_bytes_total()
+            {
+                return Err(bad(
+                    "proxy.ledger_max_*_per_proxy must not exceed the matching ledger_max_*_total",
                 ));
             }
         }
