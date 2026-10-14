@@ -1,6 +1,6 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-12 · Claude Code orchestrator 세션 (기준 커밋 `bbe48c8`)
+갱신: 2026-10-14 · Claude Code orchestrator 세션 (기준 커밋 `9c980e6`)
 
 ## 현재 상태
 
@@ -35,6 +35,34 @@
 남은 P1: T-11 S2b(CSR 서명), S3(config·status), S4(ledger·ingest), S5(projection·조회), T-12 relay, T-13, T-14, T-15(manager, sigil-manager#37), T-16.
 실기 미검증: Rocky 9 SELinux enforcing·systemd `is-enabled`(컨테이너에 systemctl 없음), x86_64 baseline.
 교훈: unix 전용 코드의 import도 `cfg(unix)`로 막는다(Windows CI 실패 2회). 후속: `parse_entry_view`, ParseError 분류 marker 위조(T-11 S4), upload proxy_id 대조(server).
+
+## 2026-10-12 P1 3회차 배정 (기준 `bbe48c8`)
+
+| 작업 | 모델/역할 | 목표 | Spec | 소유 파일 | 이슈 |
+|---|---|---|---|---|---|
+| T-12c1 | sonnet (coder, worktree) | proxy config fetch·apply, #260 한도 min·verifier `not_after`·origin 공유 | PX-005/008/012/016, AC-04/12 | `crates/sigil-proxy/**`, `crates/sigil-proxy-api/**` | #263 |
+| T-12c2 | sonnet (coder, worktree, T-12c1 뒤) | proxy status 보고, #260 503 `storage_limit`·422 처리 | PX-012/016, AC-12 | 같음 | #265 |
+| 통합 e2e | sonnet (coder, worktree) | 실제 server + proxy, loopback mTLS 수명주기 | PX-005/008/009/012, AC-04 | `crates/sigil-proxy-e2e/**`, `lifecycle.rs` test-util | #267 |
+| 리뷰 | sonnet (reviewer, 읽기 전용) | 세 작업 독립 리뷰·재확인 | 해당 ID | 없음 | — |
+
+진행:
+- T-12c1: 리뷰 approve with fixes(M1 만료를 한 task에만 의존 → `TableHandle::current()`가 deadline 검사, M2 진행 중 fetch 만료 테스트, M3 재시작 rollback → `applied.json`에 `{revision, config_hash}`만 저장, M4 semaphore 이월, M5 테스트) → 재확인에서 M4가 적용 경로에 연결되지 않음 발견(R1) → 수정 → orchestrator 확인 → PR #264. control-plane §6.2에 applied mark와 복구 절차 추가.
+- T-12c2: 리뷰 approve with fixes(M1 재시작 후 `status_sequence` 정체 → `sequence.json` 상한 저장·`accepted_snapshot_ignored`, M2 항목 없는 422의 gap 전체 격리 → snapshot-only 판별 후 단건 격리, L1·L3) → 재확인 approve → PR #266. §6.2에 sequence 행 추가.
+- 통합 e2e: server·proxy 불일치 없음. 리뷰 approve(M1 disable 단계 주장 과장 → 주석·로컬 상태 assert, knob을 `test-util` feature로, 포트 경쟁 → pre-bound listener) → PR #268. 릴리스 workspace 빌드에서 `test-util` 비활성 확인(`cargo tree -e normal`).
+
+### 3회차 머지 결과 (2026-10-12 ~ 10-14)
+
+| PR | 작업 | 이슈 |
+|---|---|---|
+| #262 | 2회차 상태 문서 | — |
+| #264 | T-12c1 config fetch·apply | #263 |
+| #266 | T-12c2 status 보고 | #265 |
+| #268 | server–proxy 통합 e2e | #267 |
+
+후속: #260(T-11 S4 gap producer·queue 영속·placeholder 상태 필드·F1 연속 `state_applied=false` 경고·F2 단건 격리 모드 처리량), #269(e2e 미커버: TTL 만료·server 재시작·gap·`fp_next`·retire·TLS·503 boot gate·read API).
+남은 P1: T-11 S4(ledger·ingest), S5(projection·조회, server 프록시별 read API 없음), S2b(CSR 서명), T-12b(MCP protocol), T-13–T-16.
+실기 미검증: 변화 없음(Rocky 9 SELinux·systemd·x86_64 baseline). 통합 e2e는 로컬 프로세스 검증이며 실기가 아니다.
+교훈: 작업자의 "연결했다" 보고는 production 경로 호출을 직접 확인한다(T-12c1 R1). 테스트 전용 진입점은 feature 뒤에 두고 릴리스 빌드에서 꺼져 있는지 확인한다.
 
 ## 2026-10-11 P1 2회차 배정 (기준 `f656b5c`)
 
