@@ -107,6 +107,9 @@ pub struct ConfigView {
     pub expires_at: Option<String>,
     pub max_offline_retry_age_seconds: Option<i64>,
     pub event_retention_seconds: Option<i64>,
+    /// `upstream_id`s of the last applied document, in config order (the status
+    /// report's `routes`; empty before the first apply of this process).
+    pub route_upstreams: Vec<String>,
 }
 
 /// Why a parsed config could not become a table. Fixed categories only.
@@ -181,6 +184,13 @@ fn meta_of(cfg: &ProxyConfig) -> (String, i64, i64) {
     )
 }
 
+fn upstreams_of(cfg: &ProxyConfig) -> Vec<String> {
+    cfg.routes
+        .iter()
+        .map(|r| r.upstream_id.as_str().to_string())
+        .collect()
+}
+
 struct Applied {
     revision: i64,
     hash: String,
@@ -209,6 +219,8 @@ pub struct ConfigSync {
     observed_revision: Option<i64>,
     /// `(expires_at, R, E)` of the last applied document, display only.
     applied_meta: Option<(String, i64, i64)>,
+    /// `upstream_id`s of the last applied document (status report `routes`).
+    applied_upstreams: Vec<String>,
     view_tx: Option<tokio::sync::watch::Sender<ConfigView>>,
 }
 
@@ -239,6 +251,7 @@ impl ConfigSync {
             last_error: None,
             observed_revision: None,
             applied_meta: None,
+            applied_upstreams: Vec::new(),
             view_tx: None,
         }
     }
@@ -255,6 +268,7 @@ impl ConfigSync {
             expires_at: meta.map(|m| m.0.clone()),
             max_offline_retry_age_seconds: meta.map(|m| m.1),
             event_retention_seconds: meta.map(|m| m.2),
+            route_upstreams: self.applied_upstreams.clone(),
         }
     }
 
@@ -398,6 +412,7 @@ impl ConfigSync {
             self.table.extend_deadline(d);
             self.last_ttl = Some(ttl);
             self.applied_meta = Some(meta_of(&cfg));
+            self.applied_upstreams = upstreams_of(&cfg);
             self.state = ConfigState::Valid;
             self.last_error = None;
             return SyncOutcome::Refreshed;
@@ -425,6 +440,7 @@ impl ConfigSync {
         self.deadline = Some(deadline);
         self.last_ttl = Some(ttl);
         self.applied_meta = Some(meta_of(&cfg));
+        self.applied_upstreams = upstreams_of(&cfg);
         self.state = ConfigState::Valid;
         self.last_error = None;
         if refresh {
@@ -594,6 +610,7 @@ mod mtls {
         authority: String,
         path: String,
         status_path: String,
+        events_path: String,
         ca_file: PathBuf,
         cert_file: PathBuf,
         key_file: PathBuf,
@@ -621,6 +638,7 @@ mod mtls {
                 port: port.unwrap_or(443),
                 path: format!("{prefix}/v1/proxy-config"),
                 status_path: format!("{prefix}/v1/proxy-status"),
+                events_path: format!("{prefix}/v1/proxy-events"),
                 ca_file: b.ca_file.clone(),
                 cert_file: b.client_cert_file.clone(),
                 key_file: b.client_key_file.clone(),
@@ -732,6 +750,27 @@ mod mtls {
         }
     }
 
+    impl crate::ingest_client::IngestTransport for MtlsFetcher {
+        fn post_events(&self, body: Vec<u8>) -> crate::status_report::PostFuture<'_> {
+            Box::pin(async move {
+                // Same client, caps and per-attempt bound as the status report.
+                let work = self.exchange(
+                    http::Method::POST,
+                    &self.events_path,
+                    Some(body),
+                    crate::ingest_client::MAX_INGEST_RESPONSE_BYTES,
+                );
+                match tokio::time::timeout(self.timeout, work).await {
+                    Ok(Some((status, body))) => Some(crate::status_report::StatusReply {
+                        status: status.as_u16(),
+                        body: body.map(|b| b.to_vec()).unwrap_or_default(),
+                    }),
+                    _ => None,
+                }
+            })
+        }
+    }
+
     impl Fetcher for MtlsFetcher {
         fn fetch(&self) -> FetchFuture<'_> {
             Box::pin(async move {
@@ -761,6 +800,13 @@ impl MtlsFetcher {
 #[cfg(not(unix))]
 impl crate::status_report::StatusTransport for MtlsFetcher {
     fn post_status(&self, _: Vec<u8>) -> crate::status_report::PostFuture<'_> {
+        Box::pin(async { None })
+    }
+}
+
+#[cfg(not(unix))]
+impl crate::ingest_client::IngestTransport for MtlsFetcher {
+    fn post_events(&self, _: Vec<u8>) -> crate::status_report::PostFuture<'_> {
         Box::pin(async { None })
     }
 }

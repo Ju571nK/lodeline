@@ -5,9 +5,12 @@
 //!   into a `POST /v1/proxy-status` body and validates it with the shared
 //!   `sigil_proxy_api::parse_status` before anything is sent.
 //! * [`classify`] reduces the server's answer to a [`ReportOutcome`]; it is pure.
-//! * [`GapQueue`] holds gap reports until they are acknowledged. The ledger that
-//!   produces gaps (T-11 S4) does not exist yet, so nothing pushes into it in
-//!   this slice; the queue is the seam and carries the response rules.
+//! * [`GapQueue`] holds gap reports until they are acknowledged. It is durable
+//!   (L6b): every change is handed to a persister (the `gap_queue.json` file of
+//!   the state dir) and the queue is reloaded at start. A gap that does not fit
+//!   is counted and reported later as one aggregated `local_record_failed` gap,
+//!   never dropped silently. The ingest client ([`crate::ingest_client`]) is the
+//!   producer.
 //! * [`run_status_reporter`] sends on a jittered schedule (the heartbeat) and
 //!   promptly after the config view changes. It reuses the config client
 //!   ([`crate::config_sync::MtlsFetcher`]) through [`StatusTransport`].
@@ -37,6 +40,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::config_sync::ConfigView;
+use crate::state_dir::GapQueueState;
 
 /// Largest answer read from the server. A 200 body lists at most 200 ids.
 pub const MAX_STATUS_RESPONSE_BYTES: usize = 64 * 1024;
@@ -52,6 +56,52 @@ pub const MAX_QUARANTINED_GAPS: usize = 256;
 /// `status_sequence` values reserved ahead in state_dir (one hour of
 /// milliseconds), so the file is rewritten about once an hour, not per report.
 const SEQUENCE_RESERVE: i64 = 3_600_000;
+
+/// Reachability of the central server as the proxy has observed it: the source
+/// of the status report's `central` section. Cheap to clone (shared).
+///
+/// Any answer from the server (even a refusal such as 429 or `storage_limit`)
+/// proves it is reachable and resets the failure count; only no answer or a 5xx
+/// other than `storage_limit` counts as a failure
+/// ([`ReportOutcome::signals_central_outage`]).
+#[derive(Clone, Default)]
+pub struct CentralHealth(Arc<Mutex<CentralInner>>);
+
+#[derive(Default)]
+struct CentralInner {
+    last_ingest_ack_at: Option<String>,
+    consecutive_failures: i64,
+}
+
+impl CentralHealth {
+    pub fn new() -> CentralHealth {
+        CentralHealth::default()
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, CentralInner> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// The server answered (any status that is not an outage signal).
+    pub fn record_answer(&self) {
+        self.lock().consecutive_failures = 0;
+    }
+    /// No answer, or a 5xx that is an outage signal.
+    pub fn record_failure(&self) {
+        let mut g = self.lock();
+        g.consecutive_failures = g.consecutive_failures.saturating_add(1);
+    }
+    /// The server durably accepted events (`accepted` or `duplicate` ids).
+    pub fn record_ingest_ack(&self, at: time::OffsetDateTime) {
+        let mut g = self.lock();
+        g.consecutive_failures = 0;
+        g.last_ingest_ack_at = Some(rfc3339(at));
+    }
+    pub fn consecutive_failures(&self) -> i64 {
+        self.lock().consecutive_failures
+    }
+    pub fn last_ingest_ack_at(&self) -> Option<String> {
+        self.lock().last_ingest_ack_at.clone()
+    }
+}
 
 /// The server's answer, reduced to what the classifier reads.
 #[derive(Clone, PartialEq, Eq)]
@@ -76,7 +126,7 @@ pub trait StatusTransport: Send + Sync {
 
 // --------------------------------------------------------------------- queue
 
-fn gap_id(g: &GapReport) -> &str {
+pub(crate) fn gap_id(g: &GapReport) -> &str {
     match g {
         GapReport::RegistryConflict(x) => x.gap_id.as_str(),
         GapReport::EventQuarantined(x) => x.gap_id.as_str(),
@@ -101,36 +151,38 @@ struct Entry {
 
 /// The pending bound is reached.
 ///
-/// A future gap producer (the ledger, T-11 S4) must turn this into an aggregated
-/// gap (`unrecorded_calls` or `local_record_failed`) instead of losing the fact
-/// that gaps were dropped.
+/// [`GapQueue::record`] turns this into an aggregated gap; a producer should
+/// call that, not [`GapQueue::push`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueFull;
 
-/// Gap reports awaiting acknowledgement. Cheap to clone (shared).
-///
-/// In memory only: a restart forgets unacknowledged gaps. Making them durable
-/// belongs to the producer task (ledger-and-query.md L6b), which owns the source
-/// of truth for what happened.
-#[derive(Clone, Default)]
-pub struct GapQueue(Arc<Mutex<Vec<Entry>>>);
+/// Called with the whole queue after each change. `false` means it is not
+/// durable; the in-memory queue is kept (a gap is never dropped for it) and the
+/// failure is logged and shown by [`GapQueue::persist_failed`].
+pub type GapPersister = Box<dyn FnMut(&GapQueueState) -> bool + Send>;
 
-impl GapQueue {
-    pub fn new() -> GapQueue {
-        GapQueue::default()
+#[derive(Default)]
+struct Inner {
+    entries: Vec<Entry>,
+    /// Gaps that did not fit and are not yet in the queue as an aggregated gap.
+    overflow: i64,
+    persist: Option<GapPersister>,
+    persist_failed: bool,
+}
+
+impl Inner {
+    fn pending(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.state == GapState::Pending)
+            .count()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Entry>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Queue a gap. A gap with the id of a queued one replaces it and is pending
-    /// again (an open `central_outage` is resent with its `ended_at`).
-    pub fn push(&self, gap: GapReport) -> Result<(), QueueFull> {
-        let mut q = self.lock();
+    /// Insert or replace by id. A replaced gap is pending again.
+    fn push(&mut self, gap: GapReport) -> Result<(), QueueFull> {
         let id = gap_id(&gap).to_string();
-        let pending = q.iter().filter(|e| e.state == GapState::Pending).count();
-        if let Some(e) = q.iter_mut().find(|e| gap_id(&e.gap) == id) {
+        let pending = self.pending();
+        if let Some(e) = self.entries.iter_mut().find(|e| gap_id(&e.gap) == id) {
             // A quarantined gap coming back as pending needs room like a new one.
             if e.state == GapState::Quarantined && pending >= MAX_QUEUED_GAPS {
                 return Err(QueueFull);
@@ -144,11 +196,185 @@ impl GapQueue {
         if pending >= MAX_QUEUED_GAPS {
             return Err(QueueFull);
         }
-        q.push(Entry {
+        self.entries.push(Entry {
             gap,
             state: GapState::Pending,
         });
         Ok(())
+    }
+
+    /// Report the overflow tally as one `local_record_failed` gap as soon as
+    /// there is room. The gap is new (its own id): a gap already sent is never
+    /// changed, because the server answers a different body under the same id
+    /// with 409.
+    fn materialize_overflow(&mut self) {
+        if self.overflow <= 0 || self.pending() >= MAX_QUEUED_GAPS {
+            return;
+        }
+        let gap = serde_json::from_value::<GapReport>(json!({
+            "kind": "local_record_failed",
+            "gap_id": uuid::Uuid::new_v4().to_string(),
+            "detected_at": rfc3339(time::OffsetDateTime::now_utc()),
+            "count": self.overflow,
+            "invocation_ids": [],
+        }));
+        if let Ok(g) = gap {
+            if self.push(g).is_ok() {
+                self.overflow = 0;
+            }
+        }
+    }
+
+    fn snapshot(&self) -> GapQueueState {
+        let of = |s: GapState| {
+            self.entries
+                .iter()
+                .filter(|e| e.state == s)
+                .map(|e| GapReport::clone(&e.gap))
+                .collect::<Vec<_>>()
+        };
+        GapQueueState {
+            pending: of(GapState::Pending),
+            quarantined: of(GapState::Quarantined),
+            overflow_count: self.overflow,
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.persist.is_none() {
+            return;
+        }
+        let snap = self.snapshot();
+        let ok = self.persist.as_mut().is_some_and(|p| p(&snap));
+        if !ok && !self.persist_failed {
+            tracing::error!("gap queue is not durable: the write failed (kept in memory)");
+        }
+        self.persist_failed = !ok;
+    }
+}
+
+/// Gap reports awaiting acknowledgement. Cheap to clone (shared).
+///
+/// Durable when a persister is attached ([`GapQueue::with_persister`]) and
+/// restorable with [`GapQueue::restore`].
+#[derive(Clone, Default)]
+pub struct GapQueue(Arc<Mutex<Inner>>);
+
+impl GapQueue {
+    pub fn new() -> GapQueue {
+        GapQueue::default()
+    }
+
+    /// Rebuild a queue from the persisted state (oldest pending first).
+    pub fn restore(state: GapQueueState) -> GapQueue {
+        let mut inner = Inner {
+            overflow: state.overflow_count.max(0),
+            ..Inner::default()
+        };
+        for gap in state.quarantined {
+            inner.entries.push(Entry {
+                gap,
+                state: GapState::Quarantined,
+            });
+        }
+        for gap in state.pending {
+            inner.entries.push(Entry {
+                gap,
+                state: GapState::Pending,
+            });
+        }
+        GapQueue(Arc::new(Mutex::new(inner)))
+    }
+
+    /// Persist every change from now on, and write the current state once.
+    pub fn with_persister(self, p: GapPersister) -> GapQueue {
+        {
+            let mut g = self.lock();
+            g.persist = Some(p);
+            g.materialize_overflow();
+            g.flush();
+        }
+        self
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queue a gap. A gap with the id of a queued one replaces it and is pending
+    /// again (an open `central_outage` is resent with its `ended_at`).
+    pub fn push(&self, gap: GapReport) -> Result<(), QueueFull> {
+        let mut g = self.lock();
+        let r = g.push(gap);
+        if r.is_ok() {
+            g.flush();
+        }
+        r
+    }
+
+    /// [`GapQueue::push`] for a producer: a gap that does not fit is counted and
+    /// reported later as one aggregated `local_record_failed` gap (L6b), so the
+    /// loss itself is recorded. Returns whether the gap itself was queued.
+    pub fn record(&self, gap: GapReport) -> bool {
+        let mut g = self.lock();
+        let queued = g.push(gap).is_ok();
+        if !queued {
+            g.overflow = g.overflow.saturating_add(1);
+            tracing::warn!("gap queue full: the gap is counted, not queued");
+        }
+        g.materialize_overflow();
+        g.flush();
+        queued
+    }
+
+    /// Gaps counted but not yet in the queue as an aggregated gap.
+    pub fn overflow_count(&self) -> i64 {
+        self.lock().overflow
+    }
+
+    /// The last write to the persister failed.
+    pub fn persist_failed(&self) -> bool {
+        self.lock().persist_failed
+    }
+
+    /// `(gap_id, started_at)` of the pending `central_outage` gap whose
+    /// `ended_at` is still null, if any (found again after a restart).
+    pub fn open_outage(&self) -> Option<(String, String)> {
+        self.lock().entries.iter().find_map(|e| match &e.gap {
+            GapReport::CentralOutage(o) if e.state == GapState::Pending && o.ended_at.is_none() => {
+                Some((
+                    o.gap_id.as_str().to_string(),
+                    o.started_at.as_str().to_string(),
+                ))
+            }
+            _ => None,
+        })
+    }
+
+    /// Set `ended_at` on the queued `central_outage` gap `id` and make it
+    /// pending again (the only mutation the server allows, L6b). `false` when
+    /// the gap is not queued (it was acknowledged and dropped).
+    pub fn close_outage(&self, id: &str, ended_at: &str) -> bool {
+        let mut g = self.lock();
+        let Some(e) = g.entries.iter_mut().find(|e| gap_id(&e.gap) == id) else {
+            return false;
+        };
+        let Ok(mut v) = serde_json::to_value(&e.gap) else {
+            return false;
+        };
+        if v["kind"] != "central_outage" {
+            return false;
+        }
+        v["ended_at"] = Value::String(ended_at.to_string());
+        let Ok(gap) = serde_json::from_value::<GapReport>(v) else {
+            return false;
+        };
+        *e = Entry {
+            gap,
+            state: GapState::Pending,
+        };
+        g.flush();
+        true
     }
 
     /// Oldest pending gaps, at most one report's worth.
@@ -159,6 +385,7 @@ impl GapQueue {
     /// Oldest pending gaps, at most `n` (capped at one report's worth).
     pub fn pending_batch_limit(&self, n: usize) -> Vec<GapReport> {
         self.lock()
+            .entries
             .iter()
             .filter(|e| e.state == GapState::Pending)
             .take(n.min(MAX_GAPS_PER_REPORT))
@@ -176,6 +403,7 @@ impl GapQueue {
 
     fn ids(&self, s: GapState) -> Vec<String> {
         self.lock()
+            .entries
             .iter()
             .filter(|e| e.state == s)
             .map(|e| gap_id(&e.gap).to_string())
@@ -184,7 +412,8 @@ impl GapQueue {
 
     /// Apply a classified answer for a report that carried `sent` (gap ids).
     pub fn settle(&self, outcome: &ReportOutcome) {
-        let mut q = self.lock();
+        let mut g = self.lock();
+        let before = g.snapshot();
         let drop_ids = |q: &mut Vec<Entry>, ids: &[String]| {
             q.retain(|e| !ids.iter().any(|i| i == gap_id(&e.gap)));
         };
@@ -197,12 +426,13 @@ impl GapQueue {
                 acknowledged,
                 duplicate,
             } => {
-                drop_ids(&mut q, acknowledged);
-                drop_ids(&mut q, duplicate);
+                drop_ids(&mut g.entries, acknowledged);
+                drop_ids(&mut g.entries, duplicate);
             }
             // Stored gaps are durable on the server; refused ones stay pending.
-            ReportOutcome::StorageLimit { stored, .. } => drop_ids(&mut q, stored),
+            ReportOutcome::StorageLimit { stored, .. } => drop_ids(&mut g.entries, stored),
             ReportOutcome::Quarantine { gaps, .. } | ReportOutcome::Conflict { gaps } => {
+                let q = &mut g.entries;
                 for e in q.iter_mut() {
                     if gaps.iter().any(|i| i == gap_id(&e.gap)) {
                         e.state = GapState::Quarantined;
@@ -225,6 +455,11 @@ impl GapQueue {
             | ReportOutcome::Unreachable
             | ReportOutcome::Unavailable
             | ReportOutcome::Retry => {}
+        }
+        // Room may have opened for an aggregated gap.
+        g.materialize_overflow();
+        if g.snapshot() != before {
+            g.flush();
         }
     }
 }
@@ -426,9 +661,10 @@ pub struct StatusBuilder {
     /// Highest bound known to be durable (0 without persistence).
     reserved: i64,
     persister: Option<SequencePersister>,
+    central: CentralHealth,
 }
 
-fn rfc3339(t: time::OffsetDateTime) -> String {
+pub(crate) fn rfc3339(t: time::OffsetDateTime) -> String {
     t.replace_nanosecond(0)
         .unwrap_or(t)
         .format(&time::format_description::well_known::Rfc3339)
@@ -443,7 +679,14 @@ impl StatusBuilder {
             last_sequence: 0,
             reserved: 0,
             persister: None,
+            central: CentralHealth::new(),
         }
+    }
+
+    /// Read the `central` section from this handle (shared with the ingest client
+    /// and the reporter).
+    pub fn set_central(&mut self, central: CentralHealth) {
+        self.central = central;
     }
 
     /// Persist the sequence bound in blocks. `floor` is the bound loaded at
@@ -513,10 +756,29 @@ impl StatusBuilder {
             .iter()
             .map(|g| serde_json::to_value(g).map_err(|_| BuildError))
             .collect::<Result<_, _>>()?;
-        // PLACEHOLDERS: spool, registry, central and routes (and the
-        // `capacity_bytes = 1` the schema forces to be positive) are vacuous
-        // until the ledger (T-11 S4) and the route health (T-12b) exist. They
-        // must be replaced with real values then; they say nothing about health.
+        // REAL sources: `central` (CentralHealth: ingest acks, answers and
+        // failures) and `routes` (the upstreams of the applied config).
+        //
+        // `routes[].state` is derived from the config alone: `supported` while
+        // the config is valid (the route is configured and serving), `disabled`
+        // otherwise. There is no upstream probe yet (T-12b), so `degraded`,
+        // `unsupported` and a `reason` are never reported; `supported` means
+        // "configured and not known to be broken", not "verified".
+        //
+        // PLACEHOLDERS: `spool` and `registry` (and the `capacity_bytes = 1` the
+        // schema forces to be positive) are vacuous until the spool and registry
+        // sync exist (T-13/T-14). They say nothing about health.
+        let route_state = if view.state == ConfigState::Valid {
+            "supported"
+        } else {
+            "disabled"
+        };
+        let routes: Vec<Value> = view
+            .route_upstreams
+            .iter()
+            .take(256)
+            .map(|u| json!({"upstream_id": u, "state": route_state}))
+            .collect();
         let body = json!({
             "schema_version": 1,
             "report_id": uuid::Uuid::new_v4().to_string(),
@@ -529,8 +791,9 @@ impl StatusBuilder {
                 "capacity_bytes": 1, "oldest_unsent_age_seconds": null,
                 "quarantined_events": 0},
             "registry": {"pending_entries": 0, "sync_stalled": false},
-            "central": {"last_ingest_ack_at": null, "consecutive_failures": 0},
-            "routes": [],
+            "central": {"last_ingest_ack_at": self.central.last_ingest_ack_at(),
+                "consecutive_failures": self.central.consecutive_failures()},
+            "routes": routes,
             "counters": {"auth_failures": [], "unmatched_cancels": []},
             "gaps": gaps,
             "last_assigned_sequence": 0,
@@ -586,7 +849,29 @@ pub struct Reporter {
     params: ReporterParams,
     failures: u32,
     mode: Mode,
+    central: CentralHealth,
+    /// Singles sent in the current `Isolate` run (bounded, see
+    /// [`MAX_ISOLATE_SENDS`]).
+    isolate_sends: usize,
+    /// F1: consecutive `state_applied = false` answers.
+    ignored_streak: u32,
+    wedged: bool,
+    wedge_hook: Option<WedgeHook>,
 }
+
+/// Called with `true` when the status sequence looks wedged and `false` when a
+/// snapshot is applied again.
+pub type WedgeHook = Box<dyn FnMut(bool) + Send>;
+
+/// F1: this many `state_applied = false` answers in a row mean the sequence is
+/// stuck below the server's stored one (for example `sequence.json` removed
+/// while the clock is behind), not a lost race.
+pub const WEDGE_THRESHOLD: u32 = 3;
+
+/// F2: singles sent in one isolation run before returning to batches. The
+/// failing gap was among the first `MAX_GAPS_PER_REPORT` pending ones when the
+/// 422 came, so a longer run only paces a steady gap producer down.
+pub const MAX_ISOLATE_SENDS: usize = MAX_GAPS_PER_REPORT;
 
 impl Reporter {
     pub fn new(proxy_id: &str, epoch_id: &str, gaps: GapQueue, params: ReporterParams) -> Reporter {
@@ -596,7 +881,30 @@ impl Reporter {
             params,
             failures: 0,
             mode: Mode::Normal,
+            central: CentralHealth::new(),
+            isolate_sends: 0,
+            ignored_streak: 0,
+            wedged: false,
+            wedge_hook: None,
         }
+    }
+
+    /// Share the `central` section source (also fed by the ingest client).
+    pub fn with_central(mut self, central: CentralHealth) -> Reporter {
+        self.builder.set_central(central.clone());
+        self.central = central;
+        self
+    }
+
+    /// F1: tell the owner when the sequence becomes (un)wedged.
+    pub fn with_wedge_hook(mut self, hook: WedgeHook) -> Reporter {
+        self.wedge_hook = Some(hook);
+        self
+    }
+
+    /// F1: the status sequence looks wedged (see [`WEDGE_THRESHOLD`]).
+    pub fn sequence_wedged(&self) -> bool {
+        self.wedged
     }
 
     /// Persist the status sequence bound (see [`StatusBuilder`]).
@@ -645,6 +953,11 @@ impl Reporter {
         };
         let reply = transport.post_status(body).await;
         let mut outcome = classify(reply.as_ref(), &sent);
+        if outcome.signals_central_outage() {
+            self.central.record_failure();
+        } else if reply.is_some() {
+            self.central.record_answer();
+        }
         if matches!(
             outcome,
             ReportOutcome::Quarantine {
@@ -662,18 +975,70 @@ impl Reporter {
             }
         }
         self.gaps.settle(&outcome);
+        let was = self.mode;
         self.mode = match (self.mode, &outcome) {
             (
                 Mode::SnapshotProbe,
                 ReportOutcome::Accepted { .. } | ReportOutcome::SnapshotIgnored { .. },
             ) => Mode::Isolate,
+            // F2: the failing gap is found (quarantined alone, or named): back
+            // to batches. Good gaps behind it are not sent one by one.
+            (Mode::Isolate, ReportOutcome::Quarantine { .. } | ReportOutcome::Conflict { .. }) => {
+                Mode::Normal
+            }
             (m, _) => m,
         };
-        if self.mode == Mode::Isolate && self.gaps.pending_ids().is_empty() {
-            self.mode = Mode::Normal;
+        if self.mode == Mode::Isolate {
+            self.isolate_sends = if was == Mode::Isolate {
+                self.isolate_sends + 1
+            } else {
+                1
+            };
+            // F2: a steady producer must not keep the reporter in singles.
+            if self.isolate_sends >= MAX_ISOLATE_SENDS || self.gaps.pending_ids().is_empty() {
+                self.mode = Mode::Normal;
+            }
         }
+        if self.mode != Mode::Isolate {
+            self.isolate_sends = 0;
+        }
+        self.track_wedge(&outcome);
         tracing::info!(outcome = outcome_label(&outcome), "status report");
         Some(outcome)
+    }
+
+    /// F1: count consecutive `state_applied = false` answers; warn once at the
+    /// threshold and tell the hook. A failure in between is neither an answer
+    /// nor a reset. An applied snapshot clears it.
+    fn track_wedge(&mut self, outcome: &ReportOutcome) {
+        match outcome {
+            ReportOutcome::SnapshotIgnored { .. } => {
+                self.ignored_streak = self.ignored_streak.saturating_add(1);
+                if self.ignored_streak == WEDGE_THRESHOLD && !self.wedged {
+                    self.wedged = true;
+                    tracing::warn!(
+                        consecutive = self.ignored_streak,
+                        "status snapshots are being ignored by the server: the status sequence \
+                         looks stuck below its stored one (was sequence.json removed while the \
+                         clock is behind?)"
+                    );
+                    if let Some(h) = self.wedge_hook.as_mut() {
+                        h(true);
+                    }
+                }
+            }
+            ReportOutcome::Accepted { .. } => {
+                self.ignored_streak = 0;
+                if self.wedged {
+                    self.wedged = false;
+                    tracing::info!("status snapshots are applied again");
+                    if let Some(h) = self.wedge_hook.as_mut() {
+                        h(false);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Delay before the next report, and whether a config change may bring it
@@ -697,8 +1062,8 @@ impl Reporter {
                 if self.mode == Mode::Normal {
                     (p.heartbeat, true)
                 } else {
-                    // Still isolating: the next gap goes out soon.
-                    (p.retry, false)
+                    // Still isolating: singles go at the least spacing (F2).
+                    (p.min_spacing, false)
                 }
             }
             Some(ReportOutcome::StorageLimit { .. }) => {
@@ -828,6 +1193,11 @@ mod tests {
             expires_at: valid.then(|| "2026-10-11T00:05:00Z".to_string()),
             max_offline_retry_age_seconds: valid.then_some(2_592_000),
             event_retention_seconds: valid.then_some(7_776_000),
+            route_upstreams: if valid {
+                vec!["up-r1".into(), "up-r2".into()]
+            } else {
+                vec![]
+            },
         }
     }
 
@@ -1663,5 +2033,330 @@ mod tests {
         }
         q.settle(&o);
         assert_eq!(q.pending_ids(), sent);
+    }
+
+    // ---- #275: durable queue, aggregation, F1, F2, central and routes
+
+    type Snaps = Arc<Mutex<Vec<GapQueueState>>>;
+
+    fn recording_queue() -> (GapQueue, Snaps) {
+        let snaps: Snaps = Arc::default();
+        let s2 = snaps.clone();
+        let q = GapQueue::new().with_persister(Box::new(move |st| {
+            s2.lock().unwrap().push(st.clone());
+            true
+        }));
+        (q, snaps)
+    }
+
+    /// L6b: every change is persisted and a restored queue is the same queue.
+    #[test]
+    fn queue_is_persisted_after_each_change_and_restores() {
+        let (q, snaps) = recording_queue();
+        assert_eq!(snaps.lock().unwrap().len(), 1, "initial state written");
+        for n in 1..=3 {
+            q.push(quarantine_gap(n)).unwrap();
+        }
+        q.settle(&ReportOutcome::Conflict { gaps: ids(&[2]) });
+        q.settle(&ReportOutcome::Accepted {
+            acknowledged: ids(&[1]),
+            duplicate: vec![],
+        });
+        let last = snaps.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last.pending.len(), 1);
+        assert_eq!(last.quarantined.len(), 1);
+        let n = snaps.lock().unwrap().len();
+        // an outcome that changes nothing writes nothing
+        q.settle(&ReportOutcome::Retry);
+        assert_eq!(snaps.lock().unwrap().len(), n);
+        let r = GapQueue::restore(last);
+        assert_eq!(r.pending_ids(), ids(&[3]));
+        assert_eq!(r.quarantined_ids(), ids(&[2]));
+    }
+
+    #[test]
+    fn a_failing_persister_keeps_gaps_in_memory() {
+        let q = GapQueue::new().with_persister(Box::new(|_| false));
+        assert!(q.persist_failed());
+        q.push(quarantine_gap(1)).unwrap();
+        assert_eq!(q.pending_ids(), ids(&[1]));
+        assert!(q.persist_failed());
+    }
+
+    /// A gap that does not fit is counted and later reported as one aggregated
+    /// `local_record_failed` gap; the loss itself is recorded and persisted.
+    #[test]
+    fn queue_full_becomes_an_aggregated_gap() {
+        let (q, snaps) = recording_queue();
+        for n in 0..MAX_QUEUED_GAPS as u32 {
+            assert!(q.record(quarantine_gap(n)));
+        }
+        for n in 0..3u32 {
+            assert!(!q.record(quarantine_gap(50_000 + n)), "not queued");
+        }
+        assert_eq!(q.pending_ids().len(), MAX_QUEUED_GAPS);
+        assert_eq!(q.overflow_count(), 3);
+        assert_eq!(snaps.lock().unwrap().last().unwrap().overflow_count, 3);
+        // room opens when the server acknowledges one: the tally becomes a gap
+        q.settle(&ReportOutcome::Accepted {
+            acknowledged: ids(&[0]),
+            duplicate: vec![],
+        });
+        assert_eq!(q.overflow_count(), 0);
+        let pending = q.pending_batch_limit(usize::MAX);
+        assert_eq!(pending.len(), MAX_GAPS_PER_REPORT);
+        let all = snaps.lock().unwrap().last().unwrap().pending.clone();
+        let agg: Vec<Value> = all
+            .iter()
+            .map(|g| serde_json::to_value(g).unwrap())
+            .filter(|g| g["kind"] == "local_record_failed")
+            .collect();
+        assert_eq!(agg.len(), 1);
+        assert_eq!(agg[0]["count"], 3);
+        assert_eq!(agg[0]["invocation_ids"], json!([]));
+        assert_eq!(
+            all.len(),
+            MAX_QUEUED_GAPS,
+            "the aggregate took the freed slot"
+        );
+        // the tally survives a restart while it is still waiting for room
+        let (q2, snaps2) = recording_queue();
+        for n in 0..MAX_QUEUED_GAPS as u32 {
+            q2.push(quarantine_gap(n)).unwrap();
+        }
+        q2.record(quarantine_gap(60_000));
+        let st = snaps2.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(GapQueue::restore(st).overflow_count(), 1);
+    }
+
+    #[test]
+    fn open_outage_is_found_in_a_restored_queue() {
+        let q = GapQueue::new();
+        q.push(outage_gap(7, Value::Null)).unwrap();
+        q.push(quarantine_gap(8)).unwrap();
+        assert_eq!(q.open_outage().unwrap().0, uid(7));
+        assert!(q.close_outage(&uid(7), "2026-10-11T00:30:00Z"));
+        assert!(q.open_outage().is_none());
+        assert!(
+            !q.close_outage(&uid(8), "2026-10-11T00:30:00Z"),
+            "not an outage"
+        );
+        assert!(!q.close_outage(&uid(99), "2026-10-11T00:30:00Z"));
+    }
+
+    /// F1: after WEDGE_THRESHOLD ignored snapshots in a row, warn once and tell
+    /// the hook; an applied snapshot clears it.
+    #[tokio::test]
+    async fn repeated_ignored_snapshots_flag_a_wedged_sequence_once() {
+        let calls: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let c2 = calls.clone();
+        let applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let a2 = applied.clone();
+        let server = Script::new(move |_| {
+            reply(
+                200,
+                json!({"state_applied": a2.load(std::sync::atomic::Ordering::SeqCst),
+                    "acknowledged_gap_ids": [], "duplicate_gap_ids": []}),
+            )
+        });
+        let mut r = Reporter::new("px-1", &uid(5), GapQueue::new(), params())
+            .with_wedge_hook(Box::new(move |w| c2.lock().unwrap().push(w)));
+        let v = view(ConfigState::None);
+        for i in 1..=2 {
+            r.send_once(&server, &v).await.unwrap();
+            assert!(!r.sequence_wedged(), "{i} in a row is not yet a wedge");
+        }
+        r.send_once(&server, &v).await.unwrap();
+        assert!(r.sequence_wedged());
+        for _ in 0..3 {
+            r.send_once(&server, &v).await.unwrap();
+        }
+        assert_eq!(*calls.lock().unwrap(), vec![true], "reported once");
+        applied.store(true, std::sync::atomic::Ordering::SeqCst);
+        r.send_once(&server, &v).await.unwrap();
+        assert!(!r.sequence_wedged());
+        assert_eq!(*calls.lock().unwrap(), vec![true, false]);
+    }
+
+    /// F1: a transport failure between ignored answers does not reset the streak.
+    #[tokio::test]
+    async fn a_failure_between_ignored_snapshots_does_not_reset_the_streak() {
+        let mut n = 0;
+        let server = Script::new(move |_| {
+            n += 1;
+            if n == 2 {
+                None
+            } else {
+                reply(
+                    200,
+                    json!({"state_applied": false, "acknowledged_gap_ids": [],
+                        "duplicate_gap_ids": []}),
+                )
+            }
+        });
+        let mut r = Reporter::new("px-1", &uid(5), GapQueue::new(), params());
+        let v = view(ConfigState::None);
+        for _ in 0..4 {
+            r.send_once(&server, &v).await.unwrap();
+        }
+        assert!(r.sequence_wedged());
+    }
+
+    /// F2: once the failing gap is isolated, the good gaps behind it go out in
+    /// one batch, not one by one; singles are paced at the least spacing.
+    #[tokio::test]
+    async fn after_the_failing_gap_is_found_batches_resume() {
+        let q = GapQueue::new();
+        for n in 1..=10 {
+            q.push(quarantine_gap(n)).unwrap();
+        }
+        let bad = uid(2);
+        let server = Script::new(move |v| {
+            let g = gap_ids_of(v);
+            if g.contains(&bad) {
+                unattributed_422()
+            } else {
+                ack200(&g)
+            }
+        });
+        let mut r = Reporter::new("px-1", &uid(5), q.clone(), params());
+        let v = view(ConfigState::None);
+        let mut delays = Vec::new();
+        for _ in 0..4 {
+            let o = r.send_once(&server, &v).await.unwrap();
+            delays.push(r.next_delay(Some(&o)).0);
+        }
+        // batch (ambiguous), probe, single 1, single 2 (quarantined)
+        assert_eq!(q.quarantined_ids(), ids(&[2]));
+        // singles are not paced at the 5 s retry delay
+        assert!(delays[2] < Duration::from_secs(2), "{delays:?}");
+        r.send_once(&server, &v).await.unwrap();
+        assert_eq!(
+            server.sent_gap_ids(4),
+            ids(&[3, 4, 5, 6, 7, 8, 9, 10]),
+            "back to one batch"
+        );
+        assert!(q.pending_ids().is_empty());
+    }
+
+    /// F2: a steady producer cannot keep the reporter in singles for good.
+    #[tokio::test]
+    async fn isolation_returns_to_batches_after_a_bounded_run() {
+        let q = GapQueue::new();
+        let total = 3 * MAX_ISOLATE_SENDS as u32;
+        for n in 1..=total {
+            q.push(quarantine_gap(n)).unwrap();
+        }
+        let mut first = true;
+        let server = Script::new(move |v| {
+            let g = gap_ids_of(v);
+            if first && g.len() > 1 {
+                first = false;
+                unattributed_422()
+            } else {
+                ack200(&g)
+            }
+        });
+        let mut r = Reporter::new("px-1", &uid(5), q.clone(), params());
+        let v = view(ConfigState::None);
+        // batch fails, probe, then singles, then a batch again
+        for _ in 0..3 + MAX_ISOLATE_SENDS {
+            r.send_once(&server, &v).await.unwrap();
+        }
+        let sizes: Vec<usize> = (0..3 + MAX_ISOLATE_SENDS)
+            .map(|i| server.sent_gap_ids(i).len())
+            .collect();
+        let singles = sizes[2..].iter().take_while(|n| **n == 1).count();
+        assert!(
+            (MAX_ISOLATE_SENDS / 2..=MAX_ISOLATE_SENDS).contains(&singles),
+            "{singles} singles"
+        );
+        assert!(sizes[2 + singles] > 1, "batches resume: {sizes:?}");
+    }
+
+    /// `central` and `routes` come from real sources; spool and registry stay
+    /// placeholders.
+    #[test]
+    fn central_and_routes_are_real_and_spool_registry_are_placeholders() {
+        let central = CentralHealth::new();
+        let mut b = StatusBuilder::new("px-1", &uid(5));
+        b.set_central(central.clone());
+        let now = time::OffsetDateTime::now_utc();
+        let st = |bytes: Vec<u8>| sigil_proxy_api::parse_status(&bytes).unwrap();
+        let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
+        let routes: Vec<(String, String)> = s
+            .routes
+            .iter()
+            .map(|r| {
+                (
+                    r.upstream_id.as_str().to_string(),
+                    serde_json::to_value(r.state)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routes,
+            vec![
+                ("up-r1".to_string(), "supported".to_string()),
+                ("up-r2".to_string(), "supported".to_string())
+            ]
+        );
+        assert!(s.central.last_ingest_ack_at.is_none());
+        assert_eq!(s.central.consecutive_failures.get(), 0);
+        central.record_failure();
+        central.record_failure();
+        let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
+        assert_eq!(s.central.consecutive_failures.get(), 2);
+        central.record_ingest_ack(now);
+        let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
+        assert_eq!(s.central.consecutive_failures.get(), 0);
+        assert!(s.central.last_ingest_ack_at.is_some());
+        // an expired config does not claim its routes are supported
+        let mut expired = view(ConfigState::Expired);
+        expired.route_upstreams = vec!["up-r1".into()];
+        let s = st(b.build(&expired, &[], now).unwrap());
+        assert_eq!(
+            serde_json::to_value(s.routes[0].state).unwrap(),
+            json!("disabled")
+        );
+        // placeholders: vacuous values (T-13/T-14)
+        assert_eq!(s.spool.depth_events.get(), 0);
+        assert_eq!(s.spool.capacity_bytes.get(), 1);
+        assert!(!s.registry.sync_stalled);
+    }
+
+    /// The reporter feeds the central failure count: no answer or 5xx counts, an
+    /// answer (even a refusal) resets it.
+    #[tokio::test]
+    async fn reporter_feeds_central_health() {
+        let central = CentralHealth::new();
+        let mut n = 0;
+        let server = Script::new(move |_| {
+            n += 1;
+            match n {
+                1 | 2 => None,
+                3 => reply(
+                    503,
+                    json!({"error": {"code": "storage_limit", "message": "x"}}),
+                ),
+                _ => ok200(),
+            }
+        });
+        let mut r =
+            Reporter::new("px-1", &uid(5), GapQueue::new(), params()).with_central(central.clone());
+        let v = view(ConfigState::None);
+        r.send_once(&server, &v).await.unwrap();
+        r.send_once(&server, &v).await.unwrap();
+        assert_eq!(central.consecutive_failures(), 2);
+        r.send_once(&server, &v).await.unwrap();
+        assert_eq!(
+            central.consecutive_failures(),
+            0,
+            "storage_limit is an answer"
+        );
     }
 }

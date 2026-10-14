@@ -9,6 +9,11 @@
 //!   revision high-water mark ONLY (never the config itself, which needs a fresh
 //!   fetch after a restart, control-plane.md §6.3). It stops a restarted proxy
 //!   from accepting a rolled-back server revision.
+//! * `gap_queue.json` `{schema_version, proxy_id, pending, quarantined,
+//!   overflow_count}`: gap reports not yet acknowledged by the server, those
+//!   quarantined after a 409/422, and the number of gaps that did not fit
+//!   (ledger-and-query.md L6b). Loaded at start; a corrupt or unsafe file
+//!   refuses the start, like `applied.json` and `sequence.json`.
 
 use std::fs::File;
 #[cfg(unix)]
@@ -18,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sigil_proxy_api::Id;
+use sigil_proxy_api::{GapReport, Id, Validate};
 use thiserror::Error;
 
 pub const LOCK_FILE: &str = "lock";
@@ -26,6 +31,7 @@ pub const BINDING_FILE: &str = "binding.json";
 pub const STATUS_FILE: &str = "status.json";
 pub const APPLIED_FILE: &str = "applied.json";
 pub const SEQUENCE_FILE: &str = "sequence.json";
+pub const GAP_QUEUE_FILE: &str = "gap_queue.json";
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -58,6 +64,13 @@ pub enum StateError {
          from the clock"
     )]
     BadSequence(String),
+    // Same stance again: an unreadable queue would silently forget gaps the
+    // server never acknowledged, so it is refused, not ignored.
+    #[error(
+        "gap queue file is unreadable or invalid ({0}); delete gap_queue.json to discard the \
+         unacknowledged gaps"
+    )]
+    BadGapQueue(String),
     #[error("i/o error on {path}: {source}")]
     Io {
         path: String,
@@ -102,6 +115,28 @@ struct SequenceBound {
     proxy_id: String,
     epoch_id: String,
     bound: i64,
+}
+
+/// The persisted gap queue (see [`StateDir::read_gap_queue`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GapQueueState {
+    /// Oldest first.
+    pub pending: Vec<GapReport>,
+    pub quarantined: Vec<GapReport>,
+    /// Gaps that did not fit in the queue and are not yet reported as an
+    /// aggregated gap.
+    pub overflow_count: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GapQueueFile {
+    schema_version: u32,
+    proxy_id: String,
+    pending: Vec<GapReport>,
+    quarantined: Vec<GapReport>,
+    overflow_count: i64,
 }
 
 /// An opened, locked state directory. The lock is released when dropped.
@@ -245,6 +280,59 @@ impl StateDir {
         };
         let bytes = serde_json::to_vec_pretty(&m).expect("bound serializes");
         write_atomic(&self.dir, SEQUENCE_FILE, &bytes)
+    }
+
+    /// The persisted gap queue. `Ok(None)` is a first start. A corrupt, foreign,
+    /// symlinked, loose-permission, oversized or inconsistent file is an error
+    /// (fail closed): every gap must validate, ids must be unique across pending
+    /// and quarantined, and the bounds of the queue must hold.
+    pub fn read_gap_queue(&self) -> Result<Option<GapQueueState>, StateError> {
+        use crate::status_report::{gap_id, MAX_QUARANTINED_GAPS, MAX_QUEUED_GAPS};
+        let path = self.dir.join(GAP_QUEUE_FILE);
+        let bytes = match crate::fsutil::read_private_file(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let bad = |why: &str| StateError::BadGapQueue(why.into());
+        let f: GapQueueFile = serde_json::from_slice(&bytes).map_err(|_| bad("parse error"))?;
+        if f.schema_version != 1 {
+            return Err(bad("unexpected content"));
+        }
+        if f.proxy_id != self.proxy_id.as_str() {
+            return Err(bad("other proxy_id"));
+        }
+        let s = GapQueueState {
+            pending: f.pending,
+            quarantined: f.quarantined,
+            overflow_count: f.overflow_count,
+        };
+        if s.pending.len() > MAX_QUEUED_GAPS
+            || s.quarantined.len() > MAX_QUARANTINED_GAPS
+            || s.overflow_count < 0
+        {
+            return Err(bad("out of bounds"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for g in s.pending.iter().chain(s.quarantined.iter()) {
+            if g.validate().is_err() || !seen.insert(gap_id(g).to_string()) {
+                return Err(bad("unexpected content"));
+            }
+        }
+        Ok(Some(s))
+    }
+
+    /// Persist the gap queue (owner-only, tmp + fsync + rename + dir fsync).
+    pub fn write_gap_queue(&self, state: &GapQueueState) -> Result<(), StateError> {
+        let f = GapQueueFile {
+            schema_version: 1,
+            proxy_id: self.proxy_id.as_str().to_string(),
+            pending: state.pending.clone(),
+            quarantined: state.quarantined.clone(),
+            overflow_count: state.overflow_count,
+        };
+        let bytes = serde_json::to_vec(&f).expect("gap queue serializes");
+        write_atomic(&self.dir, GAP_QUEUE_FILE, &bytes)
     }
 
     /// Atomically replace a file in the state directory.
@@ -573,5 +661,77 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(dir.join(LOCK_FILE), &path).unwrap();
         assert!(sd.read_sequence_bound().is_err());
+    }
+
+    fn gap(n: u32) -> GapReport {
+        serde_json::from_value(serde_json::json!({
+            "kind": "event_quarantined",
+            "gap_id": format!("00000000-0000-4000-8000-{n:012x}"),
+            "detected_at": "2026-10-11T00:00:00Z",
+            "event_ids": ["00000000-0000-4000-8000-000000000900"],
+            "code": "semantic_invalid"}))
+        .unwrap()
+    }
+
+    /// L6b: the queue round-trips; every unsafe or inconsistent file is refused.
+    #[test]
+    fn gap_queue_roundtrip_and_bad_files() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("st");
+        let id = Id::new("px-1").unwrap();
+        let sd = StateDir::open(&dir, &id).unwrap();
+        assert_eq!(sd.read_gap_queue().unwrap(), None, "first start");
+        let st = GapQueueState {
+            pending: vec![gap(1), gap(2)],
+            quarantined: vec![gap(3)],
+            overflow_count: 4,
+        };
+        sd.write_gap_queue(&st).unwrap();
+        assert_eq!(sd.read_gap_queue().unwrap(), Some(st.clone()));
+        let path = dir.join(GAP_QUEUE_FILE);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let good = std::fs::read_to_string(&path).unwrap();
+        let g1 = "00000000-0000-4000-8000-000000000001";
+        let g3 = "00000000-0000-4000-8000-000000000003";
+        for bad in [
+            "not json".to_string(),
+            good.replace("\"schema_version\":1", "\"schema_version\":2"),
+            good.replace("px-1", "other"),
+            good.replace("\"overflow_count\"", "\"x\":1,\"overflow_count\""),
+            good.replace("\"overflow_count\":4", "\"overflow_count\":-1"),
+            // a gap id in both lists
+            good.replace(g3, g1),
+            // a gap the shared validator refuses (no event ids)
+            good.replace("[\"00000000-0000-4000-8000-000000000900\"]", "[]"),
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(
+                matches!(sd.read_gap_queue(), Err(StateError::BadGapQueue(_))),
+                "accepted a bad gap queue file"
+            );
+        }
+        // over the pending bound
+        let too_many = GapQueueState {
+            pending: (0..=crate::status_report::MAX_QUEUED_GAPS as u32)
+                .map(gap)
+                .collect(),
+            ..GapQueueState::default()
+        };
+        sd.write_gap_queue(&too_many).unwrap();
+        assert!(matches!(
+            sd.read_gap_queue(),
+            Err(StateError::BadGapQueue(_))
+        ));
+        // loose permissions and a symlink: refused
+        sd.write_gap_queue(&st).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(sd.read_gap_queue().is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.join(LOCK_FILE), &path).unwrap();
+        assert!(sd.read_gap_queue().is_err());
     }
 }
