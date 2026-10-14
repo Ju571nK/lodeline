@@ -264,7 +264,7 @@ pub fn apply(
                 if next.gaps.len() >= MAX_GAPS_PER_PROXY
                     || bytes.saturating_add(size) > MAX_GAPS_BYTES_PER_PROXY
                 {
-                    refused.push(item(index, &id, ErrorCode::parse("storage_limit")));
+                    refused.push(item(index, &id, ErrorCode::StorageLimit));
                     continue;
                 }
                 bytes += size;
@@ -405,7 +405,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
             }
             Ok(()) if !refused.is_empty() => json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                ApiError::from_code(ErrorCode::parse("storage_limit")).with_items(refused),
+                ApiError::from_code(ErrorCode::StorageLimit).with_items(refused),
             ),
             Ok(()) => Json(serde_json::to_value(response).unwrap_or(serde_json::Value::Null))
                 .into_response(),
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(a.refused.len(), 1);
         assert_eq!(a.refused[0].index, 0);
         assert_eq!(a.refused[0].gap_id.as_ref().unwrap().as_str(), uid(1));
-        assert_eq!(a.refused[0].code, ErrorCode::parse("storage_limit"));
+        assert_eq!(a.refused[0].code, ErrorCode::StorageLimit);
         assert!(a.response.acknowledged_gap_ids.is_empty());
         assert_eq!(ids(&a.response.duplicate_gap_ids), vec![uid(10_000)]);
         assert_eq!(a.entry.gaps.len(), MAX_GAPS_PER_PROXY);

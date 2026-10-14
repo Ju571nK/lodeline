@@ -1558,6 +1558,142 @@ fn parse_errors_never_echo_input() {
     }
 }
 
+/// Bytes the old text-based classifier looked for, plus the duplicate-key marker.
+const FORGED: [&str; 3] = ["\u{1}S", "\u{1}L", "\u{1}D"];
+
+#[test]
+fn forged_markers_in_input_never_change_the_category() {
+    for p in points() {
+        for mark in FORGED {
+            let text = format!("{mark}CANARY");
+            // (label, plain document, forged document): the category must match.
+            let mut cases: Vec<(&str, Value, Value)> = Vec::new();
+            // Marker inside a string value of the wrong-typed slot.
+            cases.push((
+                "string value",
+                set_deep(p.doc.clone(), &p.type_slot, json!("CANARY")),
+                set_deep(p.doc.clone(), &p.type_slot, json!(text)),
+            ));
+            // Marker inside an object key.
+            let mut plain = p.doc.clone();
+            plain
+                .as_object_mut()
+                .unwrap()
+                .insert("CANARY".into(), json!(1));
+            let mut forged = p.doc.clone();
+            forged
+                .as_object_mut()
+                .unwrap()
+                .insert(text.clone(), json!(1));
+            cases.push(("object key", plain, forged));
+            // Marker as an unknown enum variant.
+            if let Some(slot) = &p.enum_slot {
+                cases.push((
+                    "unknown variant",
+                    set_deep(p.doc.clone(), slot, json!("CANARY")),
+                    set_deep(p.doc.clone(), slot, json!(text)),
+                ));
+            }
+            for (case, plain, forged) in cases {
+                let ctx = format!("{}/{case}/{mark:?}", p.name);
+                let plain_res = (p.parse)(&serde_json::to_vec(&plain).unwrap());
+                let forged_res = (p.parse)(&serde_json::to_vec(&forged).unwrap());
+                match (plain_res, forged_res) {
+                    (Ok(()), Ok(())) => assert!(p.lenient, "{ctx}"),
+                    (Err(a), Err(b)) => {
+                        assert_eq!(a, b, "{ctx}");
+                        assert!(
+                            matches!(b.category(), ErrorCategory::Schema),
+                            "{ctx}: {b:?}"
+                        );
+                        assert_no_canary(p.name, &ctx, &b);
+                    }
+                    (a, b) => panic!("{ctx}: diverged {a:?} vs {b:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn genuine_semantic_failure_stays_semantic_and_marker_ids_stay_schema() {
+    let bytes = |v: Value| serde_json::to_vec(&v).unwrap();
+    // A real Semantic rule failure stays Semantic whatever the strings contain.
+    for mark in FORGED {
+        let mut bad = set(completion(), &["payload", "outcome"], json!("denied"));
+        bad["proxy_id"] = json!(format!("{mark}x"));
+        let e = parse_event(&bytes(bad)).unwrap_err();
+        // proxy_id with control bytes is a schema violation of its own.
+        assert_eq!(e.category(), ErrorCategory::Schema, "{mark:?}");
+    }
+    let genuine = set(completion(), &["payload", "outcome"], json!("denied"));
+    assert_eq!(
+        parse_event(&bytes(genuine)).unwrap_err().category(),
+        ErrorCategory::Semantic
+    );
+}
+
+#[test]
+fn stale_signal_from_direct_serde_use_does_not_leak_into_parse() {
+    // Direct serde use of a failing semantic rule leaves no state that a later
+    // schema failure in parse_* could pick up.
+    let bad = set(completion(), &["payload", "outcome"], json!("denied"));
+    assert!(serde_json::from_value::<ProxyEvent>(bad).is_err());
+    let schema_bad = set(example(), &["sequence"], json!(0));
+    let e = parse_event(&serde_json::to_vec(&schema_bad).unwrap()).unwrap_err();
+    assert_eq!(e.category(), ErrorCategory::Schema);
+    // And a semantic failure after a clean parse is still reported.
+    parse_event(&serde_json::to_vec(&example()).unwrap()).unwrap();
+    let bad = set(completion(), &["payload", "outcome"], json!("denied"));
+    let e = parse_event(&serde_json::to_vec(&bad).unwrap()).unwrap_err();
+    assert_eq!(e.category(), ErrorCategory::Semantic);
+}
+
+#[test]
+fn new_error_codes_golden_table() {
+    let table = [
+        (
+            "storage_limit",
+            ErrorCode::StorageLimit,
+            503,
+            "Storage limit reached.",
+        ),
+        (
+            "storage_unavailable",
+            ErrorCode::StorageUnavailable,
+            503,
+            "Storage is unavailable.",
+        ),
+        (
+            "payload_too_large",
+            ErrorCode::PayloadTooLarge,
+            413,
+            "Request body is too large.",
+        ),
+        (
+            "rate_limited",
+            ErrorCode::RateLimited,
+            429,
+            "Too many requests.",
+        ),
+    ];
+    for (text, code, status, message) in table {
+        assert_eq!(code.as_str(), text);
+        assert_eq!(ErrorCode::parse(text), code);
+        assert!(code.is_known());
+        assert_eq!(code.http_status(), Some(status));
+        assert_eq!(code.fixed_message(), message);
+        let body = ApiError::from_code(code.clone());
+        assert_eq!(body.error.message, message);
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            json!({"error": {"code": text, "message": message}})
+        );
+        let back: ApiError = serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
+        assert_eq!(back.error.code, code);
+    }
+}
+
 #[test]
 fn parse_rejects_duplicate_keys() {
     for p in points() {

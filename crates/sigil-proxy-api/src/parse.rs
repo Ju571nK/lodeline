@@ -19,7 +19,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
 
 use crate::config::{ProxyConfig, PutConfigRequest};
-use crate::error::{ApiError, MARK_LIMIT, MARK_SEMANTIC};
+use crate::error::{set_raised, take_raised, ApiError, Raised};
 use crate::event::{IngestRequest, IngestResponse, ProxyEvent};
 use crate::registry::{RegistryEntry, UploadRequest, UploadResponse};
 use crate::status::{GapReport, ProxyStatus, StatusResponse};
@@ -27,7 +27,23 @@ use crate::status::{GapReport, ProxyStatus, StatusResponse};
 /// Largest accepted event batch body (README: 1 MiB).
 pub const MAX_EVENT_BATCH_BYTES: usize = 1024 * 1024;
 
-const MARK_DUPLICATE: &str = "\u{1}D";
+/// Clears the out-of-band rule-violation signal (see `error::RAISED`) for the
+/// duration of one parse call and restores the previous value on drop, including
+/// on early return and unwind, so a stale signal can neither leak into nor out of
+/// a parse call.
+struct RaisedScope(Option<Raised>);
+
+impl RaisedScope {
+    fn enter() -> Self {
+        Self(take_raised())
+    }
+}
+
+impl Drop for RaisedScope {
+    fn drop(&mut self) {
+        set_raised(self.0);
+    }
+}
 
 /// Fixed failure category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,21 +101,19 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Maps a serde error to a category. Syntax/Eof/Io come from serde's own typed
+/// classification. For data errors the category is the signal recorded by this
+/// crate's validation code (`take_raised`), never the message text, which can
+/// quote input. Without a recorded signal a data error is `Schema`.
 fn classify(e: &serde_json::Error) -> ErrorCategory {
     use serde_json::error::Category;
     match e.classify() {
         Category::Io | Category::Syntax | Category::Eof => ErrorCategory::Syntax,
-        Category::Data => {
-            // Only the fixed markers are inspected; the message text is dropped.
-            let text = e.to_string();
-            if text.contains(MARK_LIMIT) {
-                ErrorCategory::Limit
-            } else if text.contains(MARK_SEMANTIC) {
-                ErrorCategory::Semantic
-            } else {
-                ErrorCategory::Schema
-            }
-        }
+        Category::Data => match take_raised() {
+            Some(Raised::Limit) => ErrorCategory::Limit,
+            Some(Raised::Semantic) => ErrorCategory::Semantic,
+            None => ErrorCategory::Schema,
+        },
     }
 }
 
@@ -160,7 +174,7 @@ impl<'de> Visitor<'de> for StrictVisitor {
         let mut out = Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if out.contains_key(&key) {
-                return Err(A::Error::custom(MARK_DUPLICATE));
+                return Err(A::Error::custom("duplicate object key"));
             }
             let Strict(v) = map.next_value()?;
             out.insert(key, v);
@@ -170,6 +184,7 @@ impl<'de> Visitor<'de> for StrictVisitor {
 }
 
 fn parse_value(bytes: &[u8]) -> Result<Value, ParseError> {
+    let _scope = RaisedScope::enter();
     let mut de = serde_json::Deserializer::from_slice(bytes);
     let Strict(value) = Strict::deserialize(&mut de).map_err(|e| ParseError::new(classify(&e)))?;
     de.end().map_err(|e| ParseError::new(classify(&e)))?;
@@ -190,9 +205,14 @@ fn parse_doc<T: DeserializeOwned>(
     bad_element: Option<fn(&Value) -> Option<usize>>,
 ) -> Result<T, ParseError> {
     let value = parse_value(bytes)?;
-    T::deserialize(&value).map_err(|e| ParseError {
-        category: classify(&e),
-        index: bad_element.and_then(|f| f(&value)),
+    let _scope = RaisedScope::enter();
+    T::deserialize(&value).map_err(|e| {
+        // Classify first: `bad_element` re-deserializes and would overwrite the signal.
+        let category = classify(&e);
+        ParseError {
+            category,
+            index: bad_element.and_then(|f| f(&value)),
+        }
     })
 }
 

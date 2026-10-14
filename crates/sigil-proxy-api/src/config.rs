@@ -677,6 +677,39 @@ mod tests {
     }
 
     #[test]
+    fn forged_markers_never_change_the_config_category() {
+        use crate::parse::ErrorCategory;
+        for mark in ["\u{1}S", "\u{1}L", "\u{1}D"] {
+            let text = format!("{mark}CANARY");
+            let cat = |r: Result<(), crate::parse::ParseError>| {
+                let e = r.unwrap_err();
+                assert!(!format!("{e:?}{e}").contains("CANARY"));
+                e.category()
+            };
+            let get = |v: &Value| cat(parse_config(&bytes(v)).map(drop));
+            let put_ = |v: Value| cat(parse_config_put(&put(v)).map(drop));
+
+            // string value in a wrong-typed slot, object key, unknown variant
+            let mut c = full();
+            c["ttl_seconds"] = json!(text);
+            assert_eq!(get(&c), ErrorCategory::Schema, "{mark:?} value");
+            let mut c = full();
+            c[text.as_str()] = json!(1);
+            assert_eq!(get(&c), ErrorCategory::Schema, "{mark:?} key");
+            let mut c = full();
+            c["mode"] = json!(text);
+            assert_eq!(get(&c), ErrorCategory::Schema, "{mark:?} variant");
+
+            let mut s = spec();
+            s["allowed_origins"] = json!(text);
+            assert_eq!(put_(s), ErrorCategory::Schema, "{mark:?} put value");
+            let mut s = spec();
+            s["routes"][0][text.as_str()] = json!(1);
+            assert_eq!(put_(s), ErrorCategory::Schema, "{mark:?} put key");
+        }
+    }
+
+    #[test]
     fn schema_version_is_required_and_exactly_one() {
         for bad in [json!(0), json!(2), json!("1"), json!(1.5)] {
             let mut s = spec();
