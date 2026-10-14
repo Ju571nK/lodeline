@@ -135,6 +135,10 @@ ledger-and-query L3/L5, registry R2)에서 [OPEN]이다. "동결"은 D-03 ingest
 | `invalid_state` | 409 | 관리 route: 허용되지 않는 lifecycle 전이(예: retire 뒤 enable) | decided 2026-10-11 (#251) |
 | `disabled` / `retired` | 403 | 인증된 proxy 신원의 상태 거절(미등록·불일치는 404) | decided 2026-10-11 |
 | `audit_unavailable` | 503 | 관리 감사 기록 실패, 효과 없음 | server-only, 2026-10-11 (#251) |
+| `payload_too_large` | 413 | 요청 body 크기 상한 초과 | decided 2026-10-14 (S4, #271) |
+| `rate_limited` | 429 | backpressure(동시 처리 상한) | decided 2026-10-14 (S4, #271) |
+| `storage_limit` | 503 | 서버 저장 한도 도달. 중앙 단절이 아니다 | decided 2026-10-14 (S4, #271) |
+| `storage_unavailable` | 503 | 일시 저장 실패, 효과 없음 | decided 2026-10-14 (S4, #271) |
 
 status 보고 오류 코드(상태 필드 값, 응답 오류와 별개): `last_update_error` ∈ {`stale_revision`,
 `validation_failed`, `fetch_failed`, `apply_failed`, `config_hash_mismatch`},
