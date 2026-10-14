@@ -1566,6 +1566,8 @@ fn forged_markers_in_input_never_change_the_category() {
     for p in points() {
         for mark in FORGED {
             let text = format!("{mark}CANARY");
+            // String-value cases are defence in depth (serde Debug-escapes them);
+            // the key and variant cases are the ones that exercised the old bug.
             // (label, plain document, forged document): the category must match.
             let mut cases: Vec<(&str, Value, Value)> = Vec::new();
             // Marker inside a string value of the wrong-typed slot.
@@ -1616,20 +1618,46 @@ fn forged_markers_in_input_never_change_the_category() {
 }
 
 #[test]
-fn genuine_semantic_failure_stays_semantic_and_marker_ids_stay_schema() {
+fn genuine_limit_and_semantic_survive_adversarial_content() {
     let bytes = |v: Value| serde_json::to_vec(&v).unwrap();
-    // A real Semantic rule failure stays Semantic whatever the strings contain.
+    // `definition` is free-form, so marker bytes in its keys and values are valid
+    // input and the failure below is the only reason the document is rejected.
     for mark in FORGED {
-        let mut bad = set(completion(), &["payload", "outcome"], json!("denied"));
-        bad["proxy_id"] = json!(format!("{mark}x"));
-        let e = parse_event(&bytes(bad)).unwrap_err();
-        // proxy_id with control bytes is a schema violation of its own.
-        assert_eq!(e.category(), ErrorCategory::Schema, "{mark:?}");
+        let mut e = entry();
+        e["definition"] =
+            json!({"name": format!("{mark}n"), (format!("{mark}k")): format!("{mark}v")});
+        let up = |entries: Vec<Value>| {
+            bytes(json!({"schema_version": 1, "proxy_id": "proxy-demo", "entries": entries}))
+        };
+        // Sanity: the document is accepted on its own.
+        parse_upload(&up(vec![e.clone()])).unwrap();
+        // Limit: too many entries.
+        let r = parse_upload(&up(vec![e.clone(); 101])).unwrap_err();
+        assert_eq!(r.category(), ErrorCategory::Limit, "{mark:?} count");
+        let r = parse_upload(&up(vec![])).unwrap_err();
+        assert_eq!(r.category(), ErrorCategory::Limit, "{mark:?} empty");
+        // Lenient response body: the marker key is an ignored unknown field, so the
+        // only failures are the genuine uniqueness (Semantic) and count (Limit) rules.
+        let refs = |n: usize, same: bool| {
+            let v: Vec<String> = (0..n)
+                .map(|i| format!("3f4720a0-484d-8103-a955-{:012x}", if same { 0 } else { i }))
+                .collect();
+            bytes(json!({
+                "registered_metadata_refs": v, "duplicate_metadata_refs": [],
+                (format!("{mark}k")): format!("{mark}v")
+            }))
+        };
+        parse_upload_response(&refs(2, false)).unwrap();
+        let r = parse_upload_response(&refs(2, true)).unwrap_err();
+        assert_eq!(r.category(), ErrorCategory::Semantic, "{mark:?} unique");
+        let r = parse_upload_response(&refs(101, false)).unwrap_err();
+        assert_eq!(r.category(), ErrorCategory::Limit, "{mark:?} refs count");
     }
-    let genuine = set(completion(), &["payload", "outcome"], json!("denied"));
+    // Event batch: genuine Limit without any extra content.
+    let many = json!({"events": vec![example(); 101]});
     assert_eq!(
-        parse_event(&bytes(genuine)).unwrap_err().category(),
-        ErrorCategory::Semantic
+        parse_event_batch(&bytes(many)).unwrap_err().category(),
+        ErrorCategory::Limit
     );
 }
 

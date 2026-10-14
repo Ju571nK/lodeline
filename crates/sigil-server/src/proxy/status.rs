@@ -399,7 +399,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
             Err(e) => {
                 tracing::error!(error = %e, "proxy state persist failed (status report)");
                 fixed(
-                    ErrorCode::parse("storage_unavailable"),
+                    ErrorCode::StorageUnavailable,
                     StatusCode::SERVICE_UNAVAILABLE,
                 )
             }

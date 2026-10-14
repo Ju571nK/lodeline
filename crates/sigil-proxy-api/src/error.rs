@@ -61,6 +61,10 @@ impl ValidationError {
     }
 
     /// Records the category out of band and returns the fixed message.
+    ///
+    /// Validation errors must propagate immediately: never swallow, retry or
+    /// replace one, because the out-of-band category cell read by `parse::classify`
+    /// relies on the last recorded signal belonging to the error that surfaces.
     pub(crate) fn tagged(&self) -> String {
         set_raised(Some(if self.limit {
             Raised::Limit
