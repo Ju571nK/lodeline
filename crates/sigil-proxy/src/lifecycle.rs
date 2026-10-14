@@ -27,7 +27,6 @@ pub enum RunState {
 /// Local view for `health`. Not the wire `ProxyStatus` (that needs spool,
 /// registry and route sections owned by later tasks).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LocalStatus {
     pub schema_version: u32,
     pub proxy_id: String,
@@ -38,7 +37,20 @@ pub struct LocalStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update_error: Option<LastUpdateError>,
     pub forwarding: bool,
+    /// F1: the status sequence looks stuck below the server's stored one, so
+    /// status snapshots are being ignored (see `status_report::WEDGE_THRESHOLD`).
+    /// Absent (false) in the normal case.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub status_sequence_wedged: bool,
+    /// The gap queue could not be written to state_dir, so unacknowledged gaps
+    /// would be lost on a restart. Absent (false) in the normal case.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub gap_queue_persist_failed: bool,
     pub updated_at: String,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Forwarding requires a valid applied config and a running process. Nothing
@@ -77,6 +89,7 @@ pub struct Lifecycle {
     status: LocalStatus,
     applied: Option<crate::state_dir::AppliedMark>,
     sequence_bound: Option<i64>,
+    gap_queue: Option<crate::state_dir::GapQueueState>,
 }
 
 impl Lifecycle {
@@ -91,6 +104,9 @@ impl Lifecycle {
         let applied = state.read_applied()?;
         // A corrupt sequence file refuses the start too.
         let sequence_bound = state.read_sequence_bound()?;
+        // A corrupt, unsafe or inconsistent gap queue refuses the start too: it
+        // would otherwise silently forget gaps the server never acknowledged.
+        let gap_queue = state.read_gap_queue()?;
         let config_state = startup_config_state(previous.as_ref());
         let status = LocalStatus {
             schema_version: 1,
@@ -101,6 +117,8 @@ impl Lifecycle {
             config_state,
             last_update_error: None,
             forwarding: false,
+            status_sequence_wedged: false,
+            gap_queue_persist_failed: false,
             updated_at: now_rfc3339(),
         };
         let mut lc = Lifecycle {
@@ -108,6 +126,7 @@ impl Lifecycle {
             status,
             applied,
             sequence_bound,
+            gap_queue,
         };
         lc.publish()?;
         Ok(lc)
@@ -121,6 +140,31 @@ impl Lifecycle {
     /// Upper bound of the status sequences sent in this epoch, loaded at start.
     pub fn sequence_bound(&self) -> Option<i64> {
         self.sequence_bound
+    }
+
+    /// The gap queue loaded at start (once).
+    pub fn take_gap_queue(&mut self) -> Option<crate::state_dir::GapQueueState> {
+        self.gap_queue.take()
+    }
+
+    /// Persist the gap queue (called by the queue after each change).
+    pub fn persist_gap_queue(
+        &mut self,
+        q: &crate::state_dir::GapQueueState,
+    ) -> Result<(), StateError> {
+        let r = self.state.write_gap_queue(q);
+        // Show a failing queue write in the local status (on change only).
+        if r.is_err() != self.status.gap_queue_persist_failed {
+            self.status.gap_queue_persist_failed = r.is_err();
+            let _ = self.publish();
+        }
+        r
+    }
+
+    /// F1: publish whether the status sequence looks stuck.
+    pub fn set_sequence_wedged(&mut self, wedged: bool) -> Result<(), StateError> {
+        self.status.status_sequence_wedged = wedged;
+        self.publish()
     }
 
     /// Persist a new status-sequence bound before sequences up to it are used.
@@ -306,10 +350,11 @@ async fn run_inner(
     report_params: crate::status_report::ReporterParams,
     pre_bound: Option<std::net::TcpListener>,
 ) -> anyhow::Result<()> {
-    let lc = Lifecycle::start(b)?;
+    let mut lc = Lifecycle::start(b)?;
     let initial = lc.status().config_state;
     let mark = lc.applied_mark().cloned();
     let seq_floor = lc.sequence_bound();
+    let saved_gaps = lc.take_gap_queue();
     let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
     let acceptor = match &b.listener_tls {
         Some(t) => Some(crate::tls::load_acceptor(&t.cert_file, &t.key_file)?),
@@ -366,12 +411,33 @@ async fn run_inner(
                 let (sync, view_rx) = sync.with_view_channel();
                 let lc5 = lc.clone();
                 let epoch = lock(&lc).epoch_id().to_string();
+                // Durable gap queue (L6b): reloaded from state_dir, written after
+                // every change. No producer exists yet (relay events are
+                // T-13/T-14), so it only holds what a previous run left.
+                let lc6 = lc.clone();
+                let gaps = saved_gaps
+                    .map(crate::status_report::GapQueue::restore)
+                    .unwrap_or_default()
+                    .with_persister(Box::new(move |q| match lock(&lc6).persist_gap_queue(q) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!(error = %e, "cannot persist the gap queue");
+                            false
+                        }
+                    }));
+                let lc7 = lc.clone();
                 let reporter = crate::status_report::Reporter::new(
                 b.proxy_id.as_str(),
                 &epoch,
-                crate::status_report::GapQueue::new(),
+                gaps,
                 report_params,
             )
+            .with_central(crate::status_report::CentralHealth::new())
+            .with_wedge_hook(Box::new(move |w| {
+                if let Err(e) = lock(&lc7).set_sequence_wedged(w) {
+                    tracing::error!(error = %e, "cannot publish the sequence state");
+                }
+            }))
             .with_sequence_persistence(
                 seq_floor,
                 Box::new(move |bound| match lock(&lc5).persist_sequence_bound(bound) {
@@ -525,6 +591,8 @@ mod tests {
             config_state: c,
             last_update_error: None,
             forwarding: false,
+            status_sequence_wedged: false,
+            gap_queue_persist_failed: false,
             updated_at: String::new(),
         };
         assert_eq!(startup_config_state(None), ConfigState::None);
@@ -616,5 +684,93 @@ mod tests {
         std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let e = Lifecycle::start(&b).err().expect("must refuse");
         assert!(matches!(e, StateError::BadSequence(_)), "{e}");
+    }
+
+    fn lc_gap(n: u32) -> sigil_proxy_api::GapReport {
+        serde_json::from_value(serde_json::json!({
+            "kind": "event_quarantined",
+            "gap_id": format!("00000000-0000-4000-8000-{n:012x}"),
+            "detected_at": "2026-10-11T00:00:00Z",
+            "event_ids": ["00000000-0000-4000-8000-000000000900"],
+            "code": "semantic_invalid"}))
+        .unwrap()
+    }
+
+    /// L6b: unacknowledged gaps (pending and quarantined) survive a restart.
+    #[test]
+    fn gap_queue_survives_a_restart() {
+        use crate::status_report::{GapQueue, ReportOutcome};
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let uid = |n: u32| format!("00000000-0000-4000-8000-{n:012x}");
+        {
+            let mut lc = Lifecycle::start(&b).unwrap();
+            assert!(lc.take_gap_queue().is_none(), "first start");
+            let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
+            let lc2 = lc.clone();
+            let q = GapQueue::new().with_persister(Box::new(move |s| {
+                lc2.lock().unwrap().persist_gap_queue(s).is_ok()
+            }));
+            for n in 1..=3 {
+                q.push(lc_gap(n)).unwrap();
+            }
+            q.settle(&ReportOutcome::Conflict { gaps: vec![uid(2)] });
+        }
+        let mut lc = Lifecycle::start(&b).unwrap();
+        let q = GapQueue::restore(lc.take_gap_queue().expect("queue loaded"));
+        assert_eq!(q.pending_ids(), vec![uid(1), uid(3)]);
+        assert_eq!(q.quarantined_ids(), vec![uid(2)]);
+    }
+
+    /// A corrupt gap queue refuses the start, like a corrupt applied mark.
+    #[test]
+    fn corrupt_gap_queue_refuses_start() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        drop(Lifecycle::start(&b).unwrap());
+        let p = b.state_dir.join(crate::state_dir::GAP_QUEUE_FILE);
+        std::fs::write(&p, "garbage").unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let e = Lifecycle::start(&b).err().expect("must refuse");
+        assert!(matches!(e, StateError::BadGapQueue(_)), "{e}");
+        // unsafe permissions refuse too
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        assert!(Lifecycle::start(&b).is_err());
+    }
+
+    /// F1: the wedge flag reaches the local status file and clears.
+    #[test]
+    fn sequence_wedge_is_shown_in_the_local_status() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        assert!(!read_status(&b.state_dir).unwrap().status_sequence_wedged);
+        lc.set_sequence_wedged(true).unwrap();
+        assert!(read_status(&b.state_dir).unwrap().status_sequence_wedged);
+        lc.set_sequence_wedged(false).unwrap();
+        let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
+        assert!(!s.contains("wedged"), "absent when false");
+    }
+
+    /// M4: a failing gap queue write shows in the local status and clears.
+    #[test]
+    fn gap_queue_write_failure_is_shown_in_the_local_status() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        let q = crate::state_dir::GapQueueState::default();
+        lc.persist_gap_queue(&q).unwrap();
+        assert!(!read_status(&b.state_dir).unwrap().gap_queue_persist_failed);
+        // a non-empty directory in the way makes the rename fail
+        let p = b.state_dir.join(crate::state_dir::GAP_QUEUE_FILE);
+        std::fs::remove_file(&p).unwrap();
+        std::fs::create_dir_all(p.join("x")).unwrap();
+        assert!(lc.persist_gap_queue(&q).is_err());
+        assert!(read_status(&b.state_dir).unwrap().gap_queue_persist_failed);
+        std::fs::remove_dir_all(&p).unwrap();
+        lc.persist_gap_queue(&q).unwrap();
+        let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
+        assert!(!s.contains("persist_failed"), "absent when false");
     }
 }

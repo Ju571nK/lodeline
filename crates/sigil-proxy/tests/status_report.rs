@@ -420,6 +420,7 @@ fn none_view() -> ConfigView {
         expires_at: None,
         max_offline_retry_age_seconds: None,
         event_retention_seconds: None,
+        route_upstreams: Vec::new(),
     }
 }
 

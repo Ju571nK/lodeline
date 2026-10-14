@@ -11,6 +11,7 @@ pub mod config_sync;
 pub mod dest;
 pub mod fsutil;
 pub mod headers;
+pub mod ingest_client;
 pub mod lifecycle;
 pub mod limits;
 pub mod route;
