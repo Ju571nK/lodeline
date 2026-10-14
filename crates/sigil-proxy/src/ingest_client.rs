@@ -469,10 +469,14 @@ impl IngestClient {
         };
         match outage_gap(&open, None) {
             Some(g) => {
+                // Marker first, gap second: a crash between the two flushes
+                // leaves a marker without a gap (harmless, the close is still
+                // sent), never a gap without a marker.
+                self.gaps.set_open_outage(Some(open.clone()));
                 self.outage.not_queued = !self.gaps.record(g);
-                if !self.outage.not_queued {
-                    // Persisted with the queue: the close survives a restart.
-                    self.gaps.set_open_outage(Some(open.clone()));
+                if self.outage.not_queued {
+                    // Counted as overflow: there is no gap to close.
+                    self.gaps.set_open_outage(None);
                 }
                 self.outage.open = Some(open);
                 tracing::warn!("central outage opened");
@@ -601,7 +605,6 @@ impl IngestClient {
     /// the failing event (and counts as one isolation step), so batches resume.
     fn isolated_locally(&mut self) {
         if self.mode == Mode::Isolate {
-            self.isolate_sends += 1;
             self.mode = Mode::Batch;
             self.isolate_sends = 0;
         }
@@ -1575,6 +1578,13 @@ mod tests {
             acknowledged: vec![original["gap_id"].as_str().unwrap().to_string()],
             duplicate: vec![],
         });
+        // no flush ever holds the outage gap without its marker
+        assert!(snaps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| !s.pending.is_empty())
+            .all(|s| s.open_outage.is_some()));
         let saved = snaps.lock().unwrap().last().cloned().unwrap();
         assert!(saved.pending.is_empty());
         assert_eq!(
