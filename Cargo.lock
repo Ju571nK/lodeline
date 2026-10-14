@@ -3275,6 +3275,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-proxy-e2e"
+version = "0.9.1"
+dependencies = [
+ "anyhow",
+ "axum-server",
+ "blake3",
+ "parking_lot",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde_json",
+ "serde_yaml",
+ "sigil-proxy",
+ "sigil-proxy-api",
+ "sigil-server",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "sigil-rules-basic"
 version = "0.9.1"
 

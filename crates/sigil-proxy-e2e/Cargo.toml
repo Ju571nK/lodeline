@@ -1,0 +1,28 @@
+[package]
+name = "sigil-proxy-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Test-only: runs the real sigil-server proxy control plane and the real sigil-proxy together (#267)."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+sigil-server = { path = "../sigil-server" }
+sigil-proxy = { path = "../sigil-proxy", features = ["test-util"] }
+sigil-proxy-api = { path = "../sigil-proxy-api" }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+blake3 = { workspace = true }
+parking_lot = { workspace = true }
+anyhow = { workspace = true }

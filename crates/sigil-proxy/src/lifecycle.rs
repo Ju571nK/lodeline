@@ -254,6 +254,58 @@ pub async fn run_with_shutdown(
     table: crate::route::TableHandle,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    run_inner(
+        b,
+        table,
+        shutdown,
+        crate::config_sync::SyncParams::default(),
+        crate::status_report::ReporterParams::default(),
+        None,
+    )
+    .await
+}
+
+/// Pacing and an optional pre-bound listener. TEST-ONLY (feature `test-util`, or
+/// this crate's own tests): production callers never see it, and nothing reads it
+/// from the environment or from `proxy.yaml`. It lets an integration test against
+/// a real server observe a revision change within seconds and avoid a
+/// bind-then-release port race.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Default)]
+pub struct RunTuning {
+    pub sync: crate::config_sync::SyncParams,
+    pub report: crate::status_report::ReporterParams,
+    /// Used instead of binding `Bootstrap::listen` (which is then ignored).
+    pub listener: Option<std::net::TcpListener>,
+}
+
+/// [`run_with_shutdown`] with explicit pacing. Tests only.
+#[cfg(any(test, feature = "test-util"))]
+pub async fn run_tuned(
+    b: &Bootstrap,
+    table: crate::route::TableHandle,
+    shutdown: impl Future<Output = ()>,
+    tuning: RunTuning,
+) -> anyhow::Result<()> {
+    run_inner(
+        b,
+        table,
+        shutdown,
+        tuning.sync,
+        tuning.report,
+        tuning.listener,
+    )
+    .await
+}
+
+async fn run_inner(
+    b: &Bootstrap,
+    table: crate::route::TableHandle,
+    shutdown: impl Future<Output = ()>,
+    sync_params: crate::config_sync::SyncParams,
+    report_params: crate::status_report::ReporterParams,
+    pre_bound: Option<std::net::TcpListener>,
+) -> anyhow::Result<()> {
     let lc = Lifecycle::start(b)?;
     let initial = lc.status().config_state;
     let mark = lc.applied_mark().cloned();
@@ -264,7 +316,13 @@ pub async fn run_with_shutdown(
         None => None,
     };
     // Fail before publishing `running` if the address cannot be bound.
-    let listener = tokio::net::TcpListener::bind(b.listen).await?;
+    let listener = match pre_bound {
+        Some(l) => {
+            l.set_nonblocking(true)?;
+            tokio::net::TcpListener::from_std(l)?
+        }
+        None => tokio::net::TcpListener::bind(b.listen).await?,
+    };
     tracing::info!(
         proxy_id = b.proxy_id.as_str(),
         epoch_id = lock(&lc).epoch_id(),
@@ -312,7 +370,7 @@ pub async fn run_with_shutdown(
                 b.proxy_id.as_str(),
                 &epoch,
                 crate::status_report::GapQueue::new(),
-                crate::status_report::ReporterParams::default(),
+                report_params,
             )
             .with_sequence_persistence(
                 seq_floor,
@@ -340,7 +398,7 @@ pub async fn run_with_shutdown(
                     crate::config_sync::run_sync(
                         sync,
                         &*fetcher,
-                        crate::config_sync::SyncParams::default(),
+                        sync_params,
                         |s| {
                             if let Err(e) = lock(&lc2).set_config(s) {
                                 tracing::error!(error = %e, "cannot publish config status");
