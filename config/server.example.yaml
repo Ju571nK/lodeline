@@ -128,3 +128,12 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # ledger_max_bytes_per_proxy: 536870912
 #   # ledger_max_rows_total: 5000000
 #   # ledger_max_bytes_total: 4294967296
+#   # Registry-entry store for POST /v1/proxy-metadata (SQLite, 0600). Default:
+#   # proxy-metadata.sqlite next to state_path. Caps answer 503 storage_limit (unmeasured values).
+#   # metadata_path: /var/lib/sigil-server/proxy-metadata.sqlite
+#   # metadata_max_entries_per_proxy: 20000       # 1..10000000
+#   # metadata_max_bytes_total: 1073741824        # 1048576..1099511627776
+#   # Concurrent POST /v1/proxy-events (1..1024, default 16); above it: 429 rate_limited.
+#   # ingest_max_concurrent: 16
+#   # Seconds between ledger retention sweeps (60..86400, default 3600).
+#   # ledger_sweep_interval_seconds: 3600

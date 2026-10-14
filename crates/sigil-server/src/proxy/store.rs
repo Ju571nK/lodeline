@@ -48,6 +48,25 @@ pub struct StoredConfig {
     pub updated_at: String,
 }
 
+/// One route's `(upstream_id, credential_scope_id)` binding. Kept for the
+/// previous revision so ledger SV-5 can accept the scope a proxy is still
+/// minting under until it applies the new revision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopePair {
+    pub upstream_id: String,
+    pub credential_scope_id: String,
+}
+
+fn scopes_of(c: &ProxyConfig) -> Vec<ScopePair> {
+    c.routes
+        .iter()
+        .map(|r| ScopePair {
+            upstream_id: r.upstream_id.as_str().to_string(),
+            credential_scope_id: r.credential_scope_id.as_str().to_string(),
+        })
+        .collect()
+}
+
 /// Everything stored for one `proxy_id`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProxyEntry {
@@ -75,6 +94,12 @@ pub struct ProxyEntry {
     /// Totals of earlier epochs, oldest first (bounded).
     #[serde(default)]
     pub previous_epoch_totals: Vec<EpochTotals>,
+    /// Route bindings of the revision BEFORE the stored config (SV-5). Set by
+    /// [`StoreTxn::commit`] whenever the stored config's revision changes; empty
+    /// before the first revision change. Only the immediately previous revision
+    /// is kept (decisions.md "T-11 S4 범위").
+    #[serde(default)]
+    pub previous_scopes: Vec<ScopePair>,
 }
 
 impl ProxyEntry {
@@ -189,6 +214,28 @@ impl ProxyStore {
             .collect()
     }
 
+    /// SV-5 / registry R2: is `credential_scope_id` one the server assigned to
+    /// `(proxy_id, upstream_id)` in the current revision's route set or in the
+    /// previous revision's? `false` when the proxy has no config.
+    pub fn scope_assigned(
+        &self,
+        proxy_id: &str,
+        upstream_id: &str,
+        credential_scope_id: &str,
+    ) -> bool {
+        let g = self.inner.read();
+        let Some(e) = g.get(proxy_id) else {
+            return false;
+        };
+        let hit = |p: &ScopePair| {
+            p.upstream_id == upstream_id && p.credential_scope_id == credential_scope_id
+        };
+        e.config
+            .as_ref()
+            .is_some_and(|c| scopes_of(&c.config).iter().any(hit))
+            || e.previous_scopes.iter().any(hit)
+    }
+
     pub fn last_seen(&self, proxy_id: &str) -> Option<String> {
         self.inner
             .read()
@@ -219,9 +266,26 @@ impl StoreTxn<'_> {
 
     /// Persist `entry` for `proxy_id`, then swap it into memory. On error
     /// nothing changed in memory.
-    pub fn commit(self, proxy_id: &str, entry: ProxyEntry) -> Result<()> {
+    pub fn commit(self, proxy_id: &str, mut entry: ProxyEntry) -> Result<()> {
         {
             let guard = self.store.inner.read();
+            // SV-5 history: when the config revision changes, the outgoing
+            // config's bindings become `previous_scopes`. Done here, under the
+            // writer lock, so every writer (config PUT, status) stays correct.
+            let outgoing = match (
+                guard.get(proxy_id).and_then(|e| e.config.as_ref()),
+                entry.config.as_ref(),
+            ) {
+                (Some(old), Some(new))
+                    if old.config.revision.get() != new.config.revision.get() =>
+                {
+                    Some(scopes_of(&old.config))
+                }
+                _ => None,
+            };
+            if let Some(prev) = outgoing {
+                entry.previous_scopes = prev;
+            }
             let mut view: BTreeMap<&str, &ProxyEntry> =
                 guard.iter().map(|(k, v)| (k.as_str(), v)).collect();
             view.insert(proxy_id, &entry);
@@ -335,6 +399,60 @@ mod tests {
             let m = std::fs::metadata(&p).unwrap().permissions().mode();
             assert_eq!(m & 0o777, 0o600, "owner-only");
         }
+    }
+
+    /// SV-5 history: a revision change keeps the outgoing route bindings, a
+    /// write at the same revision (status report) leaves them alone, and only
+    /// the immediately previous revision is remembered.
+    #[test]
+    fn revision_change_records_the_previous_route_scopes() {
+        use sigil_proxy_api::Id;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("proxy-state.json");
+        let s = ProxyStore::open(&p).unwrap();
+        let scope = |n: u32| Id::new(format!("cs-{n:032x}")).unwrap();
+        let rev = |r: u64, sc: u32| {
+            let mut e = entry_with("a", r);
+            let c = e.config.as_mut().unwrap();
+            c.config.routes[0].credential_scope_id = scope(sc);
+            c.config_hash = c.config.config_hash().as_str().to_string();
+            e
+        };
+        assert!(
+            !s.scope_assigned("a", "up1", scope(1).as_str()),
+            "no config"
+        );
+        s.begin().commit("a", rev(1, 1)).unwrap();
+        assert!(s.scope_assigned("a", "up1", scope(1).as_str()));
+        assert!(
+            !s.scope_assigned("a", "up2", scope(1).as_str()),
+            "upstream matters"
+        );
+        assert!(
+            !s.scope_assigned("b", "up1", scope(1).as_str()),
+            "proxy matters"
+        );
+        assert!(s.entry("a").unwrap().previous_scopes.is_empty());
+
+        s.begin().commit("a", rev(2, 2)).unwrap();
+        assert!(s.scope_assigned("a", "up1", scope(1).as_str()), "previous");
+        assert!(s.scope_assigned("a", "up1", scope(2).as_str()), "current");
+
+        // Same revision: history untouched.
+        let mut same = s.entry("a").unwrap();
+        same.last_seen = Some("2026-10-11T00:00:00Z".into());
+        s.begin().commit("a", same).unwrap();
+        assert!(s.scope_assigned("a", "up1", scope(1).as_str()));
+
+        s.begin().commit("a", rev(3, 3)).unwrap();
+        assert!(!s.scope_assigned("a", "up1", scope(1).as_str()), "two back");
+        assert!(s.scope_assigned("a", "up1", scope(2).as_str()));
+        assert!(s.scope_assigned("a", "up1", scope(3).as_str()));
+
+        // Survives a reload.
+        let r = ProxyStore::open(&p).unwrap();
+        assert!(r.scope_assigned("a", "up1", scope(2).as_str()));
+        assert!(!r.scope_assigned("a", "up1", scope(1).as_str()));
     }
 
     #[test]

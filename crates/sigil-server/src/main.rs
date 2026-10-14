@@ -219,6 +219,12 @@ async fn run(cfg: ServerConfig) -> Result<()> {
         sigil_server::proxy::spawn_sighup_reload(ctx)?;
     }
 
+    // T-11 S4: periodic ledger retention sweep (first run at once).
+    if let Some(ctx) = proxy.clone() {
+        let period = std::time::Duration::from_secs(u64::from(ctx.sweep_interval_secs));
+        sigil_server::proxy::spawn_ledger_sweep(ctx, period);
+    }
+
     let app = build_router_with_proxy(state, proxy).layer(axum::middleware::from_fn_with_state(
         boot_complete.clone(),
         sigil_server::app::boot_gate,

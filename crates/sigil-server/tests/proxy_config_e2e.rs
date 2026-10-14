@@ -1595,3 +1595,39 @@ async fn a_bad_gap_in_a_status_report_is_named_by_index() {
     assert!(r.json()["error"].get("items").is_none());
     assert!(fx.ctx.store.entry("pxa").is_none());
 }
+
+/// Ledger L1 `T >= R + M` on the config PUT (#278, from the #276 review): with
+/// E satisfied, a PUT whose R + M exceeds the tombstone retention T is a 422
+/// and stores nothing, while a PUT at exactly R + M == T passes.
+#[tokio::test]
+async fn put_refuses_a_config_that_breaks_t_at_least_r_plus_m() {
+    let (dir, mgmt, fp) = Fx::prepare(Fx::default_entries);
+    let mut cfg = Fx::config(dir.path());
+    {
+        let p = cfg.proxy.as_mut().unwrap();
+        // M = 3600 s (the minimum), T = 10000 s: R + M <= T needs R <= 6400.
+        p.ack_loss_margin_seconds = Some(3600);
+        p.dedup_tombstone_retention_seconds = Some(10_000);
+    }
+    let fx = Fx::start_with(dir, mgmt, fp, cfg).await;
+    proxy(&fx, "pxa").await;
+
+    // E = 7_776_000 (default) >= R + M holds for every body; only T fails.
+    let mut s = spec("pxa", "tok-a");
+    s["max_offline_retry_age_seconds"] = 2_592_000.into();
+    let r = put(&fx, "pxa", Some(T_CFG), &put_body(0, &s)).await;
+    assert_eq!((r.status, r.code().as_str()), (422, "semantic_invalid"));
+    assert!(fx.ctx.store.config("pxa").is_none(), "nothing stored");
+
+    // Just above the limit: R + M = 10001 > T.
+    s["max_offline_retry_age_seconds"] = 6401.into();
+    let r = put(&fx, "pxa", Some(T_CFG), &put_body(0, &s)).await;
+    assert_eq!(r.status, 422);
+    assert!(fx.ctx.store.config("pxa").is_none(), "nothing stored");
+
+    // R + M == T is allowed.
+    s["max_offline_retry_age_seconds"] = 6400.into();
+    let r = put(&fx, "pxa", Some(T_CFG), &put_body(0, &s)).await;
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(fx.ctx.store.config("pxa").unwrap().config.revision.get(), 1);
+}

@@ -87,6 +87,26 @@ pub struct ProxyConfig {
     pub ledger_max_rows_total: Option<u64>,
     #[serde(default)]
     pub ledger_max_bytes_total: Option<u64>,
+    /// Registry-entry store (SQLite, `POST /v1/proxy-metadata`). Default
+    /// `proxy-metadata.sqlite` next to the effective `state_path`; same file
+    /// rules as the ledger.
+    #[serde(default)]
+    pub metadata_path: Option<PathBuf>,
+    /// Registry entries kept per proxy (1 - 10,000,000, default 20,000) and the
+    /// total stored size of all entries including their definitions
+    /// (1 MiB - 1 TiB, default 1 GiB). Exceeding either answers 503
+    /// `storage_limit` and stores nothing. Unmeasured test values (D-04).
+    #[serde(default)]
+    pub metadata_max_entries_per_proxy: Option<u64>,
+    #[serde(default)]
+    pub metadata_max_bytes_total: Option<u64>,
+    /// Concurrent `POST /v1/proxy-events` requests (1 - 1024, default 16).
+    /// Above it the server answers 429 `rate_limited` without reading the body.
+    #[serde(default)]
+    pub ingest_max_concurrent: Option<u32>,
+    /// Seconds between ledger retention sweeps (60 - 86400, default 3600).
+    #[serde(default)]
+    pub ledger_sweep_interval_seconds: Option<u32>,
 }
 
 impl ProxyConfig {
@@ -100,6 +120,13 @@ impl ProxyConfig {
     pub const MAX_LEDGER_ROWS: u64 = 1_000_000_000;
     pub const MIN_LEDGER_BYTES: u64 = 1024 * 1024;
     pub const MAX_LEDGER_BYTES: u64 = 1 << 40;
+
+    pub const DEFAULT_METADATA_ENTRIES_PER_PROXY: u64 = 20_000;
+    pub const MAX_METADATA_ENTRIES: u64 = 10_000_000;
+    pub const DEFAULT_METADATA_BYTES_TOTAL: u64 = 1 << 30;
+    pub const DEFAULT_INGEST_MAX_CONCURRENT: u32 = 16;
+    pub const MAX_INGEST_MAX_CONCURRENT: u32 = 1024;
+    pub const DEFAULT_LEDGER_SWEEP_INTERVAL_SECONDS: u32 = 3600;
 
     pub const DEFAULT_CONFIG_TTL_SECONDS: u32 = 300;
     pub const DEFAULT_ACK_LOSS_MARGIN_SECONDS: u32 = 7 * 24 * 3600;
@@ -137,6 +164,37 @@ impl ProxyConfig {
     pub fn ledger_max_bytes_total(&self) -> u64 {
         self.ledger_max_bytes_total
             .unwrap_or(Self::DEFAULT_LEDGER_BYTES_TOTAL)
+    }
+
+    pub fn metadata_max_entries_per_proxy(&self) -> u64 {
+        self.metadata_max_entries_per_proxy
+            .unwrap_or(Self::DEFAULT_METADATA_ENTRIES_PER_PROXY)
+    }
+
+    pub fn metadata_max_bytes_total(&self) -> u64 {
+        self.metadata_max_bytes_total
+            .unwrap_or(Self::DEFAULT_METADATA_BYTES_TOTAL)
+    }
+
+    pub fn ingest_max_concurrent(&self) -> u32 {
+        self.ingest_max_concurrent
+            .unwrap_or(Self::DEFAULT_INGEST_MAX_CONCURRENT)
+    }
+
+    pub fn ledger_sweep_interval(&self) -> u32 {
+        self.ledger_sweep_interval_seconds
+            .unwrap_or(Self::DEFAULT_LEDGER_SWEEP_INTERVAL_SECONDS)
+    }
+
+    /// Effective registry-entry store path.
+    pub fn metadata_path(&self) -> PathBuf {
+        self.metadata_path.clone().unwrap_or_else(|| {
+            self.state_path()
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .join("proxy-metadata.sqlite")
+        })
     }
 
     /// Effective ledger path.
@@ -361,6 +419,23 @@ impl ServerConfig {
             {
                 return Err(bad(
                     "proxy.ledger_max_*_per_proxy must not exceed the matching ledger_max_*_total",
+                ));
+            }
+            if !(1..=ProxyConfig::MAX_METADATA_ENTRIES)
+                .contains(&p.metadata_max_entries_per_proxy())
+                || !(ProxyConfig::MIN_LEDGER_BYTES..=ProxyConfig::MAX_LEDGER_BYTES)
+                    .contains(&p.metadata_max_bytes_total())
+            {
+                return Err(bad(
+                    "proxy.metadata_max_entries_per_proxy must be within 1..=10000000 and metadata_max_bytes_total within 1048576..=1099511627776",
+                ));
+            }
+            if !(1..=ProxyConfig::MAX_INGEST_MAX_CONCURRENT).contains(&p.ingest_max_concurrent()) {
+                return Err(bad("proxy.ingest_max_concurrent must be within 1..=1024"));
+            }
+            if !(60..=86_400).contains(&p.ledger_sweep_interval()) {
+                return Err(bad(
+                    "proxy.ledger_sweep_interval_seconds must be within 60..=86400",
                 ));
             }
         }
