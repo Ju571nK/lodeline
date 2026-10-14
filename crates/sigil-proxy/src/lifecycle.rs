@@ -27,7 +27,6 @@ pub enum RunState {
 /// Local view for `health`. Not the wire `ProxyStatus` (that needs spool,
 /// registry and route sections owned by later tasks).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LocalStatus {
     pub schema_version: u32,
     pub proxy_id: String,
@@ -43,6 +42,10 @@ pub struct LocalStatus {
     /// Absent (false) in the normal case.
     #[serde(default, skip_serializing_if = "is_false")]
     pub status_sequence_wedged: bool,
+    /// The gap queue could not be written to state_dir, so unacknowledged gaps
+    /// would be lost on a restart. Absent (false) in the normal case.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub gap_queue_persist_failed: bool,
     pub updated_at: String,
 }
 
@@ -115,6 +118,7 @@ impl Lifecycle {
             last_update_error: None,
             forwarding: false,
             status_sequence_wedged: false,
+            gap_queue_persist_failed: false,
             updated_at: now_rfc3339(),
         };
         let mut lc = Lifecycle {
@@ -148,7 +152,13 @@ impl Lifecycle {
         &mut self,
         q: &crate::state_dir::GapQueueState,
     ) -> Result<(), StateError> {
-        self.state.write_gap_queue(q)
+        let r = self.state.write_gap_queue(q);
+        // Show a failing queue write in the local status (on change only).
+        if r.is_err() != self.status.gap_queue_persist_failed {
+            self.status.gap_queue_persist_failed = r.is_err();
+            let _ = self.publish();
+        }
+        r
     }
 
     /// F1: publish whether the status sequence looks stuck.
@@ -582,6 +592,7 @@ mod tests {
             last_update_error: None,
             forwarding: false,
             status_sequence_wedged: false,
+            gap_queue_persist_failed: false,
             updated_at: String::new(),
         };
         assert_eq!(startup_config_state(None), ConfigState::None);
@@ -740,5 +751,26 @@ mod tests {
         lc.set_sequence_wedged(false).unwrap();
         let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
         assert!(!s.contains("wedged"), "absent when false");
+    }
+
+    /// M4: a failing gap queue write shows in the local status and clears.
+    #[test]
+    fn gap_queue_write_failure_is_shown_in_the_local_status() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        let q = crate::state_dir::GapQueueState::default();
+        lc.persist_gap_queue(&q).unwrap();
+        assert!(!read_status(&b.state_dir).unwrap().gap_queue_persist_failed);
+        // a non-empty directory in the way makes the rename fail
+        let p = b.state_dir.join(crate::state_dir::GAP_QUEUE_FILE);
+        std::fs::remove_file(&p).unwrap();
+        std::fs::create_dir_all(p.join("x")).unwrap();
+        assert!(lc.persist_gap_queue(&q).is_err());
+        assert!(read_status(&b.state_dir).unwrap().gap_queue_persist_failed);
+        std::fs::remove_dir_all(&p).unwrap();
+        lc.persist_gap_queue(&q).unwrap();
+        let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
+        assert!(!s.contains("persist_failed"), "absent when false");
     }
 }

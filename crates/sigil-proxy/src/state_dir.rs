@@ -117,6 +117,17 @@ struct SequenceBound {
     bound: i64,
 }
 
+/// The `central_outage` gap the ingest client opened and has not closed yet.
+/// Persisted so the closing `ended_at` is still sent after a restart, and so the
+/// re-sent gap equals the original apart from `ended_at` (L6b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenOutage {
+    pub gap_id: String,
+    pub started_at: String,
+    pub detected_at: String,
+}
+
 /// The persisted gap queue (see [`StateDir::read_gap_queue`]).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,6 +138,9 @@ pub struct GapQueueState {
     /// Gaps that did not fit in the queue and are not yet reported as an
     /// aggregated gap.
     pub overflow_count: i64,
+    /// The open `central_outage` gap, if any (absent in files of older builds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_outage: Option<OpenOutage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -137,6 +151,8 @@ struct GapQueueFile {
     pending: Vec<GapReport>,
     quarantined: Vec<GapReport>,
     overflow_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    open_outage: Option<OpenOutage>,
 }
 
 /// An opened, locked state directory. The lock is released when dropped.
@@ -306,7 +322,16 @@ impl StateDir {
             pending: f.pending,
             quarantined: f.quarantined,
             overflow_count: f.overflow_count,
+            open_outage: f.open_outage,
         };
+        if let Some(o) = &s.open_outage {
+            let ok = sigil_proxy_api::scalar::Uuid::new(o.gap_id.clone()).is_ok()
+                && sigil_proxy_api::scalar::Timestamp::new(o.started_at.clone()).is_ok()
+                && sigil_proxy_api::scalar::Timestamp::new(o.detected_at.clone()).is_ok();
+            if !ok {
+                return Err(bad("unexpected content"));
+            }
+        }
         if s.pending.len() > MAX_QUEUED_GAPS
             || s.quarantined.len() > MAX_QUARANTINED_GAPS
             || s.overflow_count < 0
@@ -330,6 +355,7 @@ impl StateDir {
             pending: state.pending.clone(),
             quarantined: state.quarantined.clone(),
             overflow_count: state.overflow_count,
+            open_outage: state.open_outage.clone(),
         };
         let bytes = serde_json::to_vec(&f).expect("gap queue serializes");
         write_atomic(&self.dir, GAP_QUEUE_FILE, &bytes)
@@ -685,6 +711,11 @@ mod tests {
             pending: vec![gap(1), gap(2)],
             quarantined: vec![gap(3)],
             overflow_count: 4,
+            open_outage: Some(OpenOutage {
+                gap_id: "00000000-0000-4000-8000-0000000000aa".into(),
+                started_at: "2026-10-11T00:00:00Z".into(),
+                detected_at: "2026-10-11T00:00:05Z".into(),
+            }),
         };
         sd.write_gap_queue(&st).unwrap();
         assert_eq!(sd.read_gap_queue().unwrap(), Some(st.clone()));
@@ -700,6 +731,7 @@ mod tests {
             "not json".to_string(),
             good.replace("\"schema_version\":1", "\"schema_version\":2"),
             good.replace("px-1", "other"),
+            good.replace("0000000000aa", "zz"),
             good.replace("\"overflow_count\"", "\"x\":1,\"overflow_count\""),
             good.replace("\"overflow_count\":4", "\"overflow_count\":-1"),
             // a gap id in both lists

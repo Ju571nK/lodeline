@@ -36,11 +36,12 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::json;
 use sigil_proxy_api::status::QuarantineCode;
 use sigil_proxy_api::{ErrorCode, GapReport, ProxyEvent};
 use tokio::time::Instant;
 
+use crate::state_dir::OpenOutage;
 use crate::status_report::{
     rfc3339, CentralHealth, GapQueue, PostFuture, StatusReply, MAX_ISOLATE_SENDS,
 };
@@ -60,6 +61,11 @@ pub const OUTAGE_THRESHOLD: u32 = 3;
 pub const MAX_HELD_EVENTS: usize = 1024;
 /// Holds in a row after which the registry sync counts as stalled.
 pub const STALL_ATTEMPTS: u32 = 5;
+/// Events quarantined one at a time (unattributed 422/409 or 413 on a single
+/// event) without any success in between. Past it, quarantining stops and the
+/// client backs off: a server that rejects everything must not drain the queue
+/// into quarantine.
+pub const MAX_CONSECUTIVE_SINGLE_QUARANTINES: u32 = 8;
 /// `{"events":[` and `]}`.
 const BATCH_OVERHEAD: usize = 13;
 
@@ -99,6 +105,9 @@ pub enum IngestOutcome {
     Pending { ids: Vec<String> },
     /// 413.
     TooLarge,
+    /// 404 (`proxy_unknown`): the server does not know this identity. Backed off
+    /// like a failure, but it is not an outage and not a healthy answer.
+    Unregistered,
     /// 429.
     RateLimited,
     /// 503 `storage_limit`: server storage, not an outage.
@@ -221,6 +230,7 @@ pub fn classify_ingest(reply: Option<&StatusReply>, sent: &[String]) -> IngestOu
             }
             _ => IngestOutcome::Retry,
         },
+        404 => IngestOutcome::Unregistered,
         413 => IngestOutcome::TooLarge,
         429 => IngestOutcome::RateLimited,
         503 => match err().map(|e| e.error.code) {
@@ -330,8 +340,8 @@ struct Hold {
 struct Outage {
     streak: u32,
     first_failure_at: Option<String>,
-    /// `(gap_id, started_at)` of the opened gap.
-    open: Option<(String, String)>,
+    /// The opened gap (mirrored in the persisted queue state).
+    open: Option<OpenOutage>,
     /// The open gap did not fit in the queue (counted as overflow), so there is
     /// nothing to close.
     not_queued: bool,
@@ -346,6 +356,9 @@ pub struct IngestStep {
     pub outcome: Option<IngestOutcome>,
     /// Events quarantined locally before sending (oversize or unserializable).
     pub local_quarantined: usize,
+    /// The request made progress (an answer that moved events on). Without it
+    /// the next attempt backs off.
+    pub progressed: bool,
 }
 
 pub struct IngestClient {
@@ -359,6 +372,8 @@ pub struct IngestClient {
     /// Current event cap; halved by a 413, doubled back by successes.
     cap: usize,
     failures: u32,
+    /// See [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`].
+    single_quarantines: u32,
     holds: HashMap<String, Hold>,
     outage: Outage,
 }
@@ -378,6 +393,7 @@ impl IngestClient {
             max_bytes: MAX_BATCH_BYTES,
             cap: MAX_BATCH_EVENTS,
             failures: 0,
+            single_quarantines: 0,
             holds: HashMap::new(),
             outage: Outage {
                 open,
@@ -414,10 +430,9 @@ impl IngestClient {
         if ids.is_empty() {
             return;
         }
-        source.quarantined(ids, code);
-        for id in ids {
-            self.holds.remove(id);
-        }
+        // The gap is recorded (and persisted) before the source moves the
+        // events, so a crash in between leaves a gap for events still unsent,
+        // never quarantined events without a gap.
         let now = rfc3339(time::OffsetDateTime::now_utc());
         for chunk in ids.chunks(100) {
             let gap = serde_json::from_value::<GapReport>(json!({
@@ -434,6 +449,10 @@ impl IngestClient {
                 Err(_) => tracing::error!("event_quarantined gap did not build"),
             }
         }
+        source.quarantined(ids, code);
+        for id in ids {
+            self.holds.remove(id);
+        }
         tracing::warn!(count = ids.len(), "events quarantined");
     }
 
@@ -443,21 +462,22 @@ impl IngestClient {
             .first_failure_at
             .clone()
             .unwrap_or_else(|| rfc3339(time::OffsetDateTime::now_utc()));
-        let id = uuid::Uuid::new_v4().to_string();
-        let gap = serde_json::from_value::<GapReport>(json!({
-            "kind": "central_outage",
-            "gap_id": id,
-            "detected_at": rfc3339(time::OffsetDateTime::now_utc()),
-            "started_at": started,
-            "ended_at": Value::Null,
-        }));
-        match gap {
-            Ok(g) => {
+        let open = OpenOutage {
+            gap_id: uuid::Uuid::new_v4().to_string(),
+            started_at: started,
+            detected_at: rfc3339(time::OffsetDateTime::now_utc()),
+        };
+        match outage_gap(&open, None) {
+            Some(g) => {
                 self.outage.not_queued = !self.gaps.record(g);
-                self.outage.open = Some((id, started));
+                if !self.outage.not_queued {
+                    // Persisted with the queue: the close survives a restart.
+                    self.gaps.set_open_outage(Some(open.clone()));
+                }
+                self.outage.open = Some(open);
                 tracing::warn!("central outage opened");
             }
-            Err(_) => tracing::error!("central_outage gap did not build"),
+            None => tracing::error!("central_outage gap did not build"),
         }
     }
 
@@ -467,28 +487,21 @@ impl IngestClient {
         self.central.record_answer();
         self.outage.streak = 0;
         self.outage.first_failure_at = None;
-        if let Some((id, started)) = self.outage.open.take() {
+        if let Some(open) = self.outage.open.take() {
             // An outage that did not fit in the queue was counted as overflow:
             // there is no gap to close.
             if !std::mem::take(&mut self.outage.not_queued) {
-                let now = time::OffsetDateTime::now_utc();
-                let ended = rfc3339(now);
+                let ended = rfc3339(time::OffsetDateTime::now_utc());
                 // Normally the gap is still queued; if it was acknowledged
-                // already, the server holds it open, so it is sent again with
-                // `ended_at` (the only allowed change).
-                if !self.gaps.close_outage(&id, &ended) {
-                    let gap = serde_json::from_value::<GapReport>(json!({
-                        "kind": "central_outage",
-                        "gap_id": id,
-                        "detected_at": started,
-                        "started_at": started,
-                        "ended_at": ended,
-                    }));
-                    if let Ok(g) = gap {
+                // already, the server holds it open, so it is sent again. Either
+                // way it equals the original apart from `ended_at` (L6b).
+                if !self.gaps.close_outage(&open.gap_id, &ended) {
+                    if let Some(g) = outage_gap(&open, Some(&ended)) {
                         self.gaps.record(g);
                     }
                 }
             }
+            self.gaps.set_open_outage(None);
             tracing::info!("central outage closed");
         }
     }
@@ -523,16 +536,21 @@ impl IngestClient {
                 sent: 0,
                 outcome: None,
                 local_quarantined: 0,
+                progressed: true,
             };
         }
         let batch = build_batch(&events, want, self.max_bytes);
         let local = batch.unsendable.len();
         self.quarantine(source, &batch.unsendable, QuarantineCode::SemanticInvalid);
         if batch.ids.is_empty() {
+            if local > 0 {
+                self.isolated_locally();
+            }
             return IngestStep {
                 sent: 0,
                 outcome: None,
                 local_quarantined: local,
+                progressed: true,
             };
         }
         // The shared parser is the contract check; a body it refuses is never
@@ -542,10 +560,12 @@ impl IngestClient {
                 (Some(i), _) if i < batch.ids.len() => {
                     let id = batch.ids[i].clone();
                     self.quarantine(source, &[id], QuarantineCode::SemanticInvalid);
+                    self.isolated_locally();
                 }
                 (_, 1) => {
                     let ids = batch.ids.clone();
                     self.quarantine(source, &ids, QuarantineCode::SemanticInvalid);
+                    self.isolated_locally();
                 }
                 _ => {
                     self.mode = Mode::Isolate;
@@ -556,13 +576,14 @@ impl IngestClient {
                 sent: 0,
                 outcome: None,
                 local_quarantined: local + 1,
+                progressed: true,
             };
         }
 
         let sent = batch.ids;
         let reply = transport.post_events(batch.body).await;
         let outcome = classify_ingest(reply.as_ref(), &sent);
-        self.apply(source, &outcome, &sent, now);
+        let progressed = self.apply(source, &outcome, &sent, now);
         tracing::info!(
             outcome = outcome_label(&outcome),
             events = sent.len(),
@@ -572,16 +593,49 @@ impl IngestClient {
             sent: sent.len(),
             outcome: Some(outcome),
             local_quarantined: local,
+            progressed,
         }
     }
 
+    /// An event was quarantined without a request. During isolation that finds
+    /// the failing event (and counts as one isolation step), so batches resume.
+    fn isolated_locally(&mut self) {
+        if self.mode == Mode::Isolate {
+            self.isolate_sends += 1;
+            self.mode = Mode::Batch;
+            self.isolate_sends = 0;
+        }
+    }
+
+    /// Quarantine one event on the server's say-so, unless that has already
+    /// happened [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] times without a success.
+    /// Returns whether it was quarantined.
+    fn quarantine_single(
+        &mut self,
+        source: &mut dyn EventSource,
+        ids: &[String],
+        code: QuarantineCode,
+    ) -> bool {
+        if self.single_quarantines >= MAX_CONSECUTIVE_SINGLE_QUARANTINES {
+            tracing::error!(
+                "the server keeps rejecting single events: quarantine paused, backing off"
+            );
+            return false;
+        }
+        self.single_quarantines += 1;
+        self.quarantine(source, ids, code);
+        true
+    }
+
+    /// Settle one answer. Returns whether it made progress (otherwise the caller
+    /// backs off).
     fn apply(
         &mut self,
         source: &mut dyn EventSource,
         outcome: &IngestOutcome,
         sent: &[String],
         now: Instant,
-    ) {
+    ) -> bool {
         if outcome.signals_central_outage() {
             self.central.record_failure();
             self.outage.streak = self.outage.streak.saturating_add(1);
@@ -591,9 +645,10 @@ impl IngestClient {
             if self.outage.streak >= OUTAGE_THRESHOLD && self.outage.open.is_none() {
                 self.open_outage();
             }
-        } else {
+        } else if !matches!(outcome, IngestOutcome::Unregistered) {
             // Any answer shows the server is up, a refusal for storage or load
-            // included, and so is a rejection of this proxy's identity.
+            // included, and so is a rejection of this proxy's identity. A 404 is
+            // neither healthy nor an outage: it changes nothing here.
             self.server_answered();
         }
 
@@ -607,6 +662,7 @@ impl IngestClient {
                 self.central
                     .record_ingest_ack(time::OffsetDateTime::now_utc());
                 self.cap = (self.cap * 2).clamp(1, self.max_events);
+                self.single_quarantines = 0;
             }
             IngestOutcome::Quarantine { items } => {
                 for code in [
@@ -621,6 +677,9 @@ impl IngestClient {
                         .collect();
                     self.quarantine(source, &ids, code);
                 }
+                // The server named the events: this is attribution, not a
+                // server rejecting everything.
+                self.single_quarantines = 0;
             }
             IngestOutcome::Unattributed { status } => {
                 if sent.len() > 1 {
@@ -633,14 +692,19 @@ impl IngestClient {
                     } else {
                         QuarantineCode::SemanticInvalid
                     };
-                    self.quarantine(source, sent, code);
+                    if !self.quarantine_single(source, sent, code) {
+                        self.mode = Mode::Batch;
+                        progressed = false;
+                    }
                 }
             }
             IngestOutcome::Pending { ids } => {
+                let mut held = false;
                 for id in ids {
                     if !self.holds.contains_key(id) && self.holds.len() >= MAX_HELD_EVENTS {
                         continue;
                     }
+                    held = true;
                     let h = self.holds.entry(id.clone()).or_insert(Hold {
                         attempts: 0,
                         until: now,
@@ -655,16 +719,20 @@ impl IngestClient {
                             .min(self.params.max_backoff)
                             .max(self.params.retry);
                 }
+                // Nothing held (the hold table is full): the same events would
+                // go out again at once, so back off instead.
+                progressed = held;
             }
             IngestOutcome::TooLarge => {
                 if sent.len() > 1 {
                     self.cap = (sent.len() / 2).max(1);
-                } else {
-                    self.quarantine(source, sent, QuarantineCode::SemanticInvalid);
+                } else if !self.quarantine_single(source, sent, QuarantineCode::SemanticInvalid) {
+                    progressed = false;
                 }
             }
             IngestOutcome::RateLimited
             | IngestOutcome::StorageLimit
+            | IngestOutcome::Unregistered
             | IngestOutcome::Rejected
             | IngestOutcome::Unreachable
             | IngestOutcome::Unavailable
@@ -685,6 +753,7 @@ impl IngestClient {
                 self.isolate_sends = 0;
             }
         }
+        progressed
     }
 
     /// Delay before the next request.
@@ -702,18 +771,25 @@ impl IngestClient {
             None if step.local_quarantined > 0 => p.min_spacing,
             None => p.poll,
             Some(IngestOutcome::Rejected) => p.max_backoff,
-            Some(
-                IngestOutcome::RateLimited
-                | IngestOutcome::StorageLimit
-                | IngestOutcome::Unreachable
-                | IngestOutcome::Unavailable
-                | IngestOutcome::Retry,
-            ) => backoff(&mut self.failures),
+            Some(_) if !step.progressed => backoff(&mut self.failures),
             // Progress: the rest goes out at the least spacing (singles too).
             Some(_) => p.min_spacing,
         };
         crate::config_sync::jitter(d).max(p.min_spacing)
     }
+}
+
+/// The `central_outage` gap of `open`, with `ended_at` as given. Every other
+/// field is the original's.
+fn outage_gap(open: &OpenOutage, ended_at: Option<&str>) -> Option<GapReport> {
+    serde_json::from_value::<GapReport>(json!({
+        "kind": "central_outage",
+        "gap_id": open.gap_id,
+        "detected_at": open.detected_at,
+        "started_at": open.started_at,
+        "ended_at": ended_at,
+    }))
+    .ok()
 }
 
 fn outcome_label(o: &IngestOutcome) -> &'static str {
@@ -723,6 +799,7 @@ fn outcome_label(o: &IngestOutcome) -> &'static str {
         IngestOutcome::Unattributed { .. } => "unattributed",
         IngestOutcome::Pending { .. } => "metadata_ref_pending",
         IngestOutcome::TooLarge => "payload_too_large",
+        IngestOutcome::Unregistered => "unregistered",
         IngestOutcome::RateLimited => "rate_limited",
         IngestOutcome::StorageLimit => "storage_limit",
         IngestOutcome::Rejected => "rejected",
@@ -760,6 +837,7 @@ pub async fn run_ingest<T, S>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -787,6 +865,9 @@ mod tests {
         unsent: Vec<ProxyEvent>,
         acked: Vec<String>,
         quarantined: Vec<(String, QuarantineCode)>,
+        /// Looked at when `quarantined` is called (L4).
+        probe: Option<GapQueue>,
+        gaps_seen_at_quarantine: Vec<usize>,
     }
 
     impl Mem {
@@ -813,6 +894,9 @@ mod tests {
             self.acked.extend(ids.iter().cloned());
         }
         fn quarantined(&mut self, ids: &[String], code: QuarantineCode) {
+            if let Some(q) = &self.probe {
+                self.gaps_seen_at_quarantine.push(q.pending_ids().len());
+            }
             self.unsent
                 .retain(|e| !ids.iter().any(|i| i == e.event_id.as_str()));
             self.quarantined
@@ -1010,7 +1094,7 @@ mod tests {
         assert_eq!(c(err(403, "forbidden", json!([]))), IngestOutcome::Retry);
         assert_eq!(
             c(err(404, "proxy_unknown", json!([]))),
-            IngestOutcome::Retry
+            IngestOutcome::Unregistered
         );
     }
 
@@ -1364,11 +1448,13 @@ mod tests {
         for _ in 0..OUTAGE_THRESHOLD {
             step(&mut c, &t, &mut s).await;
         }
-        let id = g.open_outage().unwrap().0;
+        let id = g.open_outage().unwrap().gap_id;
+        assert!(!g.pending_ids().is_empty());
         // restart: the queue is rebuilt from its persisted form
         let snap = g.pending_batch();
         let g2 = GapQueue::restore(crate::state_dir::GapQueueState {
             pending: snap,
+            open_outage: g.open_outage(),
             ..Default::default()
         });
         let mut c2 = IngestClient::new(g2.clone(), CentralHealth::new(), params());
@@ -1386,16 +1472,16 @@ mod tests {
         let st = step(&mut c, &t, &mut s).await;
         assert_eq!(st.outcome, Some(IngestOutcome::Rejected));
         assert!(c.next_delay(&st) >= Duration::from_secs(30));
-        t.set(vec![err(404, "proxy_unknown", json!([]))]);
-        let st = step(&mut c, &t, &mut s).await;
-        assert_eq!(st.outcome, Some(IngestOutcome::Retry));
-        assert_eq!(s.unsent.len(), 1);
-        assert!(g.pending_ids().is_empty());
         assert_eq!(
             central.consecutive_failures(),
             0,
             "an answer is not an outage"
         );
+        t.set(vec![err(404, "proxy_unknown", json!([]))]);
+        let st = step(&mut c, &t, &mut s).await;
+        assert_eq!(st.outcome, Some(IngestOutcome::Unregistered));
+        assert_eq!(s.unsent.len(), 1);
+        assert!(g.pending_ids().is_empty());
     }
 
     #[tokio::test]
@@ -1423,5 +1509,194 @@ mod tests {
         let st = step(&mut c, &t, &mut s).await;
         assert_eq!(st.sent, 1);
         assert_eq!(t.sent_ids(0), ids(&[2]));
+    }
+
+    // ---- review fixes (H1, M1-M5, L1-L4)
+
+    fn without_ended_at(mut v: Value) -> Value {
+        v["ended_at"] = Value::Null;
+        v
+    }
+
+    /// H1: the closing gap equals the original except `ended_at`, also when the
+    /// original was acknowledged and dropped from the queue.
+    #[tokio::test]
+    async fn resent_closed_outage_equals_the_original_apart_from_ended_at() {
+        let (mut c, g, _) = client();
+        let t = Fake::new(vec![None]);
+        let mut s = Mem::with(1..=1);
+        for _ in 0..OUTAGE_THRESHOLD {
+            step(&mut c, &t, &mut s).await;
+        }
+        let original = gap_kinds(&g)[0].clone();
+        // acknowledged and dropped (the open gap reached the server)
+        g.settle(&crate::status_report::ReportOutcome::Accepted {
+            acknowledged: vec![original["gap_id"].as_str().unwrap().to_string()],
+            duplicate: vec![],
+        });
+        assert!(g.pending_ids().is_empty());
+        t.set(vec![ok(&[1], &[])]);
+        step(&mut c, &t, &mut s).await;
+        let resent = gap_kinds(&g)[0].clone();
+        assert_ne!(resent["ended_at"], Value::Null);
+        assert_eq!(without_ended_at(resent), original);
+        // and when it was still queued
+        let (mut c, g, _) = client();
+        let t = Fake::new(vec![None]);
+        let mut s = Mem::with(1..=1);
+        for _ in 0..OUTAGE_THRESHOLD {
+            step(&mut c, &t, &mut s).await;
+        }
+        let original = gap_kinds(&g)[0].clone();
+        t.set(vec![ok(&[1], &[])]);
+        step(&mut c, &t, &mut s).await;
+        assert_eq!(without_ended_at(gap_kinds(&g)[0].clone()), original);
+    }
+
+    /// M2: the open outage is persisted and found after a restart, so
+    /// `ended_at` is still sent, equal to the original apart from it.
+    #[tokio::test]
+    async fn open_outage_is_persisted_and_closed_after_a_restart() {
+        let snaps: Arc<Mutex<Vec<crate::state_dir::GapQueueState>>> = Arc::default();
+        let s2 = snaps.clone();
+        let g = GapQueue::new().with_persister(Box::new(move |st| {
+            s2.lock().unwrap().push(st.clone());
+            true
+        }));
+        let mut c = IngestClient::new(g.clone(), CentralHealth::new(), params());
+        let t = Fake::new(vec![None]);
+        let mut s = Mem::with(1..=1);
+        for _ in 0..OUTAGE_THRESHOLD {
+            step(&mut c, &t, &mut s).await;
+        }
+        let original = gap_kinds(&g)[0].clone();
+        // the open gap is acknowledged, then the process restarts
+        g.settle(&crate::status_report::ReportOutcome::Accepted {
+            acknowledged: vec![original["gap_id"].as_str().unwrap().to_string()],
+            duplicate: vec![],
+        });
+        let saved = snaps.lock().unwrap().last().cloned().unwrap();
+        assert!(saved.pending.is_empty());
+        assert_eq!(
+            saved.open_outage.as_ref().unwrap().gap_id,
+            original["gap_id"].as_str().unwrap()
+        );
+        let g2 = GapQueue::restore(saved);
+        let mut c2 = IngestClient::new(g2.clone(), CentralHealth::new(), params());
+        t.set(vec![ok(&[1], &[])]);
+        step(&mut c2, &t, &mut s).await;
+        let resent = gap_kinds(&g2)[0].clone();
+        assert_ne!(resent["ended_at"], Value::Null);
+        assert_eq!(without_ended_at(resent), original);
+        assert!(g2.open_outage().is_none(), "closed outage is forgotten");
+    }
+
+    /// M3: a 424 that holds nothing new (the hold table is full) backs off
+    /// instead of resending at the minimum spacing.
+    #[tokio::test]
+    async fn pending_that_holds_nothing_backs_off() {
+        let (mut c, _g, _) = client();
+        let far = Instant::now() + Duration::from_secs(3600);
+        for n in 0..MAX_HELD_EVENTS {
+            c.holds.insert(
+                format!("held-{n}"),
+                Hold {
+                    attempts: 1,
+                    until: far,
+                },
+            );
+        }
+        let t = Fake::new(vec![err(424, "metadata_ref_pending", json!([]))]);
+        let mut s = Mem::with(1..=1);
+        let st = step(&mut c, &t, &mut s).await;
+        assert!(!st.progressed);
+        assert!(c.next_delay(&st) >= Duration::from_secs(4));
+        assert_eq!(c.held_events(), MAX_HELD_EVENTS);
+        assert_eq!(s.unsent.len(), 1);
+    }
+
+    /// M5: a server that rejects everything cannot drain the queue into
+    /// quarantine; after the cap the client stops quarantining and backs off.
+    #[tokio::test]
+    async fn consecutive_single_quarantines_are_capped() {
+        let (mut c, _g, _) = client();
+        let t = Fake::new(vec![err(422, "semantic_invalid", json!([]))]);
+        let mut s = Mem::with(1..=40);
+        let mut last = None;
+        for _ in 0..60 {
+            last = Some(step(&mut c, &t, &mut s).await);
+        }
+        assert_eq!(
+            s.quarantined.len(),
+            MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize
+        );
+        assert_eq!(
+            s.unsent.len(),
+            40 - MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize
+        );
+        let last = last.unwrap();
+        assert!(c.next_delay(&last) >= Duration::from_secs(4) || last.sent > 1);
+        // a success clears the count
+        t.set(vec![ok(&(1..=40).collect::<Vec<_>>(), &[])]);
+        step(&mut c, &t, &mut s).await;
+        step(&mut c, &t, &mut s).await;
+        assert_eq!(c.single_quarantines, 0);
+        // single-event 413 is capped the same way
+        let (mut c, _g, _) = client();
+        let t = Fake::new(vec![err(413, "payload_too_large", json!([]))]);
+        let mut s = Mem::with(1..=20);
+        for _ in 0..40 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(
+            s.quarantined.len(),
+            MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize
+        );
+    }
+
+    /// L1: a local quarantine during isolation ends isolation.
+    #[tokio::test]
+    async fn local_quarantine_during_isolation_returns_to_batches() {
+        let one = serde_json::to_vec(&event(1)).unwrap().len();
+        let mut c = IngestClient::new(GapQueue::new(), CentralHealth::new(), params())
+            .with_batch_limits(100, BATCH_OVERHEAD + one - 1);
+        c.mode = Mode::Isolate;
+        c.isolate_sends = 5;
+        let t = Fake::new(vec![ok(&[], &[])]);
+        let mut s = Mem::with(1..=2);
+        step(&mut c, &t, &mut s).await;
+        assert!(!c.isolating());
+        assert_eq!(c.isolate_sends, 0);
+    }
+
+    /// L2: 404 backs off but neither resets the failure count nor opens or
+    /// closes an outage.
+    #[tokio::test]
+    async fn not_found_is_not_a_healthy_answer() {
+        let (mut c, g, central) = client();
+        central.record_failure();
+        central.record_failure();
+        let t = Fake::new(vec![err(404, "proxy_unknown", json!([]))]);
+        let mut s = Mem::with(1..=1);
+        let st = step(&mut c, &t, &mut s).await;
+        assert_eq!(st.outcome, Some(IngestOutcome::Unregistered));
+        assert_eq!(central.consecutive_failures(), 2);
+        assert!(!st.progressed);
+        assert!(g.pending_ids().is_empty());
+    }
+
+    /// L4: the quarantine gap is queued before the source moves the events.
+    #[tokio::test]
+    async fn gap_is_recorded_before_the_events_are_quarantined() {
+        let (mut c, g, _) = client();
+        let t = Fake::new(vec![err(
+            422,
+            "semantic_invalid",
+            json!([{"index": 0, "code": "semantic_invalid"}]),
+        )]);
+        let mut s = Mem::with(1..=1);
+        s.probe = Some(g.clone());
+        step(&mut c, &t, &mut s).await;
+        assert_eq!(s.gaps_seen_at_quarantine, vec![1]);
     }
 }

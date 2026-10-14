@@ -40,7 +40,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::config_sync::ConfigView;
-use crate::state_dir::GapQueueState;
+use crate::state_dir::{GapQueueState, OpenOutage};
 
 /// Largest answer read from the server. A 200 body lists at most 200 ids.
 pub const MAX_STATUS_RESPONSE_BYTES: usize = 64 * 1024;
@@ -168,6 +168,8 @@ struct Inner {
     overflow: i64,
     persist: Option<GapPersister>,
     persist_failed: bool,
+    /// The `central_outage` gap opened and not yet closed (persisted).
+    open_outage: Option<OpenOutage>,
 }
 
 impl Inner {
@@ -206,7 +208,8 @@ impl Inner {
     /// Report the overflow tally as one `local_record_failed` gap as soon as
     /// there is room. The gap is new (its own id): a gap already sent is never
     /// changed, because the server answers a different body under the same id
-    /// with 409.
+    /// with 409. `invocation_ids` is empty on purpose: this gap says that
+    /// `count` gap records were lost locally, it is not about invocations.
     fn materialize_overflow(&mut self) {
         if self.overflow <= 0 || self.pending() >= MAX_QUEUED_GAPS {
             return;
@@ -237,6 +240,7 @@ impl Inner {
             pending: of(GapState::Pending),
             quarantined: of(GapState::Quarantined),
             overflow_count: self.overflow,
+            open_outage: self.open_outage.clone(),
         }
     }
 
@@ -269,6 +273,7 @@ impl GapQueue {
     pub fn restore(state: GapQueueState) -> GapQueue {
         let mut inner = Inner {
             overflow: state.overflow_count.max(0),
+            open_outage: state.open_outage,
             ..Inner::default()
         };
         for gap in state.quarantined {
@@ -337,18 +342,17 @@ impl GapQueue {
         self.lock().persist_failed
     }
 
-    /// `(gap_id, started_at)` of the pending `central_outage` gap whose
-    /// `ended_at` is still null, if any (found again after a restart).
-    pub fn open_outage(&self) -> Option<(String, String)> {
-        self.lock().entries.iter().find_map(|e| match &e.gap {
-            GapReport::CentralOutage(o) if e.state == GapState::Pending && o.ended_at.is_none() => {
-                Some((
-                    o.gap_id.as_str().to_string(),
-                    o.started_at.as_str().to_string(),
-                ))
-            }
-            _ => None,
-        })
+    /// The `central_outage` gap opened and not yet closed, if any (persisted,
+    /// so found again after a restart).
+    pub fn open_outage(&self) -> Option<OpenOutage> {
+        self.lock().open_outage.clone()
+    }
+
+    /// Remember (or forget) the open outage, durably.
+    pub fn set_open_outage(&self, o: Option<OpenOutage>) {
+        let mut g = self.lock();
+        g.open_outage = o;
+        g.flush();
     }
 
     /// Set `ended_at` on the queued `central_outage` gap `id` and make it
@@ -410,13 +414,26 @@ impl GapQueue {
             .collect()
     }
 
-    /// Apply a classified answer for a report that carried `sent` (gap ids).
+    /// Apply a classified answer without checking versions (tests).
     pub fn settle(&self, outcome: &ReportOutcome) {
+        self.settle_versioned(outcome, None);
+    }
+
+    /// Apply a classified answer for a report that carried the gaps `sent`.
+    /// An entry is dropped or quarantined only if it still equals the version
+    /// that was sent: a newer version (an outage closed while the report was in
+    /// flight) stays pending, because the answer does not cover it.
+    pub fn settle_versioned(&self, outcome: &ReportOutcome, sent: Option<&[GapReport]>) {
         let mut g = self.lock();
         let before = g.snapshot();
-        let drop_ids = |q: &mut Vec<Entry>, ids: &[String]| {
-            q.retain(|e| !ids.iter().any(|i| i == gap_id(&e.gap)));
+        let same = |e: &Entry| match sent {
+            None => true,
+            Some(s) => s.iter().any(|x| gap_id(x) == gap_id(&e.gap) && *x == e.gap),
         };
+        let drop_ids = |q: &mut Vec<Entry>, ids: &[String]| {
+            q.retain(|e| !(ids.iter().any(|i| i == gap_id(&e.gap)) && same(e)));
+        };
+        let mut evicted = 0i64;
         match outcome {
             ReportOutcome::Accepted {
                 acknowledged,
@@ -434,7 +451,7 @@ impl GapQueue {
             ReportOutcome::Quarantine { gaps, .. } | ReportOutcome::Conflict { gaps } => {
                 let q = &mut g.entries;
                 for e in q.iter_mut() {
-                    if gaps.iter().any(|i| i == gap_id(&e.gap)) {
+                    if gaps.iter().any(|i| i == gap_id(&e.gap)) && same(e) {
                         e.state = GapState::Quarantined;
                     }
                 }
@@ -447,6 +464,7 @@ impl GapQueue {
                 {
                     if let Some(i) = q.iter().position(|e| e.state == GapState::Quarantined) {
                         q.remove(i);
+                        evicted += 1;
                     }
                 }
             }
@@ -455,6 +473,12 @@ impl GapQueue {
             | ReportOutcome::Unreachable
             | ReportOutcome::Unavailable
             | ReportOutcome::Retry => {}
+        }
+        // An evicted quarantined gap is a lost record: count it so it is reported
+        // as a `local_record_failed` gap instead of vanishing.
+        if evicted > 0 {
+            g.overflow = g.overflow.saturating_add(evicted);
+            tracing::warn!(count = evicted, "quarantined gaps evicted (counted)");
         }
         // Room may have opened for an aggregated gap.
         g.materialize_overflow();
@@ -955,7 +979,8 @@ impl Reporter {
         let mut outcome = classify(reply.as_ref(), &sent);
         if outcome.signals_central_outage() {
             self.central.record_failure();
-        } else if reply.is_some() {
+        } else if reply.as_ref().is_some_and(|r| r.status != 404) {
+            // A 404 (`proxy_unknown`) is an answer, but not a healthy one.
             self.central.record_answer();
         }
         if matches!(
@@ -974,7 +999,7 @@ impl Reporter {
                 self.mode = Mode::SnapshotProbe;
             }
         }
-        self.gaps.settle(&outcome);
+        self.gaps.settle_versioned(&outcome, Some(&batch));
         let was = self.mode;
         self.mode = match (self.mode, &outcome) {
             (
@@ -1997,7 +2022,16 @@ mod tests {
         assert_eq!(kept.len(), MAX_QUARANTINED_GAPS);
         assert_eq!(kept.first(), all.get(40), "oldest evicted first");
         // quarantined entries do not count against the pending bound
-        for n in 0..MAX_QUEUED_GAPS as u32 {
+        // L3: the 40 evicted records became one local_record_failed gap
+        let agg: Vec<Value> = q
+            .pending_batch()
+            .iter()
+            .map(|g| serde_json::to_value(g).unwrap())
+            .filter(|g| g["kind"] == "local_record_failed")
+            .collect();
+        assert_eq!(agg.len(), 1);
+        assert_eq!(agg[0]["count"], 40);
+        for n in 0..MAX_QUEUED_GAPS as u32 - 1 {
             q.push(quarantine_gap(10_000 + n)).unwrap();
         }
         assert_eq!(q.push(quarantine_gap(99_999)), Err(QueueFull));
@@ -2134,9 +2168,7 @@ mod tests {
         let q = GapQueue::new();
         q.push(outage_gap(7, Value::Null)).unwrap();
         q.push(quarantine_gap(8)).unwrap();
-        assert_eq!(q.open_outage().unwrap().0, uid(7));
         assert!(q.close_outage(&uid(7), "2026-10-11T00:30:00Z"));
-        assert!(q.open_outage().is_none());
         assert!(
             !q.close_outage(&uid(8), "2026-10-11T00:30:00Z"),
             "not an outage"
@@ -2358,5 +2390,81 @@ mod tests {
             0,
             "storage_limit is an answer"
         );
+    }
+
+    // ---- review fixes (M1, M2, L2)
+
+    fn open_outage_value() -> OpenOutage {
+        OpenOutage {
+            gap_id: uid(7),
+            started_at: "2026-10-11T00:00:00Z".into(),
+            detected_at: "2026-10-11T00:00:05Z".into(),
+        }
+    }
+
+    /// M2: the open outage is part of the persisted state.
+    #[test]
+    fn open_outage_is_persisted_and_restored() {
+        let (q, snaps) = recording_queue();
+        q.set_open_outage(Some(open_outage_value()));
+        let st = snaps.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(st.open_outage, Some(open_outage_value()));
+        assert_eq!(
+            GapQueue::restore(st).open_outage(),
+            Some(open_outage_value())
+        );
+        q.set_open_outage(None);
+        assert!(snaps.lock().unwrap().last().unwrap().open_outage.is_none());
+    }
+
+    /// M1: an answer that acknowledges the version that was sent does not drop a
+    /// newer version of the same gap (an outage closed while the report was in
+    /// flight).
+    #[tokio::test]
+    async fn newer_gap_version_stays_pending_when_the_sent_one_is_acked() {
+        let q = GapQueue::new();
+        q.push(outage_gap(1, Value::Null)).unwrap();
+        let q2 = q.clone();
+        let server = Script::new(move |v| {
+            // the close lands while the report is in flight
+            assert!(q2.close_outage(&uid(1), "2026-10-11T00:30:00Z"));
+            ack200(&gap_ids_of(v))
+        });
+        let mut r = Reporter::new("px-1", &uid(5), q.clone(), params());
+        r.send_once(&server, &view(ConfigState::None))
+            .await
+            .unwrap();
+        assert_eq!(
+            q.pending_ids(),
+            ids(&[1]),
+            "the closed version is not covered"
+        );
+        let now = serde_json::to_value(&q.pending_batch()[0]).unwrap();
+        assert_ne!(now["ended_at"], Value::Null);
+        // the next report sends it, and that ack drops it
+        let server = Script::new(|v| ack200(&gap_ids_of(v)));
+        r.send_once(&server, &view(ConfigState::None))
+            .await
+            .unwrap();
+        assert!(q.pending_ids().is_empty());
+    }
+
+    /// L2: a 404 answer is not a healthy one for `central`.
+    #[tokio::test]
+    async fn not_found_does_not_reset_central_failures() {
+        let central = CentralHealth::new();
+        central.record_failure();
+        let server = Script::new(|_| {
+            reply(
+                404,
+                json!({"error": {"code": "proxy_unknown", "message": "x"}}),
+            )
+        });
+        let mut r =
+            Reporter::new("px-1", &uid(5), GapQueue::new(), params()).with_central(central.clone());
+        r.send_once(&server, &view(ConfigState::None))
+            .await
+            .unwrap();
+        assert_eq!(central.consecutive_failures(), 1);
     }
 }
