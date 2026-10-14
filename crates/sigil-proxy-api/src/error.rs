@@ -11,8 +11,29 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::scalar::{MetadataRef, Uuid};
 use crate::Validate;
 
-pub(crate) const MARK_SEMANTIC: &str = "\u{1}S";
-pub(crate) const MARK_LIMIT: &str = "\u{1}L";
+/// Category of a rule violation raised by this crate's own validation code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Raised {
+    Semantic,
+    Limit,
+}
+
+thread_local! {
+    /// Set only by [`ValidationError::tagged`], i.e. by code in this crate when it
+    /// rejects a value. Input bytes cannot write to it, unlike serde's message
+    /// text, which can quote unknown keys, variants and values. The byte-level
+    /// parse entry points clear it before and after each parse (see
+    /// `parse::RaisedScope`).
+    static RAISED: std::cell::Cell<Option<Raised>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn take_raised() -> Option<Raised> {
+    RAISED.with(|c| c.take())
+}
+
+pub(crate) fn set_raised(r: Option<Raised>) {
+    RAISED.with(|c| c.set(r));
+}
 
 /// A contract rule was violated. The message is a fixed text and never contains
 /// the offending value.
@@ -39,13 +60,18 @@ impl ValidationError {
         }
     }
 
+    /// Records the category out of band and returns the fixed message.
+    ///
+    /// Validation errors must propagate immediately: never swallow, retry or
+    /// replace one, because the out-of-band category cell read by `parse::classify`
+    /// relies on the last recorded signal belonging to the error that surfaces.
     pub(crate) fn tagged(&self) -> String {
-        let mark = if self.limit {
-            MARK_LIMIT
+        set_raised(Some(if self.limit {
+            Raised::Limit
         } else {
-            MARK_SEMANTIC
-        };
-        format!("{mark}{}", self.message)
+            Raised::Semantic
+        }));
+        self.message.clone()
     }
 }
 
@@ -121,11 +147,19 @@ pub enum ErrorCode {
     /// `GET` config before any configuration was issued for the proxy. 404.
     /// Distinct from `proxy_unknown`: the identity is valid.
     ConfigUnavailable,
+    /// Ingest: the store refuses more data (capacity). 503.
+    StorageLimit,
+    /// Ingest: the store cannot be reached or written. 503.
+    StorageUnavailable,
+    /// Request body exceeds the accepted size. 413.
+    PayloadTooLarge,
+    /// Too many requests. 429.
+    RateLimited,
     Unknown(UnknownCode),
 }
 
 impl ErrorCode {
-    const KNOWN: [(&'static str, ErrorCode); 19] = [
+    const KNOWN: [(&'static str, ErrorCode); 23] = [
         ("proxy_unknown", ErrorCode::ProxyUnknown),
         ("conflict", ErrorCode::Conflict),
         ("sequence_conflict", ErrorCode::SequenceConflict),
@@ -148,6 +182,10 @@ impl ErrorCode {
         ("already_exists", ErrorCode::AlreadyExists),
         ("invalid_state", ErrorCode::InvalidState),
         ("config_unavailable", ErrorCode::ConfigUnavailable),
+        ("storage_limit", ErrorCode::StorageLimit),
+        ("storage_unavailable", ErrorCode::StorageUnavailable),
+        ("payload_too_large", ErrorCode::PayloadTooLarge),
+        ("rate_limited", ErrorCode::RateLimited),
     ];
 
     pub fn as_str(&self) -> &str {
@@ -188,6 +226,9 @@ impl ErrorCode {
             | ErrorCode::AlreadyExists
             | ErrorCode::InvalidState => Some(409),
             ErrorCode::Unauthorized => Some(401),
+            ErrorCode::StorageLimit | ErrorCode::StorageUnavailable => Some(503),
+            ErrorCode::PayloadTooLarge => Some(413),
+            ErrorCode::RateLimited => Some(429),
             ErrorCode::Forbidden => Some(403),
             ErrorCode::MetadataRefPending => Some(424),
             ErrorCode::SemanticInvalid
@@ -222,6 +263,10 @@ impl ErrorCode {
             ErrorCode::AlreadyExists => "Already registered.",
             ErrorCode::InvalidState => "Not allowed in the current state.",
             ErrorCode::ConfigUnavailable => "No configuration has been issued.",
+            ErrorCode::StorageLimit => "Storage limit reached.",
+            ErrorCode::StorageUnavailable => "Storage is unavailable.",
+            ErrorCode::PayloadTooLarge => "Request body is too large.",
+            ErrorCode::RateLimited => "Too many requests.",
             ErrorCode::Unknown(_) => "Request failed.",
         }
     }

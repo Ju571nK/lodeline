@@ -95,6 +95,9 @@ pub use status::{GapReport, ProxyStatus, StatusResponse};
 pub use verifier::{verifier_for, verify};
 
 /// Cross-field rules the JSON schemas express with `if/then`, array bounds and uniqueness.
+///
+/// Errors must propagate immediately from deserialization: never swallow or retry
+/// one, because parse classification reads an out-of-band signal set when it is raised.
 pub trait Validate {
     /// Returns the first violated rule.
     fn validate(&self) -> Result<(), ValidationError>;
