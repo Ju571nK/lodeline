@@ -125,3 +125,10 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
 - proxy 패키징(2026-10-11, #253 리뷰): proxy는 전용 system 사용자·그룹 `sigil-proxy`(전용 sysusers 파일)로 실행해 다른 sigil 데몬이 upstream 자격증명을 읽지 못하게 한다.
   proxy 패키지는 빌드하되 relay(T-12)가 생기기 전까지 릴리스에 공개하지 않는다(`release.yml`의 `rm -f pkgs/sigil-proxy*`).
 - 착수 순서: PR0 `sigil-proxy-api` DTO crate(#244) → T-10 `sigil-proxy` 골격(#245)과 T-11 S1 신원·등록(#246) 병렬.
+- T-11 S4 범위(2026-10-14, 사용자 결정·추천안 채택): S4는 `POST /v1/proxy-events` 수신과 ledger 저장(중복·tombstone·epoch/sequence gap·보존 정리·저장 한도),
+  그리고 최소 metadata 업로드 저장소(`POST /v1/proxy-metadata`, SV-2–4 검증용)를 포함한다. projection과 조회 API는 S5.
+  SV-5는 route 변경 중 직전 revision과 현재 revision의 credential scope id를 모두 받는다. ledger는 기존 상태 파일 옆 별도 SQLite 파일에 두고,
+  기존 status·config 저장소의 DB 이전은 나중 단계로 미룬다. status 보고의 `last_assigned_sequence`로 만드는 tail gap은 S5 후속으로 미룬다.
+  저장 한도 수치는 설정값이며 기본값은 보수적인 시험값이다(D-04 초기값). proxy 쪽 invocation 이벤트 생성은 T-13/T-14이며 S4의 proxy 갈래는 전송 client와 gap queue까지만 한다.
+- 오류 code(2026-10-14, S4): 현재 고정 message 문구를 확정한다. 413은 `payload_too_large`, 429는 `rate_limited`, 503은 `storage_limit`(저장 한도)·`storage_unavailable`(일시 저장 실패).
+  parse 오류 분류는 serde message 문자열 검사가 아니라 입력이 위조할 수 없는 typed 신호로 한다(#271).
