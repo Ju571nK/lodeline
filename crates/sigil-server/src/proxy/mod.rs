@@ -46,6 +46,8 @@ pub struct ProxyContext {
     pub config_ttl: u32,
     /// `ack_loss_margin` M (seconds) for the E >= R + M check.
     pub ack_loss_margin: u32,
+    /// `dedup_tombstone_retention` T (seconds) for the T >= R + M check.
+    pub tombstone_retention: i64,
     /// `Some` only when `proxy.management_verifiers` is configured. `None`
     /// means every management route and the audit read route are absent.
     pub mgmt: Option<MgmtAuth>,
@@ -146,6 +148,7 @@ impl ProxyContext {
             ledger,
             config_ttl: pc.config_ttl(),
             ack_loss_margin: pc.ack_loss_margin(),
+            tombstone_retention: i64::from(pc.dedup_tombstone_retention()),
             mgmt,
             audit,
             withheld: Mutex::new(withheld),
@@ -159,12 +162,7 @@ impl ProxyContext {
     /// event retention E is its stored config value, or the default when none
     /// is stored. Not scheduled yet: slice B2 owns the periodic call.
     pub fn ledger_sweep(&self, now: i64) -> Result<ledger::SweepStats, ledger::LedgerError> {
-        self.ledger.sweep(now, &|id| {
-            self.store.config(id).map_or(
-                sigil_proxy_api::config::DEFAULT_EVENT_RETENTION_SECONDS,
-                |c| c.config.event_retention_seconds,
-            )
-        })
+        sweep_ledger(&self.ledger, &self.store, now)
     }
 
     /// Decide whether an auth denial gets its own audit record now. `Some(n)`:
@@ -349,6 +347,21 @@ pub fn check_store_against_audit(
         }
     }
     Ok(withheld)
+}
+
+/// Retention sweep with each proxy's E taken from its stored config (the
+/// default E when none is stored).
+pub fn sweep_ledger(
+    ledger: &ledger::Ledger,
+    store: &ProxyStore,
+    now: i64,
+) -> Result<ledger::SweepStats, ledger::LedgerError> {
+    ledger.sweep(now, &|id| {
+        store.config(id).map_or(
+            sigil_proxy_api::config::DEFAULT_EVENT_RETENTION_SECONDS,
+            |c| c.config.event_retention_seconds,
+        )
+    })
 }
 
 /// Proxies whose stored config breaks `E >= R + M` under the CURRENT

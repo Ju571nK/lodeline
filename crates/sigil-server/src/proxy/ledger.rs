@@ -10,7 +10,10 @@
 //!   where the OS has it). In WAL mode `NORMAL` does not sync the log at commit,
 //!   so a power loss could drop an acknowledged batch; the handler ACKs only
 //!   after [`Ledger::insert_batch`] returns, so commits must be durable.
-//!   `secure_delete=ON` so retention really removes expired event bodies.
+//!   `secure_delete=ON` zeroes freed content in the database file; because the
+//!   WAL can still hold older page copies, every sweep ends with
+//!   `wal_checkpoint(TRUNCATE)`. The file itself does not shrink (freed pages
+//!   are reused).
 //! * **Concurrency.** The connection sits behind a `Mutex`. `rusqlite::Connection`
 //!   is `Send` but not `Sync`; the mutex makes [`Ledger`] `Send + Sync` and also
 //!   serialises batches in-process (SQLite allows one writer anyway). Calls block
@@ -37,27 +40,62 @@ use std::path::Path;
 
 /// Format version stored in `PRAGMA user_version`.
 pub const SCHEMA_VERSION: i64 = 1;
-/// Server-derived gap rows kept per proxy. A batch that would exceed it is
-/// refused (`storage_limit`) rather than dropping a stored gap.
+/// Open server-derived gaps per proxy. A batch that would exceed it is refused
+/// (`storage_limit`) rather than dropping a stored gap. Closed gaps do not
+/// count: they are only retained until E.
 pub const MAX_GAPS_PER_PROXY: i64 = 10_000;
 
 /// Storage caps. Defaults are conservative, **unmeasured** test values (D-04).
+///
+/// * `rows_*` count event rows; `bytes_*` count **canonical event bytes only**
+///   (no index, tombstone or page overhead).
+/// * Tombstones have their own bound, derived as `TOMBSTONE_FACTOR` x the rows
+///   cap (tombstones can outlive event bodies when T > E, but must not eat the
+///   event rows budget).
+/// * `file_bytes` is a hard backstop on the live database size
+///   (`(page_count - freelist_count) * page_size`), derived as
+///   `FILE_FACTOR` x `bytes_total` to cover indexes and tombstones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedgerCaps {
     pub rows_per_proxy: u64,
     pub bytes_per_proxy: u64,
     pub rows_total: u64,
     pub bytes_total: u64,
+    pub tombstones_per_proxy: u64,
+    pub tombstones_total: u64,
+    pub file_bytes: u64,
+}
+
+pub const TOMBSTONE_FACTOR: u64 = 4;
+pub const FILE_FACTOR: u64 = 3;
+
+impl LedgerCaps {
+    pub fn new(
+        rows_per_proxy: u64,
+        bytes_per_proxy: u64,
+        rows_total: u64,
+        bytes_total: u64,
+    ) -> Self {
+        Self {
+            rows_per_proxy,
+            bytes_per_proxy,
+            rows_total,
+            bytes_total,
+            tombstones_per_proxy: rows_per_proxy.saturating_mul(TOMBSTONE_FACTOR),
+            tombstones_total: rows_total.saturating_mul(TOMBSTONE_FACTOR),
+            file_bytes: bytes_total.saturating_mul(FILE_FACTOR),
+        }
+    }
 }
 
 impl Default for LedgerCaps {
     fn default() -> Self {
-        Self {
-            rows_per_proxy: ProxyConfig::DEFAULT_LEDGER_ROWS_PER_PROXY,
-            bytes_per_proxy: ProxyConfig::DEFAULT_LEDGER_BYTES_PER_PROXY,
-            rows_total: ProxyConfig::DEFAULT_LEDGER_ROWS_TOTAL,
-            bytes_total: ProxyConfig::DEFAULT_LEDGER_BYTES_TOTAL,
-        }
+        Self::new(
+            ProxyConfig::DEFAULT_LEDGER_ROWS_PER_PROXY,
+            ProxyConfig::DEFAULT_LEDGER_BYTES_PER_PROXY,
+            ProxyConfig::DEFAULT_LEDGER_ROWS_TOTAL,
+            ProxyConfig::DEFAULT_LEDGER_BYTES_TOTAL,
+        )
     }
 }
 
@@ -72,12 +110,12 @@ impl LedgerOptions {
     pub fn from_config(pc: &ProxyConfig) -> Self {
         Self {
             tombstone_retention_secs: i64::from(pc.dedup_tombstone_retention()),
-            caps: LedgerCaps {
-                rows_per_proxy: pc.ledger_max_rows_per_proxy(),
-                bytes_per_proxy: pc.ledger_max_bytes_per_proxy(),
-                rows_total: pc.ledger_max_rows_total(),
-                bytes_total: pc.ledger_max_bytes_total(),
-            },
+            caps: LedgerCaps::new(
+                pc.ledger_max_rows_per_proxy(),
+                pc.ledger_max_bytes_per_proxy(),
+                pc.ledger_max_rows_total(),
+                pc.ledger_max_bytes_total(),
+            ),
         }
     }
 }
@@ -100,6 +138,12 @@ impl Default for LedgerOptions {
 /// a warning, because a stale E only shortens how long event *bodies* live; the
 /// dedup window that protects against double-ingest is `max(E, T)`. A broken T
 /// silently re-accepts retransmitted events as new, so it is a boot error.
+///
+/// A retransmission later than T after acceptance is outside this invariant
+/// (T >= R + M means a legitimate producer never retransmits that late). If one
+/// arrives anyway it is treated as new: it may also look like a new epoch
+/// (spurious `producer_epoch_change`) once its epoch row was swept. That is
+/// accepted behaviour, not a defect.
 pub fn check_tombstone_invariant<'a>(
     tombstone_secs: i64,
     margin_secs: u32,
@@ -117,6 +161,18 @@ pub fn check_tombstone_invariant<'a>(
         }
     }
     Ok(())
+}
+
+/// The config-PUT form of the L1 rules: `E >= R + M` and `T >= R + M`. A PUT
+/// that breaks either is refused (422) so it cannot make the next boot fail.
+pub fn config_retention_ok(
+    event_retention: i64,
+    max_offline_retry_age: i64,
+    margin_secs: u32,
+    tombstone_retention: i64,
+) -> bool {
+    let need = max_offline_retry_age.saturating_add(i64::from(margin_secs));
+    event_retention >= need && tombstone_retention >= need
 }
 
 /// Result of a committed batch, in batch order.
@@ -313,9 +369,10 @@ CREATE TABLE gaps (
     from_sequence     INTEGER,
     to_sequence       INTEGER,
     open              INTEGER NOT NULL,
-    closed_at         INTEGER
+    closed_at         INTEGER,
+    present           INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX gaps_proxy ON gaps (proxy_id, epoch_id, kind, open);
+CREATE INDEX gaps_open ON gaps (proxy_id, epoch_id, open, from_sequence);
 CREATE TABLE invocations (
     invocation_id    TEXT PRIMARY KEY,
     proxy_id         TEXT NOT NULL,
@@ -330,13 +387,27 @@ CREATE TABLE usage (
 ";
 
 impl Ledger {
-    /// Open (creating if needed) the ledger. Refuses a symlink, a non-regular
-    /// file, a group/world accessible file, a newer or foreign schema, or a
-    /// filesystem that cannot do WAL.
+    /// Open (creating if needed) the ledger. Refuses a symlink (checked, and
+    /// SQLite is opened with `NOFOLLOW`), a non-regular file, a file owned by
+    /// another user, a group/world accessible file, a newer or foreign schema,
+    /// or a filesystem that cannot do WAL.
     pub fn open(path: &Path, opts: LedgerOptions) -> Result<Self> {
         prepare_file(path)?;
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .context("open ledger database")?;
+        // SQLite's NOFOLLOW rejects a symlink in ANY path component (for example
+        // /var -> /private/var), so resolve the directory first; the final
+        // component was already checked by prepare_file and NOFOLLOW covers it.
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .canonicalize()
+            .context("resolve ledger directory")?;
+        let real = dir.join(path.file_name().context("ledger path has no file name")?);
+        let conn = Connection::open_with_flags(
+            &real,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .context("open ledger database")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
@@ -409,6 +480,8 @@ impl Ledger {
                 |r| r.get(0),
             )?;
             if seq_taken {
+                // Only the later colliding event is reported (the stored one
+                // is already accepted and not part of this batch's items).
                 conflicts.push(conflict(index, ev, ConflictKind::SequenceConflict));
                 continue;
             }
@@ -490,7 +563,14 @@ impl Ledger {
         seqs.sort_unstable();
         let mut gaps_added = false;
         for (_, epoch, seq) in seqs {
-            gaps_added |= derive_gaps(&tx, proxy_id, epoch, seq, received_at)?;
+            gaps_added |= derive_gaps(
+                &tx,
+                proxy_id,
+                epoch,
+                seq,
+                received_at,
+                self.opts.tombstone_retention_secs,
+            )?;
         }
 
         let rows = fresh.len() as i64;
@@ -509,7 +589,7 @@ impl Ledger {
         }
         if gaps_added {
             let n: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM gaps WHERE proxy_id = ?1",
+                "SELECT COUNT(*) FROM gaps WHERE proxy_id = ?1 AND open = 1 AND kind = 'sequence_gap'",
                 params![proxy_id],
                 |r| r.get(0),
             )?;
@@ -538,13 +618,18 @@ impl Ledger {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        let pages: i64 = tx.pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let free: i64 = tx.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+        let page_size: i64 = tx.pragma_query_value(None, "page_size", |r| r.get(0))?;
+        let live_bytes = (pages - free).saturating_mul(page_size);
         let over = |v: i64, cap: u64| u64::try_from(v).is_ok_and(|v| v > cap);
         Ok(over(pr, c.rows_per_proxy)
-            || over(pt, c.rows_per_proxy)
+            || over(pt, c.tombstones_per_proxy)
             || over(pb, c.bytes_per_proxy)
             || over(tr, c.rows_total)
-            || over(tt, c.rows_total)
-            || over(tb, c.bytes_total))
+            || over(tt, c.tombstones_total)
+            || over(tb, c.bytes_total)
+            || over(live_bytes, c.file_bytes))
     }
 
     /// Retention sweep by server `received_at` only (L1). Event rows go after
@@ -602,6 +687,11 @@ impl Ledger {
                  ON CONFLICT (proxy_id) DO UPDATE SET tombstone_rows = excluded.tombstone_rows;",
         )?;
         tx.commit()?;
+        // secure_delete zeroes freed pages in the database, but the WAL can
+        // still hold older copies until it is checkpointed and truncated.
+        if let Err(e) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
+            tracing::warn!(error = %LedgerError::from(e), "proxy ledger WAL checkpoint after sweep failed");
+        }
         Ok(s)
     }
 
@@ -720,6 +810,7 @@ fn derive_gaps(
     epoch: &str,
     seq: i64,
     now: i64,
+    tombstone_secs: i64,
 ) -> Result<bool, LedgerError> {
     let mut added = false;
     let highest: Option<i64> = tx
@@ -782,38 +873,28 @@ fn derive_gaps(
             "UPDATE epochs SET last_received_at = ?3 WHERE proxy_id = ?1 AND epoch_id = ?2",
             params![proxy_id, epoch, now],
         )?;
-        // A gap closes only when every sequence in its range is present. The
-        // count is taken from stored rows, so an expired tombstone can only
-        // keep a gap open (safe direction), never close it wrongly.
-        let open: Vec<(String, i64, i64)> = {
-            let mut st = tx.prepare(
-                "SELECT gap_id, from_sequence, to_sequence FROM gaps
-                 WHERE proxy_id = ?1 AND epoch_id = ?2 AND kind = 'sequence_gap' AND open = 1
-                   AND from_sequence <= ?3 AND to_sequence >= ?3",
-            )?;
-            let rows = st.query_map(params![proxy_id, epoch, seq], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        for (gap_id, from, to) in open {
-            let present: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM (
-                    SELECT sequence FROM tombstones
-                      WHERE proxy_id = ?1 AND epoch_id = ?2 AND sequence BETWEEN ?3 AND ?4
-                    UNION
-                    SELECT sequence FROM events
-                      WHERE proxy_id = ?1 AND epoch_id = ?2 AND sequence BETWEEN ?3 AND ?4)",
-                params![proxy_id, epoch, from, to],
-                |r| r.get(0),
-            )?;
-            if present == to - from + 1 {
-                tx.execute(
-                    "UPDATE gaps SET open = 0, closed_at = ?2 WHERE gap_id = ?1",
-                    params![gap_id, now],
-                )?;
-            }
-        }
+        // Each open gap has a `present` counter: an accepted sequence inside
+        // its range adds one, and the gap closes when present == range length.
+        // O(log n) per arrival, no range scan. A sequence is accepted once per
+        // (epoch, sequence) while its tombstone lives, so counts cannot double.
+        // Gaps older than T stop counting: a replay of an already-filled
+        // sequence (tombstone expired) must not close a gap wrongly, so such a
+        // gap can only stay open (safe direction). Overlapping gaps (possible
+        // only when an epoch row was swept and the epoch reappeared) each
+        // count the arrival.
+        tx.execute(
+            "UPDATE gaps SET present = present + 1
+             WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND kind = 'sequence_gap'
+               AND from_sequence <= ?3 AND to_sequence >= ?3 AND detected_at >= ?4",
+            params![proxy_id, epoch, seq, now.saturating_sub(tombstone_secs)],
+        )?;
+        tx.execute(
+            "UPDATE gaps SET open = 0, closed_at = ?3
+             WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND kind = 'sequence_gap'
+               AND from_sequence <= ?4 AND to_sequence >= ?4
+               AND present >= to_sequence - from_sequence + 1",
+            params![proxy_id, epoch, now, seq],
+        )?;
     }
     Ok(added)
 }
@@ -882,6 +963,11 @@ fn prepare_file(path: &Path) -> Result<()> {
                 use std::os::unix::fs::PermissionsExt;
                 if meta.permissions().mode() & 0o077 != 0 {
                     bail!("ledger database must be owner-only (it holds event data)");
+                }
+                use std::os::unix::fs::MetadataExt;
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                if meta.uid() != unsafe { libc::geteuid() } {
+                    bail!("ledger database must be owned by the server user");
                 }
             }
             Ok(())

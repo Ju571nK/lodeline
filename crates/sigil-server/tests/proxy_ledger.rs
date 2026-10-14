@@ -5,8 +5,8 @@ use serde_json::json;
 use sigil_proxy_api::{parse_event, ProxyEvent};
 use sigil_server::config::ProxyConfig;
 use sigil_server::proxy::ledger::{
-    check_tombstone_invariant, ConflictKind, GapKind, Ledger, LedgerCaps, LedgerError,
-    LedgerOptions,
+    check_tombstone_invariant, config_retention_ok, ConflictKind, GapKind, Ledger, LedgerCaps,
+    LedgerError, LedgerOptions,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -361,12 +361,7 @@ fn gap_derivation_does_not_depend_on_order_inside_a_batch() {
 #[test]
 fn storage_caps_refuse_without_effect() {
     let d = tempfile::tempdir().unwrap();
-    let caps = LedgerCaps {
-        rows_per_proxy: 3,
-        bytes_per_proxy: u64::MAX / 4,
-        rows_total: 4,
-        bytes_total: u64::MAX / 4,
-    };
+    let caps = LedgerCaps::new(3, u64::MAX / 16, 4, u64::MAX / 16);
     let l = open_with(
         d.path(),
         LedgerOptions {
@@ -414,10 +409,8 @@ fn byte_cap_is_enforced() {
         LedgerOptions {
             tombstone_retention_secs: 90 * DAY,
             caps: LedgerCaps {
-                rows_per_proxy: 1000,
-                bytes_per_proxy: 700,
-                rows_total: 1000,
-                bytes_total: 10_000,
+                file_bytes: u64::MAX / 4,
+                ..LedgerCaps::new(1000, 700, 1000, 10_000)
             },
         },
     );
@@ -545,4 +538,250 @@ fn foreign_or_newer_schema_is_refused() {
         c.pragma_update(None, "user_version", 99).unwrap();
     }
     assert!(Ledger::open(&p, LedgerOptions::default()).is_err());
+}
+
+fn db_live_bytes(path: &Path) -> u64 {
+    let c = rusqlite::Connection::open(path).unwrap();
+    let n = |p: &str| {
+        c.pragma_query_value(None, p, |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    ((n("page_count") - n("freelist_count")) * n("page_size")) as u64
+}
+
+#[test]
+fn config_put_retention_rule_includes_t() {
+    let (r, m) = (30 * DAY, (7 * DAY) as u32);
+    assert!(config_retention_ok(90 * DAY, r, m, 90 * DAY));
+    assert!(config_retention_ok(37 * DAY, r, m, 37 * DAY));
+    assert!(!config_retention_ok(37 * DAY - 1, r, m, 90 * DAY), "E");
+    assert!(!config_retention_ok(90 * DAY, r, m, 37 * DAY - 1), "T");
+}
+
+#[test]
+fn huge_sequence_jump_then_fills_is_fast_and_correct() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[ev("px", 1)], 10).unwrap();
+    l.insert_batch("px", &[ev("px", 1_000_000_000)], 11)
+        .unwrap();
+    let g = l.gaps("px").unwrap();
+    assert_eq!(g.len(), 1);
+    assert_eq!(
+        (g[0].from_sequence, g[0].to_sequence),
+        (Some(2), Some(999_999_999))
+    );
+    let t0 = std::time::Instant::now();
+    for chunk in (2..=1500i64).collect::<Vec<_>>().chunks(100) {
+        let batch: Vec<_> = chunk.iter().map(|s| ev("px", *s)).collect();
+        l.insert_batch("px", &batch, 12).unwrap();
+    }
+    assert!(t0.elapsed().as_secs() < 20, "fills must not scan the range");
+    assert!(l.gaps("px").unwrap()[0].open, "range is nowhere near full");
+}
+
+#[test]
+fn small_gap_closes_exactly_when_full_even_in_one_batch() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[ev("px", 1), ev("px", 6)], 10)
+        .unwrap(); // gap 2..5
+    l.insert_batch("px", &[ev("px", 4), ev("px", 2), ev("px", 5)], 11)
+        .unwrap();
+    assert!(l.gaps("px").unwrap()[0].open);
+    l.insert_batch("px", &[ev("px", 3)], 12).unwrap();
+    assert!(!l.gaps("px").unwrap()[0].open);
+}
+
+#[test]
+fn open_gap_cap_counts_open_gaps_only() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    // sequences 2,4,..,20000: 10_000 events, each opening a one-sequence gap
+    for start in (0..10_000i64).step_by(100) {
+        let batch: Vec<_> = (start..start + 100)
+            .map(|i| ev("px", 2 * (i + 1)))
+            .collect();
+        l.insert_batch("px", &batch, 10).unwrap();
+    }
+    assert_eq!(l.gaps("px").unwrap().len(), 10_000);
+    assert_eq!(
+        l.insert_batch("px", &[ev("px", 20_002)], 11).unwrap_err(),
+        LedgerError::StorageLimit
+    );
+    // close one gap (sequence 1 fills [1,1]); closed gaps stay listed but no
+    // longer count, so the refused event now fits
+    l.insert_batch("px", &[ev("px", 1)], 12).unwrap();
+    assert_eq!(
+        l.insert_batch("px", &[ev("px", 20_002)], 13)
+            .unwrap()
+            .accepted
+            .len(),
+        1
+    );
+    assert_eq!(l.gaps("px").unwrap().len(), 10_001);
+}
+
+#[test]
+fn file_size_backstop_and_tombstone_bound_are_separate() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("l.sqlite");
+    let f0 = {
+        let _l = Ledger::open(&p, LedgerOptions::default()).unwrap();
+        db_live_bytes(&p)
+    };
+    let caps = LedgerCaps {
+        file_bytes: f0,
+        ..LedgerCaps::default()
+    };
+    let l = Ledger::open(
+        &p,
+        LedgerOptions {
+            tombstone_retention_secs: 90 * DAY,
+            caps,
+        },
+    )
+    .unwrap();
+    let batch: Vec<_> = (1..=100).map(|s| ev("px", s)).collect();
+    assert_eq!(
+        l.insert_batch("px", &batch, 1).unwrap_err(),
+        LedgerError::StorageLimit
+    );
+    assert_eq!(l.usage("px").unwrap().event_rows, 0);
+
+    // tombstones do not consume the event rows cap: 3 events fit rows=3 even
+    // though events and tombstones together are 6
+    let d2 = tempfile::tempdir().unwrap();
+    let mut caps = LedgerCaps::new(3, 1 << 30, 100, 1 << 30);
+    let l2 = open_with(
+        d2.path(),
+        LedgerOptions {
+            tombstone_retention_secs: 90 * DAY,
+            caps,
+        },
+    );
+    l2.insert_batch("px", &[ev("px", 1), ev("px", 2), ev("px", 3)], 1)
+        .unwrap();
+    // own tombstone bound
+    caps.tombstones_per_proxy = 2;
+    let d3 = tempfile::tempdir().unwrap();
+    let l3 = open_with(
+        d3.path(),
+        LedgerOptions {
+            tombstone_retention_secs: 90 * DAY,
+            caps,
+        },
+    );
+    assert_eq!(
+        l3.insert_batch("px", &[ev("px", 1), ev("px", 2), ev("px", 3)], 1)
+            .unwrap_err(),
+        LedgerError::StorageLimit
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wal_and_shm_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[ev("px", 1)], 1).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let f = d.path().join(format!("l.sqlite{suffix}"));
+        let mode = std::fs::metadata(&f).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{suffix}: {mode:o}");
+    }
+}
+
+#[test]
+fn sweep_truncates_the_wal() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    let batch: Vec<_> = (1..=50).map(|s| ev("px", s)).collect();
+    l.insert_batch("px", &batch, 1).unwrap();
+    let wal = d.path().join("l.sqlite-wal");
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    l.sweep(1 + DAY, &|_| 100).unwrap();
+    assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+}
+
+#[test]
+fn old_epoch_event_after_a_newer_epoch_adds_no_gap() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[ev_with("px", EP1, 1, 1, 5001, "")], 1)
+        .unwrap();
+    l.insert_batch("px", &[ev_with("px", EP2, 1, 2, 5002, "")], 2)
+        .unwrap();
+    l.insert_batch("px", &[ev_with("px", EP1, 2, 3, 5003, "")], 3)
+        .unwrap();
+    let g = l.gaps("px").unwrap();
+    assert_eq!(g.len(), 1, "only the single epoch change: {g:?}");
+    assert_eq!(g[0].kind, GapKind::ProducerEpochChange);
+}
+
+#[test]
+fn gap_stays_open_when_its_evidence_expired_and_sweep_cleans_up() {
+    let d = tempfile::tempdir().unwrap();
+    let t = 10 * DAY;
+    let l = open_with(
+        d.path(),
+        LedgerOptions {
+            tombstone_retention_secs: t,
+            caps: LedgerCaps::default(),
+        },
+    );
+    let e = |_: &str| 100 * DAY;
+    l.insert_batch("px", &[ev("px", 1), ev("px", 2), ev("px", 5)], 0)
+        .unwrap(); // gap A: 3..4
+    l.insert_batch("px", &[ev_with("px", EP2, 1, 200, 5200, "")], 1000)
+        .unwrap();
+    // tombstones and the idle EP1 epoch row expire (T), gap A is kept (E)
+    let s = l.sweep(20 * DAY, &e).unwrap();
+    assert!(s.tombstones >= 4 && s.epochs == 1, "{s:?}");
+    // EP1 reappears (outside the invariant): a new epoch row, new head gap B.
+    l.insert_batch("px", &[ev("px", 7)], 20 * DAY).unwrap();
+    let gaps = l.gaps("px").unwrap();
+    let a = &gaps[0];
+    assert_eq!((a.from_sequence, a.to_sequence), (Some(3), Some(4)));
+    // replay 1..=6: 1, 2 and 5 are still stored as event rows (E > T), so they
+    // are duplicates and not counted; neither gap may close wrongly
+    let batch: Vec<_> = (1..=6).map(|s| ev("px", s)).collect();
+    let out = l.insert_batch("px", &batch, 20 * DAY + 1).unwrap();
+    assert_eq!((out.accepted.len(), out.duplicate.len()), (3, 3));
+    let gaps = l.gaps("px").unwrap();
+    assert!(gaps[0].open, "stale gap must not close on a replay");
+    let b = gaps
+        .iter()
+        .find(|g| (g.from_sequence, g.to_sequence) == (Some(1), Some(6)))
+        .unwrap();
+    assert!(b.open, "3 of 6 sequences counted");
+
+    // a full sweep long after: gaps, owners, epochs and usage all go
+    let s = l.sweep(500 * DAY, &|_| 1).unwrap();
+    assert!(s.gaps >= 3 && s.invocations >= 1, "{s:?}");
+    assert!(l.gaps("px").unwrap().is_empty());
+    assert_eq!(l.usage("px").unwrap(), Default::default());
+    // the invocation binding was released: another proxy can use that id
+    let other = ev_with("pb", EP1, 1, 900, 5001, "");
+    assert_eq!(
+        l.insert_batch("pb", &[other], 500 * DAY + 1)
+            .unwrap()
+            .accepted
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn ledger_sweep_helper_uses_default_retention_without_stored_config() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    let store = sigil_server::proxy::store::ProxyStore::open(&d.path().join("state.json")).unwrap();
+    l.insert_batch("px", &[ev("px", 1)], 1_000).unwrap();
+    let e = sigil_proxy_api::config::DEFAULT_EVENT_RETENTION_SECONDS;
+    let s = sigil_server::proxy::sweep_ledger(&l, &store, 1_000 + e).unwrap();
+    assert_eq!(s.events, 0);
+    let s = sigil_server::proxy::sweep_ledger(&l, &store, 1_000 + e + 1).unwrap();
+    assert_eq!(s.events, 1);
 }

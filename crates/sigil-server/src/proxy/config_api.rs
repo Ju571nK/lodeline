@@ -119,10 +119,14 @@ pub fn put_config(ctx: &ProxyContext, req: &MgmtRequest, path_id: &str, body: &[
     else {
         return refuse(&actor, id, ErrorCode::SemanticInvalid, st, Some(cur_rev));
     };
-    // Ledger L1: E >= R + M, with M a server setting.
-    if cfg.event_retention_seconds
-        < cfg.max_offline_retry_age_seconds + i64::from(ctx.ack_loss_margin)
-    {
+    // Ledger L1: E >= R + M and T >= R + M, with M and T server settings. A PUT
+    // that broke T would make the next boot fail the startup invariant.
+    if !super::ledger::config_retention_ok(
+        cfg.event_retention_seconds,
+        cfg.max_offline_retry_age_seconds,
+        ctx.ack_loss_margin,
+        ctx.tombstone_retention,
+    ) {
         return refuse(&actor, id, ErrorCode::SemanticInvalid, st, Some(cur_rev));
     }
     if rec.state == super::registry::ProxyState::Retired {

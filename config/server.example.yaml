@@ -113,3 +113,18 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # ack_loss_margin M (seconds, 3600..2592000, default 604800). A config PUT is refused (422)
 #   # unless event_retention_seconds >= max_offline_retry_age_seconds + M.
 #   # ack_loss_margin_seconds: 604800
+#   # Event ledger (T-11 S4). SQLite file, created owner-only (0600). Default:
+#   # proxy-ledger.sqlite next to state_path.
+#   # ledger_path: /var/lib/sigil-server/proxy-ledger.sqlite
+#   # Dedup tombstone retention T (seconds, 3600..63072000, default 7776000). Boot is REFUSED
+#   # unless T >= max_offline_retry_age_seconds + ack_loss_margin_seconds for every stored
+#   # proxy config, and a config PUT that would break it is refused (422).
+#   # dedup_tombstone_retention_seconds: 7776000
+#   # Storage caps (unmeasured test values). Exceeding one answers 503 storage_limit and stores
+#   # nothing. Rows 1..1000000000, bytes 1048576..1099511627776, per-proxy <= total. Bytes
+#   # count canonical event bytes only; tombstones (4x the rows cap) and the live file size
+#   # (3x the total bytes cap) have derived bounds.
+#   # ledger_max_rows_per_proxy: 1000000
+#   # ledger_max_bytes_per_proxy: 536870912
+#   # ledger_max_rows_total: 5000000
+#   # ledger_max_bytes_total: 4294967296
