@@ -45,6 +45,9 @@ data-encoding = { workspace = true }
 rand_core = { version = "0.6", features = ["std"] }
 # T-11 — operator CLI (`sigil-server proxy ...`) is an mTLS HTTPS client.
 reqwest = { workspace = true }
+# T-11 S4 — proxy event ledger (SQLite) and tombstone digests.
+rusqlite = { workspace = true }
+sha2 = "0.10"
 # #184 — enrollment: runtime temp files (CSR/ext/cert, atomic writes) + flock.
 tempfile = { workspace = true }
 
