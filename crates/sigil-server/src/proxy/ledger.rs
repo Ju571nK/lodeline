@@ -392,32 +392,7 @@ impl Ledger {
     /// another user, a group/world accessible file, a newer or foreign schema,
     /// or a filesystem that cannot do WAL.
     pub fn open(path: &Path, opts: LedgerOptions) -> Result<Self> {
-        prepare_file(path)?;
-        // SQLite's NOFOLLOW rejects a symlink in ANY path component (for example
-        // /var -> /private/var), so resolve the directory first; the final
-        // component was already checked by prepare_file and NOFOLLOW covers it.
-        let dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."))
-            .canonicalize()
-            .context("resolve ledger directory")?;
-        let real = dir.join(path.file_name().context("ledger path has no file name")?);
-        let conn = Connection::open_with_flags(
-            &real,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .context("open ledger database")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.pragma_update(None, "fullfsync", true)?;
-        conn.pragma_update(None, "secure_delete", true)?;
-        let jm: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-        let sync: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
-        if !jm.eq_ignore_ascii_case("wal") || sync != 2 {
-            bail!("ledger database could not be set to WAL with synchronous=FULL");
-        }
+        let conn = open_hardened(path)?;
         init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -436,6 +411,52 @@ impl Ledger {
         proxy_id: &str,
         events: &[ProxyEvent],
         received_at: i64,
+    ) -> Result<IngestOutcome, LedgerError> {
+        self.insert_inner(proxy_id, events, received_at, false)
+    }
+
+    /// Conflict check only: runs the same detection as [`Self::insert_batch`]
+    /// and stores nothing (the transaction is always rolled back). The ingest
+    /// handler uses it to answer 409 before 424 when a batch also waits on
+    /// metadata refs. `Ok` means "no conflict now", not "accepted".
+    pub fn check_batch(
+        &self,
+        proxy_id: &str,
+        events: &[ProxyEvent],
+        received_at: i64,
+    ) -> Result<(), LedgerError> {
+        self.insert_inner(proxy_id, events, received_at, true)
+            .map(|_| ())
+    }
+
+    /// Per event: is it already stored byte-equal (live row or tombstone)?
+    /// Read only; the ingest handler skips registry validation for these.
+    pub fn existing_equal(
+        &self,
+        proxy_id: &str,
+        events: &[ProxyEvent],
+    ) -> Result<Vec<bool>, LedgerError> {
+        let conn = self.conn.lock();
+        let mut out = Vec::with_capacity(events.len());
+        for ev in events {
+            let digest = Prepared::new(ev).digest;
+            let hit: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE proxy_id = ?1 AND event_id = ?2 AND sha256 = ?3)
+                     OR EXISTS(SELECT 1 FROM tombstones WHERE proxy_id = ?1 AND event_id = ?2 AND sha256 = ?3)",
+                params![proxy_id, ev.event_id.as_str(), digest],
+                |r| r.get(0),
+            )?;
+            out.push(hit);
+        }
+        Ok(out)
+    }
+
+    fn insert_inner(
+        &self,
+        proxy_id: &str,
+        events: &[ProxyEvent],
+        received_at: i64,
+        dry_run: bool,
     ) -> Result<IngestOutcome, LedgerError> {
         if events.iter().any(|e| e.proxy_id.as_str() != proxy_id) {
             return Err(LedgerError::ProxyMismatch);
@@ -539,7 +560,8 @@ impl Ledger {
             // Dropping `tx` rolls back every insert of this batch.
             return Err(LedgerError::Conflicts(conflicts));
         }
-        if fresh.is_empty() {
+        if dry_run || fresh.is_empty() {
+            // `dry_run`: dropping `tx` rolls the inserts back.
             return Ok(out);
         }
 
@@ -940,6 +962,41 @@ fn insert_gap(
 }
 
 /// Create the file owner-only when missing; refuse unsafe existing files.
+/// Open a SQLite file with the ledger's hardening: refuses a symlink (checked,
+/// and SQLite is opened with `NOFOLLOW`), a non-regular file, a file owned by
+/// another user, a group/world accessible file, or a filesystem that cannot do
+/// WAL; sets `synchronous=FULL`, `secure_delete`. Schema setup is the caller's.
+/// Shared with the metadata store (`metadata.rs`).
+pub(super) fn open_hardened(path: &Path) -> Result<Connection> {
+    prepare_file(path)?;
+    // SQLite's NOFOLLOW rejects a symlink in ANY path component (for example
+    // /var -> /private/var), so resolve the directory first; the final
+    // component was already checked by prepare_file and NOFOLLOW covers it.
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize()
+        .context("resolve ledger directory")?;
+    let real = dir.join(path.file_name().context("ledger path has no file name")?);
+    let conn = Connection::open_with_flags(
+        &real,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .context("open ledger database")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.pragma_update(None, "fullfsync", true)?;
+    conn.pragma_update(None, "secure_delete", true)?;
+    let jm: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    let sync: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+    if !jm.eq_ignore_ascii_case("wal") || sync != 2 {
+        bail!("ledger database could not be set to WAL with synchronous=FULL");
+    }
+    Ok(conn)
+}
+
 fn prepare_file(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

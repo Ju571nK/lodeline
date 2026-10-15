@@ -46,6 +46,8 @@ pub fn proxy_unknown() -> Response {
 fn is_proxy_path(path: &str) -> bool {
     path == PROXY_CONFIG_PATH
         || path == STATUS_PATH
+        || path == super::ingest::INGEST_PATH
+        || path == super::metadata::METADATA_PATH
         || path == "/v1/proxies"
         || path.starts_with(PROXIES_PREFIX)
 }
@@ -206,6 +208,18 @@ pub fn router(ctx: Arc<ProxyContext>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(
                     super::status::MAX_STATUS_BODY,
                 )),
+        )
+        // Ingest and upload read the body themselves (own cap, JSON 413), after
+        // taking a concurrency slot, so no extractor limit applies here.
+        .route(
+            super::ingest::INGEST_PATH,
+            post(super::ingest::post_events)
+                .route_layer(from_fn_with_state(ctx.clone(), proxy_guard)),
+        )
+        .route(
+            super::metadata::METADATA_PATH,
+            post(super::metadata::post_metadata)
+                .route_layer(from_fn_with_state(ctx.clone(), proxy_guard)),
         )
         .with_state(ctx)
 }

@@ -4,15 +4,19 @@
 //! Spec: PX-008/009/012/016, AC-04, AC-12, AC-13; control-plane.md §0.1, §1, §2,
 //! §6. Slices S1 (identity, registry, guard), S2a (management auth, audit,
 //! lifecycle routes, operator CLI) and S3 (config DTO, config PUT/GET, status
-//! ingest). No event ingest/ledger (S4), no CSR signing (S2b).
+//! ingest), and S4 (event ledger, `POST /v1/proxy-events`, registry-entry
+//! upload `POST /v1/proxy-metadata`, periodic retention sweep). No CSR signing
+//! (S2b); no projection or query API (S5).
 
 pub mod audit;
 pub mod cli;
 pub mod config_api;
 pub mod guard;
 pub mod identity;
+pub mod ingest;
 pub mod ledger;
 pub mod lifecycle;
+pub mod metadata;
 pub mod mgmt;
 pub mod registry;
 pub mod status;
@@ -27,7 +31,6 @@ use identity::{PeerClass, ProxyCaInfo};
 use parking_lot::Mutex;
 use registry::ProxyRegistry;
 use std::collections::HashMap;
-#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store::ProxyStore;
@@ -39,9 +42,21 @@ pub struct ProxyContext {
     pub registry: ProxyRegistry,
     /// Latest config, status snapshot and gap records per proxy.
     pub store: ProxyStore,
-    /// Event ledger (T-11 S4 B1): storage only, no route yet. Blocking API;
-    /// call from `spawn_blocking`.
+    /// Event ledger (T-11 S4). Blocking API; call from `spawn_blocking`.
     pub ledger: ledger::Ledger,
+    /// Registry entries uploaded by proxies (SV-2..SV-5). Blocking API.
+    pub metadata: metadata::MetadataStore,
+    /// Concurrent ingest/upload requests allowed (429 `rate_limited` above).
+    pub ingest_slots: Arc<tokio::sync::Semaphore>,
+    /// Slots held per proxy (see `ingest::acquire_slot`) and the cap per proxy.
+    pub ingest_per_proxy: Mutex<HashMap<String, u32>>,
+    pub ingest_per_proxy_cap: u32,
+    /// Time allowed to read one ingest/upload body.
+    pub ingest_body_timeout: Duration,
+    /// Rate-limited refusal logging for the ingest and upload routes.
+    pub ingest_log: ingest::DenyLog,
+    /// Seconds between ledger retention sweeps.
+    pub sweep_interval_secs: u32,
     /// TTL stamped on every served config (seconds).
     pub config_ttl: u32,
     /// `ack_loss_margin` M (seconds) for the E >= R + M check.
@@ -105,6 +120,15 @@ impl ProxyContext {
         let ledger =
             ledger::Ledger::open(&pc.ledger_path(), ledger::LedgerOptions::from_config(pc))
                 .with_context(|| format!("proxy ledger {}", pc.ledger_path().display()))?;
+        let metadata = metadata::MetadataStore::open(
+            &pc.metadata_path(),
+            metadata::MetadataCaps {
+                entries_per_proxy: pc.metadata_max_entries_per_proxy(),
+                bytes_per_proxy: pc.metadata_max_bytes_per_proxy(),
+                bytes_total: pc.metadata_max_bytes_total(),
+            },
+        )
+        .with_context(|| format!("proxy metadata {}", pc.metadata_path().display()))?;
         let (mgmt, audit) = match pc.management_verifiers.as_deref() {
             None => (None, None),
             Some(vp) => {
@@ -146,6 +170,15 @@ impl ProxyContext {
             registry,
             store,
             ledger,
+            metadata,
+            ingest_slots: Arc::new(tokio::sync::Semaphore::new(
+                pc.ingest_max_concurrent() as usize
+            )),
+            ingest_per_proxy: Mutex::new(HashMap::new()),
+            ingest_per_proxy_cap: (pc.ingest_max_concurrent() / 4).max(1),
+            ingest_body_timeout: Duration::from_secs(u64::from(pc.ingest_body_timeout())),
+            ingest_log: ingest::DenyLog::default(),
+            sweep_interval_secs: pc.ledger_sweep_interval(),
             config_ttl: pc.config_ttl(),
             ack_loss_margin: pc.ack_loss_margin(),
             tombstone_retention: i64::from(pc.dedup_tombstone_retention()),
@@ -160,7 +193,7 @@ impl ProxyContext {
 
     /// Run the ledger retention sweep at `now` (unix seconds). Each proxy's
     /// event retention E is its stored config value, or the default when none
-    /// is stored. Not scheduled yet: slice B2 owns the periodic call.
+    /// is stored. Scheduled by [`spawn_ledger_sweep`].
     pub fn ledger_sweep(&self, now: i64) -> Result<ledger::SweepStats, ledger::LedgerError> {
         sweep_ledger(&self.ledger, &self.store, now)
     }
@@ -347,6 +380,35 @@ pub fn check_store_against_audit(
         }
     }
     Ok(withheld)
+}
+
+/// Run [`ProxyContext::ledger_sweep`] every `period` on the blocking pool,
+/// starting with one sweep right away (clears what expired while the server was
+/// down). A failed or panicking sweep is logged and the loop continues; it
+/// never takes the server down. Call from inside the runtime; the task ends
+/// with the runtime (or when the returned handle is aborted).
+pub fn spawn_ledger_sweep(ctx: Arc<ProxyContext>, period: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(period);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let c = ctx.clone();
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            match tokio::task::spawn_blocking(move || c.ledger_sweep(now)).await {
+                Ok(Ok(s)) => tracing::info!(
+                    events = s.events,
+                    tombstones = s.tombstones,
+                    gaps = s.gaps,
+                    epochs = s.epochs,
+                    invocations = s.invocations,
+                    "proxy ledger sweep"
+                ),
+                Ok(Err(e)) => tracing::error!(error = %e, "proxy ledger sweep failed"),
+                Err(_) => tracing::error!("proxy ledger sweep task panicked"),
+            }
+        }
+    })
 }
 
 /// Retention sweep with each proxy's E taken from its stored config (the
