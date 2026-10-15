@@ -396,8 +396,9 @@ inside the same transaction as dedup (README T-00 boundary). Failures use fixed
 codes and echo no values. The identity check comes first: a proxy identity mismatch
 or unknown `proxy_id` is 404 `proxy_unknown`, byte-identical for both, evaluated
 before body validation (control-plane.md; decisions.md D-02). Then precedence stays
-422 > 409 > 424. 403 is unused on ingest (`/v1/proxy-events`), status, registry and
-inventory endpoints.
+422 > 409 > 424. On ingest (`/v1/proxy-events`), status, registry and inventory endpoints
+403 is used only for an authenticated proxy whose state is `disabled` or `retired`
+(decided 2026-10-11, decisions.md); identity failures never use 403.
 
 | Rule | Condition | Result |
 |---|---|---|
