@@ -277,6 +277,13 @@ impl Server {
     /// `port == 0` picks one; a restart passes the old port. State files are the
     /// same on every start (they live in the PKI temp dir).
     async fn start(pki: &Pki, port: u16, first: bool, tweak: &Tweak) -> Server {
+        Self::try_start(pki, port, first, tweak)
+            .await
+            .expect("server must bind")
+    }
+
+    /// `None` when the port could not be bound.
+    async fn try_start(pki: &Pki, port: u16, first: bool, tweak: &Tweak) -> Option<Server> {
         let d = pki.dir.path();
         let p = |f: &str| d.join(f).display().to_string();
         let y = format!(
@@ -300,26 +307,36 @@ impl Server {
         let handle = axum_server::Handle::new();
         let h = handle.clone();
         let task = tokio::spawn(async move {
-            axum_server::bind(format!("127.0.0.1:{port}").parse().unwrap())
+            let _ = axum_server::bind(format!("127.0.0.1:{port}").parse().unwrap())
                 .handle(h)
                 .acceptor(PeerCertAcceptor::new(tls))
                 .serve(app.into_make_service())
-                .await
-                .unwrap();
+                .await;
         });
-        let port = handle.listening().await.expect("server must bind").port();
-        Server {
+        let port = handle.listening().await?.port();
+        Some(Server {
             port,
             ctx,
             handle,
             task,
-        }
+        })
     }
 
-    /// Stop now and wait until the listener is gone (connections are refused).
-    async fn stop(self) {
-        self.handle.shutdown();
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.task).await;
+    /// Stop the server for sure: graceful shutdown with a short deadline, then
+    /// abort the task and wait for the abort, so the listener is dropped. Returns
+    /// the port; the caller checks that connections are refused.
+    async fn stop(self) -> u16 {
+        self.handle
+            .graceful_shutdown(Some(Duration::from_millis(200)));
+        let mut task = self.task;
+        if tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+        self.port
     }
 }
 
@@ -472,12 +489,46 @@ impl H {
 
     /// Stop the server (connections are refused afterwards).
     async fn server_down(&mut self) {
-        self.srv.take().expect("server is up").stop().await;
+        let port = self.srv.take().expect("server is up").stop().await;
+        // The outage phase starts only when the port really refuses connections.
+        let start = Instant::now();
+        loop {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "server still accepts connections after stop"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Start the server again on the same port and the same files.
     async fn server_up(&mut self) {
-        self.srv = Some(Server::start(&self.pki, self.last_port, false, &self.tweak).await);
+        let tweak = self.tweak.clone();
+        self.server_up_with(tweak).await;
+    }
+
+    /// As `server_up`, with other server settings (for example a raised cap).
+    ///
+    /// The bind is retried a few times: `axum_server::bind` uses
+    /// `std::net::TcpListener::bind`, which sets SO_REUSEADDR on Unix, so the
+    /// port is reusable at once despite TIME_WAIT connections. The retry only
+    /// covers the short window in which the old socket is still being released.
+    async fn server_up_with(&mut self, tweak: Tweak) {
+        for _ in 0..20 {
+            if let Some(s) = Server::try_start(&self.pki, self.last_port, false, &tweak).await {
+                self.srv = Some(s);
+                self.tweak = tweak;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("server could not rebind port {}", self.last_port);
     }
 
     fn scope_id(&self) -> String {
@@ -717,6 +768,8 @@ struct Post {
     body: Vec<u8>,
     /// The reply was withheld from the client (modelled ack loss).
     dropped: bool,
+    /// When the answer (or the failure) came back.
+    at: Instant,
 }
 
 /// The production transport, recording every request and its real answer. It can
@@ -725,6 +778,9 @@ struct Tap {
     inner: Arc<MtlsFetcher>,
     log: Mutex<Vec<Post>>,
     drop_replies: AtomicUsize,
+    /// Source whose acknowledged count is noted whenever a reply is dropped.
+    watch: Mutex<Option<Fixture>>,
+    acked_at_drop: Mutex<Vec<usize>>,
 }
 
 impl Tap {
@@ -733,6 +789,8 @@ impl Tap {
             inner,
             log: Mutex::default(),
             drop_replies: AtomicUsize::new(0),
+            watch: Mutex::default(),
+            acked_at_drop: Mutex::default(),
         })
     }
     fn posts(&self) -> Vec<Post> {
@@ -762,11 +820,17 @@ impl IngestTransport for Tap {
                     .drop_replies
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                     .is_ok();
+            if dropped {
+                if let Some(fx) = self.watch.lock().unwrap().as_ref() {
+                    self.acked_at_drop.lock().unwrap().push(fx.acked_count());
+                }
+            }
             self.log.lock().unwrap().push(Post {
                 ids,
                 status: reply.as_ref().map(|r| r.status),
                 body: reply.as_ref().map(|r| r.body.clone()).unwrap_or_default(),
                 dropped,
+                at: Instant::now(),
             });
             if dropped {
                 None
@@ -914,6 +978,7 @@ async fn happy_path_ack_after_200_and_duplicate_on_resend() {
     assert!(px.central.last_ingest_ack_at().is_some());
 
     // Ack loss: the server stores, the client never sees the 200.
+    *px.tap.watch.lock().unwrap() = Some(px.fx.clone());
     px.tap.drop_replies.store(1, Ordering::SeqCst);
     px.fx.push([ping(6), ping(7)]);
     eventually("6 and 7 acked after the resend", || {
@@ -921,6 +986,8 @@ async fn happy_path_ack_after_200_and_duplicate_on_resend() {
     })
     .await;
     run.stop().await;
+    // The source was not acknowledged while the reply was lost.
+    assert_eq!(*px.tap.acked_at_drop.lock().unwrap(), vec![5]);
     let posts = px.tap.posts();
     let lost = posts.iter().find(|p| p.dropped).expect("one reply dropped");
     assert_eq!(lost.status, Some(200));
@@ -973,6 +1040,9 @@ async fn batches_are_split_by_count_and_by_bytes_in_order() {
         .map(|e| serde_json::to_vec(e).unwrap().len())
         .max()
         .unwrap();
+    // Framing as the client counts it: `{"events":[` + `]}` is 13 bytes, and a
+    // batch of 4 events has 3 commas. 4 events fit, 5 do not (events differ in
+    // size by a byte or so at most).
     let limit = 13 + 4 * max_one + 3;
     px.fx.push(evs);
     let run = spawn_ingest(&px.tap, &px.fx, px.client().with_batch_limits(100, limit));
@@ -1123,6 +1193,8 @@ async fn unregistered_metadata_ref_is_held_then_accepted_after_upload() {
     assert_eq!(px.fx.acked_count(), 0);
     assert!(px.fx.quarantined().is_empty());
     assert!(px.gap_kinds().is_empty(), "a hold is not a gap");
+    assert_eq!(px.central.consecutive_failures(), 0);
+    assert!(px.gaps.open_outage().is_none());
     assert!(px.tap.posts().iter().all(|p| p.status == Some(424)));
     let v: Value = serde_json::from_slice(&px.tap.posts()[0].body).unwrap();
     assert_eq!(v["error"]["code"], "metadata_ref_pending");
@@ -1160,12 +1232,15 @@ async fn storage_limit_backs_off_without_outage_and_resumes_after_sweep() {
     assert!(px.gaps.open_outage().is_none());
     assert!(px.gap_kinds().is_empty(), "no central_outage gap");
     assert_eq!(px.central.consecutive_failures(), 0);
-    // Backoff: not one request per spacing tick (10 ms) over the wait.
-    let n503 = px.tap.count_status(503);
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Backoff: the last two refusals are at least the base retry (100 ms, minus
+    // the 20% jitter) apart. A lower bound only, so load cannot break it.
+    let posts = px.tap.posts();
+    let [.., prev, last] = &posts[..] else {
+        panic!("at least two posts");
+    };
     assert!(
-        px.tap.count_status(503) - n503 <= 4,
-        "refusals are backed off"
+        last.at.duration_since(prev.at) >= Duration::from_millis(60),
+        "refusals are backed off, not retried at the 10 ms spacing"
     );
 
     // Relief: sweep as if 200 days had passed (past E and T).
@@ -1178,6 +1253,42 @@ async fn storage_limit_backs_off_without_outage_and_resumes_after_sweep() {
     run.stop().await;
     assert!(h.stored(3) && h.stored(4));
     assert!(px.gaps.open_outage().is_none() && px.gap_kinds().is_empty());
+    // The resumed events continue the sequence: no server gap.
+    assert!(h.ctx().ledger.gaps(PROXY).unwrap().is_empty());
+}
+
+/// 503 `storage_limit` relieved by a raised cap: the server restarts on the same
+/// files with a bigger limit and delivery resumes.
+#[tokio::test]
+async fn storage_limit_resumes_after_the_cap_is_raised() {
+    let Some(mut h) = H::new(|p| p.ledger_max_rows_per_proxy = Some(1)).await else {
+        return;
+    };
+    let px = Proxy::new(&h);
+    let run = spawn_ingest(&px.tap, &px.fx, px.client());
+    px.fx.push([ping(1), ping(2)]);
+    eventually("a refusal for the second event", || {
+        px.tap.count_status(503) >= 1
+    })
+    .await;
+    assert!(px.fx.acked_count() <= 1 && !h.stored(2));
+    // Keep the producer quiet while the server is restarted, so no outage forms.
+    px.fx.set_paused(true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.server_down().await;
+    h.server_up_with(Arc::new(|p: &mut ProxyConfig| {
+        p.ledger_max_rows_per_proxy = Some(100)
+    }))
+    .await;
+    px.fx.set_paused(false);
+    eventually("both acked after the cap is raised", || {
+        px.fx.acked_count() == 2
+    })
+    .await;
+    run.stop().await;
+    assert!(h.stored(1) && h.stored(2));
+    assert!(px.gaps.open_outage().is_none() && px.gap_kinds().is_empty());
+    assert!(h.ctx().ledger.gaps(PROXY).unwrap().is_empty());
 }
 
 /// Server down: after 3 failures a `central_outage` gap opens. On restart (same
@@ -1282,4 +1393,6 @@ async fn disabled_proxy_is_refused_and_nothing_is_stored() {
     assert_eq!(px.fx.acked_count(), 0);
     assert_eq!(px.fx.unsent_count(), 2, "the source keeps its events");
     assert!(px.fx.quarantined().is_empty() && px.gap_kinds().is_empty());
+    assert_eq!(px.central.consecutive_failures(), 0);
+    assert!(px.gaps.open_outage().is_none());
 }
