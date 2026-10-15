@@ -136,7 +136,7 @@ ledger-and-query L3/L5, registry R2)에서 [OPEN]이다. "동결"은 D-03 ingest
 | `disabled` / `retired` | 403 | 인증된 proxy 신원의 상태 거절(미등록·불일치는 404) | decided 2026-10-11 |
 | `audit_unavailable` | 503 | 관리 감사 기록 실패, 효과 없음 | server-only, 2026-10-11 (#251) |
 | `payload_too_large` | 413 | 요청 body 크기 상한 초과 | decided 2026-10-14 (S4, #271) |
-| `rate_limited` | 429 | backpressure(동시 처리 상한) | decided 2026-10-14 (S4, #271) |
+| `rate_limited` | 429 | backpressure(동시 처리 상한·proxy별 상한), 요청 body 읽기 timeout. 처리·저장하지 않았다 | decided 2026-10-14 (S4, #271, #278) |
 | `storage_limit` | 503 | 서버 저장 한도 도달. 중앙 단절이 아니다 | decided 2026-10-14 (S4, #271) |
 | `storage_unavailable` | 503 | 일시 저장 실패, 효과 없음 | decided 2026-10-14 (S4, #271) |
 
