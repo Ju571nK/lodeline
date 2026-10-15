@@ -774,6 +774,20 @@ struct Post {
 
 /// The production transport, recording every request and its real answer. It can
 /// withhold the reply of the next requests after the server has answered.
+/// Decrement `n` if it is above zero. A compare-exchange loop, because
+/// `fetch_update` is deprecated on current stable and its replacement
+/// `try_update` is newer than the MSRV.
+fn take_one(n: &AtomicUsize) -> bool {
+    let mut cur = n.load(Ordering::SeqCst);
+    while cur > 0 {
+        match n.compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(seen) => cur = seen,
+        }
+    }
+    false
+}
+
 struct Tap {
     inner: Arc<MtlsFetcher>,
     log: Mutex<Vec<Post>>,
@@ -815,11 +829,7 @@ impl IngestTransport for Tap {
                 })
                 .unwrap_or_default();
             let reply = self.inner.post_events(body).await;
-            let dropped = reply.is_some()
-                && self
-                    .drop_replies
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                    .is_ok();
+            let dropped = reply.is_some() && take_one(&self.drop_replies);
             if dropped {
                 if let Some(fx) = self.watch.lock().unwrap().as_ref() {
                     self.acked_at_drop.lock().unwrap().push(fx.acked_count());
