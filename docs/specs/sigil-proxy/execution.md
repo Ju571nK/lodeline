@@ -1,6 +1,6 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-14 · Claude Code orchestrator 세션 (기준 커밋 `9c980e6`)
+갱신: 2026-10-15 · Claude Code orchestrator 세션 (기준 커밋 `01ce498`)
 
 ## 현재 상태
 
@@ -63,6 +63,41 @@
 남은 P1: T-11 S4(ledger·ingest), S5(projection·조회, server 프록시별 read API 없음), S2b(CSR 서명), T-12b(MCP protocol), T-13–T-16.
 실기 미검증: 변화 없음(Rocky 9 SELinux·systemd·x86_64 baseline). 통합 e2e는 로컬 프로세스 검증이며 실기가 아니다.
 교훈: 작업자의 "연결했다" 보고는 production 경로 호출을 직접 확인한다(T-12c1 R1). 테스트 전용 진입점은 feature 뒤에 두고 릴리스 빌드에서 꺼져 있는지 확인한다.
+
+## 2026-10-14 P1 4회차 배정: T-11 S4 ledger·ingest (기준 `4cea9de`)
+
+| 작업 | 모델/역할 | 목표 | Spec | 소유 파일 | 이슈 |
+|---|---|---|---|---|---|
+| S4-plan | sonnet (planner, 읽기 전용) | S4 범위·슬라이스·미결 계약 | PX-010/011, AC-05/06 | 없음 | — |
+| S4 A | sonnet (coder, worktree) | parse 오류 분류를 typed 신호로(marker 위조 차단), 413/429/503 code | PX-010/011, AC-05/06 | `crates/sigil-proxy-api/**`, server `status.rs` 호출부 | #271 |
+| S4 B1 | sonnet (coder, worktree, A 뒤) | server SQLite ledger: 중복·tombstone·gap·보존·한도·SV-1 | PX-010/011, AC-05/06 | `proxy/ledger.rs`, `proxy/mod.rs`, `config.rs`, `config_api.rs`(PUT 검사) | #274 |
+| S4 C | sonnet (coder, worktree, B1과 병렬) | proxy ingest client·gap queue 영속·#260 F1/F2·상태 필드 | PX-011/012/016, AC-06/12 | `crates/sigil-proxy/**` | #275 |
+| S4 B2 | sonnet (coder, worktree, B1 뒤) | `POST /v1/proxy-events`·`/v1/proxy-metadata`·SV-2–5·sweep 예약 | PX-005/010/011, AC-05/06 | `proxy/{ingest,metadata,guard,mod,store}.rs`, `main.rs`(sweep spawn) | #278 |
+| 리뷰 | sonnet (reviewer, 읽기 전용) | 각 갈래 독립 리뷰·재확인 | 해당 ID | 없음 | — |
+
+결정(사용자, 2026-10-14): planner 추천안 전부 채택 — [decisions.md "T-11 S4 범위", "오류 code"](decisions.md).
+
+진행:
+- A: 리뷰 approve with fixes(L만: `storage_unavailable` 호출부, 진짜 Limit 유지 테스트, 테스트 이름) → PR #273. 오류 code 표는 PR #272.
+- B1: 리뷰 approve with fixes(M1 PUT이 T ≥ R+M 미검사 → 다음 부팅 거부, M2 gap 닫기 range COUNT → 이차 비용·전 proxy 정체, M3 닫힌 gap까지 cap 집계 → 장기 backpressure, L 파일 크기 backstop·tombstone 별도 한도·NOFOLLOW·WAL TRUNCATE) → 재확인 approve(+단일 index 조회) → PR #276.
+- C: 리뷰 approve with fixes(H1 닫힌 `central_outage` 재전송이 원본과 달라 409 → 서버에서 영구 open, M1 전송 중 갱신된 gap 삭제, M2 재시작 시 open outage 소실, M3 424 재전송 루프, M4 `persist_failed` 미표시, M5 서버 한도로 정상 이벤트 단건 격리 소진) → 재확인 approve(+marker 선기록) → PR #277. `run_ingest`는 producer(T-13/T-14) 전까지 production에서 시작하지 않음을 orchestrator가 확인.
+- B2: 리뷰 approve with fixes(M1 body 읽기 timeout 없음 → slot 고갈, M2 재전송 중복에 SV-5 적용 → 422·격리, M3 flaky 테스트, M4 metadata 한도 전역·definition만 집계) → 재확인 approve → PR #280. 본문 `proxy_id` 불일치는 404 `proxy_unknown`(L5), 100개 초과는 413, body 읽기 timeout은 429 `rate_limited`.
+
+### 4회차 머지 결과 (2026-10-14 ~ 10-15)
+
+| PR | 작업 | 이슈 |
+|---|---|---|
+| #270 | 3회차 상태 문서 | — |
+| #272 | S4 결정·오류 code 표 | — |
+| #273 | S4 A parse 분류·오류 code | #271 |
+| #276 | S4 B1 ledger store | #274 |
+| #277 | S4 C ingest client·gap queue | #275 |
+| #280 | S4 B2 ingest route·metadata·sweep | #278 |
+
+후속: #279(registry 409 `metadata_ref`, metadata 보존, ingest `last_seen`, status 기반 tail gap→S5), #269(e2e 미커버), #260 남은 항목(상태 저장소 DB 이전, T-12b 항목, hardening).
+남은 P1: S5(projection·조회), S2b(CSR 서명), T-12b(MCP protocol), T-13(registry entry 생성)·T-14(spool·이벤트 생성), T-15, T-16. 통합 e2e로 ingest 경로(이벤트 fixture → server ledger) 확인 필요.
+실기 미검증: 변화 없음. ledger의 `synchronous=FULL` 내구성은 실제 전원 차단으로 검증하지 않았다.
+교훈: 계약상 "같은 것의 재전송"은 원본과 바이트 단위로 같아야 한다(C H1, B2 M2). 공유 자원(slot·mutex·전역 한도)은 한 proxy가 독점할 수 없게 proxy별 상한을 함께 둔다(B1 M2, B2 M1·M4).
 
 ## 2026-10-11 P1 2회차 배정 (기준 `f656b5c`)
 
