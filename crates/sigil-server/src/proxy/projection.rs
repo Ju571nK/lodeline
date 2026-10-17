@@ -229,7 +229,9 @@ pub fn project(events: &[ProjectionInput]) -> Option<Projection> {
 
 /// Upper bound of events one projection is computed from (cost bound for the
 /// per-batch recompute; a producer repeating one `invocation_id` must not make
-/// every later batch more expensive). The ledger feeds the first
+/// every later batch more expensive). The cap is per event type
+/// (started, completed); `cancel_requested` events are not counted and never
+/// crowd out a completion. The ledger feeds the first
 /// `MAX_PROJECTION_EVENTS` events by `created_seq` and sets `truncated`, which
 /// adds the `event_limit` flag. Initial test value (D-04).
 ///
@@ -252,6 +254,37 @@ fn distinct<'a, T: Serialize>(items: &[Entry<'a, T>]) -> Vec<&'a T> {
 /// [`project`] with the `truncated` marker set by the caller when more than
 /// [`MAX_PROJECTION_EVENTS`] events exist and `events` holds only the first ones.
 pub fn project_limited(events: &[ProjectionInput], truncated: bool) -> Option<Projection> {
+    let first = events.first()?;
+    project_with(
+        first.event.proxy_id.as_str(),
+        first.event.payload.invocation_id().as_str(),
+        events,
+        truncated,
+        None,
+    )
+}
+
+/// Whole-invocation aggregates the ledger keeps incrementally, so the
+/// projection does not need every event (in particular not the cancels).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventAggregate {
+    pub created_seq: i64,
+    pub first_received_at: i64,
+    pub last_received_at: i64,
+    pub event_count: i64,
+    pub cancel_observed: bool,
+}
+
+/// [`project_limited`] with explicit identity and optional aggregates. With
+/// `agg = Some(..)` the aggregate fields come from it and `events` may omit
+/// cancel observations; with `None` they are derived from `events`.
+pub fn project_with(
+    proxy_id: &str,
+    invocation_id: &str,
+    events: &[ProjectionInput],
+    truncated: bool,
+    agg: Option<&EventAggregate>,
+) -> Option<Projection> {
     // Collapse repeats of the same event_id (resend); keep the lowest created_seq.
     let mut by_id: BTreeMap<&str, &ProjectionInput> = BTreeMap::new();
     for e in events {
@@ -265,7 +298,9 @@ pub fn project_limited(events: &[ProjectionInput], truncated: bool) -> Option<Pr
             .or_insert(e);
     }
     let all: Vec<&ProjectionInput> = by_id.values().copied().collect();
-    let first = *all.first()?;
+    if all.is_empty() && agg.is_none() {
+        return None;
+    }
 
     let mut starts: Vec<Entry<'_, InvocationStarted>> = Vec::new();
     let mut completions: Vec<Entry<'_, InvocationCompleted>> = Vec::new();
@@ -378,9 +413,12 @@ pub fn project_limited(events: &[ProjectionInput], truncated: bool) -> Option<Pr
     }
 
     Some(Projection {
-        proxy_id: first.event.proxy_id.as_str().to_string(),
-        invocation_id: first.event.payload.invocation_id().as_str().to_string(),
-        created_seq: all.iter().map(|e| e.created_seq).min().unwrap_or(0),
+        proxy_id: proxy_id.to_string(),
+        invocation_id: invocation_id.to_string(),
+        created_seq: agg.map_or_else(
+            || all.iter().map(|e| e.created_seq).min().unwrap_or(0),
+            |a| a.created_seq,
+        ),
         lifecycle,
         outcome,
         delivery_state,
@@ -396,18 +434,24 @@ pub fn project_limited(events: &[ProjectionInput], truncated: bool) -> Option<Pr
         route_revision,
         actor,
         tool,
-        cancel_observed,
+        cancel_observed: cancel_observed || agg.is_some_and(|a| a.cancel_observed),
         decision: None,
         started_at,
         started_at_s,
         completed_at,
         completed_at_s,
-        first_received_at: all.iter().map(|e| e.received_at).min().unwrap_or(0),
-        last_received_at: all.iter().map(|e| e.received_at).max().unwrap_or(0),
+        first_received_at: agg.map_or_else(
+            || all.iter().map(|e| e.received_at).min().unwrap_or(0),
+            |a| a.first_received_at,
+        ),
+        last_received_at: agg.map_or_else(
+            || all.iter().map(|e| e.received_at).max().unwrap_or(0),
+            |a| a.last_received_at,
+        ),
         start_epoch_id,
         epoch_superseded: false,
         flags: flags.into_iter().collect(),
-        event_count: all.len() as i64,
+        event_count: agg.map_or(all.len() as i64, |a| a.event_count),
     })
 }
 
@@ -425,14 +469,24 @@ pub enum TimeBasis {
     Occurred,
 }
 
+/// The caller's `proxy.read` range for a list query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProxyScope {
+    /// Every proxy (an unrestricted caller).
+    All,
+    /// Only these proxies, bound as `proxy_id IN (...)`. An empty list matches
+    /// nothing. Combines (AND) with `InvocationFilter::proxy_id`.
+    Only(Vec<String>),
+}
+
 /// L3 invocation list filters, combined with AND. `from`/`to` are unix seconds,
 /// half-open `[from, to)`. `outcome` matches only `lifecycle = completed`
 /// records (the stored `outcome` is `NULL` otherwise).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct InvocationFilter {
-    /// Caller's `proxy.read` range, bound as `proxy_id IN (...)`. `None` = no
-    /// restriction; `Some(empty)` = no rows. Combines (AND) with `proxy_id`.
-    pub allowed_proxies: Option<Vec<String>>,
+    /// Required: who may be seen. There is deliberately no `Default`, so a
+    /// caller cannot forget to scope a query.
+    pub scope: ProxyScope,
     pub proxy_id: Option<String>,
     pub upstream_id: Option<String>,
     pub actor_id: Option<String>,
@@ -496,4 +550,23 @@ pub enum TailGapChange {
     Unchanged,
     Created,
     Extended,
+}
+
+impl InvocationFilter {
+    /// No filters beyond `scope`.
+    pub fn new(scope: ProxyScope) -> Self {
+        Self {
+            scope,
+            proxy_id: None,
+            upstream_id: None,
+            actor_id: None,
+            method: None,
+            outcome: None,
+            lifecycle: None,
+            tool_ref: None,
+            from: None,
+            to: None,
+            time_basis: TimeBasis::default(),
+        }
+    }
 }

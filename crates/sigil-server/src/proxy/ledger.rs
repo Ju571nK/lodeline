@@ -30,9 +30,10 @@
 //! conflict even after the body has been removed by retention.
 
 use super::projection::{
-    project_limited, ActorInfo, EventIdentity, Flag, GapPage, InvocationDetail, InvocationFilter,
-    InvocationPage, Lifecycle, Projection, ProjectionInput, TailGapChange, TimeBasis, ToolInfo,
-    MAX_DETAIL_EVENTS, MAX_GAP_PAGE, MAX_LIST_LIMIT, MAX_PROJECTION_EVENTS,
+    project_with, ActorInfo, EventAggregate, EventIdentity, Flag, GapPage, InvocationDetail,
+    InvocationFilter, InvocationPage, Lifecycle, Projection, ProjectionInput, ProxyScope,
+    TailGapChange, TimeBasis, ToolInfo, MAX_DETAIL_EVENTS, MAX_GAP_PAGE, MAX_LIST_LIMIT,
+    MAX_PROJECTION_EVENTS,
 };
 use crate::config::ProxyConfig;
 use anyhow::{bail, Context, Result};
@@ -43,7 +44,7 @@ use sha2::{Digest, Sha256};
 use sigil_proxy_api::{
     canonical_event_bytes, parse_event, ErrorCode, EventPayload, ProxyEvent, Uuid,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -381,14 +382,20 @@ impl ReadPool {
         let handle = conn.get_interrupt_handle();
         let limit = Duration::from_millis(self.timeout_ms.load(Ordering::Relaxed));
         let (done, rx) = mpsc::channel::<()>();
-        let timer = std::thread::Builder::new()
+        let timer = match std::thread::Builder::new()
             .name("ledger-read-timer".into())
             .spawn(move || {
                 if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(limit) {
                     handle.interrupt();
                 }
-            })
-            .ok();
+            }) {
+            Ok(t) => Some(t),
+            Err(_) => {
+                // Fail soft but loudly: this one query runs without a time limit.
+                tracing::error!("proxy ledger: read timer thread could not start; query unlimited");
+                None
+            }
+        };
         ReadGuard {
             conn,
             done: Some(done),
@@ -444,6 +451,7 @@ CREATE TABLE events (
 );
 CREATE INDEX events_received ON events (proxy_id, received_at);
 CREATE INDEX events_invocation ON events (invocation_id);
+CREATE INDEX events_inv_type ON events (proxy_id, invocation_id, event_type, created_seq);
 CREATE TABLE tombstones (
     proxy_id    TEXT NOT NULL,
     event_id    TEXT NOT NULL,
@@ -548,6 +556,10 @@ const GAPS_INDEXES_DDL: &str = "
 CREATE INDEX gaps_proxy_rowid ON gaps (proxy_id, rowid_seq);
 CREATE INDEX gaps_proxy_open_kind ON gaps (proxy_id, open, kind);
 ";
+
+/// v2 index bounding the per-type projection loads (also in `SCHEMA`).
+const EVENTS_INV_TYPE_DDL: &str =
+    "CREATE INDEX events_inv_type ON events (proxy_id, invocation_id, event_type, created_seq);";
 
 /// What v2 adds to a v1 `gaps` table (fresh files get it from `SCHEMA`).
 const GAPS_TAIL_DDL: &str = "ALTER TABLE gaps ADD COLUMN tail INTEGER NOT NULL DEFAULT 0;";
@@ -670,6 +682,8 @@ impl Ledger {
         let mut out = IngestOutcome::default();
         let mut conflicts = Vec::new();
         let mut fresh: Vec<(usize, &Prepared)> = Vec::new();
+        // Per touched invocation: (created_seq, is_cancel) of the fresh events.
+        let mut touched: BTreeMap<&str, Vec<(i64, bool)>> = BTreeMap::new();
         for (index, (ev, p)) in events.iter().zip(&prepared).enumerate() {
             let existing_digest: Option<Vec<u8>> = tx
                 .query_row(
@@ -737,6 +751,11 @@ impl Ledger {
                     p.canonical.len() as i64,
                 ],
             )?;
+            let created_seq = tx.last_insert_rowid();
+            touched
+                .entry(p.invocation_id.as_str())
+                .or_default()
+                .push((created_seq, p.event_type == "invocation.cancel_requested"));
             tx.execute(
                 "INSERT INTO tombstones (proxy_id, event_id, epoch_id, sequence, sha256, received_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -800,12 +819,27 @@ impl Ledger {
         // Recompute the projection of every touched invocation from its full
         // event set, in this transaction (pure function: arrival order and
         // resends cannot change the result).
-        let touched: BTreeSet<&str> = fresh
-            .iter()
-            .map(|(_, p)| p.invocation_id.as_str())
-            .collect();
-        for inv in touched {
-            recompute_projection(&tx, proxy_id, inv)?;
+        // The aggregates are merged with the stored row, so the cost of a batch
+        // does not depend on how many events the invocation already has.
+        for (inv, new) in &touched {
+            let prev: Option<(i64, i64, i64, i64, i64)> = tx
+                .query_row(
+                    "SELECT created_seq, first_received_at, last_received_at, event_count,
+                            cancel_observed FROM projections
+                     WHERE proxy_id = ?1 AND invocation_id = ?2",
+                    params![proxy_id, inv],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()?;
+            let new_min = new.iter().map(|n| n.0).min().unwrap_or(i64::MAX);
+            let agg = EventAggregate {
+                created_seq: prev.map_or(new_min, |p| p.0.min(new_min)),
+                first_received_at: prev.map_or(received_at, |p| p.1.min(received_at)),
+                last_received_at: prev.map_or(received_at, |p| p.2.max(received_at)),
+                event_count: prev.map_or(0, |p| p.3) + new.len() as i64,
+                cancel_observed: prev.is_some_and(|p| p.4 != 0) || new.iter().any(|n| n.1),
+            };
+            recompute_projection(&tx, proxy_id, inv, &agg)?;
         }
 
         let rows = fresh.len() as i64;
@@ -1004,7 +1038,7 @@ impl Ledger {
         text("p.method", &filter.method, &mut sql);
         text("p.outcome", &filter.outcome, &mut sql);
         text("p.tool_ref", &filter.tool_ref, &mut sql);
-        if let Some(allowed) = &filter.allowed_proxies {
+        if let ProxyScope::Only(allowed) = &filter.scope {
             if allowed.is_empty() {
                 sql.push_str(" AND 0");
             } else {
@@ -1653,6 +1687,7 @@ fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
         bail!("ledger database has an unknown format version");
     }
     tx.execute_batch(GAPS_TAIL_DDL)
+        .and_then(|()| tx.execute_batch(EVENTS_INV_TYPE_DDL))
         .and_then(|()| tx.execute_batch(GAPS_INDEXES_DDL))
         .and_then(|()| tx.execute_batch(PROJECTIONS_DDL))
         .context("migrate ledger schema to v2")?;
@@ -1662,7 +1697,23 @@ fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
         rows.collect::<std::result::Result<_, _>>()?
     };
     for (proxy_id, invocation_id) in &keys {
-        recompute_projection(&tx, proxy_id, invocation_id)
+        let agg: EventAggregate = tx.query_row(
+            "SELECT MIN(created_seq), MIN(received_at), MAX(received_at), COUNT(*),
+                    EXISTS(SELECT 1 FROM events c WHERE c.proxy_id = ?1 AND c.invocation_id = ?2
+                           AND c.event_type = 'invocation.cancel_requested')
+             FROM events WHERE proxy_id = ?1 AND invocation_id = ?2",
+            params![proxy_id, invocation_id],
+            |r| {
+                Ok(EventAggregate {
+                    created_seq: r.get(0)?,
+                    first_received_at: r.get(1)?,
+                    last_received_at: r.get(2)?,
+                    event_count: r.get(3)?,
+                    cancel_observed: r.get::<_, i64>(4)? != 0,
+                })
+            },
+        )?;
+        recompute_projection(&tx, proxy_id, invocation_id, &agg)
             .map_err(|e| anyhow::anyhow!("rebuild projection during v2 migration: {e}"))?;
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1678,56 +1729,64 @@ fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
 // Stored projection
 // ---------------------------------------------------------------------------
 
-/// Recompute and store the projection of one invocation from ALL of its stored
-/// events. Removes the row when no event is left.
+/// Recompute and store the projection of one invocation. Inputs are the first
+/// `MAX_PROJECTION_EVENTS` *started* and the first `MAX_PROJECTION_EVENTS`
+/// *completed* events by `created_seq` (bounded by the `events_inv_type`
+/// index); `cancel_requested` events are not loaded or counted and can never
+/// crowd out a completion. `agg` carries the whole-invocation aggregates.
+/// More events of a type than the cap adds the `event_limit` flag; beyond the
+/// cap the result depends on arrival order.
 fn recompute_projection(
     tx: &rusqlite::Transaction<'_>,
     proxy_id: &str,
     invocation_id: &str,
+    agg: &EventAggregate,
 ) -> Result<(), LedgerError> {
-    // At most MAX_PROJECTION_EVENTS events (the first by created_seq) feed the
-    // projection; the true count is stored in `event_count`. Beyond the cap the
-    // result depends on arrival order and carries the `event_limit` flag.
-    let total: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM events WHERE proxy_id = ?1 AND invocation_id = ?2",
-        params![proxy_id, invocation_id],
-        |r| r.get(0),
-    )?;
-    let mut st = tx.prepare_cached(
-        "SELECT created_seq, received_at, canonical FROM events
-         WHERE proxy_id = ?1 AND invocation_id = ?2 ORDER BY created_seq LIMIT ?3",
-    )?;
-    let rows = st.query_map(
-        params![proxy_id, invocation_id, MAX_PROJECTION_EVENTS as i64],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, Vec<u8>>(2)?,
-            ))
-        },
-    )?;
     let mut inputs = Vec::new();
-    for row in rows {
-        let (created_seq, received_at, canonical) = row?;
-        let event = parse_event(&canonical).map_err(|_| {
-            // Identifies the row only; never any value from it.
-            tracing::error!(created_seq, "proxy ledger: stored event does not decode");
-            LedgerError::StorageUnavailable
-        })?;
-        inputs.push(ProjectionInput {
-            event,
-            created_seq,
-            received_at,
-        });
-    }
-    drop(st);
-    let truncated = total > MAX_PROJECTION_EVENTS as i64;
-    match project_limited(&inputs, truncated) {
-        Some(mut p) => {
-            p.event_count = total;
-            store_projection(tx, &p)
+    let mut truncated = false;
+    for event_type in ["invocation.started", "invocation.completed"] {
+        let mut st = tx.prepare_cached(
+            "SELECT created_seq, received_at, canonical FROM events
+             WHERE proxy_id = ?1 AND invocation_id = ?2 AND event_type = ?3
+             ORDER BY created_seq LIMIT ?4",
+        )?;
+        let rows = st.query_map(
+            params![
+                proxy_id,
+                invocation_id,
+                event_type,
+                MAX_PROJECTION_EVENTS as i64 + 1
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )?;
+        let mut n = 0;
+        for row in rows {
+            let (created_seq, received_at, canonical) = row?;
+            n += 1;
+            if n > MAX_PROJECTION_EVENTS {
+                truncated = true;
+                break;
+            }
+            let event = parse_event(&canonical).map_err(|_| {
+                // Identifies the row only; never any value from it.
+                tracing::error!(created_seq, "proxy ledger: stored event does not decode");
+                LedgerError::StorageUnavailable
+            })?;
+            inputs.push(ProjectionInput {
+                event,
+                created_seq,
+                received_at,
+            });
         }
+    }
+    match project_with(proxy_id, invocation_id, &inputs, truncated, Some(agg)) {
+        Some(p) => store_projection(tx, &p),
         None => {
             tx.execute(
                 "DELETE FROM projections WHERE proxy_id = ?1 AND invocation_id = ?2",

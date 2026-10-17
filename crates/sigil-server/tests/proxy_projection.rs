@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use sigil_proxy_api::{canonical_event_bytes, parse_event, ProxyEvent};
 use sigil_server::proxy::ledger::{GapKind, Ledger, LedgerError, LedgerOptions, SCHEMA_VERSION};
 use sigil_server::proxy::projection::{
-    project, Flag, InvocationFilter, Lifecycle, Projection, ProjectionInput, TailGapChange,
-    TimeBasis, ToolInfo,
+    project, Flag, InvocationFilter, Lifecycle, Projection, ProjectionInput, ProxyScope,
+    TailGapChange, TimeBasis, ToolInfo,
 };
 use std::path::Path;
 
@@ -567,7 +567,7 @@ fn later_events_update_the_projection_and_keep_its_list_position() {
         (100, 102)
     );
     let page = l
-        .list_invocations(&InvocationFilter::default(), None, 10)
+        .list_invocations(&InvocationFilter::new(ProxyScope::All), None, 10)
         .unwrap();
     let order: Vec<&str> = page
         .items
@@ -832,7 +832,7 @@ fn migration_v1_to_v2_rebuilds_projections() {
     assert_eq!(p3.reported_outcome.as_deref(), Some("success"));
     // equals what the pure function says, ordered by created_seq like ingest
     let page = l
-        .list_invocations(&InvocationFilter::default(), None, 10)
+        .list_invocations(&InvocationFilter::new(ProxyScope::All), None, 10)
         .unwrap();
     let order: Vec<&str> = page
         .items
@@ -972,7 +972,7 @@ fn sweep_expires_whole_invocations_and_keeps_tombstones() {
     assert!(l.get_invocation("px", &uuid(1)).unwrap().is_none());
     assert_eq!(l.usage("px").unwrap().event_rows, 0);
     assert!(l
-        .list_invocations(&InvocationFilter::default(), None, 10)
+        .list_invocations(&InvocationFilter::new(ProxyScope::All), None, 10)
         .unwrap()
         .items
         .is_empty());
@@ -1136,7 +1136,7 @@ fn read_api_is_scoped_by_proxy() {
 
     let only = |px: &str| InvocationFilter {
         proxy_id: Some(px.into()),
-        ..Default::default()
+        ..InvocationFilter::new(ProxyScope::All)
     };
     let a = l.list_invocations(&only("pa"), None, 100).unwrap();
     let b = l.list_invocations(&only("pb"), None, 100).unwrap();
@@ -1149,7 +1149,7 @@ fn read_api_is_scoped_by_proxy() {
         .items
         .is_empty());
     assert_eq!(
-        l.list_invocations(&InvocationFilter::default(), None, 100)
+        l.list_invocations(&InvocationFilter::new(ProxyScope::All), None, 100)
             .unwrap()
             .items
             .len(),
@@ -1209,7 +1209,7 @@ fn list_filters_and_outcome_only_matches_completed() {
             .collect()
     };
     let f = |f: fn(&mut InvocationFilter)| {
-        let mut x = InvocationFilter::default();
+        let mut x = InvocationFilter::new(ProxyScope::All);
         f(&mut x);
         x
     };
@@ -1273,7 +1273,7 @@ fn time_filters_use_the_chosen_basis_half_open() {
     let recv = |from, to| InvocationFilter {
         from,
         to,
-        ..Default::default()
+        ..InvocationFilter::new(ProxyScope::All)
     };
     assert_eq!(ids(recv(Some(1000), Some(2000))), vec![uuid(1)]);
     assert_eq!(ids(recv(Some(2000), None)), vec![uuid(3), uuid(2)]);
@@ -1282,7 +1282,7 @@ fn time_filters_use_the_chosen_basis_half_open() {
         from,
         to,
         time_basis: TimeBasis::Occurred,
-        ..Default::default()
+        ..InvocationFilter::new(ProxyScope::All)
     };
     // started_at for starts, completed_at for a completion-only record
     assert_eq!(ids(occ(Some(t0 + 10), Some(t0 + 20))), vec![uuid(1)]);
@@ -1302,7 +1302,7 @@ fn keyset_paging_walks_everything_once_newest_first() {
     let mut pages = 0;
     loop {
         let page = l
-            .list_invocations(&InvocationFilter::default(), key, 10)
+            .list_invocations(&InvocationFilter::new(ProxyScope::All), key, 10)
             .unwrap();
         pages += 1;
         seen.extend(page.items.iter().map(|p| p.invocation_id.clone()));
@@ -1318,7 +1318,7 @@ fn keyset_paging_walks_everything_once_newest_first() {
     l.insert_batch("px", &[done("px", 26, 26, 1, "success", "sent", None)], 101)
         .unwrap();
     let page = l
-        .list_invocations(&InvocationFilter::default(), None, 100)
+        .list_invocations(&InvocationFilter::new(ProxyScope::All), None, 100)
         .unwrap();
     assert_eq!(page.items.last().unwrap().invocation_id, uuid(1));
 }
@@ -1332,18 +1332,22 @@ fn list_limit_is_capped_at_500() {
         .collect();
     l.insert_batch("px", &evs, 100).unwrap();
     let page = l
-        .list_invocations(&InvocationFilter::default(), None, 100_000)
+        .list_invocations(&InvocationFilter::new(ProxyScope::All), None, 100_000)
         .unwrap();
     assert_eq!(page.items.len(), 500);
     assert!(page.next_key.is_some());
     let rest = l
-        .list_invocations(&InvocationFilter::default(), page.next_key, 100_000)
+        .list_invocations(
+            &InvocationFilter::new(ProxyScope::All),
+            page.next_key,
+            100_000,
+        )
         .unwrap();
     assert_eq!(rest.items.len(), 20);
     assert!(rest.next_key.is_none());
     // limit 0 is treated as 1, never as "everything"
     assert_eq!(
-        l.list_invocations(&InvocationFilter::default(), None, 0)
+        l.list_invocations(&InvocationFilter::new(ProxyScope::All), None, 0)
             .unwrap()
             .items
             .len(),
@@ -1411,7 +1415,7 @@ fn reads_do_not_wait_for_the_writer_mutex() {
     l.insert_batch("px", &[seq_ev(1), seq_ev(3)], 100).unwrap();
     let got = l.with_writer_locked(|| {
         (
-            l.list_invocations(&InvocationFilter::default(), None, 10)
+            l.list_invocations(&InvocationFilter::new(ProxyScope::All), None, 10)
                 .unwrap()
                 .items
                 .len(),
@@ -1446,19 +1450,20 @@ fn read_connection_applies_the_same_path_safety_checks() {
 use sigil_server::proxy::ledger::LedgerCaps;
 
 #[test]
-fn m1_event_cap_flags_and_bounds_the_recompute() {
+fn m1_cap_is_per_type_and_flags_only_starts_or_completions() {
     let d = tempfile::tempdir().unwrap();
     let l = open(d.path());
-    let mut evs = vec![start("px", 1, 1, 1, "ping", None)];
-    evs.extend((2..=300).map(|i| cancel("px", i, i as u32, 1)));
+    // 300 equal starts: capped at 256, flagged, true count kept
+    let evs: Vec<ProxyEvent> = (1..=300)
+        .map(|i| start("px", i, i as u32, 1, "ping", None))
+        .collect();
     l.insert_batch("px", &evs, 100).unwrap();
     let det = l.get_invocation("px", &uuid(1)).unwrap().unwrap();
     assert_eq!(det.events_total, 300);
     assert!(det.events_truncated);
     assert_eq!(det.invocation.lifecycle, Lifecycle::Started);
-    assert_eq!(det.invocation.flags, vec![Flag::EventLimit]);
-    // beyond the cap a contradicting completion is not considered (documented:
-    // the result past the cap depends on arrival order), but it is counted
+    assert!(det.invocation.flags.contains(&Flag::EventLimit));
+    // a completion has its own cap: it is still considered
     l.insert_batch(
         "px",
         &[done("px", 301, 301, 1, "success", "sent", None)],
@@ -1466,16 +1471,79 @@ fn m1_event_cap_flags_and_bounds_the_recompute() {
     )
     .unwrap();
     let p = inv_of(&l, "px", 1);
-    assert_eq!(p.lifecycle, Lifecycle::Started);
+    assert_eq!(p.lifecycle, Lifecycle::Completed);
     assert_eq!(p.event_count, 301);
     assert!(p.flags.contains(&Flag::EventLimit));
-    // exactly at the cap there is no flag
-    let mut small = vec![start("px", 400, 400, 2, "ping", None)];
-    small.extend((401..=655).map(|i| cancel("px", i, i as u32, 2)));
+    // exactly at the cap there is no event_limit flag
+    let small: Vec<ProxyEvent> = (400..656)
+        .map(|i| start("px", i, i as u32, 2, "ping", None))
+        .collect();
     l.insert_batch("px", &small, 100).unwrap();
     let q = inv_of(&l, "px", 2);
     assert_eq!(q.event_count, 256);
-    assert!(q.flags.is_empty());
+    assert!(!q.flags.contains(&Flag::EventLimit));
+}
+
+#[test]
+fn r1_cancels_do_not_count_toward_the_cap_or_crowd_out_the_completion() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    let mut evs = vec![start("px", 1, 1, 1, "ping", None)];
+    evs.extend((2..=301).map(|i| cancel("px", i, i as u32, 1)));
+    l.insert_batch("px", &evs, 100).unwrap();
+    l.insert_batch(
+        "px",
+        &[done("px", 302, 302, 1, "success", "sent", None)],
+        101,
+    )
+    .unwrap();
+    let p = inv_of(&l, "px", 1);
+    assert_eq!(p.lifecycle, Lifecycle::Completed);
+    assert_eq!(p.outcome.as_deref(), Some("success"));
+    assert!(p.cancel_observed);
+    assert!(p.flags.is_empty(), "{:?}", p.flags);
+    assert_eq!(p.event_count, 302);
+    assert_eq!((p.first_received_at, p.last_received_at), (100, 101));
+    // cancels first (300 of them), then the start and completion
+    let mut evs: Vec<ProxyEvent> = (1..=300)
+        .map(|i| cancel("px", 1000 + i, 1000 + i as u32, 2))
+        .collect();
+    evs.push(start("px", 1301, 1301, 2, "ping", None));
+    evs.push(done("px", 1302, 1302, 2, "success", "sent", None));
+    l.insert_batch("px", &evs, 200).unwrap();
+    let q = inv_of(&l, "px", 2);
+    assert_eq!(q.lifecycle, Lifecycle::Completed);
+    assert!(q.cancel_observed && q.flags.is_empty());
+    // a cancel-only invocation
+    l.insert_batch("px", &[cancel("px", 400, 2000, 3)], 300)
+        .unwrap();
+    let c = inv_of(&l, "px", 3);
+    assert_eq!(c.lifecycle, Lifecycle::CancelWithoutStart);
+    assert!(c.cancel_observed);
+}
+
+#[test]
+fn r2_incremental_aggregates_equal_a_full_recount() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[cancel("px", 1, 1, 1)], 100).unwrap();
+    l.insert_batch("px", &[start("px", 2, 2, 1, "ping", None)], 150)
+        .unwrap();
+    l.insert_batch(
+        "px",
+        &[
+            done("px", 3, 3, 1, "success", "sent", None),
+            cancel("px", 4, 4, 1),
+        ],
+        90, // an earlier server clock than before: first_received_at takes the min
+    )
+    .unwrap();
+    let p = inv_of(&l, "px", 1);
+    assert_eq!(p.event_count, 4);
+    assert_eq!((p.first_received_at, p.last_received_at), (90, 150));
+    let det = l.get_invocation("px", &uuid(1)).unwrap().unwrap();
+    assert_eq!(det.events[0].event_type, "invocation.cancel_requested");
+    assert_eq!(p.created_seq, det.events[0].created_seq);
 }
 
 #[test]
@@ -1509,8 +1577,8 @@ fn m2_allowed_proxies_scope_and_paging_stays_full() {
         }
     }
     let allowed = |v: &[&str]| InvocationFilter {
-        allowed_proxies: Some(v.iter().map(|s| s.to_string()).collect()),
-        ..Default::default()
+        scope: ProxyScope::Only(v.iter().map(|s| s.to_string()).collect()),
+        ..InvocationFilter::new(ProxyScope::All)
     };
     let mut seen = Vec::new();
     let mut key = None;
@@ -1644,7 +1712,7 @@ fn m4_read_query_time_limit_returns_query_timeout_and_recovers() {
     l.set_read_timeout_for_test(5_000);
     for _ in 0..8 {
         assert_eq!(
-            l.list_invocations(&InvocationFilter::default(), None, 10)
+            l.list_invocations(&InvocationFilter::new(ProxyScope::All), None, 10)
                 .unwrap()
                 .items
                 .len(),
@@ -1665,7 +1733,7 @@ fn m4_concurrent_reads_run_on_the_pool_without_the_writer() {
                 s.spawn(|| {
                     for _ in 0..20 {
                         let p = l
-                            .list_invocations(&InvocationFilter::default(), None, 100)
+                            .list_invocations(&InvocationFilter::new(ProxyScope::All), None, 100)
                             .unwrap();
                         assert_eq!(p.items.len(), 50);
                     }
@@ -1828,7 +1896,7 @@ fn l5_storage_limit_and_check_batch_leave_no_projection() {
     assert_eq!(r, Err(LedgerError::StorageLimit));
     assert!(l.get_invocation("px", &uuid(5003)).unwrap().is_none());
     assert_eq!(
-        l.list_invocations(&InvocationFilter::default(), None, 10)
+        l.list_invocations(&InvocationFilter::new(ProxyScope::All), None, 10)
             .unwrap()
             .items
             .len(),
@@ -1846,7 +1914,7 @@ fn l5_keyset_paging_with_inserts_between_pages() {
     let evs: Vec<ProxyEvent> = (1..=10).map(seq_ev).collect();
     l.insert_batch("px", &evs, 100).unwrap();
     let p1 = l
-        .list_invocations(&InvocationFilter::default(), None, 4)
+        .list_invocations(&InvocationFilter::new(ProxyScope::All), None, 4)
         .unwrap();
     let ids1: Vec<String> = p1.items.iter().map(|p| p.invocation_id.clone()).collect();
     assert_eq!(
@@ -1863,7 +1931,7 @@ fn l5_keyset_paging_with_inserts_between_pages() {
     )
     .unwrap();
     let p2 = l
-        .list_invocations(&InvocationFilter::default(), p1.next_key, 100)
+        .list_invocations(&InvocationFilter::new(ProxyScope::All), p1.next_key, 100)
         .unwrap();
     let ids2: Vec<String> = p2.items.iter().map(|p| p.invocation_id.clone()).collect();
     assert_eq!(
