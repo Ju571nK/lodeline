@@ -1520,7 +1520,13 @@ async fn an_accepted_batch_updates_last_seen_at_a_bounded_rate() {
     // A value older than the interval is refreshed (also by a duplicate-only batch).
     let old = ts(sigil_server::proxy::store::LAST_SEEN_MIN_INTERVAL_SECS + 30);
     set_last_seen(&env, "pxa", &old);
-    assert_eq!(events(fx, a, &batch(&[ping("pxa", 2)])).await.status, 200);
+    let r = events(fx, a, &batch(&[ping("pxa", 2)])).await;
+    assert_eq!(r.status, 200);
+    assert!(r.json()["accepted_event_ids"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(ids(&r.json()["duplicate_event_ids"]), [uid(2)]);
     let now = fx.ctx.store.last_seen("pxa").unwrap();
     assert!(now > old && now >= first, "{now} {old}");
     // other proxies are untouched
@@ -1544,4 +1550,37 @@ async fn a_rejected_batch_does_not_touch_last_seen() {
     let r = events(fx, a, &batch(&[call("pxa", 9, &mref(9))])).await; // 424 pending
     assert_eq!(r.status, 424);
     assert_eq!(fx.ctx.store.last_seen("pxa"), Some(old));
+}
+
+#[tokio::test]
+async fn unknown_epochs_keep_at_most_one_open_tail_gap() {
+    let env = Env::new().await;
+    let (fx, a) = (&env.fx, &env.a);
+    // N distinct epochs the ledger has never seen (nor any event of).
+    for n in 1..=30u32 {
+        let epoch = format!("00000000-0000-4000-8000-{:012x}", 0xa000 + n);
+        let r = post_status(fx, a, &status_last("pxa", &epoch, 1, 7)).await;
+        assert_eq!(r.status, 200);
+    }
+    let open_tails = |env: &Env| {
+        seq_gaps(env, "pxa")
+            .into_iter()
+            .filter(|g| g.2 && g.3)
+            .count()
+    };
+    assert_eq!(open_tails(&env), 1);
+    // Superseded ones are closed, not deleted.
+    assert_eq!(seq_gaps(&env, "pxa").len(), 30);
+
+    // A real epoch announcement for the surviving unknown epoch makes it a
+    // normal tail, and genuine gaps are still accepted afterwards.
+    let epoch = format!("00000000-0000-4000-8000-{:012x}", 0xa000 + 30);
+    let mut e = ping("pxa", 500);
+    e["epoch_id"] = epoch.clone().into();
+    e["sequence"] = 1.into();
+    assert_eq!(events(fx, a, &batch(&[e])).await.status, 200);
+    let r = post_status(fx, a, &status_last("pxa", &epoch, 2, 9)).await;
+    assert_eq!(r.status, 200);
+    assert!(seq_gaps(&env, "pxa").contains(&(2, 9, true, true)));
+    assert_eq!(open_tails(&env), 1);
 }

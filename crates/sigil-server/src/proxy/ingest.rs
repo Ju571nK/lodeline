@@ -352,10 +352,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
 /// the answer into an error: it is logged without values and the next accepted
 /// batch or status report refreshes it.
 fn touch_last_seen(ctx: &ProxyContext, peer_id: &str) {
-    if let Err(e) = ctx
-        .store
-        .touch_last_seen(peer_id, time::OffsetDateTime::now_utc())
-    {
+    if let Err(e) = ctx.store.touch_last_seen(peer_id) {
         tracing::warn!(error = %e, "proxy last_seen update failed (ingest)");
     }
 }

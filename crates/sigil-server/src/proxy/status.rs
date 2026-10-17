@@ -432,7 +432,8 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
 /// ledger itself ignores an epoch that is known but not the proxy's latest.
 /// The report is already stored, so a ledger error (including `StorageLimit`,
 /// the open-gap cap) never fails it: logged without values, the next report
-/// retries.
+/// retries (the next higher-sequence report; a same-sequence retransmission is
+/// not applied and so does not retry).
 fn note_tail(ctx: &ProxyContext, peer_id: &str, epoch: &str, last_assigned: i64) {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     if let Err(e) = ctx

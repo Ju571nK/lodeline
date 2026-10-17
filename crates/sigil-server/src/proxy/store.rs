@@ -248,23 +248,32 @@ impl ProxyStore {
             .and_then(|e| e.last_seen.clone())
     }
 
-    /// Record `now` as the proxy's `last_seen` after an accepted ingest, unless
-    /// the stored value is already less than [`LAST_SEEN_MIN_INTERVAL_SECS`]
-    /// old. The check runs under the writer lock against the current entry, so
-    /// a newer status-report value is never overwritten with an older one.
-    /// Returns whether a write happened. A stored value in the future (clock
-    /// stepped back) or one that does not parse is replaced.
-    pub fn touch_last_seen(&self, proxy_id: &str, now: time::OffsetDateTime) -> Result<bool> {
+    /// Record the current time as the proxy's `last_seen` after an accepted
+    /// ingest, unless the stored value is already within
+    /// [`LAST_SEEN_MIN_INTERVAL_SECS`] of now. The clock is read AFTER the
+    /// writer lock is held and the check runs against the current entry, so a
+    /// newer status-report value is never replaced with an older one. A stored
+    /// value more than the interval in the future (clock stepped back) or one
+    /// that does not parse is replaced. Returns whether a write happened.
+    pub fn touch_last_seen(&self, proxy_id: &str) -> Result<bool> {
+        self.touch_last_seen_with(proxy_id, time::OffsetDateTime::now_utc)
+    }
+
+    fn touch_last_seen_with(
+        &self,
+        proxy_id: &str,
+        clock: impl FnOnce() -> time::OffsetDateTime,
+    ) -> Result<bool> {
         let rfc3339 = &time::format_description::well_known::Rfc3339;
         let txn = self.begin();
+        let now = clock();
         let mut entry = txn.entry(proxy_id);
+        let window = time::Duration::seconds(LAST_SEEN_MIN_INTERVAL_SECS);
         let fresh = entry
             .last_seen
             .as_deref()
             .and_then(|t| time::OffsetDateTime::parse(t, rfc3339).ok())
-            .is_some_and(|seen| {
-                seen <= now && now - seen < time::Duration::seconds(LAST_SEEN_MIN_INTERVAL_SECS)
-            });
+            .is_some_and(|seen| seen > now - window && seen <= now + window);
         if fresh {
             return Ok(false);
         }
@@ -357,6 +366,36 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sigil_proxy_api::parse_config;
+
+    #[test]
+    fn touch_last_seen_never_regresses_a_newer_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProxyStore::open(&dir.path().join("p.json")).unwrap();
+        let t0 = time::OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let fmt = |t: time::OffsetDateTime| {
+            t.format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let secs = time::Duration::seconds;
+        let set = |v: String| {
+            let txn = store.begin();
+            let mut e = txn.entry("px");
+            e.last_seen = Some(v);
+            txn.commit("px", e).unwrap();
+        };
+        // Written a moment after our clock read (a status report racing us).
+        set(fmt(t0 + secs(5)));
+        assert!(!store.touch_last_seen_with("px", || t0).unwrap());
+        assert_eq!(store.last_seen("px"), Some(fmt(t0 + secs(5))));
+        // Far in the future (clock stepped back): replaced.
+        set(fmt(t0 + secs(3600)));
+        assert!(store.touch_last_seen_with("px", || t0).unwrap());
+        assert_eq!(store.last_seen("px"), Some(fmt(t0)));
+        // Old: replaced; fresh: kept.
+        set(fmt(t0 - secs(LAST_SEEN_MIN_INTERVAL_SECS + 1)));
+        assert!(store.touch_last_seen_with("px", || t0).unwrap());
+        assert!(!store.touch_last_seen_with("px", || t0).unwrap());
+    }
 
     pub(crate) fn sample_config(id: &str, revision: u64) -> ProxyConfig {
         parse_config(
