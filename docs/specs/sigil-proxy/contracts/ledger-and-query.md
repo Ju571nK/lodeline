@@ -169,7 +169,7 @@ contract; PX-017 is P2).
 | `integrity_conflict` | see flags; headline outcome is withheld |
 
 `flags` (fixed codes, no values): `duplicate_start`, `duplicate_completion`,
-`start_binding_conflict`, `completion_contradicts_start`.
+`start_binding_conflict`, `completion_contradicts_start`, `event_limit`.
 
 ### Rules
 
@@ -182,6 +182,7 @@ contract; PX-017 is P2).
 | P-5 completion contradicts the start (rules C-1..C-3) | `integrity_conflict` + `completion_contradicts_start`; no success shown |
 | P-6 completion arrives before start | `completion_without_start`; becomes `completed` when a consistent start arrives |
 | P-7 start-only, then its epoch is superseded | `started` + `epoch_superseded=true`; still `outcome=null` |
+| P-8 more than 256 distinct starts or 256 distinct completions for one invocation | projection uses the first 256 of each type by server arrival and adds `event_limit`; past the cap the result may depend on arrival order. `cancel_requested` never counts toward the cap. All events stay stored (decided 2026-10-17, S5) |
 
 Contradiction rules (checked in both arrival orders, so the result is order independent):
 

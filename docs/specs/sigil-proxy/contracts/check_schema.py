@@ -1141,13 +1141,19 @@ def contradicts(start, comp):
     return False
 
 
-def project(events, superseded=False):
+def project(events, superseded=False, limit=256):
     starts, comps, cancels = {}, {}, {}
+    over = False
     for event in events:
         bucket = {"invocation.started": starts, "invocation.completed": comps,
                   "invocation.cancel_requested": cancels}[event["event_type"]]
+        if bucket is not cancels and event["event_id"] not in bucket and len(bucket) >= limit:
+            over = True  # P-8: first `limit` per type by arrival
+            continue
         bucket[event["event_id"]] = event
     flags, conflict = set(), False
+    if over:
+        flags.add("event_limit")
     start = None
     start_contents = {content(e) for e in starts.values()}
     if len(starts) > 1:
@@ -1264,6 +1270,13 @@ pcase("malformed start + denied/not_sent", project([malformed_start, good_denied
 pcase("reason vs method contradiction",
       project([inv_start, version_comp])["lifecycle"] == "integrity_conflict")
 pcase("reason on initialize start fine", project([init_start, version_comp])["lifecycle"] == "completed")
+many_cancels = [variant(inv_cancel) for _ in range(3)]
+pcase("cancels never count toward the event limit",
+      project(many_cancels + [inv_start, inv_comp], limit=1)["lifecycle"] == "completed"
+      and project(many_cancels + [inv_start, inv_comp], limit=1)["flags"] == [])
+over_limit = project([inv_start, variant(inv_start), inv_comp], limit=1)
+pcase("event limit flags and keeps the first start", over_limit["flags"] == ["event_limit"]
+      and over_limit["lifecycle"] == "completed")
 pcase("two starts, different tool binding", all(
     project(list(o))["lifecycle"] == "integrity_conflict"
     and "start_binding_conflict" in project(list(o))["flags"]
