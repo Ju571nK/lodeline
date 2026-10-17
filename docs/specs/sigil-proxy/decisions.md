@@ -132,3 +132,12 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   저장 한도 수치는 설정값이며 기본값은 보수적인 시험값이다(D-04 초기값). proxy 쪽 invocation 이벤트 생성은 T-13/T-14이며 S4의 proxy 갈래는 전송 client와 gap queue까지만 한다.
 - 오류 code(2026-10-14, S4): 현재 고정 message 문구를 확정한다. 413은 `payload_too_large`, 429는 `rate_limited`, 503은 `storage_limit`(저장 한도)·`storage_unavailable`(일시 저장 실패).
   parse 오류 분류는 serde message 문자열 검사가 아니라 입력이 위조할 수 없는 typed 신호로 한다(#271).
+- T-11 S5 범위(2026-10-17, 사용자 결정·추천안 채택): projection은 ledger 안의 저장 테이블로 두고 이벤트 저장과 같은 트랜잭션에서
+  해당 invocation의 이벤트 집합으로 다시 계산한다(순수 함수, 도착 순서·재전송 무관). ledger 스키마는 v2로 올리고 v1에서 기존 이벤트로 projection을 다시 만든다.
+  보존 정리는 invocation 단위로 지운다. 모순된 이벤트는 거절하지 않고 projection flag로 표시한다(L2).
+  조회 API(`GET /v1/proxies`, `/v1/proxies/{id}`, `/v1/proxy-invocations`, `/v1/proxy-invocations/{id}`)는 기존 read API와 같은 read bearer + host mTLS를 쓴다.
+  P1의 `proxy.read` 범위는 read bearer 하나가 모든 proxy를 보는 모델이며, 범위 검사는 handler의 한 함수로 모아 나중에 token별 범위로 바꿀 수 있게 한다.
+  범위 밖과 없는 대상은 같은 404 `proxy_unknown`이다. gap 목록은 `/v1/proxies/{id}`의 `audit_gaps`(최대 50)와 총수만 두고 별도 endpoint는 두지 않는다.
+  status 보고의 `last_assigned_sequence`가 ledger 최고 sequence보다 크면 보고 한 번으로 `tail=true` sequence_gap을 만들고, 이벤트가 도착하면 닫되 기록은 남긴다.
+  수락된 ingest도 `last_seen`을 갱신한다. `spool.as_of`·`status_as_of` 이름과 message 문구는 기본안으로 구현하고 리뷰에서 확정한다.
+  registry 409의 `metadata_ref`와 metadata 보존은 S5 밖이다(#279).
