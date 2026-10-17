@@ -205,6 +205,8 @@ fn parse_params(raw: Option<&str>, allowed: &[&str]) -> Result<BTreeMap<String, 
     Ok(m)
 }
 
+/// `limit` defaults to 100. A value of 0, above 500, or not a plain decimal
+/// integer is 422 `invalid_filter` (it is never clamped).
 fn parse_limit(p: &mut BTreeMap<String, String>) -> Result<usize, QErr> {
     match p.remove("limit") {
         None => Ok(DEFAULT_LIMIT),
@@ -552,6 +554,9 @@ fn summary_of(rec: &ProxyRecord, entry: Option<&ProxyEntry>, now: i64) -> ProxyS
         config_expires_at: status
             .and_then(|s| s.config.expires_at.as_ref())
             .map(|t| t.as_str().to_string()),
+        // L3: the epoch of the last applied status report, else the newest
+        // epoch the store saw. Not the ledger's latest announced epoch (no
+        // ledger accessor yet), so it can lag events from a newer epoch.
         current_epoch_id: status
             .map(|s| s.epoch_id.as_str().to_string())
             .or_else(|| entry.and_then(|e| e.epochs_seen.last().cloned())),
@@ -808,16 +813,29 @@ async fn list_proxies_inner(
         if after.as_deref().is_some_and(|a| rec.proxy_id.as_str() <= a) {
             continue;
         }
-        let entry = ctx.store.entry(&rec.proxy_id);
-        let s = summary_of(&rec, entry.as_ref(), now);
-        if want_state.is_some_and(|w| w != s.connection_state)
-            || want_sync.is_some_and(|w| w != s.config_in_sync)
-        {
-            continue;
+        // Cheap filter first: `connection_state` needs only `last_seen`, so
+        // skipped rows never clone a full store entry.
+        if let Some(w) = want_state {
+            let seen = ctx.store.last_seen(&rec.proxy_id);
+            if connection_state(seen.as_deref(), now, STALE_AFTER_SECS) != w {
+                continue;
+            }
         }
+        // `config_in_sync` needs the revisions, so that filter loads the entry.
+        let mut entry = None;
+        if let Some(w) = want_sync {
+            entry = ctx.store.entry(&rec.proxy_id);
+            if summary_of(&rec, entry.as_ref(), now).config_in_sync != w {
+                continue;
+            }
+        }
+        // A match beyond a full page only proves there is a next page; stop.
         if page.len() == limit {
             more = true;
             break;
+        }
+        if entry.is_none() {
+            entry = ctx.store.entry(&rec.proxy_id);
         }
         page.push((rec, entry));
     }

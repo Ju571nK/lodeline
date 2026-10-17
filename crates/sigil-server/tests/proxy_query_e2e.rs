@@ -548,6 +548,19 @@ async fn auth_matrix_on_all_four_routes() {
                 assert_eq!(r.status, 401, "{u} mgmt={management} bearer={b:?}");
                 assert_eq!(r.code(), "unauthorized");
             }
+            // HEAD takes the same guards as GET.
+            for b in [None, Some("wrong")] {
+                let r = fx.call("HEAD", u, Who::Host, b, None).await;
+                assert_eq!(r.status, 401, "HEAD {u} mgmt={management} bearer={b:?}");
+            }
+            for who in [Who::Proxy, Who::Ambiguous, Who::NoPeer] {
+                let r = fx.call("HEAD", u, who, Some(READ_TOKEN), None).await;
+                assert_eq!(r.status, 404, "HEAD {u} mgmt={management}");
+            }
+            if management {
+                let r = fx.call("HEAD", u, Who::Mgmt, Some(MGMT_TOKEN), None).await;
+                assert_eq!(r.status, 404, "HEAD {u} mgmt cert");
+            }
             // Host cert + read bearer: served.
             let r = fx.call("GET", u, Who::Host, Some(READ_TOKEN), None).await;
             assert_eq!(r.status, 200, "{u} mgmt={management}: {}", r.text());
