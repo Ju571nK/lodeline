@@ -42,6 +42,9 @@ pub enum Flag {
     CompletionContradictsStart,
     DuplicateCompletion,
     DuplicateStart,
+    /// The invocation has more than [`MAX_PROJECTION_EVENTS`] events; only the
+    /// first ones (by `created_seq`) were considered.
+    EventLimit,
     StartBindingConflict,
 }
 
@@ -51,6 +54,7 @@ impl Flag {
             Flag::CompletionContradictsStart => "completion_contradicts_start",
             Flag::DuplicateCompletion => "duplicate_completion",
             Flag::DuplicateStart => "duplicate_start",
+            Flag::EventLimit => "event_limit",
             Flag::StartBindingConflict => "start_binding_conflict",
         }
     }
@@ -60,6 +64,7 @@ impl Flag {
             Flag::CompletionContradictsStart,
             Flag::DuplicateCompletion,
             Flag::DuplicateStart,
+            Flag::EventLimit,
             Flag::StartBindingConflict,
         ]
         .into_iter()
@@ -219,6 +224,34 @@ fn rep<'a, T>(items: &[Entry<'a, T>]) -> Option<Entry<'a, T>> {
 /// The L2 projection of one invocation's accepted events. `None` for an empty
 /// input. All events are assumed to share `(proxy_id, invocation_id)`.
 pub fn project(events: &[ProjectionInput]) -> Option<Projection> {
+    project_limited(events, false)
+}
+
+/// Upper bound of events one projection is computed from (cost bound for the
+/// per-batch recompute; a producer repeating one `invocation_id` must not make
+/// every later batch more expensive). The ledger feeds the first
+/// `MAX_PROJECTION_EVENTS` events by `created_seq` and sets `truncated`, which
+/// adds the `event_limit` flag. Initial test value (D-04).
+///
+/// **Beyond the cap the result depends on arrival order**: which events are the
+/// "first" ones is decided by `created_seq`. Within the cap it never does.
+pub const MAX_PROJECTION_EVENTS: usize = 256;
+
+/// Distinct payloads by content hash (SHA-256 of the payload JSON), so the
+/// start x completion comparison runs over distinct contents only.
+fn distinct<'a, T: Serialize>(items: &[Entry<'a, T>]) -> Vec<&'a T> {
+    use sha2::{Digest, Sha256};
+    let mut by_hash: BTreeMap<[u8; 32], &'a T> = BTreeMap::new();
+    for (_, t) in items {
+        let h: [u8; 32] = Sha256::digest(serde_json::to_vec(t).unwrap_or_default()).into();
+        by_hash.entry(h).or_insert(t);
+    }
+    by_hash.into_values().collect()
+}
+
+/// [`project`] with the `truncated` marker set by the caller when more than
+/// [`MAX_PROJECTION_EVENTS`] events exist and `events` holds only the first ones.
+pub fn project_limited(events: &[ProjectionInput], truncated: bool) -> Option<Projection> {
     // Collapse repeats of the same event_id (resend); keep the lowest created_seq.
     let mut by_id: BTreeMap<&str, &ProjectionInput> = BTreeMap::new();
     for e in events {
@@ -246,9 +279,14 @@ pub fn project(events: &[ProjectionInput]) -> Option<Projection> {
     }
 
     let mut flags = std::collections::BTreeSet::new();
+    if truncated {
+        flags.insert(Flag::EventLimit);
+    }
     let mut conflict = false;
+    let distinct_starts = distinct(&starts);
+    let distinct_completions = distinct(&completions);
     if starts.len() > 1 {
-        if starts.windows(2).all(|w| w[0].1 == w[1].1) {
+        if distinct_starts.len() == 1 {
             flags.insert(Flag::DuplicateStart);
         } else {
             flags.insert(Flag::StartBindingConflict);
@@ -257,13 +295,13 @@ pub fn project(events: &[ProjectionInput]) -> Option<Projection> {
     }
     if completions.len() > 1 {
         flags.insert(Flag::DuplicateCompletion);
-        if !completions.windows(2).all(|w| w[0].1 == w[1].1) {
+        if distinct_completions.len() > 1 {
             conflict = true;
         }
     }
-    if starts
+    if distinct_starts
         .iter()
-        .any(|(_, s)| completions.iter().any(|(_, c)| contradicts(s, c)))
+        .any(|s| distinct_completions.iter().any(|c| contradicts(s, c)))
     {
         flags.insert(Flag::CompletionContradictsStart);
         conflict = true;
@@ -392,6 +430,9 @@ pub enum TimeBasis {
 /// records (the stored `outcome` is `NULL` otherwise).
 #[derive(Clone, Debug, Default)]
 pub struct InvocationFilter {
+    /// Caller's `proxy.read` range, bound as `proxy_id IN (...)`. `None` = no
+    /// restriction; `Some(empty)` = no rows. Combines (AND) with `proxy_id`.
+    pub allowed_proxies: Option<Vec<String>>,
     pub proxy_id: Option<String>,
     pub upstream_id: Option<String>,
     pub actor_id: Option<String>,

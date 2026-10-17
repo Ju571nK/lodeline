@@ -30,13 +30,13 @@
 //! conflict even after the body has been removed by retention.
 
 use super::projection::{
-    project, ActorInfo, EventIdentity, Flag, GapPage, InvocationDetail, InvocationFilter,
+    project_limited, ActorInfo, EventIdentity, Flag, GapPage, InvocationDetail, InvocationFilter,
     InvocationPage, Lifecycle, Projection, ProjectionInput, TailGapChange, TimeBasis, ToolInfo,
-    MAX_DETAIL_EVENTS, MAX_GAP_PAGE, MAX_LIST_LIMIT,
+    MAX_DETAIL_EVENTS, MAX_GAP_PAGE, MAX_LIST_LIMIT, MAX_PROJECTION_EVENTS,
 };
 use crate::config::ProxyConfig;
 use anyhow::{bail, Context, Result};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -45,9 +45,18 @@ use sigil_proxy_api::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// Format version stored in `PRAGMA user_version`.
 pub const SCHEMA_VERSION: i64 = 2;
+/// Read connections of the S5 read API (WAL readers do not block each other or
+/// the writer). Initial test value (D-04).
+pub const READ_POOL_SIZE: usize = 4;
+/// Wall-clock limit of one read query; beyond it the query is interrupted and
+/// the call returns [`LedgerError::QueryTimeout`]. Initial test value (D-04).
+pub const READ_QUERY_TIMEOUT_MS: u64 = 5_000;
 /// Open server-derived gaps per proxy. A batch that would exceed it is refused
 /// (`storage_limit`) rather than dropping a stored gap. Closed gaps do not
 /// count: they are only retained until E.
@@ -229,6 +238,9 @@ pub enum LedgerError {
     /// Caller bug: an event's `proxy_id` differs from the authenticated one.
     /// The handler checks this before calling; nothing was stored.
     ProxyMismatch,
+    /// A read query exceeded [`READ_QUERY_TIMEOUT_MS`] and was interrupted.
+    /// The query layer maps it to 503 `storage_unavailable`.
+    QueryTimeout,
 }
 
 impl LedgerError {
@@ -236,7 +248,9 @@ impl LedgerError {
     pub fn error_code(&self) -> Option<ErrorCode> {
         match self {
             LedgerError::StorageLimit => Some(ErrorCode::StorageLimit),
-            LedgerError::StorageUnavailable => Some(ErrorCode::StorageUnavailable),
+            LedgerError::StorageUnavailable | LedgerError::QueryTimeout => {
+                Some(ErrorCode::StorageUnavailable)
+            }
             _ => None,
         }
     }
@@ -249,6 +263,7 @@ impl std::fmt::Display for LedgerError {
             LedgerError::StorageLimit => "ledger storage limit reached",
             LedgerError::StorageUnavailable => "ledger storage unavailable",
             LedgerError::ProxyMismatch => "event proxy_id does not match the caller",
+            LedgerError::QueryTimeout => "ledger read query timed out",
         })
     }
 }
@@ -257,6 +272,11 @@ impl std::error::Error for LedgerError {}
 
 impl From<rusqlite::Error> for LedgerError {
     fn from(e: rusqlite::Error) -> Self {
+        if matches!(&e, rusqlite::Error::SqliteFailure(f, _)
+            if f.code == rusqlite::ErrorCode::OperationInterrupted)
+        {
+            return LedgerError::QueryTimeout;
+        }
         // Log the SQLite result code only, never the message.
         let code = match &e {
             rusqlite::Error::SqliteFailure(f, _) => format!("{:?}", f.code),
@@ -333,8 +353,76 @@ pub struct Ledger {
     conn: Mutex<Connection>,
     /// Separate read-only WAL connection for the S5 read API, so reads never
     /// wait on the writer mutex (WAL readers do not block the writer either).
-    read: Mutex<Connection>,
+    read: ReadPool,
     opts: LedgerOptions,
+}
+
+/// A few read-only connections; a query takes the first free one (or waits on
+/// one in round-robin order). Each query runs under a wall-clock limit.
+struct ReadPool {
+    conns: Vec<Mutex<Connection>>,
+    next: AtomicUsize,
+    timeout_ms: AtomicU64,
+}
+
+impl ReadPool {
+    fn acquire(&self) -> ReadGuard<'_> {
+        let conn = self
+            .conns
+            .iter()
+            .find_map(|m| m.try_lock())
+            .unwrap_or_else(|| {
+                let i = self.next.fetch_add(1, Ordering::Relaxed) % self.conns.len();
+                self.conns[i].lock()
+            });
+        // A timer thread interrupts the connection if the guard outlives the
+        // limit. Dropping the guard stops and joins it before the connection is
+        // released, so a late interrupt can never hit the next query.
+        let handle = conn.get_interrupt_handle();
+        let limit = Duration::from_millis(self.timeout_ms.load(Ordering::Relaxed));
+        let (done, rx) = mpsc::channel::<()>();
+        let timer = std::thread::Builder::new()
+            .name("ledger-read-timer".into())
+            .spawn(move || {
+                if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(limit) {
+                    handle.interrupt();
+                }
+            })
+            .ok();
+        ReadGuard {
+            conn,
+            done: Some(done),
+            timer,
+        }
+    }
+}
+
+struct ReadGuard<'a> {
+    conn: MutexGuard<'a, Connection>,
+    done: Option<mpsc::Sender<()>>,
+    timer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl std::ops::Deref for ReadGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for ReadGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.done.take());
+        if let Some(t) = self.timer.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 const SCHEMA: &str = "
@@ -448,8 +536,17 @@ CREATE TABLE projections (
 ) WITHOUT ROWID;
 CREATE UNIQUE INDEX projections_created ON projections (created_seq);
 CREATE INDEX projections_proxy_created ON projections (proxy_id, created_seq);
+CREATE INDEX projections_proxy_received ON projections (proxy_id, first_received_at);
+CREATE INDEX projections_proxy_lifecycle ON projections (proxy_id, lifecycle, created_seq);
+CREATE INDEX projections_proxy_upstream ON projections (proxy_id, upstream_id, created_seq);
 CREATE INDEX projections_last_received ON projections (proxy_id, last_received_at);
 CREATE INDEX projections_tool_ref ON projections (tool_ref) WHERE tool_ref IS NOT NULL;
+";
+
+/// Indexes for the gap page (`ORDER BY rowid_seq DESC`) and the open counts.
+const GAPS_INDEXES_DDL: &str = "
+CREATE INDEX gaps_proxy_rowid ON gaps (proxy_id, rowid_seq);
+CREATE INDEX gaps_proxy_open_kind ON gaps (proxy_id, open, kind);
 ";
 
 /// What v2 adds to a v1 `gaps` table (fresh files get it from `SCHEMA`).
@@ -463,12 +560,38 @@ impl Ledger {
     pub fn open(path: &Path, opts: LedgerOptions) -> Result<Self> {
         let mut conn = open_hardened(path)?;
         init_schema(&mut conn)?;
-        let read = open_read_only(path)?;
+        let conns = (0..READ_POOL_SIZE)
+            .map(|_| open_read_only(path).map(Mutex::new))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             conn: Mutex::new(conn),
-            read: Mutex::new(read),
+            read: ReadPool {
+                conns,
+                next: AtomicUsize::new(0),
+                timeout_ms: AtomicU64::new(READ_QUERY_TIMEOUT_MS),
+            },
             opts,
         })
+    }
+
+    /// Test hook: change the per-query read time limit.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_read_timeout_for_test(&self, ms: u64) {
+        self.read.timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: run one raw read-only SQL statement (single integer result)
+    /// through the pooled, time-limited read path.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn read_scalar_for_test(&self, sql: &str) -> Result<i64, LedgerError> {
+        let conn = self.read.acquire();
+        Ok(conn.query_row(sql, [], |r| r.get(0))?)
+    }
+
+    /// Test hook: the read connection's open path (checks included), nothing else.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_read_only_probe(path: &Path) -> Result<()> {
+        open_read_only(path).map(|_| ())
     }
 
     /// Test hook: run `f` while the writer mutex is held, to prove the read
@@ -881,6 +1004,16 @@ impl Ledger {
         text("p.method", &filter.method, &mut sql);
         text("p.outcome", &filter.outcome, &mut sql);
         text("p.tool_ref", &filter.tool_ref, &mut sql);
+        if let Some(allowed) = &filter.allowed_proxies {
+            if allowed.is_empty() {
+                sql.push_str(" AND 0");
+            } else {
+                sql.push_str(" AND p.proxy_id IN (");
+                sql.push_str(&vec!["?"; allowed.len()].join(","));
+                sql.push(')');
+                args.extend(allowed.iter().map(|a| SqlValue::Text(a.clone())));
+            }
+        }
         if let Some(l) = filter.lifecycle {
             sql.push_str(" AND p.lifecycle = ?");
             args.push(SqlValue::Text(l.as_str().to_string()));
@@ -904,7 +1037,7 @@ impl Ledger {
         sql.push_str(" ORDER BY p.created_seq DESC LIMIT ?");
         args.push(SqlValue::Integer(limit as i64 + 1));
 
-        let conn = self.read.lock();
+        let conn = self.read.acquire();
         let mut st = conn.prepare(&sql)?;
         let rows = st.query_map(rusqlite::params_from_iter(args.iter()), projection_from_row)?;
         let mut items: Vec<Projection> = rows.collect::<std::result::Result<_, _>>()?;
@@ -925,7 +1058,7 @@ impl Ledger {
         proxy_id: &str,
         invocation_id: &str,
     ) -> Result<Option<InvocationDetail>, LedgerError> {
-        let mut conn = self.read.lock();
+        let mut conn = self.read.acquire();
         // One snapshot for the projection and its events.
         let tx = conn.transaction()?;
         let invocation = tx
@@ -976,7 +1109,7 @@ impl Ledger {
     /// total (L3 `audit_gaps` / `audit_gaps_total`).
     pub fn gaps_page(&self, proxy_id: &str, limit: usize) -> Result<GapPage, LedgerError> {
         let limit = limit.min(MAX_GAP_PAGE);
-        let mut conn = self.read.lock();
+        let mut conn = self.read.acquire();
         let tx = conn.transaction()?;
         let total: i64 = tx.query_row(
             "SELECT COUNT(*) FROM gaps WHERE proxy_id = ?1",
@@ -998,7 +1131,7 @@ impl Ledger {
     /// Open server-derived gaps of `proxy_id` by kind (`sequence_gap`,
     /// `producer_epoch_change`); kinds with none are absent.
     pub fn open_gap_counts(&self, proxy_id: &str) -> Result<BTreeMap<String, i64>, LedgerError> {
-        let conn = self.read.lock();
+        let conn = self.read.acquire();
         let mut st = conn.prepare(
             "SELECT kind, COUNT(*) FROM gaps WHERE proxy_id = ?1 AND open = 1 GROUP BY kind",
         )?;
@@ -1014,7 +1147,16 @@ impl Ledger {
     /// created, or extended when one is already open. Arriving events shrink and
     /// finally close it (see `derive_gaps`); the record is kept. Returns
     /// `Unchanged` when nothing is missing or the open tail already covers it.
-    /// Refuses (`StorageLimit`) when it would exceed the open-gap cap.
+    ///
+    /// Returns `Unchanged` when `epoch_id` is known but is not the proxy's latest
+    /// known epoch (a stale or reordered report must not open a gap in a closed
+    /// epoch). An epoch with no row yet is accepted: it is the new epoch whose
+    /// first events have not arrived.
+    ///
+    /// Caller contract: `Err(StorageLimit)` means the open-gap cap is reached
+    /// and the tail gap was not recorded. The status handler should still apply
+    /// the rest of the report (state snapshot, gap upserts) and not fail the
+    /// whole report with it; the next report retries.
     pub fn note_last_assigned(
         &self,
         proxy_id: &str,
@@ -1032,6 +1174,21 @@ impl Ledger {
             )
             .optional()?
             .unwrap_or(0);
+        let latest: Option<String> = tx
+            .query_row(
+                "SELECT epoch_id FROM epochs WHERE proxy_id = ?1 ORDER BY ord DESC LIMIT 1",
+                params![proxy_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM epochs WHERE proxy_id = ?1 AND epoch_id = ?2)",
+            params![proxy_id, epoch_id],
+            |r| r.get(0),
+        )?;
+        if known && latest.as_deref() != Some(epoch_id) {
+            return Ok(TailGapChange::Unchanged);
+        }
         if last_assigned_sequence <= highest {
             return Ok(TailGapChange::Unchanged);
         }
@@ -1101,13 +1258,20 @@ impl Ledger {
 
 fn gap_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GapRecord> {
     let kind: String = r.get(1)?;
+    let kind = match kind.as_str() {
+        "sequence_gap" => GapKind::SequenceGap,
+        "producer_epoch_change" => GapKind::ProducerEpochChange,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                "unknown gap kind".into(),
+            ))
+        }
+    };
     Ok(GapRecord {
         gap_id: r.get(0)?,
-        kind: if kind == "sequence_gap" {
-            GapKind::SequenceGap
-        } else {
-            GapKind::ProducerEpochChange
-        },
+        kind,
         detected_at: r.get(2)?,
         epoch_id: r.get(3)?,
         previous_epoch_id: r.get(4)?,
@@ -1208,22 +1372,24 @@ fn derive_gaps(
         // splits off the missing prefix as an ordinary gap and shrinks the tail;
         // the arrival of its last sequence closes it (record kept); an arrival
         // beyond it turns it into an ordinary missing range.
-        let tail: Option<(String, i64, i64)> = tx
+        let tail: Option<(String, i64, i64, i64)> = tx
             .query_row(
-                "SELECT gap_id, from_sequence, to_sequence FROM gaps
+                "SELECT gap_id, from_sequence, to_sequence, detected_at FROM gaps
                  WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND tail = 1",
                 params![proxy_id, epoch],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
         match tail {
-            Some((gap_id, from, to)) if seq <= to => {
+            Some((gap_id, from, to, detected_at)) if seq <= to => {
                 if seq > from {
+                    // The split-off prefix was missing since the tail was
+                    // detected, so it inherits that time.
                     insert_gap(
                         tx,
                         proxy_id,
                         GapKind::SequenceGap,
-                        now,
+                        detected_at,
                         epoch,
                         None,
                         Some((from, seq - 1)),
@@ -1232,9 +1398,12 @@ fn derive_gaps(
                     added = true;
                 }
                 if seq == to {
+                    // The closed record names the sequence that actually
+                    // arrived, so it never claims a missing range.
                     tx.execute(
-                        "UPDATE gaps SET open = 0, closed_at = ?2 WHERE gap_id = ?1",
-                        params![gap_id, now],
+                        "UPDATE gaps SET open = 0, closed_at = ?2, from_sequence = ?3,
+                             to_sequence = ?3 WHERE gap_id = ?1",
+                        params![gap_id, now, seq],
                     )?;
                 } else {
                     tx.execute(
@@ -1243,7 +1412,7 @@ fn derive_gaps(
                     )?;
                 }
             }
-            Some((gap_id, _, _)) => {
+            Some((gap_id, _, _, _)) => {
                 tx.execute(
                     "UPDATE gaps SET tail = 0, to_sequence = ?2 WHERE gap_id = ?1",
                     params![gap_id, seq - 1],
@@ -1353,6 +1522,7 @@ pub(super) fn open_hardened(path: &Path) -> Result<Connection> {
     let conn = open_checked(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        true,
     )?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
@@ -1368,8 +1538,8 @@ pub(super) fn open_hardened(path: &Path) -> Result<Connection> {
 
 /// The path safety checks shared by the writer and the read-only connection
 /// (symlink, regular file, owner, mode), then open with `flags`.
-fn open_checked(path: &Path, flags: OpenFlags) -> Result<Connection> {
-    prepare_file(path)?;
+fn open_checked(path: &Path, flags: OpenFlags, create: bool) -> Result<Connection> {
+    prepare_file(path, create)?;
     // SQLite's NOFOLLOW rejects a symlink in ANY path component (for example
     // /var -> /private/var), so resolve the directory first; the final
     // component was already checked by prepare_file and NOFOLLOW covers it.
@@ -1391,13 +1561,17 @@ fn open_read_only(path: &Path) -> Result<Connection> {
     let conn = open_checked(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        false,
     )?;
     conn.pragma_update(None, "query_only", true)?;
     Ok(conn)
 }
 
-fn prepare_file(path: &Path) -> Result<()> {
+fn prepare_file(path: &Path, create: bool) -> Result<()> {
     match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => {
+            Err(e).context("ledger database does not exist")
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -1452,6 +1626,7 @@ fn init_schema(conn: &mut Connection) -> Result<()> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(SCHEMA)
                 .and_then(|()| tx.execute_batch(PROJECTIONS_DDL))
+                .and_then(|()| tx.execute_batch(GAPS_INDEXES_DDL))
                 .context("create ledger schema")?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit().context("create ledger schema")?;
@@ -1478,6 +1653,7 @@ fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
         bail!("ledger database has an unknown format version");
     }
     tx.execute_batch(GAPS_TAIL_DDL)
+        .and_then(|()| tx.execute_batch(GAPS_INDEXES_DDL))
         .and_then(|()| tx.execute_batch(PROJECTIONS_DDL))
         .context("migrate ledger schema to v2")?;
     let keys: Vec<(String, String)> = {
@@ -1509,22 +1685,34 @@ fn recompute_projection(
     proxy_id: &str,
     invocation_id: &str,
 ) -> Result<(), LedgerError> {
+    // At most MAX_PROJECTION_EVENTS events (the first by created_seq) feed the
+    // projection; the true count is stored in `event_count`. Beyond the cap the
+    // result depends on arrival order and carries the `event_limit` flag.
+    let total: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM events WHERE proxy_id = ?1 AND invocation_id = ?2",
+        params![proxy_id, invocation_id],
+        |r| r.get(0),
+    )?;
     let mut st = tx.prepare_cached(
         "SELECT created_seq, received_at, canonical FROM events
-         WHERE proxy_id = ?1 AND invocation_id = ?2 ORDER BY created_seq",
+         WHERE proxy_id = ?1 AND invocation_id = ?2 ORDER BY created_seq LIMIT ?3",
     )?;
-    let rows = st.query_map(params![proxy_id, invocation_id], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
-        ))
-    })?;
+    let rows = st.query_map(
+        params![proxy_id, invocation_id, MAX_PROJECTION_EVENTS as i64],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    )?;
     let mut inputs = Vec::new();
     for row in rows {
         let (created_seq, received_at, canonical) = row?;
         let event = parse_event(&canonical).map_err(|_| {
-            tracing::error!("proxy ledger: stored event does not decode");
+            // Identifies the row only; never any value from it.
+            tracing::error!(created_seq, "proxy ledger: stored event does not decode");
             LedgerError::StorageUnavailable
         })?;
         inputs.push(ProjectionInput {
@@ -1534,8 +1722,12 @@ fn recompute_projection(
         });
     }
     drop(st);
-    match project(&inputs) {
-        Some(p) => store_projection(tx, &p),
+    let truncated = total > MAX_PROJECTION_EVENTS as i64;
+    match project_limited(&inputs, truncated) {
+        Some(mut p) => {
+            p.event_count = total;
+            store_projection(tx, &p)
+        }
         None => {
             tx.execute(
                 "DELETE FROM projections WHERE proxy_id = ?1 AND invocation_id = ?2",

@@ -1438,3 +1438,437 @@ fn read_connection_applies_the_same_path_safety_checks() {
     assert!(Ledger::open(&link, LedgerOptions::default()).is_err());
     assert!(Ledger::open(&p, LedgerOptions::default()).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Review fixes: M1..M5, L1..L5
+// ---------------------------------------------------------------------------
+
+use sigil_server::proxy::ledger::LedgerCaps;
+
+#[test]
+fn m1_event_cap_flags_and_bounds_the_recompute() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    let mut evs = vec![start("px", 1, 1, 1, "ping", None)];
+    evs.extend((2..=300).map(|i| cancel("px", i, i as u32, 1)));
+    l.insert_batch("px", &evs, 100).unwrap();
+    let det = l.get_invocation("px", &uuid(1)).unwrap().unwrap();
+    assert_eq!(det.events_total, 300);
+    assert!(det.events_truncated);
+    assert_eq!(det.invocation.lifecycle, Lifecycle::Started);
+    assert_eq!(det.invocation.flags, vec![Flag::EventLimit]);
+    // beyond the cap a contradicting completion is not considered (documented:
+    // the result past the cap depends on arrival order), but it is counted
+    l.insert_batch(
+        "px",
+        &[done("px", 301, 301, 1, "success", "sent", None)],
+        101,
+    )
+    .unwrap();
+    let p = inv_of(&l, "px", 1);
+    assert_eq!(p.lifecycle, Lifecycle::Started);
+    assert_eq!(p.event_count, 301);
+    assert!(p.flags.contains(&Flag::EventLimit));
+    // exactly at the cap there is no flag
+    let mut small = vec![start("px", 400, 400, 2, "ping", None)];
+    small.extend((401..=655).map(|i| cancel("px", i, i as u32, 2)));
+    l.insert_batch("px", &small, 100).unwrap();
+    let q = inv_of(&l, "px", 2);
+    assert_eq!(q.event_count, 256);
+    assert!(q.flags.is_empty());
+}
+
+#[test]
+fn m1_many_equal_events_are_deduped_by_content_before_comparison() {
+    let mut evs: Vec<ProxyEvent> = (1..=100)
+        .map(|i| start("px", i, i as u32, 1, "ping", None))
+        .collect();
+    evs.extend((101..=150).map(|i| done("px", i, i as u32, 1, "success", "sent", None)));
+    let p = pure(&evs);
+    assert_eq!(p.lifecycle, Lifecycle::Completed);
+    assert_eq!(
+        p.flags,
+        vec![Flag::DuplicateCompletion, Flag::DuplicateStart]
+    );
+    assert_eq!(p.event_count, 150);
+}
+
+#[test]
+fn m2_allowed_proxies_scope_and_paging_stays_full() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    // interleave so a post-filter would return short pages
+    for i in 1..=10u32 {
+        for (px, base) in [("pa", 100u32), ("pb", 200u32), ("pc", 300u32)] {
+            l.insert_batch(
+                px,
+                &[start(px, i as i64, base + i, base + i, "ping", None)],
+                100,
+            )
+            .unwrap();
+        }
+    }
+    let allowed = |v: &[&str]| InvocationFilter {
+        allowed_proxies: Some(v.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    let mut key = None;
+    loop {
+        let page = l.list_invocations(&allowed(&["pa"]), key, 3).unwrap();
+        if page.next_key.is_some() {
+            assert_eq!(page.items.len(), 3, "full page under allowed_proxies");
+        }
+        seen.extend(page.items);
+        match page.next_key {
+            Some(k) => key = Some(k),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 10);
+    assert!(seen.iter().all(|p| p.proxy_id == "pa"));
+    assert!(l
+        .list_invocations(&allowed(&[]), None, 10)
+        .unwrap()
+        .items
+        .is_empty());
+    let two = l
+        .list_invocations(&allowed(&["pa", "pb"]), None, 100)
+        .unwrap();
+    assert_eq!(two.items.len(), 20);
+    assert!(two.items.iter().all(|p| p.proxy_id != "pc"));
+    // combined with an explicit proxy_id (AND)
+    let mut f = allowed(&["pa", "pb"]);
+    f.proxy_id = Some("pb".into());
+    let r = l.list_invocations(&f, None, 100).unwrap();
+    assert_eq!(r.items.len(), 10);
+    assert!(r.items.iter().all(|p| p.proxy_id == "pb"));
+    f.proxy_id = Some("pc".into());
+    assert!(l.list_invocations(&f, None, 100).unwrap().items.is_empty());
+}
+
+#[test]
+fn m3_closed_tail_names_what_arrived_and_prefix_inherits_detection_time() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[seq_ev(1), seq_ev(2), seq_ev(3)], 5)
+        .unwrap();
+    l.note_last_assigned("px", EP1, 8, 10).unwrap(); // tail 4..=8 detected at 10
+    l.insert_batch("px", &[seq_ev(6)], 50).unwrap(); // prefix 4..=5, tail 7..=8
+    let g = l.gaps("px").unwrap();
+    let prefix = g.iter().find(|x| !x.tail).unwrap();
+    assert_eq!(
+        (prefix.from_sequence, prefix.to_sequence),
+        (Some(4), Some(5))
+    );
+    assert_eq!(prefix.detected_at, 10, "inherits the tail's detected_at");
+    l.insert_batch("px", &[seq_ev(8)], 60).unwrap(); // the last one arrives first
+    let g = l.gaps("px").unwrap();
+    let tail = g.iter().find(|x| x.tail).unwrap();
+    assert!(!tail.open);
+    // never claims a missing range: it names the sequence that arrived
+    assert_eq!((tail.from_sequence, tail.to_sequence), (Some(8), Some(8)));
+    let seven = g.iter().find(|x| x.from_sequence == Some(7)).unwrap();
+    assert!(
+        !seven.tail && seven.open,
+        "7 is still missing as an ordinary gap"
+    );
+    assert_eq!(seven.detected_at, 10);
+}
+
+#[test]
+fn m4_filter_and_time_queries_use_the_new_indexes() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[start("px", 1, 1, 1, "ping", None)], 100)
+        .unwrap();
+    let c = rusqlite::Connection::open(d.path().join("l.sqlite")).unwrap();
+    let plan = |sql: &str| -> String {
+        let mut st = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows: Vec<String> = st
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows.join(" | ")
+    };
+    let lifecycle = plan(
+        "SELECT * FROM projections p WHERE p.proxy_id = 'px' AND p.lifecycle = 'started'
+         AND p.created_seq < 99 ORDER BY p.created_seq DESC LIMIT 11",
+    );
+    assert!(
+        lifecycle.contains("projections_proxy_lifecycle"),
+        "{lifecycle}"
+    );
+    let upstream = plan(
+        "SELECT * FROM projections p WHERE p.proxy_id = 'px' AND p.upstream_id = 'up1'
+         ORDER BY p.created_seq DESC LIMIT 11",
+    );
+    assert!(
+        upstream.contains("projections_proxy_upstream"),
+        "{upstream}"
+    );
+    let range = plan(
+        "SELECT count(*) FROM projections p WHERE p.proxy_id = 'px' AND p.first_received_at >= 1
+         AND p.first_received_at < 999",
+    );
+    assert!(range.contains("projections_proxy_received"), "{range}");
+    let time = plan(
+        "SELECT * FROM projections p WHERE p.proxy_id = 'px' AND p.first_received_at >= 1
+         AND p.first_received_at < 999 ORDER BY p.created_seq DESC LIMIT 11",
+    );
+    assert!(time.contains("projections_proxy_"), "{time}");
+    let gaps = plan("SELECT * FROM gaps WHERE proxy_id = 'px' ORDER BY rowid_seq DESC LIMIT 50");
+    assert!(gaps.contains("gaps_proxy_rowid"), "{gaps}");
+    let counts =
+        plan("SELECT kind, COUNT(*) FROM gaps WHERE proxy_id = 'px' AND open = 1 GROUP BY kind");
+    assert!(counts.contains("gaps_proxy_open_kind"), "{counts}");
+}
+
+#[test]
+fn m4_read_query_time_limit_returns_query_timeout_and_recovers() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[seq_ev(1)], 100).unwrap();
+    l.set_read_timeout_for_test(50);
+    let slow =
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000000)
+                SELECT count(*) FROM c";
+    let err = l.read_scalar_for_test(slow).unwrap_err();
+    assert_eq!(err, LedgerError::QueryTimeout);
+    assert_eq!(
+        err.error_code(),
+        Some(sigil_proxy_api::ErrorCode::StorageUnavailable)
+    );
+    // the pooled connections are not left interrupted
+    l.set_read_timeout_for_test(5_000);
+    for _ in 0..8 {
+        assert_eq!(
+            l.list_invocations(&InvocationFilter::default(), None, 10)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn m4_concurrent_reads_run_on_the_pool_without_the_writer() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    let evs: Vec<ProxyEvent> = (1..=50).map(seq_ev).collect();
+    l.insert_batch("px", &evs, 100).unwrap();
+    l.with_writer_locked(|| {
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..20 {
+                        let p = l
+                            .list_invocations(&InvocationFilter::default(), None, 100)
+                            .unwrap();
+                        assert_eq!(p.items.len(), 50);
+                    }
+                });
+            }
+        });
+    });
+}
+
+#[test]
+fn l1_reader_opens_without_create_and_applies_path_checks_alone() {
+    let d = tempfile::tempdir().unwrap();
+    let missing = d.path().join("nope.sqlite");
+    assert!(Ledger::open_read_only_probe(&missing).is_err());
+    assert!(!missing.exists(), "the reader must not create the file");
+    let p = d.path().join("l.sqlite");
+    drop(Ledger::open(&p, LedgerOptions::default()).unwrap());
+    assert!(Ledger::open_read_only_probe(&p).is_ok());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let link = d.path().join("link.sqlite");
+        std::os::unix::fs::symlink(&p, &link).unwrap();
+        assert!(Ledger::open_read_only_probe(&link).is_err());
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(Ledger::open_read_only_probe(&p).is_err());
+    }
+}
+
+#[test]
+fn l3_stale_epoch_report_opens_no_tail_but_a_new_epoch_does() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[seq_ev(1)], 100).unwrap();
+    let e2 = start_full(
+        "px", EP2, 1, 90, 90, "ping", "unknown", None, "up1", "actor-1",
+    );
+    l.insert_batch("px", &[e2], 101).unwrap();
+    // EP1 is known but no longer the latest: ignored
+    assert_eq!(
+        l.note_last_assigned("px", EP1, 50, 110).unwrap(),
+        TailGapChange::Unchanged
+    );
+    assert!(l.gaps("px").unwrap().iter().all(|g| !g.tail));
+    assert_eq!(
+        l.note_last_assigned("px", EP2, 4, 111).unwrap(),
+        TailGapChange::Created
+    );
+    // an epoch with no row yet (first events not arrived) is accepted
+    const EP3: &str = "33333333-3333-4333-8333-333333333333";
+    assert_eq!(
+        l.note_last_assigned("px", EP3, 2, 112).unwrap(),
+        TailGapChange::Created
+    );
+}
+
+#[test]
+fn l5_tail_in_a_new_epoch_with_epoch_change_gap() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    l.insert_batch("px", &[seq_ev(1)], 100).unwrap();
+    assert_eq!(
+        l.note_last_assigned("px", EP2, 3, 110).unwrap(),
+        TailGapChange::Created
+    );
+    let e = start_full(
+        "px", EP2, 2, 91, 91, "ping", "unknown", None, "up1", "actor-1",
+    );
+    l.insert_batch("px", &[e], 120).unwrap();
+    let g = l.gaps("px").unwrap();
+    assert!(g
+        .iter()
+        .any(|x| x.kind == GapKind::ProducerEpochChange && x.open));
+    let prefix = g
+        .iter()
+        .find(|x| x.kind == GapKind::SequenceGap && !x.tail)
+        .unwrap();
+    assert_eq!(
+        (
+            prefix.epoch_id.as_str(),
+            prefix.from_sequence,
+            prefix.to_sequence
+        ),
+        (EP2, Some(1), Some(1))
+    );
+    assert_eq!(prefix.detected_at, 110);
+    let tail = g.iter().find(|x| x.tail).unwrap();
+    assert!(tail.open);
+    assert_eq!((tail.from_sequence, tail.to_sequence), (Some(3), Some(3)));
+}
+
+#[test]
+fn l5_prefix_older_than_t_stays_open_when_filled() {
+    let d = tempfile::tempdir().unwrap();
+    let opts = LedgerOptions {
+        tombstone_retention_secs: 1000,
+        caps: LedgerCaps::default(),
+    };
+    let l = Ledger::open(&d.path().join("l.sqlite"), opts).unwrap();
+    l.insert_batch("px", &[seq_ev(1)], 5).unwrap();
+    l.note_last_assigned("px", EP1, 6, 10).unwrap(); // tail 2..=6 at t=10
+    l.insert_batch("px", &[seq_ev(4)], 10_000).unwrap(); // prefix 2..=3 inherits t=10
+    l.insert_batch("px", &[seq_ev(2), seq_ev(3)], 10_001)
+        .unwrap();
+    let g = l.gaps("px").unwrap();
+    let prefix = g.iter().find(|x| !x.tail).unwrap();
+    assert_eq!(prefix.detected_at, 10);
+    assert!(
+        prefix.open,
+        "evidence older than T cannot close it (safe direction)"
+    );
+}
+
+#[test]
+fn l5_open_gap_cap_hit_by_a_tail_split_rolls_back() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    let evs: Vec<ProxyEvent> = (0..10_000).map(|i| seq_ev(2 * i + 1)).collect();
+    l.insert_batch("px", &evs, 100).unwrap();
+    assert_eq!(
+        l.open_gap_counts("px").unwrap().get("sequence_gap"),
+        Some(&9_999)
+    );
+    assert_eq!(
+        l.note_last_assigned("px", EP1, 20_003, 110).unwrap(),
+        TailGapChange::Created
+    );
+    // 20002 would split off a prefix gap: one open gap too many
+    let r = l.insert_batch("px", &[seq_ev(20_002)], 120);
+    assert_eq!(r, Err(LedgerError::StorageLimit));
+    assert!(l.stored_event("px", &uuid(20_002)).unwrap().is_none());
+    assert!(l
+        .get_invocation("px", &uuid(20_002 + 5000))
+        .unwrap()
+        .is_none());
+    let g = l.gaps("px").unwrap();
+    let tail = g.iter().find(|x| x.tail).unwrap();
+    assert!(tail.open);
+    assert_eq!(
+        (tail.from_sequence, tail.to_sequence),
+        (Some(20_000), Some(20_003))
+    );
+    // the cap also refuses to create a further tail
+    assert_eq!(
+        l.note_last_assigned("px", EP2, 5, 130).map(|_| ()),
+        Err(LedgerError::StorageLimit)
+    );
+}
+
+#[test]
+fn l5_storage_limit_and_check_batch_leave_no_projection() {
+    let d = tempfile::tempdir().unwrap();
+    let opts = LedgerOptions {
+        tombstone_retention_secs: 86_400,
+        caps: LedgerCaps::new(2, 1 << 30, 100, 1 << 30),
+    };
+    let l = Ledger::open(&d.path().join("l.sqlite"), opts).unwrap();
+    l.insert_batch("px", &[seq_ev(1), seq_ev(2)], 100).unwrap();
+    let r = l.insert_batch("px", &[seq_ev(3)], 101);
+    assert_eq!(r, Err(LedgerError::StorageLimit));
+    assert!(l.get_invocation("px", &uuid(5003)).unwrap().is_none());
+    assert_eq!(
+        l.list_invocations(&InvocationFilter::default(), None, 10)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    // dry run never stores, whatever it returns
+    let _ = l.check_batch("px", &[seq_ev(9)], 102);
+    assert!(l.get_invocation("px", &uuid(5009)).unwrap().is_none());
+}
+
+#[test]
+fn l5_keyset_paging_with_inserts_between_pages() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open(d.path());
+    let evs: Vec<ProxyEvent> = (1..=10).map(seq_ev).collect();
+    l.insert_batch("px", &evs, 100).unwrap();
+    let p1 = l
+        .list_invocations(&InvocationFilter::default(), None, 4)
+        .unwrap();
+    let ids1: Vec<String> = p1.items.iter().map(|p| p.invocation_id.clone()).collect();
+    assert_eq!(
+        ids1,
+        (7..=10).rev().map(|i| uuid(i + 5000)).collect::<Vec<_>>()
+    );
+    // new invocations and a completion of an old one land between the pages
+    l.insert_batch("px", &[seq_ev(11), seq_ev(12)], 101)
+        .unwrap();
+    l.insert_batch(
+        "px",
+        &[done("px", 13, 13, 8 + 5000, "success", "sent", None)],
+        102,
+    )
+    .unwrap();
+    let p2 = l
+        .list_invocations(&InvocationFilter::default(), p1.next_key, 100)
+        .unwrap();
+    let ids2: Vec<String> = p2.items.iter().map(|p| p.invocation_id.clone()).collect();
+    assert_eq!(
+        ids2,
+        (1..=6).rev().map(|i| uuid(i + 5000)).collect::<Vec<_>>()
+    );
+    assert!(p2.next_key.is_none());
+}
