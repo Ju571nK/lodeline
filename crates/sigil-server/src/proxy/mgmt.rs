@@ -179,6 +179,18 @@ pub async fn mgmt_guard(
     if route == MgmtRoute::ConfigPut && req.method() != axum::http::Method::PUT {
         return next.run(req).await;
     }
+    // `/v1/proxies` is shared with the read-bearer listing `GET /v1/proxies`
+    // (S5): a GET (or HEAD) is that read request, not a registration. Every
+    // other method keeps the management answers (a wrong-method probe still
+    // sees the same 404/401/403 as POST).
+    if route == MgmtRoute::Register
+        && matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return next.run(req).await;
+    }
     let (Some(auth), Some(_)) = (ctx.mgmt.as_ref(), ctx.audit.as_ref()) else {
         return StatusCode::NOT_FOUND.into_response();
     };

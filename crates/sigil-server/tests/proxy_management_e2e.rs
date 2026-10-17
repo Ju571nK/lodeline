@@ -456,7 +456,9 @@ async fn check_order_404_401_binding_403_expired() {
     for (who, c, unknown) in [("host", &hc, &unknown_h), ("proxy", &pc, &unknown_p)] {
         for (m, path, body) in [
             ("POST", "/v1/proxies", Some(reg_body("pxa"))),
-            ("GET", "/v1/proxies", None),
+            // GET /v1/proxies is the read listing since S5; a wrong method on
+            // the management path must still look like an unknown route.
+            ("PUT", "/v1/proxies", None),
             ("POST", "/v1/proxies/pxa/fingerprints", Some(fp_body(FP_A))),
             ("POST", "/v1/proxies/pxa/disable", None),
             ("POST", "/v1/proxies/pxa/enable", None),

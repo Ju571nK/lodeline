@@ -130,6 +130,11 @@ impl ProxyRegistry {
 
     /// True if any entry (any state) holds `fp` as current or next. Used to
     /// keep registered proxy leaves off host routes.
+    /// Every record, ordered by `proxy_id` (read API listing).
+    pub fn list(&self) -> Vec<ProxyRecord> {
+        self.inner.read().values().cloned().collect()
+    }
+
     pub fn holds_fingerprint(&self, fp: &str) -> bool {
         self.inner
             .read()
