@@ -29,17 +29,25 @@
 //! Equal bytes <=> equal SHA-256, so the stored digest decides duplicate versus
 //! conflict even after the body has been removed by retention.
 
+use super::projection::{
+    project, ActorInfo, EventIdentity, Flag, GapPage, InvocationDetail, InvocationFilter,
+    InvocationPage, Lifecycle, Projection, ProjectionInput, TailGapChange, TimeBasis, ToolInfo,
+    MAX_DETAIL_EVENTS, MAX_GAP_PAGE, MAX_LIST_LIMIT,
+};
 use crate::config::ProxyConfig;
 use anyhow::{bail, Context, Result};
 use parking_lot::Mutex;
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
-use sigil_proxy_api::{canonical_event_bytes, ErrorCode, EventPayload, ProxyEvent, Uuid};
-use std::collections::HashMap;
+use sigil_proxy_api::{
+    canonical_event_bytes, parse_event, ErrorCode, EventPayload, ProxyEvent, Uuid,
+};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 /// Format version stored in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 /// Open server-derived gaps per proxy. A batch that would exceed it is refused
 /// (`storage_limit`) rather than dropping a stored gap. Closed gaps do not
 /// count: they are only retained until E.
@@ -287,6 +295,9 @@ pub struct GapRecord {
     pub to_sequence: Option<i64>,
     pub open: bool,
     pub closed_at: Option<i64>,
+    /// `sequence_gap` derived from a status report's `last_assigned_sequence`
+    /// (`highest accepted + 1 ..= last_assigned`): events may still be in flight.
+    pub tail: bool,
 }
 
 /// What S5 needs from a stored event.
@@ -313,10 +324,16 @@ pub struct SweepStats {
     pub gaps: usize,
     pub epochs: usize,
     pub invocations: usize,
+    /// Projection rows removed (one per expired invocation).
+    pub projections: usize,
 }
 
 pub struct Ledger {
+    /// The single writer (ingest, sweep, tail gaps).
     conn: Mutex<Connection>,
+    /// Separate read-only WAL connection for the S5 read API, so reads never
+    /// wait on the writer mutex (WAL readers do not block the writer either).
+    read: Mutex<Connection>,
     opts: LedgerOptions,
 }
 
@@ -370,7 +387,8 @@ CREATE TABLE gaps (
     to_sequence       INTEGER,
     open              INTEGER NOT NULL,
     closed_at         INTEGER,
-    present           INTEGER NOT NULL DEFAULT 0
+    present           INTEGER NOT NULL DEFAULT 0,
+    tail              INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX gaps_open ON gaps (proxy_id, epoch_id, open, from_sequence);
 CREATE TABLE invocations (
@@ -386,18 +404,79 @@ CREATE TABLE usage (
 ) WITHOUT ROWID;
 ";
 
+/// The v2 projection table (L2) with its filter columns and the `created_seq`
+/// keyset index. Shared by a fresh create and the v1 -> v2 migration so the two
+/// cannot drift. `epoch_superseded` is deliberately not stored (see
+/// `projection.rs`).
+const PROJECTIONS_DDL: &str = "
+CREATE TABLE projections (
+    proxy_id                TEXT NOT NULL,
+    invocation_id           TEXT NOT NULL,
+    created_seq             INTEGER NOT NULL,
+    lifecycle               TEXT NOT NULL,
+    outcome                 TEXT,
+    delivery_state          TEXT,
+    reason                  TEXT,
+    reported_outcome        TEXT,
+    reported_delivery_state TEXT,
+    reported_reason         TEXT,
+    duration_ms             INTEGER,
+    response_bytes          INTEGER,
+    method                  TEXT,
+    protocol_version        TEXT,
+    upstream_id             TEXT,
+    route_revision          INTEGER,
+    actor_id                TEXT,
+    actor_kind              TEXT,
+    authentication_method   TEXT,
+    evidence_source         TEXT,
+    credential_owner_id     TEXT,
+    tool_status             TEXT,
+    tool_ref                TEXT,
+    tool_reason             TEXT,
+    cancel_observed         INTEGER NOT NULL,
+    started_at              TEXT,
+    started_at_s            INTEGER,
+    completed_at            TEXT,
+    completed_at_s          INTEGER,
+    first_received_at       INTEGER NOT NULL,
+    last_received_at        INTEGER NOT NULL,
+    start_epoch_id          TEXT,
+    flags                   TEXT NOT NULL,
+    event_count             INTEGER NOT NULL,
+    PRIMARY KEY (proxy_id, invocation_id)
+) WITHOUT ROWID;
+CREATE UNIQUE INDEX projections_created ON projections (created_seq);
+CREATE INDEX projections_proxy_created ON projections (proxy_id, created_seq);
+CREATE INDEX projections_last_received ON projections (proxy_id, last_received_at);
+CREATE INDEX projections_tool_ref ON projections (tool_ref) WHERE tool_ref IS NOT NULL;
+";
+
+/// What v2 adds to a v1 `gaps` table (fresh files get it from `SCHEMA`).
+const GAPS_TAIL_DDL: &str = "ALTER TABLE gaps ADD COLUMN tail INTEGER NOT NULL DEFAULT 0;";
+
 impl Ledger {
     /// Open (creating if needed) the ledger. Refuses a symlink (checked, and
     /// SQLite is opened with `NOFOLLOW`), a non-regular file, a file owned by
     /// another user, a group/world accessible file, a newer or foreign schema,
     /// or a filesystem that cannot do WAL.
     pub fn open(path: &Path, opts: LedgerOptions) -> Result<Self> {
-        let conn = open_hardened(path)?;
-        init_schema(&conn)?;
+        let mut conn = open_hardened(path)?;
+        init_schema(&mut conn)?;
+        let read = open_read_only(path)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            read: Mutex::new(read),
             opts,
         })
+    }
+
+    /// Test hook: run `f` while the writer mutex is held, to prove the read
+    /// API does not take it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_writer_locked<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _g = self.conn.lock();
+        f()
     }
 
     pub fn options(&self) -> &LedgerOptions {
@@ -595,6 +674,17 @@ impl Ledger {
             )?;
         }
 
+        // Recompute the projection of every touched invocation from its full
+        // event set, in this transaction (pure function: arrival order and
+        // resends cannot change the result).
+        let touched: BTreeSet<&str> = fresh
+            .iter()
+            .map(|(_, p)| p.invocation_id.as_str())
+            .collect();
+        for inv in touched {
+            recompute_projection(&tx, proxy_id, inv)?;
+        }
+
         let rows = fresh.len() as i64;
         let bytes: i64 = fresh.iter().map(|(_, p)| p.canonical.len() as i64).sum();
         tx.execute(
@@ -654,8 +744,9 @@ impl Ledger {
             || over(live_bytes, c.file_bytes))
     }
 
-    /// Retention sweep by server `received_at` only (L1). Event rows go after
-    /// `event_retention(proxy_id)` seconds, tombstones after T, gap records after
+    /// Retention sweep by server `received_at` only (L1). An invocation (its
+    /// event rows and its projection together) goes `event_retention(proxy_id)`
+    /// seconds after its *last* received event, tombstones after T, gap records after
     /// E, invocation owner bindings after `max(E, T)`, and non-latest epoch
     /// rows after T. A row is kept while `now - received_at <= retention`.
     /// Callable at any time; one transaction.
@@ -670,7 +761,7 @@ impl Ledger {
         let proxies: Vec<String> = {
             let mut st = tx.prepare(
                 "SELECT proxy_id FROM events UNION SELECT proxy_id FROM gaps
-                 UNION SELECT proxy_id FROM invocations",
+                 UNION SELECT proxy_id FROM invocations UNION SELECT proxy_id FROM projections",
             )?;
             let rows = st.query_map([], |r| r.get(0))?;
             rows.collect::<std::result::Result<_, _>>()?
@@ -678,9 +769,18 @@ impl Ledger {
         let mut s = SweepStats::default();
         for p in &proxies {
             let e = event_retention(p);
+            // An invocation expires as one unit at `last_received_at + E`:
+            // its events and its projection go together (L1).
+            let cutoff = now.saturating_sub(e);
             s.events += tx.execute(
-                "DELETE FROM events WHERE proxy_id = ?1 AND received_at < ?2",
-                params![p, now.saturating_sub(e)],
+                "DELETE FROM events WHERE proxy_id = ?1 AND invocation_id IN
+                     (SELECT invocation_id FROM projections
+                      WHERE proxy_id = ?1 AND last_received_at < ?2)",
+                params![p, cutoff],
+            )?;
+            s.projections += tx.execute(
+                "DELETE FROM projections WHERE proxy_id = ?1 AND last_received_at < ?2",
+                params![p, cutoff],
             )?;
             s.gaps += tx.execute(
                 "DELETE FROM gaps WHERE proxy_id = ?1 AND detected_at < ?2",
@@ -722,26 +822,9 @@ impl Ledger {
         let conn = self.conn.lock();
         let mut st = conn.prepare(
             "SELECT gap_id, kind, detected_at, epoch_id, previous_epoch_id, from_sequence,
-                    to_sequence, open, closed_at FROM gaps WHERE proxy_id = ?1 ORDER BY rowid_seq",
+                    to_sequence, open, closed_at, tail FROM gaps WHERE proxy_id = ?1 ORDER BY rowid_seq",
         )?;
-        let rows = st.query_map(params![proxy_id], |r| {
-            let kind: String = r.get(1)?;
-            Ok(GapRecord {
-                gap_id: r.get(0)?,
-                kind: if kind == "sequence_gap" {
-                    GapKind::SequenceGap
-                } else {
-                    GapKind::ProducerEpochChange
-                },
-                detected_at: r.get(2)?,
-                epoch_id: r.get(3)?,
-                previous_epoch_id: r.get(4)?,
-                from_sequence: r.get(5)?,
-                to_sequence: r.get(6)?,
-                open: r.get::<_, i64>(7)? != 0,
-                closed_at: r.get(8)?,
-            })
-        })?;
+        let rows = st.query_map(params![proxy_id], gap_from_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -770,6 +853,232 @@ impl Ledger {
             .optional()?)
     }
 
+    // -- S5 read API (read-only connection; never takes the writer mutex) -----
+
+    /// Invocation list, newest first by `created_seq` (L3). `after_key` is the
+    /// `next_key` of the previous page (rows strictly older than it). `limit`
+    /// is clamped to `1..=500`. When `filter.proxy_id` is set every row belongs
+    /// to that proxy; with none set the query spans all proxies, so the caller
+    /// (the HTTP layer) must apply its own proxy scope.
+    pub fn list_invocations(
+        &self,
+        filter: &InvocationFilter,
+        after_key: Option<i64>,
+        limit: usize,
+    ) -> Result<InvocationPage, LedgerError> {
+        let limit = limit.clamp(1, MAX_LIST_LIMIT);
+        let mut sql = format!("SELECT {PROJ_SELECT} FROM projections p WHERE 1 = 1");
+        let mut args: Vec<SqlValue> = Vec::new();
+        let mut text = |col: &str, v: &Option<String>, sql: &mut String| {
+            if let Some(v) = v {
+                sql.push_str(&format!(" AND {col} = ?"));
+                args.push(SqlValue::Text(v.clone()));
+            }
+        };
+        text("p.proxy_id", &filter.proxy_id, &mut sql);
+        text("p.upstream_id", &filter.upstream_id, &mut sql);
+        text("p.actor_id", &filter.actor_id, &mut sql);
+        text("p.method", &filter.method, &mut sql);
+        text("p.outcome", &filter.outcome, &mut sql);
+        text("p.tool_ref", &filter.tool_ref, &mut sql);
+        if let Some(l) = filter.lifecycle {
+            sql.push_str(" AND p.lifecycle = ?");
+            args.push(SqlValue::Text(l.as_str().to_string()));
+        }
+        let time_col = match filter.time_basis {
+            TimeBasis::Received => "p.first_received_at",
+            TimeBasis::Occurred => "COALESCE(p.started_at_s, p.completed_at_s)",
+        };
+        if let Some(from) = filter.from {
+            sql.push_str(&format!(" AND {time_col} >= ?"));
+            args.push(SqlValue::Integer(from));
+        }
+        if let Some(to) = filter.to {
+            sql.push_str(&format!(" AND {time_col} < ?"));
+            args.push(SqlValue::Integer(to));
+        }
+        if let Some(k) = after_key {
+            sql.push_str(" AND p.created_seq < ?");
+            args.push(SqlValue::Integer(k));
+        }
+        sql.push_str(" ORDER BY p.created_seq DESC LIMIT ?");
+        args.push(SqlValue::Integer(limit as i64 + 1));
+
+        let conn = self.read.lock();
+        let mut st = conn.prepare(&sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(args.iter()), projection_from_row)?;
+        let mut items: Vec<Projection> = rows.collect::<std::result::Result<_, _>>()?;
+        let next_key = if items.len() > limit {
+            items.truncate(limit);
+            items.last().map(|p| p.created_seq)
+        } else {
+            None
+        };
+        Ok(InvocationPage { items, next_key })
+    }
+
+    /// One invocation of `proxy_id` with up to 32 envelope-identifier events.
+    /// `None` when unknown for that proxy (an invocation of another proxy is
+    /// indistinguishable from an unknown one).
+    pub fn get_invocation(
+        &self,
+        proxy_id: &str,
+        invocation_id: &str,
+    ) -> Result<Option<InvocationDetail>, LedgerError> {
+        let mut conn = self.read.lock();
+        // One snapshot for the projection and its events.
+        let tx = conn.transaction()?;
+        let invocation = tx
+            .query_row(
+                &format!(
+                    "SELECT {PROJ_SELECT} FROM projections p
+                     WHERE p.proxy_id = ?1 AND p.invocation_id = ?2"
+                ),
+                params![proxy_id, invocation_id],
+                projection_from_row,
+            )
+            .optional()?;
+        let Some(invocation) = invocation else {
+            return Ok(None);
+        };
+        let events = {
+            let mut st = tx.prepare(
+                "SELECT created_seq, event_type, event_id, epoch_id, sequence, occurred_at,
+                        received_at FROM events
+                 WHERE proxy_id = ?1 AND invocation_id = ?2 ORDER BY created_seq LIMIT ?3",
+            )?;
+            let rows = st.query_map(
+                params![proxy_id, invocation_id, MAX_DETAIL_EVENTS as i64],
+                |r| {
+                    Ok(EventIdentity {
+                        created_seq: r.get(0)?,
+                        event_type: r.get(1)?,
+                        event_id: r.get(2)?,
+                        epoch_id: r.get(3)?,
+                        sequence: r.get(4)?,
+                        occurred_at: r.get(5)?,
+                        received_at: r.get(6)?,
+                    })
+                },
+            )?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let events_total = invocation.event_count;
+        Ok(Some(InvocationDetail {
+            events_truncated: events_total > MAX_DETAIL_EVENTS as i64,
+            events,
+            events_total,
+            invocation,
+        }))
+    }
+
+    /// Server-derived gaps of `proxy_id`, newest first, at most 50, plus the
+    /// total (L3 `audit_gaps` / `audit_gaps_total`).
+    pub fn gaps_page(&self, proxy_id: &str, limit: usize) -> Result<GapPage, LedgerError> {
+        let limit = limit.min(MAX_GAP_PAGE);
+        let mut conn = self.read.lock();
+        let tx = conn.transaction()?;
+        let total: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM gaps WHERE proxy_id = ?1",
+            params![proxy_id],
+            |r| r.get(0),
+        )?;
+        let items = {
+            let mut st = tx.prepare(
+                "SELECT gap_id, kind, detected_at, epoch_id, previous_epoch_id, from_sequence,
+                        to_sequence, open, closed_at, tail FROM gaps
+                 WHERE proxy_id = ?1 ORDER BY rowid_seq DESC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![proxy_id, limit as i64], gap_from_row)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        Ok(GapPage { items, total })
+    }
+
+    /// Open server-derived gaps of `proxy_id` by kind (`sequence_gap`,
+    /// `producer_epoch_change`); kinds with none are absent.
+    pub fn open_gap_counts(&self, proxy_id: &str) -> Result<BTreeMap<String, i64>, LedgerError> {
+        let conn = self.read.lock();
+        let mut st = conn.prepare(
+            "SELECT kind, COUNT(*) FROM gaps WHERE proxy_id = ?1 AND open = 1 GROUP BY kind",
+        )?;
+        let rows = st.query_map(params![proxy_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// F13/AC-06 tail gap. The status slice calls this with the report's
+    /// `last_assigned_sequence` for the report's (current) epoch.
+    ///
+    /// When it is above the highest stored sequence of the epoch (0 when none),
+    /// an open `tail=true` sequence_gap `(highest+1 ..= last_assigned)` is
+    /// created, or extended when one is already open. Arriving events shrink and
+    /// finally close it (see `derive_gaps`); the record is kept. Returns
+    /// `Unchanged` when nothing is missing or the open tail already covers it.
+    /// Refuses (`StorageLimit`) when it would exceed the open-gap cap.
+    pub fn note_last_assigned(
+        &self,
+        proxy_id: &str,
+        epoch_id: &str,
+        last_assigned_sequence: i64,
+        now: i64,
+    ) -> Result<TailGapChange, LedgerError> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let highest: i64 = tx
+            .query_row(
+                "SELECT highest_sequence FROM epochs WHERE proxy_id = ?1 AND epoch_id = ?2",
+                params![proxy_id, epoch_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if last_assigned_sequence <= highest {
+            return Ok(TailGapChange::Unchanged);
+        }
+        let open_tail: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT gap_id, to_sequence FROM gaps
+                 WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND tail = 1",
+                params![proxy_id, epoch_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let change = match open_tail {
+            Some((_, to)) if last_assigned_sequence <= to => return Ok(TailGapChange::Unchanged),
+            Some((gap_id, _)) => {
+                tx.execute(
+                    "UPDATE gaps SET to_sequence = ?2 WHERE gap_id = ?1",
+                    params![gap_id, last_assigned_sequence],
+                )?;
+                TailGapChange::Extended
+            }
+            None => {
+                let open: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM gaps WHERE proxy_id = ?1 AND open = 1
+                       AND kind = 'sequence_gap'",
+                    params![proxy_id],
+                    |r| r.get(0),
+                )?;
+                if open >= MAX_GAPS_PER_PROXY {
+                    return Err(LedgerError::StorageLimit);
+                }
+                insert_gap(
+                    &tx,
+                    proxy_id,
+                    GapKind::SequenceGap,
+                    now,
+                    epoch_id,
+                    None,
+                    Some((highest + 1, last_assigned_sequence)),
+                    true,
+                )?;
+                TailGapChange::Created
+            }
+        };
+        tx.commit()?;
+        Ok(change)
+    }
+
     /// Usage counters of one proxy (zeros when none).
     pub fn usage(&self, proxy_id: &str) -> Result<Usage, LedgerError> {
         let conn = self.conn.lock();
@@ -788,6 +1097,26 @@ impl Ledger {
             .optional()?
             .unwrap_or_default())
     }
+}
+
+fn gap_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GapRecord> {
+    let kind: String = r.get(1)?;
+    Ok(GapRecord {
+        gap_id: r.get(0)?,
+        kind: if kind == "sequence_gap" {
+            GapKind::SequenceGap
+        } else {
+            GapKind::ProducerEpochChange
+        },
+        detected_at: r.get(2)?,
+        epoch_id: r.get(3)?,
+        previous_epoch_id: r.get(4)?,
+        from_sequence: r.get(5)?,
+        to_sequence: r.get(6)?,
+        open: r.get::<_, i64>(7)? != 0,
+        closed_at: r.get(8)?,
+        tail: r.get::<_, i64>(9)? != 0,
+    })
 }
 
 struct Prepared {
@@ -866,6 +1195,7 @@ fn derive_gaps(
                     epoch,
                     Some(&prev),
                     None,
+                    false,
                 )?;
                 added = true;
             }
@@ -873,17 +1203,66 @@ fn derive_gaps(
         }
     };
     if seq > highest {
-        if seq > highest + 1 {
-            insert_gap(
-                tx,
-                proxy_id,
-                GapKind::SequenceGap,
-                now,
-                epoch,
-                None,
-                Some((highest + 1, seq - 1)),
-            )?;
-            added = true;
+        // An open tail gap (`highest+1 ..= last_assigned`, from a status
+        // report) is the only open gap above `highest`. An arrival inside it
+        // splits off the missing prefix as an ordinary gap and shrinks the tail;
+        // the arrival of its last sequence closes it (record kept); an arrival
+        // beyond it turns it into an ordinary missing range.
+        let tail: Option<(String, i64, i64)> = tx
+            .query_row(
+                "SELECT gap_id, from_sequence, to_sequence FROM gaps
+                 WHERE proxy_id = ?1 AND epoch_id = ?2 AND open = 1 AND tail = 1",
+                params![proxy_id, epoch],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        match tail {
+            Some((gap_id, from, to)) if seq <= to => {
+                if seq > from {
+                    insert_gap(
+                        tx,
+                        proxy_id,
+                        GapKind::SequenceGap,
+                        now,
+                        epoch,
+                        None,
+                        Some((from, seq - 1)),
+                        false,
+                    )?;
+                    added = true;
+                }
+                if seq == to {
+                    tx.execute(
+                        "UPDATE gaps SET open = 0, closed_at = ?2 WHERE gap_id = ?1",
+                        params![gap_id, now],
+                    )?;
+                } else {
+                    tx.execute(
+                        "UPDATE gaps SET from_sequence = ?2 WHERE gap_id = ?1",
+                        params![gap_id, seq + 1],
+                    )?;
+                }
+            }
+            Some((gap_id, _, _)) => {
+                tx.execute(
+                    "UPDATE gaps SET tail = 0, to_sequence = ?2 WHERE gap_id = ?1",
+                    params![gap_id, seq - 1],
+                )?;
+            }
+            None if seq > highest + 1 => {
+                insert_gap(
+                    tx,
+                    proxy_id,
+                    GapKind::SequenceGap,
+                    now,
+                    epoch,
+                    None,
+                    Some((highest + 1, seq - 1)),
+                    false,
+                )?;
+                added = true;
+            }
+            None => {}
         }
         tx.execute(
             "UPDATE epochs SET highest_sequence = ?3, last_received_at = ?4
@@ -934,6 +1313,7 @@ fn derive_gaps(
     Ok(added)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_gap(
     tx: &rusqlite::Transaction<'_>,
     proxy_id: &str,
@@ -942,11 +1322,12 @@ fn insert_gap(
     epoch: &str,
     previous_epoch: Option<&str>,
     range: Option<(i64, i64)>,
+    tail: bool,
 ) -> Result<(), LedgerError> {
     tx.execute(
         "INSERT INTO gaps (gap_id, proxy_id, kind, detected_at, epoch_id, previous_epoch_id,
-             from_sequence, to_sequence, open)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+             from_sequence, to_sequence, open, tail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
         params![
             uuid::Uuid::new_v4().to_string(),
             proxy_id,
@@ -956,6 +1337,7 @@ fn insert_gap(
             previous_epoch,
             range.map(|r| r.0),
             range.map(|r| r.1),
+            i64::from(tail),
         ],
     )?;
     Ok(())
@@ -968,6 +1350,25 @@ fn insert_gap(
 /// WAL; sets `synchronous=FULL`, `secure_delete`. Schema setup is the caller's.
 /// Shared with the metadata store (`metadata.rs`).
 pub(super) fn open_hardened(path: &Path) -> Result<Connection> {
+    let conn = open_checked(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.pragma_update(None, "fullfsync", true)?;
+    conn.pragma_update(None, "secure_delete", true)?;
+    let jm: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    let sync: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+    if !jm.eq_ignore_ascii_case("wal") || sync != 2 {
+        bail!("ledger database could not be set to WAL with synchronous=FULL");
+    }
+    Ok(conn)
+}
+
+/// The path safety checks shared by the writer and the read-only connection
+/// (symlink, regular file, owner, mode), then open with `flags`.
+fn open_checked(path: &Path, flags: OpenFlags) -> Result<Connection> {
     prepare_file(path)?;
     // SQLite's NOFOLLOW rejects a symlink in ANY path component (for example
     // /var -> /private/var), so resolve the directory first; the final
@@ -979,21 +1380,19 @@ pub(super) fn open_hardened(path: &Path) -> Result<Connection> {
         .canonicalize()
         .context("resolve ledger directory")?;
     let real = dir.join(path.file_name().context("ledger path has no file name")?);
-    let conn = Connection::open_with_flags(
-        &real,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .context("open ledger database")?;
+    let conn = Connection::open_with_flags(&real, flags).context("open ledger database")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    conn.pragma_update(None, "fullfsync", true)?;
-    conn.pragma_update(None, "secure_delete", true)?;
-    let jm: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-    let sync: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
-    if !jm.eq_ignore_ascii_case("wal") || sync != 2 {
-        bail!("ledger database could not be set to WAL with synchronous=FULL");
-    }
+    Ok(conn)
+}
+
+/// Read-only WAL connection for the S5 read API. The writer is opened first, so
+/// the file exists and is already WAL. `query_only` is belt and braces.
+fn open_read_only(path: &Path) -> Result<Connection> {
+    let conn = open_checked(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.pragma_update(None, "query_only", true)?;
     Ok(conn)
 }
 
@@ -1045,18 +1444,260 @@ fn prepare_file(path: &Path) -> Result<()> {
     }
 }
 
-fn init_schema(conn: &Connection) -> Result<()> {
+fn init_schema(conn: &mut Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let tables: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
     match (version, tables) {
         (0, 0) => {
-            conn.execute_batch(&format!(
-                "BEGIN IMMEDIATE;{SCHEMA}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
-            ))
-            .context("create ledger schema")?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(SCHEMA)
+                .and_then(|()| tx.execute_batch(PROJECTIONS_DDL))
+                .context("create ledger schema")?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit().context("create ledger schema")?;
             Ok(())
         }
         (SCHEMA_VERSION, _) => Ok(()),
+        (1, _) => migrate_v1_to_v2(conn),
         _ => bail!("ledger database has an unknown format version"),
     }
+}
+
+/// v1 -> v2 in ONE transaction: add `gaps.tail`, create the projection table,
+/// rebuild a projection for every invocation that still has events, bump the
+/// version. Any failure (for example an undecodable stored event) drops the
+/// transaction, so the file stays exactly at v1 and the server refuses to start
+/// rather than serving a partial projection.
+fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == SCHEMA_VERSION {
+        return Ok(()); // another process migrated first
+    }
+    if version != 1 {
+        bail!("ledger database has an unknown format version");
+    }
+    tx.execute_batch(GAPS_TAIL_DDL)
+        .and_then(|()| tx.execute_batch(PROJECTIONS_DDL))
+        .context("migrate ledger schema to v2")?;
+    let keys: Vec<(String, String)> = {
+        let mut st = tx.prepare("SELECT DISTINCT proxy_id, invocation_id FROM events")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for (proxy_id, invocation_id) in &keys {
+        recompute_projection(&tx, proxy_id, invocation_id)
+            .map_err(|e| anyhow::anyhow!("rebuild projection during v2 migration: {e}"))?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit().context("commit ledger v2 migration")?;
+    tracing::info!(
+        invocations = keys.len(),
+        "proxy ledger migrated to schema v2"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stored projection
+// ---------------------------------------------------------------------------
+
+/// Recompute and store the projection of one invocation from ALL of its stored
+/// events. Removes the row when no event is left.
+fn recompute_projection(
+    tx: &rusqlite::Transaction<'_>,
+    proxy_id: &str,
+    invocation_id: &str,
+) -> Result<(), LedgerError> {
+    let mut st = tx.prepare_cached(
+        "SELECT created_seq, received_at, canonical FROM events
+         WHERE proxy_id = ?1 AND invocation_id = ?2 ORDER BY created_seq",
+    )?;
+    let rows = st.query_map(params![proxy_id, invocation_id], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut inputs = Vec::new();
+    for row in rows {
+        let (created_seq, received_at, canonical) = row?;
+        let event = parse_event(&canonical).map_err(|_| {
+            tracing::error!("proxy ledger: stored event does not decode");
+            LedgerError::StorageUnavailable
+        })?;
+        inputs.push(ProjectionInput {
+            event,
+            created_seq,
+            received_at,
+        });
+    }
+    drop(st);
+    match project(&inputs) {
+        Some(p) => store_projection(tx, &p),
+        None => {
+            tx.execute(
+                "DELETE FROM projections WHERE proxy_id = ?1 AND invocation_id = ?2",
+                params![proxy_id, invocation_id],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn store_projection(tx: &rusqlite::Transaction<'_>, p: &Projection) -> Result<(), LedgerError> {
+    let (tool_status, tool_ref, tool_reason) = match &p.tool {
+        None => (None, None, None),
+        Some(ToolInfo::Identified { metadata_ref }) => {
+            (Some("identified"), Some(metadata_ref.as_str()), None)
+        }
+        Some(ToolInfo::MetadataUnavailable { reason }) => {
+            (Some("metadata_unavailable"), None, Some(reason.as_str()))
+        }
+        Some(ToolInfo::Unavailable { reason }) => {
+            (Some("unavailable"), None, Some(reason.as_str()))
+        }
+    };
+    let a = p.actor.as_ref();
+    let flags = p
+        .flags
+        .iter()
+        .map(|f| f.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    tx.execute(
+        "INSERT OR REPLACE INTO projections (
+            proxy_id, invocation_id, created_seq, lifecycle, outcome, delivery_state, reason,
+            reported_outcome, reported_delivery_state, reported_reason, duration_ms,
+            response_bytes, method, protocol_version, upstream_id, route_revision, actor_id,
+            actor_kind, authentication_method, evidence_source, credential_owner_id,
+            tool_status, tool_ref, tool_reason, cancel_observed, started_at, started_at_s,
+            completed_at, completed_at_s, first_received_at, last_received_at, start_epoch_id,
+            flags, event_count)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,
+                 ?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)",
+        params![
+            p.proxy_id,
+            p.invocation_id,
+            p.created_seq,
+            p.lifecycle.as_str(),
+            p.outcome,
+            p.delivery_state,
+            p.reason,
+            p.reported_outcome,
+            p.reported_delivery_state,
+            p.reported_reason,
+            p.duration_ms,
+            p.response_bytes,
+            p.method,
+            p.protocol_version,
+            p.upstream_id,
+            p.route_revision,
+            a.map(|a| a.actor_id.as_str()),
+            a.map(|a| a.actor_kind.as_str()),
+            a.map(|a| a.authentication_method.as_str()),
+            a.map(|a| a.evidence_source.as_str()),
+            a.and_then(|a| a.credential_owner_id.as_deref()),
+            tool_status,
+            tool_ref,
+            tool_reason,
+            i64::from(p.cancel_observed),
+            p.started_at,
+            p.started_at_s,
+            p.completed_at,
+            p.completed_at_s,
+            p.first_received_at,
+            p.last_received_at,
+            p.start_epoch_id,
+            flags,
+            p.event_count,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Column list of [`projection_from_row`]; the last column is the derived
+/// `epoch_superseded` (the start's epoch is not the proxy's latest announced
+/// epoch; a swept epoch row is always a non-latest one).
+const PROJ_SELECT: &str = "p.proxy_id, p.invocation_id, p.created_seq, p.lifecycle, p.outcome,
+    p.delivery_state, p.reason, p.reported_outcome, p.reported_delivery_state, p.reported_reason,
+    p.duration_ms, p.response_bytes, p.method, p.protocol_version, p.upstream_id,
+    p.route_revision, p.actor_id, p.actor_kind, p.authentication_method, p.evidence_source,
+    p.credential_owner_id, p.tool_status, p.tool_ref, p.tool_reason, p.cancel_observed,
+    p.started_at, p.started_at_s, p.completed_at, p.completed_at_s, p.first_received_at,
+    p.last_received_at, p.start_epoch_id, p.flags, p.event_count,
+    (p.lifecycle = 'started' AND p.start_epoch_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM epochs e WHERE e.proxy_id = p.proxy_id AND e.epoch_id = p.start_epoch_id
+          AND e.ord = (SELECT MAX(m.ord) FROM epochs m WHERE m.proxy_id = p.proxy_id)))";
+
+fn projection_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Projection> {
+    let lifecycle: String = r.get(3)?;
+    let actor_id: Option<String> = r.get(16)?;
+    let tool_status: Option<String> = r.get(21)?;
+    let tool_ref: Option<String> = r.get(22)?;
+    let tool_reason: Option<String> = r.get(23)?;
+    let flags: String = r.get(32)?;
+    let bad = |what: &'static str| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            what.to_string().into(),
+        )
+    };
+    let tool = match tool_status.as_deref() {
+        None => None,
+        Some("identified") => Some(ToolInfo::Identified {
+            metadata_ref: tool_ref.ok_or_else(|| bad("tool_ref"))?,
+        }),
+        Some("metadata_unavailable") => Some(ToolInfo::MetadataUnavailable {
+            reason: tool_reason.ok_or_else(|| bad("tool_reason"))?,
+        }),
+        Some("unavailable") => Some(ToolInfo::Unavailable {
+            reason: tool_reason.ok_or_else(|| bad("tool_reason"))?,
+        }),
+        Some(_) => return Err(bad("tool_status")),
+    };
+    let actor = match actor_id {
+        None => None,
+        Some(actor_id) => Some(ActorInfo {
+            actor_id,
+            actor_kind: r.get(17)?,
+            authentication_method: r.get(18)?,
+            evidence_source: r.get(19)?,
+            credential_owner_id: r.get(20)?,
+        }),
+    };
+    Ok(Projection {
+        proxy_id: r.get(0)?,
+        invocation_id: r.get(1)?,
+        created_seq: r.get(2)?,
+        lifecycle: Lifecycle::parse(&lifecycle).ok_or_else(|| bad("lifecycle"))?,
+        outcome: r.get(4)?,
+        delivery_state: r.get(5)?,
+        reason: r.get(6)?,
+        reported_outcome: r.get(7)?,
+        reported_delivery_state: r.get(8)?,
+        reported_reason: r.get(9)?,
+        duration_ms: r.get(10)?,
+        response_bytes: r.get(11)?,
+        method: r.get(12)?,
+        protocol_version: r.get(13)?,
+        upstream_id: r.get(14)?,
+        route_revision: r.get(15)?,
+        actor,
+        tool,
+        cancel_observed: r.get::<_, i64>(24)? != 0,
+        decision: None,
+        started_at: r.get(25)?,
+        started_at_s: r.get(26)?,
+        completed_at: r.get(27)?,
+        completed_at_s: r.get(28)?,
+        first_received_at: r.get(29)?,
+        last_received_at: r.get(30)?,
+        start_epoch_id: r.get(31)?,
+        epoch_superseded: r.get::<_, i64>(34)? != 0,
+        flags: flags.split(',').filter_map(Flag::parse).collect(),
+        event_count: r.get(33)?,
+    })
 }

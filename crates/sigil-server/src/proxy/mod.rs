@@ -18,6 +18,7 @@ pub mod ledger;
 pub mod lifecycle;
 pub mod metadata;
 pub mod mgmt;
+pub mod projection;
 pub mod registry;
 pub mod status;
 pub mod store;
