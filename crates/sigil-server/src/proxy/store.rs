@@ -67,6 +67,11 @@ fn scopes_of(c: &ProxyConfig) -> Vec<ScopePair> {
         .collect()
 }
 
+/// An accepted ingest refreshes `last_seen` only when the stored value is at
+/// least this old, so ingest is not a heartbeat writer (every write fsyncs the
+/// whole state file). It must stay well below any sensible `stale_after`.
+pub const LAST_SEEN_MIN_INTERVAL_SECS: i64 = 30;
+
 /// Everything stored for one `proxy_id`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProxyEntry {
@@ -241,6 +246,31 @@ impl ProxyStore {
             .read()
             .get(proxy_id)
             .and_then(|e| e.last_seen.clone())
+    }
+
+    /// Record `now` as the proxy's `last_seen` after an accepted ingest, unless
+    /// the stored value is already less than [`LAST_SEEN_MIN_INTERVAL_SECS`]
+    /// old. The check runs under the writer lock against the current entry, so
+    /// a newer status-report value is never overwritten with an older one.
+    /// Returns whether a write happened. A stored value in the future (clock
+    /// stepped back) or one that does not parse is replaced.
+    pub fn touch_last_seen(&self, proxy_id: &str, now: time::OffsetDateTime) -> Result<bool> {
+        let rfc3339 = &time::format_description::well_known::Rfc3339;
+        let txn = self.begin();
+        let mut entry = txn.entry(proxy_id);
+        let fresh = entry
+            .last_seen
+            .as_deref()
+            .and_then(|t| time::OffsetDateTime::parse(t, rfc3339).ok())
+            .is_some_and(|seen| {
+                seen <= now && now - seen < time::Duration::seconds(LAST_SEEN_MIN_INTERVAL_SECS)
+            });
+        if fresh {
+            return Ok(false);
+        }
+        entry.last_seen = Some(now.format(rfc3339)?);
+        txn.commit(proxy_id, entry)?;
+        Ok(true)
     }
 
     /// Start a write transaction (takes the writer mutex).
