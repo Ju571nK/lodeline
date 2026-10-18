@@ -127,8 +127,8 @@ ledger-and-query L3/L5, registry R2)에서 [OPEN]이다. "동결"은 D-03 ingest
 | `semantic_invalid` | 422 | `items[]`: index만 (SV-3..SV-5, registry I-3/I-6..I-8) | [candidate] |
 | `schema_invalid` | 422 | `items[]`: index만. status 보고의 gap schema 위반 | checker-only, 계약 파일에서는 [OPEN] |
 | `invalid_status` | 422 | status 보고 전체 오류 code | checker-only, 계약 파일에서는 [OPEN] |
-| `invalid_cursor` | 422 | 조회: 다른 endpoint/정렬/필터의 cursor | [candidate] |
-| `invalid_filter` | 422 | 조회: 알 수 없는 필터 이름·값, 값 미echo | [candidate] |
+| `invalid_cursor` | 422 | 조회: 다른 endpoint/정렬/필터의 cursor, 형식 오류·길이 초과 cursor | decided 2026-10-17 (S5, #290) |
+| `invalid_filter` | 422 | 조회: 알 수 없는 필터 이름·값, 범위 밖 `limit`, 값 미echo | decided 2026-10-17 (S5, #290) |
 | `unauthorized` | 401 | 관리 route: bearer 없음·불일치·만료·다른 caller cert에 묶인 bearer | decided 2026-10-11 (#251) |
 | `forbidden` | 403 | 관리 route: scope 부족 | decided 2026-10-11 (#251) |
 | `already_exists` | 409 | 관리 route: 이미 있는 proxy_id, 다른 항목·관리 caller가 가진 fingerprint | decided 2026-10-11 (#251) |
