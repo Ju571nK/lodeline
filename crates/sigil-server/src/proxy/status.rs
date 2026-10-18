@@ -148,10 +148,7 @@ pub struct Applied {
 }
 
 fn counter_key(kind: char, upstream: Option<&sigil_proxy_api::Id>, reason: &str) -> String {
-    format!(
-        "{kind}\u{1f}{}\u{1f}{reason}",
-        upstream.map_or("", |u| u.as_str())
-    )
+    super::store::format_counter_key(kind, upstream.map(|u| u.as_str()), reason)
 }
 
 fn reason_text<T: serde::Serialize>(r: &T) -> String {
@@ -317,6 +314,7 @@ pub fn apply(
             }
         }
         next.status = Some(st);
+        next.status_received_at = Some(now_text.clone());
     }
     next.last_seen = Some(now_text);
     Ok(Applied {
@@ -526,11 +524,14 @@ mod tests {
         let (e1, r) = run(&cur, report(E1, 5, vec![]), NOW).unwrap();
         assert!(r.state_applied);
         assert_eq!(e1.last_seen.as_deref(), Some(NOW));
+        assert_eq!(e1.status_received_at.as_deref(), Some(NOW));
         // lower and equal sequence: not applied, last_seen still moves
+        // but the status keeps the time it was applied at
         let (e2, r) = run(&e1, report(E1, 4, vec![]), "2026-10-11T02:00:00Z").unwrap();
         assert!(!r.state_applied);
         assert_eq!(e2.status.as_ref().unwrap().status_sequence.get(), 5);
         assert_eq!(e2.last_seen.as_deref(), Some("2026-10-11T02:00:00Z"));
+        assert_eq!(e2.status_received_at.as_deref(), Some(NOW));
         assert!(
             !run(&e1, report(E1, 5, vec![]), NOW)
                 .unwrap()

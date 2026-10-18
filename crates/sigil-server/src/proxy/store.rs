@@ -72,6 +72,73 @@ fn scopes_of(c: &ProxyConfig) -> Vec<ScopePair> {
 /// whole state file). It must stay well below any sensible `stale_after`.
 pub const LAST_SEEN_MIN_INTERVAL_SECS: i64 = 30;
 
+/// Separator of the parts of a `counter_max` key.
+const COUNTER_KEY_SEP: char = '\u{1f}';
+
+/// `counter_max` key: `kind` (`a` auth failure, `c` unmatched cancel), the
+/// upstream id (empty = none) and the reason, joined by U+001F. The one
+/// writer of this format; [`parse_counter_key`] is its inverse.
+pub fn format_counter_key(kind: char, upstream: Option<&str>, reason: &str) -> String {
+    format!(
+        "{kind}{COUNTER_KEY_SEP}{}{COUNTER_KEY_SEP}{reason}",
+        upstream.unwrap_or("")
+    )
+}
+
+/// Inverse of [`format_counter_key`]; `None` for a key of another shape.
+pub fn parse_counter_key(key: &str) -> Option<(char, Option<&str>, &str)> {
+    let mut it = key.split(COUNTER_KEY_SEP);
+    let (kind, up, reason) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    let mut k = kind.chars();
+    let (kind, None) = (k.next()?, k.next()) else {
+        return None;
+    };
+    Some((kind, (!up.is_empty()).then_some(up), reason))
+}
+
+/// Fields the read API needs per proxy, copied without cloning the status,
+/// gap list or counters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreSummary {
+    pub last_seen: Option<String>,
+    pub desired_revision: Option<u64>,
+    pub applied_revision: Option<i64>,
+    pub config_state: Option<sigil_proxy_api::status::ConfigState>,
+    pub config_expires_at: Option<String>,
+    /// Epoch of the applied status, else the newest epoch seen.
+    pub current_epoch_id: Option<String>,
+    pub spool: Option<sigil_proxy_api::status::SpoolStatus>,
+    pub status_received_at: Option<String>,
+    pub has_status: bool,
+    /// Proxy-reported gaps held (all are open).
+    pub reported_gap_count: usize,
+}
+
+impl StoreSummary {
+    pub fn of(e: &ProxyEntry) -> Self {
+        let st = e.status.as_ref();
+        Self {
+            last_seen: e.last_seen.clone(),
+            desired_revision: Some(e.revision()).filter(|r| *r > 0),
+            applied_revision: st.and_then(|s| s.config.applied_revision.map(|r| r.get())),
+            config_state: st.map(|s| s.config.state),
+            config_expires_at: st
+                .and_then(|s| s.config.expires_at.as_ref())
+                .map(|t| t.as_str().to_string()),
+            current_epoch_id: st
+                .map(|s| s.epoch_id.as_str().to_string())
+                .or_else(|| e.epochs_seen.last().cloned()),
+            spool: st.map(|s| s.spool.clone()),
+            status_received_at: e.status_received_at.clone(),
+            has_status: st.is_some(),
+            reported_gap_count: e.gaps.len(),
+        }
+    }
+}
+
 /// Everything stored for one `proxy_id`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProxyEntry {
@@ -84,6 +151,11 @@ pub struct ProxyEntry {
     /// Server time of the last accepted status report (heartbeat source).
     #[serde(default)]
     pub last_seen: Option<String>,
+    /// Server time (RFC 3339) at which `status` was applied. Unlike
+    /// `last_seen` it is not moved by ingest or by stale reports. `None` for
+    /// state files written before this field existed.
+    #[serde(default)]
+    pub status_received_at: Option<String>,
     /// Epochs a snapshot was applied for, oldest first (bounded).
     #[serde(default)]
     pub epochs_seen: Vec<String>,
@@ -241,6 +313,11 @@ impl ProxyStore {
             || e.previous_scopes.iter().any(hit)
     }
 
+    /// Light per-proxy view for the read API (no deep clone of the entry).
+    pub fn summary(&self, proxy_id: &str) -> Option<StoreSummary> {
+        self.inner.read().get(proxy_id).map(StoreSummary::of)
+    }
+
     pub fn last_seen(&self, proxy_id: &str) -> Option<String> {
         self.inner
             .read()
@@ -363,6 +440,35 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn counter_key_round_trip() {
+        for (k, u, r) in [
+            ('a', Some("up1"), "credential_invalid"),
+            ('c', None, "no_matching_request"),
+        ] {
+            let key = format_counter_key(k, u, r);
+            assert_eq!(parse_counter_key(&key), Some((k, u, r)));
+        }
+        for bad in [
+            "",
+            "a",
+            "a\u{1f}b",
+            "ab\u{1f}\u{1f}r",
+            "a\u{1f}\u{1f}r\u{1f}x",
+        ] {
+            assert_eq!(parse_counter_key(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_entry_without_status_received_at_loads() {
+        let e: ProxyEntry =
+            serde_json::from_str(r#"{"last_seen":"2026-10-11T00:00:00Z"}"#).unwrap();
+        assert_eq!(e.status_received_at, None);
+        let s = StoreSummary::of(&e);
+        assert!(!s.has_status && s.status_received_at.is_none());
+    }
+
     use super::*;
     use serde_json::json;
     use sigil_proxy_api::parse_config;

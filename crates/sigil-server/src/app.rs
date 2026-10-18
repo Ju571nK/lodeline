@@ -165,10 +165,18 @@ pub fn build_router_with_proxy(
     match proxy {
         None => router,
         Some(ctx) => {
-            let mut router = router.merge(crate::proxy::guard::router(ctx.clone()));
+            let management = ctx.mgmt.is_some() && ctx.audit.is_some();
+            let mut router = router
+                .merge(crate::proxy::guard::router(ctx.clone()))
+                // Read-only query API (S5): mounted with or without management.
+                .merge(crate::proxy::query::router(
+                    ctx.clone(),
+                    read_token.clone(),
+                    management,
+                ));
             // Management routes exist only with a verifier file. The guard layer
             // sits inside the host-route guard and acts on management paths only.
-            if ctx.mgmt.is_some() && ctx.audit.is_some() {
+            if management {
                 router = router
                     .merge(crate::proxy::mgmt::router(ctx.clone(), read_token))
                     .layer(axum::middleware::from_fn_with_state(

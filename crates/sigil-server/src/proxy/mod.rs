@@ -6,7 +6,8 @@
 //! lifecycle routes, operator CLI) and S3 (config DTO, config PUT/GET, status
 //! ingest), and S4 (event ledger, `POST /v1/proxy-events`, registry-entry
 //! upload `POST /v1/proxy-metadata`, periodic retention sweep). No CSR signing
-//! (S2b); no projection or query API (S5).
+//! (S2b). S5: invocation projection (slice A) and the read-only query API
+//! `query` (slice C).
 
 pub mod audit;
 pub mod cli;
@@ -19,6 +20,7 @@ pub mod lifecycle;
 pub mod metadata;
 pub mod mgmt;
 pub mod projection;
+pub mod query;
 pub mod registry;
 pub mod status;
 pub mod store;
