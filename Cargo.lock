@@ -3279,6 +3279,7 @@ name = "sigil-proxy-e2e"
 version = "0.9.1"
 dependencies = [
  "anyhow",
+ "axum",
  "axum-server",
  "blake3",
  "parking_lot",

@@ -12,7 +12,7 @@ publish = false
 path = "src/lib.rs"
 
 [dev-dependencies]
-sigil-server = { path = "../sigil-server" }
+sigil-server = { path = "../sigil-server", features = ["test-support"] }
 sigil-proxy = { path = "../sigil-proxy", features = ["test-util"] }
 sigil-proxy-api = { path = "../sigil-proxy-api" }
 serde_json = { workspace = true }
@@ -26,3 +26,4 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 blake3 = { workspace = true }
 parking_lot = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true }
