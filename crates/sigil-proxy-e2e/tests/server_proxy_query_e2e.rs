@@ -659,7 +659,7 @@ impl Proxy {
             "proxy_id": self.id,
             "epoch_id": epoch(ep),
             "status_sequence": seq,
-            "sent_at": "2026-10-11T00:00:00Z",
+            "sent_at": ago(0),
             "config": {
                 "state": "none",
                 "applied_revision": null,
@@ -867,6 +867,10 @@ impl H {
         }
         let r = rb.send().await?;
         let status = r.status().as_u16();
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("{:?}", r.headers()).into_bytes());
         let body = r.bytes().await?.to_vec();
         self.seen.lock().unwrap().push(body.clone());
         Ok(Resp { status, body })
@@ -913,7 +917,7 @@ impl H {
     /// Start the server again on the same port and the same state files. The
     /// bind is retried: the old socket may still be being released.
     async fn server_up(&mut self) {
-        for _ in 0..20 {
+        for _ in 0..50 {
             if let Some(s) =
                 Server::try_start(&self.pki, self.last_port, false, &self.tweak, &self.scope).await
             {
@@ -1524,6 +1528,7 @@ async fn canary_is_absent_from_every_response() {
         .await
         .unwrap();
     assert_eq!(raw.status().as_u16(), 422);
+    let raw_headers = format!("{:?}", raw.headers()).into_bytes();
     let raw_body = raw.bytes().await.unwrap().to_vec();
     assert!(h.ctx().ledger.stored_event(PA, &uid(90)).unwrap().is_none());
 
@@ -1559,7 +1564,7 @@ async fn canary_is_absent_from_every_response() {
         .unwrap();
 
     // Positive control: the canary really is in the server's state.
-    let mut in_state = 0;
+    let mut files: Vec<String> = Vec::new();
     let mut stack = vec![h.pki.dir.path().to_path_buf()];
     while let Some(d) = stack.pop() {
         for e in std::fs::read_dir(&d).unwrap().flatten() {
@@ -1568,12 +1573,21 @@ async fn canary_is_absent_from_every_response() {
                 stack.push(p);
             } else if let Ok(bytes) = std::fs::read(&p) {
                 if contains(&bytes, CANARY.as_bytes()) {
-                    in_state += 1;
+                    files.push(p.file_name().unwrap().to_string_lossy().into_owned());
                 }
             }
         }
     }
-    assert!(in_state >= 1, "the canary never reached the server's state");
+    // Both the config store and the metadata registry hold it, so neither
+    // alone can satisfy the control.
+    assert!(
+        files.iter().any(|f| f.starts_with("proxy-state")),
+        "canary missing from the proxy state file: {files:?}"
+    );
+    assert!(
+        files.iter().any(|f| f.contains("metadata")),
+        "canary missing from the metadata store: {files:?}"
+    );
     assert!(
         !contains(&raw_body, CANARY_ARGS.as_bytes()),
         "the ingest refusal echoed content"
@@ -1590,8 +1604,11 @@ async fn canary_is_absent_from_every_response() {
         "UPSTREAM-SECRET-VALUE",
     ];
     let seen = h.seen.lock().unwrap();
-    assert!(seen.len() >= 12, "the sweep must have read responses");
-    for body in seen.iter().chain(std::iter::once(&raw_body)) {
+    assert!(
+        seen.len() >= 24,
+        "the sweep must have read bodies and headers"
+    );
+    for body in seen.iter().chain([&raw_body, &raw_headers]) {
         for n in needles {
             assert!(
                 !contains(body, n.as_bytes()),
@@ -1606,14 +1623,41 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// RFC 3339 UTC time `back` seconds before now. Gap `detected_at` is subject
+/// to retention at status apply, so a fixed date would age out of the test.
+fn ago(back: u64) -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - back;
+    let (days, rem) = ((t / 86400) as i64, t % 86400);
+    // Civil-from-days (Hinnant).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
 fn unrecorded_gap(n: u32) -> Value {
     json!({
         "kind": "unrecorded_calls",
         "gap_id": uid(7500 + n),
-        "detected_at": "2026-10-10T00:10:00Z",
+        "detected_at": ago(60),
         "count": 3,
-        "from_at": "2026-10-10T00:05:00Z",
-        "to_at": "2026-10-10T00:06:00Z",
+        "from_at": ago(300),
+        "to_at": ago(120),
     })
 }
 
