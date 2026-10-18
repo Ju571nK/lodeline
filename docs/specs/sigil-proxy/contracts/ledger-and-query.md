@@ -15,7 +15,7 @@ Status tags: **[DC]** decided-candidate (reviewable, consistent with frozen text
 |---|---|---|
 | (1) retention and tombstone durations | L1 | [DC] formulas and P1 initial defaults; O-1 decided (option A) |
 | (2) invocation projection | L2 | [DC] |
-| (3) query DTOs, cursor, gap rendering | L3, L4 | [DC] DTO shape; [OPEN] gap list endpoint, scope model |
+| (3) query DTOs, cursor, gap rendering | L3, L4 | [DC] DTO shape; gap list and P1 scope model decided 2026-10-17 (S5) |
 | (4) cross-event semantic validation | L5 | [DC] SV-1..SV-4, SV-6..SV-8; [OPEN] SV-5 (needs config DTO) and the new fixed error codes |
 | status endpoint, gap upsert and ACK | L6b | [DC]; endpoint name and codes [OPEN] for README |
 | inventory/drift read projections | registry.md R7b | DTO [DC]; endpoint names/permission [OPEN] |
@@ -226,10 +226,17 @@ recorded in decisions.md by the orchestrator.
 ## L3. Query DTOs
 
 All lists: `limit` default 100, max 500; response `{items, next_cursor}` where
-`next_cursor` is `null` on the last page. Errors use the README error object with
-fixed messages. Additional fixed codes proposed here, all **[OPEN]** for the README error table:
-`invalid_cursor` (422), `invalid_filter` (422), `semantic_invalid` (422 item code),
-`invocation_owner_conflict` (409 item code).
+`next_cursor` is `null` on the last page. A `limit` of 0, above 500 or not a
+number is 422 `invalid_filter`; it is never clamped (decided 2026-10-17, S5).
+Errors use the README error object with fixed messages. `invalid_cursor` (422) and
+`invalid_filter` (422) are fixed codes in the README error table (S5). Also
+proposed here, **[OPEN]** for the README error table: `semantic_invalid` (422 item
+code), `invocation_owner_conflict` (409 item code).
+
+P1 `proxy.read` model (decided 2026-10-17, S5): the read bearer with a host-class
+client certificate reads every proxy. The server resolves the caller's range in one
+place, so a later per-token range changes no endpoint. Proxy and management
+certificates cannot use these endpoints.
 Ordering is fixed per endpoint; a client cannot choose it. The cursor is opaque,
 base64url of `{v:1, <order key>, filter_hash}`, and `filter_hash` covers the
 **endpoint, the sort definition and the normalised filters**. A cursor from another
@@ -266,9 +273,9 @@ cursor `{v:1, after_proxy_id, filter_hash}` (unique key, no tie-breaker needed).
 | `config_state` | `none` \| `valid` \| `expired` (proxy-reported) |
 | `config_expires_at` | proxy-reported |
 | `current_epoch_id` | latest announced epoch |
-| `spool` | `{state, depth_events, bytes, capacity_bytes, oldest_unsent_age_seconds, as_of}` from the last heartbeat |
+| `spool` | `{state, depth_events, bytes, capacity_bytes, oldest_unsent_age_seconds, unsent_events, as_of}` from the last heartbeat; `as_of` equals `status_as_of` |
 | `open_gap_count` | open audit gaps (L4) |
-| `status_as_of` | server time of the heartbeat the status fields come from |
+| `status_as_of` | server time at which the server applied the status report the status fields come from (not the proxy's `sent_at`); `null` when no report has been applied since the field was added |
 
 `stale_after` default 90 s = 3 × heartbeat interval (30 s; bounds 5–300 s). Initial
 test values. Status fields describe the **last report**, not live state; clients
@@ -289,8 +296,8 @@ must show `status_as_of` and `connection_state` together (PX-016, AC-12).
 | `open_gap_counts` | object kind → count |
 
 404 when the proxy is unknown or outside the caller's `proxy.read` range
-(indistinguishable). **[OPEN]** a dedicated gap list endpoint is not added here;
-`audit_gaps` (max 50) is the P1 candidate.
+(indistinguishable). P1 has no dedicated gap list endpoint: `audit_gaps` (max 50)
+and `audit_gaps_total` are the gap view (decided 2026-10-17, S5).
 
 ### GET /v1/proxy-invocations
 
