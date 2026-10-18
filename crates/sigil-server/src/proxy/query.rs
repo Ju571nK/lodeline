@@ -25,7 +25,7 @@ use super::projection::{
     InvocationFilter, Lifecycle, Projection, ProxyScope, TimeBasis, ToolInfo, MAX_GAP_PAGE,
 };
 use super::registry::ProxyRecord;
-use super::store::ProxyEntry;
+use super::store::{parse_counter_key, ProxyEntry, StoreSummary};
 use super::ProxyContext;
 use crate::auth::{require_bearer, ReadToken};
 use crate::tls_accept::PeerIdentity;
@@ -339,10 +339,9 @@ pub struct SpoolDto {
     pub bytes: i64,
     pub capacity_bytes: i64,
     pub oldest_unsent_age_seconds: Option<i64>,
-    /// [OPEN] name. Proxy-reported `sent_at` of the report the spool numbers
-    /// come from (the server receive time is not stored apart from
-    /// `last_seen`, which accepted ingest also refreshes).
-    pub as_of: String,
+    /// Server time at which the report these numbers come from was applied
+    /// (`status_received_at`). Null for state written before it was recorded.
+    pub as_of: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -359,7 +358,7 @@ pub struct ProxySummary {
     pub current_epoch_id: Option<String>,
     pub spool: Option<SpoolDto>,
     pub open_gap_count: i64,
-    /// [OPEN] name. See [`SpoolDto::as_of`].
+    /// Server time the status fields were applied; see [`SpoolDto::as_of`].
     pub status_as_of: Option<String>,
 }
 
@@ -536,11 +535,10 @@ fn invocation_dto(p: &Projection) -> InvocationSummary {
 
 /// Summary without ledger data; `open_gap_count` counts proxy-reported gaps
 /// only and is completed by the caller from the ledger.
-fn summary_of(rec: &ProxyRecord, entry: Option<&ProxyEntry>, now: i64) -> ProxySummary {
-    let status = entry.and_then(|e| e.status.as_ref());
-    let last_seen = entry.and_then(|e| e.last_seen.clone());
-    let desired = entry.map(ProxyEntry::revision).filter(|r| *r > 0);
-    let applied = status.and_then(|s| s.config.applied_revision.map(|r| r.get()));
+fn summary_of(rec: &ProxyRecord, st: Option<&StoreSummary>, now: i64) -> ProxySummary {
+    let last_seen = st.and_then(|x| x.last_seen.clone());
+    let desired = st.and_then(|x| x.desired_revision);
+    let applied = st.and_then(|x| x.applied_revision);
     let in_sync = matches!((desired, applied), (Some(d), Some(a)) if i64::try_from(d) == Ok(a));
     ProxySummary {
         proxy_id: rec.proxy_id.clone(),
@@ -550,27 +548,25 @@ fn summary_of(rec: &ProxyRecord, entry: Option<&ProxyEntry>, now: i64) -> ProxyS
         desired_revision: desired,
         applied_revision: applied,
         config_in_sync: in_sync,
-        config_state: status.map_or(ConfigState::None, |s| s.config.state),
-        config_expires_at: status
-            .and_then(|s| s.config.expires_at.as_ref())
-            .map(|t| t.as_str().to_string()),
+        config_state: st.and_then(|x| x.config_state).unwrap_or(ConfigState::None),
+        config_expires_at: st.and_then(|x| x.config_expires_at.clone()),
         // L3: the epoch of the last applied status report, else the newest
         // epoch the store saw. Not the ledger's latest announced epoch (no
         // ledger accessor yet), so it can lag events from a newer epoch.
-        current_epoch_id: status
-            .map(|s| s.epoch_id.as_str().to_string())
-            .or_else(|| entry.and_then(|e| e.epochs_seen.last().cloned())),
-        spool: status.map(|s| SpoolDto {
-            state: s.spool.state,
-            depth_events: s.spool.depth_events.get(),
-            unsent_events: s.spool.unsent_events.get(),
-            bytes: s.spool.bytes.get(),
-            capacity_bytes: s.spool.capacity_bytes.get(),
-            oldest_unsent_age_seconds: s.spool.oldest_unsent_age_seconds.map(|v| v.get()),
-            as_of: s.sent_at.as_str().to_string(),
+        current_epoch_id: st.and_then(|x| x.current_epoch_id.clone()),
+        spool: st.and_then(|x| {
+            x.spool.as_ref().map(|sp| SpoolDto {
+                state: sp.state,
+                depth_events: sp.depth_events.get(),
+                unsent_events: sp.unsent_events.get(),
+                bytes: sp.bytes.get(),
+                capacity_bytes: sp.capacity_bytes.get(),
+                oldest_unsent_age_seconds: sp.oldest_unsent_age_seconds.map(|v| v.get()),
+                as_of: x.status_received_at.clone(),
+            })
         }),
-        open_gap_count: entry.map_or(0, |e| e.gaps.len() as i64),
-        status_as_of: status.map(|s| s.sent_at.as_str().to_string()),
+        open_gap_count: st.map_or(0, |x| x.reported_gap_count as i64),
+        status_as_of: st.and_then(|x| x.status_received_at.clone()),
     }
 }
 
@@ -664,18 +660,17 @@ fn counters_dto(e: &ProxyEntry) -> CountersDto {
             .collect(),
     };
     for (k, v) in &e.counter_max {
-        let mut it = k.split('\u{1f}');
-        let (Some(kind), Some(up), Some(reason)) = (it.next(), it.next(), it.next()) else {
+        let Some((kind, up, reason)) = parse_counter_key(k) else {
             continue;
         };
         let dto = CounterDto {
-            upstream_id: (!up.is_empty()).then(|| up.to_string()),
+            upstream_id: up.map(str::to_string),
             reason: reason.to_string(),
             count: *v,
         };
         match kind {
-            "a" => c.auth_failures.push(dto),
-            "c" => c.unmatched_cancels.push(dto),
+            'a' => c.auth_failures.push(dto),
+            'c' => c.unmatched_cancels.push(dto),
             _ => {}
         }
     }
@@ -807,37 +802,26 @@ async fn list_proxies_inner(
     };
 
     let now = now_secs();
-    let mut page: Vec<(ProxyRecord, Option<ProxyEntry>)> = Vec::new();
+    let mut page: Vec<(ProxyRecord, Option<StoreSummary>)> = Vec::new();
     let mut more = false;
     for rec in scoped_records(&ctx, &scope) {
         if after.as_deref().is_some_and(|a| rec.proxy_id.as_str() <= a) {
             continue;
         }
-        // Cheap filter first: `connection_state` needs only `last_seen`, so
-        // skipped rows never clone a full store entry.
-        if let Some(w) = want_state {
-            let seen = ctx.store.last_seen(&rec.proxy_id);
-            if connection_state(seen.as_deref(), now, STALE_AFTER_SECS) != w {
-                continue;
-            }
-        }
-        // `config_in_sync` needs the revisions, so that filter loads the entry.
-        let mut entry = None;
-        if let Some(w) = want_sync {
-            entry = ctx.store.entry(&rec.proxy_id);
-            if summary_of(&rec, entry.as_ref(), now).config_in_sync != w {
-                continue;
-            }
+        // One light store read per examined row (no deep clone of the entry).
+        let st = ctx.store.summary(&rec.proxy_id);
+        let s = summary_of(&rec, st.as_ref(), now);
+        if want_state.is_some_and(|w| w != s.connection_state)
+            || want_sync.is_some_and(|w| w != s.config_in_sync)
+        {
+            continue;
         }
         // A match beyond a full page only proves there is a next page; stop.
         if page.len() == limit {
             more = true;
             break;
         }
-        if entry.is_none() {
-            entry = ctx.store.entry(&rec.proxy_id);
-        }
-        page.push((rec, entry));
+        page.push((rec, st));
     }
     let next_cursor = if more {
         page.last()
@@ -845,18 +829,20 @@ async fn list_proxies_inner(
     } else {
         None
     };
+    // One ledger call for the whole page.
     let items = blocking(move || {
-        let mut out = Vec::with_capacity(page.len());
-        for (rec, entry) in &page {
-            let mut s = summary_of(rec, entry.as_ref(), now);
-            s.open_gap_count += ctx
-                .ledger
-                .open_gap_counts(&rec.proxy_id)?
-                .values()
-                .sum::<i64>();
-            out.push(s);
-        }
-        Ok(out)
+        let ids: Vec<String> = page.iter().map(|(r, _)| r.proxy_id.clone()).collect();
+        let counts = ctx.ledger.open_gap_counts_for(&ids)?;
+        Ok(page
+            .iter()
+            .map(|(rec, st)| {
+                let mut s = summary_of(rec, st.as_ref(), now);
+                s.open_gap_count += counts
+                    .get(&rec.proxy_id)
+                    .map_or(0, |m| m.values().sum::<i64>());
+                s
+            })
+            .collect::<Vec<_>>())
     })
     .await?;
     Ok(Json(Page { items, next_cursor }).into_response())
@@ -877,7 +863,8 @@ async fn get_proxy(
         let entry = ctx.store.entry(&rec.proxy_id);
         let gaps = ctx.ledger.gaps_page(&rec.proxy_id, MAX_GAP_PAGE)?;
         let derived = ctx.ledger.open_gap_counts(&rec.proxy_id)?;
-        let mut summary = summary_of(&rec, entry.as_ref(), now);
+        let st = entry.as_ref().map(StoreSummary::of);
+        let mut summary = summary_of(&rec, st.as_ref(), now);
         let reported: &[GapReport] = entry.as_ref().map_or(&[], |e| e.gaps.as_slice());
 
         let mut open_gap_counts = derived;
@@ -1088,21 +1075,10 @@ async fn get_invocation(
         return proxy_unknown();
     }
     let scope = read_scope(&ctx, &parts.extensions);
-    let proxies: Vec<String> = scoped_records(&ctx, &scope)
-        .into_iter()
-        .map(|r| r.proxy_id)
-        .collect();
-    // SV-1 binds an invocation_id to one proxy, so at most one in-scope proxy
-    // holds it; out-of-scope proxies are never consulted.
-    let found = blocking(move || {
-        for pid in &proxies {
-            if let Some(d) = ctx.ledger.get_invocation(pid, &invocation_id)? {
-                return Ok(Some(d));
-            }
-        }
-        Ok(None)
-    })
-    .await;
+    // One ledger call: the owner lookup is restricted to the scope inside the
+    // query, so an out-of-scope owner looks like no owner.
+    let found =
+        blocking(move || Ok(ctx.ledger.get_invocation_scoped(&invocation_id, &scope)?)).await;
     match found {
         Ok(Some(d)) => Json(InvocationDetailDto {
             invocation: invocation_dto(&d.invocation),

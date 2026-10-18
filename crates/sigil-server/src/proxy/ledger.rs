@@ -364,10 +364,15 @@ struct ReadPool {
     conns: Vec<Mutex<Connection>>,
     next: AtomicUsize,
     timeout_ms: AtomicU64,
+    /// Number of read-pool acquisitions (one per ledger read call).
+    #[cfg(any(test, feature = "test-support"))]
+    acquires: AtomicU64,
 }
 
 impl ReadPool {
     fn acquire(&self) -> ReadGuard<'_> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.acquires.fetch_add(1, Ordering::Relaxed);
         let conn = self
             .conns
             .iter()
@@ -561,6 +566,11 @@ CREATE INDEX gaps_proxy_open_kind ON gaps (proxy_id, open, kind);
 const EVENTS_INV_TYPE_DDL: &str =
     "CREATE INDEX events_inv_type ON events (proxy_id, invocation_id, event_type, created_seq);";
 
+/// Single-query owner lookup by `invocation_id` (S5 read API). Applied with
+/// `IF NOT EXISTS` on every open, so fresh, migrated and older v2 files all get it.
+const INVOCATION_INDEX_DDL: &str =
+    "CREATE INDEX IF NOT EXISTS projections_invocation ON projections (invocation_id);";
+
 /// What v2 adds to a v1 `gaps` table (fresh files get it from `SCHEMA`).
 const GAPS_TAIL_DDL: &str = "ALTER TABLE gaps ADD COLUMN tail INTEGER NOT NULL DEFAULT 0;";
 
@@ -572,6 +582,10 @@ impl Ledger {
     pub fn open(path: &Path, opts: LedgerOptions) -> Result<Self> {
         let mut conn = open_hardened(path)?;
         init_schema(&mut conn)?;
+        // v2 files created before the owner lookup lack this index; adding it
+        // idempotently on every open keeps the schema at v2 (no migration).
+        conn.execute_batch(INVOCATION_INDEX_DDL)
+            .context("create invocation_id index")?;
         let conns = (0..READ_POOL_SIZE)
             .map(|_| open_read_only(path).map(Mutex::new))
             .collect::<Result<Vec<_>>>()?;
@@ -581,9 +595,17 @@ impl Ledger {
                 conns,
                 next: AtomicUsize::new(0),
                 timeout_ms: AtomicU64::new(READ_QUERY_TIMEOUT_MS),
+                #[cfg(any(test, feature = "test-support"))]
+                acquires: AtomicU64::new(0),
             },
             opts,
         })
+    }
+
+    /// Test hook: how many read-pool acquisitions (ledger read calls) so far.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn read_acquires_for_test(&self) -> u64 {
+        self.read.acquires.load(Ordering::Relaxed)
     }
 
     /// Test hook: change the per-query read time limit.
@@ -1095,48 +1117,33 @@ impl Ledger {
         let mut conn = self.read.acquire();
         // One snapshot for the projection and its events.
         let tx = conn.transaction()?;
-        let invocation = tx
-            .query_row(
-                &format!(
-                    "SELECT {PROJ_SELECT} FROM projections p
-                     WHERE p.proxy_id = ?1 AND p.invocation_id = ?2"
-                ),
-                params![proxy_id, invocation_id],
-                projection_from_row,
-            )
-            .optional()?;
-        let Some(invocation) = invocation else {
+        invocation_detail(&tx, proxy_id, invocation_id)
+    }
+
+    /// The proxy holding `invocation_id`, restricted to `scope`: one indexed
+    /// query. `None` when unknown or owned by a proxy outside the scope (the
+    /// two are indistinguishable). SV-1 makes the owner unique.
+    pub fn invocation_owner(
+        &self,
+        invocation_id: &str,
+        scope: &ProxyScope,
+    ) -> Result<Option<String>, LedgerError> {
+        let conn = self.read.acquire();
+        owner_in(&conn, invocation_id, scope)
+    }
+
+    /// Owner lookup plus detail in one read acquisition and one snapshot.
+    pub fn get_invocation_scoped(
+        &self,
+        invocation_id: &str,
+        scope: &ProxyScope,
+    ) -> Result<Option<InvocationDetail>, LedgerError> {
+        let mut conn = self.read.acquire();
+        let tx = conn.transaction()?;
+        let Some(owner) = owner_in(&tx, invocation_id, scope)? else {
             return Ok(None);
         };
-        let events = {
-            let mut st = tx.prepare(
-                "SELECT created_seq, event_type, event_id, epoch_id, sequence, occurred_at,
-                        received_at FROM events
-                 WHERE proxy_id = ?1 AND invocation_id = ?2 ORDER BY created_seq LIMIT ?3",
-            )?;
-            let rows = st.query_map(
-                params![proxy_id, invocation_id, MAX_DETAIL_EVENTS as i64],
-                |r| {
-                    Ok(EventIdentity {
-                        created_seq: r.get(0)?,
-                        event_type: r.get(1)?,
-                        event_id: r.get(2)?,
-                        epoch_id: r.get(3)?,
-                        sequence: r.get(4)?,
-                        occurred_at: r.get(5)?,
-                        received_at: r.get(6)?,
-                    })
-                },
-            )?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let events_total = invocation.event_count;
-        Ok(Some(InvocationDetail {
-            events_truncated: events_total > MAX_DETAIL_EVENTS as i64,
-            events,
-            events_total,
-            invocation,
-        }))
+        invocation_detail(&tx, &owner, invocation_id)
     }
 
     /// Server-derived gaps of `proxy_id`, newest first, at most 50, plus the
@@ -1171,6 +1178,39 @@ impl Ledger {
         )?;
         let rows = st.query_map(params![proxy_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Open server-derived gaps by kind for several proxies in one query.
+    /// Proxies without open gaps are absent from the map. At most
+    /// [`MAX_LIST_LIMIT`] ids per call.
+    pub fn open_gap_counts_for(
+        &self,
+        proxy_ids: &[String],
+    ) -> Result<BTreeMap<String, BTreeMap<String, i64>>, LedgerError> {
+        let mut out = BTreeMap::new();
+        if proxy_ids.is_empty() {
+            return Ok(out);
+        }
+        let ids = &proxy_ids[..proxy_ids.len().min(MAX_LIST_LIMIT)];
+        let sql = format!(
+            "SELECT proxy_id, kind, COUNT(*) FROM gaps WHERE open = 1 AND proxy_id IN ({})
+             GROUP BY proxy_id, kind",
+            vec!["?"; ids.len()].join(",")
+        );
+        let conn = self.read.acquire();
+        let mut st = conn.prepare(&sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (p, k, n) = row?;
+            out.entry(p).or_insert_with(BTreeMap::new).insert(k, n);
+        }
+        Ok(out)
     }
 
     /// F13/AC-06 tail gap. The status slice calls this with the report's
@@ -1343,6 +1383,79 @@ struct Prepared {
     sequence: i64,
     invocation_id: String,
     event_type: &'static str,
+}
+
+/// Projection and up to [`MAX_DETAIL_EVENTS`] event identifiers of one
+/// invocation, read through `conn` (a transaction gives one snapshot).
+fn invocation_detail(
+    conn: &Connection,
+    proxy_id: &str,
+    invocation_id: &str,
+) -> Result<Option<InvocationDetail>, LedgerError> {
+    let invocation = conn
+        .query_row(
+            &format!(
+                "SELECT {PROJ_SELECT} FROM projections p
+                 WHERE p.proxy_id = ?1 AND p.invocation_id = ?2"
+            ),
+            params![proxy_id, invocation_id],
+            projection_from_row,
+        )
+        .optional()?;
+    let Some(invocation) = invocation else {
+        return Ok(None);
+    };
+    let events = {
+        let mut st = conn.prepare(
+            "SELECT created_seq, event_type, event_id, epoch_id, sequence, occurred_at,
+                    received_at FROM events
+             WHERE proxy_id = ?1 AND invocation_id = ?2 ORDER BY created_seq LIMIT ?3",
+        )?;
+        let rows = st.query_map(
+            params![proxy_id, invocation_id, MAX_DETAIL_EVENTS as i64],
+            |r| {
+                Ok(EventIdentity {
+                    created_seq: r.get(0)?,
+                    event_type: r.get(1)?,
+                    event_id: r.get(2)?,
+                    epoch_id: r.get(3)?,
+                    sequence: r.get(4)?,
+                    occurred_at: r.get(5)?,
+                    received_at: r.get(6)?,
+                })
+            },
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let events_total = invocation.event_count;
+    Ok(Some(InvocationDetail {
+        events_truncated: events_total > MAX_DETAIL_EVENTS as i64,
+        events,
+        events_total,
+        invocation,
+    }))
+}
+
+fn owner_in(
+    conn: &Connection,
+    invocation_id: &str,
+    scope: &ProxyScope,
+) -> Result<Option<String>, LedgerError> {
+    let mut sql = String::from("SELECT proxy_id FROM projections WHERE invocation_id = ?");
+    let mut args: Vec<SqlValue> = vec![SqlValue::Text(invocation_id.to_string())];
+    if let ProxyScope::Only(allowed) = scope {
+        if allowed.is_empty() {
+            return Ok(None);
+        }
+        sql.push_str(" AND proxy_id IN (");
+        sql.push_str(&vec!["?"; allowed.len()].join(","));
+        sql.push(')');
+        args.extend(allowed.iter().map(|a| SqlValue::Text(a.clone())));
+    }
+    sql.push_str(" LIMIT 1");
+    Ok(conn
+        .query_row(&sql, rusqlite::params_from_iter(args.iter()), |r| r.get(0))
+        .optional()?)
 }
 
 impl Prepared {

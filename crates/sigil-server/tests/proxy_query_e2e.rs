@@ -356,6 +356,7 @@ impl Fx {
                 parse_status(status_json(Some(3), "valid").to_string().as_bytes()).unwrap(),
             ),
             last_seen: Some(rfc(now - 30)),
+            status_received_at: Some(rfc(now - 20)),
             epochs_seen: vec![EP1.into()],
             counters_epoch: Some(EP1.into()),
             ..Default::default()
@@ -602,8 +603,12 @@ async fn proxies_list_filters_order_and_dto() {
     assert_eq!(a["current_epoch_id"], EP1);
     assert_eq!(a["spool"]["state"], "degraded");
     assert_eq!(a["spool"]["unsent_events"], 3);
-    assert_eq!(a["spool"]["as_of"], "2026-10-11T00:00:00Z");
-    assert_eq!(a["status_as_of"], "2026-10-11T00:00:00Z");
+    // server time the status was applied, not the proxy's sent_at
+    assert_eq!(a["spool"]["as_of"], rfc(fx.now - 20));
+    assert_eq!(a["status_as_of"], rfc(fx.now - 20));
+    // px-b's state predates status_received_at: null, never a guessed time
+    let b0 = &r.json()["items"][1];
+    assert!(b0["status_as_of"].is_null() && b0["spool"]["as_of"].is_null());
     // Server-derived: the sequence jump 5 -> 7 opened one sequence_gap.
     assert_eq!(a["open_gap_count"], 1);
     let b = &r.json()["items"][1];
@@ -1479,4 +1484,146 @@ async fn query_timeout_maps_to_503() {
             r.text()
         );
     }
+}
+
+// ---- part 2: ledger call bounds, owner lookup, batched counts ---------------
+
+#[tokio::test]
+async fn ledger_calls_are_bounded_per_request() {
+    let fx = Fx::new(false, 3).await;
+    let l = &fx.ctx.ledger;
+    let calls = |before: u64| l.read_acquires_for_test() - before;
+
+    let b = l.read_acquires_for_test();
+    assert_eq!(fx.get("/v1/proxies").await.status, 200);
+    assert_eq!(calls(b), 1, "list: one batched gap-count call for the page");
+
+    let b = l.read_acquires_for_test();
+    assert_eq!(
+        fx.get("/v1/proxies?connection_state=connected")
+            .await
+            .status,
+        200
+    );
+    assert_eq!(calls(b), 1);
+
+    // an empty page needs no ledger call at all
+    let b = l.read_acquires_for_test();
+    let r = fx.get_scoped("/v1/proxies", &[]).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(calls(b), 0);
+
+    let b = l.read_acquires_for_test();
+    assert_eq!(fx.get("/v1/proxies/px-a").await.status, 200);
+    assert_eq!(calls(b), 2, "detail: gap page + gap counts");
+
+    let b = l.read_acquires_for_test();
+    assert_eq!(
+        fx.get(&format!("/v1/proxy-invocations/{}", inv(1)))
+            .await
+            .status,
+        200
+    );
+    assert_eq!(calls(b), 1, "invocation detail: owner + detail in one call");
+
+    let b = l.read_acquires_for_test();
+    assert_eq!(
+        fx.get(&format!("/v1/proxy-invocations/{}", inv(999)))
+            .await
+            .status,
+        404
+    );
+    assert_eq!(calls(b), 1);
+
+    let b = l.read_acquires_for_test();
+    assert_eq!(fx.get("/v1/proxy-invocations").await.status, 200);
+    assert_eq!(calls(b), 1);
+}
+
+#[tokio::test]
+async fn batched_gap_counts_match_per_proxy_counts() {
+    let fx = Fx::new(false, 0).await;
+    let l = &fx.ctx.ledger;
+    let ids: Vec<String> = ["px-a", "px-b", "px-c", "px-none"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let batch = l.open_gap_counts_for(&ids).unwrap();
+    for id in &ids {
+        let one = l.open_gap_counts(id).unwrap();
+        assert_eq!(batch.get(id).cloned().unwrap_or_default(), one, "{id}");
+    }
+    assert_eq!(batch["px-a"]["sequence_gap"], 1);
+    assert!(!batch.contains_key("px-b") && !batch.contains_key("px-none"));
+    assert!(l.open_gap_counts_for(&[]).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invocation_owner_lookup_respects_scope() {
+    use sigil_server::proxy::projection::ProxyScope;
+    let fx = Fx::new(false, 0).await;
+    let l = &fx.ctx.ledger;
+    let all = ProxyScope::All;
+    assert_eq!(
+        l.invocation_owner(&inv(1), &all).unwrap().as_deref(),
+        Some("px-a")
+    );
+    assert_eq!(
+        l.invocation_owner(&inv(5), &all).unwrap().as_deref(),
+        Some("px-b")
+    );
+    assert_eq!(l.invocation_owner(&inv(999), &all).unwrap(), None);
+    let only_a = ProxyScope::Only(vec!["px-a".into()]);
+    assert_eq!(l.invocation_owner(&inv(5), &only_a).unwrap(), None);
+    assert_eq!(
+        l.invocation_owner(&inv(1), &only_a).unwrap().as_deref(),
+        Some("px-a")
+    );
+    assert_eq!(
+        l.invocation_owner(&inv(1), &ProxyScope::Only(vec![]))
+            .unwrap(),
+        None
+    );
+    let n = l
+        .read_scalar_for_test(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'projections_invocation'",
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn invocation_index_is_added_to_an_existing_v2_file() {
+    use sigil_server::proxy::ledger::{Ledger, LedgerOptions};
+    let fx = Fx::new(false, 0).await;
+    let path = fx.ledger_path.clone();
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("DROP INDEX projections_invocation;")
+            .unwrap();
+    }
+    let l = Ledger::open(&path, LedgerOptions::default()).unwrap();
+    let n = l
+        .read_scalar_for_test(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'projections_invocation'",
+        )
+        .unwrap();
+    assert_eq!(n, 1, "reopen recreates the index (still schema v2)");
+    drop(l);
+    Ledger::open(&path, LedgerOptions::default()).unwrap();
+}
+
+#[tokio::test]
+async fn status_received_at_is_server_time_in_responses() {
+    let fx = Fx::new(false, 0).await;
+    // legacy entry (no status_received_at) -> null as_of; once set it is served.
+    let before = fx.get("/v1/proxies/px-b").await.json();
+    assert!(before["status_as_of"].is_null());
+    let txn = fx.ctx.store.begin();
+    let mut e = txn.entry("px-b");
+    e.status_received_at = Some(rfc(fx.now - 5));
+    txn.commit("px-b", e).unwrap();
+    let after = fx.get("/v1/proxies/px-b").await.json();
+    assert_eq!(after["status_as_of"], rfc(fx.now - 5));
+    assert_eq!(after["spool"]["as_of"], rfc(fx.now - 5));
 }
