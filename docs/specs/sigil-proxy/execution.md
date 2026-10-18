@@ -1,6 +1,6 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-15 · Claude Code orchestrator 세션 (기준 커밋 `01ce498`)
+갱신: 2026-10-18 · Claude Code orchestrator 세션 (기준 커밋 `ad63551`)
 
 ## 현재 상태
 
@@ -98,6 +98,43 @@
 남은 P1: S5(projection·조회), S2b(CSR 서명), T-12b(MCP protocol), T-13(registry entry 생성)·T-14(spool·이벤트 생성), T-15, T-16. 통합 e2e로 ingest 경로(이벤트 fixture → server ledger) 확인 필요.
 실기 미검증: 변화 없음. ledger의 `synchronous=FULL` 내구성은 실제 전원 차단으로 검증하지 않았다.
 교훈: 계약상 "같은 것의 재전송"은 원본과 바이트 단위로 같아야 한다(C H1, B2 M2). 공유 자원(slot·mutex·전역 한도)은 한 proxy가 독점할 수 없게 proxy별 상한을 함께 둔다(B1 M2, B2 M1·M4).
+
+## 2026-10-17 P1 5회차 배정: T-11 S5 projection·조회 (기준 `37a3761`)
+
+4회차 마무리: #283(ingest 403 문구), #285(ingest 통합 e2e, #282) 머지. #285는 로컬 rustc가 CI stable보다 오래되어 deprecated `fetch_update` 경고를 놓쳤다가 수정했다.
+
+| 작업 | 모델/역할 | 목표 | Spec | 소유 파일 | 이슈 |
+|---|---|---|---|---|---|
+| S5-plan | sonnet (planner, 읽기 전용) | S5 범위·슬라이스·미결 계약 | PX-006/010/011/012/016, AC-05/06/12 | 없음 | — |
+| S5 A | sonnet (coder, worktree) | ledger v2·저장 projection·invocation 단위 보존 정리·읽기 API | PX-006/010/011/012/016, AC-05/06/12 | `proxy/ledger.rs`, `proxy/projection.rs` | #286 |
+| S5 B | sonnet (coder, worktree, A 뒤) | status 기반 tail gap·ingest `last_seen` | PX-011/012, AC-06/12 | `proxy/{status,store,ingest}.rs`(+ledger tail 경로) | #289 |
+| S5 C | sonnet (coder, worktree, B와 병렬) | 조회 API 4개·cursor·필터·인증·`route_of` 수정 | PX-006/010/016, AC-05/06/12 | `proxy/query.rs`, `app.rs`, `mgmt.rs`, `registry.rs`(+B 머지 뒤 ledger·store·status 일부) | #290 |
+| S5 e2e | sonnet (coder, worktree) | 실제 mTLS로 ingest→projection→조회 | AC-05/06/12 | `crates/sigil-proxy-e2e/tests/server_proxy_query_e2e.rs` | #293 |
+| 리뷰 | sonnet (reviewer, 읽기 전용) | 각 갈래 독립 리뷰·재확인 | 해당 ID | 없음 | — |
+
+결정(사용자, 2026-10-17): planner 추천안 전부 채택 — [decisions.md "T-11 S5 범위"](decisions.md). 계약 [OPEN] 정리: `proxy.read` P1 모델, `limit` 범위 밖 422, 서버 시각 `status_as_of`, gap endpoint 없음, `invalid_cursor`·`invalid_filter` 확정, flag `event_limit`(P-8).
+
+진행:
+- A: 리뷰 approve with fixes(M1 invocation당 재계산 이차 비용 → writer 정체, M2 다중 proxy 범위 불가, M3 tail 닫힘 기록이 빠진 범위를 닫힘으로 표시, M4/M5 필터·gap 조회 전체 scan·단일 읽기 mutex) → 수정(256개 상한·`event_limit`, 읽기 pool 4·조회 5 s 제한, index) → 재확인(R1 cancel이 완료를 밀어냄, R2 batch마다 O(k) COUNT, 필수 scope) → approve → PR #288.
+- B: 리뷰 approve with fixes(M1 ledger에 없는 epoch로 닫힐 수 없는 tail gap 반복 생성 → 자기 gap 한도 소진, L1 `last_seen` 수 ms 역행) → 수정(모르는 epoch tail은 proxy당 하나) → approve → PR #291.
+- C: 보안 리뷰 approve with comments(M1 `status_as_of`가 proxy 시계, M2 목록 행마다 ledger 호출, M3 단건 조회가 proxy 수만큼 조회) → B 머지 뒤 rebase하여 수정(서버 시각 `status_received_at`, 일괄 gap 수, 단일 owner 조회, 요청당 ledger 호출 상한 테스트) → approve → PR #292.
+- e2e: 리뷰 approve with fixes(M1 AC-05 검사가 header 미포함, L1 양성 대조 약함, L3 재시작 rebind, L4 고정 날짜의 gap이 보존 기간 뒤 사라질 시한폭탄) → 수정 → PR(아래).
+
+### 5회차 머지 결과 (2026-10-17 ~ 10-18)
+
+| PR | 작업 | 이슈 |
+|---|---|---|
+| #283 | ingest 403 문구 | — |
+| #285 | S4 ingest 통합 e2e | #282 |
+| #287 | S5 결정·`event_limit` | — |
+| #288 | S5 A ledger v2·projection·읽기 API | #286 |
+| #291 | S5 B tail gap·`last_seen` | #289 |
+| #292 | S5 C 조회 API | #290 |
+
+후속: #279(registry 409 `metadata_ref`→T-13, metadata 보존, `stale_after` 설정값화), #260(proxy status 보고의 `last_assigned_sequence`·spool이 T-13/T-14 전까지 고정값 → 실제 proxy로는 tail gap이 아직 생기지 않음), #284(e2e helper 공유), #269.
+남은 P1: S2b(CSR 서명), T-12b(MCP protocol), T-13(registry entry 생성)·T-14(spool·이벤트 생성), T-15(manager, sigil-manager#37), T-16.
+실기 미검증: 변화 없음. 조회 API의 실제 TLS 검증은 e2e(macOS 로컬·CI)까지이며 Rocky 실기·SELinux·systemd는 하지 않았다.
+교훈: 병렬 갈래가 같은 파일을 필요로 하면 먼저 끝난 갈래를 머지하고 rebase한 뒤 소유권을 넘긴다(C 2단계). 고정 날짜 fixture는 보존 정리가 있는 경로에서 시간이 지나면 깨진다(e2e L4).
 
 ## 2026-10-11 P1 2회차 배정 (기준 `f656b5c`)
 
