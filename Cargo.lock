@@ -3248,6 +3248,7 @@ dependencies = [
  "hyper 1.9.0",
  "hyper-util",
  "libc",
+ "rusqlite",
  "rustls",
  "rustls-pemfile",
  "serde",

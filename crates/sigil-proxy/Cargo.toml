@@ -36,6 +36,8 @@ http-body-util = "0.1"
 http-body = "1"
 bytes = "1"
 http = { workspace = true }
+# Durable event spool (T-14a): SQLite WAL, same engine as the server ledger.
+rusqlite = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
