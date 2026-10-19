@@ -322,12 +322,21 @@ struct Envelope<'a> {
     error: Present,
 }
 
+/// `name` of any JSON type: a non-string is a malformed tool name (-32602), not
+/// an unprobeable body.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NameField<'a> {
+    Str(#[serde(borrow)] Cow<'a, str>),
+    Other(IgnoredAny),
+}
+
 /// The params fields this module looks at. Everything else, `arguments`
 /// included, is skipped and dropped by the parser.
 #[derive(Deserialize, Default)]
 struct ParamsProbe<'a> {
     #[serde(borrow, default)]
-    name: Option<Cow<'a, str>>,
+    name: Option<NameField<'a>>,
     #[serde(default)]
     cursor: Present,
     #[serde(default)]
@@ -394,7 +403,9 @@ pub fn classify(body: &[u8], header: HeaderVersion) -> Message {
 
     // The params probe. A failure only matters for the methods that need params.
     let probe: Option<ParamsProbe> = match env.params {
-        Some(p) => serde_json::from_str(p.get()).ok(),
+        // params must be an object (a positional array would parse as a struct)
+        Some(p) if p.get().starts_with('{') => serde_json::from_str(p.get()).ok(),
+        Some(_) => None,
         None => Some(ParamsProbe::default()),
     };
 
@@ -407,6 +418,12 @@ pub fn classify(body: &[u8], header: HeaderVersion) -> Message {
         })
     };
 
+    if probe.is_none() {
+        // Params that are present but do not parse (duplicate keys, wrong
+        // shape): a probe that cannot see `_meta` must not be read as "not
+        // modern".
+        return with(RefusalKind::InvalidRequest, ToolField::NotApplicable);
+    }
     if method == "server/discover" || probe.as_ref().is_some_and(|p| p.meta.modern) {
         // B1 audit: method and version are both literal `unknown`.
         return Message::Refused(Refusal {
@@ -427,7 +444,11 @@ pub fn classify(body: &[u8], header: HeaderVersion) -> Message {
     }
 
     let Some(id) = id.clone() else {
-        // A notification.
+        // Only `notifications/*` may omit the id; any other id-less method
+        // would otherwise be relayed unobserved.
+        if !method.starts_with("notifications/") {
+            return with(RefusalKind::InvalidRequest, ToolField::NotApplicable);
+        }
         if method == "notifications/cancelled" {
             let target = probe
                 .as_ref()
@@ -452,7 +473,10 @@ pub fn classify(body: &[u8], header: HeaderVersion) -> Message {
         Method::ToolsCall => {
             let name = probe
                 .as_ref()
-                .and_then(|p| p.name.as_deref())
+                .and_then(|p| match p.name.as_ref() {
+                    Some(NameField::Str(s)) => Some(s.as_ref()),
+                    _ => None,
+                })
                 .and_then(ToolName::parse);
             match name {
                 Some(n) => info.tool = ToolField::Name(n),
@@ -844,6 +868,65 @@ mod tests {
         ] {
             assert_eq!(c(body), Message::ClientResponse, "{body}");
         }
+    }
+
+    /// M1: only `notifications/*` may omit the id. Anything else would be
+    /// relayed as an unobserved "notification".
+    #[test]
+    fn id_less_requests_are_refused() {
+        for body in [
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"}}"#,
+            r#"{"jsonrpc":"2.0","method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"u"}}"#,
+        ] {
+            let r = refused(c(body));
+            assert_eq!(r.kind, RefusalKind::InvalidRequest, "{body}");
+            assert!(r.id.is_none());
+        }
+        assert_eq!(
+            c(r#"{"jsonrpc":"2.0","method":"notifications/anything"}"#),
+            Message::Notification(NotificationInfo::Other)
+        );
+    }
+
+    /// M2: params that are present but cannot be probed (duplicate keys, wrong
+    /// shape) must not be read as "not modern".
+    #[test]
+    fn unprobeable_params_are_refused() {
+        for body in [
+            // duplicate `_meta`: the second one carries the modern marker
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#,
+            // duplicate `name`
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a","name":"b"}}"#,
+            // duplicate `cursor`, `task`
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":"a","cursor":"b"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a","task":{},"task":{}}}"#,
+            // wrong shapes
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":[1,2]}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":"x"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":5}}"#,
+            // notifications too
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{"_meta":{},"_meta":{}}}"#,
+        ] {
+            let r = refused(c(body));
+            assert_eq!(r.kind, RefusalKind::InvalidRequest, "{body}");
+        }
+        // the id is kept so the error can echo it
+        let r = refused(c(
+            r#"{"jsonrpc":"2.0","id":"q","method":"ping","params":{"_meta":{},"_meta":{}}}"#,
+        ));
+        assert_eq!(r.id.unwrap().raw(), "\"q\"");
+        // absent and null params are fine
+        assert!(matches!(
+            c(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":null}"#),
+            Message::Request(_)
+        ));
+        assert!(matches!(
+            c(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#),
+            Message::Request(_)
+        ));
     }
 
     #[test]

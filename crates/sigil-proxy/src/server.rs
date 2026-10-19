@@ -595,16 +595,21 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
                 principal: call.principal_id.clone(),
                 id: info.id.clone(),
             };
-            let registration = sh.cancel.register(key, call.seq, Instant::now());
-            let started = RequestStarted {
-                call: call.clone(),
-                method: info.method,
-                request_id: info.id.clone(),
-                tool: info.tool.clone(),
-                list_cursor: info.list_cursor,
-                task_augmented: info.task_augmented,
-                request_bytes: request_body.len() as u64,
-                received_at,
+            // Two in-flight requests of one principal on one route may not share
+            // an id: a cancel could not tell them apart. The second is refused.
+            let Some(registration) = sh.cancel.register(key, call.seq, Instant::now()) else {
+                return refuse(
+                    sh,
+                    call,
+                    Refusal {
+                        kind: RefusalKind::InvalidRequest,
+                        id: Some(info.id),
+                        method: info.method,
+                        tool: info.tool,
+                    },
+                    request_body.len() as u64,
+                    received_at,
+                );
             };
             let mut c = CallCtx::new(
                 sh.sink.clone(),
@@ -614,10 +619,23 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
                 t0,
                 registration,
             );
-            // The sink may defer dispatch (local spool commit of the start).
-            if sh.sink.request_started(&started).await == StartVerdict::Refuse {
-                c.abandon();
-                return fixed(StatusCode::SERVICE_UNAVAILABLE, "audit_unavailable");
+            // The sink may defer dispatch (local spool commit of the start). The
+            // no-op sink has nothing to wait for or record.
+            if sh.sink.wants_observations() {
+                let started = RequestStarted {
+                    call: call.clone(),
+                    method: info.method,
+                    request_id: c.request_id().clone(),
+                    tool: info.tool.clone(),
+                    list_cursor: info.list_cursor,
+                    task_augmented: info.task_augmented,
+                    request_bytes: request_body.len() as u64,
+                    received_at,
+                };
+                if sh.sink.request_started(&started).await == StartVerdict::Refuse {
+                    c.abandon();
+                    return fixed(StatusCode::SERVICE_UNAVAILABLE, "audit_unavailable");
+                }
             }
             if c.registration().is_cancelled() {
                 return cancelled_before_dispatch(sh, c);
@@ -902,8 +920,10 @@ fn refusal_response(r: &Refusal) -> Response<RespBody> {
     match r.kind {
         RefusalKind::ModernRequest | RefusalKind::VersionHeader => empty(bad),
         RefusalKind::Parse => jsonrpc_error(None, -32700, "Parse error", bad),
+        // The id is echoed when one was read (batches and unparseable bodies
+        // have none).
         RefusalKind::InvalidRequest | RefusalKind::Batch => {
-            jsonrpc_error(None, -32600, "Invalid Request", bad)
+            jsonrpc_error(r.id.as_ref(), -32600, "Invalid Request", bad)
         }
         RefusalKind::TasksMethod | RefusalKind::ResourcesSubscription => match &r.id {
             Some(id) => jsonrpc_error(Some(id), -32601, "Method not found", StatusCode::OK),

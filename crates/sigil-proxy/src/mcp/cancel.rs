@@ -141,7 +141,15 @@ impl CancelRegistry {
 
     /// Register a request that is about to be dispatched. If a cancel for the id
     /// is held, the registration starts out cancelled.
-    pub fn register(self: &Arc<Self>, key: CancelKey, seq: u64, now: Instant) -> Registration {
+    /// `None` if a request with the same key is already in flight: the second
+    /// one is refused rather than silently replacing the first (a cancel would
+    /// otherwise address the wrong call).
+    pub fn register(
+        self: &Arc<Self>,
+        key: CancelKey,
+        seq: u64,
+        now: Instant,
+    ) -> Option<Registration> {
         let (signal, _) = watch::channel(false);
         let entry = Arc::new(Entry {
             seq,
@@ -150,17 +158,20 @@ impl CancelRegistry {
         });
         let mut g = self.inner.lock().unwrap();
         self.expire(&mut g, now);
+        if g.inflight.contains_key(&key) {
+            return None;
+        }
         let early = g.early.remove(&key).is_some();
         if early {
             entry.state.lock().unwrap().0 = State::CancelledBefore;
         }
         g.inflight.insert(key.clone(), entry.clone());
         drop(g);
-        Registration {
+        Some(Registration {
             registry: self.clone(),
             key,
             entry,
-        }
+        })
     }
 
     /// Apply a `notifications/cancelled` for `key`.
@@ -297,7 +308,7 @@ mod tests {
     fn cancel_before_dispatch_prevents_dispatch() {
         let r = reg();
         let now = Instant::now();
-        let x = r.register(key("4"), 1, now);
+        let x = r.register(key("4"), 1, now).unwrap();
         assert_eq!(r.cancel(&key("4"), now), CancelOutcome::BeforeDispatch);
         assert!(x.is_cancelled());
         assert!(x.try_dispatch().is_err());
@@ -310,7 +321,7 @@ mod tests {
     fn cancel_after_dispatch_is_forwarded() {
         let r = reg();
         let now = Instant::now();
-        let x = r.register(key("4"), 1, now);
+        let x = r.register(key("4"), 1, now).unwrap();
         assert!(x.try_dispatch().is_ok());
         assert_eq!(r.cancel(&key("4"), now), CancelOutcome::AfterDispatch(1));
         assert!(x.cancel_requested());
@@ -327,7 +338,9 @@ mod tests {
         let r = reg();
         let t0 = Instant::now();
         assert_eq!(r.cancel(&key("9"), t0), CancelOutcome::Held);
-        let x = r.register(key("9"), 1, t0 + Duration::from_millis(1999));
+        let x = r
+            .register(key("9"), 1, t0 + Duration::from_millis(1999))
+            .unwrap();
         assert!(x.is_cancelled());
         assert!(x.try_dispatch().is_err());
         assert_eq!(r.early_len(), 0, "the held entry is consumed");
@@ -339,7 +352,9 @@ mod tests {
         let r = reg();
         let t0 = Instant::now();
         assert_eq!(r.cancel(&key("9"), t0), CancelOutcome::Held);
-        let x = r.register(key("9"), 1, t0 + Duration::from_secs(2));
+        let x = r
+            .register(key("9"), 1, t0 + Duration::from_secs(2))
+            .unwrap();
         assert!(
             !x.is_cancelled(),
             "window passed: the request is unaffected"
@@ -371,8 +386,8 @@ mod tests {
         assert_eq!(r.early_len(), 4);
         assert_eq!(r.unmatched_total(), 6, "evictions are counted");
         // the oldest were evicted; the newest are still held
-        assert!(r.register(key("9"), 1, t0).is_cancelled());
-        assert!(!r.register(key("0"), 1, t0).is_cancelled());
+        assert!(r.register(key("9"), 1, t0).unwrap().is_cancelled());
+        assert!(!r.register(key("0"), 1, t0).unwrap().is_cancelled());
     }
 
     #[test]
@@ -386,6 +401,7 @@ mod tests {
         );
         assert!(!r
             .register(key("1"), 1, t0 + Duration::from_secs(2))
+            .unwrap()
             .is_cancelled());
     }
 
@@ -393,7 +409,7 @@ mod tests {
     fn keys_separate_route_principal_and_json_type() {
         let r = reg();
         let now = Instant::now();
-        let x = r.register(key("4"), 1, now);
+        let x = r.register(key("4"), 1, now).unwrap();
         let mut other = key("4");
         other.principal = "q".into();
         assert_eq!(r.cancel(&other, now), CancelOutcome::Held);
@@ -411,7 +427,7 @@ mod tests {
     fn dropping_a_registration_forgets_it() {
         let r = reg();
         let now = Instant::now();
-        let x = r.register(key("4"), 1, now);
+        let x = r.register(key("4"), 1, now).unwrap();
         assert_eq!(r.inflight_len(), 1);
         drop(x);
         assert_eq!(r.inflight_len(), 0);
@@ -420,15 +436,24 @@ mod tests {
     }
 
     #[test]
-    fn a_reused_id_does_not_remove_its_successor() {
+    fn a_second_request_with_an_in_flight_id_is_refused() {
         let r = reg();
         let now = Instant::now();
-        let a = r.register(key("4"), 1, now);
-        let b = r.register(key("4"), 1, now);
-        drop(a);
-        assert_eq!(r.inflight_len(), 1, "b is still registered");
+        let a = r.register(key("4"), 1, now).unwrap();
+        assert!(
+            r.register(key("4"), 2, now).is_none(),
+            "no silent overwrite"
+        );
+        // the refused attempt changed nothing: a is still the target
         assert_eq!(r.cancel(&key("4"), now), CancelOutcome::BeforeDispatch);
-        assert!(b.is_cancelled());
+        assert!(a.is_cancelled());
+        // another principal or route is a different key
+        let mut other = key("4");
+        other.principal = "q".into();
+        assert!(r.register(other, 3, now).is_some());
+        // once the first is done the id can be used again
+        drop(a);
+        assert!(r.register(key("4"), 4, now).is_some());
     }
 
     /// Exactly one of {cancel stops dispatch, dispatch wins} for any interleaving.
@@ -437,7 +462,7 @@ mod tests {
         for _ in 0..200 {
             let r = reg();
             let now = Instant::now();
-            let x = Arc::new(r.register(key("4"), 1, now));
+            let x = Arc::new(r.register(key("4"), 1, now).unwrap());
             let (x2, r2) = (x.clone(), r.clone());
             let t = std::thread::spawn(move || r2.cancel(&key("4"), now));
             let dispatched = x2.try_dispatch().is_ok();
@@ -453,7 +478,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn grace_starts_when_a_cancel_is_forwarded() {
         let r = reg();
-        let x = r.register(key("4"), 1, Instant::now());
+        let x = r.register(key("4"), 1, Instant::now()).unwrap();
         x.try_dispatch().unwrap();
         let mut g = x.grace_expired(Duration::from_secs(3));
         // no cancel yet: never completes

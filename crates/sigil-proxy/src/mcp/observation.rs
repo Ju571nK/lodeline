@@ -272,10 +272,21 @@ pub trait ObservationSink: Send + Sync + 'static {
 
     /// Everything else. Default: ignore.
     fn observe(&self, _: Observation) {}
+
+    /// False means every call to this sink would be a no-op, so the relay skips
+    /// the response scanning, `tools/list` capture and observation building.
+    /// Forwarded bytes and cancel ordering are the same either way.
+    fn wants_observations(&self) -> bool {
+        true
+    }
 }
 
 /// Production default until a producer is wired in: observes nothing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopSink;
 
-impl ObservationSink for NoopSink {}
+impl ObservationSink for NoopSink {
+    fn wants_observations(&self) -> bool {
+        false
+    }
+}

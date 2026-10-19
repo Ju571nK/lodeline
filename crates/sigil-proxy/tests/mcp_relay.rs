@@ -1260,3 +1260,92 @@ async fn malformed_cancel_is_refused() {
     assert_eq!(r.status, 400);
     assert_eq!(up.count(), 0);
 }
+
+/// M1 over HTTP: an id-less `tools/call` is refused, not relayed unobserved.
+#[tokio::test]
+async fn id_less_tools_call_is_refused_over_http() {
+    let up = ok_upstream().await;
+    let rec = Rec::new();
+    let px = start(&up, limits(), Some(rec.clone())).await;
+    let r = px
+        .post(r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"}}"#)
+        .await;
+    assert_eq!(r.status, 400);
+    let v = rpc(&r.body());
+    assert_eq!(v["error"]["code"], -32600);
+    assert!(v["id"].is_null());
+    assert_eq!(up.count(), 0);
+    assert!(matches!(
+        rec.all().as_slice(),
+        [Ev::Obs(Observation::Refused(r))] if r.reason == RefusalKind::InvalidRequest
+    ));
+}
+
+/// M2 over HTTP: a duplicate `_meta` hiding the modern marker is refused.
+#[tokio::test]
+async fn duplicate_meta_cannot_hide_a_modern_request() {
+    let up = ok_upstream().await;
+    let px = start(&up, limits(), None).await;
+    let r = px
+        .post(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"x"},"_meta":{}}}"#)
+        .await;
+    assert_eq!(r.status, 400);
+    assert_eq!(up.count(), 0);
+}
+
+/// L2: a second request with an id that is still in flight (same principal and
+/// route) is refused; the first call is untouched.
+#[tokio::test]
+async fn duplicate_in_flight_id_is_refused() {
+    let (up, tx) = holding().await;
+    let rec = Rec::new();
+    let px = start(&up, limits(), Some(rec.clone())).await;
+    let first = px.spawn_post(&call("5", "slow", "{}"));
+    for _ in 0..100 {
+        if up.count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let r = px.post(&call("5", "other", "{}")).await;
+    assert_eq!(r.status, 400);
+    let v = rpc(&r.body());
+    assert_eq!(v["error"]["code"], -32600);
+    assert_eq!(v["id"], 5);
+    assert_eq!(up.count(), 1, "the duplicate never reached upstream");
+    tx.send(Bytes::from_static(
+        b"data: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}\n\n",
+    ))
+    .await
+    .unwrap();
+    drop(tx);
+    assert_eq!(first.await.unwrap().status, 200);
+    let c = rec.the_completion().await;
+    assert_eq!(c.outcome, Outcome::Success);
+    let refused = rec
+        .all()
+        .into_iter()
+        .filter(|e| matches!(e, Ev::Obs(Observation::Refused(r)) if r.reason == RefusalKind::InvalidRequest))
+        .count();
+    assert_eq!(refused, 1);
+}
+
+/// L4: with the default no-op sink nothing is scanned or captured, bytes are
+/// identical, and cancel ordering (behaviour, not observation) still applies.
+#[tokio::test]
+async fn noop_sink_keeps_bytes_and_cancel_ordering() {
+    let body =
+        br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a"}],"nextCursor":"n"}}"#.to_vec();
+    let b2 = body.clone();
+    let up = Up::start(move |_| full(200, "application/json", &b2)).await;
+    let px = start(&up, limits(), None).await;
+    let r = px
+        .post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        .await;
+    assert_eq!(r.body(), body);
+
+    assert_eq!(px.post(&cancel("9")).await.status, 202);
+    let r = px.post(&call("9", "t", "{}")).await;
+    assert_eq!(r.header("content-type"), Some("text/event-stream"));
+    assert_eq!(up.count(), 1, "the cancelled call was never dispatched");
+}

@@ -90,6 +90,8 @@ pub struct CallCtx {
     registration: Registration,
     dispatched: bool,
     done: bool,
+    /// The sink wants observations; otherwise `complete` reports nothing.
+    wants: bool,
 }
 
 impl CallCtx {
@@ -102,6 +104,7 @@ impl CallCtx {
         registration: Registration,
     ) -> CallCtx {
         CallCtx {
+            wants: sink.wants_observations(),
             sink,
             call,
             method,
@@ -145,7 +148,7 @@ impl CallCtx {
     }
 
     pub fn complete(&mut self, r: Resolution) {
-        if std::mem::replace(&mut self.done, true) {
+        if std::mem::replace(&mut self.done, true) || !self.wants {
             return;
         }
         self.sink.observe(Observation::Completed(Completed {
@@ -263,12 +266,17 @@ impl ResponseTracker {
         status: u16,
         caplimits: CaptureLimits,
     ) -> ResponseTracker {
-        let capture = (ctx.is_tools_list() && mode != BodyMode::Opaque).then(|| Capture {
-            buf: Vec::new(),
-            max: caplimits.max_bytes,
-            over: false,
-        });
-        let grace = Some(ctx.registration().grace_expired(CANCEL_RESPONSE_GRACE));
+        let capture =
+            (ctx.wants && ctx.is_tools_list() && mode != BodyMode::Opaque).then(|| Capture {
+                buf: Vec::new(),
+                max: caplimits.max_bytes,
+                over: false,
+            });
+        // Without a consumer the response is not scanned, so there is nothing to
+        // tell the grace that an answer arrived: it is not armed.
+        let grace = ctx
+            .wants
+            .then(|| ctx.registration().grace_expired(CANCEL_RESPONSE_GRACE));
         ResponseTracker {
             ctx,
             mode,
@@ -302,6 +310,9 @@ impl ResponseTracker {
     /// page).
     pub fn feed(&mut self, data: &[u8]) {
         self.total += data.len() as u64;
+        if !self.ctx.wants {
+            return;
+        }
         match self.mode {
             BodyMode::Opaque => {}
             BodyMode::Json => {
@@ -588,7 +599,7 @@ mod tests {
             principal: "p".into(),
             id: RequestId::from_raw(id).unwrap(),
         };
-        let registration = reg.register(key, 1, tokio::time::Instant::now());
+        let registration = reg.register(key, 1, tokio::time::Instant::now()).unwrap();
         registration.try_dispatch().unwrap();
         let ctx = CallCtx::new(
             rec.clone(),
@@ -972,7 +983,7 @@ mod tests {
             Method::ToolsCall,
             RequestId::from_raw("1").unwrap(),
             Instant::now(),
-            reg.register(key, 1, tokio::time::Instant::now()),
+            reg.register(key, 1, tokio::time::Instant::now()).unwrap(),
         );
         drop(ctx);
         let g = rec.0.lock().unwrap();
