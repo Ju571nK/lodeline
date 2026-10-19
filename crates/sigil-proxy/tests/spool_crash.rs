@@ -2,6 +2,10 @@
 //! and prints each sequence only after `append` returned. The parent SIGKILLs it
 //! mid-append, reopens the database and checks that no acknowledged event is
 //! lost and no partial row exists.
+//!
+//! Scope: SIGKILL of a process proves atomic commit and sequence continuity
+//! across a crash. It does NOT prove power-loss durability (the OS page cache
+//! survives a process kill); that needs hardware verification.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
@@ -36,7 +40,14 @@ fn event(n: u64) -> ProxyEvent {
 }
 
 fn open(dir: &std::path::Path) -> Spool {
-    Spool::open(SpoolConfig::new(dir, "px-1", EPOCH, &Limits::default())).unwrap()
+    Spool::open(SpoolConfig::new(
+        dir,
+        "px-1",
+        EPOCH,
+        true,
+        &Limits::default(),
+    ))
+    .unwrap()
 }
 
 /// Runs only as the child of `kill_mid_append_loses_no_acked_event`.
