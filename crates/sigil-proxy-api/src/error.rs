@@ -287,23 +287,31 @@ impl<'de> Deserialize<'de> for ErrorCode {
 wire_struct! {
     lenient
     /// Item of a batch error. 422 items carry `index` only; 409/424 carry the
-    /// validated `event_id`; status gap conflicts carry `gap_id`. At most one of
-    /// `event_id` and `gap_id` may be present.
+    /// validated `event_id`; status gap conflicts carry `gap_id`; registry upload
+    /// 409 carries `metadata_ref`. At most one of the three may be present.
     pub struct ErrorItem {
         pub index: u32,
         #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
         pub event_id: Option<Uuid>,
         #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
         pub gap_id: Option<Uuid>,
+        /// Registry upload 409 (`registry_conflict`): the conflicting entry's ref.
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub metadata_ref: Option<MetadataRef>,
         pub code: ErrorCode,
     }
 }
 
 impl Validate for ErrorItem {
     fn validate(&self) -> Result<(), ValidationError> {
-        if self.event_id.is_some() && self.gap_id.is_some() {
+        let ids = [
+            self.event_id.is_some(),
+            self.gap_id.is_some(),
+            self.metadata_ref.is_some(),
+        ];
+        if ids.into_iter().filter(|p| *p).count() > 1 {
             return Err(ValidationError::new(
-                "an error item carries at most one of event_id and gap_id",
+                "an error item carries at most one of event_id, gap_id and metadata_ref",
             ));
         }
         Ok(())

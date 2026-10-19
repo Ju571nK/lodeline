@@ -21,7 +21,7 @@ use serde_json::{Map, Number, Value};
 use crate::config::{ProxyConfig, PutConfigRequest};
 use crate::error::{set_raised, take_raised, ApiError, Raised};
 use crate::event::{IngestRequest, IngestResponse, ProxyEvent};
-use crate::registry::{RegistryEntry, UploadRequest, UploadResponse};
+use crate::registry::{InventoryReport, RegistryEntry, UploadRequest, UploadResponse};
 use crate::status::{GapReport, ProxyStatus, StatusResponse};
 
 /// Largest accepted event batch body (README: 1 MiB).
@@ -249,6 +249,13 @@ pub fn parse_config_put(bytes: &[u8]) -> Result<PutConfigRequest, ParseError> {
 /// Parses a `POST /v1/proxy-metadata` body. `index` names the first bad entry.
 pub fn parse_upload(bytes: &[u8]) -> Result<UploadRequest, ParseError> {
     parse_doc(bytes, Some(|v| first_bad::<RegistryEntry>(v, "entries")))
+}
+
+/// Parses a `POST /v1/proxy-inventory` body (closed). The contract sets no byte
+/// cap (about 450 KB at 10,000 members, more with many `changes`), so the caller
+/// must cap the transport body first.
+pub fn parse_inventory_report(bytes: &[u8]) -> Result<InventoryReport, ParseError> {
+    parse_doc(bytes, None)
 }
 
 /// Parses an error body read from the server (unknown fields ignored).

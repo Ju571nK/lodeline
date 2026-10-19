@@ -83,10 +83,14 @@ pub use event::{
 };
 pub use parse::{
     parse_api_error, parse_config, parse_config_put, parse_event, parse_event_batch,
-    parse_ingest_response, parse_status, parse_status_response, parse_upload,
-    parse_upload_response, ErrorCategory, ParseError,
+    parse_ingest_response, parse_inventory_report, parse_status, parse_status_response,
+    parse_upload, parse_upload_response, ErrorCategory, ParseError,
 };
-pub use registry::{EntryView, RegistryEntry, UploadRequest, UploadResponse};
+pub use registry::{
+    Change, Comparison, Completeness, DefinitionComparison, EntryView, IncompleteReason,
+    InventoryReport, InventoryScope, Link, RebaselineReason, RegistryEntry, UploadRequest,
+    UploadResponse,
+};
 pub use scalar::{
     ConfigHash, Fingerprint, Id, KeyId, MetadataRef, NonNegativeI64, PositiveI64, SchemaVersion,
     Timestamp, Uuid,

@@ -15,22 +15,22 @@
 //!     and fingerprint reference models (proxy-local crypto, not wire shape);
 //!   * retention, projection, cross-event semantic, cursor, inventory/marker,
 //!     counter-merge and status-upsert models;
-//!   * the inventory report schema (`$defs/inventory_report`) is not modelled yet;
 //!   * schema self-validation, format-checker preflight and `python -O` guards;
 //!   * most registry/status mutation permutations (one per category is ported).
 //!
-//! Known gap versus the schema: JSON Schema `uniqueItems`/`maxItems` on the
-//! non-gap arrays are enforced; `maxItems` on `inventory_report` is not modelled.
+//! Inventory report: the `reg_report` schema cases are ported at the end of this file
+//! (same labels as `check_schema.py`); `maxItems`/`uniqueItems` are enforced. The
+//! I-1..I-8 server rules and the drift/marker projection stay with the server.
 
 use serde_json::{json, Value};
 use sigil_proxy_api::canonical::{canonical_event_bytes, compare_for_dedup, DedupComparison};
 use sigil_proxy_api::event::{IngestRequest, IngestResponse};
-use sigil_proxy_api::registry::{UploadRequest, UploadResponse};
+use sigil_proxy_api::registry::{InventoryReport, UploadRequest, UploadResponse};
 use sigil_proxy_api::status::StatusResponse;
 use sigil_proxy_api::{
-    parse_api_error, parse_event, parse_event_batch, parse_ingest_response, parse_status,
-    parse_status_response, parse_upload, parse_upload_response, ErrorCategory, ParseError,
-    Validate,
+    parse_api_error, parse_event, parse_event_batch, parse_ingest_response, parse_inventory_report,
+    parse_status, parse_status_response, parse_upload, parse_upload_response, ErrorCategory,
+    ParseError, Validate,
 };
 use sigil_proxy_api::{ApiError, EntryView, ErrorCode, ProxyEvent, ProxyStatus, RegistryEntry};
 
@@ -1461,6 +1461,14 @@ fn points() -> Vec<Point> {
             type_slot: vec![K("schema_version")],
         },
         Point {
+            name: "inventory",
+            parse: |b| parse_inventory_report(b).map(drop),
+            doc: inv_initial(),
+            lenient: false,
+            enum_slot: Some(vec![K("comparison"), K("kind")]),
+            type_slot: vec![K("pages_observed")],
+        },
+        Point {
             name: "api_error",
             parse: |b| parse_api_error(b).map(drop),
             doc: json!({"error": {"code": "conflict", "message": "x"}}),
@@ -1998,4 +2006,440 @@ fn api_error_constructor_uses_fixed_messages() {
     let e = ApiError::from_code(ErrorCode::MetadataRefPending)
         .with_pending_metadata_refs(vec![serde_json::from_value(json!(metadata_ref())).unwrap()]);
     assert!(e.validate().is_ok());
+}
+
+// ---------------------------------------------------------------- inventory report
+
+fn v8(n: u32) -> String {
+    format!("00000000-0000-8000-8000-{n:012x}")
+}
+
+fn inv_report(over: &[(&str, Value)]) -> Value {
+    let mut v = json!({
+        "schema_version": 1, "report_id": uid(900), "proxy_id": "proxy-demo",
+        "epoch_id": "3f1c9a52-6b0e-4d2a-9c1e-7a5b2d8e4f10",
+        "observed_at": "2026-10-10T01:00:00Z",
+        "scope": {"upstream_id": "fixture", "credential_scope_id": "scope-1",
+                  "protocol_version": "2025-11-25", "observation_source": "proxy_live"},
+        "canon": "sigil-tooldef-fp-v1", "key_id": "kid-3c8e1f0a9b7d42e6a1c5f804",
+        "completeness": "complete", "pages_observed": 2,
+        "inventory_id": uid(910), "members": [v8(1), v8(2)],
+        "comparison": {"kind": "initial_baseline"}
+    });
+    for (k, val) in over {
+        v[*k] = val.clone();
+    }
+    v
+}
+
+fn inv_initial() -> Value {
+    inv_report(&[])
+}
+
+fn inv_incomplete(over: &[(&str, Value)]) -> Value {
+    let mut v = inv_report(&[
+        ("completeness", json!("incomplete")),
+        ("incomplete_reason", json!("page_error")),
+        ("pages_observed", json!(1)),
+    ]);
+    for k in ["inventory_id", "members", "comparison"] {
+        v.as_object_mut().unwrap().remove(k);
+    }
+    for (k, val) in over {
+        v[*k] = val.clone();
+    }
+    v
+}
+
+fn inv_compared_comparison() -> Value {
+    json!({"kind": "compared", "previous_inventory_id": uid(910), "changes": [
+        {"change": "changed", "metadata_ref": v8(3), "previous_metadata_ref": v8(1)},
+        {"change": "removed", "metadata_ref": v8(2)},
+        {"change": "added", "metadata_ref": v8(4)}]})
+}
+
+fn inv_rebaseline_comparison() -> Value {
+    json!({"kind": "rebaseline", "previous_inventory_id": uid(910), "reason": "key_rotation",
+           "links": [{"from_metadata_ref": v8(1), "to_metadata_ref": v8(5),
+                      "definition_comparison": "identical"}]})
+}
+
+fn inv_rebaseline() -> Value {
+    inv_report(&[
+        ("inventory_id", json!(uid(913))),
+        ("key_id", json!(format!("kid-{}", "ab".repeat(12)))),
+        ("members", json!([v8(5), v8(6)])),
+        ("comparison", inv_rebaseline_comparison()),
+    ])
+}
+
+#[test]
+fn inventory_positive_cases_round_trip() {
+    let mut cases = vec![
+        inv_initial(),
+        inv_report(&[
+            ("inventory_id", json!(uid(911))),
+            ("members", json!([v8(3), v8(4)])),
+            ("comparison", inv_compared_comparison()),
+        ]),
+        inv_report(&[(
+            "comparison",
+            json!({"kind": "compared", "previous_inventory_id": uid(910), "changes": []}),
+        )]),
+        inv_rebaseline(),
+        inv_incomplete(&[]),
+        inv_report(&[("members", json!([]))]),
+        inv_report(&[("comparison", {
+            let mut c = inv_rebaseline_comparison();
+            c["reason"] = json!("canon_version_change");
+            c["links"][0]["definition_comparison"] = json!("not_comparable");
+            c
+        })]),
+        inv_report(&[("pages_observed", json!(0))]),
+        inv_report(&[("observed_at", json!("2026-10-10T01:00:00.123456789Z"))]),
+    ];
+    for reason in [
+        "page_limit_exceeded",
+        "tool_limit_exceeded",
+        "size_limit_exceeded",
+        "page_error",
+        "cursor_invalid",
+        "access_denied",
+        "session_ended",
+        "canonicalization_failed",
+        "ambiguous_name",
+    ] {
+        cases.push(inv_incomplete(&[("incomplete_reason", json!(reason))]));
+    }
+    let members: Vec<String> = (0..10_000).map(v8).collect();
+    cases.push(inv_report(&[("members", json!(members))]));
+    for doc in cases {
+        let r: InventoryReport = serde_json::from_value(doc.clone())
+            .unwrap_or_else(|e| panic!("inventory case rejected: {e}: {doc}"));
+        assert_eq!(serde_json::to_value(&r).unwrap(), doc);
+        assert!(r.validate().is_ok());
+        parse_inventory_report(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn inventory_rejected_cases() {
+    let compared = || inv_report(&[("comparison", inv_compared_comparison())]);
+    let rebase = inv_rebaseline;
+    let with_cmp = |base: Value, k: &str, v: Value| set(base, &["comparison", k], v);
+    let many_members: Vec<String> = (0..10_001).map(v8).collect();
+    let many_changes: Vec<Value> = (0..20_001)
+        .map(|i| json!({"change": "added", "metadata_ref": v8(i)}))
+        .collect();
+    let many_links: Vec<Value> = (0..10_001)
+        .map(|i| {
+            json!({"from_metadata_ref": v8(i), "to_metadata_ref": v8(i),
+                   "definition_comparison": "identical"})
+        })
+        .collect();
+    let cases: Vec<(&str, Value)> = vec![
+        (
+            "incomplete with changes-bearing comparison",
+            set(
+                inv_incomplete(&[]),
+                &["comparison"],
+                inv_compared_comparison(),
+            ),
+        ),
+        (
+            "incomplete with members",
+            set(inv_incomplete(&[]), &["members"], json!([v8(1)])),
+        ),
+        (
+            "incomplete with inventory_id",
+            set(inv_incomplete(&[]), &["inventory_id"], json!(uid(914))),
+        ),
+        (
+            "incomplete without reason",
+            del(inv_incomplete(&[]), &["incomplete_reason"]),
+        ),
+        (
+            "incomplete raw reason",
+            set(
+                inv_incomplete(&[]),
+                &["incomplete_reason"],
+                json!("canary-secret"),
+            ),
+        ),
+        (
+            "complete without comparison",
+            del(inv_initial(), &["comparison"]),
+        ),
+        ("complete without members", del(inv_initial(), &["members"])),
+        (
+            "complete without inventory_id",
+            del(inv_initial(), &["inventory_id"]),
+        ),
+        (
+            "complete with incomplete_reason",
+            set(inv_initial(), &["incomplete_reason"], json!("page_error")),
+        ),
+        (
+            "rebaseline with changes",
+            with_cmp(
+                rebase(),
+                "changes",
+                json!([{"change": "added", "metadata_ref": v8(1)}]),
+            ),
+        ),
+        (
+            "compared with links",
+            with_cmp(compared(), "links", json!([])),
+        ),
+        (
+            "compared without changes",
+            set(
+                inv_initial(),
+                &["comparison"],
+                json!({"kind": "compared", "previous_inventory_id": uid(910)}),
+            ),
+        ),
+        (
+            "initial with previous",
+            set(
+                inv_initial(),
+                &["comparison"],
+                json!({"kind": "initial_baseline", "previous_inventory_id": uid(910)}),
+            ),
+        ),
+        (
+            "unknown comparison kind",
+            set(inv_initial(), &["comparison"], json!({"kind": "approved"})),
+        ),
+        (
+            "comparison missing kind",
+            set(inv_initial(), &["comparison"], json!({})),
+        ),
+        (
+            "comparison array",
+            set(inv_initial(), &["comparison"], json!([])),
+        ),
+        (
+            "rebaseline unknown reason",
+            with_cmp(rebase(), "reason", json!("state_loss")),
+        ),
+        (
+            "rebaseline without links",
+            del(rebase(), &["comparison", "links"]),
+        ),
+        (
+            "changed without previous",
+            with_cmp(
+                compared(),
+                "changes",
+                json!([{"change": "changed", "metadata_ref": v8(3)}]),
+            ),
+        ),
+        (
+            "added with previous",
+            with_cmp(
+                compared(),
+                "changes",
+                json!([{"change": "added", "metadata_ref": v8(3), "previous_metadata_ref": v8(1)}]),
+            ),
+        ),
+        (
+            "unknown change",
+            with_cmp(
+                compared(),
+                "changes",
+                json!([{"change": "renamed", "metadata_ref": v8(3)}]),
+            ),
+        ),
+        ("change array", with_cmp(compared(), "changes", json!([[]]))),
+        (
+            "raw name in members",
+            set(inv_initial(), &["members"], json!(["json_ok"])),
+        ),
+        (
+            "duplicate members",
+            set(inv_initial(), &["members"], json!([v8(1), v8(1)])),
+        ),
+        (
+            "10001 members",
+            set(inv_initial(), &["members"], json!(many_members)),
+        ),
+        (
+            "20001 changes",
+            with_cmp(compared(), "changes", json!(many_changes)),
+        ),
+        (
+            "10001 links",
+            with_cmp(rebase(), "links", json!(many_links)),
+        ),
+        (
+            "route_revision in scope",
+            set(inv_initial(), &["scope", "route_revision"], json!(1)),
+        ),
+        (
+            "scope daemon cache",
+            set(
+                inv_initial(),
+                &["scope", "observation_source"],
+                json!("daemon_cache"),
+            ),
+        ),
+        (
+            "scope missing field",
+            del(inv_initial(), &["scope", "upstream_id"]),
+        ),
+        (
+            "canon v2",
+            set(inv_initial(), &["canon"], json!("sigil-tooldef-fp-v2")),
+        ),
+        (
+            "negative pages",
+            set(inv_initial(), &["pages_observed"], json!(-1)),
+        ),
+        (
+            "float pages",
+            set(inv_initial(), &["pages_observed"], json!(1.0)),
+        ),
+        (
+            "pages above int64",
+            set(inv_initial(), &["pages_observed"], json!(u64::MAX)),
+        ),
+        (
+            "tool names list",
+            set(inv_initial(), &["tools"], json!(["json_ok"])),
+        ),
+        (
+            "v4 member",
+            set(
+                inv_initial(),
+                &["members"],
+                json!(["0c635e55-7e09-4e3d-978f-4b88870428f1"]),
+            ),
+        ),
+        (
+            "bad key_id",
+            set(inv_initial(), &["key_id"], json!("kid-abc")),
+        ),
+        (
+            "bad schema_version",
+            set(inv_initial(), &["schema_version"], json!(2)),
+        ),
+        (
+            "observed_at calendar",
+            set(
+                inv_initial(),
+                &["observed_at"],
+                json!("2026-02-30T00:00:00Z"),
+            ),
+        ),
+        (
+            "null members",
+            set(inv_initial(), &["members"], Value::Null),
+        ),
+        (
+            "null incomplete_reason",
+            set(inv_initial(), &["incomplete_reason"], Value::Null),
+        ),
+        (
+            "link comparison raw",
+            with_cmp(
+                rebase(),
+                "links",
+                json!([{"from_metadata_ref": v8(1), "to_metadata_ref": v8(5),
+                        "definition_comparison": "canary-secret"}]),
+            ),
+        ),
+        (
+            "link with key",
+            with_cmp(
+                rebase(),
+                "links",
+                json!([{"from_metadata_ref": v8(1), "to_metadata_ref": v8(5),
+                        "definition_comparison": "identical", "key": "canary-secret"}]),
+            ),
+        ),
+        ("missing report_id", del(inv_initial(), &["report_id"])),
+        ("missing epoch_id", del(inv_initial(), &["epoch_id"])),
+        (
+            "missing pages_observed",
+            del(inv_initial(), &["pages_observed"]),
+        ),
+    ];
+    for (label, doc) in cases {
+        assert!(
+            serde_json::from_value::<InventoryReport>(doc.clone()).is_err(),
+            "inventory case {label} accepted"
+        );
+        let e = parse_inventory_report(&serde_json::to_vec(&doc).unwrap()).expect_err(label);
+        assert_ne!(e.category(), ErrorCategory::Syntax, "{label}");
+        assert_no_canary("inventory", label, &e);
+    }
+}
+
+#[test]
+fn inventory_error_categories_and_validate() {
+    let cat = |v: Value| {
+        parse_inventory_report(&serde_json::to_vec(&v).unwrap())
+            .unwrap_err()
+            .category()
+    };
+    let too_many: Vec<String> = (0..10_001).map(v8).collect();
+    assert_eq!(
+        cat(set(inv_initial(), &["members"], json!(too_many))),
+        ErrorCategory::Limit
+    );
+    assert_eq!(
+        cat(set(inv_initial(), &["members"], json!([v8(1), v8(1)]))),
+        ErrorCategory::Semantic
+    );
+    assert_eq!(
+        cat(del(inv_initial(), &["members"])),
+        ErrorCategory::Semantic
+    );
+    assert_eq!(
+        cat(set(inv_initial(), &["x"], json!(1))),
+        ErrorCategory::Schema
+    );
+    // Hand-built values are checked by validate().
+    let mut r: InventoryReport = serde_json::from_value(inv_initial()).unwrap();
+    r.members = None;
+    assert!(r.validate().is_err());
+    // Duplicate keys are refused by the byte-level entry point.
+    let dup = br#"{"schema_version":1,"schema_version":1}"#;
+    assert_eq!(
+        parse_inventory_report(dup).unwrap_err().category(),
+        ErrorCategory::Schema
+    );
+}
+
+#[test]
+fn error_item_metadata_ref_for_registry_conflict() {
+    let item = json!({"index": 0, "metadata_ref": v8(1), "code": "registry_conflict"});
+    let body = json!({"error": {"code": "registry_conflict", "message": "m", "items": [item]}});
+    let parsed = parse_api_error(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), body);
+    // Optional: other items still round-trip without emitting the key.
+    let plain = json!({"error": {"code": "conflict", "message": "m", "items": [
+        {"index": 0, "event_id": uid(1), "code": "conflict"}]}});
+    let parsed = parse_api_error(&serde_json::to_vec(&plain).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), plain);
+    // Shape and exclusivity.
+    for bad in [
+        json!({"index": 0, "metadata_ref": "canary-secret", "code": "registry_conflict"}),
+        json!({"index": 0, "metadata_ref": "0c635e55-7e09-4e3d-978f-4b88870428f1", "code": "registry_conflict"}),
+        json!({"index": 0, "metadata_ref": Value::Null, "code": "registry_conflict"}),
+    ] {
+        let body = json!({"error": {"code": "registry_conflict", "message": "m", "items": [bad]}});
+        let e = parse_api_error(&serde_json::to_vec(&body).unwrap()).unwrap_err();
+        assert_no_canary("api_error", "metadata_ref", &e);
+    }
+    let both =
+        json!({"index": 0, "metadata_ref": v8(1), "event_id": uid(1), "code": "registry_conflict"});
+    let body = json!({"error": {"code": "registry_conflict", "message": "m", "items": [both]}});
+    assert_eq!(
+        parse_api_error(&serde_json::to_vec(&body).unwrap())
+            .unwrap_err()
+            .category(),
+        ErrorCategory::Semantic
+    );
 }

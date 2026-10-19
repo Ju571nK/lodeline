@@ -250,6 +250,7 @@ pub fn apply(
         index: u32::try_from(index).unwrap_or(u32::MAX),
         event_id: None,
         gap_id: Some(id.clone()),
+        metadata_ref: None,
         code,
     };
     for (index, incoming) in gaps.into_iter().enumerate() {
@@ -368,6 +369,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
                     index: u32::try_from(i).unwrap_or(u32::MAX),
                     event_id: None,
                     gap_id: None,
+                    metadata_ref: None,
                     code: ErrorCode::SemanticInvalid,
                 }]);
             }

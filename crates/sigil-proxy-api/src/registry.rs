@@ -1,12 +1,14 @@
 //! Registry entry, read view and upload bodies (`registry-entry.schema.json`).
 //!
-//! The inventory report (`$defs/inventory_report`) is not modelled here yet.
+//! Also models the inventory report (`$defs/inventory_report`, registry.md R7).
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::ValidationError;
 use crate::helpers::{check_array, check_len};
-use crate::scalar::{Fingerprint, Id, KeyId, MetadataRef, SchemaVersion, Timestamp};
+use crate::scalar::{
+    Fingerprint, Id, KeyId, MetadataRef, NonNegativeI64, SchemaVersion, Timestamp, Uuid,
+};
 use crate::Validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,5 +144,184 @@ impl Validate for UploadResponse {
             100,
             true,
         )
+    }
+}
+
+// ---------------------------------------------------------------- inventory report
+
+wire_struct! {
+    /// Scope key without `proxy_id` (the proxy is the authenticated sender).
+    pub struct InventoryScope {
+        pub upstream_id: Id,
+        pub credential_scope_id: Id,
+        pub protocol_version: RegistryProtocolVersion,
+        pub observation_source: ObservationSource,
+    }
+}
+no_rules!(InventoryScope);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Completeness {
+    Complete,
+    Incomplete,
+}
+
+/// Why a listing chain is incomplete (closed enum).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteReason {
+    PageLimitExceeded,
+    ToolLimitExceeded,
+    SizeLimitExceeded,
+    PageError,
+    CursorInvalid,
+    AccessDenied,
+    SessionEnded,
+    CanonicalizationFailed,
+    AmbiguousName,
+}
+
+/// One difference between two snapshots. Refs only; names never appear.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Change {
+    Added {
+        metadata_ref: MetadataRef,
+    },
+    Removed {
+        metadata_ref: MetadataRef,
+    },
+    /// Pairs the new ref with the old ref the proxy matched by its local identity.
+    Changed {
+        metadata_ref: MetadataRef,
+        previous_metadata_ref: MetadataRef,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefinitionComparison {
+    Identical,
+    Different,
+    NotComparable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebaselineReason {
+    KeyRotation,
+    CanonVersionChange,
+}
+
+wire_struct! {
+    /// Producer-asserted pairing of the same tool across a key or canon change.
+    pub struct Link {
+        pub from_metadata_ref: MetadataRef,
+        pub to_metadata_ref: MetadataRef,
+        pub definition_comparison: DefinitionComparison,
+    }
+}
+no_rules!(Link);
+
+/// How a complete report relates to the previous snapshot (`oneOf` on `kind`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Comparison {
+    /// Struct variant (not unit) so that `deny_unknown_fields` applies.
+    InitialBaseline {},
+    /// `changes` has at most 20,000 items.
+    Compared {
+        previous_inventory_id: Uuid,
+        changes: Vec<Change>,
+    },
+    /// `links` has at most 10,000 items.
+    Rebaseline {
+        previous_inventory_id: Uuid,
+        reason: RebaselineReason,
+        links: Vec<Link>,
+    },
+}
+
+/// Largest `members` array.
+pub const MAX_INVENTORY_MEMBERS: usize = 10_000;
+/// Largest `comparison.changes` array.
+pub const MAX_INVENTORY_CHANGES: usize = 20_000;
+/// Largest `comparison.links` array.
+pub const MAX_INVENTORY_LINKS: usize = 10_000;
+
+wire_struct! {
+    /// Body of `POST /v1/proxy-inventory`: one observation of a `tools/list` chain.
+    ///
+    /// Conditional fields follow `completeness`: `complete` requires `inventory_id`,
+    /// `members` and `comparison` and forbids `incomplete_reason`; `incomplete`
+    /// requires `incomplete_reason` and forbids the other three. [`Validate`]
+    /// enforces this, so a hand-built value must be validated before sending.
+    pub struct InventoryReport {
+        pub schema_version: SchemaVersion,
+        pub report_id: Uuid,
+        pub proxy_id: Id,
+        pub epoch_id: Uuid,
+        pub observed_at: Timestamp,
+        pub scope: InventoryScope,
+        pub canon: Canon,
+        pub key_id: KeyId,
+        pub completeness: Completeness,
+        pub pages_observed: NonNegativeI64,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub incomplete_reason: Option<IncompleteReason>,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub inventory_id: Option<Uuid>,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub members: Option<Vec<MetadataRef>>,
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub comparison: Option<Comparison>,
+    }
+}
+
+impl Validate for InventoryReport {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self.completeness {
+            Completeness::Complete => {
+                if self.incomplete_reason.is_some() {
+                    return Err(ValidationError::new(
+                        "a complete report must not carry incomplete_reason",
+                    ));
+                }
+                let (Some(_), Some(members), Some(comparison)) =
+                    (&self.inventory_id, &self.members, &self.comparison)
+                else {
+                    return Err(ValidationError::new(
+                        "a complete report requires inventory_id, members and comparison",
+                    ));
+                };
+                check_array("members", members, 0, MAX_INVENTORY_MEMBERS, true)?;
+                match comparison {
+                    Comparison::InitialBaseline {} => {}
+                    Comparison::Compared { changes, .. } => {
+                        check_len("changes", changes.len(), 0, MAX_INVENTORY_CHANGES)?;
+                    }
+                    Comparison::Rebaseline { links, .. } => {
+                        check_len("links", links.len(), 0, MAX_INVENTORY_LINKS)?;
+                    }
+                }
+            }
+            Completeness::Incomplete => {
+                if self.incomplete_reason.is_none() {
+                    return Err(ValidationError::new(
+                        "an incomplete report requires incomplete_reason",
+                    ));
+                }
+                if self.inventory_id.is_some()
+                    || self.members.is_some()
+                    || self.comparison.is_some()
+                {
+                    return Err(ValidationError::new(
+                        "an incomplete report must not carry inventory_id, members or comparison",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }

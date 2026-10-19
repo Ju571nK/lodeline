@@ -405,6 +405,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
                         index: index_u32(i),
                         event_id: None,
                         gap_id: None,
+                        metadata_ref: None,
                         code: ErrorCode::SemanticInvalid,
                     }]),
                     None => err,
@@ -466,6 +467,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
                     index: index_u32(i),
                     event_id: None,
                     gap_id: None,
+                    metadata_ref: None,
                     code: ErrorCode::RegistryConflict,
                 })
                 .collect();
