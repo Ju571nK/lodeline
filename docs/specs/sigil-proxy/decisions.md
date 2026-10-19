@@ -141,3 +141,9 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   status 보고의 `last_assigned_sequence`가 ledger 최고 sequence보다 크면 보고 한 번으로 `tail=true` sequence_gap을 만들고, 이벤트가 도착하면 닫되 기록은 남긴다.
   수락된 ingest도 `last_seen`을 갱신한다. `spool.as_of`·`status_as_of` 이름과 message 문구는 기본안으로 구현하고 리뷰에서 확정한다.
   registry 409의 `metadata_ref`와 metadata 보존은 S5 밖이다(#279).
+- T-13/T-14 범위(2026-10-20, 사용자 결정·추천안 채택): 호출 lifecycle과 inventory 수집은 MCP 해석이 필요하므로 T-12b를 둘로 나눠
+  T-12b1(요청·응답 분류, `Observation` seam, cancel, protocol version·batch·`tasks/*` 거절)을 T-13보다 먼저 한다. session·DELETE·GET 405는 T-12b2.
+  spool은 SQLite WAL(`synchronous=FULL`)이며 fsync 뒤에만 local ack한다. T-12b1 전에는 해석 없는 임시 이벤트를 만들지 않는다.
+  spool이 차면 P1은 차단만 한다(`allow-with-gap`은 미룸). inventory는 status 보고와 분리된 `POST /v1/proxy-inventory`로 보낸다(O-4).
+  도구 이름 조회(R6)는 P1에서 ref만 두고 T-15에서 다시 본다. test 전용 feature 이름은 crate별 기존 이름을 유지한다(proxy `test-util`, server `test-support`).
+  기본값: 재시작 뒤 완료가 없는 호출은 start만 남는다. key 회전 시 이전 K는 즉시 폐기한다(O-2). scope를 넘는 link는 만들지 않는다(O-6).
