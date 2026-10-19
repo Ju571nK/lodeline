@@ -119,6 +119,7 @@ pub(super) fn semantic_422(mut indexes: Vec<usize>) -> Response {
             index: index_u32(i),
             event_id: None,
             gap_id: None,
+            metadata_ref: None,
             code: ErrorCode::SemanticInvalid,
         })
         .collect();
@@ -169,6 +170,7 @@ fn conflict_response(items: &[super::ledger::ConflictItem]) -> Response {
             index: index_u32(c.index),
             event_id: Some(c.event_id.clone()),
             gap_id: None,
+            metadata_ref: None,
             code: c.kind.error_code(),
         })
         .collect();
@@ -201,6 +203,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
                         index: index_u32(i),
                         event_id: None,
                         gap_id: None,
+                        metadata_ref: None,
                         code: ErrorCode::SemanticInvalid,
                     }]),
                     None => err,
@@ -307,6 +310,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
                 index: index_u32(*i),
                 event_id: Some(events[*i].event_id.clone()),
                 gap_id: None,
+                metadata_ref: None,
                 code: ErrorCode::MetadataRefPending,
             })
             .collect();
