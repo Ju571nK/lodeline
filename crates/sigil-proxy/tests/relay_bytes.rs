@@ -4,6 +4,9 @@
 //! (header rows), PX-009 (credential injection and secrecy).
 
 mod common;
+
+/// A valid JSON-RPC request (T-12b1 refuses bodies that are not).
+const PING: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
 use bytes::Bytes;
 use common::*;
 use std::time::Duration;
@@ -11,14 +14,15 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 /// A request body with unknown fields, odd whitespace, escapes, a duplicate key
-/// and a NUL: nothing may be normalised on the way.
+/// and trailing whitespace: nothing may be normalised on the way. It is still
+/// valid JSON-RPC (T-12b1 refuses anything else before dispatch).
 fn awkward_request() -> Vec<u8> {
     let mut b = br#"{ "jsonrpc" : "2.0","id":7 ,"method":"tools/call","params":{"name":"x","arguments":{"k":"UESC00e9\\n","k":2},"_meta":{"progressToken":"t"}},"zzz_unknown":[1,2,3]}"#.to_vec();
     b = String::from_utf8(b)
         .unwrap()
         .replace("UESC", "\\u")
         .into_bytes();
-    b.extend_from_slice(b"\n\n\x00");
+    b.extend_from_slice(b"\n\n");
     b
 }
 
@@ -106,7 +110,7 @@ async fn upstream_statuses_pass_through() {
         let b = body.to_vec();
         let up = Up::start(move |_| full(status, "application/json", &b)).await;
         let px = simple(&up, limits()).await;
-        let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+        let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
         assert_eq!(r.status, status);
         assert_eq!(r.body(), body);
     }
@@ -128,7 +132,7 @@ async fn sse_is_flushed_incrementally_and_boundaries_survive() {
         "/mcp/a",
         Some("tok-a"),
         &[("Accept", "application/json, text/event-stream")],
-        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#,
+        PING,
     ))
     .await
     .unwrap();
@@ -178,7 +182,7 @@ async fn sse_is_flushed_incrementally_and_boundaries_survive() {
 async fn failed_exchange_is_not_retried() {
     let up = Up::start(|_| Reply::Drop).await;
     let px = simple(&up, limits()).await;
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{\"id\":1}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 502);
     assert_eq!(r.text(), "{\"error\":\"upstream_unavailable\"}");
     assert_eq!(up.count(), 1);
@@ -191,7 +195,7 @@ async fn failed_exchange_is_not_retried() {
 async fn seen_with(headers: &[(&str, &str)]) -> Seen {
     let up = ok_upstream().await;
     let px = simple(&up, limits()).await;
-    let r = px.post("/mcp/a", Some("tok-a"), headers, b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), headers, PING).await;
     assert_eq!(r.status, 200);
     up.last()
 }
@@ -262,7 +266,7 @@ async fn request_origin_is_not_forwarded() {
             "/mcp/a",
             Some("tok-a"),
             &[("Origin", "https://app.example.com")],
-            b"{}",
+            PING,
         )
         .await;
     assert_eq!(r.status, 200);
@@ -298,7 +302,7 @@ async fn request_connection_named_headers_are_stripped() {
 async fn request_host_is_the_upstream_authority() {
     let up = ok_upstream().await;
     let px = simple(&up, limits()).await;
-    px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(
         up.last().header("host"),
         Some(format!("127.0.0.1:{}", up.addr.port()).as_str())
@@ -333,7 +337,7 @@ async fn response_with(h: (&str, &str)) -> Raw {
     })
     .await;
     let px = simple(&up, limits()).await;
-    px.post("/mcp/a", Some("tok-a"), &[], b"{}").await
+    px.post("/mcp/a", Some("tok-a"), &[], PING).await
 }
 
 macro_rules! dropped {
@@ -436,7 +440,7 @@ async fn upstream_401_403_map_to_a_fixed_error() {
         let px = simple(&up, limits()).await;
         for id in ["7", "\"abc\""] {
             let body = format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"arguments":{{"canary":"CANARY-XYZ"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"t","arguments":{{"canary":"CANARY-XYZ"}}}}}}"#
             );
             let r = px.post("/mcp/a", Some("tok-a"), &[], body.as_bytes()).await;
             assert_eq!(r.status, 200, "upstream {status}");
@@ -488,7 +492,7 @@ async fn redirects_are_not_followed_or_relayed() {
         })
         .await;
         let px = simple(&up, limits()).await;
-        let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+        let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
         assert_eq!(r.status, 502, "{status}");
         assert!(!r.has("location"));
         assert_eq!(up.count(), 1);
@@ -510,7 +514,7 @@ async fn upstream_rejection_echoes_the_id_verbatim() {
         r#""a\u00e9\n/b""#,
         r#""""#,
     ] {
-        let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call"}}"#);
+        let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/list"}}"#);
         let r = px.post("/mcp/a", Some("tok-a"), &[], body.as_bytes()).await;
         assert_eq!(r.status, 200, "{id}");
         assert!(
@@ -519,7 +523,10 @@ async fn upstream_rejection_echoes_the_id_verbatim() {
             r.text()
         );
     }
-    // not string/number, duplicate key, batch: no reply is possible
+    // not string/number, duplicate key, batch, not JSON: since T-12b1 the proxy
+    // refuses these itself with a 400 before dispatch, so upstream is never asked
+    // (and its 401 cannot be mapped).
+    let before = up.count();
     for body in [
         r#"{"jsonrpc":"2.0","id":null,"method":"x"}"#,
         r#"{"jsonrpc":"2.0","id":{"a":1},"method":"x"}"#,
@@ -528,8 +535,9 @@ async fn upstream_rejection_echoes_the_id_verbatim() {
         "not json",
     ] {
         let r = px.post("/mcp/a", Some("tok-a"), &[], body.as_bytes()).await;
-        assert_eq!(r.status, 502, "{body}");
+        assert_eq!(r.status, 400, "{body}");
     }
+    assert_eq!(up.count(), before);
 }
 
 /// L5: `Expect` is not forwarded (the proxy buffers the body and answers the
@@ -539,14 +547,9 @@ async fn request_expect_is_stripped() {
     let up = ok_upstream().await;
     let px = simple(&up, limits()).await;
     let r = px
-        .post(
-            "/mcp/a",
-            Some("tok-a"),
-            &[("Expect", "100-continue")],
-            b"{}",
-        )
+        .post("/mcp/a", Some("tok-a"), &[("Expect", "100-continue")], PING)
         .await;
     assert_eq!(r.status, 200);
     assert!(!up.last().has("expect"), "{:?}", up.last().headers);
-    assert_eq!(up.last().body, b"{}");
+    assert_eq!(up.last().body, PING);
 }

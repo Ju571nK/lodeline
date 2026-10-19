@@ -4,6 +4,9 @@
 //! loader only permits lowering (see limits.rs tests).
 
 mod common;
+
+/// A valid JSON-RPC request (T-12b1 refuses bodies that are not).
+const PING: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
 use bytes::Bytes;
 use common::*;
 use sigil_proxy::lifecycle::DrainOutcome;
@@ -45,7 +48,9 @@ async fn request_body_limit() {
     assert_eq!(px.send(&raw).await.status, 413, "chunked over the limit");
     assert_eq!(up.conns(), 0, "upstream untouched");
 
-    let body = vec![b'y'; 1024];
+    // exactly at the limit: valid JSON-RPC padded with trailing whitespace
+    let mut body = PING.to_vec();
+    body.resize(1024, b' ');
     assert_eq!(
         px.post("/mcp/a", Some("tok-a"), &[], &body).await.status,
         200
@@ -60,14 +65,14 @@ async fn header_size_limit() {
     let px = simple(&up, limits()).await; // 32 KiB
     let big = "a".repeat(40 * 1024);
     let r = px
-        .post("/mcp/a", Some("tok-a"), &[("X-Big", &big)], b"{}")
+        .post("/mcp/a", Some("tok-a"), &[("X-Big", &big)], PING)
         .await;
     assert_eq!(r.status, 431, "{r:?}");
     assert_eq!(up.conns(), 0);
     // just under the limit still works
     let ok = "a".repeat(20 * 1024);
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[("X-Big", &ok)], b"{}")
+        px.post("/mcp/a", Some("tok-a"), &[("X-Big", &ok)], PING)
             .await
             .status,
         200
@@ -81,7 +86,7 @@ async fn header_size_limit() {
 async fn json_response_limit() {
     let up = Up::start(|_| full(200, "application/json", &vec![b'j'; 2000])).await;
     let px = simple(&up, lim(|l| l.max_json_response_bytes = 1000)).await;
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 502);
     assert_eq!(r.text(), "{\"error\":\"upstream_response_too_large\"}");
 
@@ -108,7 +113,7 @@ async fn json_response_limit() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     t.await.unwrap();
     assert_eq!(r.status, 200);
     let (chunks, complete) = r.chunks();
@@ -139,7 +144,7 @@ async fn sse_event_limit() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let _ = tx.send(Bytes::from_static(b"data: after\n\n")).await;
     });
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     t.await.unwrap();
     assert_eq!(r.status, 200);
     let (chunks, complete) = r.chunks();
@@ -173,7 +178,7 @@ async fn call_total_limit() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     });
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     t.abort();
     let (chunks, complete) = r.chunks();
     assert!(!complete);
@@ -186,7 +191,7 @@ async fn first_byte_timeout_is_504() {
     let up = Up::start(|_| Reply::Hang).await;
     let px = simple(&up, lim(|l| l.response_idle_timeout_secs = 1)).await;
     let t = Instant::now();
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 504);
     assert_eq!(r.text(), "{\"error\":\"upstream_timeout\"}");
     assert!(t.elapsed() < Duration::from_secs(5));
@@ -205,7 +210,7 @@ async fn idle_timeout_cuts_a_stalled_stream() {
         .await
         .unwrap();
     let t = Instant::now();
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await; // tx stays open: stall
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await; // tx stays open: stall
     assert!(t.elapsed() < Duration::from_secs(6));
     let (chunks, complete) = r.chunks();
     assert!(!complete);
@@ -229,7 +234,7 @@ async fn call_timeout_cuts_a_trickling_stream() {
         }
     });
     let start = Instant::now();
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     let took = start.elapsed();
     t.abort();
     assert!(!r.chunks().1, "stream cut, not completed");
@@ -243,7 +248,7 @@ async fn call_timeout_cuts_a_trickling_stream() {
 /// proxy has accepted it (upstream saw the request).
 async fn hold(px: &Px, up: &Up, path: &str, token: &str) -> (tokio::task::JoinHandle<Raw>, usize) {
     let before = up.count();
-    let req = px.request("POST", path, Some(token), &[], b"{}");
+    let req = px.request("POST", path, Some(token), &[], PING);
     let addr = px.addr;
     let h = tokio::spawn(async move { send_raw(addr, &req).await });
     let end = Instant::now() + Duration::from_secs(5);
@@ -280,7 +285,7 @@ async fn route_concurrency_limit() {
     let px = simple(&up, l).await;
     let (h, _) = hold(&px, &up, "/mcp/a", "tok-a").await;
     let t = Instant::now();
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 429);
     assert_eq!(r.text(), "{\"error\":\"too_many_requests\"}");
     assert!(t.elapsed() < Duration::from_secs(1), "no queueing");
@@ -310,12 +315,12 @@ async fn principal_concurrency_limit() {
     let (h, _) = hold(&px, &up, "/mcp/a", "tok-1").await;
     // same principal, other route (same principal id) -> 429
     assert_eq!(
-        px.post("/mcp/b", Some("tok-1b"), &[], b"{}").await.status,
+        px.post("/mcp/b", Some("tok-1b"), &[], PING).await.status,
         429
     );
     // same principal, same route -> 429
     assert_eq!(
-        px.post("/mcp/a", Some("tok-1"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-1"), &[], PING).await.status,
         429
     );
     // another principal still gets in
@@ -340,7 +345,7 @@ async fn total_concurrency_limit() {
     let px = Px::start(Some(t), l).await;
     let (h, _) = hold(&px, &up, "/mcp/a", "tok-a").await;
     assert_eq!(
-        px.post("/mcp/b", Some("tok-b"), &[], b"{}").await.status,
+        px.post("/mcp/b", Some("tok-b"), &[], PING).await.status,
         429
     );
     senders.lock().unwrap().clear();
@@ -428,7 +433,7 @@ async fn encoded_stream_skips_the_event_tracker_but_keeps_the_call_cap() {
             tx.send(Bytes::from(vec![0x1fu8; 200])).await.unwrap();
         }
     });
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     let (chunks, complete) = r.chunks();
     assert!(
         complete,
@@ -448,7 +453,7 @@ async fn encoded_stream_skips_the_event_tracker_but_keeps_the_call_cap() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     });
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     t.abort();
     let (chunks, complete) = r.chunks();
     assert!(!complete);
@@ -481,7 +486,7 @@ async fn connection_cap_at_accept() {
     held.pop();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-a"), &[], PING).await.status,
         200
     );
 }
@@ -526,7 +531,7 @@ async fn client_disconnect_cancels_the_upstream_stream() {
     let (up, senders) = gated_upstream().await;
     let px = simple(&up, lim(|l| l.max_calls_per_route = 1)).await;
     let mut s = TcpStream::connect(px.addr).await.unwrap();
-    s.write_all(&px.request("POST", "/mcp/a", Some("tok-a"), &[], b"{}"))
+    s.write_all(&px.request("POST", "/mcp/a", Some("tok-a"), &[], PING))
         .await
         .unwrap();
     let mut buf = Vec::new();
@@ -581,7 +586,7 @@ async fn client_disconnect_before_headers_cancels_the_upstream_exchange() {
     );
     let px = Px::start(Some(t), l).await;
     let mut s = TcpStream::connect(px.addr).await.unwrap();
-    s.write_all(&px.request("POST", "/mcp/a", Some("tok-a"), &[], b"{}"))
+    s.write_all(&px.request("POST", "/mcp/a", Some("tok-a"), &[], PING))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
