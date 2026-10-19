@@ -1,1 +1,1329 @@
-//! Durable event spool (T-14). Placeholder module; implemented in T-14a.
+//! Durable event spool (T-14a, PX-011, PX-013).
+//!
+//! A local SQLite database (WAL, `synchronous=FULL`) owned by one dedicated
+//! writer thread, so no tokio worker ever waits on an fsync inside a lock. The
+//! relay (T-13) appends validated [`ProxyEvent`] envelopes; the ingest client
+//! (T-11 S4) drains them through the [`EventSource`] implementation.
+//!
+//! Guarantees:
+//!
+//! * [`Spool::append`] returns only after the row is committed and fsynced; the
+//!   event sequence is assigned inside that same transaction from a counter in
+//!   the database (monotonic per epoch, never reused, survives restart and the
+//!   purge of acknowledged rows). Nothing is acknowledged before it is durable.
+//! * Events are delivered oldest sequence first. `acknowledged` marks rows
+//!   (kept for [`SpoolConfig::ack_retention`], then purged). `quarantined` moves
+//!   rows unchanged to the `quarantine` table; nothing is ever dropped silently.
+//! * Admission stops at `capacity - gap_reserve` of unsent event bytes
+//!   ([`AppendError::Full`]); the reserve is only for gap records.
+//! * Unsent events older than [`SpoolConfig::max_offline_retry_age`] (R) are
+//!   moved unchanged to quarantine and a `spool_expired` gap is recorded for each
+//!   contiguous sequence run (O-1 option A). The gap is handed to the status
+//!   layer with [`Spool::pending_gaps`] and removed only after
+//!   [`Spool::gaps_handed_off`], so a crash in between repeats the gap instead
+//!   of losing it.
+//! * A corrupt, foreign or unreadable database refuses to open
+//!   ([`SpoolError`]); it is never recreated or truncated.
+//!
+//! The database stores only the serialized, already validated event envelope.
+//! Errors and logs carry SQLite result-code names, never event content.
+//!
+//! The sequence counter is the *event* sequence of the epoch. It is independent
+//! of the *status* sequence bound in `state_dir` (`sequence.json`).
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use sigil_proxy_api::status::{QuarantineCode, SpoolExpiredGap};
+use sigil_proxy_api::{GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
+use tokio::sync::oneshot;
+
+use crate::ingest_client::EventSource;
+use crate::limits::Limits;
+
+/// File name of the database inside the state directory.
+pub const SPOOL_FILE: &str = "spool.db";
+const SCHEMA_VERSION: i64 = 1;
+/// Quarantine reason of events that outlived R.
+pub const EXPIRED_CODE: &str = "spool_expired";
+
+/// Unix-seconds clock. Injectable so retention is testable.
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+fn system_clock() -> Clock {
+    Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    })
+}
+
+#[derive(Clone)]
+pub struct SpoolConfig {
+    /// State directory (already created and locked by `StateDir`).
+    pub dir: PathBuf,
+    pub proxy_id: String,
+    pub epoch_id: String,
+    pub event_max_bytes: u64,
+    /// `spool_max_bytes`.
+    pub capacity_bytes: u64,
+    /// `spool_gap_reserve_bytes`: kept free of events for gap records.
+    pub gap_reserve_bytes: u64,
+    /// R: age after which an unsent event expires into quarantine.
+    pub max_offline_retry_age: Duration,
+    /// How long acknowledged rows stay (default 24 h).
+    pub ack_retention: Duration,
+    /// How often the writer thread expires and purges by itself.
+    pub maintenance_interval: Duration,
+    pub clock: Clock,
+}
+
+impl SpoolConfig {
+    /// Defaults: R = 30 days, acknowledged retention 24 h, maintenance every 60 s.
+    pub fn new(dir: &Path, proxy_id: &str, epoch_id: &str, limits: &Limits) -> SpoolConfig {
+        SpoolConfig {
+            dir: dir.to_path_buf(),
+            proxy_id: proxy_id.to_string(),
+            epoch_id: epoch_id.to_string(),
+            event_max_bytes: limits.event_max_bytes,
+            capacity_bytes: limits.spool_max_bytes,
+            gap_reserve_bytes: limits.spool_gap_reserve_bytes,
+            max_offline_retry_age: Duration::from_secs(30 * 86_400),
+            ack_retention: Duration::from_secs(86_400),
+            maintenance_interval: Duration::from_secs(60),
+            clock: system_clock(),
+        }
+    }
+}
+
+// ------------------------------------------------------------------- errors
+
+#[derive(Debug, thiserror::Error)]
+pub enum SpoolError {
+    #[error("spool database is corrupt or not a database; refusing to start")]
+    Corrupt,
+    #[error("spool database belongs to another proxy or epoch; refusing to start")]
+    Foreign,
+    #[error("spool database has an unsupported schema version")]
+    UnsupportedSchema,
+    #[error("spool database path is not a regular file")]
+    BadPath,
+    #[error("spool storage error ({0})")]
+    Storage(String),
+    #[error("spool writer is not running")]
+    Unavailable,
+}
+
+/// Why an append was refused. Nothing was stored in any of these cases.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AppendError {
+    /// Unsent bytes reached `capacity - gap_reserve`. The relay blocks new calls.
+    #[error("spool is full")]
+    Full,
+    #[error("event exceeds event_max_bytes")]
+    TooLarge,
+    #[error("event_id already in the spool")]
+    Duplicate,
+    /// `proxy_id` or `epoch_id` differs from the spool's.
+    #[error("event belongs to another proxy or epoch")]
+    WrongIdentity,
+    /// The filesystem is out of space (SQLITE_FULL). Spool state: degraded.
+    #[error("spool disk is full")]
+    DiskFull,
+    /// Any other storage failure. Spool state: degraded.
+    #[error("spool storage failure")]
+    Storage,
+    #[error("spool writer is not running")]
+    Unavailable,
+}
+
+fn code_name(e: &rusqlite::Error) -> String {
+    match e {
+        rusqlite::Error::SqliteFailure(f, _) => format!("{:?}", f.code),
+        _ => "other".to_string(),
+    }
+}
+
+fn classify_open(e: &rusqlite::Error) -> SpoolError {
+    if let rusqlite::Error::SqliteFailure(f, _) = e {
+        if matches!(
+            f.code,
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+        ) {
+            return SpoolError::Corrupt;
+        }
+    }
+    SpoolError::Storage(code_name(e))
+}
+
+fn is_disk_full(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::DiskFull)
+}
+
+// --------------------------------------------------------------- public data
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Appended {
+    /// The sequence assigned to the event (the input's own sequence is ignored).
+    pub sequence: i64,
+}
+
+pub use sigil_proxy_api::status::SpoolState;
+
+/// What T-14b puts into the status report (`spool.*`, `last_assigned_sequence`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpoolSnapshot {
+    pub state: SpoolState,
+    pub unsent_events: u64,
+    /// Serialized bytes of the unsent events.
+    pub unsent_bytes: u64,
+    /// Serialized bytes of gap records not yet handed off.
+    pub gap_bytes: u64,
+    pub capacity_bytes: u64,
+    pub gap_reserve_bytes: u64,
+    /// Seconds since the oldest unsent event was appended; `None` when empty.
+    pub oldest_unsent_age_seconds: Option<u64>,
+    /// Highest sequence ever assigned in this epoch (0 if none).
+    pub last_assigned_sequence: i64,
+    pub quarantined_events: u64,
+    /// Acknowledged rows still kept for the retention window.
+    pub retained_acked_events: u64,
+    pub pending_gaps: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpireReport {
+    pub expired_events: u64,
+    pub gaps_recorded: u64,
+    pub purged_acked: u64,
+}
+
+// ------------------------------------------------------------------ internals
+
+#[derive(Default)]
+struct Counters {
+    unsent_events: u64,
+    unsent_bytes: u64,
+    gap_bytes: u64,
+    oldest_created: Option<i64>,
+    last_seq: i64,
+    quarantined: u64,
+    acked: u64,
+    pending_gaps: u64,
+}
+
+struct Shared {
+    counters: Mutex<Counters>,
+    degraded: AtomicBool,
+    capacity: AtomicU64,
+    reserve: AtomicU64,
+    #[cfg(any(test, feature = "test-util"))]
+    inject_failure: AtomicBool,
+}
+
+enum Reply<T> {
+    Sync(mpsc::Sender<T>),
+    Async(oneshot::Sender<T>),
+}
+
+impl<T> Reply<T> {
+    fn send(self, v: T) {
+        match self {
+            Reply::Sync(s) => {
+                let _ = s.send(v);
+            }
+            Reply::Async(s) => {
+                let _ = s.send(v);
+            }
+        }
+    }
+}
+
+enum Cmd {
+    Append(Box<ProxyEvent>, Reply<Result<Appended, AppendError>>),
+    Next(usize, HashSet<String>, Reply<Vec<ProxyEvent>>),
+    Ack(Vec<String>, Reply<Result<u64, SpoolError>>),
+    Quarantine(Vec<String>, String, Reply<Result<u64, SpoolError>>),
+    Expire(Reply<Result<ExpireReport, SpoolError>>),
+    RecordGap(Box<GapReport>, Reply<Result<(), SpoolError>>),
+    PendingGaps(Reply<Result<Vec<GapReport>, SpoolError>>),
+    HandedOff(Vec<String>, Reply<Result<(), SpoolError>>),
+    Shutdown,
+}
+
+struct Inner {
+    tx: mpsc::Sender<Cmd>,
+    shared: Arc<Shared>,
+    clock: Clock,
+    join: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Cmd::Shutdown);
+        if let Some(j) = self.join.lock().ok().and_then(|mut g| g.take()) {
+            let _ = j.join();
+        }
+    }
+}
+
+/// Handle to the spool. Cheap to clone; the writer thread stops (and the database
+/// closes) when the last clone is dropped.
+#[derive(Clone)]
+pub struct Spool {
+    inner: Arc<Inner>,
+}
+
+impl Spool {
+    /// Open (or create) the spool and start the writer thread.
+    ///
+    /// Refuses to start on a corrupt, non-database, foreign (other proxy or
+    /// epoch) or newer-schema file. It never recreates or truncates an existing
+    /// file.
+    pub fn open(cfg: SpoolConfig) -> Result<Spool, SpoolError> {
+        let shared = Arc::new(Shared {
+            counters: Mutex::new(Counters::default()),
+            degraded: AtomicBool::new(false),
+            capacity: AtomicU64::new(cfg.capacity_bytes),
+            reserve: AtomicU64::new(cfg.gap_reserve_bytes),
+            #[cfg(any(test, feature = "test-util"))]
+            inject_failure: AtomicBool::new(false),
+        });
+        let (tx, rx) = mpsc::channel::<Cmd>();
+        let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), SpoolError>>(1);
+        let clock = cfg.clock.clone();
+        let sh = shared.clone();
+        let join = std::thread::Builder::new()
+            .name("sigil-proxy-spool".into())
+            .spawn(move || match Writer::open(cfg, sh) {
+                Ok(mut w) => {
+                    let _ = init_tx.send(Ok(()));
+                    w.run(rx);
+                }
+                Err(e) => {
+                    let _ = init_tx.send(Err(e));
+                }
+            })
+            .map_err(|_| SpoolError::Unavailable)?;
+        match init_rx.recv() {
+            Ok(Ok(())) => Ok(Spool {
+                inner: Arc::new(Inner {
+                    tx,
+                    shared,
+                    clock,
+                    join: Mutex::new(Some(join)),
+                }),
+            }),
+            Ok(Err(e)) => {
+                let _ = join.join();
+                Err(e)
+            }
+            Err(_) => {
+                let _ = join.join();
+                Err(SpoolError::Unavailable)
+            }
+        }
+    }
+
+    fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Option<T> {
+        let (s, r) = mpsc::channel();
+        self.inner.tx.send(make(Reply::Sync(s))).ok()?;
+        r.recv().ok()
+    }
+
+    /// Append an event durably. Blocks until commit and fsync (call from a
+    /// blocking context, or use [`Spool::append_async`]). The event's `sequence`
+    /// is ignored and replaced; its `proxy_id` and `epoch_id` must match.
+    pub fn append(&self, event: ProxyEvent) -> Result<Appended, AppendError> {
+        self.call(|r| Cmd::Append(Box::new(event), r))
+            .unwrap_or(Err(AppendError::Unavailable))
+    }
+
+    /// Like [`Spool::append`], without blocking the async worker.
+    pub async fn append_async(&self, event: ProxyEvent) -> Result<Appended, AppendError> {
+        let (s, r) = oneshot::channel();
+        if self
+            .inner
+            .tx
+            .send(Cmd::Append(Box::new(event), Reply::Async(s)))
+            .is_err()
+        {
+            return Err(AppendError::Unavailable);
+        }
+        r.await.unwrap_or(Err(AppendError::Unavailable))
+    }
+
+    /// Cheap, non-blocking view of the counters (no database access).
+    pub fn snapshot(&self) -> SpoolSnapshot {
+        let sh = &self.inner.shared;
+        let c = sh.counters.lock().unwrap_or_else(|p| p.into_inner());
+        let cap = sh.capacity.load(Ordering::Relaxed);
+        let reserve = sh.reserve.load(Ordering::Relaxed);
+        let now = (self.inner.clock)();
+        let state = if sh.degraded.load(Ordering::Relaxed) {
+            SpoolState::Degraded
+        } else if c.unsent_bytes >= cap.saturating_sub(reserve) {
+            SpoolState::Full
+        } else {
+            SpoolState::Ok
+        };
+        SpoolSnapshot {
+            state,
+            unsent_events: c.unsent_events,
+            unsent_bytes: c.unsent_bytes,
+            gap_bytes: c.gap_bytes,
+            capacity_bytes: cap,
+            gap_reserve_bytes: reserve,
+            oldest_unsent_age_seconds: c.oldest_created.map(|t| (now - t).max(0) as u64),
+            last_assigned_sequence: c.last_seq,
+            quarantined_events: c.quarantined,
+            retained_acked_events: c.acked,
+            pending_gaps: c.pending_gaps,
+        }
+    }
+
+    /// Expire old unsent events and purge old acknowledged rows now. The writer
+    /// also does this every `maintenance_interval`.
+    pub fn expire_now(&self) -> Result<ExpireReport, SpoolError> {
+        self.call(Cmd::Expire)
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
+    /// Record a gap (any kind) durably so it survives a crash until the status
+    /// layer has taken it over.
+    pub fn record_gap(&self, gap: GapReport) -> Result<(), SpoolError> {
+        self.call(|r| Cmd::RecordGap(Box::new(gap), r))
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
+    /// Gaps recorded by the spool and not yet handed off, oldest first.
+    pub fn pending_gaps(&self) -> Result<Vec<GapReport>, SpoolError> {
+        self.call(Cmd::PendingGaps)
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
+    /// The status layer persisted these gaps (by `gap_id`); remove them here.
+    pub fn gaps_handed_off(&self, gap_ids: &[String]) -> Result<(), SpoolError> {
+        self.call(|r| Cmd::HandedOff(gap_ids.to_vec(), r))
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
+    /// Test knob: make every append fail as a storage error (ENOSPC-like).
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn inject_storage_failure(&self, on: bool) {
+        self.inner.shared.inject_failure.store(on, Ordering::SeqCst);
+    }
+
+    /// Test knob: change the capacity and gap reserve.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_capacity_for_test(&self, capacity: u64, reserve: u64) {
+        self.inner.shared.capacity.store(capacity, Ordering::SeqCst);
+        self.inner.shared.reserve.store(reserve, Ordering::SeqCst);
+    }
+}
+
+impl EventSource for Spool {
+    fn next_events(&mut self, max: usize, skip: &HashSet<String>) -> Vec<ProxyEvent> {
+        self.call(|r| Cmd::Next(max, skip.clone(), r))
+            .unwrap_or_default()
+    }
+    fn acknowledged(&mut self, event_ids: &[String]) {
+        if let Some(Err(_)) = self.call(|r| Cmd::Ack(event_ids.to_vec(), r)) {
+            // Stays unsent and is resent; the server deduplicates.
+            self.inner.shared.degraded.store(true, Ordering::Relaxed);
+        }
+    }
+    fn quarantined(&mut self, event_ids: &[String], code: QuarantineCode) {
+        let c = serde_json::to_value(code)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "conflict".to_string());
+        if let Some(Err(_)) = self.call(|r| Cmd::Quarantine(event_ids.to_vec(), c, r)) {
+            self.inner.shared.degraded.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+// --------------------------------------------------------------- writer thread
+
+struct Writer {
+    conn: Connection,
+    cfg: SpoolConfig,
+    shared: Arc<Shared>,
+}
+
+const SCHEMA: &str = "
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE seq (id INTEGER PRIMARY KEY CHECK (id = 1), last INTEGER NOT NULL);
+CREATE TABLE events (
+  sequence INTEGER PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
+  bytes BLOB NOT NULL,
+  size INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  state INTEGER NOT NULL,
+  acked_at INTEGER
+);
+CREATE INDEX idx_unsent ON events(sequence) WHERE state = 0;
+CREATE TABLE quarantine (
+  sequence INTEGER PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
+  bytes BLOB NOT NULL,
+  size INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  quarantined_at INTEGER NOT NULL,
+  code TEXT NOT NULL
+);
+CREATE TABLE gaps (
+  rowid_ INTEGER PRIMARY KEY AUTOINCREMENT,
+  gap_id TEXT NOT NULL UNIQUE,
+  body TEXT NOT NULL,
+  size INTEGER NOT NULL
+);
+";
+
+impl Writer {
+    fn open(cfg: SpoolConfig, shared: Arc<Shared>) -> Result<Writer, SpoolError> {
+        let path = cfg.dir.join(SPOOL_FILE);
+        match std::fs::symlink_metadata(&path) {
+            Ok(md) if !md.is_file() => return Err(SpoolError::BadPath),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => create_private(&path)?,
+            Err(_) => return Err(SpoolError::Storage("stat".into())),
+        }
+        let conn = Connection::open(&path).map_err(|e| classify_open(&e))?;
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+            .map_err(|e| classify_open(&e))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(SpoolError::Storage("wal_unavailable".into()));
+        }
+        conn.execute_batch("PRAGMA synchronous=FULL;")
+            .map_err(|e| classify_open(&e))?;
+        let level: i64 = conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .map_err(|e| classify_open(&e))?;
+        if level != 2 {
+            return Err(SpoolError::Storage("synchronous".into()));
+        }
+        let quick: String = conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(|e| classify_open(&e))?;
+        if quick != "ok" {
+            return Err(SpoolError::Corrupt);
+        }
+        let tables: i64 = conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+            .map_err(|e| classify_open(&e))?;
+        let mut w = Writer { conn, cfg, shared };
+        if tables == 0 {
+            w.init_schema().map_err(|e| classify_open(&e))?;
+        } else {
+            w.verify_schema()?;
+        }
+        w.load_counters().map_err(|e| classify_open(&e))?;
+        Ok(w)
+    }
+
+    fn init_schema(&mut self) -> rusqlite::Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(SCHEMA)?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?1), ('proxy_id', ?2), ('epoch_id', ?3)",
+            params![SCHEMA_VERSION.to_string(), self.cfg.proxy_id, self.cfg.epoch_id],
+        )?;
+        tx.execute("INSERT INTO seq(id, last) VALUES (1, 0)", [])?;
+        tx.commit()
+    }
+
+    fn verify_schema(&self) -> Result<(), SpoolError> {
+        let get = |k: &str| -> Result<Option<String>, SpoolError> {
+            self.conn
+                .query_row("SELECT value FROM meta WHERE key = ?1", [k], |r| r.get(0))
+                .optional()
+                .map_err(|_| SpoolError::Corrupt)
+        };
+        let version = get("schema_version")?.ok_or(SpoolError::Corrupt)?;
+        if version.parse::<i64>().ok() != Some(SCHEMA_VERSION) {
+            return Err(SpoolError::UnsupportedSchema);
+        }
+        if get("proxy_id")?.as_deref() != Some(self.cfg.proxy_id.as_str())
+            || get("epoch_id")?.as_deref() != Some(self.cfg.epoch_id.as_str())
+        {
+            return Err(SpoolError::Foreign);
+        }
+        for t in ["seq", "events", "quarantine", "gaps"] {
+            self.conn
+                .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(|_| SpoolError::Corrupt)?;
+        }
+        Ok(())
+    }
+
+    fn load_counters(&self) -> rusqlite::Result<()> {
+        let c = &self.conn;
+        let (n, b): (i64, i64) = c.query_row(
+            "SELECT count(*), coalesce(sum(size), 0) FROM events WHERE state = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let acked: i64 = c.query_row("SELECT count(*) FROM events WHERE state = 1", [], |r| {
+            r.get(0)
+        })?;
+        let quarantined: i64 = c.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0))?;
+        let (gn, gb): (i64, i64) = c.query_row(
+            "SELECT count(*), coalesce(sum(size), 0) FROM gaps",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let last: i64 = c.query_row("SELECT last FROM seq WHERE id = 1", [], |r| r.get(0))?;
+        let oldest = self.oldest_unsent()?;
+        let mut k = self
+            .shared
+            .counters
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *k = Counters {
+            unsent_events: n as u64,
+            unsent_bytes: b as u64,
+            gap_bytes: gb as u64,
+            oldest_created: oldest,
+            last_seq: last,
+            quarantined: quarantined as u64,
+            acked: acked as u64,
+            pending_gaps: gn as u64,
+        };
+        Ok(())
+    }
+
+    fn oldest_unsent(&self) -> rusqlite::Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT created_at FROM events WHERE state = 0 ORDER BY sequence LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    fn set_degraded(&self, on: bool) {
+        self.shared.degraded.store(on, Ordering::Relaxed);
+    }
+
+    fn run(&mut self, rx: mpsc::Receiver<Cmd>) {
+        loop {
+            let cmd = match rx.recv_timeout(self.cfg.maintenance_interval) {
+                Ok(c) => c,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if self.expire().is_err() {
+                        self.set_degraded(true);
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            };
+            match cmd {
+                Cmd::Append(ev, r) => r.send(self.append(*ev)),
+                Cmd::Next(max, skip, r) => r.send(self.next(max, &skip)),
+                Cmd::Ack(ids, r) => r.send(self.ack(&ids).inspect_err(|_| self.set_degraded(true))),
+                Cmd::Quarantine(ids, code, r) => r.send(
+                    self.quarantine(&ids, &code)
+                        .inspect_err(|_| self.set_degraded(true)),
+                ),
+                Cmd::Expire(r) => r.send(self.expire()),
+                Cmd::RecordGap(g, r) => r.send(self.record_gap(&g)),
+                Cmd::PendingGaps(r) => r.send(self.pending_gaps()),
+                Cmd::HandedOff(ids, r) => r.send(self.handed_off(&ids)),
+                Cmd::Shutdown => return,
+            }
+        }
+    }
+
+    fn counters(&self) -> std::sync::MutexGuard<'_, Counters> {
+        self.shared
+            .counters
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn append(&mut self, mut event: ProxyEvent) -> Result<Appended, AppendError> {
+        if event.proxy_id.as_str() != self.cfg.proxy_id
+            || event.epoch_id.as_str() != self.cfg.epoch_id
+        {
+            return Err(AppendError::WrongIdentity);
+        }
+        #[cfg(any(test, feature = "test-util"))]
+        if self.shared.inject_failure.load(Ordering::SeqCst) {
+            self.set_degraded(true);
+            return Err(AppendError::DiskFull);
+        }
+        let cap = self.shared.capacity.load(Ordering::Relaxed);
+        let reserve = self.shared.reserve.load(Ordering::Relaxed);
+        let limit = cap.saturating_sub(reserve);
+        let now = (self.cfg.clock)();
+        let unsent_bytes = self.counters().unsent_bytes;
+        let res = (|| -> Result<(i64, u64), AppendError> {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| append_storage(&e))?;
+            let dup: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1) \
+                     OR EXISTS(SELECT 1 FROM quarantine WHERE event_id = ?1)",
+                    [event.event_id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(|e| append_storage(&e))?;
+            if dup {
+                return Err(AppendError::Duplicate);
+            }
+            let last: i64 = tx
+                .query_row("SELECT last FROM seq WHERE id = 1", [], |r| r.get(0))
+                .map_err(|e| append_storage(&e))?;
+            let seq = last.checked_add(1).ok_or(AppendError::Storage)?;
+            event.sequence = PositiveI64::new(seq).map_err(|_| AppendError::Storage)?;
+            let bytes = serde_json::to_vec(&event).map_err(|_| AppendError::Storage)?;
+            let size = bytes.len() as u64;
+            if size > self.cfg.event_max_bytes {
+                return Err(AppendError::TooLarge);
+            }
+            if unsent_bytes.saturating_add(size) > limit {
+                return Err(AppendError::Full);
+            }
+            tx.execute(
+                "INSERT INTO events(sequence, event_id, bytes, size, created_at, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                params![seq, event.event_id.as_str(), bytes, size as i64, now],
+            )
+            .map_err(|e| append_storage(&e))?;
+            tx.execute("UPDATE seq SET last = ?1 WHERE id = 1", [seq])
+                .map_err(|e| append_storage(&e))?;
+            tx.commit().map_err(|e| append_storage(&e))?;
+            Ok((seq, size))
+        })();
+        match res {
+            Ok((seq, size)) => {
+                let mut k = self.counters();
+                k.unsent_events += 1;
+                k.unsent_bytes += size;
+                k.last_seq = seq;
+                k.oldest_created.get_or_insert(now);
+                drop(k);
+                self.set_degraded(false);
+                Ok(Appended { sequence: seq })
+            }
+            Err(e) => {
+                if matches!(e, AppendError::DiskFull | AppendError::Storage) {
+                    self.set_degraded(true);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn next(&mut self, max: usize, skip: &HashSet<String>) -> Vec<ProxyEvent> {
+        let mut out = Vec::new();
+        if max == 0 {
+            return out;
+        }
+        let mut stmt = match self
+            .conn
+            .prepare_cached("SELECT event_id, bytes FROM events WHERE state = 0 ORDER BY sequence")
+        {
+            Ok(s) => s,
+            Err(_) => {
+                self.set_degraded(true);
+                return out;
+            }
+        };
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        });
+        let Ok(rows) = rows else {
+            self.set_degraded(true);
+            return out;
+        };
+        for row in rows {
+            let Ok((id, bytes)) = row else {
+                self.set_degraded(true);
+                break;
+            };
+            if skip.contains(&id) {
+                continue;
+            }
+            match sigil_proxy_api::parse::parse_event(&bytes) {
+                Ok(ev) => out.push(ev),
+                // A stored row that no longer parses is never sent and never
+                // deleted; the spool reports degraded.
+                Err(_) => self.shared.degraded.store(true, Ordering::Relaxed),
+            }
+            if out.len() >= max {
+                break;
+            }
+        }
+        out
+    }
+
+    fn ack(&mut self, ids: &[String]) -> Result<u64, SpoolError> {
+        let now = (self.cfg.clock)();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+        let (mut n, mut bytes) = (0u64, 0u64);
+        {
+            let mut st = tx
+                .prepare(
+                    "UPDATE events SET state = 1, acked_at = ?2 \
+                     WHERE event_id = ?1 AND state = 0 RETURNING size",
+                )
+                .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+            for id in ids {
+                let size: Option<i64> = st
+                    .query_row(params![id, now], |r| r.get(0))
+                    .optional()
+                    .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+                if let Some(s) = size {
+                    n += 1;
+                    bytes += s as u64;
+                }
+            }
+        }
+        tx.commit()
+            .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+        let oldest = self.oldest_unsent().ok().flatten();
+        let mut k = self.counters();
+        k.unsent_events = k.unsent_events.saturating_sub(n);
+        k.unsent_bytes = k.unsent_bytes.saturating_sub(bytes);
+        k.acked += n;
+        k.oldest_created = oldest;
+        Ok(n)
+    }
+
+    /// Move unsent rows to `quarantine` unchanged, inside the caller's decision.
+    fn quarantine(&mut self, ids: &[String], code: &str) -> Result<u64, SpoolError> {
+        let now = (self.cfg.clock)();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+        let mut moved = Vec::new();
+        for id in ids {
+            if let Some(size) = move_to_quarantine(&tx, id, code, now)? {
+                moved.push(size);
+            }
+        }
+        tx.commit()
+            .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+        let oldest = self.oldest_unsent().ok().flatten();
+        let n = moved.len() as u64;
+        let bytes: u64 = moved.iter().sum();
+        let mut k = self.counters();
+        k.unsent_events = k.unsent_events.saturating_sub(n);
+        k.unsent_bytes = k.unsent_bytes.saturating_sub(bytes);
+        k.quarantined += n;
+        k.oldest_created = oldest;
+        Ok(n)
+    }
+
+    fn expire(&mut self) -> Result<ExpireReport, SpoolError> {
+        let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
+        let now = (self.cfg.clock)();
+        let cutoff = now - self.cfg.max_offline_retry_age.as_secs() as i64;
+        let ack_cutoff = now - self.cfg.ack_retention.as_secs() as i64;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(st)?;
+        let expired: Vec<(i64, String)> = {
+            let mut q = tx
+                .prepare(
+                    "SELECT sequence, event_id FROM events \
+                     WHERE state = 0 AND created_at <= ?1 ORDER BY sequence",
+                )
+                .map_err(st)?;
+            let rows = q
+                .query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(st)?;
+            rows.collect::<Result<_, _>>().map_err(st)?
+        };
+        let mut report = ExpireReport::default();
+        let mut bytes = 0u64;
+        // Contiguous sequence runs: (from, to, count).
+        let mut runs: Vec<(i64, i64, i64)> = Vec::new();
+        for (seq, id) in &expired {
+            if let Some(size) = move_to_quarantine(&tx, id, EXPIRED_CODE, now)? {
+                bytes += size;
+                report.expired_events += 1;
+                match runs.last_mut() {
+                    Some((_, to, n)) if *to + 1 == *seq => {
+                        *to = *seq;
+                        *n += 1;
+                    }
+                    _ => runs.push((*seq, *seq, 1)),
+                }
+            }
+        }
+        let mut gap_bytes = 0u64;
+        for (from, to, count) in &runs {
+            let gap = spool_expired_gap(&self.cfg.epoch_id, now, *from, *to, *count)
+                .ok_or_else(|| SpoolError::Storage("gap".into()))?;
+            gap_bytes += insert_gap(&tx, &gap)?;
+            report.gaps_recorded += 1;
+        }
+        report.purged_acked = tx
+            .execute(
+                "DELETE FROM events WHERE state = 1 AND acked_at <= ?1",
+                [ack_cutoff],
+            )
+            .map_err(st)? as u64;
+        tx.commit().map_err(st)?;
+        let oldest = self.oldest_unsent().ok().flatten();
+        let mut k = self.counters();
+        k.unsent_events = k.unsent_events.saturating_sub(report.expired_events);
+        k.unsent_bytes = k.unsent_bytes.saturating_sub(bytes);
+        k.quarantined += report.expired_events;
+        k.acked = k.acked.saturating_sub(report.purged_acked);
+        k.gap_bytes += gap_bytes;
+        k.pending_gaps += report.gaps_recorded;
+        k.oldest_created = oldest;
+        Ok(report)
+    }
+
+    fn record_gap(&mut self, gap: &GapReport) -> Result<(), SpoolError> {
+        let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(st)?;
+        let size = insert_gap(&tx, gap)?;
+        tx.commit().map_err(st)?;
+        let mut k = self.counters();
+        k.gap_bytes += size;
+        k.pending_gaps += 1;
+        Ok(())
+    }
+
+    fn pending_gaps(&mut self) -> Result<Vec<GapReport>, SpoolError> {
+        let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
+        let mut q = self
+            .conn
+            .prepare("SELECT body FROM gaps ORDER BY rowid_")
+            .map_err(st)?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0)).map_err(st)?;
+        let mut out = Vec::new();
+        for body in rows {
+            let body = body.map_err(st)?;
+            out.push(serde_json::from_str(&body).map_err(|_| SpoolError::Corrupt)?);
+        }
+        Ok(out)
+    }
+
+    fn handed_off(&mut self, ids: &[String]) -> Result<(), SpoolError> {
+        let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(st)?;
+        let (mut n, mut bytes) = (0u64, 0u64);
+        {
+            let mut d = tx
+                .prepare("DELETE FROM gaps WHERE gap_id = ?1 RETURNING size")
+                .map_err(st)?;
+            for id in ids {
+                if let Some(s) = d
+                    .query_row([id], |r| r.get::<_, i64>(0))
+                    .optional()
+                    .map_err(st)?
+                {
+                    n += 1;
+                    bytes += s as u64;
+                }
+            }
+        }
+        tx.commit().map_err(st)?;
+        let mut k = self.counters();
+        k.pending_gaps = k.pending_gaps.saturating_sub(n);
+        k.gap_bytes = k.gap_bytes.saturating_sub(bytes);
+        Ok(())
+    }
+}
+
+fn append_storage(e: &rusqlite::Error) -> AppendError {
+    if is_disk_full(e) {
+        AppendError::DiskFull
+    } else {
+        AppendError::Storage
+    }
+}
+
+/// Copy one unsent row to `quarantine` and delete it. Returns its size, or
+/// `None` when the id is not an unsent row.
+fn move_to_quarantine(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    code: &str,
+    now: i64,
+) -> Result<Option<u64>, SpoolError> {
+    let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
+    let size: Option<i64> = tx
+        .query_row(
+            "SELECT size FROM events WHERE event_id = ?1 AND state = 0",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(st)?;
+    let Some(size) = size else { return Ok(None) };
+    tx.execute(
+        "INSERT INTO quarantine(sequence, event_id, bytes, size, created_at, quarantined_at, code) \
+         SELECT sequence, event_id, bytes, size, created_at, ?2, ?3 FROM events \
+         WHERE event_id = ?1 AND state = 0",
+        params![id, now, code],
+    )
+    .map_err(st)?;
+    tx.execute("DELETE FROM events WHERE event_id = ?1 AND state = 0", [id])
+        .map_err(st)?;
+    Ok(Some(size as u64))
+}
+
+fn insert_gap(tx: &rusqlite::Transaction<'_>, gap: &GapReport) -> Result<u64, SpoolError> {
+    let body = serde_json::to_string(gap).map_err(|_| SpoolError::Corrupt)?;
+    let gap_id = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("gap_id").and_then(|g| g.as_str().map(str::to_string)))
+        .ok_or(SpoolError::Corrupt)?;
+    let size = body.len() as u64;
+    tx.execute(
+        "INSERT OR IGNORE INTO gaps(gap_id, body, size) VALUES (?1, ?2, ?3)",
+        params![gap_id, body, size as i64],
+    )
+    .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+    Ok(size)
+}
+
+fn spool_expired_gap(epoch: &str, now: i64, from: i64, to: i64, count: i64) -> Option<GapReport> {
+    let at = time::OffsetDateTime::from_unix_timestamp(now).ok()?;
+    Some(GapReport::SpoolExpired(SpoolExpiredGap {
+        gap_id: Uuid::new(uuid::Uuid::new_v4().hyphenated().to_string()).ok()?,
+        detected_at: Timestamp::new(crate::status_report::rfc3339(at)).ok()?,
+        epoch_id: Uuid::new(epoch.to_string()).ok()?,
+        from_sequence: PositiveI64::new(from).ok()?,
+        to_sequence: PositiveI64::new(to).ok()?,
+        count: PositiveI64::new(count).ok()?,
+    }))
+}
+
+/// Create the empty database file owner-only (0600) before SQLite opens it.
+fn create_private(path: &Path) -> Result<(), SpoolError> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    match o.open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => Err(SpoolError::Storage("create".into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::AtomicI64;
+
+    pub(crate) fn uid(n: u32) -> String {
+        format!("00000000-0000-4000-8000-{n:012x}")
+    }
+    const EPOCH: u32 = 5000;
+
+    fn event(n: u32) -> ProxyEvent {
+        serde_json::from_value(json!({
+            "schema_version": 1, "event_id": uid(n), "proxy_id": "px-1",
+            "epoch_id": uid(EPOCH), "sequence": 1,
+            "occurred_at": "2026-10-14T00:00:00Z",
+            "event_type": "invocation.started",
+            "payload": {"invocation_id": uid(7000 + n), "upstream_id": "up-1",
+                "route_revision": 1, "protocol_version": "2025-11-25", "method": "ping",
+                "actor": {"actor_id": "a1", "actor_kind": "non_human",
+                    "authentication_method": "bearer",
+                    "evidence_source": "proxy_credential_mapping"}}
+        }))
+        .unwrap()
+    }
+
+    fn cfg(dir: &Path, now: Arc<AtomicI64>) -> SpoolConfig {
+        let mut c = SpoolConfig::new(dir, "px-1", &uid(EPOCH), &Limits::default());
+        c.maintenance_interval = Duration::from_secs(3600);
+        c.clock = Arc::new(move || now.load(Ordering::SeqCst));
+        c
+    }
+
+    fn open(dir: &Path) -> (Spool, Arc<AtomicI64>) {
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        (Spool::open(cfg(dir, now.clone())).unwrap(), now)
+    }
+
+    fn event_size() -> u64 {
+        serde_json::to_vec(&event(1)).unwrap().len() as u64
+    }
+
+    fn ids(v: &[ProxyEvent]) -> Vec<String> {
+        v.iter().map(|e| e.event_id.as_str().to_string()).collect()
+    }
+
+    #[test]
+    fn delivers_in_sequence_order_and_assigns_sequence() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        for n in 1..=5 {
+            assert_eq!(s.append(event(n)).unwrap().sequence, n as i64);
+        }
+        let got = s.next_events(3, &HashSet::new());
+        assert_eq!(ids(&got), vec![uid(1), uid(2), uid(3)]);
+        assert_eq!(got[0].sequence.get(), 1);
+        let skip: HashSet<String> = [uid(1)].into_iter().collect();
+        assert_eq!(ids(&s.next_events(2, &skip)), vec![uid(2), uid(3)]);
+        let snap = s.snapshot();
+        assert_eq!((snap.unsent_events, snap.last_assigned_sequence), (5, 5));
+        assert_eq!(snap.state, SpoolState::Ok);
+    }
+
+    #[test]
+    fn rejects_foreign_identity_duplicate_and_oversize() {
+        let d = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut c = cfg(d.path(), now);
+        c.event_max_bytes = event_size() + 2;
+        let s = Spool::open(c).unwrap();
+        s.append(event(1)).unwrap();
+        assert_eq!(s.append(event(1)), Err(AppendError::Duplicate));
+        let mut other = event(2);
+        other.epoch_id = Uuid::new(uid(9)).unwrap();
+        assert_eq!(s.append(other), Err(AppendError::WrongIdentity));
+        let mut big = serde_json::to_value(event(3)).unwrap();
+        big["payload"]["actor"]["actor_id"] = json!("a".repeat(100));
+        let big: ProxyEvent = serde_json::from_value(big).unwrap();
+        assert_eq!(s.append(big), Err(AppendError::TooLarge));
+        // A refusal consumes no sequence.
+        assert_eq!(s.append(event(4)).unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn ack_marks_rows_and_purges_after_retention() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, now) = open(d.path());
+        for n in 1..=3 {
+            s.append(event(n)).unwrap();
+        }
+        s.acknowledged(&[uid(1), uid(2), uid(99)]);
+        assert_eq!(ids(&s.next_events(10, &HashSet::new())), vec![uid(3)]);
+        let snap = s.snapshot();
+        assert_eq!((snap.unsent_events, snap.retained_acked_events), (1, 2));
+        now.fetch_add(86_400 + 1, Ordering::SeqCst);
+        let r = s.expire_now().unwrap();
+        assert_eq!(r.purged_acked, 2);
+        assert_eq!(s.snapshot().retained_acked_events, 0);
+        // Sequence never reused after the purge.
+        assert_eq!(s.append(event(4)).unwrap().sequence, 4);
+    }
+
+    #[test]
+    fn quarantine_moves_rows_unchanged() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        for n in 1..=3 {
+            s.append(event(n)).unwrap();
+        }
+        let before = ids(&s.next_events(10, &HashSet::new()));
+        s.quarantined(&[uid(2)], QuarantineCode::SemanticInvalid);
+        let after = ids(&s.next_events(10, &HashSet::new()));
+        assert_eq!(before.len(), 3);
+        assert_eq!(after, vec![uid(1), uid(3)]);
+        assert_eq!(s.snapshot().quarantined_events, 1);
+        drop(s);
+        let conn = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        let (code, bytes): (String, Vec<u8>) = conn
+            .query_row(
+                "SELECT code, bytes FROM quarantine WHERE event_id = ?1",
+                [uid(2)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(code, "semantic_invalid");
+        let ev = sigil_proxy_api::parse::parse_event(&bytes).unwrap();
+        assert_eq!(ev.sequence.get(), 2);
+        // A quarantined id cannot be appended again.
+    }
+
+    #[test]
+    fn capacity_blocks_and_keeps_gap_reserve() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let sz = event_size();
+        // Room for exactly 2 events plus a 1 KiB reserve.
+        s.set_capacity_for_test(2 * sz + 1024, 1024);
+        s.append(event(1)).unwrap();
+        s.append(event(2)).unwrap();
+        assert_eq!(s.snapshot().state, SpoolState::Full);
+        assert_eq!(s.append(event(3)), Err(AppendError::Full));
+        // The reserve still takes a gap record.
+        let gap = spool_expired_gap(&uid(EPOCH), 1_800_000_000, 1, 1, 1).unwrap();
+        s.record_gap(gap).unwrap();
+        assert_eq!(s.snapshot().pending_gaps, 1);
+        assert_eq!(s.append(event(3)), Err(AppendError::Full));
+        // Draining frees room again.
+        let mut s2 = s.clone();
+        s2.acknowledged(&[uid(1)]);
+        assert_eq!(s.snapshot().state, SpoolState::Ok);
+        assert!(s.append(event(3)).is_ok());
+    }
+
+    #[test]
+    fn storage_failure_degrades_then_recovers() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.inject_storage_failure(true);
+        assert_eq!(s.append(event(1)), Err(AppendError::DiskFull));
+        assert_eq!(s.snapshot().state, SpoolState::Degraded);
+        assert_eq!(s.snapshot().unsent_events, 0);
+        s.inject_storage_failure(false);
+        assert_eq!(s.append(event(1)).unwrap().sequence, 1);
+        assert_eq!(s.snapshot().state, SpoolState::Ok);
+    }
+
+    #[test]
+    fn expiry_quarantines_and_records_gap_per_run() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, now) = open(d.path());
+        for n in 1..=4 {
+            s.append(event(n)).unwrap();
+        }
+        // seq 2 was acked: the expired events are runs {1} and {3,4}.
+        s.acknowledged(&[uid(2)]);
+        now.fetch_add(30 * 86_400 + 1, Ordering::SeqCst);
+        s.append(event(5)).unwrap(); // fresh, survives
+        let r = s.expire_now().unwrap();
+        assert_eq!((r.expired_events, r.gaps_recorded), (3, 2));
+        assert_eq!(ids(&s.next_events(10, &HashSet::new())), vec![uid(5)]);
+        let snap = s.snapshot();
+        assert_eq!((snap.quarantined_events, snap.pending_gaps), (3, 2));
+        let gaps = s.pending_gaps().unwrap();
+        let mut ranges: Vec<(i64, i64, i64)> = gaps
+            .iter()
+            .map(|g| match g {
+                GapReport::SpoolExpired(x) => {
+                    (x.from_sequence.get(), x.to_sequence.get(), x.count.get())
+                }
+                _ => panic!("kind"),
+            })
+            .collect();
+        ranges.sort();
+        assert_eq!(ranges, vec![(1, 1, 1), (3, 4, 2)]);
+        // Handoff removes them; a second expiry pass makes none.
+        let gids: Vec<String> = gaps
+            .iter()
+            .map(|g| match g {
+                GapReport::SpoolExpired(x) => x.gap_id.as_str().to_string(),
+                _ => unreachable!(),
+            })
+            .collect();
+        s.gaps_handed_off(&gids).unwrap();
+        assert_eq!(s.snapshot().pending_gaps, 0);
+        assert_eq!(s.snapshot().gap_bytes, 0);
+        assert_eq!(s.expire_now().unwrap(), ExpireReport::default());
+    }
+
+    #[test]
+    fn restart_recovers_unsent_gaps_and_sequence() {
+        let d = tempfile::tempdir().unwrap();
+        {
+            let (mut s, now) = open(d.path());
+            for n in 1..=3 {
+                s.append(event(n)).unwrap();
+            }
+            s.acknowledged(&[uid(1)]);
+            now.fetch_add(30 * 86_400 + 1, Ordering::SeqCst);
+            s.expire_now().unwrap();
+            s.append(event(4)).unwrap();
+        }
+        let (mut s, _) = open(d.path());
+        let snap = s.snapshot();
+        assert_eq!(snap.last_assigned_sequence, 4);
+        assert_eq!(snap.unsent_events, 1);
+        assert_eq!(snap.pending_gaps, 1);
+        assert_eq!(snap.quarantined_events, 2);
+        assert_eq!(ids(&s.next_events(10, &HashSet::new())), vec![uid(4)]);
+        assert_eq!(s.append(event(5)).unwrap().sequence, 5);
+    }
+
+    #[test]
+    fn refuses_corrupt_foreign_and_non_regular() {
+        let d = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        drop(Spool::open(cfg(d.path(), now.clone())).unwrap());
+        // Foreign epoch.
+        let mut c = cfg(d.path(), now.clone());
+        c.epoch_id = uid(1);
+        assert!(matches!(Spool::open(c), Err(SpoolError::Foreign)));
+        let mut c = cfg(d.path(), now.clone());
+        c.proxy_id = "px-2".into();
+        assert!(matches!(Spool::open(c), Err(SpoolError::Foreign)));
+        // Garbage file is left untouched.
+        let p = d.path().join(SPOOL_FILE);
+        let junk = vec![0x41u8; 4096];
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", p.display()));
+        }
+        std::fs::write(&p, &junk).unwrap();
+        assert!(matches!(
+            Spool::open(cfg(d.path(), now.clone())),
+            Err(SpoolError::Corrupt)
+        ));
+        assert_eq!(std::fs::read(&p).unwrap(), junk);
+        // A directory in the way.
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d2.path().join(SPOOL_FILE)).unwrap();
+        assert!(matches!(
+            Spool::open(cfg(d2.path(), now)),
+            Err(SpoolError::BadPath)
+        ));
+    }
+
+    #[test]
+    fn database_is_owner_only_and_wal() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.append(event(1)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(d.path().join(SPOOL_FILE)).unwrap();
+            assert_eq!(m.permissions().mode() & 0o077, 0);
+        }
+        assert!(d.path().join(format!("{SPOOL_FILE}-wal")).exists());
+    }
+
+    #[tokio::test]
+    async fn append_async_acks_after_commit() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        assert_eq!(s.append_async(event(1)).await.unwrap().sequence, 1);
+        assert_eq!(s.snapshot().unsent_events, 1);
+    }
+}
