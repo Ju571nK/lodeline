@@ -1036,6 +1036,10 @@ fn proxy_binary() -> Option<PathBuf> {
     match c.status() {
         Ok(st) if st.success() => {}
         other => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "building the sigil-proxy binary failed under CI ({other:?})"
+            );
             eprintln!("skipped: building the sigil-proxy binary failed ({other:?})");
             return None;
         }

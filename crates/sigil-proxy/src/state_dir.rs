@@ -447,7 +447,7 @@ fn set_aside_spool(dir: &Path) -> Result<(), StateError> {
         .filter(|n| std::fs::symlink_metadata(dir.join(n)).is_ok())
         .collect();
     let note = dir.join(ASIDE_NOTE);
-    let id = match std::fs::read_to_string(&note) {
+    let mut id = match std::fs::read_to_string(&note) {
         Ok(v) if uuid::Uuid::parse_str(v.trim()).is_ok() => v.trim().to_string(),
         _ => {
             if present.is_empty() {
@@ -458,16 +458,45 @@ fn set_aside_spool(dir: &Path) -> Result<(), StateError> {
             id
         }
     };
+    // Never overwrite a kept file: if a target of this id exists (a stale note
+    // whose id was used before), take a fresh id and record it in the note.
+    let taken = |id: &str| {
+        present
+            .iter()
+            .any(|n| std::fs::symlink_metadata(dir.join(format!("{n}.stale-{id}"))).is_ok())
+    };
+    let mut tries = 0;
+    while taken(&id) {
+        tries += 1;
+        if tries > 8 {
+            return Err(StateError::Dir {
+                path: dir.display().to_string(),
+                reason: "cannot pick an unused name for the old spool".into(),
+            });
+        }
+        id = uuid::Uuid::new_v4().hyphenated().to_string();
+        write_atomic(dir, ASIDE_NOTE, id.as_bytes())?;
+    }
     for name in present {
         let from = dir.join(name);
         let to = dir.join(format!("{name}.stale-{id}"));
+        if std::fs::symlink_metadata(&to).is_ok() {
+            return Err(io_err(
+                &to,
+                std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+            ));
+        }
         std::fs::rename(&from, &to).map_err(|e| io_err(&from, e))?;
         tracing::warn!(
             file = name.as_str(),
             "spool of an older epoch moved aside (not deleted)"
         );
     }
-    let _ = std::fs::remove_file(&note);
+    match std::fs::remove_file(&note) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(&note, e)),
+    }
     Ok(())
 }
 
@@ -967,6 +996,32 @@ mod tests {
             "wal"
         );
         assert!(!d.join("spool.db-wal").exists());
+        assert!(!d.join(ASIDE_NOTE).exists());
+    }
+
+    /// A stale note whose id was used before must not make the set-aside
+    /// overwrite a kept database: a fresh id is taken.
+    #[test]
+    fn set_aside_never_overwrites_an_existing_target() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("st");
+        std::fs::create_dir_all(&d).unwrap();
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        std::fs::write(d.join(ASIDE_NOTE), &id).unwrap();
+        std::fs::write(d.join(format!("spool.db.stale-{id}")), "OLD-KEPT").unwrap();
+        std::fs::write(d.join("spool.db"), "NEWER").unwrap();
+        set_aside_spool(&d).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(d.join(format!("spool.db.stale-{id}"))).unwrap(),
+            "OLD-KEPT"
+        );
+        assert!(!d.join("spool.db").exists());
+        let kept: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("spool.db.stale-"))
+            .collect();
+        assert_eq!(kept.len(), 2, "both databases are kept: {kept:?}");
         assert!(!d.join(ASIDE_NOTE).exists());
     }
 }
