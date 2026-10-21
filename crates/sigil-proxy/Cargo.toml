@@ -28,6 +28,8 @@ uuid = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 getrandom = "0.2"
+# Registry key derivations (T-13b). Already in Cargo.lock (sha2 0.10, as sigil-proxy-api).
+sha2 = "0.10"
 # Relay (T-12 slice A, #258). Raw hyper on the forwarding path; no MCP SDK (D-01).
 # All already in Cargo.lock (hyper 1.9, hyper-util 0.1.20, http-body-util 0.1.3).
 hyper = { version = "1", default-features = false, features = ["server", "client", "http1"] }

@@ -562,6 +562,39 @@ mod tests {
         assert!(e4.status.unwrap().gaps.is_empty());
     }
 
+    /// The optional registry counters (quarantined / poisoned / discarded) are
+    /// stored and exposed when a proxy sends them, and an older proxy that omits
+    /// them is accepted unchanged.
+    #[test]
+    fn registry_counters_are_stored_when_present_and_optional_when_absent() {
+        // Old shape: accepted, stored without the counters, and not invented
+        // when the snapshot is rendered.
+        let (old, r) = run(&ProxyEntry::default(), report(E1, 1, vec![]), NOW).unwrap();
+        assert!(r.state_applied);
+        let reg = old.status.as_ref().unwrap().registry.clone();
+        assert!(reg.quarantined_entries.is_none() && reg.poisoned_entries.is_none());
+        assert_eq!(
+            serde_json::to_value(&reg).unwrap(),
+            json!({"pending_entries": 0, "sync_stalled": false})
+        );
+        // New shape: the same bytes the proxy sends, through the shared parser.
+        let mut v = serde_json::to_value(report(E1, 2, vec![])).unwrap();
+        v["registry"] = json!({"pending_entries": 1, "sync_stalled": false,
+            "quarantined_entries": 2, "poisoned_entries": 3, "discarded_reports": 4});
+        let parsed = parse_status(&serde_json::to_vec(&v).unwrap()).unwrap();
+        let (cur, r) = run(&old, parsed, NOW).unwrap();
+        assert!(r.state_applied);
+        let reg = serde_json::to_value(&cur.status.as_ref().unwrap().registry).unwrap();
+        assert_eq!(
+            reg,
+            json!({"pending_entries": 1, "sync_stalled": false,
+                "quarantined_entries": 2, "poisoned_entries": 3, "discarded_reports": 4})
+        );
+        // A later old-shape report replaces the counters with "unknown".
+        let (next, _) = run(&cur, report(E1, 3, vec![]), NOW).unwrap();
+        assert!(next.status.unwrap().registry.discarded_reports.is_none());
+    }
+
     #[test]
     fn gap_upsert_is_idempotent_and_acked() {
         let g = vec![quarantine(1, "conflict"), outage(2, Value::Null)];
