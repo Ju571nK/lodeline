@@ -735,9 +735,13 @@ async fn lifecycle_drains_the_spool_and_reports_real_spool_numbers() {
         s.unsent_events == 0 && s.retained_acked_events == 5
     })
     .await;
+    // A status report sent while events were still unsent may have opened a
+    // transient tail gap; it closes when the events arrive but stays recorded
+    // (the tail-gap rule is pending a server-side decision). So only an OPEN gap
+    // is a failure here.
     assert!(
-        h.ctx().ledger.gaps(PROXY).unwrap().is_empty(),
-        "no gap while everything is delivered"
+        h.ctx().ledger.gaps(PROXY).unwrap().iter().all(|g| !g.open),
+        "no open gap while everything is delivered"
     );
     eventually("status shows the real spool", || {
         h.status().is_some_and(|s| {
