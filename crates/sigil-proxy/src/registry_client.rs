@@ -546,7 +546,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
             UploadOutcome::Done { refs } => {
                 self.store.mark_acked(refs)?;
                 self.isolating = false;
-                self.cap = (self.cap * 2).min(MAX_UPLOAD_ENTRIES).max(1);
+                self.cap = (self.cap * 2).clamp(1, MAX_UPLOAD_ENTRIES);
                 true
             }
             UploadOutcome::Conflict { refs } => {
