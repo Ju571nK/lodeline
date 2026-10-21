@@ -9,6 +9,13 @@
 //!   revision high-water mark ONLY (never the config itself, which needs a fresh
 //!   fetch after a restart, control-plane.md §6.3). It stops a restarted proxy
 //!   from accepting a rolled-back server revision.
+//! * `spool.db`      the durable event spool ([`crate::spool`]); not written here
+//! * `spool_ready.json` `{schema_version, proxy_id, epoch_id}`: written only
+//!   after the spool database of that epoch was created and its schema
+//!   committed. Until it exists the spool may be created (a first start that
+//!   failed in between must not brick the next one); afterwards a missing
+//!   database is refused (recreating it would restart the event sequence of an
+//!   epoch the server knows).
 //! * `gap_queue.json` `{schema_version, proxy_id, pending, quarantined,
 //!   overflow_count}`: gap reports not yet acknowledged by the server, those
 //!   quarantined after a 409/422, and the number of gaps that did not fit
@@ -32,6 +39,7 @@ pub const STATUS_FILE: &str = "status.json";
 pub const APPLIED_FILE: &str = "applied.json";
 pub const SEQUENCE_FILE: &str = "sequence.json";
 pub const GAP_QUEUE_FILE: &str = "gap_queue.json";
+pub const SPOOL_READY_FILE: &str = "spool_ready.json";
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -71,6 +79,13 @@ pub enum StateError {
          unacknowledged gaps"
     )]
     BadGapQueue(String),
+    // Same stance: an unreadable marker is refused rather than read as "the spool
+    // was never created", which would let a lost spool be recreated silently.
+    #[error(
+        "spool marker file is unreadable or invalid ({0}); delete spool_ready.json only if \
+         spool.db was never used"
+    )]
+    BadSpoolMarker(String),
     #[error("i/o error on {path}: {source}")]
     Io {
         path: String,
@@ -90,6 +105,14 @@ fn io_err(path: &Path, source: std::io::Error) -> StateError {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Binding {
+    schema_version: u32,
+    proxy_id: String,
+    epoch_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpoolMarker {
     schema_version: u32,
     proxy_id: String,
     epoch_id: String,
@@ -191,6 +214,11 @@ impl StateDir {
                 // New or lost state: fresh random epoch (new K/key_id come with the
                 // registry work, not here).
                 let epoch = uuid::Uuid::new_v4().hyphenated().to_string();
+                // A spool database left by an older epoch is moved aside BEFORE
+                // the binding is written, so a crash in between repeats this
+                // step instead of leaving a foreign database next to the new
+                // epoch. It is renamed, never deleted.
+                set_aside_spool(dir)?;
                 let b = Binding {
                     schema_version: 1,
                     proxy_id: proxy_id.as_str().to_string(),
@@ -223,6 +251,40 @@ impl StateDir {
     /// True when this open created the epoch (state was new or lost).
     pub fn is_new_epoch(&self) -> bool {
         self.new_epoch
+    }
+
+    /// True when the spool database of THIS epoch was created and its schema
+    /// committed (see [`StateDir::mark_spool_ready`]). False for a marker of an
+    /// older epoch. A corrupt, foreign, symlinked or loose-permission marker is
+    /// an error (fail closed).
+    pub fn spool_ready(&self) -> Result<bool, StateError> {
+        let path = self.dir.join(SPOOL_READY_FILE);
+        let bytes = match crate::fsutil::read_private_file(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let m: SpoolMarker = serde_json::from_slice(&bytes)
+            .map_err(|_| StateError::BadSpoolMarker("parse error".into()))?;
+        if m.schema_version != 1 || sigil_proxy_api::Uuid::new(m.epoch_id.clone()).is_err() {
+            return Err(StateError::BadSpoolMarker("unexpected content".into()));
+        }
+        if m.proxy_id != self.proxy_id.as_str() {
+            return Err(StateError::BadSpoolMarker("other proxy_id".into()));
+        }
+        Ok(m.epoch_id == self.epoch_id)
+    }
+
+    /// Record that the spool database of this epoch exists with its schema. Call
+    /// it only after the spool opened successfully.
+    pub fn mark_spool_ready(&self) -> Result<(), StateError> {
+        let m = SpoolMarker {
+            schema_version: 1,
+            proxy_id: self.proxy_id.as_str().to_string(),
+            epoch_id: self.epoch_id.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&m).expect("marker serializes");
+        write_atomic(&self.dir, SPOOL_READY_FILE, &bytes)
     }
 
     /// The persisted high-water mark. `Ok(None)` is a normal first start. A
@@ -365,6 +427,77 @@ impl StateDir {
     pub fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), StateError> {
         write_atomic(&self.dir, name, bytes)
     }
+}
+
+/// Note file holding the suffix of an unfinished set-aside, so a retry after a
+/// crash uses the same names for the files not yet moved.
+const ASIDE_NOTE: &str = ".spool_aside";
+
+/// Rename `spool.db` and its WAL/SHM files to `<name>.stale-<id>`. The id is
+/// fixed before the first rename (note file) and reused by a retry, so one
+/// database never ends up split over two suffixes. Nothing is deleted except the
+/// note itself, once every file is moved. Missing files are skipped.
+fn set_aside_spool(dir: &Path) -> Result<(), StateError> {
+    let names: Vec<String> = ["", "-wal", "-shm"]
+        .iter()
+        .map(|suffix| format!("{}{suffix}", crate::spool::SPOOL_FILE))
+        .collect();
+    let present: Vec<&String> = names
+        .iter()
+        .filter(|n| std::fs::symlink_metadata(dir.join(n)).is_ok())
+        .collect();
+    let note = dir.join(ASIDE_NOTE);
+    let mut id = match std::fs::read_to_string(&note) {
+        Ok(v) if uuid::Uuid::parse_str(v.trim()).is_ok() => v.trim().to_string(),
+        _ => {
+            if present.is_empty() {
+                return Ok(());
+            }
+            let id = uuid::Uuid::new_v4().hyphenated().to_string();
+            write_atomic(dir, ASIDE_NOTE, id.as_bytes())?;
+            id
+        }
+    };
+    // Never overwrite a kept file: if a target of this id exists (a stale note
+    // whose id was used before), take a fresh id and record it in the note.
+    let taken = |id: &str| {
+        present
+            .iter()
+            .any(|n| std::fs::symlink_metadata(dir.join(format!("{n}.stale-{id}"))).is_ok())
+    };
+    let mut tries = 0;
+    while taken(&id) {
+        tries += 1;
+        if tries > 8 {
+            return Err(StateError::Dir {
+                path: dir.display().to_string(),
+                reason: "cannot pick an unused name for the old spool".into(),
+            });
+        }
+        id = uuid::Uuid::new_v4().hyphenated().to_string();
+        write_atomic(dir, ASIDE_NOTE, id.as_bytes())?;
+    }
+    for name in present {
+        let from = dir.join(name);
+        let to = dir.join(format!("{name}.stale-{id}"));
+        if std::fs::symlink_metadata(&to).is_ok() {
+            return Err(io_err(
+                &to,
+                std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+            ));
+        }
+        std::fs::rename(&from, &to).map_err(|e| io_err(&from, e))?;
+        tracing::warn!(
+            file = name.as_str(),
+            "spool of an older epoch moved aside (not deleted)"
+        );
+    }
+    match std::fs::remove_file(&note) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(&note, e)),
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -765,5 +898,130 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(dir.join(LOCK_FILE), &path).unwrap();
         assert!(sd.read_gap_queue().is_err());
+    }
+
+    /// N1 marker: absent until written, bound to the epoch, and a corrupt one is
+    /// refused (never read as "never created").
+    #[test]
+    fn spool_ready_marker_is_epoch_bound_and_fail_closed() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("st");
+        let a = StateDir::open(&d, &id("px-1")).unwrap();
+        assert!(!a.spool_ready().unwrap());
+        a.mark_spool_ready().unwrap();
+        assert!(a.spool_ready().unwrap());
+        let mode = std::fs::metadata(d.join(SPOOL_READY_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        drop(a);
+        let b = StateDir::open(&d, &id("px-1")).unwrap();
+        assert!(b.spool_ready().unwrap(), "a restart keeps it");
+        drop(b);
+        // A new epoch does not inherit the old epoch's marker.
+        std::fs::remove_file(d.join(BINDING_FILE)).unwrap();
+        let c = StateDir::open(&d, &id("px-1")).unwrap();
+        assert!(c.is_new_epoch());
+        assert!(!c.spool_ready().unwrap());
+        // Corrupt content is refused.
+        std::fs::write(d.join(SPOOL_READY_FILE), b"{ nope").unwrap();
+        std::fs::set_permissions(
+            d.join(SPOOL_READY_FILE),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(matches!(
+            c.spool_ready(),
+            Err(StateError::BadSpoolMarker(_))
+        ));
+    }
+
+    /// N2: stale spool files of an older epoch are renamed (database, WAL and
+    /// shared-memory file), never deleted, before the new binding is written.
+    #[test]
+    fn new_epoch_renames_stale_spool_files_under_one_suffix() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("st");
+        let a = StateDir::open(&d, &id("px-1")).unwrap();
+        drop(a);
+        for (f, body) in [
+            ("spool.db", "db"),
+            ("spool.db-wal", "wal"),
+            ("spool.db-shm", "shm"),
+        ] {
+            std::fs::write(d.join(f), body).unwrap();
+        }
+        std::fs::remove_file(d.join(BINDING_FILE)).unwrap();
+        let b = StateDir::open(&d, &id("px-1")).unwrap();
+        let mut ids = std::collections::HashSet::new();
+        for (f, body) in [
+            ("spool.db", "db"),
+            ("spool.db-wal", "wal"),
+            ("spool.db-shm", "shm"),
+        ] {
+            assert!(!d.join(f).exists(), "{f} moved");
+            let kept = std::fs::read_dir(&d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .find(|n| n.starts_with(&format!("{f}.stale-")))
+                .unwrap_or_else(|| panic!("{f} kept"));
+            ids.insert(kept[f.len()..].to_string());
+            assert_eq!(std::fs::read_to_string(d.join(kept)).unwrap(), body);
+        }
+        assert_eq!(ids.len(), 1, "one suffix for the whole set");
+        assert!(!d.join(ASIDE_NOTE).exists());
+        // An existing epoch never touches its spool files.
+        std::fs::write(d.join("spool.db"), "mine").unwrap();
+        drop(b);
+        let c = StateDir::open(&d, &id("px-1")).unwrap();
+        assert!(!c.is_new_epoch());
+        assert_eq!(std::fs::read_to_string(d.join("spool.db")).unwrap(), "mine");
+    }
+
+    /// A crash halfway through the set-aside: the retry finishes under the same
+    /// suffix (taken from the note), not a new one.
+    #[test]
+    fn set_aside_retry_keeps_one_suffix() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("st");
+        std::fs::create_dir_all(&d).unwrap();
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        std::fs::write(d.join(ASIDE_NOTE), &id).unwrap();
+        std::fs::write(d.join(format!("spool.db.stale-{id}")), "db").unwrap();
+        std::fs::write(d.join("spool.db-wal"), "wal").unwrap();
+        set_aside_spool(&d).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(d.join(format!("spool.db-wal.stale-{id}"))).unwrap(),
+            "wal"
+        );
+        assert!(!d.join("spool.db-wal").exists());
+        assert!(!d.join(ASIDE_NOTE).exists());
+    }
+
+    /// A stale note whose id was used before must not make the set-aside
+    /// overwrite a kept database: a fresh id is taken.
+    #[test]
+    fn set_aside_never_overwrites_an_existing_target() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("st");
+        std::fs::create_dir_all(&d).unwrap();
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        std::fs::write(d.join(ASIDE_NOTE), &id).unwrap();
+        std::fs::write(d.join(format!("spool.db.stale-{id}")), "OLD-KEPT").unwrap();
+        std::fs::write(d.join("spool.db"), "NEWER").unwrap();
+        set_aside_spool(&d).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(d.join(format!("spool.db.stale-{id}"))).unwrap(),
+            "OLD-KEPT"
+        );
+        assert!(!d.join("spool.db").exists());
+        let kept: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("spool.db.stale-"))
+            .collect();
+        assert_eq!(kept.len(), 2, "both databases are kept: {kept:?}");
+        assert!(!d.join(ASIDE_NOTE).exists());
     }
 }

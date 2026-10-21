@@ -43,7 +43,7 @@ use sigil_proxy_api::status::{QuarantineCode, SpoolExpiredGap};
 use sigil_proxy_api::{GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
 use tokio::sync::oneshot;
 
-use crate::ingest_client::EventSource;
+use crate::ingest_client::{EventSource, SourceFuture};
 use crate::limits::Limits;
 
 /// File name of the database inside the state directory.
@@ -76,10 +76,12 @@ pub struct SpoolConfig {
     pub dir: PathBuf,
     pub proxy_id: String,
     pub epoch_id: String,
-    /// True only when this start created the epoch (`StateDir::is_new_epoch`). A
-    /// missing or schema-less database is created only then; otherwise open
-    /// returns [`SpoolError::Missing`] (recreating would restart the sequence in
-    /// an epoch the server already knows).
+    /// True only while creating the database is safe: this start created the
+    /// epoch (`StateDir::is_new_epoch`), or the epoch's spool was never marked
+    /// ready (`StateDir::spool_ready`, a first start that failed before the
+    /// schema committed). A missing or schema-less database is created only then;
+    /// otherwise open returns [`SpoolError::Missing`] (recreating would restart
+    /// the sequence in an epoch the server already knows).
     pub new_epoch: bool,
     pub event_max_bytes: u64,
     /// `spool_max_bytes`.
@@ -224,6 +226,9 @@ pub struct SpoolSnapshot {
     /// Acknowledged rows still kept for the retention window.
     pub retained_acked_events: u64,
     pub pending_gaps: u64,
+    /// A gap record did not fit the reserve (sticky, see `Shared::gap_exhausted`).
+    /// The state is `Degraded` while it is set.
+    pub gap_reserve_exhausted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -256,8 +261,19 @@ struct Shared {
     dead: AtomicBool,
     capacity: AtomicU64,
     reserve: AtomicU64,
+    /// R in seconds; the applied server config can change it at runtime.
+    retry_age_secs: AtomicU64,
+    /// Sticky: a gap record did not fit `spool_gap_reserve_bytes`. Set when that
+    /// happens and cleared only once gaps were handed off (room came back) or a
+    /// later gap fit, so the reported state does not flap with every append.
+    gap_exhausted: AtomicBool,
     #[cfg(any(test, feature = "test-util"))]
     inject_failure: AtomicBool,
+    #[cfg(any(test, feature = "test-util"))]
+    delivery_paused: AtomicBool,
+    /// Seconds added to the clock (test knob, see [`Spool::advance_clock_for_test`]).
+    #[cfg(any(test, feature = "test-util"))]
+    clock_skew: std::sync::atomic::AtomicI64,
 }
 
 enum Reply<T> {
@@ -294,6 +310,8 @@ struct Inner {
     tx: mpsc::Sender<Cmd>,
     shared: Arc<Shared>,
     clock: Clock,
+    proxy_id: String,
+    epoch_id: String,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -326,9 +344,24 @@ impl Spool {
             dead: AtomicBool::new(false),
             capacity: AtomicU64::new(cfg.capacity_bytes),
             reserve: AtomicU64::new(cfg.gap_reserve_bytes),
+            retry_age_secs: AtomicU64::new(cfg.max_offline_retry_age.as_secs()),
+            gap_exhausted: AtomicBool::new(false),
             #[cfg(any(test, feature = "test-util"))]
             inject_failure: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-util"))]
+            delivery_paused: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-util"))]
+            clock_skew: std::sync::atomic::AtomicI64::new(0),
         });
+        #[cfg(any(test, feature = "test-util"))]
+        let cfg = {
+            let (base, sh) = (cfg.clock.clone(), shared.clone());
+            SpoolConfig {
+                clock: Arc::new(move || base() + sh.clock_skew.load(Ordering::SeqCst)),
+                ..cfg
+            }
+        };
+        let (proxy_id, epoch_id) = (cfg.proxy_id.clone(), cfg.epoch_id.clone());
         let (tx, rx) = mpsc::channel::<Cmd>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), SpoolError>>(1);
         let clock = cfg.clock.clone();
@@ -361,6 +394,8 @@ impl Spool {
                     tx,
                     shared,
                     clock,
+                    proxy_id,
+                    epoch_id,
                     join: Mutex::new(Some(join)),
                 }),
             }),
@@ -388,6 +423,53 @@ impl Spool {
         got
     }
 
+    async fn call_async<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Option<T> {
+        let (s, r) = oneshot::channel();
+        if self.inner.tx.send(make(Reply::Async(s))).is_err() {
+            self.inner.shared.dead.store(true, Ordering::SeqCst);
+            return None;
+        }
+        match r.await {
+            Ok(v) => Some(v),
+            Err(_) => {
+                self.inner.shared.dead.store(true, Ordering::SeqCst);
+                None
+            }
+        }
+    }
+
+    /// Stop the writer thread and wait for it without blocking a tokio worker
+    /// (the join runs on the blocking pool). Afterwards the database is closed;
+    /// other clones see `Unavailable`. Dropping the last clone does the same
+    /// synchronously, so call this where that drop would land on a worker.
+    pub async fn close(&self) {
+        let _ = self.inner.tx.send(Cmd::Shutdown);
+        let join = self.inner.join.lock().ok().and_then(|mut g| g.take());
+        if let Some(j) = join {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = j.join();
+            })
+            .await;
+        }
+    }
+
+    pub fn proxy_id(&self) -> &str {
+        &self.inner.proxy_id
+    }
+
+    pub fn epoch_id(&self) -> &str {
+        &self.inner.epoch_id
+    }
+
+    /// Change R (the server-issued `max_offline_retry_age_seconds`). Applies from
+    /// the next maintenance pass.
+    pub fn set_max_offline_retry_age(&self, age: Duration) {
+        self.inner
+            .shared
+            .retry_age_secs
+            .store(age.as_secs(), Ordering::SeqCst);
+    }
+
     /// Append an event durably. Blocks until commit and fsync (call from a
     /// blocking context, or use [`Spool::append_async`]). The event's `sequence`
     /// is ignored and replaced; its `proxy_id` and `epoch_id` must match.
@@ -396,25 +478,12 @@ impl Spool {
             .unwrap_or(Err(AppendError::Unavailable))
     }
 
-    /// Like [`Spool::append`], without blocking the async worker.
+    /// Like [`Spool::append`], without blocking the async worker. This is the
+    /// admission call of the relay (see [`Admission`]).
     pub async fn append_async(&self, event: ProxyEvent) -> Result<Appended, AppendError> {
-        let (s, r) = oneshot::channel();
-        if self
-            .inner
-            .tx
-            .send(Cmd::Append(Box::new(event), Reply::Async(s)))
-            .is_err()
-        {
-            self.inner.shared.dead.store(true, Ordering::SeqCst);
-            return Err(AppendError::Unavailable);
-        }
-        match r.await {
-            Ok(v) => v,
-            Err(_) => {
-                self.inner.shared.dead.store(true, Ordering::SeqCst);
-                Err(AppendError::Unavailable)
-            }
-        }
+        self.call_async(|r| Cmd::Append(Box::new(event), r))
+            .await
+            .unwrap_or(Err(AppendError::Unavailable))
     }
 
     /// Cheap, non-blocking view of the counters (no database access).
@@ -424,7 +493,10 @@ impl Spool {
         let cap = sh.capacity.load(Ordering::Relaxed);
         let reserve = sh.reserve.load(Ordering::Relaxed);
         let now = (self.inner.clock)();
-        let state = if sh.degraded.load(Ordering::Relaxed) || sh.dead.load(Ordering::SeqCst) {
+        let state = if sh.degraded.load(Ordering::Relaxed)
+            || sh.dead.load(Ordering::SeqCst)
+            || sh.gap_exhausted.load(Ordering::SeqCst)
+        {
             SpoolState::Degraded
         } else if c.unsent_bytes >= cap.saturating_sub(reserve) {
             SpoolState::Full
@@ -445,6 +517,7 @@ impl Spool {
             quarantined_events: c.quarantined,
             retained_acked_events: c.acked,
             pending_gaps: c.pending_gaps,
+            gap_reserve_exhausted: sh.gap_exhausted.load(Ordering::SeqCst),
         }
     }
 
@@ -468,6 +541,21 @@ impl Spool {
             .unwrap_or(Err(SpoolError::Unavailable))
     }
 
+    /// [`Spool::pending_gaps`] without blocking the async worker.
+    pub async fn pending_gaps_async(&self) -> Result<Vec<GapReport>, SpoolError> {
+        self.call_async(Cmd::PendingGaps)
+            .await
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
+    /// [`Spool::gaps_handed_off`] without blocking the async worker.
+    pub async fn gaps_handed_off_async(&self, gap_ids: &[String]) -> Result<(), SpoolError> {
+        let ids = gap_ids.to_vec();
+        self.call_async(|r| Cmd::HandedOff(ids, r))
+            .await
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
     /// The status layer persisted these gaps (by `gap_id`); remove them here.
     pub fn gaps_handed_off(&self, gap_ids: &[String]) -> Result<(), SpoolError> {
         self.call(|r| Cmd::HandedOff(gap_ids.to_vec(), r))
@@ -488,6 +576,122 @@ impl Spool {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+impl Spool {
+    /// Test knob: move the spool's clock forward (retention and expiry follow it).
+    pub fn advance_clock_for_test(&self, secs: i64) {
+        self.inner
+            .shared
+            .clock_skew
+            .fetch_add(secs, Ordering::SeqCst);
+    }
+
+    /// Test knob: stop handing events to the ingest client (appends still work),
+    /// so a test can observe the status report of a spool that is filling up.
+    pub fn set_delivery_paused_for_test(&self, on: bool) {
+        self.inner
+            .shared
+            .delivery_paused
+            .store(on, Ordering::SeqCst);
+    }
+
+    /// TEST-ONLY event injector (feature `test-util`, or this crate's own tests;
+    /// never compiled into a release build). Appends one valid
+    /// `invocation.started` of this spool's proxy and epoch, with fresh ids.
+    /// Production events come from the relay (T-13) through [`Admission`].
+    pub async fn inject_test_event(&self, upstream_id: &str) -> Result<Appended, AppendError> {
+        self.append_async(test_event(self, upstream_id)).await
+    }
+
+    /// [`Spool::inject_test_event`] from a blocking context.
+    pub fn inject_test_event_blocking(&self, upstream_id: &str) -> Result<Appended, AppendError> {
+        self.append(test_event(self, upstream_id))
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn test_event(spool: &Spool, upstream_id: &str) -> ProxyEvent {
+    let now = crate::status_report::rfc3339(time::OffsetDateTime::now_utc());
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "event_id": uuid::Uuid::new_v4().hyphenated().to_string(),
+        "proxy_id": spool.proxy_id(),
+        "epoch_id": spool.epoch_id(),
+        "sequence": 1,
+        "occurred_at": now,
+        "event_type": "invocation.started",
+        "payload": {
+            "invocation_id": uuid::Uuid::new_v4().hyphenated().to_string(),
+            "upstream_id": upstream_id,
+            "route_revision": 1,
+            "protocol_version": "unknown",
+            "method": "ping",
+            "actor": {"actor_id": "actor-1", "actor_kind": "non_human",
+                "authentication_method": "bearer",
+                "evidence_source": "proxy_credential_mapping"}
+        }
+    }))
+    .expect("test event is valid")
+}
+
+/// Why the spool refused an event. Nothing was stored in any case, and nothing is
+/// dropped silently: the caller decides what the client sees (AC-12).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// Unsent bytes reached `capacity - gap_reserve`. The relay must refuse the
+    /// call (fail closed); admission opens again as the ingest client drains.
+    #[error("spool is full")]
+    Full,
+    /// The spool cannot record right now (disk full, storage failure, writer
+    /// gone). Same handling as `Full` for the call, different operator signal.
+    #[error("spool cannot record events")]
+    Unavailable,
+    /// The event itself is not admissible (too large, duplicate id, other proxy
+    /// or epoch). A producer bug, not a capacity condition.
+    #[error("event not admissible: {0}")]
+    Invalid(AppendError),
+}
+
+/// The relay's way into the spool (T-13d calls [`Admission::append`]).
+///
+/// The returned future completes after the event is committed and fsynced, so
+/// the caller may forward the call only after `Ok`. It never blocks a tokio
+/// worker.
+#[derive(Clone)]
+pub struct Admission {
+    spool: Spool,
+}
+
+impl Admission {
+    pub fn new(spool: Spool) -> Admission {
+        Admission { spool }
+    }
+
+    /// Append the event or refuse it with a typed [`Refusal`].
+    pub async fn append(&self, event: ProxyEvent) -> Result<Appended, Refusal> {
+        self.spool.append_async(event).await.map_err(|e| match e {
+            AppendError::Full => Refusal::Full,
+            AppendError::DiskFull | AppendError::Storage | AppendError::Unavailable => {
+                Refusal::Unavailable
+            }
+            e @ (AppendError::TooLarge | AppendError::Duplicate | AppendError::WrongIdentity) => {
+                Refusal::Invalid(e)
+            }
+        })
+    }
+
+    /// Cheap view for the status report and for early refusal.
+    pub fn snapshot(&self) -> SpoolSnapshot {
+        self.spool.snapshot()
+    }
+}
+
+impl std::fmt::Debug for Spool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Spool").finish_non_exhaustive()
+    }
+}
+
 impl EventSource for Spool {
     fn next_events(&mut self, max: usize, skip: &HashSet<String>) -> Vec<ProxyEvent> {
         self.call(|r| Cmd::Next(max, skip.clone(), r))
@@ -500,14 +704,55 @@ impl EventSource for Spool {
         }
     }
     fn quarantined(&mut self, event_ids: &[String], code: QuarantineCode) {
-        let c = serde_json::to_value(code)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_else(|| "conflict".to_string());
+        let c = quarantine_code_name(code);
         if let Some(Err(_)) = self.call(|r| Cmd::Quarantine(event_ids.to_vec(), c, r)) {
             self.inner.shared.degraded.store(true, Ordering::Relaxed);
         }
     }
+
+    // The ingest loop runs on the tokio workers: the writer thread is reached
+    // through a oneshot reply, so no worker waits on an fsync (M2).
+    fn next_events_async<'a>(
+        &'a mut self,
+        max: usize,
+        skip: &'a HashSet<String>,
+    ) -> SourceFuture<'a, Vec<ProxyEvent>> {
+        Box::pin(async move {
+            self.call_async(|r| Cmd::Next(max, skip.clone(), r))
+                .await
+                .unwrap_or_default()
+        })
+    }
+    fn acknowledged_async<'a>(&'a mut self, event_ids: &'a [String]) -> SourceFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(Err(_)) = self.call_async(|r| Cmd::Ack(event_ids.to_vec(), r)).await {
+                // Stays unsent and is resent; the server deduplicates.
+                self.inner.shared.degraded.store(true, Ordering::Relaxed);
+            }
+        })
+    }
+    fn quarantined_async<'a>(
+        &'a mut self,
+        event_ids: &'a [String],
+        code: QuarantineCode,
+    ) -> SourceFuture<'a, ()> {
+        Box::pin(async move {
+            let c = quarantine_code_name(code);
+            if let Some(Err(_)) = self
+                .call_async(|r| Cmd::Quarantine(event_ids.to_vec(), c, r))
+                .await
+            {
+                self.inner.shared.degraded.store(true, Ordering::Relaxed);
+            }
+        })
+    }
+}
+
+fn quarantine_code_name(code: QuarantineCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "conflict".to_string())
 }
 
 // --------------------------------------------------------------- writer thread
@@ -712,6 +957,8 @@ impl Writer {
                     // after any commands already queued.
                     Ok((_, true)) => next_maintenance = now,
                     Ok(_) => {}
+                    // Sticky signal set where it happened; not a storage fault.
+                    Err(SpoolError::GapReserveExceeded) => {}
                     Err(_) => self.set_degraded(true),
                 }
             }
@@ -723,7 +970,14 @@ impl Writer {
             };
             match cmd {
                 Cmd::Append(ev, r) => r.send(self.append(*ev)),
-                Cmd::Next(max, skip, r) => r.send(self.next(max, &skip)),
+                Cmd::Next(max, skip, r) => {
+                    #[cfg(any(test, feature = "test-util"))]
+                    if self.shared.delivery_paused.load(Ordering::SeqCst) {
+                        r.send(Vec::new());
+                        continue;
+                    }
+                    r.send(self.next(max, &skip))
+                }
                 Cmd::Ack(ids, r) => r.send(self.ack(&ids).inspect_err(|_| self.set_degraded(true))),
                 Cmd::Quarantine(ids, code, r) => r.send(
                     self.quarantine(&ids, &code)
@@ -998,7 +1252,8 @@ impl Writer {
     fn expire_batch(&mut self) -> Result<(ExpireReport, bool), SpoolError> {
         let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
         let now = (self.cfg.clock)();
-        let cutoff = now - self.cfg.max_offline_retry_age.as_secs() as i64;
+        let retry_age = self.shared.retry_age_secs.load(Ordering::SeqCst);
+        let cutoff = now.saturating_sub(i64::try_from(retry_age).unwrap_or(i64::MAX));
         let ack_cutoff = now - self.cfg.ack_retention.as_secs() as i64;
         let reserve = self.shared.reserve.load(Ordering::Relaxed);
         let tx = self
@@ -1043,7 +1298,11 @@ impl Writer {
         for (from, to, count) in &runs {
             let gap = spool_expired_gap(&self.cfg.epoch_id, now, *from, *to, *count)
                 .ok_or_else(|| SpoolError::Storage("gap".into()))?;
-            let added = insert_gap(&tx, &gap, room)?;
+            let added = insert_gap(&tx, &gap, room).inspect_err(|e| {
+                if matches!(e, SpoolError::GapReserveExceeded) {
+                    self.shared.gap_exhausted.store(true, Ordering::SeqCst);
+                }
+            })?;
             room = room.saturating_sub(added);
             gap_bytes += added;
             report.gaps_recorded += 1;
@@ -1067,6 +1326,9 @@ impl Writer {
             }
         }
         tx.commit().map_err(st)?;
+        if report.gaps_recorded > 0 && gap_bytes > 0 {
+            self.shared.gap_exhausted.store(false, Ordering::SeqCst);
+        }
         let more = report.expired_events >= MAINTENANCE_BATCH as u64
             || report.purged_acked >= MAINTENANCE_BATCH as u64;
         let oldest = self.oldest_unsent().ok().flatten();
@@ -1091,12 +1353,21 @@ impl Writer {
             .map_err(st)?;
         let reserve = self.shared.reserve.load(Ordering::Relaxed);
         let room = reserve.saturating_sub(shared_gap_bytes(&self.shared));
-        let size = insert_gap(&tx, gap, room)?;
+        let size = match insert_gap(&tx, gap, room) {
+            Ok(n) => n,
+            Err(e) => {
+                if matches!(e, SpoolError::GapReserveExceeded) {
+                    self.shared.gap_exhausted.store(true, Ordering::SeqCst);
+                }
+                return Err(e);
+            }
+        };
         tx.commit().map_err(st)?;
         let mut k = self.counters();
         k.gap_bytes += size;
         if size > 0 {
             k.pending_gaps += 1;
+            self.shared.gap_exhausted.store(false, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -1142,6 +1413,11 @@ impl Writer {
         let mut k = self.counters();
         k.pending_gaps = k.pending_gaps.saturating_sub(n);
         k.gap_bytes = k.gap_bytes.saturating_sub(bytes);
+        if n > 0 {
+            // Room came back; the next maintenance pass or gap sets it again if
+            // that was not enough.
+            self.shared.gap_exhausted.store(false, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -1211,6 +1487,18 @@ fn insert_gap(
         .and_then(|v| v.get("gap_id").and_then(|g| g.as_str().map(str::to_string)))
         .ok_or(SpoolError::Corrupt)?;
     let size = body.len() as u64;
+    // N3: a gap_id that is already stored is a no-op, even when the reserve is
+    // full (re-recording after a restart must not fail).
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM gaps WHERE gap_id = ?1)",
+            [&gap_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| SpoolError::Storage(code_name(&e)))?;
+    if exists {
+        return Ok(0);
+    }
     if size > room {
         return Err(SpoolError::GapReserveExceeded);
     }
@@ -1683,7 +1971,11 @@ mod tests {
             dead: AtomicBool::new(false),
             capacity: AtomicU64::new(1 << 30),
             reserve: AtomicU64::new(1 << 20),
+            retry_age_secs: AtomicU64::new(3600),
+            gap_exhausted: AtomicBool::new(false),
             inject_failure: AtomicBool::new(false),
+            delivery_paused: AtomicBool::new(false),
+            clock_skew: std::sync::atomic::AtomicI64::new(0),
         });
         let w = Writer::open(cfg(d.path(), now), sh).unwrap();
         let sync: i64 = w
@@ -1704,5 +1996,186 @@ mod tests {
         let (s, _) = open(d.path());
         assert_eq!(s.append_async(event(1)).await.unwrap().sequence, 1);
         assert_eq!(s.snapshot().unsent_events, 1);
+    }
+
+    fn outage_gap(n: u32) -> GapReport {
+        serde_json::from_value(json!({
+            "kind": "central_outage", "gap_id": uid(n),
+            "detected_at": "2026-10-14T00:00:00Z",
+            "started_at": "2026-10-14T00:00:00Z", "ended_at": null}))
+        .unwrap()
+    }
+
+    fn gap_size(n: u32) -> u64 {
+        serde_json::to_string(&outage_gap(n)).unwrap().len() as u64
+    }
+
+    /// N3: recording a gap_id that is already stored is a no-op even when the
+    /// reserve is full; a new id is refused and the refusal is sticky.
+    #[test]
+    fn re_recording_an_existing_gap_is_a_noop_when_the_reserve_is_full() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.set_capacity_for_test(1 << 20, gap_size(1));
+        s.record_gap(outage_gap(1)).unwrap();
+        assert_eq!(s.snapshot().pending_gaps, 1);
+        // Same id again: Ok, nothing added.
+        s.record_gap(outage_gap(1)).unwrap();
+        let snap = s.snapshot();
+        assert_eq!((snap.pending_gaps, snap.gap_bytes), (1, gap_size(1)));
+        assert!(!snap.gap_reserve_exhausted);
+        assert_eq!(snap.state, SpoolState::Ok);
+        // A different id does not fit.
+        assert!(matches!(
+            s.record_gap(outage_gap(2)),
+            Err(SpoolError::GapReserveExceeded)
+        ));
+        assert!(s.snapshot().gap_reserve_exhausted);
+        assert_eq!(s.pending_gaps().unwrap().len(), 1);
+    }
+
+    /// The exhausted signal is sticky: appends do not clear it (no flapping);
+    /// handing a gap off does.
+    #[test]
+    fn gap_reserve_exhausted_is_sticky_until_a_gap_is_handed_off() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.set_capacity_for_test(1 << 20, gap_size(1));
+        s.record_gap(outage_gap(1)).unwrap();
+        assert!(s.record_gap(outage_gap(2)).is_err());
+        for n in 1..=3 {
+            s.append(event(n)).unwrap();
+            let snap = s.snapshot();
+            assert!(snap.gap_reserve_exhausted, "append {n} must not clear it");
+            assert_eq!(snap.state, SpoolState::Degraded, "append {n}");
+        }
+        s.gaps_handed_off(&[uid(1)]).unwrap();
+        let snap = s.snapshot();
+        assert!(!snap.gap_reserve_exhausted);
+        assert_eq!(snap.state, SpoolState::Ok);
+    }
+
+    /// An expiry whose gap does not fit leaves the events unsent (never expired
+    /// without a record) and raises the sticky signal, not a storage fault.
+    #[test]
+    fn expiry_with_a_full_gap_reserve_keeps_events_and_flags_exhaustion() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, now) = open(d.path());
+        s.append(event(1)).unwrap();
+        s.set_capacity_for_test(1 << 20, 1);
+        now.fetch_add(31 * 86_400, Ordering::SeqCst);
+        assert!(matches!(
+            s.expire_now(),
+            Err(SpoolError::GapReserveExceeded)
+        ));
+        let snap = s.snapshot();
+        assert_eq!(snap.unsent_events, 1);
+        assert_eq!(snap.quarantined_events, 0);
+        assert!(snap.gap_reserve_exhausted);
+        assert_eq!(snap.state, SpoolState::Degraded);
+    }
+
+    /// R follows the applied config.
+    #[test]
+    fn retry_age_can_be_changed_at_runtime() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, now) = open(d.path());
+        s.append(event(1)).unwrap();
+        now.fetch_add(2 * 3600, Ordering::SeqCst);
+        assert_eq!(s.expire_now().unwrap().expired_events, 0);
+        s.set_max_offline_retry_age(Duration::from_secs(3600));
+        assert_eq!(s.expire_now().unwrap().expired_events, 1);
+        assert_eq!(s.pending_gaps().unwrap().len(), 1);
+    }
+
+    /// Admission: full is a typed refusal and nothing is stored; space returns as
+    /// events are acknowledged.
+    #[tokio::test]
+    async fn admission_refuses_when_full_and_reopens_after_ack() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let size = event_size();
+        s.set_capacity_for_test(size * 2 + 10, 10);
+        let adm = Admission::new(s.clone());
+        assert_eq!(adm.append(event(1)).await.unwrap().sequence, 1);
+        assert_eq!(adm.append(event(2)).await.unwrap().sequence, 2);
+        assert_eq!(adm.append(event(3)).await, Err(Refusal::Full));
+        let snap = adm.snapshot();
+        assert_eq!(snap.state, SpoolState::Full);
+        assert_eq!(snap.unsent_events, 2);
+        assert_eq!(
+            snap.last_assigned_sequence, 2,
+            "a refused event takes no sequence"
+        );
+        // Duplicate and foreign-identity events are Invalid, not capacity.
+        assert!(matches!(
+            adm.append(event(1)).await,
+            Err(Refusal::Invalid(AppendError::Duplicate))
+        ));
+        s.acknowledged_async(&[uid(1)]).await;
+        assert!(adm.append(event(3)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn admission_maps_storage_failure_to_unavailable() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.inject_storage_failure(true);
+        let adm = Admission::new(s.clone());
+        assert_eq!(adm.append(event(1)).await, Err(Refusal::Unavailable));
+        assert_eq!(s.snapshot().state, SpoolState::Degraded);
+    }
+
+    /// The async EventSource path behaves like the sync one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_event_source_roundtrip() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        for n in 1..=3 {
+            s.append_async(event(n)).await.unwrap();
+        }
+        let got = s.next_events_async(10, &HashSet::new()).await;
+        assert_eq!(ids(&got), vec![uid(1), uid(2), uid(3)]);
+        let skip: HashSet<String> = [uid(1)].into_iter().collect();
+        assert_eq!(s.next_events_async(10, &skip).await.len(), 2);
+        s.acknowledged_async(&[uid(1)]).await;
+        s.quarantined_async(&[uid(2)], QuarantineCode::Conflict)
+            .await;
+        let snap = s.snapshot();
+        assert_eq!((snap.unsent_events, snap.quarantined_events), (1, 1));
+        assert_eq!(s.pending_gaps_async().await.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn injector_events_are_valid_and_sequenced() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        assert_eq!(s.inject_test_event_blocking("up-1").unwrap().sequence, 1);
+        assert_eq!(s.inject_test_event_blocking("up-1").unwrap().sequence, 2);
+        s.set_delivery_paused_for_test(true);
+        let mut s2 = s.clone();
+        assert!(s2.next_events(10, &HashSet::new()).is_empty());
+        s.set_delivery_paused_for_test(false);
+        assert_eq!(s2.next_events(10, &HashSet::new()).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn close_stops_the_writer_and_releases_the_database() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.append_async(event(1)).await.unwrap();
+        s.close().await;
+        assert_eq!(
+            s.append_async(event(2)).await,
+            Err(AppendError::Unavailable)
+        );
+        // The file can be opened again by a new spool at once.
+        let (s2, _) = {
+            let now = Arc::new(AtomicI64::new(1_800_000_000));
+            let mut c = cfg(d.path(), now.clone());
+            c.new_epoch = false;
+            (Spool::open(c).unwrap(), now)
+        };
+        assert_eq!(s2.snapshot().unsent_events, 1);
     }
 }

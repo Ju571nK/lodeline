@@ -40,6 +40,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::config_sync::ConfigView;
+use crate::spool::Spool;
 use crate::state_dir::{GapQueueState, OpenOutage};
 
 /// Largest answer read from the server. A 200 body lists at most 200 ids.
@@ -205,6 +206,15 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether [`Inner::push`] would accept this gap (without changing anything).
+    fn has_room_for(&self, gap: &GapReport) -> bool {
+        let id = gap_id(gap);
+        match self.entries.iter().find(|e| gap_id(&e.gap) == id) {
+            Some(e) if e.state == GapState::Pending => true,
+            _ => self.pending() < MAX_QUEUED_GAPS,
+        }
+    }
+
     /// Report the overflow tally as one `local_record_failed` gap as soon as
     /// there is room. The gap is new (its own id): a gap already sent is never
     /// changed, because the server answers a different body under the same id
@@ -315,6 +325,13 @@ impl GapQueue {
             g.flush();
         }
         r
+    }
+
+    /// Whether the queue can take this gap now. A producer whose own record is
+    /// the only copy checks this first, so a refusal never turns into an overflow
+    /// count on every retry.
+    pub fn has_room_for(&self, gap: &GapReport) -> bool {
+        self.lock().has_room_for(gap)
     }
 
     /// [`GapQueue::push`] for a producer: a gap that does not fit is counted and
@@ -686,6 +703,9 @@ pub struct StatusBuilder {
     reserved: i64,
     persister: Option<SequencePersister>,
     central: CentralHealth,
+    /// The event spool (T-14b). Without one (unit tests of the builder alone) the
+    /// `spool` section is the empty placeholder and `last_assigned_sequence` is 0.
+    spool: Option<Spool>,
 }
 
 pub(crate) fn rfc3339(t: time::OffsetDateTime) -> String {
@@ -704,7 +724,13 @@ impl StatusBuilder {
             reserved: 0,
             persister: None,
             central: CentralHealth::new(),
+            spool: None,
         }
+    }
+
+    /// Report the `spool` section and `last_assigned_sequence` from this spool.
+    pub fn set_spool(&mut self, spool: Spool) {
+        self.spool = Some(spool);
     }
 
     /// Read the `central` section from this handle (shared with the ingest client
@@ -789,9 +815,32 @@ impl StatusBuilder {
         // `unsupported` and a `reason` are never reported; `supported` means
         // "configured and not known to be broken", not "verified".
         //
-        // PLACEHOLDERS: `spool` and `registry` (and the `capacity_bytes = 1` the
-        // schema forces to be positive) are vacuous until the spool and registry
-        // sync exist (T-13/T-14). They say nothing about health.
+        // REAL (T-14b): `spool` and `last_assigned_sequence` come from the spool
+        // snapshot when one is attached (always, in the production lifecycle).
+        // PLACEHOLDER: `registry` is vacuous until the registry sync exists
+        // (T-13). It says nothing about health. A builder with no spool attached
+        // (unit tests only) reports an empty spool and `capacity_bytes = 1`, the
+        // least the schema allows.
+        let (spool_section, last_assigned) = match self.spool.as_ref().map(Spool::snapshot) {
+            Some(s) => (
+                json!({
+                    "state": s.state,
+                    "depth_events": s.unsent_events.saturating_add(s.retained_acked_events),
+                    "unsent_events": s.unsent_events,
+                    "bytes": s.unsent_bytes.saturating_add(s.retained_acked_bytes),
+                    "capacity_bytes": s.capacity_bytes.max(1),
+                    "oldest_unsent_age_seconds": s.oldest_unsent_age_seconds,
+                    "quarantined_events": s.quarantined_events,
+                }),
+                s.last_assigned_sequence,
+            ),
+            None => (
+                json!({"state": "ok", "depth_events": 0, "unsent_events": 0, "bytes": 0,
+                    "capacity_bytes": 1, "oldest_unsent_age_seconds": null,
+                    "quarantined_events": 0}),
+                0,
+            ),
+        };
         let route_state = if view.state == ConfigState::Valid {
             "supported"
         } else {
@@ -811,16 +860,14 @@ impl StatusBuilder {
             "status_sequence": sequence,
             "sent_at": rfc3339(now),
             "config": config,
-            "spool": {"state": "ok", "depth_events": 0, "unsent_events": 0, "bytes": 0,
-                "capacity_bytes": 1, "oldest_unsent_age_seconds": null,
-                "quarantined_events": 0},
+            "spool": spool_section,
             "registry": {"pending_entries": 0, "sync_stalled": false},
             "central": {"last_ingest_ack_at": self.central.last_ingest_ack_at(),
                 "consecutive_failures": self.central.consecutive_failures()},
             "routes": routes,
             "counters": {"auth_failures": [], "unmatched_cancels": []},
             "gaps": gaps,
-            "last_assigned_sequence": 0,
+            "last_assigned_sequence": last_assigned,
         });
         let bytes = serde_json::to_vec(&body).map_err(|_| BuildError)?;
         // The shared parser is the contract check; a body it refuses is never sent.
@@ -917,6 +964,12 @@ impl Reporter {
     pub fn with_central(mut self, central: CentralHealth) -> Reporter {
         self.builder.set_central(central.clone());
         self.central = central;
+        self
+    }
+
+    /// Report the spool (see [`StatusBuilder::set_spool`]).
+    pub fn with_spool(mut self, spool: Spool) -> Reporter {
+        self.builder.set_spool(spool);
         self
     }
 
@@ -1178,6 +1231,65 @@ pub async fn run_status_reporter<T: StatusTransport + ?Sized>(
         let (delay, early) = reporter.next_delay(outcome.as_ref());
         early_ok = early;
         next = now + delay.max(params.min_spacing);
+    }
+}
+
+/// Hand the spool's gaps (`spool_expired`, recorded by the spool itself) to the
+/// gap queue once. Returns how many were handed off.
+///
+/// A gap leaves the spool only after the queue holds it durably: if it does not
+/// fit, or the queue could not be persisted, the gap stays in the spool and is
+/// offered again on the next call. Offering a gap twice (a crash between the
+/// two steps) is harmless:
+/// the queue replaces an entry by `gap_id`, and the server answers a repeated
+/// `gap_id` with the same body as `duplicate`.
+pub async fn hand_off_spool_gaps(spool: &Spool, gaps: &GapQueue) -> usize {
+    let Ok(pending) = spool.pending_gaps_async().await else {
+        return 0;
+    };
+    if pending.is_empty() {
+        return 0;
+    }
+    // Only gaps the queue takes are recorded and handed off. A gap that does not
+    // fit stays in the spool (durable) and is offered again next time; recording
+    // it anyway would only bump the overflow count and lose its range.
+    let mut ids: Vec<String> = Vec::new();
+    for g in pending {
+        // Checked right before each record, so a batch cannot overshoot.
+        if gaps.has_room_for(&g) {
+            ids.push(gap_id(&g).to_string());
+            // `record` flushes the persister, so `persist_failed` below
+            // describes this very write, not an earlier one.
+            gaps.record(g);
+        }
+    }
+    if ids.is_empty() {
+        return 0;
+    }
+    if gaps.persist_failed() {
+        // Not durable yet: keep them in the spool, which is durable.
+        return 0;
+    }
+    match spool.gaps_handed_off_async(&ids).await {
+        Ok(()) => ids.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Run [`hand_off_spool_gaps`] every `interval` until `shutdown` completes.
+pub async fn run_spool_gap_pump(
+    spool: Spool,
+    gaps: GapQueue,
+    interval: Duration,
+    shutdown: impl Future<Output = ()>,
+) {
+    tokio::pin!(shutdown);
+    loop {
+        hand_off_spool_gaps(&spool, &gaps).await;
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
     }
 }
 
@@ -2466,5 +2578,203 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(central.consecutive_failures(), 1);
+    }
+
+    // ----------------------------------------------------- spool (T-14b)
+
+    fn test_spool(dir: &std::path::Path) -> Spool {
+        let mut c = crate::spool::SpoolConfig::new(
+            dir,
+            "px-1",
+            &uid(5000),
+            true,
+            &crate::limits::Limits::default(),
+        );
+        c.maintenance_interval = Duration::from_secs(3600);
+        Spool::open(c).unwrap()
+    }
+
+    fn built(b: &mut StatusBuilder) -> Value {
+        let bytes = b
+            .build(
+                &view(ConfigState::Valid),
+                &[],
+                time::OffsetDateTime::now_utc(),
+            )
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The report carries the spool's real numbers and its tail sequence, not
+    /// the placeholders (F13/AC-06, AC-12).
+    #[tokio::test]
+    async fn report_carries_real_spool_numbers_and_the_tail_sequence() {
+        let d = tempfile::tempdir().unwrap();
+        let spool = test_spool(d.path());
+        let mut b = StatusBuilder::new("px-1", &uid(5000));
+        b.set_spool(spool.clone());
+        let v = built(&mut b);
+        assert_eq!(v["last_assigned_sequence"], 0);
+        assert_eq!(v["spool"]["state"], "ok");
+        assert_eq!(v["spool"]["unsent_events"], 0);
+        assert_eq!(
+            v["spool"]["capacity_bytes"],
+            crate::limits::Limits::default().spool_max_bytes
+        );
+        assert!(v["spool"]["oldest_unsent_age_seconds"].is_null());
+
+        spool.inject_test_event("up-1").await.unwrap();
+        spool.inject_test_event("up-1").await.unwrap();
+        let v = built(&mut b);
+        assert_eq!(v["last_assigned_sequence"], 2);
+        assert_eq!(v["spool"]["unsent_events"], 2);
+        assert_eq!(v["spool"]["depth_events"], 2);
+        assert!(v["spool"]["bytes"].as_u64().unwrap() > 0);
+        assert!(v["spool"]["oldest_unsent_age_seconds"].is_u64());
+        assert_eq!(v["spool"]["quarantined_events"], 0);
+
+        // Full: admission is closed and the state says so.
+        let one = spool.snapshot().unsent_bytes / 2;
+        spool.set_capacity_for_test(one * 2 + 5, 5);
+        let v = built(&mut b);
+        assert_eq!(v["spool"]["state"], "full");
+        assert_eq!(v["spool"]["capacity_bytes"], one * 2 + 5);
+
+        // Acknowledged events leave `unsent` but the sequence never goes back.
+        let mut src = spool.clone();
+        let ids: Vec<String> = crate::ingest_client::EventSource::next_events(
+            &mut src,
+            10,
+            &std::collections::HashSet::new(),
+        )
+        .iter()
+        .map(|e| e.event_id.as_str().to_string())
+        .collect();
+        crate::ingest_client::EventSource::acknowledged(&mut src, &ids);
+        let v = built(&mut b);
+        assert_eq!(v["spool"]["unsent_events"], 0);
+        assert_eq!(v["last_assigned_sequence"], 2);
+    }
+
+    /// A builder without a spool still validates (unit-test path only).
+    #[test]
+    fn builder_without_a_spool_reports_the_empty_placeholder() {
+        let mut b = StatusBuilder::new("px-1", &uid(5000));
+        let v = built(&mut b);
+        assert_eq!(v["last_assigned_sequence"], 0);
+        assert_eq!(v["spool"]["capacity_bytes"], 1);
+    }
+
+    fn expired_spool_gap(spool: &Spool) -> GapReport {
+        // R expiry is the producer in production; here the spool records an
+        // equivalent gap directly.
+        let g: GapReport = serde_json::from_value(json!({
+            "kind": "spool_expired", "gap_id": uid(77),
+            "detected_at": "2026-10-11T00:00:00Z", "epoch_id": uid(5000),
+            "from_sequence": 1, "to_sequence": 3, "count": 3}))
+        .unwrap();
+        spool.record_gap(g.clone()).unwrap();
+        g
+    }
+
+    /// A spool gap moves to the gap queue and leaves the spool only afterwards;
+    /// offering it again is idempotent (one pending entry, same body).
+    #[tokio::test]
+    async fn spool_gaps_are_handed_to_the_queue_then_removed_from_the_spool() {
+        let d = tempfile::tempdir().unwrap();
+        let spool = test_spool(d.path());
+        let g = expired_spool_gap(&spool);
+        let queue = GapQueue::new();
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
+        assert_eq!(queue.pending_ids(), vec![uid(77)]);
+        assert!(spool.pending_gaps().unwrap().is_empty());
+        assert_eq!(spool.snapshot().pending_gaps, 0);
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 0);
+
+        // A crash between the two steps: the gap is in both places. The next
+        // hand-off replaces by id: still exactly one entry, same body, so the
+        // server answers `duplicate` (it dedupes by gap_id).
+        spool.record_gap(g.clone()).unwrap();
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
+        assert_eq!(queue.pending_ids(), vec![uid(77)]);
+        assert_eq!(queue.pending_batch(), vec![g]);
+    }
+
+    /// A gap whose queue write failed stays in the spool (durable) and is
+    /// offered again.
+    #[tokio::test]
+    async fn spool_gap_stays_in_the_spool_while_the_queue_is_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let spool = test_spool(d.path());
+        expired_spool_gap(&spool);
+        let ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ok2 = ok.clone();
+        let queue = GapQueue::new().with_persister(Box::new(move |_| {
+            ok2.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 0);
+        assert_eq!(spool.pending_gaps().unwrap().len(), 1, "kept");
+        ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
+        assert!(spool.pending_gaps().unwrap().is_empty());
+    }
+
+    /// A full gap queue: spool gaps that do not fit stay in the spool, and the
+    /// overflow count does not grow on retries; they move once there is room.
+    #[tokio::test]
+    async fn spool_gaps_stay_in_the_spool_while_the_queue_is_full() {
+        let d = tempfile::tempdir().unwrap();
+        let spool = test_spool(d.path());
+        expired_spool_gap(&spool);
+        let queue = GapQueue::new();
+        for n in 0..MAX_QUEUED_GAPS as u32 {
+            queue.push(quarantine_gap(10_000 + n)).unwrap();
+        }
+        for _ in 0..3 {
+            assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 0);
+        }
+        assert_eq!(spool.pending_gaps().unwrap().len(), 1, "range not lost");
+        assert_eq!(queue.overflow_count(), 0, "retries do not count overflow");
+        assert!(!queue.pending_ids().contains(&uid(77)));
+        // Room appears (an acknowledged gap leaves the queue).
+        queue.settle(&ReportOutcome::Accepted {
+            acknowledged: vec![uid(10_000)],
+            duplicate: vec![],
+        });
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
+        assert!(queue.pending_ids().contains(&uid(77)));
+        assert!(spool.pending_gaps().unwrap().is_empty());
+    }
+
+    /// A `persist_failed` left over from an earlier write neither blocks nor
+    /// wrongly allows a hand-off: only the write made for this gap counts.
+    #[tokio::test]
+    async fn stale_persist_failure_does_not_decide_the_hand_off() {
+        let d = tempfile::tempdir().unwrap();
+        let spool = test_spool(d.path());
+        let ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ok2 = ok.clone();
+        let queue = GapQueue::new().with_persister(Box::new(move |_| {
+            ok2.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        // The initial flush failed: the flag is stale-true.
+        assert!(queue.persist_failed());
+        ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        expired_spool_gap(&spool);
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
+        assert!(!queue.persist_failed());
+        // And the other direction: a failing write keeps the gap in the spool.
+        ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        spool
+            .record_gap(
+                serde_json::from_value(json!({
+                    "kind": "spool_expired", "gap_id": uid(78),
+                    "detected_at": "2026-10-11T00:00:00Z", "epoch_id": uid(5000),
+                    "from_sequence": 4, "to_sequence": 5, "count": 2}))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 0);
+        assert_eq!(spool.pending_gaps().unwrap().len(), 1);
     }
 }
