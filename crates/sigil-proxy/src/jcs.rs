@@ -13,16 +13,15 @@
 //! Inputs outside the domain are REFUSED, never approximated:
 //!
 //! * a duplicate object member name (when parsing text);
-//! * an integer whose magnitude exceeds 2^53 (it would silently round in a
-//!   double; JCS/I-JSON cannot represent it exactly);
 //! * a non-finite number (cannot come out of a JSON parser, but a hand-built
 //!   [`Value`] is checked too);
 //! * nesting deeper than [`MAX_DEPTH`];
 //! * text that is not valid JSON (this includes lone surrogate escapes and
 //!   numbers whose double is infinite).
 //!
-//! One residual: an integer literal beyond the `u64` range is read by
-//! `serde_json` as an IEEE double (I-JSON behaviour) before this module sees it.
+//! Numbers are IEEE-754 doubles (RFC 8785 section 3.2.2.3): an integer literal
+//! beyond 2^53, or beyond `u64`, is rounded to the nearest double and printed
+//! like any other number (`9007199254740993` becomes `9007199254740992`).
 
 use std::fmt;
 
@@ -30,9 +29,6 @@ use serde_json::{Map, Value};
 
 /// Deepest nesting accepted.
 pub const MAX_DEPTH: usize = 128;
-
-/// Largest integer magnitude that a double represents exactly (2^53).
-const MAX_EXACT_INT: u64 = 1 << 53;
 
 /// Why a value cannot be canonicalised. Carries no content: the value may be
 /// untrusted tool-definition text.
@@ -43,7 +39,7 @@ pub enum JcsError {
     Syntax,
     /// A duplicate member name in one object.
     DuplicateKey,
-    /// An integer beyond +-2^53, or a non-finite number.
+    /// A non-finite number (for example `1e400`).
     NumberOutOfDomain,
     /// Nesting deeper than [`MAX_DEPTH`].
     TooDeep,
@@ -315,15 +311,12 @@ fn write_value(v: &Value, out: &mut Vec<u8>, depth: usize) -> Result<(), JcsErro
         Value::Bool(true) => out.extend_from_slice(b"true"),
         Value::Bool(false) => out.extend_from_slice(b"false"),
         Value::Number(n) => {
+            // RFC 8785 / I-JSON: every number is an IEEE-754 double. Integers
+            // beyond 2^53 are rounded to the nearest double (ties to even, as
+            // `as f64` does) and printed by the ES algorithm: no special path.
             let f = if let Some(i) = n.as_i64() {
-                if i.unsigned_abs() > MAX_EXACT_INT {
-                    return Err(JcsError::NumberOutOfDomain);
-                }
                 i as f64
             } else if let Some(u) = n.as_u64() {
-                if u > MAX_EXACT_INT {
-                    return Err(JcsError::NumberOutOfDomain);
-                }
                 u as f64
             } else {
                 n.as_f64().ok_or(JcsError::NumberOutOfDomain)?
@@ -544,6 +537,43 @@ mod tests {
         );
     }
 
+    /// RFC 8785 treats every number as an IEEE-754 double: big integers round to
+    /// the nearest double and print by the ES rules. Expected strings from V8.
+    #[test]
+    fn integers_beyond_2_pow_53_round_to_the_double() {
+        let cases = [
+            ("9007199254740993", "9007199254740992"), // 2^53+1, ties to even
+            ("9007199254740995", "9007199254740996"), // 2^53+3, ties to even
+            ("-9007199254740993", "-9007199254740992"),
+            ("9223372036854775807", "9223372036854776000"), // i64::MAX
+            ("-9223372036854775808", "-9223372036854776000"),
+            ("18446744073709551615", "18446744073709552000"), // u64::MAX
+            ("123456789012345678901234567890", "1.2345678901234568e+29"),
+            ("-123456789012345678901234567890", "-1.2345678901234568e+29"),
+            ("1000000000000000000000000000000", "1e+30"), // 31 digits
+            ("-1000000000000000000000000000000", "-1e+30"),
+            ("100000000000000000000000", "1e+23"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(canon(input), want, "{input}");
+        }
+        // Inside containers, and the same text is the same bytes whether it came
+        // in as an integer or as a float literal.
+        assert_eq!(
+            canon("[9007199254740993, 9007199254740992.0]"),
+            "[9007199254740992,9007199254740992]"
+        );
+        // A hand-built Value takes the same path.
+        assert_eq!(
+            canonicalize(&json!(u64::MAX)).unwrap(),
+            b"18446744073709552000"
+        );
+        assert_eq!(
+            canonicalize(&json!(i64::MIN)).unwrap(),
+            b"-9223372036854776000"
+        );
+    }
+
     #[test]
     fn numbers_are_normalised_through_the_double() {
         assert_eq!(
@@ -556,14 +586,7 @@ mod tests {
 
     #[test]
     fn refuses_what_it_cannot_represent() {
-        for t in [
-            "9007199254740993",
-            "-9007199254740993",
-            "9223372036854775807",
-            "18446744073709551615",
-        ] {
-            assert_eq!(canonicalize_str(t), Err(JcsError::NumberOutOfDomain), "{t}");
-        }
+        assert_eq!(canonicalize_str("1e400"), Err(JcsError::NumberOutOfDomain));
         assert_eq!(
             canonicalize_str(r#"{"a":1,"a":2}"#),
             Err(JcsError::DuplicateKey)
@@ -587,10 +610,6 @@ mod tests {
         assert!(es_number(f64::NAN).is_err());
         assert!(es_number(f64::INFINITY).is_err());
         // Hand-built values are checked too.
-        assert_eq!(
-            canonicalize(&json!(u64::MAX)),
-            Err(JcsError::NumberOutOfDomain)
-        );
         let mut deep = json!(1);
         for _ in 0..(MAX_DEPTH + 2) {
             deep = json!([deep]);

@@ -543,12 +543,12 @@ fn what_cannot_be_canonicalised_or_named_uniquely_is_incomplete() {
         definition: def.to_string(),
     };
     for (i, def) in [
-        r#"{"name":"t","n":9007199254740993}"#, // integer beyond 2^53
-        r#"{"name":"t","a":1,"a":2}"#,          // duplicate member
-        r#"{"name":"t""#,                       // not JSON
-        r#"["t"]"#,                             // not an object
-        r#"{}"#,                                // empty object
-        r#"{"name":"other"}"#,                  // name differs from the announced one
+        r#"{"name":"t","n":1e400}"#,   // not a finite double
+        r#"{"name":"t","a":1,"a":2}"#, // duplicate member
+        r#"{"name":"t""#,              // not JSON
+        r#"["t"]"#,                    // not an object
+        r#"{}"#,                       // empty object
+        r#"{"name":"other"}"#,         // name differs from the announced one
     ]
     .iter()
     .enumerate()
