@@ -116,11 +116,16 @@ pub const MAX_OBSERVED_AHEAD_SECS: i64 = 300;
 /// Blocking body of the handler: validate against the registry, then store.
 pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    handle_at(ctx, peer_id, body, now)
+    handle_inner(ctx, peer_id, body, now)
 }
 
 /// [`handle`] with the server clock (unix seconds) given, for tests.
+#[cfg(any(test, feature = "test-support"))]
 pub fn handle_at(ctx: &ProxyContext, peer_id: &str, body: &[u8], now: i64) -> Response {
+    handle_inner(ctx, peer_id, body, now)
+}
+
+fn handle_inner(ctx: &ProxyContext, peer_id: &str, body: &[u8], now: i64) -> Response {
     if foreign_proxy_id_in_body(body, peer_id) {
         ctx.ingest_log.note("inventory", "identity_mismatch");
         return proxy_unknown();
