@@ -540,6 +540,8 @@ pub struct InvocationDetail {
 pub struct GapPage {
     pub items: Vec<crate::proxy::ledger::GapRecord>,
     pub total: i64,
+    /// Inventory gap records dropped because the gap budget was full.
+    pub dropped: i64,
 }
 
 /// Result of [`crate::proxy::ledger::Ledger::note_last_assigned`].

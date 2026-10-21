@@ -21,7 +21,7 @@ use sigil_server::config::ServerConfig;
 use sigil_server::fleet_index::FleetIndex;
 use sigil_server::persist::HighWater;
 use sigil_server::proxy::identity::proxy_san;
-use sigil_server::proxy::ledger::{Ledger, LedgerOptions, SCHEMA_VERSION};
+use sigil_server::proxy::ledger::{Ledger, LedgerError, LedgerOptions, SCHEMA_VERSION};
 use sigil_server::proxy::ledger_inventory::{report_digest, InvFilter, InventoryOutcome, RefCheck};
 use sigil_server::proxy::query::TestScope;
 use sigil_server::proxy::registry::{ProxyRecord, ProxyState};
@@ -2474,7 +2474,7 @@ fn schema_v2_files_migrate_to_v3_and_keep_their_data() {
         let c = rusqlite::Connection::open(&path).unwrap();
         c.execute_batch(
             "DROP TABLE inv_reports; DROP TABLE inv_snapshots; DROP TABLE inv_members;
-             DROP TABLE inv_links; DROP TABLE inv_drift; DROP TABLE inv_markers;
+             DROP TABLE inv_links; DROP TABLE inv_drift; DROP TABLE inv_markers; DROP TABLE inv_gap_overflow;
              ALTER TABLE gaps DROP COLUMN details;
              INSERT INTO gaps (gap_id, proxy_id, kind, detected_at, epoch_id, from_sequence,
                  to_sequence, open) VALUES ('g1','px-a','sequence_gap',5,'e',4,4,1);
@@ -2549,4 +2549,371 @@ fn the_projection_stores_no_tool_content_columns() {
             );
         }
     }
+}
+
+// ===== review fixes: wait list, gap budget, ageing, more orders =======================
+
+fn try_ingest(l: &Ledger, report: &Value, now: i64) -> Result<InventoryOutcome, LedgerError> {
+    let r = parse_inventory_report(report.to_string().as_bytes()).expect("valid report");
+    l.ingest_inventory("px-a", &r, &report_digest(&r), &RefCheck::default(), now)
+}
+
+fn permutations(n: usize) -> Vec<Vec<usize>> {
+    fn go(cur: &mut Vec<usize>, used: &mut Vec<bool>, out: &mut Vec<Vec<usize>>) {
+        if cur.len() == used.len() {
+            out.push(cur.clone());
+            return;
+        }
+        for i in 0..used.len() {
+            if !used[i] {
+                used[i] = true;
+                cur.push(i);
+                go(cur, used, out);
+                cur.pop();
+                used[i] = false;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    go(&mut Vec::new(), &mut vec![false; n], &mut out);
+    out
+}
+
+/// Every arrival order accepted by `keep` must be accepted and give the same
+/// projection. Returns the number of orders compared and the projection.
+fn all_orders_equal(reports: &[(Value, i64)], keep: impl Fn(&[usize]) -> bool) -> (usize, Value) {
+    let mut reference: Option<Value> = None;
+    let mut n = 0;
+    for order in permutations(reports.len()).into_iter().filter(|o| keep(o)) {
+        let d = tempfile::tempdir().unwrap();
+        let l = open_ledger(d.path());
+        for i in &order {
+            let (r, now) = &reports[*i];
+            assert_eq!(ingest(&l, r, *now), InventoryOutcome::Accepted, "{order:?}");
+        }
+        let p = projection(&l);
+        match &reference {
+            None => reference = Some(p),
+            Some(r) => assert_eq!(&p, r, "order {order:?}"),
+        }
+        n += 1;
+    }
+    (n, reference.expect("at least one order"))
+}
+
+#[test]
+fn orders_with_a_pending_report_that_turns_inconsistent() {
+    let reports = vec![
+        (
+            rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1, 2, 3], initial()),
+            1001,
+        ),
+        // omits the removal of 3: inconsistent once its previous arrives
+        (
+            rep(
+                "px-a",
+                2,
+                2,
+                20,
+                UP1,
+                CS1,
+                1,
+                1,
+                &[1, 2, 4],
+                compared(1, vec![added(4)]),
+            ),
+            1002,
+        ),
+        (
+            rep("px-a", 3, 9, 15, UP2, CS2, 1, 1, &[31], initial()),
+            1003,
+        ),
+    ];
+    // in-order arrival rejects the bad report (422) by contract; every order in
+    // which it comes first is comparable
+    let (n, p) = all_orders_equal(&reports, |o| {
+        o.iter().position(|i| *i == 1) < o.iter().position(|i| *i == 0)
+    });
+    assert_eq!(n, 3);
+    let snaps = p["snapshots"].as_array().unwrap();
+    let bad = snaps
+        .iter()
+        .find(|s| s["inventory_id"] == inv_id(2).as_str())
+        .unwrap();
+    assert_eq!(bad["comparison_state"], "inconsistent");
+    assert!(p["drift"].as_array().unwrap().is_empty());
+    let gaps = p["gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(
+        gaps[0]["detected_at"], 1002,
+        "the report's own receipt time"
+    );
+}
+
+#[test]
+fn observed_at_ties_are_ordered_by_inventory_id_in_every_order() {
+    let reports = vec![
+        (rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()), 1001),
+        (rep("px-a", 2, 2, 10, UP1, CS1, 2, 1, &[2], initial()), 1002),
+        (rep("px-a", 3, 3, 10, UP1, CS1, 3, 2, &[3], initial()), 1003),
+        (rep("px-a", 4, 4, 10, UP1, CS1, 1, 1, &[1], initial()), 1004),
+    ];
+    let (n, p) = all_orders_equal(&reports, |_| true);
+    assert_eq!(n, 24);
+    // inv1 < inv2 < inv3 < inv4 by id: three markers (2, 3, 4)
+    let m = p["markers"].as_array().unwrap();
+    assert_eq!(m.len(), 3);
+    let by = |inv: u32| {
+        m.iter()
+            .find(|x| x["inventory_id"] == inv_id(inv).as_str())
+            .unwrap()
+    };
+    assert_eq!(by(2)["cause"], "key_change_undeclared");
+    assert_eq!(by(2)["previous_inventory_id"], inv_id(1).as_str());
+    assert_eq!(by(3)["cause"], "epoch_change_detected");
+    assert_eq!(by(4)["cause"], "epoch_change_detected");
+    assert_eq!(by(4)["previous_inventory_id"], inv_id(3).as_str());
+}
+
+#[test]
+fn an_initial_baseline_arriving_between_two_others_gives_the_same_markers() {
+    let reports = vec![
+        (rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()), 1001),
+        (rep("px-a", 2, 2, 20, UP1, CS1, 2, 1, &[2], initial()), 1002),
+        (rep("px-a", 3, 3, 30, UP1, CS1, 3, 1, &[3], initial()), 1003),
+        (
+            rep(
+                "px-a",
+                4,
+                4,
+                15,
+                UP1,
+                CS1,
+                1,
+                1,
+                &[1, 5],
+                compared(1, vec![added(5)]),
+            ),
+            1004,
+        ),
+    ];
+    let (n, p) = all_orders_equal(&reports, |_| true);
+    assert_eq!(n, 24);
+    let m = p["markers"].as_array().unwrap();
+    let by = |inv: u32| {
+        m.iter()
+            .find(|x| x["inventory_id"] == inv_id(inv).as_str())
+            .unwrap()
+    };
+    // inv2 follows inv4 (obs 15) and inv3 follows inv2, whatever arrived first
+    assert_eq!(by(2)["previous_inventory_id"], inv_id(4).as_str());
+    assert_eq!(by(3)["previous_inventory_id"], inv_id(2).as_str());
+}
+
+#[test]
+fn the_wait_list_is_bounded_and_resolves_once_per_arrival() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    l.set_pending_cap_for_test(2);
+    // three reports that wait for the same, absent previous snapshot
+    let child = |n: u32| {
+        rep(
+            "px-a",
+            n,
+            n,
+            10 * n,
+            UP1,
+            CS1,
+            1,
+            1,
+            &[1, 2, 3],
+            compared(99, vec![]),
+        )
+    };
+    assert_eq!(ingest(&l, &child(1), 1001), InventoryOutcome::Accepted);
+    assert_eq!(ingest(&l, &child(2), 1002), InventoryOutcome::Accepted);
+    // 503, not 422: the report is valid and nothing was stored for it
+    assert_eq!(
+        try_ingest(&l, &child(3), 1003).unwrap_err(),
+        LedgerError::StorageLimit
+    );
+    // a report that waits for nothing is not limited
+    assert_eq!(
+        ingest(
+            &l,
+            &rep("px-a", 50, 50, 5, UP2, CS2, 1, 1, &[31], initial()),
+            1004
+        ),
+        InventoryOutcome::Accepted
+    );
+    // the previous arrives: both children resolve in that one call
+    assert_eq!(
+        ingest(
+            &l,
+            &rep("px-a", 60, 99, 5, UP1, CS1, 1, 1, &[1, 2, 3], initial()),
+            1005
+        ),
+        InventoryOutcome::Accepted
+    );
+    let p = projection(&l);
+    let states: Vec<&str> = p["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| {
+            s["inventory_id"] == inv_id(1).as_str() || s["inventory_id"] == inv_id(2).as_str()
+        })
+        .map(|s| s["comparison_state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, vec!["compared", "compared"]);
+    // room again
+    assert_eq!(ingest(&l, &child(3), 1006), InventoryOutcome::Accepted);
+}
+
+#[test]
+fn the_gap_budget_never_refuses_a_previous_snapshot() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    l.fill_inventory_gaps_for_test("px-a", 10_000).unwrap();
+    // B waits for A and is inconsistent against it
+    let b = rep(
+        "px-a",
+        2,
+        2,
+        20,
+        UP1,
+        CS1,
+        1,
+        1,
+        &[1, 2, 4],
+        compared(1, vec![added(4)]),
+    );
+    assert_eq!(ingest(&l, &b, 1002), InventoryOutcome::Accepted);
+    // the legitimate previous snapshot is accepted although the gap record
+    // cannot be stored: it is counted instead
+    let a = rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1, 2, 3], initial());
+    assert_eq!(ingest(&l, &a, 1001), InventoryOutcome::Accepted);
+    assert_eq!(l.inventory_gap_overflow("px-a").unwrap(), 1);
+    let p = projection(&l);
+    let state = |n: u32| {
+        p["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["inventory_id"] == inv_id(n).as_str())
+            .unwrap()["comparison_state"]
+            .clone()
+    };
+    assert_eq!(state(1), "baseline");
+    assert_eq!(state(2), "inconsistent");
+    assert!(p["drift"].as_array().unwrap().is_empty());
+    // an incomplete observation, whose only effect is its gap, is refused
+    assert_eq!(
+        try_ingest(
+            &l,
+            &incomplete("px-a", 5, 30, UP1, CS1, 1, "page_error"),
+            1003
+        )
+        .unwrap_err(),
+        LedgerError::StorageLimit
+    );
+}
+
+#[tokio::test]
+async fn dropped_gap_records_are_visible_in_the_proxy_detail() {
+    let fx = Fx::new().await;
+    fx.reg_default();
+    fx.ctx
+        .ledger
+        .fill_inventory_gaps_for_test("px-a", 10_000)
+        .unwrap();
+    fx.ok(
+        A,
+        &rep(
+            "px-a",
+            2,
+            2,
+            20,
+            UP1,
+            CS1,
+            1,
+            1,
+            &[1, 2, 4],
+            compared(1, vec![added(4)]),
+        ),
+    )
+    .await;
+    fx.ok(
+        A,
+        &rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1, 2, 3], initial()),
+    )
+    .await;
+    let d = fx.get("/v1/proxies/px-a").await.json();
+    assert_eq!(d["audit_gaps_dropped"], 1);
+    let s = fx.snaps("px-a").await;
+    assert_eq!(snap(&s, 2)["comparison_state"], "inconsistent");
+}
+
+#[test]
+fn waiting_snapshots_age_out_and_a_replay_never_makes_a_forever_row() {
+    let d = tempfile::tempdir().unwrap();
+    let opts = LedgerOptions {
+        tombstone_retention_secs: 5_000,
+        ..LedgerOptions::default()
+    };
+    let l = Ledger::open(&d.path().join("l.sqlite"), opts).unwrap();
+    let e = 1_000i64;
+    let waiting = rep(
+        "px-a",
+        1,
+        2,
+        20,
+        UP1,
+        CS1,
+        1,
+        1,
+        &[1, 2],
+        compared(77, vec![]),
+    );
+    let count = |sql: &str| -> i64 {
+        let c = rusqlite::Connection::open(d.path().join("l.sqlite")).unwrap();
+        c.query_row(sql, [], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(ingest(&l, &waiting, 1000), InventoryOutcome::Accepted);
+    assert_eq!(count("SELECT COUNT(*) FROM inv_snapshots"), 1);
+    // not yet E old
+    l.sweep(1000 + e, &|_| e).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM inv_snapshots"), 1);
+    // E after receipt it is gone, with its members
+    let st = l.sweep(1000 + e + 1, &|_| e).unwrap();
+    assert_eq!(st.inventory_snapshots, 1);
+    assert_eq!(count("SELECT COUNT(*) FROM inv_snapshots"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM inv_members"), 0);
+    // a replay inside max(E, T) is a duplicate: no new waiting row
+    assert_eq!(ingest(&l, &waiting, 3000), InventoryOutcome::Duplicate);
+    assert_eq!(count("SELECT COUNT(*) FROM inv_snapshots"), 0);
+    // after the report id expired too, a replay waits again, and ages out again
+    l.sweep(1000 + 5_001, &|_| e).unwrap();
+    assert_eq!(ingest(&l, &waiting, 7000), InventoryOutcome::Accepted);
+    assert_eq!(count("SELECT COUNT(*) FROM inv_snapshots"), 1);
+    l.sweep(7000 + e + 1, &|_| e).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM inv_snapshots"), 0);
+}
+
+#[test]
+fn a_complete_report_without_a_comparison_is_refused_not_treated_as_incomplete() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    let inc = incomplete("px-a", 1, 10, UP1, CS1, 1, "page_error");
+    let mut r = parse_inventory_report(inc.to_string().as_bytes()).unwrap();
+    r.completeness = sigil_proxy_api::Completeness::Complete;
+    r.incomplete_reason = None;
+    r.inventory_id = Some(sigil_proxy_api::Uuid::new(inv_id(1)).unwrap());
+    r.members = Some(vec![]);
+    r.comparison = None;
+    let out = l
+        .ingest_inventory("px-a", &r, &report_digest(&r), &RefCheck::default(), 1)
+        .unwrap();
+    assert_eq!(out, InventoryOutcome::Invalid);
+    assert!(l.gaps("px-a").unwrap().is_empty());
 }

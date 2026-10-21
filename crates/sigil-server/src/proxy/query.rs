@@ -416,6 +416,8 @@ pub struct ProxyDetail {
     pub counters: CountersDto,
     pub audit_gaps: Vec<GapDto>,
     pub audit_gaps_total: i64,
+    /// Inventory gap records dropped because the per-proxy gap budget was full.
+    pub audit_gaps_dropped: i64,
     pub open_gap_counts: BTreeMap<String, i64>,
 }
 
@@ -942,6 +944,7 @@ async fn get_proxy(
             ),
             audit_gaps: all.into_iter().map(|(_, g)| g).collect(),
             audit_gaps_total: gaps.total + reported.len() as i64,
+            audit_gaps_dropped: gaps.dropped,
             open_gap_counts,
             summary,
         })

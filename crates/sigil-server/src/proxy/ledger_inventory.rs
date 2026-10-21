@@ -55,6 +55,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Longest 424 ref list (the producer re-syncs the registry and resends).
 pub const MAX_PENDING_REFS: usize = 100;
+/// Snapshots a proxy may hold in `pending_previous`. Bounds the work one
+/// arrival can trigger (each waiting snapshot is evaluated once, against the
+/// arriving snapshot's members, which are loaded once). Initial test value (D-04).
+pub const DEFAULT_PENDING_PER_PROXY: u64 = 256;
 /// Snapshots a proxy may hold. Initial test value (D-04).
 pub const DEFAULT_SNAPSHOTS_PER_PROXY: u64 = 50_000;
 /// Member rows a proxy may hold across its snapshots. Initial test value (D-04).
@@ -65,6 +69,9 @@ pub const DEFAULT_MEMBER_ROWS_PER_PROXY: u64 = 2_000_000;
 pub struct InventoryCaps {
     pub snapshots_per_proxy: AtomicU64,
     pub member_rows_per_proxy: AtomicU64,
+    /// Snapshots a proxy may hold in `pending_previous` (their payload is kept
+    /// and each one costs work when its previous snapshot arrives).
+    pub pending_per_proxy: AtomicU64,
 }
 
 impl Default for InventoryCaps {
@@ -72,6 +79,7 @@ impl Default for InventoryCaps {
         Self {
             snapshots_per_proxy: AtomicU64::new(DEFAULT_SNAPSHOTS_PER_PROXY),
             member_rows_per_proxy: AtomicU64::new(DEFAULT_MEMBER_ROWS_PER_PROXY),
+            pending_per_proxy: AtomicU64::new(DEFAULT_PENDING_PER_PROXY),
         }
     }
 }
@@ -133,6 +141,10 @@ CREATE TABLE inv_links (
     to_metadata_ref       TEXT NOT NULL,
     definition_comparison TEXT NOT NULL,
     PRIMARY KEY (proxy_id, inventory_id, from_metadata_ref)
+) WITHOUT ROWID;
+CREATE TABLE inv_gap_overflow (
+    proxy_id TEXT PRIMARY KEY,
+    dropped  INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE inv_drift (
     drift_seq             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -475,10 +487,9 @@ fn chain_pred(a: &str, b: &str) -> String {
 
 /// SQL: `b` is strictly earlier than `a` in `(observed_at_s, inventory_id)`.
 fn earlier_pred(a: &str, b: &str) -> String {
-    format!(
-        "({b}.observed_at_s < {a}.observed_at_s OR \
-         ({b}.observed_at_s = {a}.observed_at_s AND {b}.inventory_id < {a}.inventory_id))"
-    )
+    // Row-value comparison: one range scan on the chain index
+    // `(.., canon, key_id, observed_at_s, inventory_id)`.
+    format!("({b}.observed_at_s, {b}.inventory_id) < ({a}.observed_at_s, {a}.inventory_id)")
 }
 
 fn change_name(c: &Change) -> (&'static str, &str, Option<&str>) {
@@ -602,7 +613,7 @@ fn recompute_baseline_marker(
             "SELECT inventory_id, canon, key_id, epoch_id FROM inv_snapshots
              WHERE proxy_id = ?1 AND upstream_id = ?2 AND credential_scope_id = ?3
                AND protocol_version = ?4 AND observation_source = ?5
-               AND (observed_at_s < ?6 OR (observed_at_s = ?6 AND inventory_id < ?7))
+               AND (observed_at_s, inventory_id) < (?6, ?7)
              ORDER BY observed_at_s DESC, inventory_id DESC LIMIT 1",
             params![
                 proxy_id,
@@ -701,6 +712,7 @@ fn reason_text(r: RebaselineReason) -> &'static str {
 }
 
 /// Insert one inventory gap (never closes). `Ok(false)` when the id exists.
+#[allow(clippy::too_many_arguments)]
 fn insert_inventory_gap(
     conn: &Connection,
     proxy_id: &str,
@@ -709,6 +721,7 @@ fn insert_inventory_gap(
     detected_at: i64,
     epoch_id: &str,
     details: &serde_json::Value,
+    drop_when_full: bool,
 ) -> Result<bool, LedgerError> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM gaps WHERE gap_id = ?1)",
@@ -725,6 +738,16 @@ fn insert_inventory_gap(
         |r| r.get(0),
     )?;
     if n >= MAX_GAPS_PER_PROXY {
+        if drop_when_full {
+            // A legitimate snapshot is never refused for the gap budget: the
+            // record is dropped and counted (shown in `audit_gaps_dropped`).
+            conn.execute(
+                "INSERT INTO inv_gap_overflow (proxy_id, dropped) VALUES (?1, 1)
+                 ON CONFLICT (proxy_id) DO UPDATE SET dropped = dropped + 1",
+                params![proxy_id],
+            )?;
+            return Ok(false);
+        }
         return Err(LedgerError::StorageLimit);
     }
     conn.execute(
@@ -749,17 +772,16 @@ fn resolve_one(
     proxy_id: &str,
     waiting: &SnapRow,
     p: &SnapRow,
-    now: i64,
+    pmembers: &BTreeSet<String>,
 ) -> Result<(), LedgerError> {
     let cmp: Option<Comparison> = waiting
         .pending
         .as_deref()
         .and_then(|b| serde_json::from_slice(b).ok());
     let members = load_members(conn, proxy_id, &waiting.inventory_id)?;
-    let pmembers = load_members(conn, proxy_id, &p.inventory_id)?;
     let ok = cmp
         .as_ref()
-        .is_some_and(|c| evaluate(waiting, c, &members, p, &pmembers));
+        .is_some_and(|c| evaluate(waiting, c, &members, p, pmembers));
     if !ok {
         conn.execute(
             "UPDATE inv_snapshots SET state = 'inconsistent', pending = NULL
@@ -776,9 +798,12 @@ fn resolve_one(
                 &waiting.inventory_id,
                 "comparison_inconsistent",
             ]),
-            now,
+            // The waiting report's own receipt time, so the record does not
+            // depend on when its previous snapshot happened to arrive.
+            waiting.received_at,
             &waiting.epoch_id,
             &serde_json::json!({ "inventory_id": waiting.inventory_id }),
+            true,
         )?;
         return Ok(());
     }
@@ -860,7 +885,12 @@ impl Ledger {
 
         let complete = report.completeness == Completeness::Complete;
         let snap = if complete {
-            snap_of_report(report, now)
+            // Defensive: parsing already requires a comparison on a complete
+            // report; never treat one without it as an incomplete report.
+            match snap_of_report(report, now) {
+                Some(s) => Some(s),
+                None => return Ok(InventoryOutcome::Invalid),
+            }
         } else {
             None
         };
@@ -909,6 +939,24 @@ impl Ledger {
             ));
         }
 
+        if snap
+            .as_ref()
+            .is_some_and(|s| s.previous_inventory_id.is_some())
+            && previous.is_none()
+        {
+            // This report would wait for a previous snapshot. The wait list is
+            // bounded (503, not 422: the report is valid, the producer should
+            // retry once earlier snapshots have been delivered or have aged out).
+            let waiting_now: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM inv_snapshots WHERE proxy_id = ?1 AND state = 'pending_previous'",
+                params![proxy_id],
+                |r| r.get(0),
+            )?;
+            let cap = self.inv_caps.pending_per_proxy.load(Ordering::Relaxed);
+            if u64::try_from(waiting_now).is_ok_and(|n| n >= cap) {
+                return Err(LedgerError::StorageLimit);
+            }
+        }
         tx.execute(
             "INSERT INTO inv_reports (proxy_id, report_id, digest, received_at)
              VALUES (?1, ?2, ?3, ?4)",
@@ -935,6 +983,7 @@ impl Ledger {
                     "incomplete_reason": reason,
                     "observed_at": report.observed_at.as_str(),
                 }),
+                false,
             )?;
             if self.file_over_cap(&tx)? {
                 return Err(LedgerError::StorageLimit);
@@ -1049,7 +1098,7 @@ impl Ledger {
             rows.collect::<Result<_, _>>()?
         };
         for w in &waiting {
-            resolve_one(&tx, proxy_id, w, &s, now)?;
+            resolve_one(&tx, proxy_id, w, &s, &members)?;
         }
         // Markers that depend on chain order: this snapshot and its successor.
         recompute_baseline_marker(&tx, proxy_id, &s.inventory_id)?;
@@ -1058,7 +1107,7 @@ impl Ledger {
                 "SELECT inventory_id FROM inv_snapshots
                  WHERE proxy_id = ?1 AND upstream_id = ?2 AND credential_scope_id = ?3
                    AND protocol_version = ?4 AND observation_source = ?5
-                   AND (observed_at_s > ?6 OR (observed_at_s = ?6 AND inventory_id > ?7))
+                   AND (observed_at_s, inventory_id) > (?6, ?7)
                  ORDER BY observed_at_s ASC, inventory_id ASC LIMIT 1",
                 params![
                     proxy_id,
@@ -1111,6 +1160,41 @@ impl Ledger {
         ) || self.file_over_cap(tx)?)
     }
 
+    /// Inventory gap records dropped because the gap budget was full.
+    pub fn inventory_gap_overflow(&self, proxy_id: &str) -> Result<i64, LedgerError> {
+        let conn = self.read.acquire();
+        Ok(conn
+            .query_row(
+                "SELECT dropped FROM inv_gap_overflow WHERE proxy_id = ?1",
+                params![proxy_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// Test hook: lower the pending-snapshot bound.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_pending_cap_for_test(&self, n: u64) {
+        self.inv_caps.pending_per_proxy.store(n, Ordering::Relaxed);
+    }
+
+    /// Test hook: fill the inventory gap budget (`n` filler gaps for `proxy_id`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fill_inventory_gaps_for_test(&self, proxy_id: &str, n: i64) -> Result<(), LedgerError> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        for i in 0..n {
+            tx.execute(
+                "INSERT INTO gaps (gap_id, proxy_id, kind, detected_at, epoch_id, open, tail, details)
+                 VALUES (?1, ?2, 'inventory_incomplete', 1, 'e', 1, 0, '{}')",
+                params![format!("filler-{proxy_id}-{i}"), proxy_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Test hook: lower the per-proxy inventory bounds.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_inventory_caps_for_test(&self, snapshots: u64, member_rows: u64) {
@@ -1157,6 +1241,13 @@ pub(super) fn sweep_proxy(
         chain_pred("d", "f"),
         earlier_pred("d", "f")
     );
+    // A snapshot still waiting for its previous one ages out E after receipt
+    // (its previous was swept, or never arrives); the report id stays
+    // remembered for max(E, T), so a replay in that window is a duplicate and
+    // never makes a new waiting row.
+    let doomed = format!(
+        "({doomed}) OR (d.proxy_id = ?1 AND d.state = 'pending_previous' AND d.received_at < ?2)"
+    );
     for table in ["inv_members", "inv_links"] {
         conn.execute(
             &format!(
@@ -1169,6 +1260,12 @@ pub(super) fn sweep_proxy(
     s.inventory_snapshots += conn.execute(
         &format!("DELETE FROM inv_snapshots WHERE snap_seq IN (SELECT d.snap_seq FROM inv_snapshots d WHERE {doomed})"),
         params![proxy_id, cutoff],
+    )?;
+    conn.execute(
+        "DELETE FROM inv_gap_overflow WHERE proxy_id = ?1 AND NOT EXISTS
+           (SELECT 1 FROM gaps WHERE proxy_id = ?1
+              AND kind IN ('inventory_incomplete', 'comparison_inconsistent'))",
+        params![proxy_id],
     )?;
     Ok(())
 }

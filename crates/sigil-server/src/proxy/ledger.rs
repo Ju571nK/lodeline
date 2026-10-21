@@ -1189,7 +1189,19 @@ impl Ledger {
             let rows = st.query_map(params![proxy_id, limit as i64], gap_from_row)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
-        Ok(GapPage { items, total })
+        let dropped: i64 = tx
+            .query_row(
+                "SELECT dropped FROM inv_gap_overflow WHERE proxy_id = ?1",
+                params![proxy_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(GapPage {
+            items,
+            total,
+            dropped,
+        })
     }
 
     /// Open server-derived gaps of `proxy_id` by kind (`sequence_gap`,
