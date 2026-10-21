@@ -109,6 +109,18 @@ wire_struct! {
     pub struct RegistryStatus {
         pub pending_entries: NonNegativeI64,
         pub sync_stalled: bool,
+        /// Entries quarantined after a registry conflict (central 409 or the local
+        /// hash check). Optional: proxies that predate it omit the field.
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub quarantined_entries: Option<NonNegativeI64>,
+        /// Entries the server refused for good (repeated 422, too large alone).
+        /// Optional like `quarantined_entries`.
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub poisoned_entries: Option<NonNegativeI64>,
+        /// Inventory reports the proxy gave up on since it started. Optional like
+        /// `quarantined_entries`.
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub discarded_reports: Option<NonNegativeI64>,
     }
 }
 

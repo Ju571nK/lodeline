@@ -2443,3 +2443,51 @@ fn error_item_metadata_ref_for_registry_conflict() {
         ErrorCategory::Semantic
     );
 }
+
+#[test]
+fn registry_counters_are_optional_and_round_trip() {
+    use sigil_proxy_api::parse_status;
+    // Old shape (a proxy that predates the counters): accepted, fields absent,
+    // and not invented on the way back out.
+    let old = parse_status(&serde_json::to_vec(&status()).unwrap()).unwrap();
+    assert!(old.registry.quarantined_entries.is_none());
+    assert!(old.registry.poisoned_entries.is_none());
+    assert!(old.registry.discarded_reports.is_none());
+    let back = serde_json::to_value(&old).unwrap();
+    assert_eq!(
+        back["registry"],
+        json!({"pending_entries": 0, "sync_stalled": false})
+    );
+
+    // New shape.
+    let mut v = status();
+    v["registry"] = json!({"pending_entries": 2, "sync_stalled": true,
+        "quarantined_entries": 1, "poisoned_entries": 3, "discarded_reports": 0});
+    let new = parse_status(&serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_eq!(new.registry.quarantined_entries.unwrap().get(), 1);
+    assert_eq!(new.registry.poisoned_entries.unwrap().get(), 3);
+    assert_eq!(new.registry.discarded_reports.unwrap().get(), 0);
+    assert_eq!(
+        serde_json::to_value(&new).unwrap()["registry"],
+        v["registry"]
+    );
+
+    // A partial set is fine; bad values and unknown members are not.
+    let mut p = status();
+    p["registry"] = json!({"pending_entries": 0, "sync_stalled": false, "poisoned_entries": 4});
+    let part = parse_status(&serde_json::to_vec(&p).unwrap()).unwrap();
+    assert_eq!(part.registry.poisoned_entries.unwrap().get(), 4);
+    assert!(part.registry.quarantined_entries.is_none());
+    for bad in [json!(-1), json!(1.5), json!("1"), json!(null), json!(true)] {
+        let mut b = status();
+        b["registry"] =
+            json!({"pending_entries": 0, "sync_stalled": false, "discarded_reports": bad});
+        assert!(
+            parse_status(&serde_json::to_vec(&b).unwrap()).is_err(),
+            "{bad}"
+        );
+    }
+    let mut u = status();
+    u["registry"] = json!({"pending_entries": 0, "sync_stalled": false, "other": 1});
+    assert!(parse_status(&serde_json::to_vec(&u).unwrap()).is_err());
+}

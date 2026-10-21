@@ -1272,3 +1272,77 @@ async fn the_conflict_gap_id_is_deterministic_across_a_crash_rerun() {
     assert_ne!(a, g("r", "k2", &ids));
     assert!(sigil_proxy_api::Uuid::new(a).is_ok());
 }
+
+fn config_view() -> sigil_proxy::config_sync::ConfigView {
+    sigil_proxy::config_sync::ConfigView {
+        state: sigil_proxy_api::status::ConfigState::None,
+        last_update_error: None,
+        applied_revision: None,
+        config_hash: None,
+        observed_revision: None,
+        expires_at: None,
+        max_offline_retry_age_seconds: None,
+        event_retention_seconds: None,
+        route_upstreams: vec![],
+    }
+}
+
+#[tokio::test]
+async fn the_status_registry_section_reflects_real_counts() {
+    use sigil_proxy::status_report::StatusBuilder;
+    let mut f = fx_with(vec![uuid(1)]);
+    let mut b = StatusBuilder::new("px-1", &uuid(77).replace("-4000-8000", "-4000-8000"));
+    let now = time::OffsetDateTime::now_utc();
+    let parse = |bytes: Vec<u8>| sigil_proxy_api::parse_status(&bytes).unwrap();
+
+    // Without a probe: the old shape, no counters.
+    let s = parse(b.build(&config_view(), &[], now).unwrap());
+    assert!(s.registry.quarantined_entries.is_none() && s.registry.discarded_reports.is_none());
+
+    // The first step of a client re-arms poisoned entries (restart), so let it run.
+    list(&mut f.engine, vec![tool("warm", "w")]);
+    drain(&mut f.client).await;
+    b.set_registry(f.client.health_probe());
+    let c = list(
+        &mut f.engine,
+        vec![tool("good", "g"), tool("bad", "b"), tool("pz", "p")],
+    );
+    let r = |n: &str| c.tools.iter().find(|(t, _)| t == n).unwrap().1.clone();
+    let s = parse(b.build(&config_view(), &[], now).unwrap());
+    assert_eq!(s.registry.pending_entries.get(), 3);
+    assert_eq!(s.registry.quarantined_entries.unwrap().get(), 0);
+
+    f.store.poison(&r("pz")).unwrap();
+    f.sim.st().conflict.insert(r("bad"));
+    drain(&mut f.client).await;
+
+    let s = parse(b.build(&config_view(), &[], now).unwrap());
+    assert_eq!(s.registry.pending_entries.get(), 0);
+    assert!(!s.registry.sync_stalled);
+    assert_eq!(s.registry.quarantined_entries.unwrap().get(), 1, "the 409");
+    assert_eq!(s.registry.poisoned_entries.unwrap().get(), 1);
+    assert_eq!(
+        s.registry.discarded_reports.unwrap().get(),
+        1,
+        "the report naming the quarantined entry"
+    );
+    let h = f.client.health().unwrap();
+    assert_eq!(
+        (
+            h.quarantined_entries,
+            h.poisoned_entries,
+            h.discarded_reports
+        ),
+        (1, 1, 1)
+    );
+
+    // A stalled link shows as sync_stalled through the same probe.
+    list(&mut f.engine, vec![tool("late", "l")]);
+    for _ in 0..5 {
+        f.sim.st().meta_script.push_back(None);
+        f.client.sync_once().await;
+    }
+    let s = parse(b.build(&config_view(), &[], now).unwrap());
+    assert!(s.registry.sync_stalled);
+    assert_eq!(s.registry.pending_entries.get(), 1);
+}

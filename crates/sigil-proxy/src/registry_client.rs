@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,12 +44,13 @@ use sigil_proxy_api::{
     Timestamp, Uuid, Validate,
 };
 
+use crate::ingest_client::STALL_ATTEMPTS;
 use crate::jcs;
 use crate::registry_key::ScopeKey;
 use crate::registry_store::{
     EntryCheck, EntryRecord, EntryState, RegistryError, RegistryStore, StoredReport,
 };
-use crate::status_report::{GapQueue, PostFuture, StatusReply};
+use crate::status_report::{GapQueue, PostFuture, RegistryProbe, RegistrySnapshot, StatusReply};
 
 /// The `gap_id` of one registry-conflict chunk: SHA-256 over the ref, the
 /// `key_id` and the sorted chunk event ids, as a version-8 UUID. A re-run after
@@ -495,6 +497,8 @@ pub struct ClientHealth {
     /// Reports given up on since start (each reset its scope chain).
     pub discarded_reports: u64,
     pub consecutive_failures: u32,
+    /// Entries quarantined after a registry conflict.
+    pub quarantined_entries: u64,
 }
 
 pub struct RegistryClient<T: RegistryTransport> {
@@ -507,6 +511,9 @@ pub struct RegistryClient<T: RegistryTransport> {
     cap: usize,
     failures: u32,
     discarded_reports: u64,
+    /// Mirrors of `discarded_reports` and `failures` for the status probe.
+    shared_discarded: Arc<AtomicU64>,
+    shared_failures: Arc<AtomicU32>,
     resumed: bool,
     /// When poisoned entries are next made eligible again.
     next_unpoison: Option<Instant>,
@@ -535,6 +542,8 @@ impl<T: RegistryTransport> RegistryClient<T> {
             cap: MAX_UPLOAD_ENTRIES,
             failures: 0,
             discarded_reports: 0,
+            shared_discarded: Arc::new(AtomicU64::new(0)),
+            shared_failures: Arc::new(AtomicU32::new(0)),
             resumed: false,
             next_unpoison: None,
             report_424: HashMap::new(),
@@ -564,11 +573,37 @@ impl<T: RegistryTransport> RegistryClient<T> {
             poisoned_entries: self.store.poisoned_count()?,
             discarded_reports: self.discarded_reports,
             consecutive_failures: self.failures,
+            quarantined_entries: self.store.quarantined_count()?,
+        })
+    }
+
+    /// The source of the status report's `registry` section. Hand it to
+    /// `StatusBuilder::set_registry` (T-13c does, next to the spool): real counts
+    /// from the registry store, the discard count since start, and `sync_stalled`
+    /// after [`STALL_ATTEMPTS`] consecutive failed steps.
+    pub fn health_probe(&self) -> RegistryProbe {
+        let store = self.store.clone();
+        let discarded = self.shared_discarded.clone();
+        let failures = self.shared_failures.clone();
+        Arc::new(move || {
+            Some(RegistrySnapshot {
+                pending_entries: store.pending_entry_count().ok()?,
+                sync_stalled: failures.load(Ordering::Relaxed) >= STALL_ATTEMPTS,
+                quarantined_entries: store.quarantined_count().ok()?,
+                poisoned_entries: store.poisoned_count().ok()?,
+                discarded_reports: discarded.load(Ordering::Relaxed),
+            })
         })
     }
 
     /// One request's worth of work.
     pub async fn sync_once(&mut self) -> SyncStep {
+        let r = self.sync_step().await;
+        self.shared_failures.store(self.failures, Ordering::Relaxed);
+        r
+    }
+
+    async fn sync_step(&mut self) -> SyncStep {
         match self.step().await {
             Ok(s) => {
                 if s.progressed {
@@ -845,6 +880,8 @@ impl<T: RegistryTransport> RegistryClient<T> {
     ) -> Result<(), RegistryError> {
         self.store.report_done(&report.report_id)?;
         self.discarded_reports += 1;
+        self.shared_discarded
+            .store(self.discarded_reports, Ordering::Relaxed);
         let Some(p) = parsed else { return Ok(()) };
         let Some(inv) = p.inventory_id.as_ref() else {
             return Ok(()); // an incomplete report is not part of the chain

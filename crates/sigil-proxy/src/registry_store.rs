@@ -590,6 +590,16 @@ impl RegistryStore {
         Ok(Vec::new())
     }
 
+    /// Entries quarantined after a registry conflict.
+    pub fn quarantined_count(&self) -> Result<u64, RegistryError> {
+        let n: i64 = self.lock().conn.query_row(
+            "SELECT count(*) FROM entries WHERE state = 'quarantined'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
     /// Entries refused for good.
     pub fn poisoned_count(&self) -> Result<u64, RegistryError> {
         let n: i64 = self.lock().conn.query_row(

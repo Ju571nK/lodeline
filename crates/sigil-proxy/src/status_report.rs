@@ -695,6 +695,21 @@ pub struct BuildError;
 /// sequence the server already holds.
 pub type SequencePersister = Box<dyn FnMut(i64) -> bool + Send>;
 
+/// What the `registry` section of a status report says, read from the registry
+/// sync (T-13). `None` from a [`RegistryProbe`] means the registry could not be
+/// read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegistrySnapshot {
+    pub pending_entries: u64,
+    pub sync_stalled: bool,
+    pub quarantined_entries: u64,
+    pub poisoned_entries: u64,
+    pub discarded_reports: u64,
+}
+
+/// Source of the `registry` section; see `RegistryClient::health_probe`.
+pub type RegistryProbe = Arc<dyn Fn() -> Option<RegistrySnapshot> + Send + Sync>;
+
 pub struct StatusBuilder {
     proxy_id: String,
     epoch_id: String,
@@ -706,6 +721,9 @@ pub struct StatusBuilder {
     /// The event spool (T-14b). Without one (unit tests of the builder alone) the
     /// `spool` section is the empty placeholder and `last_assigned_sequence` is 0.
     spool: Option<Spool>,
+    /// The registry sync (T-13b). Without one the `registry` section is the
+    /// vacuous placeholder without the optional counters.
+    registry: Option<RegistryProbe>,
 }
 
 pub(crate) fn rfc3339(t: time::OffsetDateTime) -> String {
@@ -725,7 +743,13 @@ impl StatusBuilder {
             persister: None,
             central: CentralHealth::new(),
             spool: None,
+            registry: None,
         }
+    }
+
+    /// Report the `registry` section from the registry sync.
+    pub fn set_registry(&mut self, probe: RegistryProbe) {
+        self.registry = Some(probe);
     }
 
     /// Report the `spool` section and `last_assigned_sequence` from this spool.
@@ -841,6 +865,23 @@ impl StatusBuilder {
                 0,
             ),
         };
+        // REAL when a registry sync is attached (T-13b): pending entries, a
+        // stall flag and the optional quarantined / poisoned / discarded counts.
+        // An unreadable registry reports `sync_stalled`. Without a probe (unit
+        // tests of the builder alone) it is the old vacuous shape.
+        let registry_section = match self.registry.as_ref() {
+            Some(probe) => match probe() {
+                Some(r) => json!({
+                    "pending_entries": r.pending_entries.min(i64::MAX as u64),
+                    "sync_stalled": r.sync_stalled,
+                    "quarantined_entries": r.quarantined_entries.min(i64::MAX as u64),
+                    "poisoned_entries": r.poisoned_entries.min(i64::MAX as u64),
+                    "discarded_reports": r.discarded_reports.min(i64::MAX as u64),
+                }),
+                None => json!({"pending_entries": 0, "sync_stalled": true}),
+            },
+            None => json!({"pending_entries": 0, "sync_stalled": false}),
+        };
         let route_state = if view.state == ConfigState::Valid {
             "supported"
         } else {
@@ -861,7 +902,7 @@ impl StatusBuilder {
             "sent_at": rfc3339(now),
             "config": config,
             "spool": spool_section,
-            "registry": {"pending_entries": 0, "sync_stalled": false},
+            "registry": registry_section,
             "central": {"last_ingest_ack_at": self.central.last_ingest_ack_at(),
                 "consecutive_failures": self.central.consecutive_failures()},
             "routes": routes,

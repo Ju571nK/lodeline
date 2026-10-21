@@ -559,6 +559,15 @@
         },
         "sync_stalled": {
           "type": "boolean"
+        },
+        "quarantined_entries": {
+          "$ref": "#/$defs/nonnegative_int64"
+        },
+        "poisoned_entries": {
+          "$ref": "#/$defs/nonnegative_int64"
+        },
+        "discarded_reports": {
+          "$ref": "#/$defs/nonnegative_int64"
         }
       },
       "required": [
