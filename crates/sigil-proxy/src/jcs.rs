@@ -18,14 +18,14 @@
 //! * a non-finite number (cannot come out of a JSON parser, but a hand-built
 //!   [`Value`] is checked too);
 //! * nesting deeper than [`MAX_DEPTH`];
-//! * text that is not valid JSON (this includes lone surrogate escapes).
+//! * text that is not valid JSON (this includes lone surrogate escapes and
+//!   numbers whose double is infinite).
 //!
 //! One residual: an integer literal beyond the `u64` range is read by
 //! `serde_json` as an IEEE double (I-JSON behaviour) before this module sees it.
 
 use std::fmt;
 
-use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 
 /// Deepest nesting accepted.
@@ -74,75 +74,235 @@ pub fn canonicalize_str(text: &str) -> Result<Vec<u8>, JcsError> {
     canonicalize(&parse_strict(text)?)
 }
 
-/// Parse JSON text into a [`Value`], rejecting duplicate member names.
+/// Parse JSON text (RFC 8259) into a [`Value`], rejecting duplicate member names.
+///
+/// This is a small parser of its own, not `serde_json`'s: RFC 8785 needs numbers
+/// that are correctly rounded to the nearest double, and `serde_json` only does
+/// that behind a feature (`float_roundtrip`) that cargo would unify across the
+/// whole workspace. Here fractions and exponents go through `str::parse::<f64>`,
+/// which is correctly rounded; plain integer literals are read as `i64`/`u64`
+/// (and, beyond `u64`, as a double).
 pub fn parse_strict(text: &str) -> Result<Value, JcsError> {
-    let mut de = serde_json::Deserializer::from_str(text);
-    let v = Strict::deserialize(&mut de).map_err(|e| {
-        if e.to_string().contains(DUP_MARK) {
-            JcsError::DuplicateKey
-        } else {
-            JcsError::Syntax
-        }
-    })?;
-    de.end().map_err(|_| JcsError::Syntax)?;
-    Ok(v.0)
+    let mut p = Parser {
+        b: text.as_bytes(),
+        i: 0,
+    };
+    p.ws();
+    let v = p.value(0)?;
+    p.ws();
+    if p.i != p.b.len() {
+        return Err(JcsError::Syntax);
+    }
+    Ok(v)
 }
 
-const DUP_MARK: &str = "sigil-jcs-duplicate-key";
+struct Parser<'a> {
+    b: &'a [u8],
+    i: usize,
+}
 
-struct Strict(Value);
+impl Parser<'_> {
+    fn ws(&mut self) {
+        while matches!(self.b.get(self.i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.i += 1;
+        }
+    }
 
-impl<'de> Deserialize<'de> for Strict {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = Strict;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a JSON value")
-            }
-            fn visit_bool<E: de::Error>(self, b: bool) -> Result<Strict, E> {
-                Ok(Strict(Value::Bool(b)))
-            }
-            fn visit_i64<E: de::Error>(self, n: i64) -> Result<Strict, E> {
-                Ok(Strict(Value::from(n)))
-            }
-            fn visit_u64<E: de::Error>(self, n: u64) -> Result<Strict, E> {
-                Ok(Strict(Value::from(n)))
-            }
-            fn visit_f64<E: de::Error>(self, n: f64) -> Result<Strict, E> {
-                serde_json::Number::from_f64(n)
-                    .map(|n| Strict(Value::Number(n)))
-                    .ok_or_else(|| E::custom("non-finite number"))
-            }
-            fn visit_str<E: de::Error>(self, s: &str) -> Result<Strict, E> {
-                Ok(Strict(Value::String(s.to_owned())))
-            }
-            fn visit_string<E: de::Error>(self, s: String) -> Result<Strict, E> {
-                Ok(Strict(Value::String(s)))
-            }
-            fn visit_unit<E: de::Error>(self) -> Result<Strict, E> {
-                Ok(Strict(Value::Null))
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Strict, A::Error> {
+    fn eat(&mut self, lit: &[u8]) -> Result<(), JcsError> {
+        if self.b[self.i..].starts_with(lit) {
+            self.i += lit.len();
+            Ok(())
+        } else {
+            Err(JcsError::Syntax)
+        }
+    }
+
+    fn value(&mut self, depth: usize) -> Result<Value, JcsError> {
+        if depth > MAX_DEPTH {
+            return Err(JcsError::TooDeep);
+        }
+        match self.b.get(self.i).copied() {
+            Some(b'n') => self.eat(b"null").map(|_| Value::Null),
+            Some(b't') => self.eat(b"true").map(|_| Value::Bool(true)),
+            Some(b'f') => self.eat(b"false").map(|_| Value::Bool(false)),
+            Some(b'"') => self.string().map(Value::String),
+            Some(b'[') => {
+                self.i += 1;
                 let mut v = Vec::new();
-                while let Some(Strict(x)) = a.next_element()? {
-                    v.push(x);
+                self.ws();
+                if self.b.get(self.i) == Some(&b']') {
+                    self.i += 1;
+                    return Ok(Value::Array(v));
                 }
-                Ok(Strict(Value::Array(v)))
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Strict, A::Error> {
-                let mut m = Map::new();
-                while let Some(k) = a.next_key::<String>()? {
-                    if m.contains_key(&k) {
-                        return Err(de::Error::custom(DUP_MARK));
+                loop {
+                    self.ws();
+                    v.push(self.value(depth + 1)?);
+                    self.ws();
+                    match self.b.get(self.i) {
+                        Some(b',') => self.i += 1,
+                        Some(b']') => {
+                            self.i += 1;
+                            return Ok(Value::Array(v));
+                        }
+                        _ => return Err(JcsError::Syntax),
                     }
-                    let Strict(v) = a.next_value()?;
-                    m.insert(k, v);
                 }
-                Ok(Strict(Value::Object(m)))
+            }
+            Some(b'{') => {
+                self.i += 1;
+                let mut m = Map::new();
+                self.ws();
+                if self.b.get(self.i) == Some(&b'}') {
+                    self.i += 1;
+                    return Ok(Value::Object(m));
+                }
+                loop {
+                    self.ws();
+                    if self.b.get(self.i) != Some(&b'"') {
+                        return Err(JcsError::Syntax);
+                    }
+                    let k = self.string()?;
+                    self.ws();
+                    if self.b.get(self.i) != Some(&b':') {
+                        return Err(JcsError::Syntax);
+                    }
+                    self.i += 1;
+                    self.ws();
+                    let v = self.value(depth + 1)?;
+                    if m.insert(k, v).is_some() {
+                        return Err(JcsError::DuplicateKey);
+                    }
+                    self.ws();
+                    match self.b.get(self.i) {
+                        Some(b',') => self.i += 1,
+                        Some(b'}') => {
+                            self.i += 1;
+                            return Ok(Value::Object(m));
+                        }
+                        _ => return Err(JcsError::Syntax),
+                    }
+                }
+            }
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            _ => Err(JcsError::Syntax),
+        }
+    }
+
+    fn hex4(&mut self) -> Result<u32, JcsError> {
+        let h = self.b.get(self.i..self.i + 4).ok_or(JcsError::Syntax)?;
+        let mut n = 0u32;
+        for c in h {
+            n = n * 16 + (*c as char).to_digit(16).ok_or(JcsError::Syntax)?;
+        }
+        self.i += 4;
+        Ok(n)
+    }
+
+    fn string(&mut self) -> Result<String, JcsError> {
+        self.i += 1; // opening quote
+        let mut out = String::new();
+        loop {
+            let start = self.i;
+            while let Some(c) = self.b.get(self.i) {
+                if *c == b'"' || *c == b'\\' || *c < 0x20 {
+                    break;
+                }
+                self.i += 1;
+            }
+            // The input is a &str and we split only at ASCII bytes.
+            out.push_str(
+                std::str::from_utf8(&self.b[start..self.i]).map_err(|_| JcsError::Syntax)?,
+            );
+            match self.b.get(self.i).copied() {
+                Some(b'"') => {
+                    self.i += 1;
+                    return Ok(out);
+                }
+                Some(b'\\') => {
+                    self.i += 1;
+                    let e = self.b.get(self.i).copied().ok_or(JcsError::Syntax)?;
+                    self.i += 1;
+                    match e {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let hi = self.hex4()?;
+                            let cp = if (0xD800..0xDC00).contains(&hi) {
+                                // A high surrogate must be followed by a low one.
+                                self.eat(b"\\u")?;
+                                let lo = self.hex4()?;
+                                if !(0xDC00..0xE000).contains(&lo) {
+                                    return Err(JcsError::Syntax);
+                                }
+                                0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                            } else {
+                                hi
+                            };
+                            out.push(char::from_u32(cp).ok_or(JcsError::Syntax)?);
+                        }
+                        _ => return Err(JcsError::Syntax),
+                    }
+                }
+                _ => return Err(JcsError::Syntax), // control character or end of input
             }
         }
-        d.deserialize_any(V)
+    }
+
+    fn number(&mut self) -> Result<Value, JcsError> {
+        let start = self.i;
+        if self.b.get(self.i) == Some(&b'-') {
+            self.i += 1;
+        }
+        match self.b.get(self.i) {
+            Some(b'0') => self.i += 1,
+            Some(b'1'..=b'9') => self.digits(),
+            _ => return Err(JcsError::Syntax),
+        }
+        let mut float = false;
+        if self.b.get(self.i) == Some(&b'.') {
+            float = true;
+            self.i += 1;
+            if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
+                return Err(JcsError::Syntax);
+            }
+            self.digits();
+        }
+        if matches!(self.b.get(self.i), Some(b'e' | b'E')) {
+            float = true;
+            self.i += 1;
+            if matches!(self.b.get(self.i), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
+            if !self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
+                return Err(JcsError::Syntax);
+            }
+            self.digits();
+        }
+        let t = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| JcsError::Syntax)?;
+        if !float {
+            if let Ok(n) = t.parse::<i64>() {
+                return Ok(Value::from(n));
+            }
+            if let Ok(n) = t.parse::<u64>() {
+                return Ok(Value::from(n));
+            }
+        }
+        let f: f64 = t.parse().map_err(|_| JcsError::Syntax)?;
+        serde_json::Number::from_f64(f)
+            .map(Value::Number)
+            .ok_or(JcsError::NumberOutOfDomain)
+    }
+
+    fn digits(&mut self) {
+        while self.b.get(self.i).is_some_and(u8::is_ascii_digit) {
+            self.i += 1;
+        }
     }
 }
 
@@ -445,6 +605,58 @@ mod tests {
     fn error_text_carries_no_content() {
         let e = parse_strict(r#"{"secret-name":1,"secret-name":2}"#).unwrap_err();
         assert!(!format!("{e} {e:?}").contains("secret"));
+    }
+
+    #[test]
+    fn own_parser_agrees_with_serde_json_and_is_strict() {
+        for t in [
+            r#"{"a":[1,2.5,-0.0,1e3,"xé😀\n\/"],"b":{"c":null,"d":true}}"#,
+            " [ ] ",
+            r#"{"":0}"#,
+            "12345678901234567890",
+            "-9223372036854775808",
+        ] {
+            let mine = parse_strict(t).unwrap();
+            let theirs: Value = serde_json::from_str(t).unwrap();
+            assert_eq!(mine, theirs, "{t}");
+        }
+        assert_eq!(
+            parse_strict(r#""😀""#).unwrap(),
+            Value::String("\u{1f600}".into())
+        );
+        for t in [
+            "-",
+            "1.",
+            ".5",
+            "+1",
+            "1e",
+            "1e+",
+            "01",
+            "[1,]",
+            r#"{"a":1,}"#,
+            "{a:1}",
+            r#""\ud83d""#,
+            r#""\ude00""#,
+            r#""\x""#,
+            "\"a\nb\"",
+            "tru",
+            "nul",
+            "[1 2]",
+            r#"{"a" 1}"#,
+            "\"abc",
+            "[",
+            "]",
+        ] {
+            assert_eq!(parse_strict(t), Err(JcsError::Syntax), "{t:?}");
+        }
+        assert_eq!(parse_strict("1e400"), Err(JcsError::NumberOutOfDomain));
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert_eq!(parse_strict(&deep), Err(JcsError::TooDeep));
+        // Correct rounding without serde_json's float_roundtrip feature.
+        assert_eq!(
+            canon("[333333333.33333329, 0.1, 2.2250738585072014e-308]"),
+            "[333333333.3333333,0.1,2.2250738585072014e-308]"
+        );
     }
 
     #[test]

@@ -332,6 +332,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hmac_rfc4231_case_7_and_block_size_boundaries() {
+        // Case 7: key and data both longer than the block size.
+        let data = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
+        assert_eq!(
+            hex(&hmac_sha256(&[0xaa; 131], data)),
+            "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2"
+        );
+        // Keys of 63, 64 (exactly the block) and 65 (hashed first) bytes, from
+        // Python's hmac module.
+        for (n, want) in [
+            (
+                63u8,
+                "a3f5e50452b8f20e018bbad3eec760142f58e8b943446fb154eea58679c63036",
+            ),
+            (
+                64,
+                "a5347accf12c5c3edf87ddb44e5b3a1c6957591c7092e527c2e63a5e48f8ebc5",
+            ),
+            (
+                65,
+                "0b4330970a8c3347598324cd9a56100c0c95ad46a30ae4de0011a39cc6c31dfe",
+            ),
+        ] {
+            let key: Vec<u8> = (0..n).collect();
+            assert_eq!(hex(&hmac_sha256(&key, b"msg")), want, "{n}-byte key");
+        }
+    }
+
     /// Vectors computed by the reference model of `check_schema.py`
     /// (`key_id_for`, `fingerprint`, `metadata_ref`).
     #[test]

@@ -85,27 +85,70 @@ impl fmt::Debug for ToolInput {
     }
 }
 
+/// An opaque identity of a pagination cursor: HMAC-SHA-256 under a per-process
+/// random key ([`CursorHasher`]). The cursor itself is never kept or compared.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CursorTag([u8; 32]);
+
+impl fmt::Debug for CursorTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CursorTag(<opaque>)")
+    }
+}
+
+/// Makes [`CursorTag`]s. One per process (T-13c holds it next to the relay): the
+/// request cursor of page N+1 and the `nextCursor` of page N must be tagged by
+/// the same hasher for the engine to see them as equal.
+#[derive(Clone)]
+pub struct CursorHasher {
+    key: [u8; 32],
+}
+
+impl fmt::Debug for CursorHasher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CursorHasher(<redacted>)")
+    }
+}
+
+impl CursorHasher {
+    pub fn new() -> Result<CursorHasher, RegistryError> {
+        let mut key = [0u8; 32];
+        getrandom::getrandom(&mut key).map_err(|_| RegistryError::Random)?;
+        Ok(CursorHasher { key })
+    }
+
+    pub fn tag(&self, cursor: &str) -> CursorTag {
+        CursorTag(crate::registry_key::hmac_sha256(
+            &self.key,
+            cursor.as_bytes(),
+        ))
+    }
+}
+
 /// What the relay saw of one `tools/list` response.
 #[derive(Debug, Clone)]
 pub enum PageInput {
-    /// A usable page. `request_cursor`: the client's request carried a cursor.
-    /// `has_next`: the page carried a `nextCursor`.
+    /// A usable page. `request_cursor`: the tag of the cursor the client's
+    /// request carried (`None` for the first request of a chain). `next_cursor`:
+    /// the tag of the page's `nextCursor` (`None` on the last page). A page of a
+    /// chain is accepted only if its `request_cursor` equals the previous
+    /// page's `next_cursor`.
     Tools {
-        request_cursor: bool,
+        request_cursor: Option<CursorTag>,
         tools: Vec<ToolInput>,
-        has_next: bool,
+        next_cursor: Option<CursorTag>,
     },
     /// The page cannot be used. `reason` is the T-13c mapping of the relay's
     /// `PageUnavailable` (`page_error`, `size_limit_exceeded`,
     /// `tool_limit_exceeded`, `cursor_invalid`, `access_denied`, ...).
     Failed {
-        request_cursor: bool,
+        request_cursor: Option<CursorTag>,
         reason: IncompleteReason,
     },
 }
 
 impl PageInput {
-    fn request_cursor(&self) -> bool {
+    fn request_cursor(&self) -> Option<CursorTag> {
         match self {
             PageInput::Tools { request_cursor, .. } | PageInput::Failed { request_cursor, .. } => {
                 *request_cursor
@@ -172,6 +215,8 @@ enum Chain {
         pages: u64,
         bytes: u64,
         tools: Vec<Collected>,
+        /// The cursor the next request of the chain must carry.
+        expect: Option<CursorTag>,
     },
     /// Ended incomplete; later pages of the same chain are ignored until a
     /// request without a cursor starts a new chain.
@@ -222,7 +267,8 @@ impl InventoryEngine {
         key: &ListingKey,
         page: PageInput,
     ) -> Result<ListingProgress, RegistryError> {
-        if !page.request_cursor() {
+        let request = page.request_cursor();
+        if request.is_none() {
             // A request without a cursor starts a new chain. A chain still in
             // progress under this key never completed.
             if let Some(old) = self.collectors.remove(key) {
@@ -237,6 +283,7 @@ impl InventoryEngine {
                         pages: 0,
                         bytes: 0,
                         tools: Vec::new(),
+                        expect: None,
                     },
                     stamp,
                 },
@@ -259,15 +306,20 @@ impl InventoryEngine {
                     return Ok(ListingProgress::Incomplete(IncompleteReason::CursorInvalid));
                 }
                 Some(Chain::Dead) => return Ok(ListingProgress::Ignored),
-                Some(Chain::Collecting { .. }) => {}
+                Some(Chain::Collecting { expect, .. }) => {
+                    // The cursor must be the one the previous page handed out.
+                    if *expect != request {
+                        return self.fail(key, IncompleteReason::CursorInvalid);
+                    }
+                }
             }
         }
 
-        let (tools, has_next) = match page {
+        let (tools, next) = match page {
             PageInput::Failed { reason, .. } => return self.fail(key, reason),
             PageInput::Tools {
-                tools, has_next, ..
-            } => (tools, has_next),
+                tools, next_cursor, ..
+            } => (tools, next_cursor),
         };
         let limits = self.limits;
         let outcome = {
@@ -276,11 +328,13 @@ impl InventoryEngine {
                 pages,
                 bytes,
                 tools: collected,
+                expect,
             } = &mut c.chain
             else {
                 return Ok(ListingProgress::Ignored);
             };
             *pages += 1;
+            *expect = next;
             let mut failed = None;
             if *pages > limits.max_pages {
                 failed = Some(IncompleteReason::PageLimitExceeded);
@@ -310,7 +364,7 @@ impl InventoryEngine {
         if let Some(reason) = outcome {
             return self.fail(key, reason);
         }
-        if has_next {
+        if next.is_some() {
             return Ok(ListingProgress::Continue);
         }
         let c = self.collectors.remove(key).expect("collector present");
@@ -544,6 +598,9 @@ fn finish_complete(
         let Ok(text) = String::from_utf8(text) else {
             return incomplete(inner, IncompleteReason::CanonicalizationFailed);
         };
+        if text.len() > MAX_DEFINITION_BYTES {
+            return incomplete(inner, IncompleteReason::SizeLimitExceeded);
+        }
         entries.push(EntryRecord {
             metadata_ref: d.metadata_ref.clone(),
             scope: scope.clone(),
@@ -561,6 +618,23 @@ fn finish_complete(
             jcs_text: text,
         });
     }
+
+    // A ref the server can never hold (quarantined after a conflict, or refused
+    // for good) is left out of the members: the listing stays complete for
+    // everything else, the tool resolves as `not_in_inventory`, and later
+    // reports are not stuck behind it. The integrity gap was reported when the
+    // entry was quarantined.
+    let mut unusable = HashSet::new();
+    for m in &minted {
+        if matches!(
+            inner.entry_state(&m.metadata_ref)?,
+            Some(EntryState::Quarantined | EntryState::Poisoned)
+        ) {
+            unusable.insert(m.metadata_ref.clone());
+        }
+    }
+    entries.retain(|e| !unusable.contains(&e.metadata_ref));
+    minted.retain(|m| !unusable.contains(&m.metadata_ref));
 
     let prev = inner.latest_snapshot(scope)?;
     let declared = inner.rotation_declared(&key_id)?;

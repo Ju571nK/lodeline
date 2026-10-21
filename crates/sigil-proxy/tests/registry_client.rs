@@ -13,8 +13,8 @@ use sigil_proxy::inventory::{
     InventoryEngine, InventoryLimits, ListingKey, ListingProgress, PageInput, ToolInput,
 };
 use sigil_proxy::registry_client::{
-    classify_report, classify_upload, ConflictHandler, ConflictReporter, RegistryClient,
-    RegistryParams, RegistryTransport, ReportOutcome, StepKind, UploadOutcome,
+    classify_report, classify_upload, ConflictHandler, ConflictReporter, NoDependents,
+    RegistryClient, RegistryParams, RegistryTransport, ReportOutcome, StepKind, UploadOutcome,
 };
 use sigil_proxy::registry_key::ScopeKey;
 use sigil_proxy::registry_store::{EntryState, RegistryStore};
@@ -51,9 +51,9 @@ fn list(e: &mut InventoryEngine, tools: Vec<ToolInput>) -> sigil_proxy::inventor
                 scope: scope(),
             },
             PageInput::Tools {
-                request_cursor: false,
+                request_cursor: None,
                 tools,
-                has_next: false,
+                next_cursor: None,
             },
         )
         .unwrap()
@@ -403,6 +403,8 @@ async fn a_409_quarantines_the_entry_reports_the_gap_and_drops_the_dependent_rep
     assert_eq!(posts[1], vec![good]);
     // The report names the quarantined member, so it can never be accepted.
     assert_eq!(f.client.discarded_reports(), 1);
+    // The server never saw that snapshot: the chain restarts at a baseline.
+    assert!(f.store.latest_snapshot(&scope()).unwrap().is_none());
     assert!(f.sim.st().log.iter().all(|l| *l != "inv"));
     assert!(f.store.pending_reports(10).unwrap().is_empty());
     // A second quarantine of the same ref is a no-op (no second gap).
@@ -458,8 +460,8 @@ async fn an_unattributed_409_is_isolated_by_singles() {
     assert_eq!(f.handled.lock().unwrap().len(), 1);
 }
 
-#[tokio::test]
-async fn a_422_does_not_hold_back_the_other_entries() {
+#[tokio::test(start_paused = true)]
+async fn a_poisoned_entry_holds_back_neither_good_entries_nor_unrelated_reports() {
     let mut f = fx();
     let c = list(
         &mut f.engine,
@@ -474,8 +476,11 @@ async fn a_422_does_not_hold_back_the_other_entries() {
             refs: vec![poison.clone()]
         })
     );
-    assert!(!s.progressed, "a refusal backs off");
-    // The others go through together, the refused one afterwards and alone.
+    assert!(
+        s.progressed,
+        "a refusal of one entry does not back the link off"
+    );
+    // The others go through at once, together and without it.
     let s = f.client.sync_once().await;
     assert!(matches!(
         s.kind,
@@ -484,18 +489,215 @@ async fn a_422_does_not_hold_back_the_other_entries() {
     let posts = f.sim.st().meta_posts.clone();
     assert_eq!(posts[1].len(), 2);
     assert!(!posts[1].contains(&poison));
-    let s = f.client.sync_once().await;
+    // New unrelated work flows while the refused entry waits for its retry time.
+    let other = list(&mut f.engine, vec![tool("x", "9")]);
+    let _ = other;
     assert!(matches!(
-        s.kind,
-        StepKind::Upload(UploadOutcome::Invalid { .. })
+        f.client.sync_once().await.kind,
+        StepKind::Upload(UploadOutcome::Done { .. })
     ));
-    assert_eq!(f.sim.st().meta_posts[2], vec![poison.clone()]);
-    // It is never quarantined by a 422, and the report waits behind it.
+    // The first report (which names the refused entry) waits; the second one,
+    // which does not, is sent.
+    let s = f.client.sync_once().await;
+    assert_eq!(s.kind, StepKind::Report(ReportOutcome::Done));
+    assert_eq!(f.sim.st().log.iter().filter(|l| **l == "inv").count(), 1);
+    assert_eq!(f.store.pending_reports(10).unwrap().len(), 1);
+    // After the retry time the refused entry is tried alone, until it is
+    // poisoned (3 refusals), never quarantined.
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(120)).await;
+        let s = f.client.sync_once().await;
+        assert!(matches!(
+            s.kind,
+            StepKind::Upload(UploadOutcome::Invalid { .. })
+        ));
+    }
+    assert_eq!(f.sim.st().meta_posts.last().unwrap(), &vec![poison.clone()]);
     assert_eq!(
         f.store.entry(&poison).unwrap().unwrap().state,
-        EntryState::Pending
+        EntryState::Poisoned
     );
-    assert_eq!(f.sim.st().log.iter().filter(|l| **l == "inv").count(), 0);
+    assert_eq!(f.client.health().unwrap().poisoned_entries, 1);
+    // The report that names it is given up and its chain reset.
+    let s = f.client.sync_once().await;
+    assert_eq!(s.kind, StepKind::Dropped);
+    assert_eq!(f.client.discarded_reports(), 1);
+    assert!(f.store.pending_reports(10).unwrap().is_empty());
+    assert_eq!(f.client.sync_once().await.kind, StepKind::Idle);
+}
+
+#[tokio::test]
+async fn a_single_entry_413_is_poisoned_not_retried_forever() {
+    let mut f = fx();
+    let c = list(&mut f.engine, vec![tool("a", "1")]);
+    f.sim.st().max_batch = Some(0);
+    let s = f.client.sync_once().await;
+    assert_eq!(s.kind, StepKind::Upload(UploadOutcome::TooLarge));
+    assert_eq!(
+        f.store.entry(&c.tools[0].1).unwrap().unwrap().state,
+        EntryState::Poisoned
+    );
+    assert_eq!(f.client.health().unwrap().poisoned_entries, 1);
+    let n = f.sim.st().meta_posts.len();
+    for _ in 0..5 {
+        f.client.sync_once().await;
+    }
+    assert_eq!(f.sim.st().meta_posts.len(), n, "never uploaded again");
+}
+
+#[tokio::test]
+async fn discarding_a_report_rewrites_the_reports_that_were_built_on_it() {
+    let mut f = fx();
+    // A = [keep, gone]; B = [keep] compared with A, both queued before any send.
+    let a = list(&mut f.engine, vec![tool("keep", "k"), tool("gone", "g")]);
+    let b = list(&mut f.engine, vec![tool("keep", "k")]);
+    let gone = a.tools.iter().find(|(n, _)| n == "gone").unwrap().1.clone();
+    f.sim.st().conflict.insert(gone.clone());
+    drain(&mut f.client).await;
+    assert_eq!(
+        f.client.discarded_reports(),
+        1,
+        "A names a quarantined member"
+    );
+    // Only B reached the server, and as a baseline (its previous, A, never did).
+    let bodies = f.sim.st().inv_bodies.clone();
+    assert_eq!(bodies.len(), 1);
+    let r = sigil_proxy_api::parse_inventory_report(&bodies[0]).unwrap();
+    assert_eq!(r.inventory_id.unwrap().as_str(), b.inventory_id);
+    assert!(matches!(
+        r.comparison,
+        Some(sigil_proxy_api::Comparison::InitialBaseline {})
+    ));
+    // The local latest snapshot is B, and the next listing compares with it.
+    assert_eq!(
+        f.store
+            .latest_snapshot(&scope())
+            .unwrap()
+            .unwrap()
+            .inventory_id,
+        b.inventory_id
+    );
+}
+
+#[tokio::test]
+async fn a_report_the_server_keeps_calling_pending_is_given_up_after_a_cap() {
+    let mut f = fx();
+    let c = list(&mut f.engine, vec![tool("a", "1")]);
+    let r = c.tools[0].1.clone();
+    for _ in 0..5 {
+        f.sim.st().inv_script.push_back(reply(
+            424,
+            &ApiError::from_code(ErrorCode::MetadataRefPending)
+                .with_pending_metadata_refs(vec![MetadataRef::new(r.clone()).unwrap()]),
+        ));
+    }
+    let mut backoffs = 0;
+    for _ in 0..40 {
+        let s = f.client.sync_once().await;
+        if matches!(s.kind, StepKind::Report(ReportOutcome::Pending { .. })) {
+            assert!(!s.progressed || f.client.discarded_reports() == 1);
+            backoffs += 1;
+        }
+        if s.kind == StepKind::Idle {
+            break;
+        }
+    }
+    assert_eq!(backoffs, 5);
+    assert_eq!(f.client.discarded_reports(), 1);
+    assert!(f.store.latest_snapshot(&scope()).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_unfinished_conflict_is_finished_after_a_restart() {
+    let mut f = fx_with(vec![uuid(1), uuid(2)]);
+    let c = list(&mut f.engine, vec![tool("a", "1")]);
+    let r = c.tools[0].1.clone();
+    // Crash after the quarantine row was written, before the seam and the gap.
+    assert!(f.store.quarantine(&r, "central_409").unwrap());
+    assert_eq!(f.store.gap_pending().unwrap().len(), 1);
+    assert!(f.gaps.pending_batch().is_empty());
+    f.client.sync_once().await; // first step resumes
+    let gaps = f.gaps.pending_batch();
+    assert_eq!(gaps.len(), 1);
+    let GapReport::RegistryConflict(g) = &gaps[0] else {
+        panic!()
+    };
+    assert_eq!(g.detected_by, ConflictDetector::Central409);
+    assert_eq!(g.metadata_ref.as_str(), r);
+    assert!(f.store.gap_pending().unwrap().is_empty());
+    assert_eq!(f.handled.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_largest_entry_with_the_longest_ids_fits_the_limit() {
+    use sigil_proxy::registry_store::MAX_DEFINITION_BYTES;
+    let d = dir();
+    let proxy = format!("p{}", "x".repeat(127));
+    let (store, _) = RegistryStore::open(d.path(), &proxy).unwrap();
+    let sc = ScopeKey::live(
+        &proxy,
+        &format!("u{}", "y".repeat(127)),
+        &format!("c{}", "z".repeat(127)),
+    );
+    let mk = |len: usize| ToolInput {
+        name: "t".into(),
+        definition: json!({"name": "t", "description": "d".repeat(len),
+                           "inputSchema": {"type": "object"}})
+        .to_string(),
+    };
+    let overhead = sigil_proxy::jcs::canonicalize_str(&mk(0).definition)
+        .unwrap()
+        .len();
+    let mut e = InventoryEngine::new(
+        store.clone(),
+        EPOCH,
+        InventoryLimits {
+            max_pages: 10,
+            max_tools: 10,
+            max_bytes: 100 << 20,
+        },
+    );
+    let key = ListingKey {
+        session: 1,
+        scope: sc.clone(),
+    };
+    let go = |e: &mut InventoryEngine, t: ToolInput| {
+        e.observe_page(
+            &key,
+            PageInput::Tools {
+                request_cursor: None,
+                tools: vec![t],
+                next_cursor: None,
+            },
+        )
+        .unwrap()
+    };
+    // One byte over the bound is refused as too large.
+    assert_eq!(
+        go(&mut e, mk(MAX_DEFINITION_BYTES - overhead + 1)),
+        ListingProgress::Incomplete(sigil_proxy_api::registry::IncompleteReason::SizeLimitExceeded)
+    );
+    assert!(matches!(
+        go(&mut e, mk(MAX_DEFINITION_BYTES - overhead)),
+        ListingProgress::Complete(_)
+    ));
+    let sim = Arc::new(Sim::default());
+    let mut client = RegistryClient::new(
+        store.clone(),
+        Tr(sim.clone()),
+        ConflictReporter::new(store.clone(), GapQueue::new(), Box::new(NoDependents)),
+        RegistryParams::default(),
+    );
+    assert!(matches!(
+        client.sync_once().await.kind,
+        StepKind::Upload(UploadOutcome::Done { .. })
+    ));
+    let body = sim.st().meta_bodies[0].clone();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let entry = serde_json::to_vec(&v["entries"][0]).unwrap();
+    assert!(entry.len() <= 256 * 1024, "entry is {} bytes", entry.len());
+    assert!(entry.len() > MAX_DEFINITION_BYTES);
+    assert_eq!(client.health().unwrap().poisoned_entries, 0);
 }
 
 #[tokio::test]
@@ -584,10 +786,11 @@ async fn failures_back_off_with_a_bound_and_success_resets() {
         assert!(!s.progressed, "{:?}", s.kind);
         delays.push(f.client.next_delay(&s));
     }
-    assert_eq!(delays[0], Duration::from_secs(5));
-    assert!(delays.windows(2).all(|w| w[1] >= w[0]));
-    assert!(delays.iter().all(|d| *d <= Duration::from_secs(60)));
-    assert_eq!(*delays.last().unwrap(), Duration::from_secs(60));
+    // Jittered in [d/2, d] with d doubling from 5 s up to the 60 s cap.
+    for (i, d) in delays.iter().enumerate() {
+        let base = Duration::from_secs((5u64 << i.min(10)).min(60));
+        assert!(*d >= base / 2 && *d <= base, "step {i}: {d:?} vs {base:?}");
+    }
     // Nothing was lost meanwhile: success follows and resets the streak.
     let s = f.client.sync_once().await;
     assert!(s.progressed);
@@ -806,12 +1009,12 @@ async fn definitions_and_keys_never_reach_logs_errors_reports_or_gaps() {
                     scope: scope(),
                 },
                 PageInput::Tools {
-                    request_cursor: false,
+                    request_cursor: None,
                     tools: vec![ToolInput {
                         name: NAME_CANARY.into(),
                         definition: bad.clone(),
                     }],
-                    has_next: false,
+                    next_cursor: None,
                 },
             )
             .unwrap();
@@ -834,9 +1037,9 @@ async fn definitions_and_keys_never_reach_logs_errors_reports_or_gaps() {
     note(format!(
         "{rec:?} {:?} {:?}",
         f.store,
-        f.store.latest_snapshot(&scope()).unwrap().unwrap()
+        f.store.latest_snapshot(&scope()).unwrap()
     ));
-    note(format!("{:?}", f.store.pending_entries(10).unwrap()));
+    note(format!("{:?}", f.store.pending_entries(10, true).unwrap()));
     let key = std::fs::read_to_string(f._d.path().join("registry_key.json")).unwrap();
     let key_hex = serde_json::from_str::<Value>(&key).unwrap()["key"]
         .as_str()

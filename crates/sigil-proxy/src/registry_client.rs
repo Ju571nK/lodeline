@@ -26,12 +26,16 @@
 //!
 //! Nothing here logs a body, a definition, a name, a ref or an address.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use sigil_proxy_api::registry::{
-    Canon, ObservationSource, RegistryEntry, RegistryProtocolVersion, UploadRequest,
+    Canon, Comparison, InventoryReport, ObservationSource, RegistryEntry, RegistryProtocolVersion,
+    UploadRequest,
 };
 use sigil_proxy_api::status::{ConflictDetector, RegistryConflictGap};
 use sigil_proxy_api::{
@@ -40,10 +44,26 @@ use sigil_proxy_api::{
 };
 
 use crate::jcs;
+use crate::registry_key::ScopeKey;
 use crate::registry_store::{
     EntryCheck, EntryRecord, EntryState, RegistryError, RegistryStore, StoredReport,
 };
 use crate::status_report::{GapQueue, PostFuture, StatusReply};
+
+fn detector_str(d: ConflictDetector) -> &'static str {
+    match d {
+        ConflictDetector::Central409 => "central_409",
+        ConflictDetector::LocalHashCheck => "local_hash_check",
+    }
+}
+
+fn detector_from(s: &str) -> ConflictDetector {
+    if s == "central_409" {
+        ConflictDetector::Central409
+    } else {
+        ConflictDetector::LocalHashCheck
+    }
+}
 
 /// Entries per request (registry.md R2).
 pub const MAX_UPLOAD_ENTRIES: usize = 100;
@@ -106,6 +126,12 @@ impl ConflictReporter {
 
     /// The registry-conflict path for one entry. Returns the number of events
     /// that depend on it.
+    ///
+    /// Idempotent across a crash: quarantine sets a durable "gap pending" mark in
+    /// the same statement; the mark is cleared only after the spool seam ran and
+    /// the gap is queued. A repeated call (or [`ConflictReporter::resume`] after a
+    /// restart) finishes whatever did not finish. At worst the gap is queued twice
+    /// (with different `gap_id`s), never zero times.
     pub fn report_conflict(
         &self,
         metadata_ref: &str,
@@ -114,17 +140,46 @@ impl ConflictReporter {
         let Some(rec) = self.store.entry(metadata_ref)? else {
             return Ok(0);
         };
-        let first = self.store.quarantine(metadata_ref)?;
-        if !first {
+        let changed = self
+            .store
+            .quarantine(metadata_ref, detector_str(detected_by))?;
+        let unfinished = self
+            .store
+            .gap_pending()?
+            .iter()
+            .any(|(r, _)| r == metadata_ref);
+        if !changed && !unfinished {
             return Ok(0); // already handled
         }
+        self.finish(&rec, detected_by)
+    }
+
+    fn finish(
+        &self,
+        rec: &EntryRecord,
+        detected_by: ConflictDetector,
+    ) -> Result<usize, RegistryError> {
         let ids = self
             .handler
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .registry_conflict(metadata_ref, &rec.key_id);
-        self.queue_gap(&rec, &ids, detected_by);
+            .registry_conflict(&rec.metadata_ref, &rec.key_id);
+        self.queue_gap(rec, &ids, detected_by);
+        self.store.clear_gap_pending(&rec.metadata_ref)?;
         Ok(ids.len())
+    }
+
+    /// Finish conflicts whose handling was cut short (crash between quarantine
+    /// and the queued gap). Call once at start; [`RegistryClient`] does.
+    pub fn resume(&self) -> Result<usize, RegistryError> {
+        let mut n = 0;
+        for (r, det) in self.store.gap_pending()? {
+            if let Some(rec) = self.store.entry(&r)? {
+                self.finish(&rec, detector_from(&det))?;
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     fn queue_gap(&self, rec: &EntryRecord, ids: &[String], detected_by: ConflictDetector) {
@@ -387,6 +442,28 @@ pub struct SyncStep {
     pub progressed: bool,
 }
 
+/// Refusals (422) after which an entry is poisoned.
+pub const POISON_AFTER: i64 = 3;
+/// Consecutive 424s for one report after which it is given up (and its chain
+/// reset).
+pub const MAX_REPORT_424: u32 = 5;
+/// Queued reports looked at per step.
+const REPORT_SCAN: usize = 32;
+/// Largest serialized entry (registry.md R2).
+pub const MAX_ENTRY_BYTES: usize = 256 * 1024;
+
+/// What T-13c needs for a status/health view of the sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientHealth {
+    pub pending_entries: u64,
+    pub pending_reports: u64,
+    /// Entries refused for good (counted, never retried).
+    pub poisoned_entries: u64,
+    /// Reports given up on since start (each reset its scope chain).
+    pub discarded_reports: u64,
+    pub consecutive_failures: u32,
+}
+
 pub struct RegistryClient<T: RegistryTransport> {
     store: RegistryStore,
     transport: T,
@@ -395,9 +472,15 @@ pub struct RegistryClient<T: RegistryTransport> {
     proxy_id: String,
     /// Current entries-per-request cap (halved by 413, 1 while isolating).
     cap: usize,
-    isolating: bool,
     failures: u32,
     discarded_reports: u64,
+    resumed: bool,
+    /// Consecutive 424s per queued report.
+    report_424: HashMap<String, u32>,
+    /// Refused entries are not retried before this instant, so a bad entry never
+    /// delays good ones.
+    refused_not_before: Option<Instant>,
+    refused_streak: u32,
 }
 
 impl<T: RegistryTransport> RegistryClient<T> {
@@ -415,9 +498,12 @@ impl<T: RegistryTransport> RegistryClient<T> {
             params,
             proxy_id,
             cap: MAX_UPLOAD_ENTRIES,
-            isolating: false,
             failures: 0,
             discarded_reports: 0,
+            resumed: false,
+            report_424: HashMap::new(),
+            refused_not_before: None,
+            refused_streak: 0,
         }
     }
 
@@ -425,14 +511,24 @@ impl<T: RegistryTransport> RegistryClient<T> {
         &self.conflicts
     }
 
-    /// Reports dropped without being accepted (409, 413, 422 or a quarantined
-    /// member). Lets T-13c surface a stalled or lossy sync.
+    /// Reports given up on (409, 413, 422, a repeated 424, or a member that can
+    /// never be registered).
     pub fn discarded_reports(&self) -> u64 {
         self.discarded_reports
     }
 
     pub fn consecutive_failures(&self) -> u32 {
         self.failures
+    }
+
+    pub fn health(&self) -> Result<ClientHealth, RegistryError> {
+        Ok(ClientHealth {
+            pending_entries: self.store.pending_entry_count()?,
+            pending_reports: self.store.pending_reports(10_000)?.len() as u64,
+            poisoned_entries: self.store.poisoned_count()?,
+            discarded_reports: self.discarded_reports,
+            consecutive_failures: self.failures,
+        })
     }
 
     /// One request's worth of work.
@@ -457,17 +553,59 @@ impl<T: RegistryTransport> RegistryClient<T> {
     }
 
     async fn step(&mut self) -> Result<SyncStep, RegistryError> {
-        let pending = self.store.pending_entries(self.cap)?;
+        if !self.resumed {
+            self.conflicts.resume()?;
+            self.resumed = true;
+        }
+        let allow_refused = self.refused_not_before.is_none_or(|t| Instant::now() >= t);
+        let pending = self.store.pending_entries(self.cap, allow_refused)?;
         if !pending.is_empty() {
             return self.upload(pending).await;
         }
-        let Some(report) = self.store.pending_reports(1)?.into_iter().next() else {
-            return Ok(SyncStep {
-                kind: StepKind::Idle,
-                progressed: true,
-            });
-        };
-        self.send_report(report).await
+        // Reports are sent whether or not a refused entry is still waiting; only
+        // a report that names a pending entry waits.
+        for report in self.store.pending_reports(REPORT_SCAN)? {
+            let parsed = sigil_proxy_api::parse_inventory_report(&report.body).ok();
+            let Some(parsed) = parsed else {
+                self.drop_report(&report, None)?;
+                return Ok(SyncStep {
+                    kind: StepKind::Dropped,
+                    progressed: true,
+                });
+            };
+            let members: Vec<String> = parsed
+                .members
+                .iter()
+                .flatten()
+                .map(|m| m.as_str().to_string())
+                .collect();
+            let states = self.store.entry_states(&members)?;
+            if members.iter().any(|m| {
+                matches!(
+                    states.get(m),
+                    None | Some(EntryState::Quarantined | EntryState::Poisoned)
+                )
+            }) {
+                // The server can never register a member: give up on the report
+                // and reset the chain it belonged to.
+                self.drop_report(&report, Some(&parsed))?;
+                return Ok(SyncStep {
+                    kind: StepKind::Dropped,
+                    progressed: true,
+                });
+            }
+            if members
+                .iter()
+                .any(|m| states.get(m) == Some(&EntryState::Pending))
+            {
+                continue; // waits for its entries; later reports may go first
+            }
+            return self.send_report(report, parsed).await;
+        }
+        Ok(SyncStep {
+            kind: StepKind::Idle,
+            progressed: true,
+        })
     }
 
     // ----------------------------------------------------------------- entries
@@ -501,16 +639,24 @@ impl<T: RegistryTransport> RegistryClient<T> {
         let mut entries = Vec::new();
         let mut sent = Vec::new();
         let mut bytes = 64usize;
+        let mut skipped = false;
         for rec in &pending {
             // A stored entry that cannot be rebuilt was damaged: quarantine it.
             let Some(w) = self.wire_entry(rec) else {
                 self.conflicts
                     .report_conflict(&rec.metadata_ref, ConflictDetector::LocalHashCheck)?;
+                skipped = true;
                 continue;
             };
             let len = serde_json::to_vec(&w)
                 .map(|v| v.len())
                 .unwrap_or(usize::MAX);
+            if len > MAX_ENTRY_BYTES {
+                // Cannot be accepted whatever the server says.
+                self.store.poison(&rec.metadata_ref)?;
+                skipped = true;
+                continue;
+            }
             if !entries.is_empty() && bytes + len + 1 > MAX_UPLOAD_BYTES {
                 break;
             }
@@ -521,7 +667,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
         if entries.is_empty() {
             return Ok(SyncStep {
                 kind: StepKind::Dropped,
-                progressed: true,
+                progressed: skipped,
             });
         }
         let req = UploadRequest {
@@ -545,8 +691,8 @@ impl<T: RegistryTransport> RegistryClient<T> {
         Ok(match o {
             UploadOutcome::Done { refs } => {
                 self.store.mark_acked(refs)?;
-                self.isolating = false;
                 self.cap = (self.cap * 2).clamp(1, MAX_UPLOAD_ENTRIES);
+                self.refused_streak = 0;
                 true
             }
             UploadOutcome::Conflict { refs } => {
@@ -561,27 +707,38 @@ impl<T: RegistryTransport> RegistryClient<T> {
                     // The only entry sent: it is the culprit.
                     self.conflicts
                         .report_conflict(&sent[0], ConflictDetector::Central409)?;
-                    self.isolating = false;
-                    true
                 } else {
                     // Send singles until the failing entry is found.
-                    self.isolating = true;
                     self.cap = 1;
-                    true
                 }
+                true
             }
             UploadOutcome::Invalid { refs } => {
-                let named = if refs.is_empty() {
-                    sent
+                if refs.is_empty() && sent.len() > 1 {
+                    // Nothing named: find the culprit by singles, count nothing.
+                    self.cap = 1;
                 } else {
-                    refs.as_slice()
-                };
-                self.store.bump_attempts(named)?;
-                false
+                    let named = if refs.is_empty() {
+                        sent
+                    } else {
+                        refs.as_slice()
+                    };
+                    self.store.bump_attempts(named, POISON_AFTER)?;
+                    self.refused_streak = self.refused_streak.saturating_add(1);
+                    let d = self.backoff(self.refused_streak);
+                    self.refused_not_before = Some(Instant::now() + d);
+                }
+                // Not a failure of the link: good entries carry on at once.
+                true
             }
             UploadOutcome::TooLarge => {
-                self.cap = (sent.len() / 2).max(1);
-                self.cap > 1 || sent.len() > 1
+                if sent.len() == 1 {
+                    // Alone and still too large: it can never be accepted.
+                    self.store.poison(&sent[0])?;
+                } else {
+                    self.cap = (sent.len() / 2).max(1);
+                }
+                true
             }
             _ => false,
         })
@@ -589,47 +746,34 @@ impl<T: RegistryTransport> RegistryClient<T> {
 
     // ----------------------------------------------------------------- reports
 
-    async fn send_report(&mut self, report: StoredReport) -> Result<SyncStep, RegistryError> {
-        let parsed = sigil_proxy_api::parse_inventory_report(&report.body);
-        let members: Vec<String> = match &parsed {
-            Ok(r) => r
-                .members
-                .as_ref()
-                .map(|m| m.iter().map(|x| x.as_str().to_string()).collect())
-                .unwrap_or_default(),
-            Err(_) => {
-                self.drop_report(&report)?;
-                return Ok(SyncStep {
-                    kind: StepKind::Dropped,
-                    progressed: true,
-                });
-            }
-        };
-        let states = self.store.entry_states(&members)?;
-        let unusable = members
-            .iter()
-            .any(|m| matches!(states.get(m), None | Some(EntryState::Quarantined)));
-        if unusable {
-            self.drop_report(&report)?;
-            return Ok(SyncStep {
-                kind: StepKind::Dropped,
-                progressed: true,
-            });
-        }
+    async fn send_report(
+        &mut self,
+        report: StoredReport,
+        parsed: InventoryReport,
+    ) -> Result<SyncStep, RegistryError> {
         let reply = self.transport.post_inventory(report.body.clone()).await;
         let outcome = classify_report(reply.as_ref());
         let progressed = match &outcome {
             ReportOutcome::Done => {
                 self.store.report_done(&report.report_id)?;
+                self.report_424.remove(&report.report_id);
                 true
             }
             ReportOutcome::Pending { refs } => {
-                self.store.mark_unacked(refs)?;
-                // Members not named stay as they are; the upload path runs next.
-                !refs.is_empty()
+                let n = self.report_424.entry(report.report_id.clone()).or_insert(0);
+                *n += 1;
+                if *n >= MAX_REPORT_424 {
+                    // The server keeps not knowing members: give up on it.
+                    self.report_424.remove(&report.report_id);
+                    self.drop_report(&report, Some(&parsed))?;
+                    true
+                } else {
+                    self.store.mark_unacked(refs)?;
+                    false // backs off, growing with the failure streak
+                }
             }
             ReportOutcome::Discard { .. } => {
-                self.drop_report(&report)?;
+                self.drop_report(&report, Some(&parsed))?;
                 true
             }
             _ => false,
@@ -640,16 +784,74 @@ impl<T: RegistryTransport> RegistryClient<T> {
         })
     }
 
-    fn drop_report(&mut self, report: &StoredReport) -> Result<(), RegistryError> {
+    /// Give up on a report. A discarded COMPLETE report breaks the server's
+    /// chain for its scope key (the server never saw that snapshot), so:
+    ///
+    /// * the local latest snapshot is forgotten if it is that one, making the
+    ///   next complete listing an `initial_baseline`;
+    /// * queued reports that name it as their previous snapshot are rewritten to
+    ///   `initial_baseline` (their own members and snapshot stay valid).
+    fn drop_report(
+        &mut self,
+        report: &StoredReport,
+        parsed: Option<&InventoryReport>,
+    ) -> Result<(), RegistryError> {
         self.store.report_done(&report.report_id)?;
         self.discarded_reports += 1;
+        let Some(p) = parsed else { return Ok(()) };
+        let Some(inv) = p.inventory_id.as_ref() else {
+            return Ok(()); // an incomplete report is not part of the chain
+        };
+        let scope = ScopeKey {
+            proxy_id: p.proxy_id.as_str().to_string(),
+            upstream_id: p.scope.upstream_id.as_str().to_string(),
+            credential_scope_id: p.scope.credential_scope_id.as_str().to_string(),
+            protocol_version: "2025-11-25".to_string(),
+            observation_source: "proxy_live".to_string(),
+        };
+        self.store.forget_snapshot(&scope, inv.as_str())?;
+        for r in self.store.pending_reports(10_000)? {
+            let Ok(mut q) = sigil_proxy_api::parse_inventory_report(&r.body) else {
+                continue;
+            };
+            let names_it = match &q.comparison {
+                Some(Comparison::Compared {
+                    previous_inventory_id,
+                    ..
+                })
+                | Some(Comparison::Rebaseline {
+                    previous_inventory_id,
+                    ..
+                }) => previous_inventory_id.as_str() == inv.as_str(),
+                _ => false,
+            };
+            if names_it {
+                q.comparison = Some(Comparison::InitialBaseline {});
+                if let Ok(body) = serde_json::to_vec(&q) {
+                    self.store.replace_report_body(&r.report_id, &body)?;
+                }
+            }
+        }
         Ok(())
     }
 
     // --------------------------------------------------------------------- run
 
+    /// Bounded exponential backoff for failure streak `n` (1-based) with
+    /// "equal jitter": uniform in `[d/2, d]`.
+    fn backoff(&self, n: u32) -> Duration {
+        let shift = n.saturating_sub(1).min(16);
+        let d = self
+            .params
+            .retry
+            .saturating_mul(1u32 << shift)
+            .min(self.params.max_backoff);
+        let r = (uuid::Uuid::new_v4().as_u128() & 0xffff) as u32; // 0..=65535
+        d / 2 + d.mul_f64(f64::from(r) / 131_072.0)
+    }
+
     /// Delay before the next step: spacing after progress, the poll interval
-    /// when idle, else bounded exponential backoff.
+    /// when idle, else jittered bounded exponential backoff.
     pub fn next_delay(&self, step: &SyncStep) -> Duration {
         if step.kind == StepKind::Idle {
             return self.params.poll;
@@ -657,11 +859,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
         if step.progressed {
             return self.params.min_spacing;
         }
-        let shift = self.failures.saturating_sub(1).min(16);
-        self.params
-            .retry
-            .saturating_mul(1u32 << shift)
-            .min(self.params.max_backoff)
+        self.backoff(self.failures)
     }
 
     /// Paced loop until `shutdown` completes.
@@ -737,12 +935,6 @@ mod mtls {
                 key_file: b.client_key_file.clone(),
                 timeout: TIMEOUT,
             })
-        }
-
-        /// Test hook: a different per-attempt bound.
-        pub fn with_timeout(mut self, t: Duration) -> Self {
-            self.timeout = t;
-            self
         }
 
         async fn exchange(&self, path: &str, payload: Vec<u8>) -> Option<(u16, Vec<u8>)> {

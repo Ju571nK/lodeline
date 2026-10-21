@@ -17,8 +17,7 @@ path = "src/main.rs"
 [dependencies]
 sigil-proxy-api = { path = "../sigil-proxy-api" }
 serde = { workspace = true }
-# float_roundtrip: correctly rounded float parsing, required by RFC 8785 (jcs.rs).
-serde_json = { workspace = true, features = ["raw_value", "float_roundtrip"] }
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

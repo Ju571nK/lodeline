@@ -354,12 +354,12 @@ fn list_one(e: &mut InventoryEngine) {
                 scope: ScopeKey::live("px-1", "up-1", "cs-1"),
             },
             PageInput::Tools {
-                request_cursor: false,
+                request_cursor: None,
                 tools: vec![ToolInput {
                     name: "t".into(),
                     definition: def,
                 }],
-                has_next: false,
+                next_cursor: None,
             },
         )
         .unwrap();

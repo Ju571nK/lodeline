@@ -9,8 +9,8 @@ use std::path::Path;
 
 use serde_json::json;
 use sigil_proxy::inventory::{
-    ComparisonKind, InventoryEngine, InventoryLimits, ListingKey, ListingProgress, PageInput,
-    ToolInput, MAX_COLLECTORS,
+    ComparisonKind, CursorHasher, CursorTag, InventoryEngine, InventoryLimits, ListingKey,
+    ListingProgress, PageInput, ToolInput, MAX_COLLECTORS,
 };
 use sigil_proxy::registry_key::{ScopeKey, KEY_FILE};
 use sigil_proxy::registry_store::{EntryState, OpenKind, RegistryStore, ToolLookup};
@@ -51,11 +51,21 @@ fn tool(name: &str, desc: &str) -> ToolInput {
     }
 }
 
-fn page(tools: Vec<ToolInput>, request_cursor: bool, has_next: bool) -> PageInput {
+fn hasher() -> &'static CursorHasher {
+    static H: std::sync::OnceLock<CursorHasher> = std::sync::OnceLock::new();
+    H.get_or_init(|| CursorHasher::new().unwrap())
+}
+
+/// The tag of "cursor n".
+fn tag(n: u8) -> CursorTag {
+    hasher().tag(&format!("cursor-{n}"))
+}
+
+fn page(tools: Vec<ToolInput>, request: Option<u8>, next: Option<u8>) -> PageInput {
     PageInput::Tools {
-        request_cursor,
+        request_cursor: request.map(tag),
         tools,
-        has_next,
+        next_cursor: next.map(tag),
     }
 }
 
@@ -65,7 +75,7 @@ fn engine(store: &RegistryStore) -> InventoryEngine {
 
 /// One whole listing in a single page.
 fn list(e: &mut InventoryEngine, session: u64, tools: Vec<ToolInput>) -> ListingProgress {
-    e.observe_page(&lk(session), page(tools, false, false))
+    e.observe_page(&lk(session), page(tools, None, None))
         .unwrap()
 }
 
@@ -270,7 +280,7 @@ fn incomplete_listing_changes_nothing_and_the_next_complete_compares_to_the_old_
         .observe_page(
             &lk(1),
             PageInput::Failed {
-                request_cursor: false,
+                request_cursor: None,
                 reason: IncompleteReason::PageError,
             },
         )
@@ -296,7 +306,7 @@ fn incomplete_listing_changes_nothing_and_the_next_complete_compares_to_the_old_
     // Later pages of the dead chain are ignored (no report storm).
     let n = reports(&store).len();
     let ign = e
-        .observe_page(&lk(1), page(vec![tool("a", "x")], true, false))
+        .observe_page(&lk(1), page(vec![tool("a", "x")], Some(1), None))
         .unwrap();
     assert_eq!(ign, ListingProgress::Ignored);
     assert_eq!(reports(&store).len(), n);
@@ -325,18 +335,18 @@ fn multi_page_chain_completes_only_on_the_last_page() {
     let mut e = engine(&store);
     let k = lk(7);
     assert_eq!(
-        e.observe_page(&k, page(vec![tool("a", "1")], false, true))
+        e.observe_page(&k, page(vec![tool("a", "1")], None, Some(1)))
             .unwrap(),
         ListingProgress::Continue
     );
     assert_eq!(
-        e.observe_page(&k, page(vec![tool("b", "2")], true, true))
+        e.observe_page(&k, page(vec![tool("b", "2")], Some(1), Some(2)))
             .unwrap(),
         ListingProgress::Continue
     );
     assert!(reports(&store).is_empty(), "nothing is reported mid-chain");
     let c = complete(
-        e.observe_page(&k, page(vec![tool("c", "3")], true, false))
+        e.observe_page(&k, page(vec![tool("c", "3")], Some(2), None))
             .unwrap(),
     );
     assert_eq!(c.tools.len(), 3);
@@ -349,7 +359,7 @@ fn a_chain_that_does_not_start_without_a_cursor_is_never_complete() {
     let (store, _) = open(d.path());
     let mut e = engine(&store);
     let p = e
-        .observe_page(&lk(1), page(vec![tool("a", "1")], true, false))
+        .observe_page(&lk(1), page(vec![tool("a", "1")], Some(1), None))
         .unwrap();
     assert_eq!(
         p,
@@ -363,14 +373,72 @@ fn a_chain_that_does_not_start_without_a_cursor_is_never_complete() {
 }
 
 #[test]
+fn a_cursor_other_than_the_one_handed_out_breaks_the_chain() {
+    let d = dir();
+    let (store, _) = open(d.path());
+    let mut e = engine(&store);
+    let k = lk(5);
+    e.observe_page(&k, page(vec![tool("a", "1")], None, Some(1)))
+        .unwrap();
+    // The next request carries cursor 9, not the cursor 1 page one handed out.
+    let p = e
+        .observe_page(&k, page(vec![tool("b", "1")], Some(9), None))
+        .unwrap();
+    assert_eq!(
+        p,
+        ListingProgress::Incomplete(IncompleteReason::CursorInvalid)
+    );
+    assert!(store.latest_snapshot(&scope()).unwrap().is_none());
+    // A page without a cursor after a page with one is a fresh chain, and a
+    // last page that arrives with NO cursor where one was handed out likewise.
+    let k2 = lk(6);
+    e.observe_page(&k2, page(vec![tool("a", "1")], None, Some(1)))
+        .unwrap();
+    let p = e
+        .observe_page(&k2, page(vec![tool("b", "1")], Some(1), None))
+        .unwrap();
+    assert!(matches!(p, ListingProgress::Complete(_)));
+    // Tags are opaque, equal for equal cursors under one hasher and differ
+    // between hashers; they print nothing.
+    assert_eq!(hasher().tag("x"), hasher().tag("x"));
+    assert_ne!(hasher().tag("x"), CursorHasher::new().unwrap().tag("x"));
+    assert!(!format!("{:?} {:?}", hasher().tag("secret-cursor"), hasher()).contains("secret"));
+}
+
+#[test]
+fn a_quarantined_ref_is_left_out_of_later_listings() {
+    let d = dir();
+    let (store, _) = open(d.path());
+    let mut e = engine(&store);
+    let c1 = complete(list(&mut e, 1, vec![tool("keep", "k"), tool("bad", "b")]));
+    store
+        .quarantine(&ref_of(&c1, "bad"), "central_409")
+        .unwrap();
+    let c2 = complete(list(&mut e, 1, vec![tool("keep", "k"), tool("bad", "b")]));
+    assert_eq!(c2.tools.len(), 1, "the quarantined tool is not a member");
+    assert_eq!(
+        store.lookup_tool(&scope(), "bad").unwrap(),
+        ToolLookup::NotInInventory
+    );
+    // Compared with the earlier snapshot it simply shows as removed.
+    match last_report(&store).comparison.unwrap() {
+        Comparison::Compared { changes, .. } => {
+            assert_eq!(changes.len(), 1);
+            assert!(matches!(changes[0], Change::Removed { .. }));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn restarting_a_chain_or_ending_the_session_records_session_ended() {
     let d = dir();
     let (store, _) = open(d.path());
     let mut e = engine(&store);
-    e.observe_page(&lk(1), page(vec![tool("a", "1")], false, true))
+    e.observe_page(&lk(1), page(vec![tool("a", "1")], None, Some(1)))
         .unwrap();
     // The client starts over without finishing: the first chain never completed.
-    e.observe_page(&lk(1), page(vec![tool("a", "1")], false, true))
+    e.observe_page(&lk(1), page(vec![tool("a", "1")], None, Some(1)))
         .unwrap();
     assert_eq!(reports(&store).len(), 1);
     assert_eq!(
@@ -391,7 +459,7 @@ fn collectors_are_bounded() {
     let (store, _) = open(d.path());
     let mut e = engine(&store);
     for s in 0..(MAX_COLLECTORS as u64 + 3) {
-        e.observe_page(&lk(s), page(vec![tool("a", "1")], false, true))
+        e.observe_page(&lk(s), page(vec![tool("a", "1")], None, Some(1)))
             .unwrap();
     }
     // The three oldest were ended as session_ended.
@@ -411,12 +479,12 @@ fn limits_make_the_listing_incomplete() {
 
     // pages
     let k = lk(1);
-    e.observe_page(&k, page(vec![tool("a", "1")], false, true))
+    e.observe_page(&k, page(vec![tool("a", "1")], None, Some(1)))
         .unwrap();
-    e.observe_page(&k, page(vec![tool("b", "1")], true, true))
+    e.observe_page(&k, page(vec![tool("b", "1")], Some(1), Some(2)))
         .unwrap();
     let p = e
-        .observe_page(&k, page(vec![tool("c", "1")], true, true))
+        .observe_page(&k, page(vec![tool("c", "1")], Some(2), Some(3)))
         .unwrap();
     assert_eq!(
         p,
@@ -519,7 +587,7 @@ fn another_credential_scope_is_a_separate_chain_with_no_comparison() {
         scope: ScopeKey::live("px-1", "up-1", "cs-2"),
     };
     let c2 = complete(
-        e.observe_page(&other, page(vec![tool("a", "1")], false, false))
+        e.observe_page(&other, page(vec![tool("a", "1")], None, None))
             .unwrap(),
     );
     assert_eq!(

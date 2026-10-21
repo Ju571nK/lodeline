@@ -36,9 +36,12 @@ use crate::registry_key::{sha256_hex, Key, ScopeKey, CANON_V1};
 /// SQLite file inside the state directory.
 pub const REGISTRY_DB_FILE: &str = "registry.sqlite3";
 const SCHEMA_VERSION: &str = "1";
-/// Per-definition bound: registry.md R2 allows 256 KiB per uploaded entry, and
-/// the entry's other fields take about 1 KiB of that.
-pub const MAX_DEFINITION_BYTES: usize = 255 * 1024;
+/// Per-definition bound, measured on the JCS text. registry.md R2 allows 256 KiB
+/// per uploaded entry; the other fields take at most about 1 KiB (three 128-byte
+/// ids plus fixed fields and member names), and re-serialising can differ from
+/// the JCS text by a few bytes per number, so 6 KiB of margin is left. The
+/// client re-checks the serialized entry before sending.
+pub const MAX_DEFINITION_BYTES: usize = 250 * 1024;
 /// Unsent incomplete reports kept; the oldest ones are dropped beyond this.
 /// A complete report is never dropped for space.
 pub const MAX_PENDING_INCOMPLETE_REPORTS: usize = 64;
@@ -109,6 +112,9 @@ pub enum EntryState {
     /// The server answered 409 (or the local hash check failed). Kept unchanged,
     /// never uploaded again.
     Quarantined,
+    /// Refused by the server for good (repeated 422, or too large alone). Never
+    /// uploaded again; counted. Not a conflict, so no gap.
+    Poisoned,
 }
 
 impl EntryState {
@@ -117,6 +123,7 @@ impl EntryState {
             "pending" => EntryState::Pending,
             "acked" => EntryState::Acked,
             "quarantined" => EntryState::Quarantined,
+            "poisoned" => EntryState::Poisoned,
             _ => return None,
         })
     }
@@ -287,9 +294,11 @@ CREATE TABLE entries(
   observed_at TEXT NOT NULL,
   tool_name TEXT NOT NULL,
   definition TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('pending','acked','quarantined')),
+  state TEXT NOT NULL CHECK(state IN ('pending','acked','quarantined','poisoned')),
   ack_hash TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0
+  attempts INTEGER NOT NULL DEFAULT 0,
+  gap_pending INTEGER NOT NULL DEFAULT 0,
+  gap_detector TEXT
 );
 CREATE TABLE snapshots(
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -420,19 +429,25 @@ impl RegistryStore {
                 },
             ),
             None => {
-                let k = Key::generate()?;
-                k.store(dir)?;
+                // State loss. Forget the comparison state FIRST (committed), then
+                // write the new key: a crash in between finds no key again and
+                // repeats this branch, never a new key with old snapshots.
                 if entry_count > 0 {
-                    // State loss: forget the comparison state so the next
-                    // complete inventory is reported as an initial baseline.
                     let tx = conn.unchecked_transaction()?;
                     tx.execute("DELETE FROM snapshot_members", [])?;
                     tx.execute("DELETE FROM snapshots", [])?;
                     tx.commit()?;
-                    (k, OpenKind::KeyLost)
-                } else {
-                    (k, OpenKind::Fresh)
                 }
+                let k = Key::generate()?;
+                k.store(dir)?;
+                (
+                    k,
+                    if entry_count > 0 {
+                        OpenKind::KeyLost
+                    } else {
+                        OpenKind::Fresh
+                    },
+                )
             }
         };
         let inner = Inner {
@@ -473,7 +488,14 @@ impl RegistryStore {
             "INSERT INTO rotations(key_id, reason) VALUES (?1, 'key_rotation')",
             [&new_key_id],
         )?;
-        new.store(&g.dir)?;
+        if let Err(e) = new.store(&g.dir) {
+            // The rename may or may not have happened: trust the disk. If it
+            // holds the new key, use it; otherwise keep the old one.
+            if let Ok(Some(k)) = Key::load(&g.dir) {
+                g.key = k;
+            }
+            return Err(e);
+        }
         let old = std::mem::replace(&mut g.key, new);
         let old_key_id = old.key_id();
         drop(old); // zeroises
@@ -540,12 +562,21 @@ impl RegistryStore {
     }
 
     /// Entries still to upload, oldest first. Entries that were refused before
-    /// (a 422 counted against them) are not mixed with the others: they are
-    /// offered one at a time, and only when no other entry is pending, so one
-    /// poisoned entry cannot hold the rest back.
-    pub fn pending_entries(&self, limit: usize) -> Result<Vec<EntryRecord>, RegistryError> {
+    /// (a 422 counted against them) are not mixed with the others: with
+    /// `include_refused` they are offered one at a time, and only when no other
+    /// entry is pending, so one bad entry cannot hold the rest back.
+    pub fn pending_entries(
+        &self,
+        limit: usize,
+        include_refused: bool,
+    ) -> Result<Vec<EntryRecord>, RegistryError> {
         let g = self.lock();
-        for (cond, lim) in [("attempts = 0", limit as i64), ("attempts > 0", 1)] {
+        let rounds: &[(&str, i64)] = if include_refused {
+            &[("attempts = 0", limit as i64), ("attempts > 0", 1)]
+        } else {
+            &[("attempts = 0", limit as i64)]
+        };
+        for (cond, lim) in rounds {
             let mut st = g.conn.prepare(&format!(
                 "SELECT {ENTRY_COLS} FROM entries WHERE state = 'pending' AND {cond} \
                  ORDER BY attempts, seq LIMIT ?1"
@@ -557,6 +588,16 @@ impl RegistryStore {
             }
         }
         Ok(Vec::new())
+    }
+
+    /// Entries refused for good.
+    pub fn poisoned_count(&self) -> Result<u64, RegistryError> {
+        let n: i64 = self.lock().conn.query_row(
+            "SELECT count(*) FROM entries WHERE state = 'poisoned'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
     }
 
     pub fn pending_entry_count(&self) -> Result<u64, RegistryError> {
@@ -592,7 +633,7 @@ impl RegistryStore {
         let tx = g.conn.unchecked_transaction()?;
         for r in refs {
             let Some(rec) = g.entry(r)? else { continue };
-            if rec.state == EntryState::Quarantined {
+            if matches!(rec.state, EntryState::Quarantined | EntryState::Poisoned) {
                 continue;
             }
             tx.execute(
@@ -619,27 +660,108 @@ impl RegistryStore {
     }
 
     /// Quarantine an entry unchanged (README M2b): it is never uploaded again.
-    pub fn quarantine(&self, metadata_ref: &str) -> Result<bool, RegistryError> {
+    /// The same statement sets a durable "gap pending" mark (with who detected
+    /// it) that [`RegistryStore::clear_gap_pending`] removes once the spool
+    /// seam has run and the gap is queued, so a crash in between repeats those
+    /// steps instead of losing the gap. Returns whether the state changed.
+    pub fn quarantine(&self, metadata_ref: &str, detector: &str) -> Result<bool, RegistryError> {
         let n = self.lock().conn.execute(
-            "UPDATE entries SET state = 'quarantined' WHERE metadata_ref = ?1 \
-             AND state <> 'quarantined'",
-            [metadata_ref],
+            "UPDATE entries SET state = 'quarantined', gap_pending = 1, gap_detector = ?2 \
+             WHERE metadata_ref = ?1 AND state <> 'quarantined'",
+            params![metadata_ref, detector],
         )?;
         Ok(n > 0)
     }
 
-    /// Count a failed upload attempt (a 422 on the entry) so that other pending
-    /// entries are tried first.
-    pub fn bump_attempts(&self, refs: &[String]) -> Result<(), RegistryError> {
+    /// Quarantined entries whose conflict handling did not finish: `(ref, detector)`.
+    pub fn gap_pending(&self) -> Result<Vec<(String, String)>, RegistryError> {
+        let g = self.lock();
+        let mut st = g.conn.prepare(
+            "SELECT metadata_ref, COALESCE(gap_detector, '') FROM entries \
+             WHERE gap_pending = 1 ORDER BY seq",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn clear_gap_pending(&self, metadata_ref: &str) -> Result<(), RegistryError> {
+        self.lock().conn.execute(
+            "UPDATE entries SET gap_pending = 0 WHERE metadata_ref = ?1",
+            [metadata_ref],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a pending entry refused for good.
+    pub fn poison(&self, metadata_ref: &str) -> Result<(), RegistryError> {
+        self.lock().conn.execute(
+            "UPDATE entries SET state = 'poisoned' WHERE metadata_ref = ?1 AND state = 'pending'",
+            [metadata_ref],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the latest snapshot of `scope` if it is `inventory_id`: the server
+    /// never saw it, so the next complete listing must be an `initial_baseline`.
+    pub fn forget_snapshot(
+        &self,
+        scope: &ScopeKey,
+        inventory_id: &str,
+    ) -> Result<(), RegistryError> {
+        let g = self.lock();
+        if g.latest_snapshot(scope)?
+            .is_some_and(|s| s.inventory_id == inventory_id)
+        {
+            let tx = g.conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM snapshot_members WHERE inventory_id = ?1",
+                [inventory_id],
+            )?;
+            tx.execute(
+                "DELETE FROM snapshots WHERE inventory_id = ?1",
+                [inventory_id],
+            )?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    /// Replace the bytes of a queued report (used to turn a report whose
+    /// previous snapshot was discarded into an `initial_baseline`).
+    pub fn replace_report_body(&self, report_id: &str, body: &[u8]) -> Result<(), RegistryError> {
+        self.lock().conn.execute(
+            "UPDATE reports SET body = ?2 WHERE report_id = ?1",
+            params![report_id, body],
+        )?;
+        Ok(())
+    }
+
+    /// Count a refusal (a 422 on the entry). An entry that reaches `poison_at`
+    /// refusals becomes `Poisoned`; those refs are returned.
+    pub fn bump_attempts(
+        &self,
+        refs: &[String],
+        poison_at: i64,
+    ) -> Result<Vec<String>, RegistryError> {
         let g = self.lock();
         let tx = g.conn.unchecked_transaction()?;
+        let mut poisoned = Vec::new();
         for r in refs {
             tx.execute(
-                "UPDATE entries SET attempts = attempts + 1 WHERE metadata_ref = ?1",
+                "UPDATE entries SET attempts = attempts + 1 WHERE metadata_ref = ?1 AND state = 'pending'",
                 [r],
             )?;
+            let n = tx.execute(
+                "UPDATE entries SET state = 'poisoned' WHERE metadata_ref = ?1 \
+                 AND state = 'pending' AND attempts >= ?2",
+                params![r, poison_at],
+            )?;
+            if n > 0 {
+                poisoned.push(r.clone());
+            }
         }
-        Ok(tx.commit()?)
+        tx.commit()?;
+        Ok(poisoned)
     }
 
     pub fn report_done(&self, report_id: &str) -> Result<(), RegistryError> {
@@ -658,7 +780,7 @@ impl RegistryStore {
             return Ok(EntryCheck::Missing);
         };
         match rec.state {
-            EntryState::Quarantined => Ok(EntryCheck::Quarantined),
+            EntryState::Quarantined | EntryState::Poisoned => Ok(EntryCheck::Quarantined),
             EntryState::Pending => Ok(EntryCheck::NotAcked),
             EntryState::Acked => {
                 let want: Option<String> = g.conn.query_row(
@@ -716,7 +838,7 @@ impl Inner {
         Ok(n > 0)
     }
 
-    fn entry_state(&self, r: &str) -> Result<Option<EntryState>, RegistryError> {
+    pub(crate) fn entry_state(&self, r: &str) -> Result<Option<EntryState>, RegistryError> {
         let s: Option<String> = self
             .conn
             .query_row(
