@@ -20,6 +20,8 @@ use hyper::body::Incoming;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Instant, Sleep};
 
+use crate::mcp::response::{End, ResponseTracker};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyLimit {
     ResponseTooLarge,
@@ -27,6 +29,9 @@ pub enum BodyLimit {
     CallTooLarge,
     IdleTimeout,
     CallTimeout,
+    /// A cancel was forwarded for this call and no response came within the
+    /// grace period (M3 `cancel_no_response`). Ends the stream.
+    CancelNoResponse,
 }
 
 impl std::fmt::Display for BodyLimit {
@@ -37,6 +42,7 @@ impl std::fmt::Display for BodyLimit {
             BodyLimit::CallTooLarge => "call exceeds the accumulated response limit",
             BodyLimit::IdleTimeout => "upstream response idle timeout",
             BodyLimit::CallTimeout => "call timeout",
+            BodyLimit::CancelNoResponse => "cancelled call got no response",
         })
     }
 }
@@ -92,8 +98,10 @@ pub enum BodyMode {
     Sse,
     /// A content-encoded stream: the bytes are opaque, so neither the JSON
     /// nor the event limit can be applied. Only the call cap and timeouts.
-    // OPEN: T-12b must treat encoded bodies as unobservable and must never
-    // decode them without a size cap (decompression bomb).
+    // Encoded bodies are unobservable (T-12b1): the response tracker reports
+    // outcome `unknown`/`unobservable` and the proxy never decodes them.
+    // OPEN: whether to strip `Accept-Encoding` upstream so bodies can be
+    // observed is undecided; current behaviour (pass through) is kept.
     Opaque,
 }
 
@@ -106,6 +114,8 @@ pub struct Limits {
     pub call_deadline: Instant,
 }
 
+type PollFrame = Poll<Option<Result<Frame<Bytes>, Box<dyn std::error::Error + Send + Sync>>>>;
+
 /// Admission permits (total, route, principal). Dropped with the body.
 pub struct Permits(#[allow(dead_code)] pub Vec<OwnedSemaphorePermit>);
 
@@ -116,13 +126,31 @@ pub struct MeteredBody {
     sse: SseEventTracker,
     idle: Pin<Box<Sleep>>,
     deadline: Pin<Box<Sleep>>,
+    /// Classifies the response for the observation seam. Reads the frames, never
+    /// alters them.
+    tracker: Option<ResponseTracker>,
     _permits: Permits,
 }
 
 impl MeteredBody {
-    pub fn new(inner: Incoming, lim: Limits, permits: Permits) -> Self {
+    pub fn new(
+        inner: Incoming,
+        lim: Limits,
+        permits: Permits,
+        tracker: Option<ResponseTracker>,
+    ) -> Self {
         let idle = Box::pin(tokio::time::sleep(lim.idle));
         let deadline = Box::pin(tokio::time::sleep_until(lim.call_deadline));
+        let mut tracker = tracker;
+        // hyper does not poll a body to its end when the response carries a
+        // Content-Length: it stops after that many bytes, or never polls an
+        // empty one. The end must be recognised here or the call would end as
+        // "client gone".
+        if inner.is_end_stream() {
+            if let Some(t) = &mut tracker {
+                t.finish(End::Eof);
+            }
+        }
         MeteredBody {
             inner,
             lim,
@@ -130,7 +158,25 @@ impl MeteredBody {
             sse: SseEventTracker::default(),
             idle,
             deadline,
+            tracker,
             _permits: permits,
+        }
+    }
+
+    /// End the stream with a limit error, reporting it to the tracker first.
+    fn abort(&mut self, e: BodyLimit) -> PollFrame {
+        if let Some(t) = &mut self.tracker {
+            t.finish(End::Limit(e));
+        }
+        Poll::Ready(Some(Err(e.into())))
+    }
+}
+
+impl Drop for MeteredBody {
+    fn drop(&mut self) {
+        // Dropped before the end: the client went away (or hyper aborted).
+        if let Some(t) = &mut self.tracker {
+            t.finish(End::Dropped);
         }
     }
 }
@@ -145,34 +191,56 @@ impl Body for MeteredBody {
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let this = &mut *self;
         if this.deadline.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Some(Err(BodyLimit::CallTimeout.into())));
+            return this.abort(BodyLimit::CallTimeout);
+        }
+        if let Some(t) = &mut this.tracker {
+            if t.poll_cancel_grace(cx).is_ready() {
+                return this.abort(BodyLimit::CancelNoResponse);
+            }
         }
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Pending => {
                 if this.idle.as_mut().poll(cx).is_ready() {
-                    return Poll::Ready(Some(Err(BodyLimit::IdleTimeout.into())));
+                    return this.abort(BodyLimit::IdleTimeout);
                 }
                 Poll::Pending
             }
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(Box::new(e)))),
+            Poll::Ready(None) => {
+                if let Some(t) = &mut this.tracker {
+                    t.finish(End::Eof);
+                }
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(e))) => {
+                if let Some(t) = &mut this.tracker {
+                    t.finish(End::Upstream);
+                }
+                Poll::Ready(Some(Err(Box::new(e))))
+            }
             Poll::Ready(Some(Ok(frame))) => {
                 this.idle.as_mut().reset(Instant::now() + this.lim.idle);
                 if let Some(d) = frame.data_ref() {
                     this.total += d.len() as u64;
                     if this.total > this.lim.max_call_bytes {
-                        return Poll::Ready(Some(Err(BodyLimit::CallTooLarge.into())));
+                        return this.abort(BodyLimit::CallTooLarge);
                     }
                     match this.lim.mode {
                         BodyMode::Sse => {
                             if let Err(e) = this.sse.feed(d, this.lim.max_sse_event_bytes) {
-                                return Poll::Ready(Some(Err(e.into())));
+                                return this.abort(e);
                             }
                         }
                         BodyMode::Json if this.total > this.lim.max_json_bytes => {
-                            return Poll::Ready(Some(Err(BodyLimit::ResponseTooLarge.into())));
+                            return this.abort(BodyLimit::ResponseTooLarge);
                         }
                         BodyMode::Json | BodyMode::Opaque => {}
+                    }
+                    if let Some(t) = &mut this.tracker {
+                        t.feed(d);
+                        // The last data frame of a length-delimited body.
+                        if this.inner.is_end_stream() {
+                            t.finish(End::Eof);
+                        }
                     }
                 }
                 Poll::Ready(Some(Ok(frame)))

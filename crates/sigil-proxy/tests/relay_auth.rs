@@ -295,7 +295,7 @@ async fn foreign_host_is_rejected_on_loopback() {
         &format!("127.0.0.1:{}", port + 1),
     ] {
         let req = format!(
-            "POST /mcp/a HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer tok-a\r\nContent-Length: 2\r\n\r\n{{}}"
+            "POST /mcp/a HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer tok-a\r\nContent-Length: 40\r\n\r\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}}"
         );
         let r = px.send(req.as_bytes()).await;
         assert_eq!(r.status, 403, "{host}");
@@ -306,7 +306,7 @@ async fn foreign_host_is_rejected_on_loopback() {
         format!("[::1]:{port}"),
     ] {
         let req = format!(
-            "POST /mcp/a HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer tok-a\r\nContent-Length: 2\r\n\r\n{{}}"
+            "POST /mcp/a HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer tok-a\r\nContent-Length: 40\r\n\r\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}}"
         );
         assert_eq!(px.send(req.as_bytes()).await.status, 200, "{host}");
     }
@@ -368,7 +368,7 @@ async fn request_cannot_name_the_upstream() {
     );
     // absolute-form request target naming another authority
     let req = format!(
-        "POST http://{}/mcp/a HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAuthorization: Bearer tok-a\r\nContent-Length: 2\r\n\r\n{{}}",
+        "POST http://{}/mcp/a HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAuthorization: Bearer tok-a\r\nContent-Length: 40\r\n\r\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}}",
         other.addr, px.addr
     );
     assert_eq!(px.send(req.as_bytes()).await.status, 200);

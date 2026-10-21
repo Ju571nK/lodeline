@@ -155,7 +155,7 @@ async fn tls_listener_relays() {
                 .await
                 .unwrap();
             let req = format!(
-                "POST /mcp/a HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: 2\r\n\r\n{{}}",
+                "POST /mcp/a HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: 40\r\n\r\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}}",
                 addr.port()
             );
             s.write_all(req.as_bytes()).await.unwrap();

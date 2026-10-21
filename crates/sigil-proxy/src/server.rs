@@ -12,8 +12,13 @@
 //! 7. method (only POST relays)               -> 405
 //! 8. admission (total, route, principal)     -> 429 (queue depth 0)
 //! 9. bounded request body                    -> 413
-//! 10. resolve + destination check, connect   -> 502 / 504
-//! 11. relay; response streamed through the metered body
+//! 10. classify the JSON-RPC message (`mcp`)  -> 400 / 200 fixed refusals,
+//!     202 for a held or pre-dispatch cancel
+//! 11. start observation (may defer)          -> 503 if the sink refuses
+//! 12. resolve + destination check, connect   -> 502 / 504
+//! 13. cancel check, then dispatch
+//! 14. relay; response streamed through the metered body, which classifies
+//!     the outcome for the observation seam
 //!
 //! The forwarded request body and the response bytes are never re-encoded
 //! (D-01 relay-first). No MCP SDK type is on this path.
@@ -22,8 +27,9 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
@@ -46,6 +52,13 @@ use crate::dest::{resolve_checked, DestError, Resolver};
 use crate::headers::{downstream_response_headers, upstream_request_headers};
 use crate::lifecycle::{drain, DrainOutcome};
 use crate::limits::Limits;
+use crate::mcp::cancel::{CancelKey, CancelOutcome, CancelRegistry};
+use crate::mcp::classify::{self, HeaderVersion, Message, NotificationInfo, Refusal, RefusalKind};
+use crate::mcp::observation::{
+    CallRef, CancelDisposition, CancelObserved, Cause, Delivery, Method as McpMethod, NoopSink,
+    Observation, ObservationSink, Outcome, RequestRefused, RequestStarted, StartVerdict, ToolField,
+};
+use crate::mcp::response::{CallCtx, CaptureLimits, Resolution, ResponseTracker};
 use crate::route::{Route, TableHandle};
 use crate::tls;
 
@@ -106,6 +119,10 @@ struct Shared {
     total: Arc<Semaphore>,
     host: HostPolicy,
     header_read_timeout: Duration,
+    sink: Arc<dyn ObservationSink>,
+    cancel: Arc<CancelRegistry>,
+    /// Relay-local call numbers (not invocation ids).
+    seq: AtomicU64,
     #[cfg(unix)]
     upstream_tls: tls::Connector,
 }
@@ -115,6 +132,8 @@ pub struct Proxy {
     table: TableHandle,
     resolver: Arc<dyn Resolver>,
     header_read_timeout: Duration,
+    sink: Arc<dyn ObservationSink>,
+    cancel: Arc<CancelRegistry>,
 }
 
 impl Proxy {
@@ -124,7 +143,23 @@ impl Proxy {
             table,
             resolver,
             header_read_timeout: HEADER_READ_TIMEOUT,
+            // No producer until T-13: nothing is observed and behaviour is
+            // exactly the plain relay.
+            sink: Arc::new(NoopSink),
+            cancel: Arc::new(CancelRegistry::default()),
         }
+    }
+
+    /// Install the consumer of observations (T-13). The default observes
+    /// nothing.
+    pub fn with_sink(mut self, sink: Arc<dyn ObservationSink>) -> Proxy {
+        self.sink = sink;
+        self
+    }
+
+    /// The cancel registry, for its counters (`unmatched_total`).
+    pub fn cancel_registry(&self) -> Arc<CancelRegistry> {
+        self.cancel.clone()
     }
 
     /// Override the header-read (and TLS handshake) timeout; used by tests.
@@ -151,6 +186,9 @@ impl Proxy {
                 HostPolicy::Any
             },
             header_read_timeout: self.header_read_timeout,
+            sink: self.sink,
+            cancel: self.cancel,
+            seq: AtomicU64::new(1),
             limits: self.limits,
             table: self.table,
             resolver: self.resolver,
@@ -480,6 +518,13 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     // Effective per-route limits: min(local, remote) (#260).
     let lim = route.limits();
     let call_deadline = Instant::now() + Duration::from_secs(lim.call_timeout_secs);
+    let received_at = SystemTime::now();
+    let t0 = std::time::Instant::now();
+    let call = CallRef {
+        seq: sh.seq.fetch_add(1, Ordering::Relaxed),
+        route_id: route.id.as_str().to_string(),
+        principal_id: principal.id.as_str().to_string(),
+    };
 
     // The request body is read in full under the request limit BEFORE any
     // upstream contact: an oversized body is a 413 with upstream untouched, and
@@ -488,7 +533,7 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     // stream; the upstream sees a Content-Length body, not the client's framing.
     let max_body = lim.max_request_body_bytes;
     if content_length(&parts.headers).is_some_and(|n| n > max_body) {
-        return fixed(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large");
+        return refuse_too_large(sh, call, received_at);
     }
     let collected = tokio::time::timeout_at(
         call_deadline,
@@ -498,11 +543,117 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     let request_body: Bytes = match collected {
         Err(_) => return fixed(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
         Ok(Err(e)) if e.downcast_ref::<LengthLimitError>().is_some() => {
-            return fixed(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large")
+            return refuse_too_large(sh, call, received_at)
         }
         Ok(Err(_)) => return fixed(StatusCode::BAD_REQUEST, "bad_request"),
         Ok(Ok(c)) => c.to_bytes(),
     };
+
+    // Classify a parse COPY of the body (T-12b1). The bytes forwarded below are
+    // `request_body` itself, untouched.
+    let message = classify::classify(&request_body, HeaderVersion::from_headers(&parts.headers));
+    // `Some` for a client request that is observed (start, completion, cancel).
+    let mut ctx: Option<CallCtx> = None;
+    match message {
+        Message::Refused(r) => {
+            return refuse(sh, call, r, request_body.len() as u64, received_at);
+        }
+        // Client answers to server requests and other notifications are relayed
+        // as they are; no events.
+        Message::ClientResponse | Message::Notification(NotificationInfo::Other) => {}
+        Message::Notification(NotificationInfo::Cancelled { target }) => {
+            let key = CancelKey {
+                route: call.route_id.clone(),
+                principal: call.principal_id.clone(),
+                id: target.clone(),
+            };
+            match sh.cancel.cancel(&key, Instant::now()) {
+                CancelOutcome::AfterDispatch(seq) => {
+                    // The target is in flight: the cancel goes upstream (below).
+                    sh.sink.observe(Observation::Cancel(CancelObserved {
+                        target: CallRef {
+                            seq,
+                            route_id: call.route_id.clone(),
+                            principal_id: call.principal_id.clone(),
+                        },
+                        target_id: target,
+                        disposition: CancelDisposition::AfterDispatch,
+                        at: SystemTime::now(),
+                    }));
+                }
+                // Not dispatched yet (the target's handler records it), already
+                // cancelled, or held for a request that has not arrived: never
+                // forwarded (M3, no hold-and-forward).
+                CancelOutcome::BeforeDispatch
+                | CancelOutcome::AlreadyCancelled
+                | CancelOutcome::Held => return empty(StatusCode::ACCEPTED),
+            }
+        }
+        Message::Request(info) => {
+            let key = CancelKey {
+                route: call.route_id.clone(),
+                principal: call.principal_id.clone(),
+                id: info.id.clone(),
+            };
+            // Two in-flight requests of one principal on one route may not share
+            // an id: a cancel could not tell them apart. The second is refused.
+            let Some(registration) = sh.cancel.register(key, call.seq, Instant::now()) else {
+                return refuse(
+                    sh,
+                    call,
+                    Refusal {
+                        kind: RefusalKind::InvalidRequest,
+                        id: Some(info.id),
+                        method: info.method,
+                        tool: info.tool,
+                    },
+                    request_body.len() as u64,
+                    received_at,
+                );
+            };
+            let mut c = CallCtx::new(
+                sh.sink.clone(),
+                call.clone(),
+                info.method,
+                info.id,
+                t0,
+                registration,
+            );
+            // The sink may defer dispatch (local spool commit of the start). The
+            // no-op sink has nothing to wait for or record.
+            if sh.sink.wants_observations() {
+                let started = RequestStarted {
+                    call: call.clone(),
+                    method: info.method,
+                    request_id: c.request_id().clone(),
+                    tool: info.tool.clone(),
+                    list_cursor: info.list_cursor,
+                    task_augmented: info.task_augmented,
+                    request_bytes: request_body.len() as u64,
+                    received_at,
+                };
+                if sh.sink.request_started(&started).await == StartVerdict::Refuse {
+                    c.abandon();
+                    return fixed(StatusCode::SERVICE_UNAVAILABLE, "audit_unavailable");
+                }
+            }
+            if c.registration().is_cancelled() {
+                return cancelled_before_dispatch(sh, c);
+            }
+            ctx = Some(c);
+        }
+    }
+
+    // Fail the observed call (if any) and answer.
+    macro_rules! bail {
+        ($resp:expr, $res:expr) => {{
+            let resp = $resp;
+            if let Some(c) = ctx.as_mut() {
+                c.complete($res);
+            }
+            return resp;
+        }};
+    }
 
     // Destination: resolve once, check every address, connect to a checked one.
     // Resolution is bounded by the connect timeout (a hanging resolver is a 504).
@@ -512,18 +663,25 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     )
     .await;
     let addrs = match resolved {
-        Err(_) => return fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+        Err(_) => bail!(
+            fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectTimeout)
+        ),
         Ok(Ok(a)) => a,
-        Ok(Err(DestError::Unresolved)) => {
-            return fixed(StatusCode::BAD_GATEWAY, "upstream_unresolved")
-        }
+        Ok(Err(DestError::Unresolved)) => bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_unresolved"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::Unresolved)
+        ),
         Ok(Err(DestError::Refused(why))) => {
             tracing::warn!(
                 route = route.id.as_str(),
                 class = why,
                 "destination refused"
             );
-            return fixed(StatusCode::BAD_GATEWAY, "destination_refused");
+            bail!(
+                fixed(StatusCode::BAD_GATEWAY, "destination_refused"),
+                Resolution::not_sent(Outcome::TransportFailure, Cause::DestinationRefused)
+            )
         }
     };
 
@@ -532,10 +690,16 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
         &route.upstream_authorization,
         &route.upstream.host_header,
     ) else {
-        return fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable");
+        bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::UpstreamRequestBuild)
+        )
     };
     let Ok(uri) = route.upstream.path.parse::<http::Uri>() else {
-        return fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable");
+        bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::UpstreamRequestBuild)
+        )
     };
     let mut up_req = Request::new(Full::new(request_body.clone()));
     *up_req.method_mut() = Method::POST;
@@ -545,18 +709,36 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     let connect_for = Duration::from_secs(lim.connect_timeout_secs);
     let io = match connect(sh, route, &addrs, connect_for).await {
         Ok(io) => io,
-        Err(ConnectError::Timeout) => {
-            return fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout")
-        }
-        Err(ConnectError::Io) => return fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+        Err(ConnectError::Timeout) => bail!(
+            fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectTimeout)
+        ),
+        Err(ConnectError::Io) => bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectFailed)
+        ),
     };
     let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(io)).await {
         Ok(p) => p,
-        Err(_) => return fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+        Err(_) => bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectFailed)
+        ),
     };
     tokio::spawn(async move {
         let _ = conn.await;
     });
+
+    // M3: the dispatch decision. A cancel that got here first wins and the
+    // request is never written; otherwise the request is dispatched and any
+    // later cancel is forwarded instead.
+    if let Some(c) = ctx.as_mut() {
+        if c.registration().try_dispatch().is_err() {
+            let c = ctx.take().expect("checked above");
+            return cancelled_before_dispatch(sh, c);
+        }
+        c.mark_dispatched();
+    }
 
     // One fresh connection per exchange and one send: a failed exchange is never
     // retried (PX-015). First byte = response headers, bounded by the idle limit
@@ -564,26 +746,56 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
     let first_byte =
         (Instant::now() + Duration::from_secs(lim.response_idle_timeout_secs)).min(call_deadline);
     let resp = match tokio::time::timeout_at(first_byte, sender.send_request(up_req)).await {
-        Err(_) => return fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
-        Ok(Err(_)) => return fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+        Err(_) => bail!(
+            fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+            Resolution::after_dispatch(
+                Outcome::Timeout,
+                Delivery::Unknown,
+                Cause::FirstByteTimeout,
+                None
+            )
+        ),
+        Ok(Err(_)) => bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+            Resolution::after_dispatch(
+                Outcome::Unknown,
+                Delivery::Unknown,
+                Cause::SendFailed,
+                None
+            )
+        ),
         Ok(Ok(r)) => r,
     };
 
     let (rparts, rbody) = resp.into_parts();
     let status = rparts.status;
+    let sent = |cause| {
+        Resolution::after_dispatch(
+            Outcome::Unknown,
+            Delivery::Sent,
+            cause,
+            Some(status.as_u16()),
+        )
+    };
     if status.is_redirection() {
         // Redirects are neither followed nor relayed (PX-014).
-        return fixed(StatusCode::BAD_GATEWAY, "upstream_redirect_refused");
+        bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_redirect_refused"),
+            sent(Cause::UpstreamRedirect)
+        )
     }
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return upstream_auth_rejected(&request_body);
+        // decisions.md D-02 #7: unknown/sent, no reason.
+        bail!(
+            upstream_auth_rejected(&request_body),
+            sent(Cause::UpstreamAuthRejected)
+        )
     }
 
     let sse = is_sse(&rparts.headers);
     // A content-encoded stream is opaque to the proxy: the event tracker cannot
-    // see event boundaries in compressed bytes, so only the call cap applies.
-    // OPEN: T-12b must treat encoded bodies as unobservable and must never
-    // decode them without a size cap.
+    // see event boundaries in compressed bytes, so only the call cap applies. It
+    // is never decoded, and the call's outcome is reported as unobservable.
     let encoded = rparts
         .headers
         .get(header::CONTENT_ENCODING)
@@ -597,6 +809,9 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
         (true, true) => BodyMode::Opaque,
         (false, _) => BodyMode::Json,
     };
+    // The limits above treat an encoded plain body like JSON (as before); the
+    // outcome tracker cannot read it.
+    let track_mode = if encoded { BodyMode::Opaque } else { mode };
     // A declared length over the limit is refused while the status line can
     // still be replaced.
     let declared_cap = if mode == BodyMode::Json {
@@ -605,9 +820,31 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
         lim.max_call_response_bytes
     };
     if content_length(&rparts.headers).is_some_and(|n| n > declared_cap) {
-        return fixed(StatusCode::BAD_GATEWAY, "upstream_response_too_large");
+        bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_response_too_large"),
+            sent(Cause::ResponseTooLarge)
+        )
     }
 
+    // From here the tracker owns the call and reports its completion when the
+    // body ends, fails or is dropped.
+    let page_cap = if mode == BodyMode::Json {
+        lim.max_json_response_bytes
+    } else {
+        lim.max_sse_event_bytes
+    }
+    .min(lim.inventory_max_bytes);
+    let tracker = ctx.take().map(|c| {
+        ResponseTracker::new(
+            c,
+            track_mode,
+            status.as_u16(),
+            CaptureLimits {
+                max_bytes: page_cap as usize,
+                max_tools: lim.inventory_max_tools as usize,
+            },
+        )
+    });
     let metered = MeteredBody::new(
         rbody,
         crate::body::Limits {
@@ -619,11 +856,145 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
             call_deadline,
         },
         permits,
+        tracker,
     );
     let mut out = Response::new(metered.boxed());
     *out.status_mut() = status;
     *out.headers_mut() = downstream_response_headers(&rparts.headers);
     out
+}
+
+// ------------------------------------------------------- MCP-level answers
+
+fn empty(status: StatusCode) -> Response<RespBody> {
+    let mut r = Response::new(boxed_full(Bytes::new()));
+    *r.status_mut() = status;
+    r.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    r
+}
+
+/// A fixed JSON-RPC error: constant message, no `data`, nothing echoed but the
+/// request id (contracts/README.md "Client-visible errors for pre-dispatch
+/// refusals"). Without an id the reply carries `"id":null`.
+fn jsonrpc_error(
+    id: Option<&classify::RequestId>,
+    code: i32,
+    message: &'static str,
+    status: StatusCode,
+) -> Response<RespBody> {
+    // `id.raw()` is validated JSON (a string or number); the message is a
+    // constant without quotes.
+    let body = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{},\"error\":{{\"code\":{code},\"message\":\"{message}\"}}}}",
+        id.map(|i| i.raw()).unwrap_or("null")
+    );
+    let mut r = Response::new(boxed_full(Bytes::from(body)));
+    *r.status_mut() = status;
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    r
+}
+
+/// The client-visible answer to a refusal. Upstream is never contacted.
+///
+/// - modern-era request, legacy version header: HTTP 400, empty body (B1).
+/// - `tasks/*`, `resources/(un)subscribe`: JSON-RPC `-32601`, HTTP 200.
+/// - unparseable tool name: JSON-RPC `-32602`, HTTP 200.
+/// - batch, malformed JSON-RPC, a method-less notification refusal: HTTP 400
+///   with a JSON-RPC `-32700`/`-32600` error and `"id":null`.
+// OPEN: the batch/malformed shape is not fixed by the contract ("batch 거절의
+// client 응답 형태는 [OPEN]"); this is the JSON-RPC 2.0 Invalid Request shape
+// over HTTP 400.
+fn refusal_response(r: &Refusal) -> Response<RespBody> {
+    let bad = StatusCode::BAD_REQUEST;
+    match r.kind {
+        RefusalKind::ModernRequest | RefusalKind::VersionHeader => empty(bad),
+        RefusalKind::Parse => jsonrpc_error(None, -32700, "Parse error", bad),
+        // The id is echoed when one was read (batches and unparseable bodies
+        // have none).
+        RefusalKind::InvalidRequest | RefusalKind::Batch => {
+            jsonrpc_error(r.id.as_ref(), -32600, "Invalid Request", bad)
+        }
+        RefusalKind::TasksMethod | RefusalKind::ResourcesSubscription => match &r.id {
+            Some(id) => jsonrpc_error(Some(id), -32601, "Method not found", StatusCode::OK),
+            // a notification: there is nobody to answer by id
+            None => jsonrpc_error(None, -32600, "Invalid Request", bad),
+        },
+        RefusalKind::ToolNameMalformed => {
+            jsonrpc_error(r.id.as_ref(), -32602, "Invalid params", StatusCode::OK)
+        }
+        RefusalKind::RequestTooLarge => fixed(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large"),
+    }
+}
+
+fn refuse(
+    sh: &Shared,
+    call: CallRef,
+    r: Refusal,
+    request_bytes: u64,
+    received_at: SystemTime,
+) -> Response<RespBody> {
+    let resp = refusal_response(&r);
+    sh.sink.observe(Observation::Refused(RequestRefused {
+        call,
+        reason: r.kind,
+        method: r.method,
+        request_id: r.id,
+        tool: r.tool,
+        http_status: resp.status().as_u16(),
+        request_bytes,
+        received_at,
+    }));
+    resp
+}
+
+fn refuse_too_large(sh: &Shared, call: CallRef, received_at: SystemTime) -> Response<RespBody> {
+    refuse(
+        sh,
+        call,
+        Refusal {
+            kind: RefusalKind::RequestTooLarge,
+            id: None,
+            method: McpMethod::Unknown,
+            tool: ToolField::NotApplicable,
+        },
+        0,
+        received_at,
+    )
+}
+
+/// M3: a cancel won against dispatch. Nothing was written upstream and no
+/// JSON-RPC response is sent; the open POST gets an event-less 200 event stream
+/// (README "취소 순서(M3)", N13).
+// OPEN: P1 verification: if Claude/Codex retry on this, close the connection
+// without an HTTP response instead (decisions.md "취소 전 dispatch의 HTTP 종료").
+fn cancelled_before_dispatch(sh: &Shared, mut ctx: CallCtx) -> Response<RespBody> {
+    sh.sink.observe(Observation::Cancel(CancelObserved {
+        target: ctx.call().clone(),
+        target_id: ctx.request_id().clone(),
+        disposition: CancelDisposition::BeforeDispatch,
+        at: SystemTime::now(),
+    }));
+    ctx.complete(Resolution::not_sent(
+        Outcome::Unknown,
+        Cause::CancelledBeforeDispatch,
+    ));
+    let mut r = empty(StatusCode::OK);
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    r
 }
 
 // ------------------------------------------------------------------ connect

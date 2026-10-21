@@ -3,6 +3,9 @@
 //! the connection goes to a checked address, DNS is resolved once per request.
 
 mod common;
+
+/// A valid JSON-RPC request (T-12b1 refuses bodies that are not).
+const PING: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
 use common::*;
 use std::net::IpAddr;
 
@@ -31,7 +34,7 @@ async fn named_route(up: &Up, answers: Vec<Vec<IpAddr>>) -> Px {
 async fn name_resolving_to_loopback_relays() {
     let up = ok_upstream().await;
     let px = named_route(&up, vec![vec![ip("127.0.0.1")]]).await;
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 200);
     assert_eq!(up.count(), 1);
     assert_eq!(
@@ -56,7 +59,7 @@ async fn http_name_resolving_to_non_loopback_is_refused() {
         "::ffff:10.0.0.5",
     ] {
         let px = named_route(&up, vec![vec![ip(bad)]]).await;
-        let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+        let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
         assert_eq!(r.status, 502, "{bad}");
         assert_eq!(r.text(), "{\"error\":\"destination_refused\"}", "{bad}");
         // the refusal reason (address class) is not disclosed to the client
@@ -65,7 +68,7 @@ async fn http_name_resolving_to_non_loopback_is_refused() {
     // one bad address in an otherwise loopback answer refuses the whole answer
     let px = named_route(&up, vec![vec![ip("127.0.0.1"), ip("10.0.0.5")]]).await;
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-a"), &[], PING).await.status,
         502
     );
     assert_eq!(up.conns(), 0, "no connection was attempted");
@@ -81,11 +84,11 @@ async fn rebinding_is_checked_per_request() {
     let up = ok_upstream().await;
     let px = named_route(&up, vec![vec![ip("127.0.0.1")], vec![ip("10.0.0.5")]]).await;
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-a"), &[], PING).await.status,
         200
     );
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-a"), &[], PING).await.status,
         502
     );
     assert_eq!(up.conns(), 1);
@@ -93,12 +96,12 @@ async fn rebinding_is_checked_per_request() {
     let up = ok_upstream().await;
     let px = named_route(&up, vec![vec![ip("10.0.0.5")], vec![ip("127.0.0.1")]]).await;
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-a"), &[], PING).await.status,
         502
     );
     assert_eq!(up.conns(), 0);
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-a"), &[], PING).await.status,
         200
     );
 }
@@ -108,7 +111,7 @@ async fn rebinding_is_checked_per_request() {
 async fn unresolvable_name_is_502() {
     let up = ok_upstream().await;
     let px = named_route(&up, vec![vec![]]).await;
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 502);
     assert_eq!(r.text(), "{\"error\":\"upstream_unresolved\"}");
     assert_eq!(up.conns(), 0);
@@ -177,7 +180,7 @@ async fn ip_literal_skips_dns() {
     )
     .await;
     assert_eq!(
-        px.post("/mcp/a", Some("tok-a"), &[], b"{}").await.status,
+        px.post("/mcp/a", Some("tok-a"), &[], PING).await.status,
         200
     );
 }
@@ -199,7 +202,7 @@ async fn hanging_resolver_is_a_504() {
     );
     let px = Px::start_with(Some(t), l, std::sync::Arc::new(HangResolver)).await;
     let start = std::time::Instant::now();
-    let r = px.post("/mcp/a", Some("tok-a"), &[], b"{}").await;
+    let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 504);
     assert_eq!(r.text(), "{\"error\":\"upstream_timeout\"}");
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
