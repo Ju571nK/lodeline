@@ -1,6 +1,6 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-18 · Claude Code orchestrator 세션 (기준 커밋 `ad63551`)
+갱신: 2026-10-21 · Claude Code orchestrator 세션 (기준 커밋 `6a90e5f`)
 
 ## 현재 상태
 
@@ -135,6 +135,44 @@
 남은 P1: S2b(CSR 서명), T-12b(MCP protocol), T-13(registry entry 생성)·T-14(spool·이벤트 생성), T-15(manager, sigil-manager#37), T-16.
 실기 미검증: 변화 없음. 조회 API의 실제 TLS 검증은 e2e(macOS 로컬·CI)까지이며 Rocky 실기·SELinux·systemd는 하지 않았다.
 교훈: 병렬 갈래가 같은 파일을 필요로 하면 먼저 끝난 갈래를 머지하고 rebase한 뒤 소유권을 넘긴다(C 2단계). 고정 날짜 fixture는 보존 정리가 있는 경로에서 시간이 지나면 깨진다(e2e L4).
+
+## 2026-10-20 P1 6회차 배정: T-12b1·T-13·T-14 (기준 `ad63551`)
+
+결정(사용자, 2026-10-20·10-21): [decisions.md "T-13/T-14 범위"·"T-13a/T-13b 후속 결정"](decisions.md).
+
+| 작업 | 모델/역할 | 목표 | Spec | 소유 파일 | 이슈 |
+|---|---|---|---|---|---|
+| 골격 | orchestrator | `mcp`·`spool` 모듈 자리, 결정 기록 | — | `lib.rs`, `Cargo.toml`, decisions.md | — |
+| API DTO | sonnet (coder, worktree) | inventory 보고 DTO, `ErrorItem.metadata_ref` | PX-005/016, AC-02 | `crates/sigil-proxy-api/**` | #298 |
+| T-14a | sonnet (coder, worktree) | SQLite WAL spool, fsync 뒤 ack, 한도·격리 | PX-011/012, AC-06/12 | `sigil-proxy/src/spool.rs` | #297 |
+| T-12b1 | sonnet (coder, worktree) | MCP 요청·응답 분류, `ObservationSink`, cancel | PX-003/004, AC-07 | `sigil-proxy/src/mcp/**` | #299 |
+| T-14b | sonnet (coder, worktree) | spool을 lifecycle·status 보고에 연결 | PX-011/012, AC-06/12 | `lifecycle.rs`, `status_report.rs`, `ingest_client.rs`, `state_dir.rs`, e2e | #305 |
+| T-13a-server | sonnet (coder, worktree) | inventory 수신·snapshot/drift projection·조회 | PX-005/006, AC-02 | `sigil-server/src/proxy/inventory*.rs`, `ledger*.rs`, `query.rs`, e2e | #304 |
+| T-13b | sonnet (coder, worktree) | registry key·JCS·registry 저장소·inventory 엔진·upload client | PX-005, AC-02/05 | `sigil-proxy/src/{jcs,registry_key,registry_store,inventory,registry_client}.rs` | #306 |
+| 리뷰 | sonnet (reviewer, 읽기 전용) | 각 갈래 독립 리뷰·재확인 | 해당 ID | 없음 | — |
+
+진행:
+- T-14a·T-12b1·DTO: 리뷰 지적(spool 유지보수 굶주림·조용한 재생성·용량 계산, id 없는 요청 미관측·중복 key·중복 in-flight id) 수정 뒤 재확인 → 머지.
+- T-14b: 리뷰 지적(gap 인계 overflow, set-aside 충돌 구간, 쓸 수 없는 URL은 시작 오류) 수정. Rocky CI에서 일시적 tail gap으로 e2e가 실패해 "열린 gap 없음"으로 고침 → 머지.
+- T-13a-server: 리뷰 지적(이차 비용 resolve, gap 한도가 snapshot을 막음, 대기 노화, 멱등 table) 수정. 후속 결정 1·2 반영 뒤 rebase하면서 #308의 e2e가 이전 tail 규칙을 기대해 고쳐 씀.
+- T-13b: 리뷰 지적(discard 뒤 chain 끊김, 단일 413/422 정체, 충돌 gap 충돌 안전, cursor 정체성, 424 반복, poison은 일시 정지, 결정적 `gap_id`) 수정. 후속 결정 3·4 반영.
+
+### 6회차 머지 결과 (2026-10-20 ~ )
+
+| PR | 작업 | 이슈 |
+|---|---|---|
+| #296 | 골격·T-13/T-14 결정 | — |
+| #300 | inventory DTO | #298 |
+| #301 | T-14a spool | #297 |
+| #303 | T-12b1 MCP 분류 | #299 |
+| #308 | T-14b spool 연결 | #305, #260 |
+
+후속: #302(spool 만료 시계·NOFOLLOW·격리 한도), #307(registry entry 보존·보고 backlog).
+T-12b2로 넘김: cancel key에 session 포함, upstream initialize 판정, m5 version header 누락 규칙.
+T-13c로 넘김: `StatusBuilder::set_registry(client.health_probe())` 연결, `sync_stalled`에 ingest 424 보류 정체 합산, probe를 `spawn_blocking`으로.
+T-13d로 넘김: `Admission`을 `Proxy`에 전달, 비울 수 없는 spool은 fail closed.
+실기 미검증: spool fsync·재시작 복구, inventory 수신은 macOS 로컬·CI e2e까지. Rocky 실기·SELinux·systemd는 하지 않았다.
+교훈: stacked PR의 base를 `--delete-branch`로 머지하면 위 PR이 자동으로 닫힌다. base를 지우기 전에 위 PR의 base를 main으로 바꾼다. 규칙을 바꾸는 갈래는 rebase 뒤 전체 workspace 테스트를 돌린다(다른 갈래의 e2e가 이전 규칙을 기대했다).
 
 ## 2026-10-11 P1 2회차 배정 (기준 `f656b5c`)
 

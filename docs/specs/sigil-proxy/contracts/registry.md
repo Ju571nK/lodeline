@@ -20,7 +20,7 @@ Status tags: **[DC]** decided-candidate, **[OPEN]** needs a decision or evidence
 | History links across key_id | R4 | [DC]; [OPEN] O-3 |
 | Re-baseline marker projection | R5 | [DC] |
 | Scoped content lookup | R6 | [OPEN] (README already lists it as open) |
-| Inventory report / drift event contract | R7 | [DC]; [OPEN] O-4 |
+| Inventory report / drift event contract | R7 | [DC]; O-4 decided |
 
 ## R1. Registry entry
 
@@ -190,9 +190,23 @@ fixed unavailable label when deleted. Possession of a UUID or ordinary
 
 ## R7. Inventory and drift events
 
-Transport: `POST /v1/proxy-inventory` (candidate; mTLS proxy identity), body is one
-`inventory_report`. Inventory is **not** an invocation event, so the frozen
-`proxy-event.schema.json` is untouched.
+Transport: `POST /v1/proxy-inventory` (decided 2026-10-20, O-4: separate from the status
+report; mTLS proxy identity), body is one `inventory_report`. Inventory is **not** an
+invocation event, so the frozen `proxy-event.schema.json` is untouched.
+
+- Body limit: 4 MiB (P1 initial test value), checked before any parse; larger bodies
+  get 413 `payload_too_large`.
+- Clock: chain order uses the proxy clock (`observed_at`). A report whose `observed_at`
+  is more than 300 s ahead of the server's receive time is 422 `semantic_invalid`
+  (fixed body, the value is not echoed). Past `observed_at` values are accepted.
+  The check runs after I-1, parse and the I-4 duplicate check, so a duplicate of an
+  accepted report is still acknowledged.
+- 503 `storage_limit`: at most 256 reports per proxy may wait in `pending_previous`
+  (I-5). Over that cap the report is refused; the proxy retries later or sends a
+  fresh complete baseline. A legitimate snapshot is never refused for the gap budget:
+  when the per-proxy gap cap is reached the `inventory_incomplete` /
+  `comparison_inconsistent` record is dropped and counted in `audit_gaps_dropped`
+  (ledger-and-query.md).
 
 ### Report
 
@@ -303,11 +317,16 @@ listed as `inventory_incomplete` gaps (L4), never as snapshots.
 
 | ID | Question |
 |---|---|
-| O-2 | Keep the old K for a bounded rollback window, or destroy at once (R3)? |
+| O-2 | Decided 2026-10-20: the old K is destroyed at once (no rollback window). |
 | O-3 | Should a proxy-asserted `definition_comparison=different` be surfaced to attention (R4)? |
-| O-4 | `POST /v1/proxy-inventory` as a separate endpoint, or batched with the status report? Report size at 10,000 members is about 450 KB. |
+| O-4 | Decided 2026-10-20: separate `POST /v1/proxy-inventory` (R7). |
 | O-5 | Server-side integrity flag when the same fingerprint arrives with different `definition` (R1)? |
-| O-6 | Cross-scope links on `credential_scope_id` change (R5)? |
+| O-6 | Decided 2026-10-20: no cross-scope links on `credential_scope_id` change. |
+
+Canonical JSON (R1): integers beyond 2^53 are rounded to the IEEE-754 double and
+printed with the RFC 8785 number rules, like every other number (decided 2026-10-21).
+Two definitions that differ only beyond double precision therefore share a
+fingerprint. Non-finite numbers cannot be canonicalised (`canonicalization_failed`).
 
 ## R9. Evidence boundary
 
