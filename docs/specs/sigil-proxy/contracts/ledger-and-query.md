@@ -287,12 +287,13 @@ must show `status_as_of` and `connection_state` together (PX-016, AC-12).
 
 | Field | Meaning |
 |---|---|
-| `registry` | `{pending_entries, sync_stalled}` |
+| `registry` | `{pending_entries, sync_stalled}` plus optional `quarantined_entries`, `poisoned_entries`, `discarded_reports` (proxy-status.schema.json; absent from older proxies) |
 | `routes` | `[{upstream_id, state, reason?}]` route health, fixed enums (proxy-status.schema.json) |
 | `central` | `{last_ingest_ack_at, consecutive_failures}` proxy-reported |
 | `outages` | recent proxy-reported central outages (`central_outage` gaps), max 16 |
 | `counters` | L6 |
 | `audit_gaps` | newest-first, max 50, plus `audit_gaps_total` |
+| `audit_gaps_dropped` | count of inventory gap records (`inventory_incomplete`, `comparison_inconsistent`) dropped because the per-proxy gap cap was reached (registry.md R7) |
 | `open_gap_counts` | object kind → count |
 
 404 when the proxy is unknown or outside the caller's `proxy.read` range
@@ -372,7 +373,7 @@ at most 32 items. `events_total` is the number of constituent events and
 | `kind` | source | `details` |
 |---|---|---|
 | `producer_epoch_change` | server | `previous_epoch_id`, `epoch_id` |
-| `sequence_gap` | server | `epoch_id`, `from_sequence`, `to_sequence`, `tail` (bool). A missing range below the highest accepted sequence (`tail=false`), or the range `(highest accepted + 1 .. last_assigned_sequence)` from the status report (`tail=true`, F13/AC-06). A tail can be events still in flight; it closes when they arrive and manager shows it with `spool.unsent_events` |
+| `sequence_gap` | server | `epoch_id`, `from_sequence`, `to_sequence`, `tail` (bool). A missing range below the highest accepted sequence (`tail=false`), or the range `(highest accepted + 1 .. last_assigned_sequence − spool.unsent_events)` from the status report (`tail=true`, F13/AC-06; decided 2026-10-21). Events still unsent in the spool are backlog, not a gap; a spool holds exactly one epoch, so the subtraction always applies to the reporting epoch. A tail can still be events handed to the network but not yet stored; it closes when they arrive |
 | `registry_conflict` | proxy | `metadata_ref`, `key_id`, `event_ids` (≤ 100), `affected_event_count`, `detected_by` |
 | `event_quarantined` | proxy | `event_ids`, `code` (`conflict`, `sequence_conflict`, `semantic_invalid`) |
 | `local_record_failed` | proxy | `count`, `invocation_ids` (completion could not be stored locally) |

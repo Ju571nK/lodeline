@@ -147,3 +147,9 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   spool이 차면 P1은 차단만 한다(`allow-with-gap`은 미룸). inventory는 status 보고와 분리된 `POST /v1/proxy-inventory`로 보낸다(O-4).
   도구 이름 조회(R6)는 P1에서 ref만 두고 T-15에서 다시 본다. test 전용 feature 이름은 crate별 기존 이름을 유지한다(proxy `test-util`, server `test-support`).
   기본값: 재시작 뒤 완료가 없는 호출은 start만 남는다. key 회전 시 이전 K는 즉시 폐기한다(O-2). scope를 넘는 link는 만들지 않는다(O-6).
+- T-13a/T-13b 후속 결정(2026-10-21, 사용자 결정·추천안 채택):
+  status 보고의 tail gap은 `last_assigned_sequence − spool.unsent_events`를 기준으로 판정한다. spool에 남아 아직 보내지 않은 이벤트는 gap이 아니다(spool은 epoch 하나에만 묶인다).
+  inventory chain 순서는 proxy 시계(`observed_at`)로 정하고, server 수신 시각보다 300초 넘게 미래인 보고는 422 `semantic_invalid`로 거절한다.
+  status `registry` 블록에 선택 필드 `quarantined_entries`·`poisoned_entries`·`discarded_reports`를 둔다. status DTO는 모르는 필드를 거절하므로 server를 proxy보다 먼저 올린다.
+  canonical JSON은 2^53을 넘는 정수도 RFC 8785대로 double로 반올림한다.
+  orchestrator 결정: inventory body 한도는 4 MiB(P1 초기 시험값)이며 parse 전에 413 `payload_too_large`로 막는다. `pending_previous` 대기는 proxy당 256개이며 넘으면 503 `storage_limit`이다.
