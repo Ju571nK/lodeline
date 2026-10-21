@@ -148,7 +148,6 @@ impl Lifecycle {
         &self,
         limits: &crate::limits::Limits,
     ) -> anyhow::Result<crate::spool::Spool> {
-        use anyhow::Context;
         let creatable = self.state.is_new_epoch() || !self.state.spool_ready()?;
         let cfg = crate::spool::SpoolConfig::new(
             self.state.dir(),
@@ -157,10 +156,27 @@ impl Lifecycle {
             creatable,
             limits,
         );
-        let spool = crate::spool::Spool::open(cfg).context(
-            "cannot open the event spool (to start a new epoch, stop the proxy and delete \
-             binding.json; the old spool.db is kept aside, never deleted)",
-        )?;
+        use crate::spool::SpoolError;
+        let spool = match crate::spool::Spool::open(cfg) {
+            Ok(s) => s,
+            // The database itself is unusable: only an operator decision (a new
+            // epoch) can move on, and it has a cost.
+            Err(
+                e @ (SpoolError::Missing
+                | SpoolError::Corrupt
+                | SpoolError::Foreign
+                | SpoolError::UnsupportedSchema),
+            ) => {
+                return Err(anyhow::Error::new(e).context(
+                    "cannot open the event spool. To start a new epoch, stop the proxy and \
+                     delete binding.json: the old spool.db is kept aside (never deleted), but \
+                     its unsent events will NOT be sent and the server will record a gap",
+                ))
+            }
+            // Transient (disk full, permissions, ...): retry after fixing it; no
+            // advice to discard anything.
+            Err(e) => return Err(anyhow::Error::new(e).context("cannot open the event spool")),
+        };
         self.state.mark_spool_ready()?;
         Ok(spool)
     }
@@ -399,6 +415,11 @@ async fn run_inner(
         report: report_params,
         ingest: ingest_params,
     } = pacing;
+    // The bootstrap already validated `control_plane_url`; if it still cannot be
+    // used, a proxy that could never send its events must not run (and must not
+    // touch state_dir).
+    let fetcher = crate::config_sync::MtlsFetcher::from_bootstrap(b)
+        .ok_or_else(|| anyhow::anyhow!("control_plane_url is unusable: refusing to start"))?;
     let mut lc = Lifecycle::start(b)?;
     // The durable spool opens right after the lock and binding. A start that
     // cannot open it does not run: events must never be accepted into a spool
@@ -442,7 +463,7 @@ async fn run_inner(
     let mut ingest_task = None;
     let mut pump_task = None;
     let mut retention_task = None;
-    let sync_task = match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
+    let sync_task = match Some(fetcher) {
         Some(fetcher) => {
             // One mTLS client serves the config fetch and the status report.
             let fetcher = std::sync::Arc::new(fetcher);
@@ -577,10 +598,8 @@ async fn run_inner(
                 .await;
             }))
         }
-        None => {
-            tracing::error!("control_plane_url unusable: no config will be fetched");
-            None
-        }
+        // Checked at the top of this function.
+        None => None,
     };
 
     let proxy = crate::server::Proxy::new(
@@ -614,6 +633,9 @@ async fn run_inner(
     // The relay stops appending once `serve` returned; the spool closes when its
     // last handle goes.
     drop(admission);
+    // Every task holding the spool is done: close the writer on the blocking
+    // pool (not in a drop on a worker) before `stopped` is published.
+    spool.close().await;
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
     lock(&lc).set_run_state(RunState::Stopped)?;
@@ -994,10 +1016,16 @@ mod tests {
         assert_ne!(new_epoch, old_epoch);
         // Not ready for the new epoch even though an older marker exists.
         assert!(!lc.state.spool_ready().unwrap());
-        let aside = b
-            .state_dir
-            .join(format!("{}.stale-{new_epoch}", crate::spool::SPOOL_FILE));
-        assert!(aside.exists(), "the old database is kept");
+        let prefix = format!("{}.stale-", crate::spool::SPOOL_FILE);
+        let aside = std::fs::read_dir(&b.state_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .expect("the old database is kept");
         let spool = lc.open_spool(&spool_limits()).unwrap();
         let snap = spool.snapshot();
         assert_eq!((snap.unsent_events, snap.last_assigned_sequence), (0, 0));

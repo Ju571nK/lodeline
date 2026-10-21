@@ -218,7 +218,7 @@ impl StateDir {
                 // the binding is written, so a crash in between repeats this
                 // step instead of leaving a foreign database next to the new
                 // epoch. It is renamed, never deleted.
-                set_aside_spool(dir, &epoch)?;
+                set_aside_spool(dir)?;
                 let b = Binding {
                     schema_version: 1,
                     proxy_id: proxy_id.as_str().to_string(),
@@ -429,26 +429,45 @@ impl StateDir {
     }
 }
 
-/// Rename `spool.db` and its WAL/SHM files to `<name>.stale-<epoch>` (the epoch
-/// is the NEW one, so the name cannot collide with an earlier set-aside). Nothing
-/// is deleted. Missing files are skipped, so the step is repeatable after a crash
-/// halfway.
-fn set_aside_spool(dir: &Path, new_epoch: &str) -> Result<(), StateError> {
-    for suffix in ["", "-wal", "-shm"] {
-        let name = format!("{}{suffix}", crate::spool::SPOOL_FILE);
-        let from = dir.join(&name);
-        match std::fs::symlink_metadata(&from) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(io_err(&from, e)),
+/// Note file holding the suffix of an unfinished set-aside, so a retry after a
+/// crash uses the same names for the files not yet moved.
+const ASIDE_NOTE: &str = ".spool_aside";
+
+/// Rename `spool.db` and its WAL/SHM files to `<name>.stale-<id>`. The id is
+/// fixed before the first rename (note file) and reused by a retry, so one
+/// database never ends up split over two suffixes. Nothing is deleted except the
+/// note itself, once every file is moved. Missing files are skipped.
+fn set_aside_spool(dir: &Path) -> Result<(), StateError> {
+    let names: Vec<String> = ["", "-wal", "-shm"]
+        .iter()
+        .map(|suffix| format!("{}{suffix}", crate::spool::SPOOL_FILE))
+        .collect();
+    let present: Vec<&String> = names
+        .iter()
+        .filter(|n| std::fs::symlink_metadata(dir.join(n)).is_ok())
+        .collect();
+    let note = dir.join(ASIDE_NOTE);
+    let id = match std::fs::read_to_string(&note) {
+        Ok(v) if uuid::Uuid::parse_str(v.trim()).is_ok() => v.trim().to_string(),
+        _ => {
+            if present.is_empty() {
+                return Ok(());
+            }
+            let id = uuid::Uuid::new_v4().hyphenated().to_string();
+            write_atomic(dir, ASIDE_NOTE, id.as_bytes())?;
+            id
         }
-        let to = dir.join(format!("{name}.stale-{new_epoch}"));
+    };
+    for name in present {
+        let from = dir.join(name);
+        let to = dir.join(format!("{name}.stale-{id}"));
         std::fs::rename(&from, &to).map_err(|e| io_err(&from, e))?;
         tracing::warn!(
             file = name.as_str(),
             "spool of an older epoch moved aside (not deleted)"
         );
     }
+    let _ = std::fs::remove_file(&note);
     Ok(())
 }
 
@@ -892,7 +911,7 @@ mod tests {
     /// N2: stale spool files of an older epoch are renamed (database, WAL and
     /// shared-memory file), never deleted, before the new binding is written.
     #[test]
-    fn new_epoch_renames_stale_spool_files_with_the_new_epoch() {
+    fn new_epoch_renames_stale_spool_files_under_one_suffix() {
         let t = tempfile::tempdir().unwrap();
         let d = t.path().join("st");
         let a = StateDir::open(&d, &id("px-1")).unwrap();
@@ -906,20 +925,48 @@ mod tests {
         }
         std::fs::remove_file(d.join(BINDING_FILE)).unwrap();
         let b = StateDir::open(&d, &id("px-1")).unwrap();
+        let mut ids = std::collections::HashSet::new();
         for (f, body) in [
             ("spool.db", "db"),
             ("spool.db-wal", "wal"),
             ("spool.db-shm", "shm"),
         ] {
             assert!(!d.join(f).exists(), "{f} moved");
-            let kept = d.join(format!("{f}.stale-{}", b.epoch_id()));
-            assert_eq!(std::fs::read_to_string(kept).unwrap(), body);
+            let kept = std::fs::read_dir(&d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .find(|n| n.starts_with(&format!("{f}.stale-")))
+                .unwrap_or_else(|| panic!("{f} kept"));
+            ids.insert(kept[f.len()..].to_string());
+            assert_eq!(std::fs::read_to_string(d.join(kept)).unwrap(), body);
         }
+        assert_eq!(ids.len(), 1, "one suffix for the whole set");
+        assert!(!d.join(ASIDE_NOTE).exists());
         // An existing epoch never touches its spool files.
         std::fs::write(d.join("spool.db"), "mine").unwrap();
         drop(b);
         let c = StateDir::open(&d, &id("px-1")).unwrap();
         assert!(!c.is_new_epoch());
         assert_eq!(std::fs::read_to_string(d.join("spool.db")).unwrap(), "mine");
+    }
+
+    /// A crash halfway through the set-aside: the retry finishes under the same
+    /// suffix (taken from the note), not a new one.
+    #[test]
+    fn set_aside_retry_keeps_one_suffix() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("st");
+        std::fs::create_dir_all(&d).unwrap();
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        std::fs::write(d.join(ASIDE_NOTE), &id).unwrap();
+        std::fs::write(d.join(format!("spool.db.stale-{id}")), "db").unwrap();
+        std::fs::write(d.join("spool.db-wal"), "wal").unwrap();
+        set_aside_spool(&d).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(d.join(format!("spool.db-wal.stale-{id}"))).unwrap(),
+            "wal"
+        );
+        assert!(!d.join("spool.db-wal").exists());
+        assert!(!d.join(ASIDE_NOTE).exists());
     }
 }

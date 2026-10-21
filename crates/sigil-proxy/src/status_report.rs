@@ -206,6 +206,15 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether [`Inner::push`] would accept this gap (without changing anything).
+    fn has_room_for(&self, gap: &GapReport) -> bool {
+        let id = gap_id(gap);
+        match self.entries.iter().find(|e| gap_id(&e.gap) == id) {
+            Some(e) if e.state == GapState::Pending => true,
+            _ => self.pending() < MAX_QUEUED_GAPS,
+        }
+    }
+
     /// Report the overflow tally as one `local_record_failed` gap as soon as
     /// there is room. The gap is new (its own id): a gap already sent is never
     /// changed, because the server answers a different body under the same id
@@ -316,6 +325,13 @@ impl GapQueue {
             g.flush();
         }
         r
+    }
+
+    /// Whether the queue can take this gap now. A producer whose own record is
+    /// the only copy checks this first, so a refusal never turns into an overflow
+    /// count on every retry.
+    pub fn has_room_for(&self, gap: &GapReport) -> bool {
+        self.lock().has_room_for(gap)
     }
 
     /// [`GapQueue::push`] for a producer: a gap that does not fit is counted and
@@ -1221,9 +1237,10 @@ pub async fn run_status_reporter<T: StatusTransport + ?Sized>(
 /// Hand the spool's gaps (`spool_expired`, recorded by the spool itself) to the
 /// gap queue once. Returns how many were handed off.
 ///
-/// A gap leaves the spool only after the queue holds it durably: if the queue
-/// could not be persisted the gap stays in the spool and is offered again on the
-/// next call. Offering a gap twice (a crash between the two steps) is harmless:
+/// A gap leaves the spool only after the queue holds it durably: if it does not
+/// fit, or the queue could not be persisted, the gap stays in the spool and is
+/// offered again on the next call. Offering a gap twice (a crash between the
+/// two steps) is harmless:
 /// the queue replaces an entry by `gap_id`, and the server answers a repeated
 /// `gap_id` with the same body as `duplicate`.
 pub async fn hand_off_spool_gaps(spool: &Spool, gaps: &GapQueue) -> usize {
@@ -1233,9 +1250,21 @@ pub async fn hand_off_spool_gaps(spool: &Spool, gaps: &GapQueue) -> usize {
     if pending.is_empty() {
         return 0;
     }
-    let ids: Vec<String> = pending.iter().map(|g| gap_id(g).to_string()).collect();
+    // Only gaps the queue takes are recorded and handed off. A gap that does not
+    // fit stays in the spool (durable) and is offered again next time; recording
+    // it anyway would only bump the overflow count and lose its range.
+    let mut ids: Vec<String> = Vec::new();
     for g in pending {
-        gaps.record(g);
+        // Checked right before each record, so a batch cannot overshoot.
+        if gaps.has_room_for(&g) {
+            ids.push(gap_id(&g).to_string());
+            // `record` flushes the persister, so `persist_failed` below
+            // describes this very write, not an earlier one.
+            gaps.record(g);
+        }
+    }
+    if ids.is_empty() {
+        return 0;
     }
     if gaps.persist_failed() {
         // Not durable yet: keep them in the spool, which is durable.
@@ -2688,5 +2717,64 @@ mod tests {
         ok.store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
         assert!(spool.pending_gaps().unwrap().is_empty());
+    }
+
+    /// A full gap queue: spool gaps that do not fit stay in the spool, and the
+    /// overflow count does not grow on retries; they move once there is room.
+    #[tokio::test]
+    async fn spool_gaps_stay_in_the_spool_while_the_queue_is_full() {
+        let d = tempfile::tempdir().unwrap();
+        let spool = test_spool(d.path());
+        expired_spool_gap(&spool);
+        let queue = GapQueue::new();
+        for n in 0..MAX_QUEUED_GAPS as u32 {
+            queue.push(quarantine_gap(10_000 + n)).unwrap();
+        }
+        for _ in 0..3 {
+            assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 0);
+        }
+        assert_eq!(spool.pending_gaps().unwrap().len(), 1, "range not lost");
+        assert_eq!(queue.overflow_count(), 0, "retries do not count overflow");
+        assert!(!queue.pending_ids().contains(&uid(77)));
+        // Room appears (an acknowledged gap leaves the queue).
+        queue.settle(&ReportOutcome::Accepted {
+            acknowledged: vec![uid(10_000)],
+            duplicate: vec![],
+        });
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
+        assert!(queue.pending_ids().contains(&uid(77)));
+        assert!(spool.pending_gaps().unwrap().is_empty());
+    }
+
+    /// A `persist_failed` left over from an earlier write neither blocks nor
+    /// wrongly allows a hand-off: only the write made for this gap counts.
+    #[tokio::test]
+    async fn stale_persist_failure_does_not_decide_the_hand_off() {
+        let d = tempfile::tempdir().unwrap();
+        let spool = test_spool(d.path());
+        let ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ok2 = ok.clone();
+        let queue = GapQueue::new().with_persister(Box::new(move |_| {
+            ok2.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        // The initial flush failed: the flag is stale-true.
+        assert!(queue.persist_failed());
+        ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        expired_spool_gap(&spool);
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 1);
+        assert!(!queue.persist_failed());
+        // And the other direction: a failing write keeps the gap in the spool.
+        ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        spool
+            .record_gap(
+                serde_json::from_value(json!({
+                    "kind": "spool_expired", "gap_id": uid(78),
+                    "detected_at": "2026-10-11T00:00:00Z", "epoch_id": uid(5000),
+                    "from_sequence": 4, "to_sequence": 5, "count": 2}))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(hand_off_spool_gaps(&spool, &queue).await, 0);
+        assert_eq!(spool.pending_gaps().unwrap().len(), 1);
     }
 }

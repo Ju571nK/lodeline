@@ -271,6 +271,9 @@ struct Shared {
     inject_failure: AtomicBool,
     #[cfg(any(test, feature = "test-util"))]
     delivery_paused: AtomicBool,
+    /// Seconds added to the clock (test knob, see [`Spool::advance_clock_for_test`]).
+    #[cfg(any(test, feature = "test-util"))]
+    clock_skew: std::sync::atomic::AtomicI64,
 }
 
 enum Reply<T> {
@@ -347,7 +350,17 @@ impl Spool {
             inject_failure: AtomicBool::new(false),
             #[cfg(any(test, feature = "test-util"))]
             delivery_paused: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-util"))]
+            clock_skew: std::sync::atomic::AtomicI64::new(0),
         });
+        #[cfg(any(test, feature = "test-util"))]
+        let cfg = {
+            let (base, sh) = (cfg.clock.clone(), shared.clone());
+            SpoolConfig {
+                clock: Arc::new(move || base() + sh.clock_skew.load(Ordering::SeqCst)),
+                ..cfg
+            }
+        };
         let (proxy_id, epoch_id) = (cfg.proxy_id.clone(), cfg.epoch_id.clone());
         let (tx, rx) = mpsc::channel::<Cmd>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), SpoolError>>(1);
@@ -422,6 +435,21 @@ impl Spool {
                 self.inner.shared.dead.store(true, Ordering::SeqCst);
                 None
             }
+        }
+    }
+
+    /// Stop the writer thread and wait for it without blocking a tokio worker
+    /// (the join runs on the blocking pool). Afterwards the database is closed;
+    /// other clones see `Unavailable`. Dropping the last clone does the same
+    /// synchronously, so call this where that drop would land on a worker.
+    pub async fn close(&self) {
+        let _ = self.inner.tx.send(Cmd::Shutdown);
+        let join = self.inner.join.lock().ok().and_then(|mut g| g.take());
+        if let Some(j) = join {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = j.join();
+            })
+            .await;
         }
     }
 
@@ -550,6 +578,14 @@ impl Spool {
 
 #[cfg(any(test, feature = "test-util"))]
 impl Spool {
+    /// Test knob: move the spool's clock forward (retention and expiry follow it).
+    pub fn advance_clock_for_test(&self, secs: i64) {
+        self.inner
+            .shared
+            .clock_skew
+            .fetch_add(secs, Ordering::SeqCst);
+    }
+
     /// Test knob: stop handing events to the ingest client (appends still work),
     /// so a test can observe the status report of a spool that is filling up.
     pub fn set_delivery_paused_for_test(&self, on: bool) {
@@ -1939,6 +1975,7 @@ mod tests {
             gap_exhausted: AtomicBool::new(false),
             inject_failure: AtomicBool::new(false),
             delivery_paused: AtomicBool::new(false),
+            clock_skew: std::sync::atomic::AtomicI64::new(0),
         });
         let w = Writer::open(cfg(d.path(), now), sh).unwrap();
         let sync: i64 = w
@@ -2120,5 +2157,25 @@ mod tests {
         assert!(s2.next_events(10, &HashSet::new()).is_empty());
         s.set_delivery_paused_for_test(false);
         assert_eq!(s2.next_events(10, &HashSet::new()).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn close_stops_the_writer_and_releases_the_database() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.append_async(event(1)).await.unwrap();
+        s.close().await;
+        assert_eq!(
+            s.append_async(event(2)).await,
+            Err(AppendError::Unavailable)
+        );
+        // The file can be opened again by a new spool at once.
+        let (s2, _) = {
+            let now = Arc::new(AtomicI64::new(1_800_000_000));
+            let mut c = cfg(d.path(), now.clone());
+            c.new_epoch = false;
+            (Spool::open(c).unwrap(), now)
+        };
+        assert_eq!(s2.snapshot().unsent_events, 1);
     }
 }
