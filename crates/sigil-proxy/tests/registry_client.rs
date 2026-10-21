@@ -1291,7 +1291,7 @@ fn config_view() -> sigil_proxy::config_sync::ConfigView {
 async fn the_status_registry_section_reflects_real_counts() {
     use sigil_proxy::status_report::StatusBuilder;
     let mut f = fx_with(vec![uuid(1)]);
-    let mut b = StatusBuilder::new("px-1", &uuid(77).replace("-4000-8000", "-4000-8000"));
+    let mut b = StatusBuilder::new("px-1", &uuid(77));
     let now = time::OffsetDateTime::now_utc();
     let parse = |bytes: Vec<u8>| sigil_proxy_api::parse_status(&bytes).unwrap();
 
