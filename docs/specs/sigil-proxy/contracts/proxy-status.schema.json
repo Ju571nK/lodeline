@@ -564,10 +564,12 @@
           "$ref": "#/$defs/nonnegative_int64"
         },
         "poisoned_entries": {
-          "$ref": "#/$defs/nonnegative_int64"
+          "$ref": "#/$defs/nonnegative_int64",
+          "description": "Entries currently paused after a non-retryable refusal; re-armed periodically and on restart. Optional: older proxies omit it."
         },
         "discarded_reports": {
-          "$ref": "#/$defs/nonnegative_int64"
+          "$ref": "#/$defs/nonnegative_int64",
+          "description": "Inventory reports the proxy gave up on, counted since the proxy process started. Optional: older proxies omit it."
         }
       },
       "required": [
