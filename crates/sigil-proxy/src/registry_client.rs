@@ -50,6 +50,29 @@ use crate::registry_store::{
 };
 use crate::status_report::{GapQueue, PostFuture, StatusReply};
 
+/// The `gap_id` of one registry-conflict chunk: SHA-256 over the ref, the
+/// `key_id` and the sorted chunk event ids, as a version-8 UUID. A re-run after
+/// a crash therefore produces the same gap, which the server dedupes by id.
+pub fn gap_id_for(metadata_ref: &str, key_id: &str, sorted_event_ids: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"sigil-registry-conflict-gap-v1\0");
+    for part in [metadata_ref, key_id] {
+        h.update(part.as_bytes());
+        h.update([0]);
+    }
+    for id in sorted_event_ids {
+        h.update(id.as_bytes());
+        h.update([0]);
+    }
+    let d = h.finalize();
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&d[..16]);
+    b[6] = (b[6] & 0x0f) | 0x80;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(b).hyphenated().to_string()
+}
+
 fn detector_str(d: ConflictDetector) -> &'static str {
     match d {
         ConflictDetector::Central409 => "central_409",
@@ -195,13 +218,18 @@ impl ConflictReporter {
             return;
         };
         let at = crate::status_report::rfc3339(time::OffsetDateTime::now_utc());
-        for chunk in ids.chunks(GAP_EVENT_IDS) {
+        // Sorted, so the chunks and their gap ids do not depend on the order the
+        // spool seam lists the events in.
+        let mut sorted: Vec<String> = ids.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        for chunk in sorted.chunks(GAP_EVENT_IDS) {
             let event_ids: Result<Vec<Uuid>, _> =
                 chunk.iter().map(|i| Uuid::new(i.clone())).collect();
             let (Ok(event_ids), Ok(detected_at), Ok(gap_id)) = (
                 event_ids,
                 Timestamp::new(at.clone()),
-                Uuid::new(uuid::Uuid::new_v4().to_string()),
+                Uuid::new(gap_id_for(&rec.metadata_ref, &rec.key_id, chunk)),
             ) else {
                 continue;
             };
@@ -444,6 +472,11 @@ pub struct SyncStep {
 
 /// Refusals (422) after which an entry is poisoned.
 pub const POISON_AFTER: i64 = 3;
+/// A poisoned entry is offered again after about this long (jittered to between
+/// half and all of it), and on every process start. Poison is a pause, not a
+/// verdict: the server's view (scope assignment, limits) can change. One more
+/// refusal poisons it again at once. Poisoned entries are counted meanwhile.
+pub const POISON_RETRY: Duration = Duration::from_secs(3600);
 /// Consecutive 424s for one report after which it is given up (and its chain
 /// reset).
 pub const MAX_REPORT_424: u32 = 5;
@@ -475,6 +508,8 @@ pub struct RegistryClient<T: RegistryTransport> {
     failures: u32,
     discarded_reports: u64,
     resumed: bool,
+    /// When poisoned entries are next made eligible again.
+    next_unpoison: Option<Instant>,
     /// Consecutive 424s per queued report.
     report_424: HashMap<String, u32>,
     /// Refused entries are not retried before this instant, so a bad entry never
@@ -501,6 +536,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
             failures: 0,
             discarded_reports: 0,
             resumed: false,
+            next_unpoison: None,
             report_424: HashMap::new(),
             refused_not_before: None,
             refused_streak: 0,
@@ -556,6 +592,17 @@ impl<T: RegistryTransport> RegistryClient<T> {
         if !self.resumed {
             self.conflicts.resume()?;
             self.resumed = true;
+            // A restart gives poisoned entries another chance.
+            self.store.unpoison_all(POISON_AFTER - 1)?;
+        }
+        let now = Instant::now();
+        match self.next_unpoison {
+            None => self.next_unpoison = Some(now + jittered(POISON_RETRY)),
+            Some(t) if now >= t => {
+                self.store.unpoison_all(POISON_AFTER - 1)?;
+                self.next_unpoison = Some(now + jittered(POISON_RETRY));
+            }
+            Some(_) => {}
         }
         let allow_refused = self.refused_not_before.is_none_or(|t| Instant::now() >= t);
         let pending = self.store.pending_entries(self.cap, allow_refused)?;
@@ -1014,4 +1061,10 @@ impl RegistryTransport for MtlsRegistryTransport {
     fn post_inventory(&self, _: Vec<u8>) -> PostFuture<'_> {
         Box::pin(async { None })
     }
+}
+
+/// Uniform in `[d/2, d]`.
+fn jittered(d: Duration) -> Duration {
+    let r = (uuid::Uuid::new_v4().as_u128() & 0xffff) as u32;
+    d / 2 + d.mul_f64(f64::from(r) / 131_072.0)
 }

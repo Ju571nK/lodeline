@@ -1155,3 +1155,120 @@ async fn definitions_and_keys_never_reach_logs_errors_reports_or_gaps() {
     let keys: HashSet<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(keys, HashSet::from(["name", "description", "inputSchema"]));
 }
+
+#[tokio::test(start_paused = true)]
+async fn poison_is_a_pause_it_ends_after_the_interval_and_on_restart() {
+    let mut f = fx();
+    let c = list(&mut f.engine, vec![tool("a", "1")]);
+    let r = c.tools[0].1.clone();
+    f.sim.st().max_batch = Some(0);
+    f.client.sync_once().await;
+    assert_eq!(
+        f.store.entry(&r).unwrap().unwrap().state,
+        EntryState::Poisoned
+    );
+    assert_eq!(
+        f.client.health().unwrap().poisoned_entries,
+        1,
+        "counted while poisoned"
+    );
+    let posts = f.sim.st().meta_posts.len();
+    // Not retried before the interval...
+    tokio::time::advance(Duration::from_secs(60)).await;
+    f.client.sync_once().await;
+    assert_eq!(f.sim.st().meta_posts.len(), posts);
+    // ...but after it (jittered, at most POISON_RETRY) the entry is offered again.
+    f.sim.st().max_batch = None;
+    tokio::time::advance(sigil_proxy::registry_client::POISON_RETRY).await;
+    drain(&mut f.client).await;
+    assert_eq!(f.sim.st().meta_posts.len(), posts + 1);
+    assert_eq!(f.store.entry(&r).unwrap().unwrap().state, EntryState::Acked);
+    assert_eq!(f.client.health().unwrap().poisoned_entries, 0);
+
+    // A restart (a new client over the same store) also gives it another go.
+    let c2 = list(&mut f.engine, vec![tool("b", "2")]);
+    let r2 = c2.tools[0].1.clone();
+    f.sim.st().max_batch = Some(0);
+    f.client.sync_once().await;
+    assert_eq!(
+        f.store.entry(&r2).unwrap().unwrap().state,
+        EntryState::Poisoned
+    );
+    f.sim.st().max_batch = None;
+    let conflicts = ConflictReporter::new(f.store.clone(), f.gaps.clone(), Box::new(NoDependents));
+    let mut fresh = RegistryClient::new(
+        f.store.clone(),
+        Tr(f.sim.clone()),
+        conflicts,
+        RegistryParams::default(),
+    );
+    assert_eq!(
+        f.store.entry(&r2).unwrap().unwrap().state,
+        EntryState::Poisoned
+    );
+    drain(&mut fresh).await;
+    assert_eq!(
+        f.store.entry(&r2).unwrap().unwrap().state,
+        EntryState::Acked
+    );
+
+    // After the pause, one more refusal poisons the entry again at once.
+    let c3 = list(&mut f.engine, vec![tool("c", "3")]);
+    let r3 = c3.tools[0].1.clone();
+    f.sim.st().poison.insert(r3.clone());
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(120)).await;
+        fresh.sync_once().await;
+    }
+    assert_eq!(
+        f.store.entry(&r3).unwrap().unwrap().state,
+        EntryState::Poisoned
+    );
+    assert_eq!(f.store.unpoison_all(2).unwrap(), 1);
+    tokio::time::advance(Duration::from_secs(120)).await;
+    fresh.sync_once().await;
+    assert_eq!(
+        f.store.entry(&r3).unwrap().unwrap().state,
+        EntryState::Poisoned,
+        "one refusal suffices"
+    );
+}
+
+#[tokio::test]
+async fn the_conflict_gap_id_is_deterministic_across_a_crash_rerun() {
+    let ids: Vec<String> = (1..=3).map(uuid).collect();
+    let mut shuffled = ids.clone();
+    shuffled.reverse();
+    let mut f = fx_with(shuffled);
+    let c = list(&mut f.engine, vec![tool("bad", "b")]);
+    let r = c.tools[0].1.clone();
+    f.sim.st().conflict.insert(r.clone());
+    f.client.sync_once().await;
+    // Crash after the gap was queued but before the mark was cleared: re-run.
+    let conn = rusqlite::Connection::open(f._d.path().join("registry.sqlite3")).unwrap();
+    conn.execute(
+        "UPDATE entries SET gap_pending = 1, gap_detector = 'central_409' WHERE metadata_ref = ?1",
+        [&r],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(f.client.conflicts().resume().unwrap(), 1);
+    let gap_ids: HashSet<String> = f
+        .gaps
+        .pending_batch()
+        .iter()
+        .map(|g| match g {
+            GapReport::RegistryConflict(g) => g.gap_id.as_str().to_string(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(gap_ids.len(), 1, "same gap_id both times: {gap_ids:?}");
+    // The id depends on exactly the ref, the key_id and the event ids.
+    let g = sigil_proxy::registry_client::gap_id_for;
+    let a = g("r", "k", &ids);
+    assert_eq!(a, g("r", "k", &ids));
+    assert_ne!(a, g("r", "k", &ids[..2]));
+    assert_ne!(a, g("r2", "k", &ids));
+    assert_ne!(a, g("r", "k2", &ids));
+    assert!(sigil_proxy_api::Uuid::new(a).is_ok());
+}

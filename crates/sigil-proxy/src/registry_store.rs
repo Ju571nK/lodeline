@@ -692,6 +692,15 @@ impl RegistryStore {
         Ok(())
     }
 
+    /// Make every poisoned entry eligible again, with `attempts` refusals
+    /// already counted (so one more poisons it again). Returns how many.
+    pub fn unpoison_all(&self, attempts: i64) -> Result<usize, RegistryError> {
+        Ok(self.lock().conn.execute(
+            "UPDATE entries SET state = 'pending', attempts = ?1 WHERE state = 'poisoned'",
+            [attempts],
+        )?)
+    }
+
     /// Mark a pending entry refused for good.
     pub fn poison(&self, metadata_ref: &str) -> Result<(), RegistryError> {
         self.lock().conn.execute(
