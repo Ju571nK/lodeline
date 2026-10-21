@@ -2,8 +2,8 @@
 //! shared mTLS exchange, with the answer rules of the contracts README and the
 //! gap rules of ledger-and-query.md L4/L6b.
 //!
-//! * [`EventSource`] is the seam to the event producer. The relay does not
-//!   produce events yet (T-13/T-14), so only tests feed it.
+//! * [`EventSource`] is the seam to the event producer. In production it is the
+//!   durable spool ([`crate::spool::Spool`], T-14b); tests feed it in memory.
 //! * [`classify_ingest`] reduces the server's answer to an [`IngestOutcome`]; it
 //!   is pure.
 //! * [`IngestClient`] builds batches (at most [`MAX_BATCH_EVENTS`] events and
@@ -81,7 +81,32 @@ pub trait EventSource: Send {
     /// These events are rejected for good. Keep them unchanged in a local
     /// quarantine; never send them again, never rewrite them.
     fn quarantined(&mut self, event_ids: &[String], code: QuarantineCode);
+
+    // Async variants, which the ingest loop calls (M2). The defaults run the
+    // synchronous method inline, which is right for an in-memory source. A
+    // source that waits on I/O (the spool: an fsync behind a writer thread)
+    // overrides them so no tokio worker blocks.
+    fn next_events_async<'a>(
+        &'a mut self,
+        max: usize,
+        skip: &'a HashSet<String>,
+    ) -> SourceFuture<'a, Vec<ProxyEvent>> {
+        Box::pin(async move { self.next_events(max, skip) })
+    }
+    fn acknowledged_async<'a>(&'a mut self, event_ids: &'a [String]) -> SourceFuture<'a, ()> {
+        Box::pin(async move { self.acknowledged(event_ids) })
+    }
+    fn quarantined_async<'a>(
+        &'a mut self,
+        event_ids: &'a [String],
+        code: QuarantineCode,
+    ) -> SourceFuture<'a, ()> {
+        Box::pin(async move { self.quarantined(event_ids, code) })
+    }
 }
+
+/// Boxed future returned by the async [`EventSource`] methods.
+pub type SourceFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// How batches are sent. `None` means no answer (transport error, timeout, bad
 /// TLS material).
@@ -426,7 +451,12 @@ impl IngestClient {
         self.mode == Mode::Isolate
     }
 
-    fn quarantine(&mut self, source: &mut dyn EventSource, ids: &[String], code: QuarantineCode) {
+    async fn quarantine(
+        &mut self,
+        source: &mut dyn EventSource,
+        ids: &[String],
+        code: QuarantineCode,
+    ) {
         if ids.is_empty() {
             return;
         }
@@ -449,7 +479,7 @@ impl IngestClient {
                 Err(_) => tracing::error!("event_quarantined gap did not build"),
             }
         }
-        source.quarantined(ids, code);
+        source.quarantined_async(ids, code).await;
         for id in ids {
             self.holds.remove(id);
         }
@@ -533,7 +563,7 @@ impl IngestClient {
         } else {
             self.cap.min(self.max_events)
         };
-        let events = source.next_events(want, &skip);
+        let events = source.next_events_async(want, &skip).await;
         if events.is_empty() {
             self.mode = Mode::Batch;
             return IngestStep {
@@ -545,7 +575,8 @@ impl IngestClient {
         }
         let batch = build_batch(&events, want, self.max_bytes);
         let local = batch.unsendable.len();
-        self.quarantine(source, &batch.unsendable, QuarantineCode::SemanticInvalid);
+        self.quarantine(source, &batch.unsendable, QuarantineCode::SemanticInvalid)
+            .await;
         if batch.ids.is_empty() {
             if local > 0 {
                 self.isolated_locally();
@@ -563,12 +594,14 @@ impl IngestClient {
             match (e.index(), batch.ids.len()) {
                 (Some(i), _) if i < batch.ids.len() => {
                     let id = batch.ids[i].clone();
-                    self.quarantine(source, &[id], QuarantineCode::SemanticInvalid);
+                    self.quarantine(source, &[id], QuarantineCode::SemanticInvalid)
+                        .await;
                     self.isolated_locally();
                 }
                 (_, 1) => {
                     let ids = batch.ids.clone();
-                    self.quarantine(source, &ids, QuarantineCode::SemanticInvalid);
+                    self.quarantine(source, &ids, QuarantineCode::SemanticInvalid)
+                        .await;
                     self.isolated_locally();
                 }
                 _ => {
@@ -587,7 +620,7 @@ impl IngestClient {
         let sent = batch.ids;
         let reply = transport.post_events(batch.body).await;
         let outcome = classify_ingest(reply.as_ref(), &sent);
-        let progressed = self.apply(source, &outcome, &sent, now);
+        let progressed = self.apply(source, &outcome, &sent, now).await;
         tracing::info!(
             outcome = outcome_label(&outcome),
             events = sent.len(),
@@ -613,7 +646,7 @@ impl IngestClient {
     /// Quarantine one event on the server's say-so, unless that has already
     /// happened [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] times without a success.
     /// Returns whether it was quarantined.
-    fn quarantine_single(
+    async fn quarantine_single(
         &mut self,
         source: &mut dyn EventSource,
         ids: &[String],
@@ -626,13 +659,13 @@ impl IngestClient {
             return false;
         }
         self.single_quarantines += 1;
-        self.quarantine(source, ids, code);
+        self.quarantine(source, ids, code).await;
         true
     }
 
     /// Settle one answer. Returns whether it made progress (otherwise the caller
     /// backs off).
-    fn apply(
+    async fn apply(
         &mut self,
         source: &mut dyn EventSource,
         outcome: &IngestOutcome,
@@ -658,7 +691,7 @@ impl IngestClient {
         let mut progressed = true;
         match outcome {
             IngestOutcome::Done { ids } => {
-                source.acknowledged(ids);
+                source.acknowledged_async(ids).await;
                 for id in ids {
                     self.holds.remove(id);
                 }
@@ -678,7 +711,7 @@ impl IngestClient {
                         .filter(|(_, c)| *c == code)
                         .map(|(i, _)| i.clone())
                         .collect();
-                    self.quarantine(source, &ids, code);
+                    self.quarantine(source, &ids, code).await;
                 }
                 // The server named the events: this is attribution, not a
                 // server rejecting everything.
@@ -695,7 +728,7 @@ impl IngestClient {
                     } else {
                         QuarantineCode::SemanticInvalid
                     };
-                    if !self.quarantine_single(source, sent, code) {
+                    if !self.quarantine_single(source, sent, code).await {
                         self.mode = Mode::Batch;
                         progressed = false;
                     }
@@ -729,7 +762,10 @@ impl IngestClient {
             IngestOutcome::TooLarge => {
                 if sent.len() > 1 {
                     self.cap = (sent.len() / 2).max(1);
-                } else if !self.quarantine_single(source, sent, QuarantineCode::SemanticInvalid) {
+                } else if !self
+                    .quarantine_single(source, sent, QuarantineCode::SemanticInvalid)
+                    .await
+                {
                     progressed = false;
                 }
             }
@@ -812,8 +848,8 @@ fn outcome_label(o: &IngestOutcome) -> &'static str {
     }
 }
 
-/// Send events until `shutdown` completes. Not started by the production
-/// lifecycle yet: it needs a real [`EventSource`] (T-13/T-14).
+/// Send events until `shutdown` completes. The production lifecycle starts it
+/// with the spool as the [`EventSource`] (T-14b).
 pub async fn run_ingest<T, S>(
     transport: &T,
     mut source: S,

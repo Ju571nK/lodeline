@@ -132,6 +132,39 @@ impl Lifecycle {
         Ok(lc)
     }
 
+    /// Open the durable event spool of this epoch (T-14b), right after the
+    /// state_dir lock and binding.
+    ///
+    /// Creating the database is allowed while the epoch's spool was never marked
+    /// ready: on the epoch's first start, and on a start that follows a first
+    /// start that failed after the binding was written but before the schema
+    /// committed (N1). The marker is written only after the spool opened, so from
+    /// then on a missing database is refused (the server knows the epoch's
+    /// sequences). A spool of an older epoch was already moved aside when the
+    /// new binding was created (N2).
+    ///
+    /// Blocks while the database opens; call it once at start.
+    pub fn open_spool(
+        &self,
+        limits: &crate::limits::Limits,
+    ) -> anyhow::Result<crate::spool::Spool> {
+        use anyhow::Context;
+        let creatable = self.state.is_new_epoch() || !self.state.spool_ready()?;
+        let cfg = crate::spool::SpoolConfig::new(
+            self.state.dir(),
+            self.state.proxy_id().as_str(),
+            self.state.epoch_id(),
+            creatable,
+            limits,
+        );
+        let spool = crate::spool::Spool::open(cfg).context(
+            "cannot open the event spool (to start a new epoch, stop the proxy and delete \
+             binding.json; the old spool.db is kept aside, never deleted)",
+        )?;
+        self.state.mark_spool_ready()?;
+        Ok(spool)
+    }
+
     /// The revision high-water mark loaded at start.
     pub fn applied_mark(&self) -> Option<&crate::state_dir::AppliedMark> {
         self.applied.as_ref()
@@ -298,15 +331,7 @@ pub async fn run_with_shutdown(
     table: crate::route::TableHandle,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    run_inner(
-        b,
-        table,
-        shutdown,
-        crate::config_sync::SyncParams::default(),
-        crate::status_report::ReporterParams::default(),
-        None,
-    )
-    .await
+    run_inner(b, table, shutdown, Pacing::default(), None, None).await
 }
 
 /// Pacing and an optional pre-bound listener. TEST-ONLY (feature `test-util`, or
@@ -321,6 +346,10 @@ pub struct RunTuning {
     pub report: crate::status_report::ReporterParams,
     /// Used instead of binding `Bootstrap::listen` (which is then ignored).
     pub listener: Option<std::net::TcpListener>,
+    pub ingest: crate::ingest_client::IngestParams,
+    /// Receives a handle to the spool once it is open, so a test can inject
+    /// events and read the snapshot.
+    pub spool_out: Option<tokio::sync::oneshot::Sender<crate::spool::Spool>>,
 }
 
 /// [`run_with_shutdown`] with explicit pacing. Tests only.
@@ -335,22 +364,51 @@ pub async fn run_tuned(
         b,
         table,
         shutdown,
-        tuning.sync,
-        tuning.report,
+        Pacing {
+            sync: tuning.sync,
+            report: tuning.report,
+            ingest: tuning.ingest,
+        },
         tuning.listener,
+        tuning.spool_out,
     )
     .await
 }
+
+/// Pacing of the background loops. Production uses the defaults.
+#[derive(Default)]
+struct Pacing {
+    sync: crate::config_sync::SyncParams,
+    report: crate::status_report::ReporterParams,
+    ingest: crate::ingest_client::IngestParams,
+}
+
+/// How often the spool's own gaps (R expiry) are handed to the gap queue.
+const SPOOL_GAP_PUMP_INTERVAL: Duration = Duration::from_secs(5);
 
 async fn run_inner(
     b: &Bootstrap,
     table: crate::route::TableHandle,
     shutdown: impl Future<Output = ()>,
-    sync_params: crate::config_sync::SyncParams,
-    report_params: crate::status_report::ReporterParams,
+    pacing: Pacing,
     pre_bound: Option<std::net::TcpListener>,
+    spool_out: Option<tokio::sync::oneshot::Sender<crate::spool::Spool>>,
 ) -> anyhow::Result<()> {
+    let Pacing {
+        sync: sync_params,
+        report: report_params,
+        ingest: ingest_params,
+    } = pacing;
     let mut lc = Lifecycle::start(b)?;
+    // The durable spool opens right after the lock and binding. A start that
+    // cannot open it does not run: events must never be accepted into a spool
+    // that is not durable.
+    let spool = lc.open_spool(&b.limits)?;
+    if let Some(out) = spool_out {
+        let _ = out.send(spool.clone());
+    }
+    // The handle the relay (T-13d) appends through; its refusal is typed.
+    let admission = crate::spool::Admission::new(spool.clone());
     let initial = lc.status().config_state;
     let mark = lc.applied_mark().cloned();
     let seq_floor = lc.sequence_bound();
@@ -381,58 +439,64 @@ async fn run_inner(
     // Config sync: fetch over mTLS, apply, keep the TTL deadline.
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let mut report_task = None;
-    let sync_task =
-        match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
-            Some(fetcher) => {
-                // One mTLS client serves the config fetch and the status report.
-                let fetcher = std::sync::Arc::new(fetcher);
-                let lc2 = lc.clone();
-                let lc4 = lc.clone();
-                let mut sync = crate::config_sync::ConfigSync::new(
-                    b.proxy_id.as_str(),
-                    b.credentials.clone(),
-                    b.limits.clone(),
-                    table.clone(),
-                    initial,
-                )
-                .with_persister(Box::new(move |rev, hash| {
-                    match lock(&lc4).persist_applied(rev, hash) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::error!(error = %e, "cannot persist the applied revision");
-                            false
-                        }
+    let mut ingest_task = None;
+    let mut pump_task = None;
+    let mut retention_task = None;
+    let sync_task = match crate::config_sync::MtlsFetcher::from_bootstrap(b) {
+        Some(fetcher) => {
+            // One mTLS client serves the config fetch and the status report.
+            let fetcher = std::sync::Arc::new(fetcher);
+            let lc2 = lc.clone();
+            let lc4 = lc.clone();
+            let mut sync = crate::config_sync::ConfigSync::new(
+                b.proxy_id.as_str(),
+                b.credentials.clone(),
+                b.limits.clone(),
+                table.clone(),
+                initial,
+            )
+            .with_persister(Box::new(move |rev, hash| {
+                match lock(&lc4).persist_applied(rev, hash) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(error = %e, "cannot persist the applied revision");
+                        false
+                    }
+                }
+            }));
+            if let Some(m) = mark {
+                sync = sync.with_high_water(m.revision, m.config_hash);
+            }
+            // Status report and heartbeat (T-12c2): follows the config view.
+            let (sync, view_rx) = sync.with_view_channel();
+            let lc5 = lc.clone();
+            let epoch = lock(&lc).epoch_id().to_string();
+            // Durable gap queue (L6b): reloaded from state_dir, written after
+            // every change. Producers: the ingest client (quarantine and
+            // outage gaps) and the spool (R expiry, via the gap pump).
+            let lc6 = lc.clone();
+            let gaps = saved_gaps
+                .map(crate::status_report::GapQueue::restore)
+                .unwrap_or_default()
+                .with_persister(Box::new(move |q| match lock(&lc6).persist_gap_queue(q) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(error = %e, "cannot persist the gap queue");
+                        false
                     }
                 }));
-                if let Some(m) = mark {
-                    sync = sync.with_high_water(m.revision, m.config_hash);
-                }
-                // Status report and heartbeat (T-12c2): follows the config view.
-                let (sync, view_rx) = sync.with_view_channel();
-                let lc5 = lc.clone();
-                let epoch = lock(&lc).epoch_id().to_string();
-                // Durable gap queue (L6b): reloaded from state_dir, written after
-                // every change. No producer exists yet (relay events are
-                // T-13/T-14), so it only holds what a previous run left.
-                let lc6 = lc.clone();
-                let gaps = saved_gaps
-                    .map(crate::status_report::GapQueue::restore)
-                    .unwrap_or_default()
-                    .with_persister(Box::new(move |q| match lock(&lc6).persist_gap_queue(q) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::error!(error = %e, "cannot persist the gap queue");
-                            false
-                        }
-                    }));
-                let lc7 = lc.clone();
-                let reporter = crate::status_report::Reporter::new(
+            let lc7 = lc.clone();
+            // Shared by the reporter (its `central` section) and the ingest
+            // client (acks, answers, failures).
+            let central = crate::status_report::CentralHealth::new();
+            let reporter = crate::status_report::Reporter::new(
                 b.proxy_id.as_str(),
                 &epoch,
-                gaps,
+                gaps.clone(),
                 report_params,
             )
-            .with_central(crate::status_report::CentralHealth::new())
+            .with_central(central.clone())
+            .with_spool(spool.clone())
             .with_wedge_hook(Box::new(move |w| {
                 if let Err(e) = lock(&lc7).set_sequence_wedged(w) {
                     tracing::error!(error = %e, "cannot publish the sequence state");
@@ -440,48 +504,84 @@ async fn run_inner(
             }))
             .with_sequence_persistence(
                 seq_floor,
-                Box::new(move |bound| match lock(&lc5).persist_sequence_bound(bound) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::error!(error = %e, "cannot persist the status sequence bound");
-                        false
-                    }
-                }),
+                Box::new(
+                    move |bound| match lock(&lc5).persist_sequence_bound(bound) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!(error = %e, "cannot persist the status sequence bound");
+                            false
+                        }
+                    },
+                ),
             );
-                let (report_fetcher, mut report_stop) = (fetcher.clone(), stop_rx.clone());
-                report_task = Some(tokio::spawn(async move {
-                    crate::status_report::run_status_reporter(
-                        &*report_fetcher,
-                        reporter,
-                        view_rx,
-                        async move {
-                            let _ = report_stop.wait_for(|v| *v).await;
-                        },
-                    )
-                    .await;
-                }));
-                Some(tokio::spawn(async move {
-                    crate::config_sync::run_sync(
-                        sync,
-                        &*fetcher,
-                        sync_params,
-                        |s| {
-                            if let Err(e) = lock(&lc2).set_config(s) {
-                                tracing::error!(error = %e, "cannot publish config status");
-                            }
-                        },
-                        async move {
-                            let _ = stop_rx.wait_for(|v| *v).await;
-                        },
-                    )
-                    .await;
-                }))
-            }
-            None => {
-                tracing::error!("control_plane_url unusable: no config will be fetched");
-                None
-            }
-        };
+            // R follows the applied server config.
+            let (ret_spool, ret_rx, mut ret_stop) =
+                (spool.clone(), view_rx.clone(), stop_rx.clone());
+            retention_task = Some(tokio::spawn(async move {
+                follow_retention(&ret_spool, ret_rx, async move {
+                    let _ = ret_stop.wait_for(|v| *v).await;
+                })
+                .await;
+            }));
+            // Spool gaps (R expiry) join the gap queue.
+            let (pump_spool, pump_gaps, mut pump_stop) =
+                (spool.clone(), gaps.clone(), stop_rx.clone());
+            pump_task = Some(tokio::spawn(async move {
+                crate::status_report::run_spool_gap_pump(
+                    pump_spool,
+                    pump_gaps,
+                    SPOOL_GAP_PUMP_INTERVAL,
+                    async move {
+                        let _ = pump_stop.wait_for(|v| *v).await;
+                    },
+                )
+                .await;
+            }));
+            // Ingest: the spool is the event source (T-14b). Production path
+            // for every event the relay appends.
+            let client = crate::ingest_client::IngestClient::new(gaps, central, ingest_params);
+            let (ing_fetcher, ing_spool, mut ing_stop) =
+                (fetcher.clone(), spool.clone(), stop_rx.clone());
+            ingest_task = Some(tokio::spawn(async move {
+                crate::ingest_client::run_ingest(&*ing_fetcher, ing_spool, client, async move {
+                    let _ = ing_stop.wait_for(|v| *v).await;
+                })
+                .await;
+            }));
+            let (report_fetcher, mut report_stop) = (fetcher.clone(), stop_rx.clone());
+            report_task = Some(tokio::spawn(async move {
+                crate::status_report::run_status_reporter(
+                    &*report_fetcher,
+                    reporter,
+                    view_rx,
+                    async move {
+                        let _ = report_stop.wait_for(|v| *v).await;
+                    },
+                )
+                .await;
+            }));
+            Some(tokio::spawn(async move {
+                crate::config_sync::run_sync(
+                    sync,
+                    &*fetcher,
+                    sync_params,
+                    |s| {
+                        if let Err(e) = lock(&lc2).set_config(s) {
+                            tracing::error!(error = %e, "cannot publish config status");
+                        }
+                    },
+                    async move {
+                        let _ = stop_rx.wait_for(|v| *v).await;
+                    },
+                )
+                .await;
+            }))
+        }
+        None => {
+            tracing::error!("control_plane_url unusable: no config will be fetched");
+            None
+        }
+    };
 
     let proxy = crate::server::Proxy::new(
         b.limits.clone(),
@@ -505,10 +605,44 @@ async fn run_inner(
     if let Some(t) = report_task {
         let _ = t.await;
     }
+    for t in [ingest_task, pump_task, retention_task]
+        .into_iter()
+        .flatten()
+    {
+        let _ = t.await;
+    }
+    // The relay stops appending once `serve` returned; the spool closes when its
+    // last handle goes.
+    drop(admission);
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
     lock(&lc).set_run_state(RunState::Stopped)?;
     Ok(())
+}
+
+/// Keep the spool's R equal to the `max_offline_retry_age_seconds` of the applied
+/// server config (it is `None` until the first apply of this process; the
+/// spool's own default holds until then).
+async fn follow_retention(
+    spool: &crate::spool::Spool,
+    mut rx: tokio::sync::watch::Receiver<crate::config_sync::ConfigView>,
+    shutdown: impl Future<Output = ()>,
+) {
+    tokio::pin!(shutdown);
+    loop {
+        let secs = rx.borrow_and_update().max_offline_retry_age_seconds;
+        if let Some(r) = secs.and_then(|v| u64::try_from(v).ok()).filter(|v| *v > 0) {
+            spool.set_max_offline_retry_age(Duration::from_secs(r));
+        }
+        tokio::select! {
+            _ = &mut shutdown => return,
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Result of `health`: read-only, opens no listener and creates nothing.
@@ -772,5 +906,107 @@ mod tests {
         lc.persist_gap_queue(&q).unwrap();
         let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
         assert!(!s.contains("persist_failed"), "absent when false");
+    }
+
+    fn spool_limits() -> crate::limits::Limits {
+        crate::limits::Limits::default()
+    }
+
+    /// N1: a first start that wrote the binding but failed before the spool
+    /// schema committed must not brick the next start. Both flavours: no
+    /// database file at all, and an empty file (created, schema not committed).
+    #[test]
+    fn first_start_that_failed_before_the_spool_schema_does_not_brick_the_next() {
+        for empty_file in [false, true] {
+            let t = tempfile::tempdir().unwrap();
+            let b = bootstrap(t.path());
+            {
+                // "First start": binding written, then the start dies.
+                let lc = Lifecycle::start(&b).unwrap();
+                assert!(lc.state.is_new_epoch());
+                assert!(!lc.state.spool_ready().unwrap());
+                if empty_file {
+                    std::fs::write(lc.state.dir().join(crate::spool::SPOOL_FILE), b"").unwrap();
+                }
+            }
+            let lc = Lifecycle::start(&b).unwrap();
+            assert!(!lc.state.is_new_epoch(), "the binding is already there");
+            let spool = lc.open_spool(&spool_limits()).expect("must not be bricked");
+            assert!(lc.state.spool_ready().unwrap());
+            spool.inject_test_event_blocking("up-1").unwrap();
+        }
+    }
+
+    /// After the spool was marked ready, a missing database is refused (the
+    /// server knows the epoch's sequences), and nothing is created. A normal
+    /// restart keeps the events and the sequence.
+    #[test]
+    fn missing_spool_in_a_ready_epoch_is_refused_and_restart_keeps_events() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        {
+            let lc = Lifecycle::start(&b).unwrap();
+            let spool = lc.open_spool(&spool_limits()).unwrap();
+            spool.inject_test_event_blocking("up-1").unwrap();
+            spool.inject_test_event_blocking("up-1").unwrap();
+        }
+        {
+            let lc = Lifecycle::start(&b).unwrap();
+            let spool = lc.open_spool(&spool_limits()).unwrap();
+            let snap = spool.snapshot();
+            assert_eq!((snap.unsent_events, snap.last_assigned_sequence), (2, 2));
+            assert_eq!(
+                spool.inject_test_event_blocking("up-1").unwrap().sequence,
+                3
+            );
+        }
+        let db = b.state_dir.join(crate::spool::SPOOL_FILE);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+        }
+        let lc = Lifecycle::start(&b).unwrap();
+        let err = lc.open_spool(&spool_limits()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("missing"),
+            "refused as missing: {err:#}"
+        );
+        assert!(!db.exists(), "a ready epoch's spool is never recreated");
+    }
+
+    /// N2: a new epoch with a spool.db of an older epoch moves it aside with the
+    /// epoch in the name, never deleting it, and starts a fresh spool.
+    #[test]
+    fn new_epoch_moves_a_stale_spool_aside_never_deleting_it() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let old_epoch;
+        {
+            let lc = Lifecycle::start(&b).unwrap();
+            old_epoch = lc.epoch_id().to_string();
+            let spool = lc.open_spool(&spool_limits()).unwrap();
+            spool.inject_test_event_blocking("up-1").unwrap();
+        }
+        // The operator deletes the binding on purpose: a new epoch.
+        std::fs::remove_file(b.state_dir.join(crate::state_dir::BINDING_FILE)).unwrap();
+        let lc = Lifecycle::start(&b).unwrap();
+        assert!(lc.state.is_new_epoch());
+        let new_epoch = lc.epoch_id().to_string();
+        assert_ne!(new_epoch, old_epoch);
+        // Not ready for the new epoch even though an older marker exists.
+        assert!(!lc.state.spool_ready().unwrap());
+        let aside = b
+            .state_dir
+            .join(format!("{}.stale-{new_epoch}", crate::spool::SPOOL_FILE));
+        assert!(aside.exists(), "the old database is kept");
+        let spool = lc.open_spool(&spool_limits()).unwrap();
+        let snap = spool.snapshot();
+        assert_eq!((snap.unsent_events, snap.last_assigned_sequence), (0, 0));
+        assert_eq!(spool.epoch_id(), new_epoch);
+        // The kept file still holds the event of the old epoch.
+        let old = rusqlite::Connection::open(&aside).unwrap();
+        let n: i64 = old
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
