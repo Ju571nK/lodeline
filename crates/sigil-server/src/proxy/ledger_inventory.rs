@@ -84,6 +84,15 @@ impl Default for InventoryCaps {
     }
 }
 
+/// Created idempotently on every open (also repairs v3 files written before it
+/// existed), so it is not part of [`INVENTORY_DDL`].
+pub(super) const GAP_OVERFLOW_DDL: &str = "
+CREATE TABLE IF NOT EXISTS inv_gap_overflow (
+    proxy_id TEXT PRIMARY KEY,
+    dropped  INTEGER NOT NULL
+) WITHOUT ROWID;
+";
+
 /// Created on a fresh file and by the v2 -> v3 migration.
 pub(super) const INVENTORY_DDL: &str = "
 CREATE TABLE inv_reports (
@@ -141,10 +150,6 @@ CREATE TABLE inv_links (
     to_metadata_ref       TEXT NOT NULL,
     definition_comparison TEXT NOT NULL,
     PRIMARY KEY (proxy_id, inventory_id, from_metadata_ref)
-) WITHOUT ROWID;
-CREATE TABLE inv_gap_overflow (
-    proxy_id TEXT PRIMARY KEY,
-    dropped  INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE inv_drift (
     drift_seq             INTEGER PRIMARY KEY AUTOINCREMENT,

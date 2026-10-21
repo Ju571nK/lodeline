@@ -2917,3 +2917,49 @@ fn a_complete_report_without_a_comparison_is_refused_not_treated_as_incomplete()
     assert_eq!(out, InventoryOutcome::Invalid);
     assert!(l.gaps("px-a").unwrap().is_empty());
 }
+
+#[test]
+fn a_v3_file_without_the_gap_overflow_table_is_repaired_on_open() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("l.sqlite");
+    {
+        let l = Ledger::open(&path, LedgerOptions::default()).unwrap();
+        ingest(
+            &l,
+            &rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()),
+            1000,
+        );
+        drop(l);
+        // the shape of a v3 file written before the table existed
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("DROP TABLE inv_gap_overflow;").unwrap();
+    }
+    let l = Ledger::open(&path, LedgerOptions::default()).unwrap();
+    // what GET /v1/proxies/{id} reads, and the retention sweep
+    let page = l.gaps_page("px-a", 50).unwrap();
+    assert_eq!((page.total, page.dropped), (0, 0));
+    assert_eq!(l.inventory_gap_overflow("px-a").unwrap(), 0);
+    l.sweep(1_000_000_000, &|_| 1_000).unwrap();
+    // and the counter works
+    l.fill_inventory_gaps_for_test("px-a", 10_000).unwrap();
+    let b = rep(
+        "px-a",
+        3,
+        3,
+        20,
+        UP1,
+        CS1,
+        1,
+        1,
+        &[1, 2],
+        compared(2, vec![added(2)]),
+    );
+    let a = rep("px-a", 2, 2, 15, UP1, CS1, 1, 1, &[1], initial());
+    ingest(&l, &b, 1001);
+    ingest(&l, &a, 1002);
+    assert_eq!(
+        l.gaps_page("px-a", 50).unwrap().dropped,
+        0,
+        "consistent: no gap"
+    );
+}

@@ -604,6 +604,10 @@ impl Ledger {
         // idempotently on every open keeps the schema at v2 (no migration).
         conn.execute_batch(INVOCATION_INDEX_DDL)
             .context("create invocation_id index")?;
+        // A v3 file created before the gap overflow counter lacks its table;
+        // like the index above it is added idempotently on every open.
+        conn.execute_batch(super::ledger_inventory::GAP_OVERFLOW_DDL)
+            .context("create inventory gap overflow table")?;
         let conns = (0..READ_POOL_SIZE)
             .map(|_| open_read_only(path).map(Mutex::new))
             .collect::<Result<Vec<_>>>()?;
