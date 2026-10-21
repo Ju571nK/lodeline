@@ -96,7 +96,7 @@ impl fmt::Debug for CursorTag {
     }
 }
 
-/// Makes [`CursorTag`]s. One per process (T-13c holds it next to the relay): the
+/// Makes [`CursorTag`]s. One per process (T-13c: `inventory_sink::InventorySink` holds it): the
 /// request cursor of page N+1 and the `nextCursor` of page N must be tagged by
 /// the same hasher for the engine to see them as equal.
 #[derive(Clone)]
@@ -393,6 +393,14 @@ impl InventoryEngine {
             }
         }
         Ok(n)
+    }
+
+    /// The sessions that still have a chain (in progress or ended incomplete).
+    pub fn open_sessions(&self) -> Vec<u64> {
+        let mut v: Vec<u64> = self.collectors.keys().map(|k| k.session).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     fn make_room(&mut self) -> Result<(), RegistryError> {

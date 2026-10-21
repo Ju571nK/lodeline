@@ -799,12 +799,33 @@ impl StatusBuilder {
         Ok(seq)
     }
 
-    /// Build and validate one report body.
+    /// The attached registry probe, if any. The async reporter reads it off the
+    /// async workers (see [`Reporter::send_once_at`]).
+    pub fn registry_probe(&self) -> Option<RegistryProbe> {
+        self.registry.clone()
+    }
+
+    /// Build and validate one report body. A registry probe is read inline here
+    /// (it opens SQLite); the async reporter reads it with `spawn_blocking` and
+    /// calls [`StatusBuilder::build_with_registry`] instead.
     pub fn build(
         &mut self,
         view: &ConfigView,
         gaps: &[GapReport],
         now: time::OffsetDateTime,
+    ) -> Result<Vec<u8>, BuildError> {
+        let reading = self.registry.as_ref().map(|probe| probe());
+        self.build_with_registry(view, gaps, now, reading)
+    }
+
+    /// [`StatusBuilder::build`] with the registry reading supplied: `None` when no
+    /// probe is attached, `Some(None)` when the registry could not be read.
+    pub fn build_with_registry(
+        &mut self,
+        view: &ConfigView,
+        gaps: &[GapReport],
+        now: time::OffsetDateTime,
+        reading: Option<Option<RegistrySnapshot>>,
     ) -> Result<Vec<u8>, BuildError> {
         let mut config = json!({
             "state": view.state,
@@ -869,8 +890,8 @@ impl StatusBuilder {
         // stall flag and the optional quarantined / poisoned / discarded counts.
         // An unreadable registry reports `sync_stalled`. Without a probe (unit
         // tests of the builder alone) it is the old vacuous shape.
-        let registry_section = match self.registry.as_ref() {
-            Some(probe) => match probe() {
+        let registry_section = match reading {
+            Some(reading) => match reading {
                 Some(r) => json!({
                     "pending_entries": r.pending_entries.min(i64::MAX as u64),
                     "sync_stalled": r.sync_stalled,
@@ -1008,6 +1029,13 @@ impl Reporter {
         self
     }
 
+    /// Report the `registry` section from this probe (see
+    /// [`StatusBuilder::set_registry`]).
+    pub fn with_registry(mut self, probe: RegistryProbe) -> Reporter {
+        self.builder.set_registry(probe);
+        self
+    }
+
     /// Report the spool (see [`StatusBuilder::set_spool`]).
     pub fn with_spool(mut self, spool: Spool) -> Reporter {
         self.builder.set_spool(spool);
@@ -1065,7 +1093,18 @@ impl Reporter {
             Mode::Isolate => self.gaps.pending_batch_limit(1),
         };
         let sent: Vec<String> = batch.iter().map(|g| gap_id(g).to_string()).collect();
-        let Ok(body) = self.builder.build(view, &batch, now) else {
+        // The probe opens SQLite: read it off the async workers. A probe that
+        // panics or a runtime that is shutting down reads as an unreadable
+        // registry (`sync_stalled`), never as a healthy one.
+        let reading = match self.builder.registry_probe() {
+            Some(probe) => Some(
+                tokio::task::spawn_blocking(move || probe())
+                    .await
+                    .unwrap_or(None),
+            ),
+            None => None,
+        };
+        let Ok(body) = self.builder.build_with_registry(view, &batch, now, reading) else {
             tracing::error!("status report did not validate; not sent");
             return None;
         };

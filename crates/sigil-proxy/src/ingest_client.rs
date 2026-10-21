@@ -34,6 +34,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -401,6 +403,9 @@ pub struct IngestClient {
     single_quarantines: u32,
     holds: HashMap<String, Hold>,
     outage: Outage,
+    /// Mirror of [`IngestClient::registry_sync_stalled`] for the status report
+    /// (the client itself moves into the ingest task).
+    stalled: Arc<AtomicBool>,
 }
 
 impl IngestClient {
@@ -424,7 +429,14 @@ impl IngestClient {
                 open,
                 ..Outage::default()
             },
+            stalled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// A flag that follows [`IngestClient::registry_sync_stalled`] after every
+    /// request, readable while the client runs in its task.
+    pub fn registry_stalled_flag(&self) -> Arc<AtomicBool> {
+        self.stalled.clone()
     }
 
     /// Test knob: smaller batch limits.
@@ -543,6 +555,22 @@ impl IngestClient {
     /// Build, send and settle one request. Does nothing when the source has no
     /// event that is not held.
     pub async fn send_once<T, S>(
+        &mut self,
+        transport: &T,
+        source: &mut S,
+        now: Instant,
+    ) -> IngestStep
+    where
+        T: IngestTransport + ?Sized,
+        S: EventSource,
+    {
+        let step = self.send_once_inner(transport, source, now).await;
+        self.stalled
+            .store(self.registry_sync_stalled(), Ordering::Relaxed);
+        step
+    }
+
+    async fn send_once_inner<T, S>(
         &mut self,
         transport: &T,
         source: &mut S,
