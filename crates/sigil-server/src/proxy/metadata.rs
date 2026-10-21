@@ -459,15 +459,16 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
         .into_response(),
         Err(UploadError::Conflicts(idx)) => {
             ctx.ingest_log.note("metadata", "registry_conflict");
-            // The contract's item also names the ref; `ErrorItem` has no field
-            // for it, so the index (which the producer holds) identifies it.
+            // The contract's item carries `{index, metadata_ref, code}` (R2): the
+            // ref is the (already validated) conflicting entry's own, never a
+            // stored or submitted value beyond that.
             let items = idx
                 .into_iter()
                 .map(|i| ErrorItem {
                     index: index_u32(i),
                     event_id: None,
                     gap_id: None,
-                    metadata_ref: None,
+                    metadata_ref: req.entries.get(i).map(|e| e.metadata_ref.clone()),
                     code: ErrorCode::RegistryConflict,
                 })
                 .collect();

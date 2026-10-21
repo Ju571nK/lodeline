@@ -102,7 +102,7 @@ pub fn bounded_scope(ids: impl IntoIterator<Item = String>) -> ProxyScope {
     ProxyScope::Only(v)
 }
 
-fn visible(scope: &ProxyScope, proxy_id: &str) -> bool {
+pub(super) fn visible(scope: &ProxyScope, proxy_id: &str) -> bool {
     match scope {
         ProxyScope::All => true,
         ProxyScope::Only(ids) => ids.iter().any(|i| i == proxy_id),
@@ -120,7 +120,7 @@ fn scoped_records(ctx: &ProxyContext, scope: &ProxyScope) -> Vec<ProxyRecord> {
 
 // ---- errors -----------------------------------------------------------------
 
-enum QErr {
+pub(super) enum QErr {
     Filter,
     Cursor,
     Storage,
@@ -173,7 +173,10 @@ fn pct_decode(s: &str) -> Option<String> {
 
 /// Parsed `name=value` pairs. Unknown or repeated names, empty values and
 /// over-long input are `invalid_filter`.
-fn parse_params(raw: Option<&str>, allowed: &[&str]) -> Result<BTreeMap<String, String>, QErr> {
+pub(super) fn parse_params(
+    raw: Option<&str>,
+    allowed: &[&str],
+) -> Result<BTreeMap<String, String>, QErr> {
     let raw = raw.unwrap_or("");
     let mut m = BTreeMap::new();
     for seg in raw.split('&').filter(|s| !s.is_empty()) {
@@ -207,7 +210,7 @@ fn parse_params(raw: Option<&str>, allowed: &[&str]) -> Result<BTreeMap<String, 
 
 /// `limit` defaults to 100. A value of 0, above 500, or not a plain decimal
 /// integer is 422 `invalid_filter` (it is never clamped).
-fn parse_limit(p: &mut BTreeMap<String, String>) -> Result<usize, QErr> {
+pub(super) fn parse_limit(p: &mut BTreeMap<String, String>) -> Result<usize, QErr> {
     match p.remove("limit") {
         None => Ok(DEFAULT_LIMIT),
         Some(v) => match v.parse::<usize>() {
@@ -217,18 +220,18 @@ fn parse_limit(p: &mut BTreeMap<String, String>) -> Result<usize, QErr> {
     }
 }
 
-fn parse_id(v: &str) -> Result<String, QErr> {
+pub(super) fn parse_id(v: &str) -> Result<String, QErr> {
     Id::new(v).map(|_| v.to_string()).map_err(|_| QErr::Filter)
 }
 
-fn parse_enum(v: &str, allowed: &[&str]) -> Result<String, QErr> {
+pub(super) fn parse_enum(v: &str, allowed: &[&str]) -> Result<String, QErr> {
     allowed
         .contains(&v)
         .then(|| v.to_string())
         .ok_or(QErr::Filter)
 }
 
-fn parse_time(v: &str) -> Result<i64, QErr> {
+pub(super) fn parse_time(v: &str) -> Result<i64, QErr> {
     Timestamp::new(v).map_err(|_| QErr::Filter)?;
     super::projection::timestamp_secs(v).ok_or(QErr::Filter)
 }
@@ -244,7 +247,7 @@ struct CursorWire {
 }
 
 /// Hash binding endpoint, sort definition and normalised filters.
-fn filter_hash(endpoint: &str, order: &str, normalised: &str) -> String {
+pub(super) fn filter_hash(endpoint: &str, order: &str, normalised: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"sigil-proxy-cursor-v1\0");
     for part in [endpoint, order, normalised] {
@@ -254,7 +257,7 @@ fn filter_hash(endpoint: &str, order: &str, normalised: &str) -> String {
     data_encoding::HEXLOWER.encode(&h.finalize())
 }
 
-fn encode_cursor(key: serde_json::Value, hash: &str) -> String {
+pub(super) fn encode_cursor(key: serde_json::Value, hash: &str) -> String {
     let w = CursorWire {
         v: 1,
         key,
@@ -264,7 +267,7 @@ fn encode_cursor(key: serde_json::Value, hash: &str) -> String {
 }
 
 /// The key of a valid cursor for `hash`; every defect is `invalid_cursor`.
-fn decode_cursor(raw: &str, hash: &str) -> Result<serde_json::Value, QErr> {
+pub(super) fn decode_cursor(raw: &str, hash: &str) -> Result<serde_json::Value, QErr> {
     if raw.len() > MAX_CURSOR_LEN {
         return Err(QErr::Cursor);
     }
@@ -280,7 +283,7 @@ fn decode_cursor(raw: &str, hash: &str) -> Result<serde_json::Value, QErr> {
 
 // ---- time and connection state ----------------------------------------------
 
-fn rfc3339(secs: i64) -> String {
+pub(super) fn rfc3339(secs: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp(secs)
         .ok()
         .and_then(|t| {
@@ -475,9 +478,9 @@ pub struct InvocationDetailDto {
 }
 
 #[derive(Serialize)]
-struct Page<T: Serialize> {
-    items: Vec<T>,
-    next_cursor: Option<String>,
+pub(super) struct Page<T: Serialize> {
+    pub(super) items: Vec<T>,
+    pub(super) next_cursor: Option<String>,
 }
 
 fn tool_dto(t: &ToolInfo) -> serde_json::Value {
@@ -633,6 +636,16 @@ fn derived_gap_dto(g: &super::ledger::GapRecord) -> GapDto {
                 "tail": g.tail,
             }),
         ),
+        // Inventory gaps carry their fixed `details` object (identifiers and
+        // closed codes only; registry.md R7, ledger-and-query.md L4).
+        super::ledger::GapKind::InventoryIncomplete => (
+            "inventory_incomplete",
+            g.details.clone().unwrap_or_default(),
+        ),
+        super::ledger::GapKind::ComparisonInconsistent => (
+            "comparison_inconsistent",
+            g.details.clone().unwrap_or_default(),
+        ),
     };
     GapDto {
         gap_id: g.gap_id.clone(),
@@ -703,7 +716,7 @@ async fn read_class_guard(
     next.run(req).await
 }
 
-fn guarded(
+pub(super) fn guarded(
     mr: MethodRouter<Arc<ProxyContext>>,
     ctx: &Arc<ProxyContext>,
     token: &ReadToken,
@@ -741,11 +754,11 @@ pub fn router(ctx: Arc<ProxyContext>, read_token: ReadToken, management: bool) -
 
 // ---- handlers ---------------------------------------------------------------
 
-fn now_secs() -> i64 {
+pub(super) fn now_secs() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
-async fn blocking<T: Send + 'static>(
+pub(super) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, QErr> + Send + 'static,
 ) -> Result<T, QErr> {
     tokio::task::spawn_blocking(f)

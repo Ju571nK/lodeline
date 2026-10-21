@@ -977,6 +977,10 @@ async fn metadata_upload_rules() {
         (it.len(), it[0]["index"].as_u64(), it[0]["code"].as_str()),
         (1, Some(1), Some("registry_conflict"))
     );
+    // R2: the 409 item names the conflicting entry's own ref (and only that:
+    // no event_id/gap_id, and the other, accepted-looking entry is not listed).
+    assert_eq!(it[0]["metadata_ref"].as_str(), Some(mref(1).as_str()));
+    assert!(it[0].get("event_id").is_none() && it[0].get("gap_id").is_none());
     assert!(!String::from_utf8_lossy(&r.body).contains(&"f".repeat(64)));
     assert_eq!(
         fx.ctx.metadata.count("pxa").unwrap(),
