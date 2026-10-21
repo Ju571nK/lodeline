@@ -106,8 +106,21 @@ fn named_refs(r: &InventoryReport) -> BTreeMap<&str, &MetadataRef> {
     out
 }
 
+/// How far a report's `observed_at` (the proxy's clock) may be ahead of the
+/// server's receipt time. Chain order uses the producer clock, so a clock far
+/// in the future would pin a chain's "latest" snapshot; beyond this skew the
+/// report is a 422 `semantic_invalid`. A past `observed_at` is always accepted
+/// (a spooled report may be old). Initial test value (D-04).
+pub const MAX_OBSERVED_AHEAD_SECS: i64 = 300;
+
 /// Blocking body of the handler: validate against the registry, then store.
 pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    handle_at(ctx, peer_id, body, now)
+}
+
+/// [`handle`] with the server clock (unix seconds) given, for tests.
+pub fn handle_at(ctx: &ProxyContext, peer_id: &str, body: &[u8], now: i64) -> Response {
     if foreign_proxy_id_in_body(body, peer_id) {
         ctx.ingest_log.note("inventory", "identity_mismatch");
         return proxy_unknown();
@@ -143,6 +156,13 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
         Err(e) => return storage_error(&e),
     }
 
+    // Producer clock bound (see MAX_OBSERVED_AHEAD_SECS).
+    let observed = super::projection::timestamp_secs(report.observed_at.as_str());
+    if observed.is_none_or(|o| o > now.saturating_add(MAX_OBSERVED_AHEAD_SECS)) {
+        ctx.ingest_log.note("inventory", "observed_at_ahead");
+        return fixed(ErrorCode::SemanticInvalid);
+    }
+
     // I-1: the scope is one the server assigned to this proxy and upstream.
     if !ctx.store.scope_assigned(
         peer_id,
@@ -171,7 +191,6 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
         }
     }
 
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     match ctx
         .ledger
         .ingest_inventory(peer_id, &report, &digest, &refs, now)

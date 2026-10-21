@@ -2963,3 +2963,54 @@ fn a_v3_file_without_the_gap_overflow_table_is_repaired_on_open() {
         "consistent: no gap"
     );
 }
+
+fn parse_now(t: &str) -> i64 {
+    time::OffsetDateTime::parse(t, &time::format_description::well_known::Rfc3339)
+        .unwrap()
+        .unix_timestamp()
+}
+
+#[tokio::test]
+async fn observed_at_may_be_at_most_300_seconds_ahead_of_the_server_clock() {
+    assert_eq!(sigil_server::proxy::inventory::MAX_OBSERVED_AHEAD_SECS, 300);
+    let fx = Fx::new().await;
+    fx.reg_default();
+    // the report observed at `at(1000)`, judged at a fixed server clock
+    let report = |rid: u32, obs: u32| rep("px-a", rid, rid, obs, UP1, CS1, 1, 1, &[1], initial());
+    let base = parse_now(&at(1000));
+    let judge = |r: &Value, now: i64| {
+        sigil_server::proxy::inventory::handle_at(&fx.ctx, "px-a", r.to_string().as_bytes(), now)
+    };
+    let status = |r: axum::response::Response| r.status().as_u16();
+    // exactly 300 s ahead: accepted
+    assert_eq!(status(judge(&report(1, 1000), base - 300)), 200);
+    // 301 s ahead: 422, nothing stored
+    let r = judge(&report(2, 1000), base - 301);
+    assert_eq!(r.status().as_u16(), 422);
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+        "semantic_invalid"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains(&at(1000)));
+    assert_eq!(fx.snaps("px-a").await.len(), 1);
+    // an incomplete report is bound by the same rule
+    let inc = incomplete("px-a", 3, 1000, UP1, CS1, 1, "page_error");
+    assert_eq!(status(judge(&inc, base - 301)), 422);
+    assert_eq!(status(judge(&inc, base - 300)), 200);
+}
+
+#[tokio::test]
+async fn an_old_observed_at_is_accepted() {
+    let fx = Fx::new().await;
+    fx.reg_default();
+    let r = rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial());
+    // server clock a year after the observation
+    let now = parse_now(&at(10)) + 365 * 86_400;
+    let resp =
+        sigil_server::proxy::inventory::handle_at(&fx.ctx, "px-a", r.to_string().as_bytes(), now);
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(fx.snaps("px-a").await.len(), 1);
+}
