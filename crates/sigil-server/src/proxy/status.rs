@@ -379,9 +379,16 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
     if st.proxy_id.as_str() != peer_id {
         return super::guard::proxy_unknown();
     }
+    // Events still buffered unsent in the proxy spool are backlog, not loss: a
+    // tail gap is judged against `last_assigned_sequence - spool.unsent_events`
+    // (never below 0). `unsent_events` is a required field of the report, so
+    // there is no "absent" case; 0 is the old behaviour.
     let (report_epoch, last_assigned) = (
         st.epoch_id.as_str().to_string(),
-        st.last_assigned_sequence.get(),
+        st.last_assigned_sequence
+            .get()
+            .saturating_sub(st.spool.unsent_events.get())
+            .max(0),
     );
     let txn = ctx.store.begin();
     let cur = txn.entry(peer_id);
