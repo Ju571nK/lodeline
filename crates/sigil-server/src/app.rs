@@ -173,6 +173,11 @@ pub fn build_router_with_proxy(
                     ctx.clone(),
                     read_token.clone(),
                     management,
+                ))
+                // Inventory read views (T-13a): same read bearer + host mTLS.
+                .merge(crate::proxy::inventory_query::router(
+                    ctx.clone(),
+                    read_token.clone(),
                 ));
             // Management routes exist only with a verifier file. The guard layer
             // sits inside the host-route guard and acts on management paths only.

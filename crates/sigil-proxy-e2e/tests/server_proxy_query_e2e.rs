@@ -666,8 +666,11 @@ impl Proxy {
                 "observed_desired_revision": null,
                 "expires_at": null
             },
+            // unsent_events stays 0: unsent backlog is excluded from the
+            // tail-gap rule (last_assigned_sequence - unsent_events), and these
+            // tests are about sequence/tail gaps, not backlog.
             "spool": {
-                "state": "ok", "depth_events": 3, "unsent_events": 2, "bytes": 100,
+                "state": "ok", "depth_events": 3, "unsent_events": 0, "bytes": 100,
                 "capacity_bytes": 1000, "oldest_unsent_age_seconds": null,
                 "quarantined_events": 0
             },
@@ -1737,7 +1740,7 @@ async fn sequence_and_tail_gaps_open_close_and_stay_listed() {
     // The report's state shows too.
     assert_eq!(d["connection_state"], "connected");
     assert_eq!(d["spool"]["state"], "ok");
-    assert_eq!(d["spool"]["unsent_events"], 2);
+    assert_eq!(d["spool"]["unsent_events"], 0);
     assert!(d["spool"]["as_of"].is_string() && d["status_as_of"].is_string());
     assert_eq!(d["current_epoch_id"], epoch(1));
     // px-a is unaffected by px-b's gaps.

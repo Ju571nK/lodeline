@@ -153,7 +153,7 @@ pub(super) fn differs(v: Option<&serde_json::Value>, peer_id: &str) -> bool {
     matches!(v, Some(serde_json::Value::String(s)) if s != peer_id)
 }
 
-fn storage_error(e: &super::ledger::LedgerError) -> Response {
+pub(super) fn storage_error(e: &super::ledger::LedgerError) -> Response {
     use super::ledger::LedgerError;
     match e {
         LedgerError::StorageLimit => fixed(ErrorCode::StorageLimit),
@@ -355,7 +355,7 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
 /// is already committed in the ledger, so a failed state write must not turn
 /// the answer into an error: it is logged without values and the next accepted
 /// batch or status report refreshes it.
-fn touch_last_seen(ctx: &ProxyContext, peer_id: &str) {
+pub(super) fn touch_last_seen(ctx: &ProxyContext, peer_id: &str) {
     if let Err(e) = ctx.store.touch_last_seen(peer_id) {
         tracing::warn!(error = %e, "proxy last_seen update failed (ingest)");
     }

@@ -48,6 +48,7 @@ fn is_proxy_path(path: &str) -> bool {
         || path == STATUS_PATH
         || path == super::ingest::INGEST_PATH
         || path == super::metadata::METADATA_PATH
+        || path == super::inventory::INVENTORY_PATH
         || path == "/v1/proxies"
         || path.starts_with(PROXIES_PREFIX)
 }
@@ -219,6 +220,11 @@ pub fn router(ctx: Arc<ProxyContext>) -> Router {
         .route(
             super::metadata::METADATA_PATH,
             post(super::metadata::post_metadata)
+                .route_layer(from_fn_with_state(ctx.clone(), proxy_guard)),
+        )
+        .route(
+            super::inventory::INVENTORY_PATH,
+            post(super::inventory::post_inventory)
                 .route_layer(from_fn_with_state(ctx.clone(), proxy_guard)),
         )
         .with_state(ctx)

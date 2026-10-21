@@ -977,6 +977,10 @@ async fn metadata_upload_rules() {
         (it.len(), it[0]["index"].as_u64(), it[0]["code"].as_str()),
         (1, Some(1), Some("registry_conflict"))
     );
+    // R2: the 409 item names the conflicting entry's own ref (and only that:
+    // no event_id/gap_id, and the other, accepted-looking entry is not listed).
+    assert_eq!(it[0]["metadata_ref"].as_str(), Some(mref(1).as_str()));
+    assert!(it[0].get("event_id").is_none() && it[0].get("gap_id").is_none());
     assert!(!String::from_utf8_lossy(&r.body).contains(&"f".repeat(64)));
     assert_eq!(
         fx.ctx.metadata.count("pxa").unwrap(),
@@ -1364,6 +1368,13 @@ fn status_last(proxy: &str, epoch: &str, seq: u32, last_assigned: i64) -> String
     v.to_string()
 }
 
+fn status_unsent(proxy: &str, epoch: &str, seq: u32, last_assigned: i64, unsent: i64) -> String {
+    let mut v: Value =
+        serde_json::from_str(&status_last(proxy, epoch, seq, last_assigned)).unwrap();
+    v["spool"]["unsent_events"] = unsent.into();
+    v.to_string()
+}
+
 /// `(from, to, open, tail)` of every sequence_gap record of `proxy`.
 fn seq_gaps(env: &Env, proxy: &str) -> Vec<(i64, i64, bool, bool)> {
     env.fx
@@ -1583,4 +1594,40 @@ async fn unknown_epochs_keep_at_most_one_open_tail_gap() {
     assert_eq!(r.status, 200);
     assert!(seq_gaps(&env, "pxa").contains(&(2, 9, true, true)));
     assert_eq!(open_tails(&env), 1);
+}
+
+#[tokio::test]
+async fn unsent_backlog_is_not_a_tail_gap() {
+    let env = Env::new().await;
+    let (fx, a) = (&env.fx, &env.a);
+    events(fx, a, &batch(&[ping("pxa", 1), ping("pxa", 2)])).await;
+    // 10 assigned, 8 still buffered unsent in the spool: delivered 2 == 10 - 8
+    let r = post_status(fx, a, &status_unsent("pxa", EPOCH, 1, 10, 8)).await;
+    assert_eq!(r.status, 200);
+    assert!(seq_gaps(&env, "pxa").is_empty(), "backlog is not loss");
+    // more unsent than assigned never goes below zero
+    let r = post_status(fx, a, &status_unsent("pxa", EPOCH, 2, 3, 50)).await;
+    assert_eq!(r.status, 200);
+    assert!(seq_gaps(&env, "pxa").is_empty());
+}
+
+#[tokio::test]
+async fn a_real_loss_beyond_the_unsent_backlog_still_records_a_tail_gap() {
+    let env = Env::new().await;
+    let (fx, a) = (&env.fx, &env.a);
+    events(fx, a, &batch(&[ping("pxa", 1), ping("pxa", 2)])).await;
+    // 10 assigned, 3 unsent: sequences up to 7 should have been delivered
+    let r = post_status(fx, a, &status_unsent("pxa", EPOCH, 1, 10, 3)).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(seq_gaps(&env, "pxa"), [(3, 7, true, true)]);
+}
+
+#[tokio::test]
+async fn zero_unsent_keeps_the_old_tail_gap_rule() {
+    let env = Env::new().await;
+    let (fx, a) = (&env.fx, &env.a);
+    events(fx, a, &batch(&[ping("pxa", 1), ping("pxa", 2)])).await;
+    let r = post_status(fx, a, &status_unsent("pxa", EPOCH, 1, 5, 0)).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(seq_gaps(&env, "pxa"), [(3, 5, true, true)]);
 }

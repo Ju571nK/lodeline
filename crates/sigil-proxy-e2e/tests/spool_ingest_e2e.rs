@@ -904,36 +904,33 @@ async fn proxy_restart_during_an_outage_recovers_from_the_spool() {
     px.stop().await;
 }
 
-/// #260 payoff (F13/AC-06): events assigned in the spool but never received show
-/// up on the server as a tail `sequence_gap` from the real status report, and
-/// close when the events arrive.
+/// #260 / F13 / AC-06 under the approved tail-gap rule: the server judges a tail
+/// gap against `last_assigned_sequence - spool.unsent_events`, so events that
+/// are assigned but still buffered unsent in the spool are backlog, not a gap.
+/// The status report carries the context (4 unsent of 4 assigned) and the
+/// server records no tail gap, before or after the backlog drains.
 #[tokio::test]
-async fn tail_sequence_gap_appears_via_the_status_report_and_closes() {
+async fn unsent_backlog_is_not_a_tail_gap_end_to_end() {
     let Some(h) = H::new(|_| {}).await else {
         return;
     };
     let px = start_proxy(&h).await;
     px.spool.set_delivery_paused_for_test(true);
     inject(&px.spool, 4).await;
-    eventually("tail gap 1..=4 on the server", || {
-        h.tail_gaps()
-            .iter()
-            .any(|g| g.open && g.from_sequence == Some(1) && g.to_sequence == Some(4))
+    eventually("server status shows 4 assigned and 4 unsent", || {
+        h.status().is_some_and(|s| {
+            s.spool.unsent_events.get() == 4 && s.last_assigned_sequence.get() == 4
+        })
     })
     .await;
-    // The manager-visible context: the events are in the spool, unsent.
-    assert!(h
-        .status()
-        .is_some_and(|s| s.spool.unsent_events.get() == 4 && s.last_assigned_sequence.get() == 4));
+    assert!(h.tail_gaps().is_empty(), "backlog is not a gap");
     assert_eq!(h.rows(), 0);
 
     px.spool.set_delivery_paused_for_test(false);
     eventually("events arrive", || h.rows() == 4).await;
-    eventually("tail gap closed", || {
-        let g = h.tail_gaps();
-        !g.is_empty() && g.iter().all(|g| !g.open)
-    })
-    .await;
+    // A transient tail gap from an in-flight hand-off may exist, but nothing
+    // stays open once everything has arrived.
+    eventually("no open tail gap", || h.tail_gaps().iter().all(|g| !g.open)).await;
     px.stop().await;
 }
 

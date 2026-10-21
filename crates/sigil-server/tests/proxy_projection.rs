@@ -810,14 +810,15 @@ fn table_exists(path: &Path, name: &str) -> bool {
 
 #[test]
 fn migration_v1_to_v2_rebuilds_projections() {
-    assert_eq!(SCHEMA_VERSION, 2);
+    // v1 -> v2 rebuilds the projections; the same open then continues to v3.
+    assert_eq!(SCHEMA_VERSION, 3);
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("l.sqlite");
     build_v1(&path, &v1_events(), None);
     assert_eq!(user_version(&path), 1);
 
     let l = Ledger::open(&path, LedgerOptions::default()).unwrap();
-    assert_eq!(user_version(&path), 2);
+    assert_eq!(user_version(&path), 3);
     let p1 = inv_of(&l, "px", 1);
     assert_eq!(
         (p1.lifecycle, p1.outcome.as_deref()),
@@ -886,7 +887,7 @@ fn newer_schema_is_still_refused() {
     drop(Ledger::open(&p, LedgerOptions::default()).unwrap());
     rusqlite::Connection::open(&p)
         .unwrap()
-        .pragma_update(None, "user_version", 3)
+        .pragma_update(None, "user_version", 4)
         .unwrap();
     assert!(Ledger::open(&p, LedgerOptions::default()).is_err());
 }

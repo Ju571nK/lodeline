@@ -51,7 +51,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 /// Format version stored in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 /// Read connections of the S5 read API (WAL readers do not block each other or
 /// the writer). Initial test value (D-04).
 pub const READ_POOL_SIZE: usize = 4;
@@ -292,13 +292,20 @@ impl From<rusqlite::Error> for LedgerError {
 pub enum GapKind {
     ProducerEpochChange,
     SequenceGap,
+    /// Registry R7: an incomplete inventory observation (never closes).
+    InventoryIncomplete,
+    /// Registry I-3/I-6/I-7/I-8 failed when the previous snapshot arrived
+    /// later (never closes).
+    ComparisonInconsistent,
 }
 
 impl GapKind {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             GapKind::ProducerEpochChange => "producer_epoch_change",
             GapKind::SequenceGap => "sequence_gap",
+            GapKind::InventoryIncomplete => "inventory_incomplete",
+            GapKind::ComparisonInconsistent => "comparison_inconsistent",
         }
     }
 }
@@ -319,6 +326,9 @@ pub struct GapRecord {
     /// `sequence_gap` derived from a status report's `last_assigned_sequence`
     /// (`highest accepted + 1 ..= last_assigned`): events may still be in flight.
     pub tail: bool,
+    /// Fixed-field `details` of the inventory kinds (identifiers and closed
+    /// codes only); `None` for the event-derived kinds.
+    pub details: Option<serde_json::Value>,
 }
 
 /// What S5 needs from a stored event.
@@ -347,20 +357,27 @@ pub struct SweepStats {
     pub invocations: usize,
     /// Projection rows removed (one per expired invocation).
     pub projections: usize,
+    /// Inventory (registry.md R7) rows removed by retention.
+    pub inventory_reports: usize,
+    pub inventory_snapshots: usize,
+    pub inventory_drift: usize,
+    pub inventory_markers: usize,
 }
 
 pub struct Ledger {
     /// The single writer (ingest, sweep, tail gaps).
-    conn: Mutex<Connection>,
+    pub(super) conn: Mutex<Connection>,
     /// Separate read-only WAL connection for the S5 read API, so reads never
     /// wait on the writer mutex (WAL readers do not block the writer either).
-    read: ReadPool,
-    opts: LedgerOptions,
+    pub(super) read: ReadPool,
+    pub(super) opts: LedgerOptions,
+    /// Inventory storage bounds (see `ledger_inventory`).
+    pub(super) inv_caps: super::ledger_inventory::InventoryCaps,
 }
 
 /// A few read-only connections; a query takes the first free one (or waits on
 /// one in round-robin order). Each query runs under a wall-clock limit.
-struct ReadPool {
+pub(super) struct ReadPool {
     conns: Vec<Mutex<Connection>>,
     next: AtomicUsize,
     timeout_ms: AtomicU64,
@@ -370,7 +387,7 @@ struct ReadPool {
 }
 
 impl ReadPool {
-    fn acquire(&self) -> ReadGuard<'_> {
+    pub(super) fn acquire(&self) -> ReadGuard<'_> {
         #[cfg(any(test, feature = "test-support"))]
         self.acquires.fetch_add(1, Ordering::Relaxed);
         let conn = self
@@ -409,7 +426,7 @@ impl ReadPool {
     }
 }
 
-struct ReadGuard<'a> {
+pub(super) struct ReadGuard<'a> {
     conn: MutexGuard<'a, Connection>,
     done: Option<mpsc::Sender<()>>,
     timer: Option<std::thread::JoinHandle<()>>,
@@ -489,7 +506,8 @@ CREATE TABLE gaps (
     open              INTEGER NOT NULL,
     closed_at         INTEGER,
     present           INTEGER NOT NULL DEFAULT 0,
-    tail              INTEGER NOT NULL DEFAULT 0
+    tail              INTEGER NOT NULL DEFAULT 0,
+    details           TEXT
 );
 CREATE INDEX gaps_open ON gaps (proxy_id, epoch_id, open, from_sequence);
 CREATE TABLE invocations (
@@ -586,6 +604,10 @@ impl Ledger {
         // idempotently on every open keeps the schema at v2 (no migration).
         conn.execute_batch(INVOCATION_INDEX_DDL)
             .context("create invocation_id index")?;
+        // A v3 file created before the gap overflow counter lacks its table;
+        // like the index above it is added idempotently on every open.
+        conn.execute_batch(super::ledger_inventory::GAP_OVERFLOW_DDL)
+            .context("create inventory gap overflow table")?;
         let conns = (0..READ_POOL_SIZE)
             .map(|_| open_read_only(path).map(Mutex::new))
             .collect::<Result<Vec<_>>>()?;
@@ -599,6 +621,7 @@ impl Ledger {
                 acquires: AtomicU64::new(0),
             },
             opts,
+            inv_caps: Default::default(),
         })
     }
 
@@ -940,7 +963,9 @@ impl Ledger {
         let proxies: Vec<String> = {
             let mut st = tx.prepare(
                 "SELECT proxy_id FROM events UNION SELECT proxy_id FROM gaps
-                 UNION SELECT proxy_id FROM invocations UNION SELECT proxy_id FROM projections",
+                 UNION SELECT proxy_id FROM invocations UNION SELECT proxy_id FROM projections
+                 UNION SELECT proxy_id FROM inv_reports UNION SELECT proxy_id FROM inv_snapshots
+                 UNION SELECT proxy_id FROM inv_drift UNION SELECT proxy_id FROM inv_markers",
             )?;
             let rows = st.query_map([], |r| r.get(0))?;
             rows.collect::<std::result::Result<_, _>>()?
@@ -969,6 +994,7 @@ impl Ledger {
                 "DELETE FROM invocations WHERE proxy_id = ?1 AND last_received_at < ?2",
                 params![p, now.saturating_sub(e.max(t))],
             )?;
+            super::ledger_inventory::sweep_proxy(&tx, p, now, e, t, &mut s)?;
         }
         s.tombstones += tx.execute(
             "DELETE FROM tombstones WHERE received_at < ?1",
@@ -1001,7 +1027,8 @@ impl Ledger {
         let conn = self.conn.lock();
         let mut st = conn.prepare(
             "SELECT gap_id, kind, detected_at, epoch_id, previous_epoch_id, from_sequence,
-                    to_sequence, open, closed_at, tail FROM gaps WHERE proxy_id = ?1 ORDER BY rowid_seq",
+                    to_sequence, open, closed_at, tail, details FROM gaps
+             WHERE proxy_id = ?1 ORDER BY rowid_seq",
         )?;
         let rows = st.query_map(params![proxy_id], gap_from_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1160,13 +1187,25 @@ impl Ledger {
         let items = {
             let mut st = tx.prepare(
                 "SELECT gap_id, kind, detected_at, epoch_id, previous_epoch_id, from_sequence,
-                        to_sequence, open, closed_at, tail FROM gaps
+                        to_sequence, open, closed_at, tail, details FROM gaps
                  WHERE proxy_id = ?1 ORDER BY rowid_seq DESC LIMIT ?2",
             )?;
             let rows = st.query_map(params![proxy_id, limit as i64], gap_from_row)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
-        Ok(GapPage { items, total })
+        let dropped: i64 = tx
+            .query_row(
+                "SELECT dropped FROM inv_gap_overflow WHERE proxy_id = ?1",
+                params![proxy_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(GapPage {
+            items,
+            total,
+            dropped,
+        })
     }
 
     /// Open server-derived gaps of `proxy_id` by kind (`sequence_gap`,
@@ -1355,6 +1394,8 @@ fn gap_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GapRecord> {
     let kind = match kind.as_str() {
         "sequence_gap" => GapKind::SequenceGap,
         "producer_epoch_change" => GapKind::ProducerEpochChange,
+        "inventory_incomplete" => GapKind::InventoryIncomplete,
+        "comparison_inconsistent" => GapKind::ComparisonInconsistent,
         _ => {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 1,
@@ -1374,6 +1415,9 @@ fn gap_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GapRecord> {
         open: r.get::<_, i64>(7)? != 0,
         closed_at: r.get(8)?,
         tail: r.get::<_, i64>(9)? != 0,
+        details: r
+            .get::<_, Option<String>>(10)?
+            .and_then(|t| serde_json::from_str(&t).ok()),
     })
 }
 
@@ -1794,13 +1838,15 @@ fn init_schema(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(SCHEMA)
                 .and_then(|()| tx.execute_batch(PROJECTIONS_DDL))
                 .and_then(|()| tx.execute_batch(GAPS_INDEXES_DDL))
+                .and_then(|()| tx.execute_batch(super::ledger_inventory::INVENTORY_DDL))
                 .context("create ledger schema")?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit().context("create ledger schema")?;
             Ok(())
         }
         (SCHEMA_VERSION, _) => Ok(()),
-        (1, _) => migrate_v1_to_v2(conn),
+        (1, _) => migrate_v1_to_v2(conn).and_then(|()| migrate_v2_to_v3(conn)),
+        (2, _) => migrate_v2_to_v3(conn),
         _ => bail!("ledger database has an unknown format version"),
     }
 }
@@ -1813,7 +1859,7 @@ fn init_schema(conn: &mut Connection) -> Result<()> {
 fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == SCHEMA_VERSION {
+    if version >= 2 {
         return Ok(()); // another process migrated first
     }
     if version != 1 {
@@ -1849,12 +1895,32 @@ fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
         recompute_projection(&tx, proxy_id, invocation_id, &agg)
             .map_err(|e| anyhow::anyhow!("rebuild projection during v2 migration: {e}"))?;
     }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.pragma_update(None, "user_version", 2)?;
     tx.commit().context("commit ledger v2 migration")?;
     tracing::info!(
         invocations = keys.len(),
         "proxy ledger migrated to schema v2"
     );
+    Ok(())
+}
+
+/// v2 -> v3 in ONE transaction: the inventory tables (registry.md R7) and
+/// `gaps.details`. No data has to be rebuilt: no inventory existed before v3.
+fn migrate_v2_to_v3(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == SCHEMA_VERSION {
+        return Ok(()); // another process migrated first
+    }
+    if version != 2 {
+        bail!("ledger database has an unknown format version");
+    }
+    tx.execute_batch("ALTER TABLE gaps ADD COLUMN details TEXT;")
+        .and_then(|()| tx.execute_batch(super::ledger_inventory::INVENTORY_DDL))
+        .context("migrate ledger schema to v3")?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit().context("commit ledger v3 migration")?;
+    tracing::info!("proxy ledger migrated to schema v3");
     Ok(())
 }
 
