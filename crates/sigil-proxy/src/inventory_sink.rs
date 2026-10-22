@@ -29,8 +29,13 @@
 //! with a clone of the same hasher. The tag goes to the engine as the page's
 //! `request_cursor`, and the engine accepts a continuation only if it equals the
 //! `nextCursor` tag of the previous page of that chain. A stale or invented
-//! cursor, a retried page and an interleaved second listing therefore all end the
-//! chain as `cursor_invalid`; none can complete a listing.
+//! cursor and a retried page therefore end the chain as `cursor_invalid`, and so
+//! does an interleaved second listing of the same principal whose cursor differs.
+//! The check compares cursor STRINGS: if two interleaved listings are handed
+//! identical cursor strings by the upstream, either's continuation is accepted
+//! into the one chain the engine holds (one chain per principal and scope, never a
+//! second one), so no snapshot can mix two chains' pages; the worst case is a
+//! listing the upstream itself made ambiguous, which is harmless.
 //!
 //! The sink keeps one fact per `tools/list` call between its start and its
 //! completion: the request's cursor tag. If that fact is missing at completion

@@ -143,7 +143,7 @@ async fn start_table(
     handle.set(Some(t));
     let mut proxy = Proxy::new(limits, handle, Arc::new(SystemResolver));
     if let Some(s) = sink {
-        proxy = proxy.with_sink(s);
+        proxy = proxy.with_sink(s, sigil_proxy::inventory::CursorHasher::new().unwrap());
     }
     let registry = proxy.cancel_registry();
     let (stop, rx) = oneshot::channel::<()>();

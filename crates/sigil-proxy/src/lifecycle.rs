@@ -725,7 +725,7 @@ async fn run_inner(
     // Without a registry the relay keeps its no-op sink and does no observation
     // work at all (`wants_observations` is false).
     if let (Some(sink), Some(hasher)) = (inventory_sink.take(), cursor_hasher.take()) {
-        proxy = proxy.with_sink(sink).with_cursor_hasher(hasher);
+        proxy = proxy.with_sink(sink, hasher);
     }
     let lc3 = lc.clone();
     let served = proxy

@@ -156,18 +156,15 @@ impl Proxy {
         }
     }
 
-    /// Install the consumer of observations (T-13). The default observes
+    /// Install the consumer of observations (T-13) together with the hasher that
+    /// tags `tools/list` request cursors for it. The hasher must be the one the
+    /// sink uses for a page's `nextCursor` (clone the producer's), or a
+    /// continuation can never be matched; taking both here means a sink cannot
+    /// be installed with a mismatched or default hasher. The default observes
     /// nothing.
-    pub fn with_sink(mut self, sink: Arc<dyn ObservationSink>) -> Proxy {
+    pub fn with_sink(mut self, sink: Arc<dyn ObservationSink>, hasher: CursorHasher) -> Proxy {
         self.sink = sink;
-        self
-    }
-
-    /// The hasher that turns a `tools/list` request cursor into the tag the sink
-    /// sees. It must be the one that tags the pages' `nextCursor` (the inventory
-    /// sink's), or a continuation can never be matched.
-    pub fn with_cursor_hasher(mut self, h: CursorHasher) -> Proxy {
-        self.cursor_hasher = h;
+        self.cursor_hasher = hasher;
         self
     }
 
