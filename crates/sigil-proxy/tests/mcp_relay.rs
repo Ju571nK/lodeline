@@ -937,7 +937,7 @@ async fn observations_carry_no_content() {
         ToolField::Name(n) => assert_eq!(n.as_str(), "echo"),
         o => panic!("{o:?}"),
     }
-    assert!(started[1].list_cursor && started[1].method == Method::ToolsList);
+    assert!(started[1].list_cursor.is_some() && started[1].method == Method::ToolsList);
     assert_eq!(started[3].method, Method::Unknown);
     let list = rec
         .completed()
@@ -1027,7 +1027,7 @@ async fn tools_list_pages_are_exposed_to_the_seam() {
         .all()
         .into_iter()
         .filter_map(|e| match e {
-            Ev::Started(s) => Some(s.list_cursor),
+            Ev::Started(s) => Some(s.list_cursor.is_some()),
             _ => None,
         })
         .collect();

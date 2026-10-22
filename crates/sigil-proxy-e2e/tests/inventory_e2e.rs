@@ -901,6 +901,51 @@ async fn an_unfinished_listing_never_becomes_a_snapshot() {
     assert!(h.snapshots().await.is_empty());
 }
 
+/// H1: the client skips ahead with a cursor the proxy never handed out. The
+/// upstream answers it happily and the last page has no `nextCursor`, but the
+/// relay's keyed cursor tag does not match, so the listing is NOT complete.
+#[tokio::test]
+async fn a_forged_cursor_never_completes_a_listing() {
+    let Some(h) = H::new(
+        &[
+            (NAMES[0], "first tool"),
+            (NAMES[1], "second tool"),
+            (NAMES[2], "third tool"),
+        ],
+        2,
+    )
+    .await
+    else {
+        return;
+    };
+    let px = start_proxy(&h, Duration::from_secs(120)).await;
+    let (st, v) = px
+        .call(json!({"jsonrpc": "2.0", "id": 31, "method": "tools/list"}))
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["result"]["nextCursor"], "o2");
+    // "o1" is a valid cursor for the upstream but not the one it was handed.
+    let (st, v) = px
+        .call(json!({"jsonrpc": "2.0", "id": 32, "method": "tools/list",
+                     "params": {"cursor": "o1"}}))
+        .await;
+    assert_eq!(st, 200);
+    assert!(v["result"]["nextCursor"].is_null());
+    px.stop().await;
+    let (store, _) =
+        sigil_proxy::registry_store::RegistryStore::open(&h.state_dir(), PROXY).unwrap();
+    let reports: Vec<Value> = store
+        .pending_reports(100)
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0]["completeness"], "incomplete");
+    assert_eq!(reports[0]["incomplete_reason"], "cursor_invalid");
+    assert!(h.snapshots().await.is_empty());
+}
+
 // ------------------------------------------------------- the real binary
 
 /// Build (a no-op when current) and locate the real `sigil-proxy` binary, built

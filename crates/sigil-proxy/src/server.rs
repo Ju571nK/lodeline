@@ -50,6 +50,7 @@ use crate::body::{BodyMode, MeteredBody, Permits};
 use crate::bootstrap::{is_loopback, is_loopback_host, normalize_origin};
 use crate::dest::{resolve_checked, DestError, Resolver};
 use crate::headers::{downstream_response_headers, upstream_request_headers};
+use crate::inventory::CursorHasher;
 use crate::lifecycle::{drain, DrainOutcome};
 use crate::limits::Limits;
 use crate::mcp::cancel::{CancelKey, CancelOutcome, CancelRegistry};
@@ -120,6 +121,7 @@ struct Shared {
     host: HostPolicy,
     header_read_timeout: Duration,
     sink: Arc<dyn ObservationSink>,
+    cursor_hasher: CursorHasher,
     cancel: Arc<CancelRegistry>,
     /// Relay-local call numbers (not invocation ids).
     seq: AtomicU64,
@@ -133,6 +135,7 @@ pub struct Proxy {
     resolver: Arc<dyn Resolver>,
     header_read_timeout: Duration,
     sink: Arc<dyn ObservationSink>,
+    cursor_hasher: CursorHasher,
     cancel: Arc<CancelRegistry>,
 }
 
@@ -146,6 +149,9 @@ impl Proxy {
             // No producer until T-13: nothing is observed and behaviour is
             // exactly the plain relay.
             sink: Arc::new(NoopSink),
+            // Only used when a sink observes; a producer installs the process's
+            // own hasher with `with_cursor_hasher`.
+            cursor_hasher: CursorHasher::new().unwrap_or_else(|_| CursorHasher::from_key([0; 32])),
             cancel: Arc::new(CancelRegistry::default()),
         }
     }
@@ -154,6 +160,14 @@ impl Proxy {
     /// nothing.
     pub fn with_sink(mut self, sink: Arc<dyn ObservationSink>) -> Proxy {
         self.sink = sink;
+        self
+    }
+
+    /// The hasher that turns a `tools/list` request cursor into the tag the sink
+    /// sees. It must be the one that tags the pages' `nextCursor` (the inventory
+    /// sink's), or a continuation can never be matched.
+    pub fn with_cursor_hasher(mut self, h: CursorHasher) -> Proxy {
+        self.cursor_hasher = h;
         self
     }
 
@@ -187,6 +201,7 @@ impl Proxy {
             },
             header_read_timeout: self.header_read_timeout,
             sink: self.sink,
+            cursor_hasher: self.cursor_hasher,
             cancel: self.cancel,
             seq: AtomicU64::new(1),
             limits: self.limits,
@@ -627,7 +642,10 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
                     method: info.method,
                     request_id: c.request_id().clone(),
                     tool: info.tool.clone(),
-                    list_cursor: info.list_cursor,
+                    list_cursor: info
+                        .list_cursor
+                        .as_ref()
+                        .map(|c| sh.cursor_hasher.tag_list_cursor(c)),
                     task_augmented: info.task_augmented,
                     request_bytes: request_body.len() as u64,
                     received_at,

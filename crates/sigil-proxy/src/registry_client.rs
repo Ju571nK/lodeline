@@ -113,15 +113,35 @@ pub trait ConflictHandler: Send {
     /// accepted to `{"status":"metadata_unavailable","reason":"registry_conflict"}`
     /// (M2b; the original bytes stay in quarantine) and return the `event_id`s
     /// of ALL events that depend on the entry, rewritten or not.
-    fn registry_conflict(&mut self, metadata_ref: &str, key_id: &str) -> Vec<String>;
+    ///
+    /// An `Err` means the spool could not be read or written: the conflict stays
+    /// unfinished (the durable "gap pending" mark is kept) and is retried by
+    /// [`ConflictReporter::resume`], so the central gap is never lost.
+    fn registry_conflict(
+        &mut self,
+        metadata_ref: &str,
+        key_id: &str,
+    ) -> Result<Vec<String>, HandlerError>;
 }
+
+/// The spool could not complete a registry-conflict rewrite. Carries no content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandlerError;
+
+impl std::fmt::Display for HandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the spool could not rewrite the dependent events")
+    }
+}
+
+impl std::error::Error for HandlerError {}
 
 /// A handler for a proxy with no spool wired yet: no dependents.
 pub struct NoDependents;
 
 impl ConflictHandler for NoDependents {
-    fn registry_conflict(&mut self, _: &str, _: &str) -> Vec<String> {
-        Vec::new()
+    fn registry_conflict(&mut self, _: &str, _: &str) -> Result<Vec<String>, HandlerError> {
+        Ok(Vec::new())
     }
 }
 
@@ -184,11 +204,15 @@ impl ConflictReporter {
         rec: &EntryRecord,
         detected_by: ConflictDetector,
     ) -> Result<usize, RegistryError> {
+        // The handler may block on the spool's writer thread: callers run this
+        // off the async workers. The store lock is NOT held here.
         let ids = self
             .handler
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .registry_conflict(&rec.metadata_ref, &rec.key_id);
+            .registry_conflict(&rec.metadata_ref, &rec.key_id)
+            // The "gap pending" mark stays set: `resume` finishes it later.
+            .map_err(|_| RegistryError::Storage)?;
         self.queue_gap(rec, &ids, detected_by);
         self.store.clear_gap_pending(&rec.metadata_ref)?;
         Ok(ids.len())
@@ -266,7 +290,8 @@ impl ConflictReporter {
             self.handler
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .registry_conflict(&rec.metadata_ref, &rec.key_id);
+                .registry_conflict(&rec.metadata_ref, &rec.key_id)
+                .map_err(|_| RegistryError::Storage)?;
             n += 1;
         }
         Ok(n)
@@ -296,11 +321,15 @@ impl ConflictReporter {
 /// ONLY the `tool` field of the never-accepted dependent starts and returns the
 /// ids of ALL dependents (see [`crate::spool::Spool::registry_conflict`]).
 ///
-/// The seam returns no error, so a failing spool is retried a few times; if it
-/// still fails the conflict is logged and no dependents are returned. The events
-/// then keep their ref, which the server answers with 424 until the registry
-/// sync catches up: that shows as `sync_stalled`, never as a silent send of a
-/// conflicting ref (the entry stays quarantined).
+/// A failing spool is an `Err`: the conflict keeps its durable "gap pending" mark
+/// and [`RegistryClient`] retries it through [`ConflictReporter::resume`] (paced),
+/// so neither the rewrite nor the central gap is lost. No retry or sleep happens
+/// here.
+///
+/// An event batch already handed to the ingest client keeps the OLD bytes
+/// (referencing the quarantined ref) until it is answered: the central gap names
+/// those events, and the server answers 424 for a quarantined (never registered)
+/// ref, so they are held and read again rewritten.
 pub struct SpoolConflictHandler {
     spool: crate::spool::Spool,
 }
@@ -312,16 +341,15 @@ impl SpoolConflictHandler {
 }
 
 impl ConflictHandler for SpoolConflictHandler {
-    fn registry_conflict(&mut self, metadata_ref: &str, _key_id: &str) -> Vec<String> {
-        for attempt in 0..3 {
-            match self.spool.registry_conflict(metadata_ref) {
-                Ok(ids) => return ids,
-                Err(_) if attempt < 2 => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => {}
-            }
-        }
-        tracing::error!("registry conflict: the spool could not rewrite the dependent events");
-        Vec::new()
+    fn registry_conflict(
+        &mut self,
+        metadata_ref: &str,
+        _key_id: &str,
+    ) -> Result<Vec<String>, HandlerError> {
+        self.spool.registry_conflict(metadata_ref).map_err(|_| {
+            tracing::error!("registry conflict: the spool could not rewrite the dependent events");
+            HandlerError
+        })
     }
 }
 
@@ -678,6 +706,8 @@ pub const POISON_RETRY: Duration = Duration::from_secs(3600);
 /// Consecutive 424s for one report after which it is given up (and its chain
 /// reset).
 pub const MAX_REPORT_424: u32 = 5;
+/// A conflict whose spool rewrite failed is retried after this long.
+pub const RESUME_RETRY: Duration = Duration::from_secs(2);
 /// Queued reports looked at per step.
 const REPORT_SCAN: usize = 32;
 /// Largest serialized entry (registry.md R2).
@@ -711,6 +741,8 @@ pub struct RegistryClient<T: RegistryTransport> {
     shared_discarded: Arc<AtomicU64>,
     shared_failures: Arc<AtomicU32>,
     resumed: bool,
+    /// A failed conflict resume is not tried again before this instant.
+    resume_after: Option<Instant>,
     /// When poisoned entries are next made eligible again.
     next_unpoison: Option<Instant>,
     /// Consecutive 424s per queued report.
@@ -741,6 +773,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
             shared_discarded: Arc::new(AtomicU64::new(0)),
             shared_failures: Arc::new(AtomicU32::new(0)),
             resumed: false,
+            resume_after: None,
             next_unpoison: None,
             report_424: HashMap::new(),
             refused_not_before: None,
@@ -819,9 +852,50 @@ impl<T: RegistryTransport> RegistryClient<T> {
         }
     }
 
+    /// `report_conflict` off the async workers: it blocks on the spool's writer.
+    async fn conflict(
+        &self,
+        metadata_ref: &str,
+        by: ConflictDetector,
+    ) -> Result<(), RegistryError> {
+        let (c, r) = (self.conflicts.clone(), metadata_ref.to_string());
+        tokio::task::spawn_blocking(move || c.report_conflict(&r, by))
+            .await
+            .map_err(|_| RegistryError::Storage)?
+            .map(|_| ())
+    }
+
+    /// Finish conflicts whose handling was cut short (a crash, or a spool that
+    /// failed meanwhile), off the async workers. A failure is retried after
+    /// [`RESUME_RETRY`], not at every step.
+    async fn resume_conflicts(&mut self) -> Result<(), RegistryError> {
+        let now = Instant::now();
+        if self.resume_after.is_some_and(|t| now < t) {
+            return Ok(());
+        }
+        let c = self.conflicts.clone();
+        let r = tokio::task::spawn_blocking(move || c.resume())
+            .await
+            .map_err(|_| RegistryError::Storage)?;
+        match r {
+            Ok(_) => {
+                self.resume_after = None;
+                Ok(())
+            }
+            Err(e) => {
+                self.resume_after = Some(now + RESUME_RETRY);
+                Err(e)
+            }
+        }
+    }
+
     async fn step(&mut self) -> Result<SyncStep, RegistryError> {
+        // Every step, not only the first: a spool failure leaves the gap pending.
+        if self.resume_conflicts().await.is_err() {
+            // Not fatal for the sync: the mark stays and the next try is paced.
+            tracing::warn!("registry conflict handling is still unfinished");
+        }
         if !self.resumed {
-            self.conflicts.resume()?;
             self.resumed = true;
             // A restart gives poisoned entries another chance.
             self.store.unpoison_all(POISON_AFTER - 1)?;
@@ -921,8 +995,8 @@ impl<T: RegistryTransport> RegistryClient<T> {
         for rec in &pending {
             // A stored entry that cannot be rebuilt was damaged: quarantine it.
             let Some(w) = self.wire_entry(rec) else {
-                self.conflicts
-                    .report_conflict(&rec.metadata_ref, ConflictDetector::LocalHashCheck)?;
+                self.conflict(&rec.metadata_ref, ConflictDetector::LocalHashCheck)
+                    .await?;
                 skipped = true;
                 continue;
             };
@@ -958,14 +1032,18 @@ impl<T: RegistryTransport> RegistryClient<T> {
         let body = serde_json::to_vec(&req).map_err(|_| RegistryError::Invalid("upload"))?;
         let reply = self.transport.post_metadata(body).await;
         let outcome = classify_upload(reply.as_ref(), &sent);
-        let progressed = self.apply_upload(&outcome, &sent)?;
+        let progressed = self.apply_upload(&outcome, &sent).await?;
         Ok(SyncStep {
             kind: StepKind::Upload(outcome),
             progressed,
         })
     }
 
-    fn apply_upload(&mut self, o: &UploadOutcome, sent: &[String]) -> Result<bool, RegistryError> {
+    async fn apply_upload(
+        &mut self,
+        o: &UploadOutcome,
+        sent: &[String],
+    ) -> Result<bool, RegistryError> {
         Ok(match o {
             UploadOutcome::Done { refs } => {
                 self.store.mark_acked(refs)?;
@@ -975,16 +1053,15 @@ impl<T: RegistryTransport> RegistryClient<T> {
             }
             UploadOutcome::Conflict { refs } => {
                 for r in refs {
-                    self.conflicts
-                        .report_conflict(r, ConflictDetector::Central409)?;
+                    self.conflict(r, ConflictDetector::Central409).await?;
                 }
                 true
             }
             UploadOutcome::UnattributedConflict => {
                 if sent.len() == 1 {
                     // The only entry sent: it is the culprit.
-                    self.conflicts
-                        .report_conflict(&sent[0], ConflictDetector::Central409)?;
+                    self.conflict(&sent[0], ConflictDetector::Central409)
+                        .await?;
                 } else {
                     // Send singles until the failing entry is found.
                     self.cap = 1;

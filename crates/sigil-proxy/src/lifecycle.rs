@@ -506,6 +506,7 @@ async fn run_inner(
     // The inventory: the relay's observation sink and the worker behind it.
     let mut inventory_sink: Option<std::sync::Arc<crate::inventory_sink::InventorySink>> = None;
     let mut inventory_handle: Option<crate::inventory_sink::InventoryHandle> = None;
+    let mut cursor_hasher: Option<crate::inventory::CursorHasher> = None;
     let sync_task = match Some(fetcher) {
         Some(fetcher) => {
             // One mTLS client serves the config fetch and the status report.
@@ -572,6 +573,8 @@ async fn run_inner(
                     &epoch,
                     crate::inventory::InventoryLimits::from_limits(&b.limits),
                 );
+                // The relay tags request cursors with a clone of this hasher.
+                cursor_hasher = Some(hasher.clone());
                 let (sink, handle) = crate::inventory_sink::InventorySink::start(
                     engine,
                     hasher,
@@ -721,8 +724,8 @@ async fn run_inner(
     );
     // Without a registry the relay keeps its no-op sink and does no observation
     // work at all (`wants_observations` is false).
-    if let Some(sink) = inventory_sink.take() {
-        proxy = proxy.with_sink(sink);
+    if let (Some(sink), Some(hasher)) = (inventory_sink.take(), cursor_hasher.take()) {
+        proxy = proxy.with_sink(sink).with_cursor_hasher(hasher);
     }
     let lc3 = lc.clone();
     let served = proxy

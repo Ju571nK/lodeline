@@ -218,9 +218,13 @@ impl RegistryTransport for Tr {
 struct Events(Arc<Mutex<Vec<(String, String)>>>, Vec<String>);
 
 impl ConflictHandler for Events {
-    fn registry_conflict(&mut self, r: &str, k: &str) -> Vec<String> {
+    fn registry_conflict(
+        &mut self,
+        r: &str,
+        k: &str,
+    ) -> Result<Vec<String>, sigil_proxy::registry_client::HandlerError> {
         self.0.lock().unwrap().push((r.to_string(), k.to_string()));
-        self.1.clone()
+        Ok(self.1.clone())
     }
 }
 
@@ -1345,4 +1349,82 @@ async fn the_status_registry_section_reflects_real_counts() {
     let s = parse(b.build(&config_view(), &[], now).unwrap());
     assert!(s.registry.sync_stalled);
     assert_eq!(s.registry.pending_entries.get(), 1);
+}
+
+// ------------------------------------------------ a failing spool (H2, T-13c)
+
+struct Flaky(Arc<std::sync::atomic::AtomicBool>, Vec<String>);
+
+impl ConflictHandler for Flaky {
+    fn registry_conflict(
+        &mut self,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<String>, sigil_proxy::registry_client::HandlerError> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(sigil_proxy::registry_client::HandlerError)
+        } else {
+            Ok(self.1.clone())
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_whose_spool_rewrite_failed_keeps_its_mark_and_queues_the_gap_later() {
+    let d = dir();
+    let (store, _) = RegistryStore::open(d.path(), "px-1").unwrap();
+    let mut engine = InventoryEngine::new(store.clone(), EPOCH, InventoryLimits::default());
+    let sim = Arc::new(Sim::default());
+    let gaps = GapQueue::new();
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let conflicts = ConflictReporter::new(
+        store.clone(),
+        gaps.clone(),
+        Box::new(Flaky(failing.clone(), vec![uuid(1), uuid(2)])),
+    );
+    let mut client = RegistryClient::new(
+        store.clone(),
+        Tr(sim.clone()),
+        conflicts,
+        RegistryParams {
+            poll: Duration::from_secs(1),
+            retry: Duration::from_secs(5),
+            max_backoff: Duration::from_secs(60),
+            min_spacing: Duration::from_millis(10),
+        },
+    );
+    let c = list(&mut engine, vec![tool("a", "da")]);
+    let a = c.tools[0].1.clone();
+    sim.st().conflict.insert(a.clone());
+
+    // The 409 quarantines the entry, but the spool cannot be rewritten.
+    let step = client.sync_once().await;
+    assert_eq!(step.kind, StepKind::StoreError);
+    assert_eq!(
+        store.entry(&a).unwrap().unwrap().state,
+        EntryState::Quarantined
+    );
+    assert_eq!(store.gap_pending().unwrap().len(), 1, "the mark is kept");
+    assert!(gaps.pending_batch().is_empty());
+
+    // Still failing at the next steps: the mark stays, nothing is lost.
+    for _ in 0..3 {
+        client.sync_once().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+    }
+    assert_eq!(store.gap_pending().unwrap().len(), 1);
+    assert!(gaps.pending_batch().is_empty());
+
+    // The spool recovers: the periodic resume (not only the one at start) queues
+    // the gap and clears the mark.
+    failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    client.sync_once().await;
+    assert!(store.gap_pending().unwrap().is_empty());
+    let queued = gaps.pending_batch();
+    let GapReport::RegistryConflict(g) = &queued[0] else {
+        panic!("{queued:?}")
+    };
+    assert_eq!(g.metadata_ref.as_str(), a);
+    assert_eq!(g.event_ids.len(), 2);
 }

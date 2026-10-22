@@ -1162,6 +1162,7 @@ impl Writer {
             .map_err(st)?;
         tx.execute("DELETE FROM events WHERE state = 1", [])
             .map_err(st)?;
+        purge_orphan_originals(&tx).map_err(st)?;
         tx.commit().map_err(st)?;
         let mut k = self.counters();
         k.acked = 0;
@@ -1451,6 +1452,7 @@ impl Writer {
                 report.purged_acked += 1;
             }
         }
+        purge_orphan_originals(&tx).map_err(st)?;
         tx.commit().map_err(st)?;
         if report.gaps_recorded > 0 && gap_bytes > 0 {
             self.shared.gap_exhausted.store(false, Ordering::SeqCst);
@@ -1596,7 +1598,19 @@ fn move_to_quarantine(
     .map_err(st)?;
     tx.execute("DELETE FROM events WHERE event_id = ?1 AND state = 0", [id])
         .map_err(st)?;
+    // The unchanged pre-rewrite bytes live as long as the event row does.
+    tx.execute("DELETE FROM rewrite_originals WHERE event_id = ?1", [id])
+        .map_err(st)?;
     Ok(Some(size as u64))
+}
+
+/// Drop the pre-rewrite bytes of events that left the `events` table (purged
+/// after their acknowledgement was retained long enough).
+fn purge_orphan_originals(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<usize> {
+    tx.execute(
+        "DELETE FROM rewrite_originals WHERE event_id NOT IN (SELECT event_id FROM events)",
+        [],
+    )
 }
 
 /// Insert a gap record if it fits the `room` left in the gap reserve; otherwise
@@ -2384,6 +2398,53 @@ mod tests {
         s.quarantined(&[uid(1)], QuarantineCode::SemanticInvalid);
         assert_eq!(s.snapshot().quarantined_events, 1);
         assert!(s.next_events(10, &HashSet::new()).is_empty());
+    }
+
+    fn originals(dir: &Path) -> i64 {
+        Connection::open(dir.join(SPOOL_FILE))
+            .unwrap()
+            .query_row("SELECT count(*) FROM rewrite_originals", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_originals_leave_with_a_quarantined_event() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        assert_eq!(originals(d.path()), 1);
+        s.quarantined(&[uid(1)], QuarantineCode::SemanticInvalid);
+        assert_eq!(originals(d.path()), 0);
+    }
+
+    #[test]
+    fn the_originals_leave_when_the_acknowledged_event_is_purged() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, now) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.append(call_event(2, 2)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.registry_conflict(&mref(2)).unwrap();
+        s.acknowledged(&[uid(1), uid(2)]);
+        // Retained while the acknowledged row is retained.
+        assert_eq!(originals(d.path()), 2);
+        now.fetch_add(86_400 + 1, Ordering::SeqCst);
+        s.expire_now().unwrap();
+        assert_eq!(originals(d.path()), 0);
+    }
+
+    #[test]
+    fn the_originals_leave_when_an_unsent_event_expires() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, now) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.set_max_offline_retry_age(Duration::from_secs(10));
+        now.fetch_add(11, Ordering::SeqCst);
+        let r = s.expire_now().unwrap();
+        assert_eq!(r.expired_events, 1);
+        assert_eq!(originals(d.path()), 0);
     }
 
     #[test]

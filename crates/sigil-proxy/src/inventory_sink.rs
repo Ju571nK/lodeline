@@ -23,12 +23,20 @@
 //! | `tools/list` call with no capture, upstream 401/403 | `access_denied` |
 //! | `tools/list` call with no capture, anything else | `page_error` |
 //!
-//! Cursor identity. The relay keeps only whether the request carried a cursor
-//! (never the value, see `RequestStarted::list_cursor`). The adapter therefore
-//! treats a request that carries one as the continuation the chain expects (the
-//! tag of the previous page's `nextCursor`), and a request without one as a chain
-//! start. A client that sends a cursor other than the one it was handed is not
-//! detected by this adapter. // OPEN: carry a cursor tag from the relay.
+//! Cursor identity. The relay tags the request's `params.cursor` with the
+//! process's keyed [`CursorHasher`] (`RequestStarted::list_cursor`; the raw value
+//! is never kept, logged or compared) and this sink tags a page's `nextCursor`
+//! with a clone of the same hasher. The tag goes to the engine as the page's
+//! `request_cursor`, and the engine accepts a continuation only if it equals the
+//! `nextCursor` tag of the previous page of that chain. A stale or invented
+//! cursor, a retried page and an interleaved second listing therefore all end the
+//! chain as `cursor_invalid`; none can complete a listing.
+//!
+//! The sink keeps one fact per `tools/list` call between its start and its
+//! completion: the request's cursor tag. If that fact is missing at completion
+//! (the table was cleared at [`MAX_INFLIGHT`], or the call was never started) the
+//! page cannot be placed in a chain, so it fails closed: the chain in progress, if
+//! any, ends as `page_error`, and nothing starts or completes a chain.
 //!
 //! Sessions. The relay has no session id yet (T-12b2), so the principal of the
 //! call stands in for it: one listing chain per (principal, scope). A new chain
@@ -59,9 +67,7 @@ use crate::registry_key::ScopeKey;
 /// Pages queued for the engine worker. Beyond it a page is dropped (counted).
 pub const QUEUE_DEPTH: usize = 256;
 /// `tools/list` calls remembered between their start and their completion.
-const MAX_INFLIGHT: usize = 4096;
-/// Chains whose expected next cursor is remembered.
-const MAX_EXPECT: usize = 1024;
+pub const MAX_INFLIGHT: usize = 4096;
 
 /// `route_id -> (upstream_id, credential_scope_id)` of the applied config. The
 /// config sync fills it on every apply; the sink reads it per observation.
@@ -97,16 +103,17 @@ impl RouteScopes {
 enum Msg {
     Page(Box<(ListingKey, PageInput)>),
     EndSession(u64),
+    /// The relay's state for a page was lost: end the chain as `reason`.
+    Abort(Box<ListingKey>, IncompleteReason),
     EndAll,
     Stop,
 }
 
 #[derive(Default)]
 struct State {
-    /// `seq -> request carried a cursor`, for `tools/list` calls in flight.
-    inflight: HashMap<u64, bool>,
-    /// The tag of the `nextCursor` last handed out per chain.
-    expect: HashMap<ListingKey, CursorTag>,
+    /// `seq -> the tag of the request's cursor` (`None`: no cursor), for the
+    /// `tools/list` calls in flight.
+    inflight: HashMap<u64, Option<CursorTag>>,
     sessions: HashMap<String, u64>,
     next_session: u64,
 }
@@ -115,11 +122,12 @@ struct State {
 pub struct InventorySink {
     proxy_id: String,
     hasher: CursorHasher,
-    unknown: CursorTag,
     scopes: RouteScopes,
     state: Mutex<State>,
     tx: SyncSender<Msg>,
     dropped: AtomicU64,
+    #[cfg(any(test, feature = "test-util"))]
+    paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for InventorySink {
@@ -144,18 +152,29 @@ impl InventorySink {
         proxy_id: &str,
     ) -> std::io::Result<(Arc<InventorySink>, InventoryHandle)> {
         let (tx, rx) = sync_channel(QUEUE_DEPTH);
+        #[cfg(any(test, feature = "test-util"))]
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(any(test, feature = "test-util"))]
+        let worker_paused = paused.clone();
         let join = std::thread::Builder::new()
             .name("sigil-inventory".into())
-            .spawn(move || worker(engine, rx))?;
-        let unknown = hasher.tag("\u{0}sigil-unknown-cursor");
+            .spawn(move || {
+                worker(
+                    engine,
+                    rx,
+                    #[cfg(any(test, feature = "test-util"))]
+                    worker_paused,
+                )
+            })?;
         let sink = Arc::new(InventorySink {
             proxy_id: proxy_id.to_string(),
             hasher,
-            unknown,
             scopes,
             state: Mutex::new(State::default()),
             tx: tx.clone(),
             dropped: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-util"))]
+            paused,
         });
         Ok((
             sink,
@@ -166,6 +185,12 @@ impl InventorySink {
         ))
     }
 
+    /// Test knob: stop the worker from taking messages, so the queue can fill.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn pause_worker_for_test(&self, on: bool) {
+        self.paused.store(on, Ordering::SeqCst);
+    }
+
     /// Pages dropped because the engine could not keep up.
     pub fn dropped_pages(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
@@ -174,14 +199,7 @@ impl InventorySink {
     /// The session behind `principal` ended: close its chains as
     /// `session_ended` (T-12b2 calls this with the real session).
     pub fn end_session(&self, principal_id: &str) {
-        let session = {
-            let mut st = self.lock();
-            let s = st.sessions.remove(principal_id);
-            if let Some(s) = s {
-                st.expect.retain(|k, _| k.session != s);
-            }
-            s
-        };
+        let session = { self.lock().sessions.remove(principal_id) };
         if let Some(s) = session {
             let _ = self.tx.try_send(Msg::EndSession(s));
         }
@@ -203,7 +221,7 @@ impl InventorySink {
     }
 
     fn completed(&self, c: &Completed) {
-        let had_cursor = self.lock().inflight.remove(&c.call.seq).unwrap_or(false);
+        let request_cursor = self.lock().inflight.remove(&c.call.seq);
         let Some((upstream_id, credential_scope_id)) = self.scopes.get(&c.call.route_id) else {
             return;
         };
@@ -219,10 +237,12 @@ impl InventorySink {
             }
         };
         let key = ListingKey { session, scope };
-        let request_cursor = if had_cursor {
-            Some(st.expect.get(&key).copied().unwrap_or(self.unknown))
-        } else {
-            None
+        drop(st);
+        // Fail closed: without the request's cursor fact the page has no place in
+        // any chain (see the module doc).
+        let Some(request_cursor) = request_cursor else {
+            self.send(Msg::Abort(Box::new(key), IncompleteReason::PageError));
+            return;
         };
         let page = match &c.tool_list {
             Some(ToolListCapture::Page(p)) => PageInput::Tools {
@@ -250,22 +270,6 @@ impl InventorySink {
                 },
             },
         };
-        match &page {
-            PageInput::Tools {
-                next_cursor: Some(n),
-                ..
-            } => {
-                if st.expect.len() >= MAX_EXPECT && !st.expect.contains_key(&key) {
-                    // Forgetting makes later cursors `cursor_invalid`: fail closed.
-                    st.expect.clear();
-                }
-                st.expect.insert(key.clone(), *n);
-            }
-            _ => {
-                st.expect.remove(&key);
-            }
-        }
-        drop(st);
         self.send(Msg::Page(Box::new((key, page))));
     }
 }
@@ -286,8 +290,9 @@ impl ObservationSink for InventorySink {
         if s.method == Method::ToolsList {
             let mut st = self.lock();
             if st.inflight.len() >= MAX_INFLIGHT {
-                // A call that never completes cannot pile up forever. A forgotten
-                // flag reads as "no cursor": the request then starts a chain.
+                // A call that never completes cannot pile up forever. A cleared
+                // fact makes its completion fail closed (`page_error`), it never
+                // reads as "no cursor".
                 st.inflight.clear();
             }
             st.inflight.insert(s.call.seq, s.list_cursor);
@@ -304,14 +309,27 @@ impl ObservationSink for InventorySink {
     }
 }
 
-fn worker(mut engine: InventoryEngine, rx: Receiver<Msg>) {
+fn worker(
+    mut engine: InventoryEngine,
+    rx: Receiver<Msg>,
+    #[cfg(any(test, feature = "test-util"))] paused: Arc<std::sync::atomic::AtomicBool>,
+) {
     while let Ok(m) = rx.recv() {
+        #[cfg(any(test, feature = "test-util"))]
+        while paused.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         match m {
             Msg::Page(p) => {
                 let (key, page) = *p;
                 if engine.observe_page(&key, page).is_err() {
                     // Fixed text only: the error carries no content.
                     tracing::error!("inventory engine could not record a page");
+                }
+            }
+            Msg::Abort(key, reason) => {
+                if engine.abort_chain(&key, reason).is_err() {
+                    tracing::error!("inventory engine could not record an aborted page");
                 }
             }
             Msg::EndSession(s) => {

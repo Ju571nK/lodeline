@@ -117,6 +117,25 @@ impl CursorHasher {
         Ok(CursorHasher { key })
     }
 
+    /// A fixed key. Only for a relay that has no producer installed (nothing
+    /// observes, so nothing compares tags) and when randomness is unavailable.
+    pub(crate) fn from_key(key: [u8; 32]) -> CursorHasher {
+        CursorHasher { key }
+    }
+
+    /// The tag of a `tools/list` request cursor. A cursor that is not a string
+    /// gets a tag of its own, which matches no page's `nextCursor` (those are
+    /// tagged from strings by [`CursorHasher::tag`]).
+    pub fn tag_list_cursor(&self, c: &crate::mcp::ListCursor) -> CursorTag {
+        match c {
+            crate::mcp::ListCursor::Value(s) => self.tag(s),
+            crate::mcp::ListCursor::Invalid => CursorTag(crate::registry_key::hmac_sha256(
+                &self.key,
+                b"\0sigil-invalid-cursor-type",
+            )),
+        }
+    }
+
     pub fn tag(&self, cursor: &str) -> CursorTag {
         CursorTag(crate::registry_key::hmac_sha256(
             &self.key,
@@ -393,6 +412,21 @@ impl InventoryEngine {
             }
         }
         Ok(n)
+    }
+
+    /// Something outside the pages broke the chain of `key` (the relay lost the
+    /// state needed to read a page). Ends the chain in progress as `reason` and
+    /// queues the incomplete report; never starts a chain, never completes one.
+    pub fn abort_chain(
+        &mut self,
+        key: &ListingKey,
+        reason: IncompleteReason,
+    ) -> Result<(), RegistryError> {
+        match self.collectors.get(key).map(|c| &c.chain) {
+            Some(Chain::Collecting { .. }) => self.fail(key, reason).map(|_| ()),
+            Some(Chain::Dead) => Ok(()),
+            None => self.record_incomplete(&key.scope, reason, 0),
+        }
     }
 
     /// The sessions that still have a chain (in progress or ended incomplete).

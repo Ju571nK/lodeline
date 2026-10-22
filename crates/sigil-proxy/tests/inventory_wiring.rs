@@ -47,6 +47,7 @@ struct Rig {
     store: RegistryStore,
     _d: tempfile::TempDir,
     seq: u64,
+    hasher: CursorHasher,
 }
 
 fn rig() -> Rig {
@@ -55,14 +56,15 @@ fn rig() -> Rig {
     let engine = InventoryEngine::new(store.clone(), EPOCH, InventoryLimits::default());
     let scopes = RouteScopes::new();
     scopes.replace([("r1".to_string(), "up-1".to_string(), "cs-1".to_string())]);
-    let (sink, handle) =
-        InventorySink::start(engine, CursorHasher::new().unwrap(), scopes, "px-1").unwrap();
+    let hasher = CursorHasher::new().unwrap();
+    let (sink, handle) = InventorySink::start(engine, hasher.clone(), scopes, "px-1").unwrap();
     Rig {
         sink,
         handle,
         store,
         _d: d,
         seq: 0,
+        hasher,
     }
 }
 
@@ -78,7 +80,12 @@ fn tool(name: &str, desc: &str) -> ToolDescriptor {
 
 impl Rig {
     /// One `tools/list` call through the sink: its start, then its completion.
-    async fn call(&mut self, principal: &str, cursor: bool, capture: Option<ToolListCapture>) {
+    async fn call(
+        &mut self,
+        principal: &str,
+        cursor: Option<&str>,
+        capture: Option<ToolListCapture>,
+    ) {
         self.call_cause(principal, cursor, capture, Cause::None)
             .await
     }
@@ -86,7 +93,7 @@ impl Rig {
     async fn call_cause(
         &mut self,
         principal: &str,
-        cursor: bool,
+        cursor: Option<&str>,
         capture: Option<ToolListCapture>,
         cause: Cause,
     ) {
@@ -102,7 +109,7 @@ impl Rig {
             method: Method::ToolsList,
             request_id: id.clone(),
             tool: ToolField::NotApplicable,
-            list_cursor: cursor,
+            list_cursor: cursor.map(|c| self.hasher.tag(c)),
             task_augmented: false,
             request_bytes: 10,
             received_at: SystemTime::now(),
@@ -152,12 +159,16 @@ async fn a_paginated_listing_through_the_sink_commits_a_baseline_snapshot() {
     let mut r = rig();
     r.call(
         "pr",
-        false,
+        None,
         Rig::page(vec![tool("a", "1"), tool("b", "2")], Some("CURSOR-1")),
     )
     .await;
-    r.call("pr", true, Rig::page(vec![tool("c", "3")], None))
-        .await;
+    r.call(
+        "pr",
+        Some("CURSOR-1"),
+        Rig::page(vec![tool("c", "3")], None),
+    )
+    .await;
     let (store, _d) = r.finish().await;
     let snap = store.latest_snapshot(&scope()).unwrap().expect("snapshot");
     let mut names: Vec<_> = snap.members.iter().map(|(_, n)| n.clone()).collect();
@@ -176,9 +187,9 @@ async fn a_paginated_listing_through_the_sink_commits_a_baseline_snapshot() {
 #[tokio::test]
 async fn a_changed_listing_is_reported_as_drift() {
     let mut r = rig();
-    r.call("pr", false, Rig::page(vec![tool("a", "1")], None))
+    r.call("pr", None, Rig::page(vec![tool("a", "1")], None))
         .await;
-    r.call("pr", false, Rig::page(vec![tool("a", "CHANGED")], None))
+    r.call("pr", None, Rig::page(vec![tool("a", "CHANGED")], None))
         .await;
     let (store, _d) = r.finish().await;
     let rep = reports(&store);
@@ -207,7 +218,7 @@ async fn relay_page_errors_map_to_incomplete_reasons() {
     ];
     for (u, want) in cases {
         let mut r = rig();
-        r.call("pr", false, Some(ToolListCapture::Unavailable(u)))
+        r.call("pr", None, Some(ToolListCapture::Unavailable(u)))
             .await;
         let (store, _d) = r.finish().await;
         assert_eq!(incomplete_reason(&store), vec![want], "{u:?}");
@@ -218,12 +229,12 @@ async fn relay_page_errors_map_to_incomplete_reasons() {
 #[tokio::test]
 async fn a_call_without_a_capture_is_a_page_error_or_access_denied() {
     let mut r = rig();
-    r.call("pr", false, None).await;
+    r.call("pr", None, None).await;
     let (store, _d) = r.finish().await;
     assert_eq!(incomplete_reason(&store), vec!["page_error"]);
 
     let mut r = rig();
-    r.call_cause("pr", false, None, Cause::UpstreamAuthRejected)
+    r.call_cause("pr", None, None, Cause::UpstreamAuthRejected)
         .await;
     let (store, _d) = r.finish().await;
     assert_eq!(incomplete_reason(&store), vec!["access_denied"]);
@@ -232,11 +243,11 @@ async fn a_call_without_a_capture_is_a_page_error_or_access_denied() {
 #[tokio::test]
 async fn a_failed_page_leaves_the_latest_snapshot_in_place() {
     let mut r = rig();
-    r.call("pr", false, Rig::page(vec![tool("a", "1")], None))
+    r.call("pr", None, Rig::page(vec![tool("a", "1")], None))
         .await;
     r.call(
         "pr",
-        false,
+        None,
         Some(ToolListCapture::Unavailable(PageUnavailable::NoSuccess)),
     )
     .await;
@@ -256,7 +267,7 @@ async fn a_failed_page_leaves_the_latest_snapshot_in_place() {
 #[tokio::test]
 async fn a_continuation_without_a_chain_start_is_cursor_invalid() {
     let mut r = rig();
-    r.call("pr", true, Rig::page(vec![tool("a", "1")], None))
+    r.call("pr", Some("STALE"), Rig::page(vec![tool("a", "1")], None))
         .await;
     let (store, _d) = r.finish().await;
     assert_eq!(incomplete_reason(&store), vec!["cursor_invalid"]);
@@ -266,7 +277,7 @@ async fn a_continuation_without_a_chain_start_is_cursor_invalid() {
 #[tokio::test]
 async fn session_end_closes_an_unfinished_chain() {
     let mut r = rig();
-    r.call("pr", false, Rig::page(vec![tool("a", "1")], Some("C")))
+    r.call("pr", None, Rig::page(vec![tool("a", "1")], Some("C")))
         .await;
     r.sink.end_session("pr");
     // The worker is ordered: shutdown drains behind the session end.
@@ -279,9 +290,9 @@ async fn session_end_closes_an_unfinished_chain() {
 #[tokio::test]
 async fn shutdown_closes_every_open_chain() {
     let mut r = rig();
-    r.call("p1", false, Rig::page(vec![tool("a", "1")], Some("C")))
+    r.call("p1", None, Rig::page(vec![tool("a", "1")], Some("C")))
         .await;
-    r.call("p2", false, Rig::page(vec![tool("a", "1")], Some("C")))
+    r.call("p2", None, Rig::page(vec![tool("a", "1")], Some("C")))
         .await;
     let (store, _d) = r.finish().await;
     assert_eq!(
@@ -293,10 +304,10 @@ async fn shutdown_closes_every_open_chain() {
 #[tokio::test]
 async fn principals_do_not_share_a_chain() {
     let mut r = rig();
-    r.call("p1", false, Rig::page(vec![tool("a", "1")], Some("C")))
+    r.call("p1", None, Rig::page(vec![tool("a", "1")], Some("C")))
         .await;
     // p2's continuation has no chain of its own.
-    r.call("p2", true, Rig::page(vec![tool("a", "1")], None))
+    r.call("p2", Some("C"), Rig::page(vec![tool("a", "1")], None))
         .await;
     let (store, _d) = r.finish().await;
     let reasons = incomplete_reason(&store);
@@ -340,6 +351,160 @@ async fn the_sink_prints_no_content() {
     let s = format!("{:?} {:?}", r.sink, tool("SECRET-TOOL", "SECRET-DESC"));
     assert!(!s.contains("SECRET"), "{s}");
     r.handle.shutdown().await;
+}
+
+// ------------------------------------------------------- cursor identity (H1)
+
+#[tokio::test]
+async fn a_stale_cursor_from_an_older_listing_is_cursor_invalid() {
+    let mut r = rig();
+    r.call("pr", None, Rig::page(vec![tool("a", "1")], Some("C1")))
+        .await;
+    // A new listing starts; the first one is closed.
+    r.call("pr", None, Rig::page(vec![tool("b", "2")], Some("C2")))
+        .await;
+    // The client now uses the OLD cursor.
+    r.call("pr", Some("C1"), Rig::page(vec![tool("c", "3")], None))
+        .await;
+    let (store, _d) = r.finish().await;
+    assert_eq!(
+        incomplete_reason(&store),
+        vec!["session_ended", "cursor_invalid"]
+    );
+    assert!(store.latest_snapshot(&scope()).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_retried_page_is_not_counted_twice_and_never_completes() {
+    let mut r = rig();
+    r.call("pr", None, Rig::page(vec![tool("a", "1")], Some("C1")))
+        .await;
+    r.call(
+        "pr",
+        Some("C1"),
+        Rig::page(vec![tool("b", "2")], Some("C2")),
+    )
+    .await;
+    // The client retries page 2 with the same cursor.
+    r.call(
+        "pr",
+        Some("C1"),
+        Rig::page(vec![tool("b", "2")], Some("C2")),
+    )
+    .await;
+    // Even the page that would end the chain now cannot complete it.
+    r.call("pr", Some("C2"), Rig::page(vec![tool("c", "3")], None))
+        .await;
+    let (store, _d) = r.finish().await;
+    assert_eq!(incomplete_reason(&store), vec!["cursor_invalid"]);
+    assert!(store.latest_snapshot(&scope()).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn interleaved_listings_of_one_principal_never_make_a_mixed_snapshot() {
+    let mut r = rig();
+    r.call("pr", None, Rig::page(vec![tool("a1", "1")], Some("A1")))
+        .await;
+    r.call("pr", None, Rig::page(vec![tool("b1", "1")], Some("B1")))
+        .await;
+    r.call("pr", Some("A1"), Rig::page(vec![tool("a2", "2")], None))
+        .await;
+    r.call("pr", Some("B1"), Rig::page(vec![tool("b2", "2")], None))
+        .await;
+    let (store, _d) = r.finish().await;
+    assert!(store.latest_snapshot(&scope()).unwrap().is_none());
+    assert!(!incomplete_reason(&store).is_empty());
+    assert!(reports(&store)
+        .iter()
+        .all(|r| r["completeness"] == "incomplete"));
+}
+
+// ------------------------------------------------- lost request facts (M1)
+
+impl Rig {
+    fn call_ref(&mut self, principal: &str) -> CallRef {
+        self.seq += 1;
+        CallRef {
+            seq: self.seq,
+            route_id: "r1".into(),
+            principal_id: principal.into(),
+        }
+    }
+
+    async fn start_only(&self, call: &CallRef, cursor: Option<&str>) {
+        let started = RequestStarted {
+            call: call.clone(),
+            method: Method::ToolsList,
+            request_id: RequestId::from_raw("1").unwrap(),
+            tool: ToolField::NotApplicable,
+            list_cursor: cursor.map(|c| self.hasher.tag(c)),
+            task_augmented: false,
+            request_bytes: 10,
+            received_at: SystemTime::now(),
+        };
+        self.sink.request_started(&started).await;
+    }
+
+    fn complete_only(&self, call: CallRef, capture: Option<ToolListCapture>) {
+        self.sink.observe(Observation::Completed(Completed {
+            call,
+            method: Method::ToolsList,
+            request_id: RequestId::from_raw("1").unwrap(),
+            outcome: Outcome::Success,
+            delivery: Delivery::Sent,
+            cause: Cause::None,
+            http_status: Some(200),
+            response_bytes: 1,
+            duration: Duration::from_millis(1),
+            completed_at: SystemTime::now(),
+            cancel_requested: false,
+            tool_list: capture,
+        }));
+    }
+}
+
+#[tokio::test]
+async fn a_page_without_its_request_fact_fails_closed() {
+    let mut r = rig();
+    // A page that would be a complete one-page listing, never started.
+    let c = r.call_ref("pr");
+    r.complete_only(c, Rig::page(vec![tool("a", "1")], None));
+    let (store, _d) = r.finish().await;
+    assert_eq!(incomplete_reason(&store), vec!["page_error"]);
+    assert!(store.latest_snapshot(&scope()).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_lost_fact_ends_the_chain_in_progress_and_starts_no_chain() {
+    let mut r = rig();
+    r.call("pr", None, Rig::page(vec![tool("a", "1")], Some("C1")))
+        .await;
+    // The next page's start was never seen.
+    let c = r.call_ref("pr");
+    r.complete_only(c, Rig::page(vec![tool("b", "2")], None));
+    // The real continuation afterwards does not revive the chain.
+    r.call("pr", Some("C1"), Rig::page(vec![tool("b", "2")], None))
+        .await;
+    let (store, _d) = r.finish().await;
+    // One report for the aborted chain (not a `session_ended` from a chain start).
+    assert_eq!(incomplete_reason(&store), vec!["page_error"]);
+    assert!(store.latest_snapshot(&scope()).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn clearing_the_inflight_table_fails_the_forgotten_call_closed() {
+    let mut r = rig();
+    let victim = r.call_ref("pr");
+    r.start_only(&victim, None).await;
+    // More calls in flight than the table holds: it is cleared.
+    for _ in 0..sigil_proxy::inventory_sink::MAX_INFLIGHT {
+        let c = r.call_ref("other");
+        r.start_only(&c, None).await;
+    }
+    r.complete_only(victim, Rig::page(vec![tool("a", "1")], None));
+    let (store, _d) = r.finish().await;
+    assert_eq!(incomplete_reason(&store), vec!["page_error"]);
+    assert!(store.latest_snapshot(&scope()).unwrap().is_none());
 }
 
 // ------------------------------------------------------------- the stall flag

@@ -19,8 +19,8 @@ pub mod response;
 pub mod scan;
 
 pub use classify::{
-    classify, HeaderVersion, Message, Method, NotificationInfo, Refusal, RefusalKind, RequestId,
-    RequestInfo, ToolField, ToolName,
+    classify, HeaderVersion, ListCursor, Message, Method, NotificationInfo, Refusal, RefusalKind,
+    RequestId, RequestInfo, ToolField, ToolName,
 };
 pub use observation::{
     CallRef, CancelDisposition, CancelObserved, Cause, Completed, Delivery, NoopSink, Observation,
