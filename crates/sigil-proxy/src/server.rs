@@ -536,6 +536,7 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
         seq: sh.seq.fetch_add(1, Ordering::Relaxed),
         route_id: route.id.as_str().to_string(),
         principal_id: principal.id.as_str().to_string(),
+        scope: route.scope.clone(),
     };
 
     // The request body is read in full under the request limit BEFORE any
@@ -587,6 +588,7 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
                             seq,
                             route_id: call.route_id.clone(),
                             principal_id: call.principal_id.clone(),
+                            scope: call.scope.clone(),
                         },
                         target_id: target,
                         disposition: CancelDisposition::AfterDispatch,

@@ -4,11 +4,12 @@
 //! (`test-util`).
 
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use sigil_proxy::inventory::{CursorHasher, InventoryEngine, InventoryLimits};
-use sigil_proxy::inventory_sink::{InventorySink, RouteScopes, QUEUE_DEPTH};
+use sigil_proxy::inventory_sink::{InventorySink, QUEUE_DEPTH};
 use sigil_proxy::mcp::observation::{
     CallRef, Cause, Completed, Delivery, Method, NextCursor, Observation, ObservationSink, Outcome,
     RequestStarted, ToolDescriptor, ToolListCapture, ToolListPage,
@@ -16,6 +17,7 @@ use sigil_proxy::mcp::observation::{
 use sigil_proxy::mcp::{RequestId, ToolField, ToolName};
 use sigil_proxy::registry_key::ScopeKey;
 use sigil_proxy::registry_store::RegistryStore;
+use sigil_proxy::route::RouteScope;
 
 const EPOCH: &str = "0f0f0f0f-1111-4222-8333-444444444444";
 
@@ -37,10 +39,8 @@ async fn a_dropped_page_never_makes_a_listing_complete() {
     std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (store, _) = RegistryStore::open(d.path(), "px-1").unwrap();
     let engine = InventoryEngine::new(store.clone(), EPOCH, InventoryLimits::default());
-    let scopes = RouteScopes::new();
-    scopes.replace([("r1".to_string(), "up-1".to_string(), "cs-1".to_string())]);
     let hasher = CursorHasher::new().unwrap();
-    let (sink, handle) = InventorySink::start(engine, hasher.clone(), scopes, "px-1").unwrap();
+    let (sink, handle) = InventorySink::start(engine, hasher.clone(), "px-1").unwrap();
 
     let mut seq = 0u64;
     let mut send = |principal: &str, cursor: Option<&str>, capture| {
@@ -49,6 +49,10 @@ async fn a_dropped_page_never_makes_a_listing_complete() {
             seq,
             route_id: "r1".into(),
             principal_id: principal.into(),
+            scope: Some(Arc::new(RouteScope {
+                upstream_id: "up-1".into(),
+                credential_scope_id: "cs-1".into(),
+            })),
         };
         let id = RequestId::from_raw("1").unwrap();
         let started = RequestStarted {

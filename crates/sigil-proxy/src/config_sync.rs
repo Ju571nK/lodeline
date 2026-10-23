@@ -171,6 +171,10 @@ fn route_specs(cfg: &ProxyConfig) -> Result<Vec<RouteSpec>, BuildError> {
             allowed_origins: cfg.allowed_origins.clone(),
             allow_private_destination: false,
             limits: remote_limits(r),
+            scope: Some(crate::route::RouteScope {
+                upstream_id: r.upstream_id.as_str().to_string(),
+                credential_scope_id: r.credential_scope_id.as_str().to_string(),
+            }),
         });
     }
     Ok(out)
@@ -188,20 +192,6 @@ fn upstreams_of(cfg: &ProxyConfig) -> Vec<String> {
     cfg.routes
         .iter()
         .map(|r| r.upstream_id.as_str().to_string())
-        .collect()
-}
-
-/// `(route_id, upstream_id, credential_scope_id)` of every route of `cfg`.
-fn scopes_of(cfg: &ProxyConfig) -> Vec<(String, String, String)> {
-    cfg.routes
-        .iter()
-        .map(|r| {
-            (
-                r.route_id.as_str().to_string(),
-                r.upstream_id.as_str().to_string(),
-                r.credential_scope_id.as_str().to_string(),
-            )
-        })
         .collect()
 }
 
@@ -236,8 +226,6 @@ pub struct ConfigSync {
     /// `upstream_id`s of the last applied document (status report `routes`).
     applied_upstreams: Vec<String>,
     view_tx: Option<tokio::sync::watch::Sender<ConfigView>>,
-    /// Where the inventory sink looks up a route's scope (T-13c).
-    scopes: Option<crate::inventory_sink::RouteScopes>,
 }
 
 impl ConfigSync {
@@ -269,7 +257,6 @@ impl ConfigSync {
             applied_meta: None,
             applied_upstreams: Vec::new(),
             view_tx: None,
-            scopes: None,
         }
     }
 
@@ -308,19 +295,6 @@ impl ConfigSync {
                     true
                 }
             });
-        }
-    }
-
-    /// Publish the `(upstream_id, credential_scope_id)` of every applied route to
-    /// the inventory sink.
-    pub fn with_route_scopes(mut self, scopes: crate::inventory_sink::RouteScopes) -> ConfigSync {
-        self.scopes = Some(scopes);
-        self
-    }
-
-    fn publish_scopes(&self, cfg: &ProxyConfig) {
-        if let Some(s) = &self.scopes {
-            s.replace(scopes_of(cfg));
         }
     }
 
@@ -443,7 +417,6 @@ impl ConfigSync {
             self.last_ttl = Some(ttl);
             self.applied_meta = Some(meta_of(&cfg));
             self.applied_upstreams = upstreams_of(&cfg);
-            self.publish_scopes(&cfg);
             self.state = ConfigState::Valid;
             self.last_error = None;
             return SyncOutcome::Refreshed;
@@ -466,8 +439,6 @@ impl ConfigSync {
             }
         }
         let deadline = now + Duration::from_secs(ttl_secs);
-        // Before the table is installed, so a call routed by it finds its scope.
-        self.publish_scopes(&cfg);
         self.table.set_with_deadline(table, deadline);
         self.high_water = Some(Applied { revision, hash });
         self.deadline = Some(deadline);

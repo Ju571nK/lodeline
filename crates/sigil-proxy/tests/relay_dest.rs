@@ -141,6 +141,7 @@ fn credential_origin_mismatch_fails_the_build() {
         allowed_origins: vec![],
         allow_private_destination: false,
         limits: Default::default(),
+        scope: None,
     };
     let l = limits();
     assert!(

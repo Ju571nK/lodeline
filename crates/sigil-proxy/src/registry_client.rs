@@ -305,7 +305,10 @@ impl ConflictReporter {
         let mut bad = Vec::new();
         for r in refs {
             match self.store.verify_entry(r)? {
-                EntryCheck::Verified | EntryCheck::NotAcked => {}
+                // A poisoned entry is not registered yet, like a pending one: its
+                // events go out unchanged and the server holds them (424) until
+                // the entry is offered again and registered. Never a conflict.
+                EntryCheck::Verified | EntryCheck::NotAcked | EntryCheck::Poisoned => {}
                 EntryCheck::Mismatch => {
                     self.report_conflict(r, ConflictDetector::LocalHashCheck)?;
                     bad.push(r.clone());

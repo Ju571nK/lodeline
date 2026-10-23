@@ -532,9 +532,6 @@ async fn run_inner(
             if let Some(m) = mark {
                 sync = sync.with_high_water(m.revision, m.config_hash);
             }
-            // The inventory looks a route's scope up here (T-13c).
-            let scopes = crate::inventory_sink::RouteScopes::new();
-            sync = sync.with_route_scopes(scopes.clone());
             // Status report and heartbeat (T-12c2): follows the config view.
             let (sync, view_rx) = sync.with_view_channel();
             let lc5 = lc.clone();
@@ -578,7 +575,6 @@ async fn run_inner(
                 let (sink, handle) = crate::inventory_sink::InventorySink::start(
                     engine,
                     hasher,
-                    scopes,
                     b.proxy_id.as_str(),
                 )?;
                 inventory_sink = Some(sink);

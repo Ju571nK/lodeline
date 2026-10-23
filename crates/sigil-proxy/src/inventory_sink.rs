@@ -55,7 +55,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use sigil_proxy_api::registry::IncompleteReason;
@@ -73,37 +73,6 @@ use crate::registry_key::ScopeKey;
 pub const QUEUE_DEPTH: usize = 256;
 /// `tools/list` calls remembered between their start and their completion.
 pub const MAX_INFLIGHT: usize = 4096;
-
-/// `route_id -> (upstream_id, credential_scope_id)` of the applied config. The
-/// config sync fills it on every apply; the sink reads it per observation.
-#[derive(Clone, Default)]
-pub struct RouteScopes(Arc<RwLock<HashMap<String, (String, String)>>>);
-
-impl std::fmt::Debug for RouteScopes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RouteScopes")
-    }
-}
-
-impl RouteScopes {
-    pub fn new() -> RouteScopes {
-        RouteScopes::default()
-    }
-
-    /// Replace the whole map (a new applied config).
-    pub fn replace(&self, routes: impl IntoIterator<Item = (String, String, String)>) {
-        let map = routes.into_iter().map(|(r, u, c)| (r, (u, c))).collect();
-        *self.0.write().unwrap_or_else(|p| p.into_inner()) = map;
-    }
-
-    fn get(&self, route_id: &str) -> Option<(String, String)> {
-        self.0
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(route_id)
-            .cloned()
-    }
-}
 
 enum Msg {
     Page(Box<(ListingKey, PageInput)>),
@@ -127,7 +96,6 @@ struct State {
 pub struct InventorySink {
     proxy_id: String,
     hasher: CursorHasher,
-    scopes: RouteScopes,
     state: Mutex<State>,
     tx: SyncSender<Msg>,
     dropped: AtomicU64,
@@ -153,7 +121,6 @@ impl InventorySink {
     pub fn start(
         engine: InventoryEngine,
         hasher: CursorHasher,
-        scopes: RouteScopes,
         proxy_id: &str,
     ) -> std::io::Result<(Arc<InventorySink>, InventoryHandle)> {
         let (tx, rx) = sync_channel(QUEUE_DEPTH);
@@ -174,7 +141,6 @@ impl InventorySink {
         let sink = Arc::new(InventorySink {
             proxy_id: proxy_id.to_string(),
             hasher,
-            scopes,
             state: Mutex::new(State::default()),
             tx: tx.clone(),
             dropped: AtomicU64::new(0),
@@ -227,10 +193,13 @@ impl InventorySink {
 
     fn completed(&self, c: &Completed) {
         let request_cursor = self.lock().inflight.remove(&c.call.seq);
-        let Some((upstream_id, credential_scope_id)) = self.scopes.get(&c.call.route_id) else {
+        // The scope of the route table that dispatched this call, never the
+        // current config's: a route repointed or removed while the call was in
+        // flight must not file its tools under another scope.
+        let Some(rs) = c.call.scope.as_deref() else {
             return;
         };
-        let scope = ScopeKey::live(&self.proxy_id, &upstream_id, &credential_scope_id);
+        let scope = ScopeKey::live(&self.proxy_id, &rs.upstream_id, &rs.credential_scope_id);
         let mut st = self.lock();
         let session = match st.sessions.get(&c.call.principal_id) {
             Some(s) => *s,

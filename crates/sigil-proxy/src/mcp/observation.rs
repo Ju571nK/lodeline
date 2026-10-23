@@ -25,6 +25,9 @@ pub struct CallRef {
     pub seq: u64,
     pub route_id: String,
     pub principal_id: String,
+    /// The scope of the route in the very table that routed this call (T-13c).
+    /// `None`: the route has no scope (no applied config).
+    pub scope: Option<std::sync::Arc<crate::route::RouteScope>>,
 }
 
 /// A client request that passed classification and is about to be dispatched.

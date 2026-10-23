@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 use sigil_proxy::ingest_client::EventSource;
 use sigil_proxy::inventory::{CursorHasher, InventoryEngine, InventoryLimits};
-use sigil_proxy::inventory_sink::{InventoryHandle, InventorySink, RouteScopes};
+use sigil_proxy::inventory_sink::{InventoryHandle, InventorySink};
 use sigil_proxy::limits::Limits;
 use sigil_proxy::mcp::observation::{
     CallRef, Cause, Completed, Delivery, Method, NextCursor, Observation, ObservationSink, Outcome,
@@ -25,6 +25,7 @@ use sigil_proxy::registry_client::{
 };
 use sigil_proxy::registry_key::ScopeKey;
 use sigil_proxy::registry_store::{RegistryStore, ToolLookup};
+use sigil_proxy::route::RouteScope;
 use sigil_proxy::spool::{Spool, SpoolConfig};
 use sigil_proxy::status_report::{GapQueue, RegistryProbe, RegistrySnapshot};
 use sigil_proxy_api::{GapReport, ProxyEvent};
@@ -54,10 +55,8 @@ fn rig() -> Rig {
     let d = dir();
     let (store, _) = RegistryStore::open(d.path(), "px-1").unwrap();
     let engine = InventoryEngine::new(store.clone(), EPOCH, InventoryLimits::default());
-    let scopes = RouteScopes::new();
-    scopes.replace([("r1".to_string(), "up-1".to_string(), "cs-1".to_string())]);
     let hasher = CursorHasher::new().unwrap();
-    let (sink, handle) = InventorySink::start(engine, hasher.clone(), scopes, "px-1").unwrap();
+    let (sink, handle) = InventorySink::start(engine, hasher.clone(), "px-1").unwrap();
     Rig {
         sink,
         handle,
@@ -102,6 +101,10 @@ impl Rig {
             seq: self.seq,
             route_id: "r1".into(),
             principal_id: principal.into(),
+            scope: Some(Arc::new(RouteScope {
+                upstream_id: "up-1".into(),
+                credential_scope_id: "cs-1".into(),
+            })),
         };
         let id = RequestId::from_raw("1").unwrap();
         let started = RequestStarted {
@@ -326,6 +329,7 @@ async fn a_route_without_a_known_scope_is_ignored() {
         seq: r.seq,
         route_id: "unknown-route".into(),
         principal_id: "pr".into(),
+        scope: None,
     };
     r.sink.observe(Observation::Completed(Completed {
         call,
@@ -428,6 +432,10 @@ impl Rig {
             seq: self.seq,
             route_id: "r1".into(),
             principal_id: principal.into(),
+            scope: Some(Arc::new(RouteScope {
+                upstream_id: "up-1".into(),
+                credential_scope_id: "cs-1".into(),
+            })),
         }
     }
 
@@ -566,6 +574,7 @@ struct Conflict {
     reporter: ConflictReporter,
     refs: Vec<String>,
     d: tempfile::TempDir,
+    spool_dir: std::path::PathBuf,
 }
 
 /// A registry with two ACKed entries and a spool with one unsent start for each
@@ -615,6 +624,7 @@ async fn conflict_rig() -> Conflict {
         gaps.clone(),
         Box::new(SpoolConflictHandler::new(spool.clone())),
     );
+    let spool_dir = sd.path().to_path_buf();
     std::mem::forget(sd);
     Conflict {
         spool,
@@ -623,6 +633,7 @@ async fn conflict_rig() -> Conflict {
         reporter,
         refs,
         d,
+        spool_dir,
     }
 }
 
@@ -728,4 +739,104 @@ async fn the_checked_source_passes_clean_batches_through() {
     assert_eq!(got.len(), 3);
     assert!(got.iter().all(|e| tool_of(e)["status"] == "identified"));
     assert!(c.gaps.pending_batch().is_empty());
+}
+
+/// The stored bytes of event `id` in the spool (`table`: `events` or
+/// `rewrite_originals`).
+fn spool_bytes(c: &Conflict, table: &str, id: &str) -> Option<Vec<u8>> {
+    let conn =
+        rusqlite::Connection::open(c.spool_dir.join(sigil_proxy::spool::SPOOL_FILE)).unwrap();
+    conn.query_row(
+        &format!("SELECT bytes FROM {table} WHERE event_id = ?1"),
+        [id],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_poisoned_entry_is_a_pause_not_a_conflict_and_a_real_conflict_still_rewrites() {
+    let c = conflict_rig().await;
+    let m = c.refs[0].clone();
+    let original = spool_bytes(&c, "events", &uid(1)).unwrap();
+
+    // The server refuses the entry until it is poisoned (a pause, POISON_RETRY).
+    c.store.mark_unacked(std::slice::from_ref(&m)).unwrap();
+    let poisoned = c.store.bump_attempts(std::slice::from_ref(&m), 1).unwrap();
+    assert_eq!(poisoned, vec![m.clone()]);
+    assert_eq!(
+        c.store.verify_entry(&m).unwrap(),
+        sigil_proxy::registry_store::EntryCheck::Poisoned
+    );
+
+    // Neither the checked source nor the explicit rewrite treats it as a
+    // conflict: the dependent start goes out unchanged (the server holds it with
+    // 424 until the entry is registered), no gap, nothing rewritten.
+    let mut src = CheckedSource::new(c.spool.clone(), c.reporter.clone());
+    let got = src.next_events_async(10, &HashSet::new()).await;
+    assert_eq!(got.len(), 3);
+    assert!(got.iter().all(|e| tool_of(e)["status"] == "identified"));
+    assert_eq!(tool_of(&got[0])["metadata_ref"], json!(m));
+    // The blocking path of the checked source agrees.
+    let got = tokio::task::block_in_place(|| src.next_events(10, &HashSet::new()));
+    assert_eq!(got.len(), 3);
+    assert_eq!(
+        tool_of(&got[0]),
+        json!({"status": "identified", "metadata_ref": m})
+    );
+    let r = c.reporter.clone();
+    let m2 = m.clone();
+    let n = tokio::task::spawn_blocking(move || r.rewrite_quarantined(&[m2]).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    assert!(c.gaps.pending_batch().is_empty());
+    assert_eq!(spool_bytes(&c, "events", &uid(1)).unwrap(), original);
+    assert!(spool_bytes(&c, "rewrite_originals", &uid(1)).is_none());
+
+    // Recovery: the poison expires, the entry is offered again and registered.
+    assert_eq!(
+        c.store
+            .unpoison_all(sigil_proxy::registry_client::POISON_AFTER - 1)
+            .unwrap(),
+        1
+    );
+    c.store.mark_acked(std::slice::from_ref(&m)).unwrap();
+    assert_eq!(
+        c.store.verify_entry(&m).unwrap(),
+        sigil_proxy::registry_store::EntryCheck::Verified
+    );
+    let got = src.next_events_async(10, &HashSet::new()).await;
+    assert!(got.iter().all(|e| tool_of(e)["status"] == "identified"));
+    assert!(c.gaps.pending_batch().is_empty());
+    assert_eq!(spool_bytes(&c, "events", &uid(1)).unwrap(), original);
+
+    // A true conflict on the same entry still takes the M2b path: the start is
+    // rewritten, the original bytes are kept, and a gap names the event.
+    let r = c.reporter.clone();
+    let m3 = m.clone();
+    tokio::task::spawn_blocking(move || {
+        r.report_conflict(&m3, sigil_proxy_api::status::ConflictDetector::Central409)
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        c.store.verify_entry(&m).unwrap(),
+        sigil_proxy::registry_store::EntryCheck::Quarantined
+    );
+    let got = src.next_events_async(10, &HashSet::new()).await;
+    assert_eq!(
+        tool_of(&got[0]),
+        json!({"status": "metadata_unavailable", "reason": "registry_conflict"})
+    );
+    assert_eq!(
+        spool_bytes(&c, "rewrite_originals", &uid(1)).unwrap(),
+        original
+    );
+    let gaps = c.gaps.pending_batch();
+    let GapReport::RegistryConflict(g) = &gaps[0] else {
+        panic!("{gaps:?}")
+    };
+    assert_eq!(g.event_ids[0].as_str(), uid(1));
 }
