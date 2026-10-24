@@ -13,6 +13,7 @@ pub mod fsutil;
 pub mod headers;
 pub mod ingest_client;
 pub mod inventory;
+pub mod inventory_sink;
 pub mod jcs;
 pub mod lifecycle;
 pub mod limits;

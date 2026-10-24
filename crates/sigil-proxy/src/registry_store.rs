@@ -233,8 +233,12 @@ pub enum EntryCheck {
     NotAcked,
     /// The stored fields no longer hash to the value recorded at the ACK.
     Mismatch,
-    /// Already quarantined.
+    /// Already quarantined (a registry conflict). Only this state permits the
+    /// registry-conflict rewrite of dependent events.
     Quarantined,
+    /// Poisoned: a pause, not a conflict. The entry is offered again later
+    /// (`registry_client::POISON_RETRY`), so its dependents keep waiting.
+    Poisoned,
     /// No such entry.
     Missing,
 }
@@ -799,7 +803,8 @@ impl RegistryStore {
             return Ok(EntryCheck::Missing);
         };
         match rec.state {
-            EntryState::Quarantined | EntryState::Poisoned => Ok(EntryCheck::Quarantined),
+            EntryState::Quarantined => Ok(EntryCheck::Quarantined),
+            EntryState::Poisoned => Ok(EntryCheck::Poisoned),
             EntryState::Pending => Ok(EntryCheck::NotAcked),
             EntryState::Acked => {
                 let want: Option<String> = g.conn.query_row(

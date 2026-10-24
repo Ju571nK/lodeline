@@ -193,13 +193,30 @@ impl Refusal {
     }
 }
 
+/// The `params.cursor` of a `tools/list` request, handed to the relay once so it
+/// can be turned into a keyed tag (`CursorHasher`). The value is untrusted, is
+/// never printed and never leaves the relay's request handling.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ListCursor {
+    Value(Box<str>),
+    /// A cursor that is not a string (`null`, a number, an object, ...).
+    Invalid,
+}
+
+impl fmt::Debug for ListCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ListCursor(<opaque>)")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestInfo {
     pub id: RequestId,
     pub method: Method,
     pub tool: ToolField,
-    /// `tools/list` only: a cursor was sent (the value is never kept).
-    pub list_cursor: bool,
+    /// `tools/list` only: the request carried a cursor. The relay replaces it by
+    /// a keyed tag before anything is observed.
+    pub list_cursor: Option<ListCursor>,
     /// `tools/call` only: `params.task` was present. Forwarded unchanged.
     pub task_augmented: bool,
 }
@@ -261,6 +278,26 @@ impl<'de> Deserialize<'de> for Present {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         IgnoredAny::deserialize(d)?;
         Ok(Present(true))
+    }
+}
+
+/// `cursor` of any JSON type: a string is kept (for tagging), anything else is
+/// present but invalid.
+#[derive(Default)]
+struct CursorField(Option<ListCursor>);
+
+impl<'de> Deserialize<'de> for CursorField {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw<'a> {
+            Str(#[serde(borrow)] Cow<'a, str>),
+            Other(IgnoredAny),
+        }
+        Ok(CursorField(Some(match Raw::deserialize(d)? {
+            Raw::Str(s) => ListCursor::Value(s.into()),
+            Raw::Other(_) => ListCursor::Invalid,
+        })))
     }
 }
 
@@ -338,7 +375,7 @@ struct ParamsProbe<'a> {
     #[serde(borrow, default)]
     name: Option<NameField<'a>>,
     #[serde(default)]
-    cursor: Present,
+    cursor: CursorField,
     #[serde(default)]
     task: Present,
     #[serde(rename = "_meta", default)]
@@ -466,7 +503,7 @@ pub fn classify(body: &[u8], header: HeaderVersion) -> Message {
         id,
         method: audit,
         tool: ToolField::NotApplicable,
-        list_cursor: false,
+        list_cursor: None,
         task_augmented: false,
     };
     match audit {
@@ -485,7 +522,7 @@ pub fn classify(body: &[u8], header: HeaderVersion) -> Message {
             info.task_augmented = probe.as_ref().is_some_and(|p| p.task.0);
         }
         Method::ToolsList => {
-            info.list_cursor = probe.as_ref().is_some_and(|p| p.cursor.0);
+            info.list_cursor = probe.as_ref().and_then(|p| p.cursor.0.clone());
         }
         _ => {}
     }
@@ -520,7 +557,7 @@ mod tests {
         assert_eq!(r.method, Method::ToolsCall);
         assert_eq!(r.id.raw(), "7");
         assert_eq!(r.tool, ToolField::Name(ToolName::parse("echo").unwrap()));
-        assert!(!r.task_augmented && !r.list_cursor);
+        assert!(!r.task_augmented && r.list_cursor.is_none());
     }
 
     #[test]
@@ -541,17 +578,28 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_cursor_presence_only() {
+    fn tools_list_cursor_is_captured_but_never_printed() {
         let r = req(c(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":"SECRET-CURSOR"}}"#,
         ));
-        assert!(r.list_cursor);
+        assert_eq!(
+            r.list_cursor,
+            Some(ListCursor::Value("SECRET-CURSOR".into()))
+        );
+        assert!(!format!("{r:?}").contains("SECRET"));
         let r = req(c(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#));
-        assert!(!r.list_cursor);
+        assert!(r.list_cursor.is_none());
         let r = req(c(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
         ));
-        assert!(!r.list_cursor);
+        assert!(r.list_cursor.is_none());
+        // Present but not a string.
+        for v in ["null", "7", "{}", "[1]"] {
+            let r = req(c(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{{"cursor":{v}}}}}"#
+            )));
+            assert_eq!(r.list_cursor, Some(ListCursor::Invalid), "{v}");
+        }
     }
 
     #[test]

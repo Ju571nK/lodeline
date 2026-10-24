@@ -309,6 +309,7 @@ pub fn try_table(rs: &[R], limits: &Limits) -> Result<RouteTable, sigil_proxy::r
             allowed_origins: r.origins.iter().map(|s| s.to_string()).collect(),
             allow_private_destination: r.allow_private,
             limits: Default::default(),
+            scope: None,
         })
         .collect();
     RouteTable::build(&specs, &creds, limits)

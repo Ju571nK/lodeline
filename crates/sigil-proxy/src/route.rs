@@ -69,6 +69,19 @@ pub struct RouteSpec {
     pub allow_private_destination: bool,
     /// Remote per-route limits; they can only lower the local ones.
     pub limits: RemoteLimits,
+    /// The applied config's `(upstream_id, credential_scope_id)` of this route.
+    /// `None` outside a config sync (tests, local tables): such calls feed no
+    /// inventory.
+    pub scope: Option<RouteScope>,
+}
+
+/// The inventory scope of a route, fixed in the route table it was built into
+/// (T-13c). A call carries the scope of the table that routed it, so a later
+/// config that repoints the route never re-scopes a call already in flight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteScope {
+    pub upstream_id: String,
+    pub credential_scope_id: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -133,6 +146,7 @@ pub struct Route {
     sem_cap: usize,
     /// Effective limits of this route: `min(local, remote)` per field.
     pub(crate) limits: Limits,
+    pub(crate) scope: Option<Arc<RouteScope>>,
 }
 
 impl std::fmt::Debug for Route {
@@ -315,6 +329,7 @@ impl RouteTable {
                         .map_or_else(|| Arc::new(Semaphore::new(route_cap)), |r| r.sem.clone()),
                     sem_cap: route_cap,
                     limits: limits.lowered_by(&spec.limits),
+                    scope: spec.scope.clone().map(Arc::new),
                 },
             );
         }
@@ -509,6 +524,7 @@ mod tests {
             allowed_origins: vec![],
             allow_private_destination: false,
             limits: RemoteLimits::default(),
+            scope: None,
         }
     }
 

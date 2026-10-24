@@ -143,7 +143,7 @@ async fn start_table(
     handle.set(Some(t));
     let mut proxy = Proxy::new(limits, handle, Arc::new(SystemResolver));
     if let Some(s) = sink {
-        proxy = proxy.with_sink(s);
+        proxy = proxy.with_sink(s, sigil_proxy::inventory::CursorHasher::new().unwrap());
     }
     let registry = proxy.cancel_registry();
     let (stop, rx) = oneshot::channel::<()>();
@@ -937,7 +937,7 @@ async fn observations_carry_no_content() {
         ToolField::Name(n) => assert_eq!(n.as_str(), "echo"),
         o => panic!("{o:?}"),
     }
-    assert!(started[1].list_cursor && started[1].method == Method::ToolsList);
+    assert!(started[1].list_cursor.is_some() && started[1].method == Method::ToolsList);
     assert_eq!(started[3].method, Method::Unknown);
     let list = rec
         .completed()
@@ -1027,7 +1027,7 @@ async fn tools_list_pages_are_exposed_to_the_seam() {
         .all()
         .into_iter()
         .filter_map(|e| match e {
-            Ev::Started(s) => Some(s.list_cursor),
+            Ev::Started(s) => Some(s.list_cursor.is_some()),
             _ => None,
         })
         .collect();

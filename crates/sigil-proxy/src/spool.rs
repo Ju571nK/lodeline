@@ -14,6 +14,10 @@
 //! * Events are delivered oldest sequence first. `acknowledged` marks rows
 //!   (kept for [`SpoolConfig::ack_retention`], then purged). `quarantined` moves
 //!   rows unchanged to the `quarantine` table; nothing is ever dropped silently.
+//!   The one exception to "unchanged" is the registry-conflict rewrite of an unsent
+//!   start's `tool` (README M2b): its ORIGINAL bytes are kept in `quarantine` when
+//!   the event is quarantined, and under [`ORIGINAL_CODE`] when the acknowledged
+//!   rewritten row is purged.
 //! * Admission stops at `capacity - gap_reserve` of unsent event bytes
 //!   ([`AppendError::Full`]); the reserve is only for gap records.
 //! * Unsent events older than [`SpoolConfig::max_offline_retry_age`] (R) are
@@ -51,6 +55,11 @@ pub const SPOOL_FILE: &str = "spool.db";
 const SCHEMA_VERSION: i64 = 1;
 /// Quarantine reason of events that outlived R.
 pub const EXPIRED_CODE: &str = "spool_expired";
+/// Quarantine code of the UNCHANGED pre-rewrite bytes of an event whose `tool` was
+/// rewritten after a registry conflict (README M2b), kept when the acknowledged
+/// rewritten event is purged. Such a row is evidence, not a lost event: it is not
+/// counted in `quarantined_events` (its bytes are in `quarantined_bytes`).
+pub const ORIGINAL_CODE: &str = "registry_conflict_original";
 /// Rows moved or purged per maintenance transaction, so one pass cannot stall
 /// the writer (appends wait behind it) for long.
 #[cfg(not(test))]
@@ -303,6 +312,7 @@ enum Cmd {
     RecordGap(Box<GapReport>, Reply<Result<(), SpoolError>>),
     PendingGaps(Reply<Result<Vec<GapReport>, SpoolError>>),
     HandedOff(Vec<String>, Reply<Result<(), SpoolError>>),
+    RegistryConflict(String, Reply<Result<Vec<String>, SpoolError>>),
     Shutdown,
 }
 
@@ -562,6 +572,23 @@ impl Spool {
             .unwrap_or(Err(SpoolError::Unavailable))
     }
 
+    /// The registry-conflict spool seam (README M2b, `registry_client::ConflictHandler`).
+    ///
+    /// For the quarantined entry `metadata_ref`: every `invocation.started` in the
+    /// spool whose `tool` is `identified` with that ref DEPENDS on it. Those never
+    /// centrally accepted (still unsent) get ONLY their `tool` field rewritten to
+    /// `{"status":"metadata_unavailable","reason":"registry_conflict"}`; the original
+    /// bytes are kept unchanged in the `rewrite_originals` table (never sent, never
+    /// deleted here). Dependents already acknowledged are left alone. Returns the
+    /// `event_id`s of ALL dependents, rewritten or not, oldest first. Idempotent: a
+    /// second call finds nothing left to rewrite and returns the acknowledged ones.
+    ///
+    /// Blocks until committed and fsynced: call it from a blocking context.
+    pub fn registry_conflict(&self, metadata_ref: &str) -> Result<Vec<String>, SpoolError> {
+        self.call(|r| Cmd::RegistryConflict(metadata_ref.to_string(), r))
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
     /// Test knob: make every append fail as a storage error (ENOSPC-like).
     #[cfg(any(test, feature = "test-util"))]
     pub fn inject_storage_failure(&self, on: bool) {
@@ -584,6 +611,14 @@ impl Spool {
             .shared
             .clock_skew
             .fetch_add(secs, Ordering::SeqCst);
+    }
+
+    /// Stop the writer and wait for it (tests read the database file after).
+    pub fn close_blocking_for_test(&self) {
+        let _ = self.inner.tx.send(Cmd::Shutdown);
+        if let Some(j) = self.inner.join.lock().ok().and_then(|mut g| g.take()) {
+            let _ = j.join();
+        }
     }
 
     /// Test knob: stop handing events to the ingest client (appends still work),
@@ -763,6 +798,16 @@ struct Writer {
     shared: Arc<Shared>,
 }
 
+const REWRITE_ORIGINALS: &str = "
+CREATE TABLE IF NOT EXISTS rewrite_originals (
+  event_id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL,
+  metadata_ref TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  rewritten_at INTEGER NOT NULL
+) WITHOUT ROWID;
+";
+
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE seq (id INTEGER PRIMARY KEY CHECK (id = 1), last INTEGER NOT NULL);
@@ -842,6 +887,12 @@ impl Writer {
         } else {
             w.verify_schema()?;
         }
+        // Additive table (T-13c): the unchanged bytes of events whose `tool` was
+        // rewritten after a registry conflict. Created in place for databases
+        // written before it existed (same schema version).
+        w.conn
+            .execute_batch(REWRITE_ORIGINALS)
+            .map_err(|e| classify_open(&e))?;
         w.load_counters().map_err(|e| classify_open(&e))?;
         Ok(w)
     }
@@ -898,7 +949,8 @@ impl Writer {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let (quarantined, quarantined_bytes): (i64, i64) = c.query_row(
-            "SELECT count(*), coalesce(sum(size), 0) FROM quarantine",
+            "SELECT coalesce(sum(code <> 'registry_conflict_original'), 0), \
+             coalesce(sum(size), 0) FROM quarantine",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -987,6 +1039,7 @@ impl Writer {
                 Cmd::RecordGap(g, r) => r.send(self.record_gap(&g)),
                 Cmd::PendingGaps(r) => r.send(self.pending_gaps()),
                 Cmd::HandedOff(ids, r) => r.send(self.handed_off(&ids)),
+                Cmd::RegistryConflict(r_, r) => r.send(self.registry_conflict(&r_)),
                 Cmd::Shutdown => return,
             }
         }
@@ -1117,12 +1170,25 @@ impl Writer {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(st)?;
+        let now = (self.cfg.clock)();
+        let ids: Vec<String> = {
+            let mut q = tx
+                .prepare("SELECT event_id FROM events WHERE state = 1")
+                .map_err(st)?;
+            let mapped = q.query_map([], |r| r.get(0)).map_err(st)?;
+            mapped.collect::<Result<_, _>>().map_err(st)?
+        };
+        let mut archived = 0u64;
+        for id in &ids {
+            archived += archive_original(&tx, id, now).map_err(st)?;
+        }
         tx.execute("DELETE FROM events WHERE state = 1", [])
             .map_err(st)?;
         tx.commit().map_err(st)?;
         let mut k = self.counters();
         k.acked = 0;
         k.acked_bytes = 0;
+        k.quarantined_bytes += archived;
         Ok(())
     }
 
@@ -1233,6 +1299,89 @@ impl Writer {
         Ok(n)
     }
 
+    /// See [`Spool::registry_conflict`].
+    fn registry_conflict(&mut self, metadata_ref: &str) -> Result<Vec<String>, SpoolError> {
+        use sigil_proxy_api::event::{
+            EventPayload, MetadataUnavailableReason, Tool, ToolMetadataUnavailable,
+        };
+        let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
+        let now = (self.cfg.clock)();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(st)?;
+        // Candidate rows: the ref is a token, so a bytewise search finds every
+        // event that mentions it; the parse below decides which really depend.
+        let rows: Vec<(i64, String, Vec<u8>, i64, i64)> = {
+            let mut q = tx
+                .prepare(
+                    "SELECT sequence, event_id, bytes, size, state FROM events \
+                     WHERE state IN (0, 1) AND instr(bytes, ?1) > 0 ORDER BY sequence",
+                )
+                .map_err(st)?;
+            let mapped = q
+                .query_map([metadata_ref.as_bytes()], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .map_err(st)?;
+            mapped.collect::<Result<_, _>>().map_err(st)?
+        };
+        // Events rewritten by an earlier call (or before a crash) still depend on
+        // the entry: the central gap must name them too.
+        let mut dependents: Vec<(i64, String)> = {
+            let mut q = tx
+                .prepare("SELECT sequence, event_id FROM rewrite_originals WHERE metadata_ref = ?1")
+                .map_err(st)?;
+            let mapped = q
+                .query_map([metadata_ref], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(st)?;
+            mapped.collect::<Result<_, _>>().map_err(st)?
+        };
+        let (mut removed, mut added) = (0u64, 0u64);
+        for (sequence, event_id, bytes, size, state) in rows {
+            let Ok(mut ev) = sigil_proxy_api::parse::parse_event(&bytes) else {
+                continue;
+            };
+            let depends = matches!(
+                &ev.payload,
+                EventPayload::Started(s)
+                    if matches!(&s.tool, Some(Tool::Identified(t)) if t.metadata_ref.as_str() == metadata_ref)
+            );
+            if !depends {
+                continue;
+            }
+            dependents.push((sequence, event_id.clone()));
+            if state != 0 {
+                continue; // centrally accepted already: never rewritten
+            }
+            if let EventPayload::Started(s) = &mut ev.payload {
+                s.tool = Some(Tool::MetadataUnavailable(ToolMetadataUnavailable {
+                    reason: MetadataUnavailableReason::RegistryConflict,
+                }));
+            }
+            let new_bytes = serde_json::to_vec(&ev).map_err(|_| SpoolError::Corrupt)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO rewrite_originals(event_id, sequence, metadata_ref, bytes, rewritten_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![event_id, sequence, metadata_ref, bytes, now],
+            )
+            .map_err(st)?;
+            tx.execute(
+                "UPDATE events SET bytes = ?2, size = ?3 WHERE sequence = ?1 AND state = 0",
+                params![sequence, new_bytes, new_bytes.len() as i64],
+            )
+            .map_err(st)?;
+            removed += size as u64;
+            added += new_bytes.len() as u64;
+        }
+        tx.commit().map_err(st)?;
+        let mut k = self.counters();
+        k.unsent_bytes = k.unsent_bytes.saturating_sub(removed).saturating_add(added);
+        dependents.sort();
+        dependents.dedup();
+        Ok(dependents.into_iter().map(|(_, id)| id).collect())
+    }
+
     /// Expire and purge until nothing is left to do (batched; see
     /// [`MAINTENANCE_BATCH`]).
     fn expire(&mut self) -> Result<ExpireReport, SpoolError> {
@@ -1308,20 +1457,33 @@ impl Writer {
             report.gaps_recorded += 1;
         }
         let mut purged_bytes = 0u64;
+        let mut archived = 0u64;
         {
-            let mut d = tx
-                .prepare(
-                    "DELETE FROM events WHERE sequence IN (SELECT sequence FROM events \
-                     WHERE state = 1 AND acked_at <= ?1 LIMIT ?2) RETURNING size",
-                )
-                .map_err(st)?;
-            let sizes = d
-                .query_map(params![ack_cutoff, MAINTENANCE_BATCH], |r| {
-                    r.get::<_, i64>(0)
-                })
-                .map_err(st)?;
-            for sz in sizes {
-                purged_bytes += sz.map_err(st)? as u64;
+            let due: Vec<(i64, String)> = {
+                let mut q = tx
+                    .prepare(
+                        "SELECT sequence, event_id FROM events \
+                         WHERE state = 1 AND acked_at <= ?1 ORDER BY sequence LIMIT ?2",
+                    )
+                    .map_err(st)?;
+                let mapped = q
+                    .query_map(params![ack_cutoff, MAINTENANCE_BATCH], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .map_err(st)?;
+                mapped.collect::<Result<_, _>>().map_err(st)?
+            };
+            for (seq, id) in due {
+                // The pre-rewrite bytes outlive the purged acknowledged row.
+                archived += archive_original(&tx, &id, now).map_err(st)?;
+                let sz: i64 = tx
+                    .query_row(
+                        "DELETE FROM events WHERE sequence = ?1 RETURNING size",
+                        [seq],
+                        |r| r.get(0),
+                    )
+                    .map_err(st)?;
+                purged_bytes += sz as u64;
                 report.purged_acked += 1;
             }
         }
@@ -1336,7 +1498,7 @@ impl Writer {
         k.unsent_events = k.unsent_events.saturating_sub(report.expired_events);
         k.unsent_bytes = k.unsent_bytes.saturating_sub(bytes);
         k.quarantined += report.expired_events;
-        k.quarantined_bytes += bytes;
+        k.quarantined_bytes += bytes + archived;
         k.acked = k.acked.saturating_sub(report.purged_acked);
         k.acked_bytes = k.acked_bytes.saturating_sub(purged_bytes);
         k.gap_bytes += gap_bytes;
@@ -1461,16 +1623,55 @@ fn move_to_quarantine(
         .optional()
         .map_err(st)?;
     let Some(size) = size else { return Ok(None) };
-    tx.execute(
-        "INSERT INTO quarantine(sequence, event_id, bytes, size, created_at, quarantined_at, code) \
-         SELECT sequence, event_id, bytes, size, created_at, ?2, ?3 FROM events \
-         WHERE event_id = ?1 AND state = 0",
-        params![id, now, code],
-    )
-    .map_err(st)?;
+    // An event whose `tool` was rewritten goes to quarantine with its ORIGINAL
+    // bytes (README M2b / N11): the rewritten form is derived and is not evidence.
+    // The returned size stays the unsent row's (the unsent counters use it).
+    let moved = tx
+        .execute(
+            "INSERT INTO quarantine(sequence, event_id, bytes, size, created_at, quarantined_at, code) \
+             SELECT e.sequence, e.event_id, o.bytes, length(o.bytes), e.created_at, ?2, ?3 \
+             FROM events e JOIN rewrite_originals o ON o.event_id = e.event_id \
+             WHERE e.event_id = ?1 AND e.state = 0",
+            params![id, now, code],
+        )
+        .map_err(st)?;
+    if moved == 0 {
+        tx.execute(
+            "INSERT INTO quarantine(sequence, event_id, bytes, size, created_at, quarantined_at, code) \
+             SELECT sequence, event_id, bytes, size, created_at, ?2, ?3 FROM events \
+             WHERE event_id = ?1 AND state = 0",
+            params![id, now, code],
+        )
+        .map_err(st)?;
+    }
     tx.execute("DELETE FROM events WHERE event_id = ?1 AND state = 0", [id])
         .map_err(st)?;
+    tx.execute("DELETE FROM rewrite_originals WHERE event_id = ?1", [id])
+        .map_err(st)?;
     Ok(Some(size as u64))
+}
+
+/// Before an acknowledged row is purged: move the pre-rewrite bytes of its event
+/// (if it was rewritten) into `quarantine` under [`ORIGINAL_CODE`] and drop the
+/// originals row, in the caller's transaction. Returns the bytes archived.
+fn archive_original(tx: &rusqlite::Transaction<'_>, id: &str, now: i64) -> rusqlite::Result<u64> {
+    let size: Option<i64> = tx
+        .query_row(
+            "SELECT length(bytes) FROM rewrite_originals WHERE event_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(size) = size else { return Ok(0) };
+    tx.execute(
+        "INSERT INTO quarantine(sequence, event_id, bytes, size, created_at, quarantined_at, code) \
+         SELECT o.sequence, o.event_id, o.bytes, length(o.bytes), e.created_at, ?2, ?3 \
+         FROM rewrite_originals o JOIN events e ON e.event_id = o.event_id \
+         WHERE o.event_id = ?1",
+        params![id, now, ORIGINAL_CODE],
+    )?;
+    tx.execute("DELETE FROM rewrite_originals WHERE event_id = ?1", [id])?;
+    Ok(size as u64)
 }
 
 /// Insert a gap record if it fits the `room` left in the gap reserve; otherwise
@@ -2177,5 +2378,241 @@ mod tests {
             (Spool::open(c).unwrap(), now)
         };
         assert_eq!(s2.snapshot().unsent_events, 1);
+    }
+
+    fn mref(n: u32) -> String {
+        format!("00000000-0000-8000-8000-{n:012}")
+    }
+
+    /// A `tools/call` start whose tool is identified by `mref(m)`.
+    fn call_event(n: u32, m: u32) -> ProxyEvent {
+        let mut v = serde_json::to_value(event(n)).unwrap();
+        v["payload"]["method"] = json!("tools/call");
+        v["payload"]["tool"] = json!({"status": "identified", "metadata_ref": mref(m)});
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn registry_conflict_rewrites_only_the_tool_of_unsent_dependents() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap(); // dependent, will be acked
+        s.append(call_event(2, 1)).unwrap(); // dependent, unsent
+        s.append(call_event(3, 2)).unwrap(); // other ref
+        s.append(event(4)).unwrap(); // no tool
+        s.acknowledged(&[uid(1)]);
+        let before = s.snapshot();
+        let dep = s.registry_conflict(&mref(1)).unwrap();
+        assert_eq!(dep, vec![uid(1), uid(2)]);
+        let got = s.next_events(10, &HashSet::new());
+        assert_eq!(ids(&got), vec![uid(2), uid(3), uid(4)]);
+        // Only the tool of event 2 changed.
+        let mut want = serde_json::to_value(call_event(2, 1)).unwrap();
+        want["payload"]["tool"] =
+            json!({"status": "metadata_unavailable", "reason": "registry_conflict"});
+        want["sequence"] = json!(2);
+        assert_eq!(serde_json::to_value(&got[0]).unwrap(), want);
+        // The others are untouched.
+        let mut other = serde_json::to_value(call_event(3, 2)).unwrap();
+        other["sequence"] = json!(3);
+        assert_eq!(serde_json::to_value(&got[1]).unwrap(), other);
+        // The counters follow the new size.
+        let after = s.snapshot();
+        assert_eq!(after.unsent_events, before.unsent_events);
+        assert_ne!(after.unsent_bytes, before.unsent_bytes);
+        // Idempotent: nothing left to rewrite, the same dependents are named.
+        assert_eq!(s.registry_conflict(&mref(1)).unwrap(), dep);
+        // An unrelated ref names nothing.
+        assert!(s.registry_conflict(&mref(9)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn registry_conflict_keeps_the_original_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        let original = serde_json::to_vec(&{
+            let mut e = call_event(1, 1);
+            e.sequence = PositiveI64::new(1).unwrap();
+            e
+        })
+        .unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.close_blocking_for_test();
+        let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        let kept: Vec<u8> = c
+            .query_row(
+                "SELECT bytes FROM rewrite_originals WHERE event_id = ?1",
+                [uid(1)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, original);
+    }
+
+    #[test]
+    fn a_rewritten_event_can_still_be_quarantined_later() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.quarantined(&[uid(1)], QuarantineCode::SemanticInvalid);
+        assert_eq!(s.snapshot().quarantined_events, 1);
+        assert!(s.next_events(10, &HashSet::new()).is_empty());
+    }
+
+    fn originals(dir: &Path) -> i64 {
+        Connection::open(dir.join(SPOOL_FILE))
+            .unwrap()
+            .query_row("SELECT count(*) FROM rewrite_originals", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// `(code, bytes, size)` of the quarantine row of `event_id`.
+    fn quarantined_row(dir: &Path, event_id: &str) -> (String, Vec<u8>, i64) {
+        Connection::open(dir.join(SPOOL_FILE))
+            .unwrap()
+            .query_row(
+                "SELECT code, bytes, size FROM quarantine WHERE event_id = ?1",
+                [event_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    /// The bytes the spool stored for `call_event(n, m)` before any rewrite.
+    fn original_bytes(n: u32, m: u32, sequence: i64) -> Vec<u8> {
+        let mut e = call_event(n, m);
+        e.sequence = PositiveI64::new(sequence).unwrap();
+        serde_json::to_vec(&e).unwrap()
+    }
+
+    #[test]
+    fn a_quarantined_rewritten_event_keeps_its_original_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        let rewritten_size = s.snapshot().unsent_bytes;
+        s.quarantined(&[uid(1)], QuarantineCode::SemanticInvalid);
+        let (_, bytes, size) = quarantined_row(d.path(), &uid(1));
+        let want = original_bytes(1, 1, 1);
+        assert_eq!(bytes, want);
+        assert_eq!(size, want.len() as i64);
+        // The unsent counters dropped the REWRITTEN size they had held.
+        let snap = s.snapshot();
+        assert_eq!((snap.unsent_events, snap.unsent_bytes), (0, 0));
+        assert!(rewritten_size > 0);
+        assert_eq!(snap.quarantined_events, 1);
+        assert_eq!(originals(d.path()), 0);
+    }
+
+    #[test]
+    fn an_acknowledged_rewritten_event_leaves_its_original_in_quarantine_when_purged() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, now) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.append(call_event(2, 2)).unwrap();
+        s.append(event(3)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.registry_conflict(&mref(2)).unwrap();
+        s.acknowledged(&[uid(1), uid(2), uid(3)]);
+        // Kept as a rewrite original while the acknowledged row is retained.
+        assert_eq!(originals(d.path()), 2);
+        now.fetch_add(86_400 + 1, Ordering::SeqCst);
+        s.expire_now().unwrap();
+        assert_eq!(originals(d.path()), 0);
+        for (n, m) in [(1, 1), (2, 2)] {
+            let (code, bytes, size) = quarantined_row(d.path(), &uid(n));
+            assert_eq!(code, ORIGINAL_CODE);
+            let want = original_bytes(n, m, n as i64);
+            assert_eq!(bytes, want);
+            assert_eq!(size, want.len() as i64);
+        }
+        let snap = s.snapshot();
+        // Evidence, not lost events: not counted as quarantined events, but the
+        // bytes are accounted for.
+        assert_eq!(snap.quarantined_events, 0);
+        assert!(snap.quarantined_bytes > 0);
+        assert_eq!(snap.retained_acked_events, 0);
+        // The evidence id cannot be appended again.
+        assert_eq!(s.append(call_event(1, 1)), Err(AppendError::Duplicate));
+    }
+
+    #[test]
+    fn purging_all_acknowledged_rows_also_archives_the_originals() {
+        let d = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut c = cfg(d.path(), now);
+        // Room for one event only: the second append purges the acknowledged row.
+        c.capacity_bytes = event_size() * 2 + 400;
+        c.gap_reserve_bytes = 100;
+        let s = Spool::open(c).unwrap();
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        let mut src = s.clone();
+        src.acknowledged(&[uid(1)]);
+        for n in 2..6 {
+            let _ = s.append(call_event(n, 99));
+        }
+        let (code, bytes, _) = quarantined_row(d.path(), &uid(1));
+        assert_eq!(code, ORIGINAL_CODE);
+        assert_eq!(bytes, original_bytes(1, 1, 1));
+    }
+
+    #[test]
+    fn an_expired_rewritten_unsent_event_quarantines_its_original_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, now) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.set_max_offline_retry_age(Duration::from_secs(10));
+        now.fetch_add(11, Ordering::SeqCst);
+        let r = s.expire_now().unwrap();
+        assert_eq!(r.expired_events, 1);
+        let (code, bytes, size) = quarantined_row(d.path(), &uid(1));
+        assert_eq!(code, EXPIRED_CODE);
+        let want = original_bytes(1, 1, 1);
+        assert_eq!(bytes, want);
+        assert_eq!(size, want.len() as i64);
+        assert_eq!(originals(d.path()), 0);
+    }
+
+    #[test]
+    fn counters_after_a_restart_do_not_count_originals_as_quarantined_events() {
+        let d = tempfile::tempdir().unwrap();
+        {
+            let (mut s, now) = open(d.path());
+            s.append(call_event(1, 1)).unwrap();
+            s.registry_conflict(&mref(1)).unwrap();
+            s.acknowledged(&[uid(1)]);
+            now.fetch_add(86_400 + 1, Ordering::SeqCst);
+            s.expire_now().unwrap();
+            s.close_blocking_for_test();
+        }
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut c = cfg(d.path(), now);
+        c.new_epoch = false;
+        let s = Spool::open(c).unwrap();
+        let snap = s.snapshot();
+        assert_eq!(snap.quarantined_events, 0);
+        assert!(snap.quarantined_bytes > 0);
+    }
+
+    #[test]
+    fn databases_without_the_originals_table_are_upgraded_in_place() {
+        let d = tempfile::tempdir().unwrap();
+        {
+            let (s, _) = open(d.path());
+            s.append(call_event(1, 1)).unwrap();
+            s.close_blocking_for_test();
+            let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+            c.execute_batch("DROP TABLE rewrite_originals").unwrap();
+        }
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut c = cfg(d.path(), now);
+        c.new_epoch = false;
+        let s = Spool::open(c).unwrap();
+        assert_eq!(s.registry_conflict(&mref(1)).unwrap(), vec![uid(1)]);
     }
 }

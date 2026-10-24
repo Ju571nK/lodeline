@@ -1,6 +1,6 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-21 · Claude Code orchestrator 세션 (기준 커밋 `6a90e5f`)
+갱신: 2026-10-24 · PR #313 병합 전 회귀 수정 (기준 커밋 `d9e98f3`)
 
 ## 현재 상태
 
@@ -8,6 +8,51 @@
   계약 종료는 구현·실기 검증 완료가 아니다.
 - P1 착수. 사용자 창구: 이 대화의 orchestrator. 하위 모델은 orchestrator가 작업별로 지정한다(판단 sonnet, 기계적 검증 haiku).
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
+
+## 2026-10-23–24 PR #313 병합 전 회귀 수정
+
+기준: `d9e98f3`, T-13c / #312 / PR #313. 요구사항 PX-005/006/010/011,
+인수 기준 AC-05/06, 계약 scope key·M2b·N11. 기존 호환성 gate와 P1 한계를 유지한다.
+
+| 작업 | 역할 / Dispatch | 소유 파일 | 상태 |
+|---|---|---|---|
+| T-13c-fix | coder / `ctx_e37a41641c1f` | `crates/sigil-proxy/**`, `crates/sigil-proxy-e2e/**` 중 필요한 구현·회귀 테스트 | completed, 사용자 인계로 terminal retained |
+| 실행 기록·통합 | orchestrator | 이 문서 | 로컬 검증 완료, PR 업데이트 |
+| 독립 재리뷰 | reviewer / `ctx_05ece3268fd2` | 코드·회귀 테스트 읽기 전용 | approve (정적 검토, 테스트 재실행·실기 검증 아님), released |
+| 자동 검증 | orchestrator / verifier | 읽기 전용 테스트 실행 | workspace 2,417 passed, 0 failed |
+
+수정 대상:
+
+- 요청 완료 시 최신 route scope를 조회하여 이전 upstream 응답을 새 upstream/credential scope의
+  기준 목록으로 기록하는 경쟁 조건. 실제 전달에 사용한 불변 라우트와 같은 scope를 유지해야 한다.
+- 일시 재시도 중단인 `Poisoned`를 `Quarantined`로 취급하여 conflict 없이 spool 이벤트를
+  영구 rewrite하는 회귀. 실제 quarantine만 conflict rewrite를 허용한다.
+
+수정 전 증거: 기존 표적 테스트 51개 통과와 별개로 scope 변경 중 요청 재현 테스트 실패.
+Poisoned 경로는 독립 정적 리뷰와 orchestrator 코드 확인으로 확인했고 회귀 테스트를 추가한다.
+완료 결과 (2026-10-24):
+
+- `RouteSpec`/불변 `Route`가 scope를 보존하고, 실제 선택된 라우트의 scope를
+  `CallRef`에 복사한다. `InventorySink`의 가변 scope map과 별도 publish 경로를 제거했다.
+- `EntryCheck::Poisoned`를 분리해 재시도 중인 메타데이터의 이벤트를 변경 없이 전달한다.
+  실제 `Quarantined`만 conflict rewrite를 허용한다.
+- 신규 HTTP 회귀 테스트 4개는 `ConfigSync::on_fetch`로 설정을 적용하고 요청 전달 직전
+  credential scope·upstream 변경과 route 삭제를 끼워 넣어 이전 scope 보존을 확인한다.
+- Poisoned 회귀는 sync/async `CheckedSource` 모두 원문·ref 보존, gap 부재,
+  unpoison+ACK 복구, 이후 실제 conflict의 원문 보존·rewrite·gap을 확인한다.
+  이전 `verify_entry` 매핑으로 잠시 되돌렸을 때 실패하고 복원 후 통과했다.
+- coder: `cargo test -p sigil-proxy --all-features` 473 passed;
+  `cargo test -p sigil-proxy-e2e --test inventory_e2e` 4 passed.
+- orchestrator: `cargo fmt --all -- --check`, `git diff --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings` 통과;
+  `cargo test --workspace` 2,417 passed, 0 failed, 0 ignored.
+- 독립 정적 리뷰 approve. GitHub 승인 리뷰나 실기 검증을 뜻하지 않는다.
+  PR push 후 Windows·Linux·MSRV 등 원격 CI는 별도로 확인한다.
+
+유지되는 한계: principal을 session 대신 사용하는 P1 동작, Windows inventory 미지원,
+실제 클라이언트·운영 환경 실기 미검증. Poisoned 복구 회귀의 ACK는 store에 직접 적용하며,
+기존 registry client retry 테스트를 대체하지 않는다. Poisoned member를 포함한 inventory
+report 제외·drop 동작은 이번 event rewrite 수정 범위 밖으로 유지했다. 실제 병합은 하지 않았다.
 
 ## 2026-10-11 P1 1회차 배정 (기준 `2120415`)
 

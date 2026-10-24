@@ -50,6 +50,7 @@ use crate::body::{BodyMode, MeteredBody, Permits};
 use crate::bootstrap::{is_loopback, is_loopback_host, normalize_origin};
 use crate::dest::{resolve_checked, DestError, Resolver};
 use crate::headers::{downstream_response_headers, upstream_request_headers};
+use crate::inventory::CursorHasher;
 use crate::lifecycle::{drain, DrainOutcome};
 use crate::limits::Limits;
 use crate::mcp::cancel::{CancelKey, CancelOutcome, CancelRegistry};
@@ -120,6 +121,7 @@ struct Shared {
     host: HostPolicy,
     header_read_timeout: Duration,
     sink: Arc<dyn ObservationSink>,
+    cursor_hasher: CursorHasher,
     cancel: Arc<CancelRegistry>,
     /// Relay-local call numbers (not invocation ids).
     seq: AtomicU64,
@@ -133,6 +135,7 @@ pub struct Proxy {
     resolver: Arc<dyn Resolver>,
     header_read_timeout: Duration,
     sink: Arc<dyn ObservationSink>,
+    cursor_hasher: CursorHasher,
     cancel: Arc<CancelRegistry>,
 }
 
@@ -146,14 +149,22 @@ impl Proxy {
             // No producer until T-13: nothing is observed and behaviour is
             // exactly the plain relay.
             sink: Arc::new(NoopSink),
+            // Only used when a sink observes; a producer installs the process's
+            // own hasher with `with_cursor_hasher`.
+            cursor_hasher: CursorHasher::new().unwrap_or_else(|_| CursorHasher::from_key([0; 32])),
             cancel: Arc::new(CancelRegistry::default()),
         }
     }
 
-    /// Install the consumer of observations (T-13). The default observes
+    /// Install the consumer of observations (T-13) together with the hasher that
+    /// tags `tools/list` request cursors for it. The hasher must be the one the
+    /// sink uses for a page's `nextCursor` (clone the producer's), or a
+    /// continuation can never be matched; taking both here means a sink cannot
+    /// be installed with a mismatched or default hasher. The default observes
     /// nothing.
-    pub fn with_sink(mut self, sink: Arc<dyn ObservationSink>) -> Proxy {
+    pub fn with_sink(mut self, sink: Arc<dyn ObservationSink>, hasher: CursorHasher) -> Proxy {
         self.sink = sink;
+        self.cursor_hasher = hasher;
         self
     }
 
@@ -187,6 +198,7 @@ impl Proxy {
             },
             header_read_timeout: self.header_read_timeout,
             sink: self.sink,
+            cursor_hasher: self.cursor_hasher,
             cancel: self.cancel,
             seq: AtomicU64::new(1),
             limits: self.limits,
@@ -524,6 +536,7 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
         seq: sh.seq.fetch_add(1, Ordering::Relaxed),
         route_id: route.id.as_str().to_string(),
         principal_id: principal.id.as_str().to_string(),
+        scope: route.scope.clone(),
     };
 
     // The request body is read in full under the request limit BEFORE any
@@ -575,6 +588,7 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
                             seq,
                             route_id: call.route_id.clone(),
                             principal_id: call.principal_id.clone(),
+                            scope: call.scope.clone(),
                         },
                         target_id: target,
                         disposition: CancelDisposition::AfterDispatch,
@@ -627,7 +641,10 @@ async fn handle_inner(req: Request<Incoming>, sh: &Shared) -> Response<RespBody>
                     method: info.method,
                     request_id: c.request_id().clone(),
                     tool: info.tool.clone(),
-                    list_cursor: info.list_cursor,
+                    list_cursor: info
+                        .list_cursor
+                        .as_ref()
+                        .map(|c| sh.cursor_hasher.tag_list_cursor(c)),
                     task_augmented: info.task_augmented,
                     request_bytes: request_body.len() as u64,
                     received_at,

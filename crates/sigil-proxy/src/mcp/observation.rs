@@ -11,6 +11,7 @@
 //! ([`ToolListPage`]), which T-13 needs for the inventory and registry; its
 //! types print nothing of their content in `Debug`.
 
+use crate::inventory::CursorTag;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
@@ -24,6 +25,9 @@ pub struct CallRef {
     pub seq: u64,
     pub route_id: String,
     pub principal_id: String,
+    /// The scope of the route in the very table that routed this call (T-13c).
+    /// `None`: the route has no scope (no applied config).
+    pub scope: Option<std::sync::Arc<crate::route::RouteScope>>,
 }
 
 /// A client request that passed classification and is about to be dispatched.
@@ -35,8 +39,11 @@ pub struct RequestStarted {
     pub method: Method,
     pub request_id: RequestId,
     pub tool: ToolField,
-    /// `tools/list`: a cursor was sent (value not kept).
-    pub list_cursor: bool,
+    /// `tools/list`: the keyed tag of the cursor the request carried (`None`:
+    /// no cursor). The value itself is never kept; the tag is made by the
+    /// process's `CursorHasher`, the same one that tags a page's `nextCursor`,
+    /// so a continuation can be matched to the page that handed it out.
+    pub list_cursor: Option<CursorTag>,
     /// `tools/call`: `params.task` was present (forwarded unchanged).
     pub task_augmented: bool,
     pub request_bytes: u64,

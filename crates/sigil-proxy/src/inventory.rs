@@ -96,7 +96,7 @@ impl fmt::Debug for CursorTag {
     }
 }
 
-/// Makes [`CursorTag`]s. One per process (T-13c holds it next to the relay): the
+/// Makes [`CursorTag`]s. One per process (T-13c: `inventory_sink::InventorySink` holds it): the
 /// request cursor of page N+1 and the `nextCursor` of page N must be tagged by
 /// the same hasher for the engine to see them as equal.
 #[derive(Clone)]
@@ -115,6 +115,25 @@ impl CursorHasher {
         let mut key = [0u8; 32];
         getrandom::getrandom(&mut key).map_err(|_| RegistryError::Random)?;
         Ok(CursorHasher { key })
+    }
+
+    /// A fixed key. Only for a relay that has no producer installed (nothing
+    /// observes, so nothing compares tags) and when randomness is unavailable.
+    pub(crate) fn from_key(key: [u8; 32]) -> CursorHasher {
+        CursorHasher { key }
+    }
+
+    /// The tag of a `tools/list` request cursor. A cursor that is not a string
+    /// gets a tag of its own, which matches no page's `nextCursor` (those are
+    /// tagged from strings by [`CursorHasher::tag`]).
+    pub fn tag_list_cursor(&self, c: &crate::mcp::ListCursor) -> CursorTag {
+        match c {
+            crate::mcp::ListCursor::Value(s) => self.tag(s),
+            crate::mcp::ListCursor::Invalid => CursorTag(crate::registry_key::hmac_sha256(
+                &self.key,
+                b"\0sigil-invalid-cursor-type",
+            )),
+        }
     }
 
     pub fn tag(&self, cursor: &str) -> CursorTag {
@@ -393,6 +412,29 @@ impl InventoryEngine {
             }
         }
         Ok(n)
+    }
+
+    /// Something outside the pages broke the chain of `key` (the relay lost the
+    /// state needed to read a page). Ends the chain in progress as `reason` and
+    /// queues the incomplete report; never starts a chain, never completes one.
+    pub fn abort_chain(
+        &mut self,
+        key: &ListingKey,
+        reason: IncompleteReason,
+    ) -> Result<(), RegistryError> {
+        match self.collectors.get(key).map(|c| &c.chain) {
+            Some(Chain::Collecting { .. }) => self.fail(key, reason).map(|_| ()),
+            Some(Chain::Dead) => Ok(()),
+            None => self.record_incomplete(&key.scope, reason, 0),
+        }
+    }
+
+    /// The sessions that still have a chain (in progress or ended incomplete).
+    pub fn open_sessions(&self) -> Vec<u64> {
+        let mut v: Vec<u64> = self.collectors.keys().map(|k| k.session).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     fn make_room(&mut self) -> Result<(), RegistryError> {

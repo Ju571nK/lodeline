@@ -181,6 +181,39 @@ impl Lifecycle {
         Ok(spool)
     }
 
+    /// Open the local metadata registry (SQLite + the registry key K) in the state
+    /// directory (T-13c), right after the spool. One store per process.
+    ///
+    /// `Ok(None)` only where the registry cannot exist (a platform without
+    /// owner-only files): the proxy then runs without an inventory. Any other
+    /// failure refuses the start: a proxy that cannot keep its registry must not
+    /// forward calls it could not attribute.
+    ///
+    /// Blocks while the database opens; call it once at start.
+    pub fn open_registry(&self) -> anyhow::Result<Option<crate::registry_store::RegistryStore>> {
+        use crate::registry_store::{OpenKind, RegistryError, RegistryStore};
+        match RegistryStore::open(self.state.dir(), self.state.proxy_id().as_str()) {
+            Ok((store, kind)) => {
+                if kind == OpenKind::KeyLost {
+                    // README M1: the key is gone, so earlier refs can never be
+                    // minted again and the comparison state was cleared. The next
+                    // complete inventory is an initial baseline. A new producer
+                    // epoch is the operator's decision (delete binding.json).
+                    tracing::warn!(
+                        "the registry key was lost: inventory comparison restarts from a new \
+                         baseline; consider a new producer epoch"
+                    );
+                }
+                Ok(Some(store))
+            }
+            Err(RegistryError::Unsupported) => {
+                tracing::warn!("the metadata registry is not supported here: no inventory");
+                Ok(None)
+            }
+            Err(e) => Err(anyhow::Error::new(e).context("cannot open the metadata registry")),
+        }
+    }
+
     /// The revision high-water mark loaded at start.
     pub fn applied_mark(&self) -> Option<&crate::state_dir::AppliedMark> {
         self.applied.as_ref()
@@ -363,6 +396,7 @@ pub struct RunTuning {
     /// Used instead of binding `Bootstrap::listen` (which is then ignored).
     pub listener: Option<std::net::TcpListener>,
     pub ingest: crate::ingest_client::IngestParams,
+    pub registry: crate::registry_client::RegistryParams,
     /// Receives a handle to the spool once it is open, so a test can inject
     /// events and read the snapshot.
     pub spool_out: Option<tokio::sync::oneshot::Sender<crate::spool::Spool>>,
@@ -384,6 +418,7 @@ pub async fn run_tuned(
             sync: tuning.sync,
             report: tuning.report,
             ingest: tuning.ingest,
+            registry: tuning.registry,
         },
         tuning.listener,
         tuning.spool_out,
@@ -397,6 +432,7 @@ struct Pacing {
     sync: crate::config_sync::SyncParams,
     report: crate::status_report::ReporterParams,
     ingest: crate::ingest_client::IngestParams,
+    registry: crate::registry_client::RegistryParams,
 }
 
 /// How often the spool's own gaps (R expiry) are handed to the gap queue.
@@ -414,6 +450,7 @@ async fn run_inner(
         sync: sync_params,
         report: report_params,
         ingest: ingest_params,
+        registry: registry_params,
     } = pacing;
     // The bootstrap already validated `control_plane_url`; if it still cannot be
     // used, a proxy that could never send its events must not run (and must not
@@ -425,6 +462,8 @@ async fn run_inner(
     // cannot open it does not run: events must never be accepted into a spool
     // that is not durable.
     let spool = lc.open_spool(&b.limits)?;
+    // The registry (T-13c) opens next to it: its key K and database are state.
+    let registry = lc.open_registry()?;
     if let Some(out) = spool_out {
         let _ = out.send(spool.clone());
     }
@@ -463,6 +502,11 @@ async fn run_inner(
     let mut ingest_task = None;
     let mut pump_task = None;
     let mut retention_task = None;
+    let mut registry_task = None;
+    // The inventory: the relay's observation sink and the worker behind it.
+    let mut inventory_sink: Option<std::sync::Arc<crate::inventory_sink::InventorySink>> = None;
+    let mut inventory_handle: Option<crate::inventory_sink::InventoryHandle> = None;
+    let mut cursor_hasher: Option<crate::inventory::CursorHasher> = None;
     let sync_task = match Some(fetcher) {
         Some(fetcher) => {
             // One mTLS client serves the config fetch and the status report.
@@ -510,7 +554,63 @@ async fn run_inner(
             // Shared by the reporter (its `central` section) and the ingest
             // client (acks, answers, failures).
             let central = crate::status_report::CentralHealth::new();
-            let reporter = crate::status_report::Reporter::new(
+            // Ingest client first: the status report reads its stall flag.
+            let client = crate::ingest_client::IngestClient::new(
+                gaps.clone(),
+                central.clone(),
+                ingest_params,
+            );
+            // Inventory and registry sync (T-13c), when a registry is open.
+            let mut conflicts = None;
+            let mut registry_probe = None;
+            if let Some(store) = registry.clone() {
+                let hasher = crate::inventory::CursorHasher::new()?;
+                let engine = crate::inventory::InventoryEngine::new(
+                    store.clone(),
+                    &epoch,
+                    crate::inventory::InventoryLimits::from_limits(&b.limits),
+                );
+                // The relay tags request cursors with a clone of this hasher.
+                cursor_hasher = Some(hasher.clone());
+                let (sink, handle) = crate::inventory_sink::InventorySink::start(
+                    engine,
+                    hasher,
+                    b.proxy_id.as_str(),
+                )?;
+                inventory_sink = Some(sink);
+                inventory_handle = Some(handle);
+                let transport = crate::registry_client::MtlsRegistryTransport::from_bootstrap(b)
+                    .ok_or_else(|| anyhow::anyhow!("control_plane_url is unusable"))?;
+                let reporter = crate::registry_client::ConflictReporter::new(
+                    store.clone(),
+                    gaps.clone(),
+                    Box::new(crate::registry_client::SpoolConflictHandler::new(
+                        spool.clone(),
+                    )),
+                );
+                let rclient = crate::registry_client::RegistryClient::new(
+                    store,
+                    transport,
+                    reporter.clone(),
+                    registry_params,
+                );
+                // `sync_stalled` is the registry sync's OR the ingest client's
+                // 424 holds.
+                registry_probe = Some(crate::registry_client::with_ingest_stall(
+                    rclient.health_probe(),
+                    client.registry_stalled_flag(),
+                ));
+                conflicts = Some(reporter);
+                let mut reg_stop = stop_rx.clone();
+                registry_task = Some(tokio::spawn(async move {
+                    rclient
+                        .run(async move {
+                            let _ = reg_stop.wait_for(|v| *v).await;
+                        })
+                        .await;
+                }));
+            }
+            let mut reporter = crate::status_report::Reporter::new(
                 b.proxy_id.as_str(),
                 &epoch,
                 gaps.clone(),
@@ -535,6 +635,9 @@ async fn run_inner(
                     },
                 ),
             );
+            if let Some(probe) = registry_probe {
+                reporter = reporter.with_registry(probe);
+            }
             // R follows the applied server config.
             let (ret_spool, ret_rx, mut ret_stop) =
                 (spool.clone(), view_rx.clone(), stop_rx.clone());
@@ -560,15 +663,23 @@ async fn run_inner(
             }));
             // Ingest: the spool is the event source (T-14b). Production path
             // for every event the relay appends.
-            let client = crate::ingest_client::IngestClient::new(gaps, central, ingest_params);
             let (ing_fetcher, ing_spool, mut ing_stop) =
                 (fetcher.clone(), spool.clone(), stop_rx.clone());
-            ingest_task = Some(tokio::spawn(async move {
-                crate::ingest_client::run_ingest(&*ing_fetcher, ing_spool, client, async move {
-                    let _ = ing_stop.wait_for(|v| *v).await;
-                })
-                .await;
-            }));
+            let ing_stop = async move {
+                let _ = ing_stop.wait_for(|v| *v).await;
+            };
+            ingest_task = Some(match conflicts {
+                // README N11 iii: each referenced registry entry is checked
+                // before its events are sent.
+                Some(c) => tokio::spawn(async move {
+                    let source = crate::registry_client::CheckedSource::new(ing_spool, c);
+                    crate::ingest_client::run_ingest(&*ing_fetcher, source, client, ing_stop).await;
+                }),
+                None => tokio::spawn(async move {
+                    crate::ingest_client::run_ingest(&*ing_fetcher, ing_spool, client, ing_stop)
+                        .await;
+                }),
+            });
             let (report_fetcher, mut report_stop) = (fetcher.clone(), stop_rx.clone());
             report_task = Some(tokio::spawn(async move {
                 crate::status_report::run_status_reporter(
@@ -602,11 +713,16 @@ async fn run_inner(
         None => None,
     };
 
-    let proxy = crate::server::Proxy::new(
+    let mut proxy = crate::server::Proxy::new(
         b.limits.clone(),
         table,
         std::sync::Arc::new(crate::dest::SystemResolver),
     );
+    // Without a registry the relay keeps its no-op sink and does no observation
+    // work at all (`wants_observations` is false).
+    if let (Some(sink), Some(hasher)) = (inventory_sink.take(), cursor_hasher.take()) {
+        proxy = proxy.with_sink(sink, hasher);
+    }
     let lc3 = lc.clone();
     let served = proxy
         .serve(listener, acceptor, async {
@@ -617,6 +733,11 @@ async fn run_inner(
     // NOTE: Signal handlers stay installed during drain, so a second SIGTERM is
     // swallowed and only SIGKILL ends the process. Fine under systemd
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
+    // The relay stopped, so no page is arriving any more: end the open listing
+    // chains (`session_ended`), drain the queue and stop the engine worker.
+    if let Some(h) = inventory_handle.take() {
+        h.shutdown().await;
+    }
     let _ = stop_tx.send(true);
     if let Some(t) = sync_task {
         let _ = t.await;
@@ -624,7 +745,7 @@ async fn run_inner(
     if let Some(t) = report_task {
         let _ = t.await;
     }
-    for t in [ingest_task, pump_task, retention_task]
+    for t in [ingest_task, pump_task, retention_task, registry_task]
         .into_iter()
         .flatten()
     {

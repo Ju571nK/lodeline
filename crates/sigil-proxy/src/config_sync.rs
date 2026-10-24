@@ -171,6 +171,10 @@ fn route_specs(cfg: &ProxyConfig) -> Result<Vec<RouteSpec>, BuildError> {
             allowed_origins: cfg.allowed_origins.clone(),
             allow_private_destination: false,
             limits: remote_limits(r),
+            scope: Some(crate::route::RouteScope {
+                upstream_id: r.upstream_id.as_str().to_string(),
+                credential_scope_id: r.credential_scope_id.as_str().to_string(),
+            }),
         });
     }
     Ok(out)
