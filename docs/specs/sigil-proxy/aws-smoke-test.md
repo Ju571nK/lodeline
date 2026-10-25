@@ -1,7 +1,7 @@
 # Sigil Proxy AWS two-instance smoke test (runbook)
 
-2026-10-24 · base `e5612f8` plus the uncommitted T-13d/T-12b2 working tree of `feat/proxy-invocations-sessions`
-· status: **preparation only. Nothing has been provisioned or run in AWS.**
+2026-10-24 · base `e5612f8` plus the T-13d/T-12b2 change, merged as `b17b2d2` (#314)
+· status: **H run passed on 2026-10-25 at `b17b2d2` (D1, §18).** Real clients (R), D2, manager UI and systemd remain unmeasured.
 Traces: PX-003/004/006–011/013–016, AC-03/04/05/06/07/08/12/15 (see [t13d-t12b2.md](t13d-t12b2.md)).
 Tools: [`scripts/proxy-smoke/`](../../../scripts/proxy-smoke/README.md).
 
@@ -572,3 +572,35 @@ manager UI, systemd/SELinux, real vendor clients and AWS remain unmeasured.
 A disposable lab certificate CN mistake was rejected as `proxy_unknown`, corrected to the documented proxy ID, and
 rerun using the same source/binaries. A checkpoint initially repeated historical 32/48 spool counts; the verified current
 artifact is 31/49 and is the only final count used here. No production source change was needed for the rehearsal.
+
+## 18. AWS run (H, 2026-10-25 UTC)
+
+Operator-run on two EC2 instances at `b17b2d2`, data plane D1. Account, region, addresses, instance IDs, tokens and
+certificates are deliberately not recorded here.
+
+| Item | Value |
+|---|---|
+| A, B | t4g.small (2 vCPU, 2 GiB; A with 4 GiB swap), Amazon Linux 2023 aarch64, Python 3.9.25, OpenSSL 3.5.8 |
+| Build | on A, `cargo build --release --locked -p sigil-server -p sigil-proxy`, 6 min 15 s; `sigil-proxy` copied to B, SHA256 equal on both |
+| PC | macOS, Python 3.15.0, OpenSSL 4.0.3 |
+| Access | SSM Session Manager for both hosts; PC to B listener by SSM port forwarding (8480). No inbound rule on SG-B. SG-A allowed only SG-B on 8443 and 22 |
+| Host-to-host copies | `scp` started from B only. Tokens and secrets never went through SSM command text or output |
+
+| Check | Measured result |
+|---|---|
+| §9 scenario (stateful) | 27/27 passed |
+| §9 ledger | 22 completed, zero duplicate invocation/event sets, zero canary and tool-name occurrences. Table equals the §9 rehearsal table |
+| §9 drift / inventory | one `metadata_ref` `added` then `removed`; latest snapshot `member_count` 5 |
+| §9 fixture counters | `smoke_echo` 1, `deletes` 2, `cancels_matched` 1 |
+| §9 management audit (`proxy audit`) | ran (not run in the rehearsal): seq 0–4 = register, fingerprint_register, config_put, disable, enable, all `ok` |
+| §10 privacy | B 15 / A 12 readable files, zero occurrences, zero errors; positive control FOUND |
+| §11 server offline within TTL | initialize 202, five calls 200; after restart exactly six completed invocations, no duplicates |
+| §11 proxy restart with server down | `config_state: Expired`, `forwarding: false`, initialize 401; after server start `Valid`, call 200 |
+| §12 spool 49152 / reserve 16384 | 32 calls 200, 48 calls 503; fixture `smoke_echo` delta exactly 32. After drain one call 200 |
+| §12 boundary | one invocation stayed `lifecycle: started` with an open `local_record_failed` gap, the designed visibility in §12 step 4. A `central_outage` gap also stayed open; not investigated here |
+| §13 disable / enable | `Disabled` and 401 within 10 s; `Valid` and 200 within 20 s of enable |
+| Teardown | processes stopped, temporary SSH keys and client tokens deleted, instances stopped. PKI is throwaway (7 days) |
+
+Differences from §17: spool counts 32/48 instead of 31/49 (fill counts depend on record bytes and are observations), and the
+boundary start-only invocation appeared (as in §15, not in §17). Not measured: the stateless and `--initialize-sse` fixture
+variants on AWS, final stopped-state scans, D2, real vendor clients (R), manager UI, systemd/SELinux.
