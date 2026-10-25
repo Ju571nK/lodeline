@@ -322,6 +322,9 @@ jobs:
           for f in sigil sigil-sender sigil-server sigil-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
-          test -f /usr/lib/tmpfiles.d/sigil.conf
-          test -f /usr/lib/tmpfiles.d/sigil-sender.conf
+          # The per-package copies must stay identical (they define one shared
+          # `sigil` user and its directories).
+          cmp /usr/lib/sysusers.d/sigil.conf /usr/lib/sysusers.d/sigil-sender.conf
+          cmp /usr/lib/sysusers.d/sigil.conf /usr/lib/sysusers.d/sigil-server.conf
+          cmp /usr/lib/tmpfiles.d/sigil.conf /usr/lib/tmpfiles.d/sigil-sender.conf
           dpkg -P "${all[@]}"

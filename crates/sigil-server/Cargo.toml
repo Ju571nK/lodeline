@@ -89,7 +89,7 @@ assets = [
     # (#10 slice 2). Idempotent. No tmpfiles here: systemd StateDirectory=
     # sigil-server owns /var/lib/sigil-server as sigil:sigil; the agent's
     # /var/lib/sigil is not used on a server-only host.
-    ["../../packaging/sysusers.d/sigil.conf", "usr/lib/sysusers.d/sigil-server.conf", "644"],
+    ["../../packaging/sysusers.d/sigil-server.conf", "usr/lib/sysusers.d/sigil-server.conf", "644"],
 ]
 
 [package.metadata.deb.systemd-units]
@@ -107,7 +107,7 @@ assets = [
     { source = "../../config/server.example.yaml", dest = "/etc/sigil/server.yaml.example", mode = "0644" },
     { source = "../../README.md", dest = "/usr/share/doc/sigil-server/README.md", mode = "0644", doc = true },
     { source = "../../LICENSE", dest = "/usr/share/doc/sigil-server/LICENSE", mode = "0644", doc = true },
-    { source = "../../packaging/sysusers.d/sigil.conf", dest = "/usr/lib/sysusers.d/sigil-server.conf", mode = "0644" },
+    { source = "../../packaging/sysusers.d/sigil-server.conf", dest = "/usr/lib/sysusers.d/sigil-server.conf", mode = "0644" },
     { source = "../../packaging/selinux/sigil.te", dest = "/usr/share/selinux/packages/sigil/sigil.te", mode = "0644" },
     { source = "../../packaging/selinux/sigil.fc", dest = "/usr/share/selinux/packages/sigil/sigil.fc", mode = "0644" },
 ]
