@@ -597,7 +597,7 @@ certificates are deliberately not recorded here.
 | §11 server offline within TTL | initialize 202, five calls 200; after restart exactly six completed invocations, no duplicates |
 | §11 proxy restart with server down | `config_state: Expired`, `forwarding: false`, initialize 401; after server start `Valid`, call 200 |
 | §12 spool 49152 / reserve 16384 | 32 calls 200, 48 calls 503; fixture `smoke_echo` delta exactly 32. After drain one call 200 |
-| §12 boundary | one invocation stayed `lifecycle: started` with an open `local_record_failed` gap, the designed visibility in §12 step 4. A `central_outage` gap also stayed open; not investigated here |
+| §12 boundary | one invocation stayed `lifecycle: started` with an open `local_record_failed` gap, the designed visibility in §12 step 4. A `central_outage` gap also reads `state: open`, as the contract requires (only `sequence_gap` closes). Its `started_at`/`ended_at` match the §12 server stop, so the outage was recorded and ended correctly. Only one of the three server stops produced an outage gap; the proxy opens one after 3 consecutive failed ingest attempts (`OUTAGE_THRESHOLD` in `ingest_client.rs`), and the shorter §11 stops likely stayed under it (retry counts were not measured) |
 | §13 disable / enable | `Disabled` and 401 within 10 s; `Valid` and 200 within 20 s of enable |
 | Teardown | processes stopped, temporary SSH keys and client tokens deleted, instances stopped. PKI is throwaway (7 days) |
 
