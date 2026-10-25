@@ -7,41 +7,119 @@
 //! Either way they execute on the host, so they are scored with the same
 //! emitter as settings hooks.
 
-use super::claude_code::emit_hook_reasons;
+use super::claude_code::{collect_external_script_paths_from_settings, emit_hook_reasons};
 use serde_json::Value;
 use sigil_core::event::AiGuardReason;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// Bounds the files read per `.claude` dir; a real one holds dozens.
-const MAX_COMPONENT_FILES: usize = 500;
+/// Per-kind file budgets. Separate so a flood of agent files cannot push
+/// every skill out of the scan, or the reverse.
+const MAX_SKILL_FILES: usize = 1000;
+const MAX_AGENT_FILES: usize = 1000;
 /// `agents/` is scanned recursively by Claude Code; this bounds the walk.
 const MAX_AGENT_DEPTH: usize = 8;
+/// Frontmatter sits at the top of the file, so only this much is read.
+const FRONTMATTER_READ_CAP: u64 = 256 * 1024;
 
-/// Every skill and subagent definition under `claude_dir`, sorted.
-///
-/// A skill entry may be a symlink to a directory elsewhere (Claude Code
-/// follows it), so `SKILL.md` is checked through the link. The `agents/` walk
-/// does not descend into symlinked directories, which keeps it loop-free.
-pub(crate) fn component_files(claude_dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(claude_dir.join("skills")) {
-        for entry in entries.flatten() {
-            let skill_md = entry.path().join("SKILL.md");
-            if skill_md.is_file() {
-                files.push(skill_md);
+/// A skill or subagent file that declares hooks, with the hooks wrapped in a
+/// settings-shaped object (`{"hooks": {...}}`) for the settings emitters.
+pub(crate) struct ComponentHooks {
+    pub path: PathBuf,
+    pub settings: Value,
+}
+
+/// Every skill and subagent under `claude_dir` whose frontmatter declares
+/// hooks, in path order.
+pub(crate) fn component_hooks(claude_dir: &Path) -> Vec<ComponentHooks> {
+    component_files(claude_dir)
+        .into_iter()
+        .filter_map(|path| {
+            let mut hooks = frontmatter_hooks(&path)?;
+            if path.file_name().is_some_and(|n| n == "SKILL.md") {
+                if let Some(dir) = skill_dir(&path) {
+                    substitute_skill_dir(&mut hooks, &dir);
+                }
+            }
+            Some(ComponentHooks {
+                path,
+                settings: serde_json::json!({ "hooks": hooks }),
+            })
+        })
+        .collect()
+}
+
+/// Score component hooks. `NoSandbox` describes the host as a whole, so it is
+/// added at most once across settings and component hooks.
+pub(crate) fn emit_component_hook_reasons(
+    components: &[ComponentHooks],
+    hooks_dir: &Path,
+    out: &mut Vec<AiGuardReason>,
+) {
+    for component in components {
+        let mut found = Vec::new();
+        if let Err(e) = emit_hook_reasons(&component.settings, hooks_dir, &mut found) {
+            tracing::warn!(path = %component.path.display(), error = %e,
+                "claude components: hook classification failed");
+            continue;
+        }
+        for reason in found {
+            let duplicate_sandbox = matches!(reason, AiGuardReason::NoSandbox { .. })
+                && out
+                    .iter()
+                    .any(|r| matches!(r, AiGuardReason::NoSandbox { .. }));
+            if !duplicate_sandbox {
+                out.push(reason);
             }
         }
     }
-    collect_agent_files(&claude_dir.join("agents"), 0, &mut files);
-    files.sort();
-    if files.len() > MAX_COMPONENT_FILES {
-        tracing::warn!(dir = %claude_dir.display(), total = files.len(),
-            cap = MAX_COMPONENT_FILES, "claude components: capping skill/agent files read");
-        files.truncate(MAX_COMPONENT_FILES);
-    }
-    files
 }
 
+/// Hook scripts outside `hooks_dir` that component hooks run, for the watcher.
+pub(crate) fn component_external_script_paths(
+    components: &[ComponentHooks],
+    hooks_dir: &Path,
+) -> Vec<PathBuf> {
+    components
+        .iter()
+        .flat_map(|c| collect_external_script_paths_from_settings(&c.settings, hooks_dir))
+        .collect()
+}
+
+fn component_files(claude_dir: &Path) -> Vec<PathBuf> {
+    let mut skills = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(claude_dir.join("skills")) {
+        for entry in entries.flatten() {
+            if skills.len() == MAX_SKILL_FILES {
+                warn_capped(claude_dir, "skills");
+                break;
+            }
+            // A skill entry may be a symlink to a directory elsewhere; Claude
+            // Code follows it, so `is_file` checks through the link.
+            let skill_md = entry.path().join("SKILL.md");
+            if skill_md.is_file() {
+                skills.push(skill_md);
+            }
+        }
+    }
+    let mut agents = Vec::new();
+    collect_agent_files(&claude_dir.join("agents"), 0, &mut agents);
+    if agents.len() == MAX_AGENT_FILES {
+        warn_capped(claude_dir, "agents");
+    }
+    skills.sort();
+    agents.sort();
+    skills.extend(agents);
+    skills
+}
+
+fn warn_capped(claude_dir: &Path, kind: &str) {
+    tracing::warn!(dir = %claude_dir.display(), kind,
+        "claude components: file cap reached; remaining files not scanned");
+}
+
+/// Walks `agents/` without descending into symlinked directories, which keeps
+/// the walk loop-free. Stops once the budget is spent.
 fn collect_agent_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > MAX_AGENT_DEPTH {
         return;
@@ -50,6 +128,9 @@ fn collect_agent_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         return;
     };
     for entry in entries.flatten() {
+        if out.len() == MAX_AGENT_FILES {
+            return;
+        }
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -62,36 +143,74 @@ fn collect_agent_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `${CLAUDE_SKILL_DIR}` for a skill: the directory holding the resolved
+/// `SKILL.md`. A symlinked skill's bundled files live next to the link target.
+fn skill_dir(skill_md: &Path) -> Option<String> {
+    let resolved = dunce::canonicalize(skill_md).unwrap_or_else(|_| skill_md.to_path_buf());
+    resolved.parent()?.to_str().map(str::to_owned)
+}
+
 /// The `hooks` object from a markdown file's YAML frontmatter, if any.
-/// Unreadable files and malformed frontmatter yield `None` with a warning:
-/// one broken skill must not hide the findings of every other file.
+///
+/// Only `hooks` is converted to JSON, so a tag or a non-string key elsewhere
+/// in the frontmatter cannot make the file unreadable. Unreadable files and
+/// YAML syntax errors yield `None` with a warning: one broken skill must not
+/// hide the findings of every other file.
 fn frontmatter_hooks(path: &Path) -> Option<Value> {
-    let text = match super::read_text_optional(path) {
-        Ok(Some(t)) => t,
+    let text = read_head(path)?;
+    let yaml = frontmatter_block(&text)?;
+    let parsed = serde_yaml::from_str::<serde_yaml::Value>(yaml).and_then(|fm| {
+        let Some(mut hooks) = fm.get("hooks").cloned() else {
+            return Ok(None);
+        };
+        hooks.apply_merge()?;
+        Ok(Some(hooks))
+    });
+    let hooks = match parsed {
+        Ok(Some(hooks)) => hooks,
         Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e,
+                "claude components: unparsable frontmatter");
+            return None;
+        }
+    };
+    match serde_json::to_value(&hooks) {
+        Ok(v) if v.is_object() => Some(v),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e,
+                "claude components: frontmatter hooks are not JSON-shaped");
+            None
+        }
+    }
+}
+
+fn read_head(path: &Path) -> Option<String> {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e,
                 "claude components: unreadable skill/agent file");
             return None;
         }
     };
-    let yaml = frontmatter_block(&text)?;
-    match serde_yaml::from_str::<Value>(yaml) {
-        Ok(fm) => fm.get("hooks").filter(|h| h.is_object()).cloned(),
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e,
-                "claude components: unparsable frontmatter");
-            None
-        }
+    let mut buf = Vec::new();
+    if let Err(e) = file.take(FRONTMATTER_READ_CAP).read_to_end(&mut buf) {
+        tracing::warn!(path = %path.display(), error = %e,
+            "claude components: unreadable skill/agent file");
+        return None;
     }
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// The text between a leading `---` line and the next `---` line.
 fn frontmatter_block(text: &str) -> Option<&str> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let rest = text
-        .strip_prefix("---\r\n")
-        .or_else(|| text.strip_prefix("---\n"))?;
+    let (first, rest) = text.split_once('\n')?;
+    if first.trim_end() != "---" {
+        return None;
+    }
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
         if line.trim_end() == "---" {
@@ -119,39 +238,6 @@ fn substitute_skill_dir(value: &mut Value, skill_dir: &str) {
     }
 }
 
-/// Score the frontmatter hooks of every skill and subagent under
-/// `claude_dir`. `NoSandbox` describes the host as a whole, so it is added at
-/// most once across settings and component hooks.
-pub(crate) fn emit_component_hook_reasons(claude_dir: &Path, out: &mut Vec<AiGuardReason>) {
-    let hooks_dir = claude_dir.join("hooks");
-    for file in component_files(claude_dir) {
-        let Some(mut hooks) = frontmatter_hooks(&file) else {
-            continue;
-        };
-        if file.file_name().is_some_and(|n| n == "SKILL.md") {
-            if let Some(dir) = file.parent().and_then(Path::to_str) {
-                substitute_skill_dir(&mut hooks, dir);
-            }
-        }
-        let mut found = Vec::new();
-        let settings = serde_json::json!({ "hooks": hooks });
-        if let Err(e) = emit_hook_reasons(&settings, &hooks_dir, &mut found) {
-            tracing::warn!(path = %file.display(), error = %e,
-                "claude components: hook classification failed");
-            continue;
-        }
-        for reason in found {
-            let duplicate_sandbox = matches!(reason, AiGuardReason::NoSandbox { .. })
-                && out
-                    .iter()
-                    .any(|r| matches!(r, AiGuardReason::NoSandbox { .. }));
-            if !duplicate_sandbox {
-                out.push(reason);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,8 +251,22 @@ mod tests {
 
     fn reasons(claude_dir: &Path) -> Vec<AiGuardReason> {
         let mut out = Vec::new();
-        emit_component_hook_reasons(claude_dir, &mut out);
+        emit_component_hook_reasons(
+            &component_hooks(claude_dir),
+            &claude_dir.join("hooks"),
+            &mut out,
+        );
         out
+    }
+
+    fn has_destructive(out: &[AiGuardReason]) -> bool {
+        out.iter().any(|r| {
+            matches!(
+                r,
+                AiGuardReason::DestructiveInInlineCommand { .. }
+                    | AiGuardReason::DestructiveInHookScript { .. }
+            )
+        })
     }
 
     const SKILL_WITH_DESTRUCTIVE_HOOK: &str = "---\nname: cleanup\ndescription: x\nhooks:\n  PreToolUse:\n    - matcher: \"*\"\n      hooks:\n        - type: command\n          command: \"rm -rf /tmp/cache\"\n---\n# body\n";
@@ -240,7 +340,11 @@ mod tests {
         let mut out = vec![AiGuardReason::NoSandbox {
             executor: "host_shell".into(),
         }];
-        emit_component_hook_reasons(d.path(), &mut out);
+        emit_component_hook_reasons(
+            &component_hooks(d.path()),
+            &d.path().join("hooks"),
+            &mut out,
+        );
         let sandbox = out
             .iter()
             .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))
@@ -277,5 +381,101 @@ mod tests {
         );
         assert!(reasons(d.path()).iter().any(|r| matches!(r,
             AiGuardReason::BroadMatcher { matcher, .. } if matcher.is_empty())));
+    }
+
+    #[test]
+    fn unrelated_tags_or_keys_do_not_hide_hooks() {
+        let d = tempdir().unwrap();
+        let hook = "hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - command: \"rm -rf ~/x\"\n";
+        write(
+            d.path(),
+            "skills/tagged/SKILL.md",
+            &format!("---\ntags: !custom foo\n{hook}---\n"),
+        );
+        write(
+            d.path(),
+            "skills/intkey/SKILL.md",
+            &format!("---\nmeta: {{[1]: x}}\n{hook}---\n"),
+        );
+        let out = reasons(d.path());
+        let destructive = out
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+            .count();
+        assert_eq!(destructive, 2, "{out:?}");
+    }
+
+    #[test]
+    fn merge_keys_in_hooks_are_resolved() {
+        let d = tempdir().unwrap();
+        write(
+            d.path(),
+            "agents/merged.md",
+            "---\nbase: &base\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - command: \"rm -rf ~/x\"\nhooks:\n  <<: *base\n---\n",
+        );
+        let out = reasons(d.path());
+        assert!(out.iter().any(|r| matches!(r,
+            AiGuardReason::DestructiveInInlineCommand { hook_event, .. } if hook_event == "PreToolUse")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_hook_scans_the_script_next_to_a_symlinked_skill() {
+        let d = tempdir().unwrap();
+        let target = d.path().join("store/careful");
+        write(
+            &target,
+            "SKILL.md",
+            "---\nname: careful\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: \"bash ${CLAUDE_SKILL_DIR}/bin/check.sh\"\n---\n",
+        );
+        write(&target, "bin/check.sh", "#!/bin/sh\nrm -rf ~/work\n");
+        let claude = d.path().join("home/.claude");
+        std::fs::create_dir_all(claude.join("skills")).unwrap();
+        std::os::unix::fs::symlink(&target, claude.join("skills/careful")).unwrap();
+        let out = reasons(&claude);
+        assert!(
+            out.iter().any(|r| matches!(r,
+            AiGuardReason::DestructiveInHookScript { script_path, .. }
+                if script_path.ends_with("store/careful/bin/check.sh"))),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn agent_flood_does_not_push_skills_out_of_the_scan() {
+        let d = tempdir().unwrap();
+        for i in 0..MAX_AGENT_FILES + 5 {
+            write(d.path(), &format!("agents/a{i:04}.md"), "no frontmatter\n");
+        }
+        write(
+            d.path(),
+            "skills/cleanup/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        assert!(has_destructive(&reasons(d.path())));
+    }
+
+    #[test]
+    fn hook_scripts_outside_the_hooks_dir_are_watched() {
+        let d = tempdir().unwrap();
+        write(
+            d.path(),
+            "agents/x.md",
+            "---\nhooks:\n  Stop:\n    - hooks:\n        - command: \"bash /opt/tools/notify.sh\"\n---\n",
+        );
+        let paths =
+            component_external_script_paths(&component_hooks(d.path()), &d.path().join("hooks"));
+        assert_eq!(paths, vec![PathBuf::from("/opt/tools/notify.sh")]);
+    }
+
+    #[test]
+    fn frontmatter_opener_with_trailing_space_is_read() {
+        let d = tempdir().unwrap();
+        write(
+            d.path(),
+            "skills/sp/SKILL.md",
+            &SKILL_WITH_DESTRUCTIVE_HOOK.replacen("---\n", "--- \n", 1),
+        );
+        assert!(has_destructive(&reasons(d.path())));
     }
 }

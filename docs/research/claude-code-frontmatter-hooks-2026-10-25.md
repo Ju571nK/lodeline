@@ -32,24 +32,45 @@ the working directory to the repository root.
 `~/.claude/skills/` on this machine holds 71 entries, many of them symlinks.
 Four declare frontmatter hooks (`careful`, `freeze`, `guard`, `investigate`),
 all `PreToolUse` command hooks of the form
-`bash ${CLAUDE_SKILL_DIR}/bin/<check>.sh`. The docs list `${CLAUDE_SKILL_DIR}`
+`bash ${CLAUDE_SKILL_DIR}/bin/<check>.sh`. Several entries, `careful`
+included, are symlinks into `skills/gstack/`. The docs list `${CLAUDE_SKILL_DIR}`
 substitution for skill content and `allowed-tools`, not hooks; these skills
 rely on it in hooks anyway.
 
 ## What Sigil reads now
 
 - Personal and project `skills/<name>/SKILL.md` (through symlinks) and
-  `agents/**/*.md` (depth 8, no symlinked directories), at most 500 files per
-  `.claude` directory.
-- The frontmatter `hooks` object goes through the settings hook emitter, so it
-  yields the same reasons: `no_sandbox` (once per assessment),
-  `broad_matcher`, destructive inline commands, scanned hook scripts, and
-  `hook_forwards_tool_calls`.
-- `${CLAUDE_SKILL_DIR}` is replaced with the skill directory before
-  classification, so a hook that runs a bundled script by path gets that
-  script scanned.
+  `agents/**/*.md` (depth 8, no symlinked directories). Each kind has its own
+  budget of 1,000 files, so a flood of one kind cannot hide the other; a
+  warning is logged when a budget runs out. Only the first 256 KiB of each
+  file is read.
+- Only the frontmatter `hooks` value is converted, so a YAML tag or a
+  non-string key in another field does not hide the hooks. Merge keys
+  (`<<: *anchor`) are resolved. A YAML syntax error skips that file with a
+  warning.
+- The `hooks` object goes through the settings hook emitter, so it yields the
+  same reasons: `no_sandbox` (once per assessment), `broad_matcher`,
+  destructive inline commands, scanned hook scripts, and
+  `hook_forwards_tool_calls`. Scripts those hooks run are watched like
+  settings hook scripts.
+- `${CLAUDE_SKILL_DIR}` is replaced with the directory of the resolved
+  `SKILL.md`. On this machine `careful/SKILL.md` is a symlink and its `bin/`
+  exists only next to the target, so the skill could not work with the link's
+  directory. That is the basis for resolving; it is inferred, not documented.
+- A hook command of the form `bash <script>` (also `sh`, `zsh`, `dash`) now
+  has its script scanned, for settings hooks too. Before, only a command
+  whose first token was a path was.
+- The script scanner skips full-line comments when matching destructive
+  patterns. `careful`'s `check-careful.sh` lists `rm -rf /` in a comment and
+  was otherwise reported.
 - A repo with only `.claude/skills/` or `.claude/agents/` is now discovered.
+
+`sigil scan` on this machine after the change reports no destructive
+hook-script finding and logs no frontmatter warning. Before the comment fix
+it reported `check-careful.sh`, which shows that script is now read.
 
 Not covered: plugin skills and agents, nested `<subdir>/.claude/skills/`
 below a repository root, parent-directory walks, and workspace-trust state.
-Reasons carry no field naming the skill or agent that declared the hook.
+Changes to a symlinked `SKILL.md` target outside the watched directories are
+picked up on the next periodic assessment, not by the watcher. Reasons carry
+no field naming the skill or agent that declared the hook.

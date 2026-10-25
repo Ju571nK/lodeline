@@ -50,22 +50,7 @@ impl AiGuardParser for ClaudeCodeParser {
     }
 
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        let claude = home_dir.join(".claude");
-        let base = super::read_json_optional(&claude.join("settings.json"))
-            .ok()
-            .flatten();
-        let local = super::read_json_optional(&claude.join("settings.local.json"))
-            .ok()
-            .flatten();
-        if base.is_none() && local.is_none() {
-            return Vec::new();
-        }
-        let merged = merge_overlay(
-            base.unwrap_or(serde_json::Value::Object(Default::default())),
-            local,
-        );
-        let hooks_dir = claude.join("hooks");
-        collect_external_script_paths_from_settings(&merged, &hooks_dir)
+        external_script_paths(&home_dir.join(".claude"))
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
@@ -75,6 +60,7 @@ impl AiGuardParser for ClaudeCodeParser {
 
         let base = super::read_json_optional(&base_path)?;
         let local = super::read_json_optional(&local_path)?;
+        let components = super::claude_components::component_hooks(&claude);
 
         // Missing primary file with no overlay → operator hasn't enabled tool.
         // #191 — a real unattended task (a `scheduled-tasks/<name>/SKILL.md`) is
@@ -87,7 +73,7 @@ impl AiGuardParser for ClaudeCodeParser {
             // #199 — a `loop.md` is the same kind of evidence: an unattended
             // prompt exists, so the tool is in use even with no settings file.
             && !claude.join("loop.md").is_file()
-            && super::claude_components::component_files(&claude).is_empty()
+            && components.is_empty()
         {
             return Ok(Vec::new());
         }
@@ -101,7 +87,7 @@ impl AiGuardParser for ClaudeCodeParser {
         let hooks_dir = claude.join("hooks");
         let mut out = Vec::new();
         emit_hook_reasons(&merged, &hooks_dir, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&claude, &mut out);
+        super::claude_components::emit_component_hook_reasons(&components, &hooks_dir, &mut out);
         emit_permission_reasons(&merged, &mut out);
         // #191 signal 1 — `permissions.defaultMode` auto-approval posture.
         emit_default_mode_reason(&merged, &mut out);
@@ -128,6 +114,28 @@ impl AiGuardParser for ClaudeCodeParser {
         super::instruction_scan::scan_file_path(&claude.join("CLAUDE.md"), &mut out);
         Ok(out)
     }
+}
+
+/// Hook scripts outside `<claude_dir>/hooks` that settings or skill/subagent
+/// frontmatter hooks run, so the watcher re-assesses when one changes.
+fn external_script_paths(claude_dir: &Path) -> Vec<PathBuf> {
+    let hooks_dir = claude_dir.join("hooks");
+    let base = super::read_json_optional(&claude_dir.join("settings.json"))
+        .ok()
+        .flatten();
+    let local = super::read_json_optional(&claude_dir.join("settings.local.json"))
+        .ok()
+        .flatten();
+    let mut paths = Vec::new();
+    if base.is_some() || local.is_some() {
+        let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
+        paths = collect_external_script_paths_from_settings(&merged, &hooks_dir);
+    }
+    paths.extend(super::claude_components::component_external_script_paths(
+        &super::claude_components::component_hooks(claude_dir),
+        &hooks_dir,
+    ));
+    paths
 }
 
 /// Merge security settings recursively; permission/hook lists accumulate.
@@ -322,16 +330,8 @@ fn classify_command(
     // `./foo | bash` stay classified as inline. Issue #15 — Windows hook
     // commands like `C:\Users\alice\.claude\hooks\pre.sh` were previously
     // misclassified as inline because the original check only looked for `/`.
-    let first_token = cmd.split_whitespace().next().unwrap_or("");
-    let has_shell_meta = first_token.contains('|') || first_token.contains('&');
-    let looks_pathish = !has_shell_meta
-        && (std::path::Path::new(first_token).is_absolute()
-            || first_token.starts_with('~')
-            || first_token.contains('/')
-            || first_token.contains('\\'));
-
-    if looks_pathish {
-        let candidate = std::path::PathBuf::from(first_token);
+    if let Some(script) = hook_script_path(cmd) {
+        let candidate = std::path::PathBuf::from(script);
         if path_is_inside(&candidate, hooks_dir) {
             // 3b.3.1 — convention-dir script delegates to recursive walker
             // so sourced files inside the convention dir also get scanned.
@@ -399,27 +399,49 @@ pub(crate) fn collect_external_script_paths_from_settings(
 
 /// Returns Some(path) if `cmd`'s first token is a path that lies OUTSIDE
 /// `hooks_dir` (i.e., would be classified as external by `classify_command`).
-/// Mirrors the path-detection logic of `classify_command` exactly.
+/// Shares `hook_script_path` with `classify_command`.
 fn external_path_from_command(
     cmd: &str,
     hooks_dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let first_token = cmd.split_whitespace().next().unwrap_or("");
-    let has_shell_meta = first_token.contains('|') || first_token.contains('&');
-    let looks_pathish = !has_shell_meta
-        && (std::path::Path::new(first_token).is_absolute()
-            || first_token.starts_with('~')
-            || first_token.contains('/')
-            || first_token.contains('\\'));
-    if !looks_pathish {
-        return None;
-    }
-    let candidate = std::path::PathBuf::from(first_token);
+    let candidate = std::path::PathBuf::from(hook_script_path(cmd)?);
     if path_is_inside(&candidate, hooks_dir) {
         None
     } else {
         Some(candidate)
     }
+}
+
+/// The script a hook command runs: its first token when that looks like a
+/// path, or the operand of a leading `sh`-family interpreter
+/// (`bash ./check.sh`). Only `sh`-family scripts are worth reading, because
+/// the scanner matches shell patterns.
+fn hook_script_path(cmd: &str) -> Option<&str> {
+    let mut tokens = cmd.split_whitespace();
+    let first = tokens.next()?;
+    if looks_pathish(first) && !is_sh_interpreter(first) {
+        return Some(first);
+    }
+    if is_sh_interpreter(first) {
+        return tokens
+            .next()
+            .filter(|t| !t.starts_with('-') && looks_pathish(t));
+    }
+    None
+}
+
+fn looks_pathish(token: &str) -> bool {
+    let has_shell_meta = token.contains('|') || token.contains('&');
+    !has_shell_meta
+        && (std::path::Path::new(token).is_absolute()
+            || token.starts_with('~')
+            || token.contains('/')
+            || token.contains('\\'))
+}
+
+fn is_sh_interpreter(token: &str) -> bool {
+    let name = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    matches!(name, "sh" | "bash" | "zsh" | "dash")
 }
 
 /// Truncate command for inclusion in evidence (max 80 chars, sanitize NULs).
@@ -772,28 +794,14 @@ impl AiGuardParser for ClaudeCodeProjectParser {
     }
 
     fn collect_external_script_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
-        let claude = self.repo_root.join(".claude");
-        let base = super::read_json_optional(&claude.join("settings.json"))
-            .ok()
-            .flatten();
-        let local = super::read_json_optional(&claude.join("settings.local.json"))
-            .ok()
-            .flatten();
-        if base.is_none() && local.is_none() {
-            return Vec::new();
-        }
-        let merged = merge_overlay(
-            base.unwrap_or(serde_json::Value::Object(Default::default())),
-            local,
-        );
-        let hooks_dir = claude.join("hooks");
-        collect_external_script_paths_from_settings(&merged, &hooks_dir)
+        external_script_paths(&self.repo_root.join(".claude"))
     }
 
     fn assess(&self, _home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
         let cd = self.repo_root.join(".claude");
         let base = super::read_json_optional(&cd.join("settings.json"))?;
         let local = super::read_json_optional(&cd.join("settings.local.json"))?;
+        let components = super::claude_components::component_hooks(&cd);
         // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
         // abort the whole assess and thereby blind us to a malicious
         // `.claude/settings.json` in the same repo (a corrupt-sidecar evasion
@@ -817,7 +825,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             && !self.repo_root.join("CLAUDE.md").is_file()
             && !self.repo_root.join("AGENTS.md").is_file()
             && !cd.join("loop.md").is_file()
-            && super::claude_components::component_files(&cd).is_empty()
+            && components.is_empty()
         {
             return Ok(Vec::new());
         }
@@ -825,7 +833,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         let hooks_dir = cd.join("hooks");
         let mut out = Vec::new();
         emit_hook_reasons(&merged, &hooks_dir, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&cd, &mut out);
+        super::claude_components::emit_component_hook_reasons(&components, &hooks_dir, &mut out);
         emit_permission_reasons(&merged, &mut out);
         emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
         // #145 — auto-enable posture: emit ONLY when a server-enable key is
