@@ -189,6 +189,16 @@ jobs:
           	sigil-proxy|sigil-proxy|sigil-proxy.service|/etc/sigil/proxy.yaml.example
           	TABLE
 
+          # Co-install (#252), matching the deb leg.
+          all=(sigil sigil-sender sigil-server sigil-signer sigil-proxy)
+          rpms=()
+          for pkg in "${all[@]}"; do rpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)"); done
+          rpm -i "${rpms[@]}"
+          for f in sigil sigil-sender sigil-server sigil-proxy; do
+            test -f "/usr/lib/sysusers.d/${f}.conf"
+          done
+          rpm -e "${all[@]}"
+
   # Debian/Ubuntu validation of the .deb packages. The rocky9 leg covers the
   # RPM path; this covers .deb end-to-end: build all five, install each, smoke
   # `--help`, then purge and verify cleanup. (#11)
@@ -302,3 +312,19 @@ jobs:
             dpkg -P "$pkg"
             test ! -e "/usr/bin/${bin}"
           done
+
+          # Co-install (#252): dpkg refuses a package that owns a path another
+          # installed package owns, which the one-at-a-time loop above never hits.
+          all=(sigil sigil-sender sigil-server sigil-signer sigil-proxy)
+          debs=()
+          for pkg in "${all[@]}"; do debs+=("./$(echo target/debian/${pkg}_[0-9]*.deb)"); done
+          apt-get install -y "${debs[@]}"
+          for f in sigil sigil-sender sigil-server sigil-proxy; do
+            test -f "/usr/lib/sysusers.d/${f}.conf"
+          done
+          # The per-package copies must stay identical (they define one shared
+          # `sigil` user and its directories).
+          cmp /usr/lib/sysusers.d/sigil.conf /usr/lib/sysusers.d/sigil-sender.conf
+          cmp /usr/lib/sysusers.d/sigil.conf /usr/lib/sysusers.d/sigil-server.conf
+          cmp /usr/lib/tmpfiles.d/sigil.conf /usr/lib/tmpfiles.d/sigil-sender.conf
+          dpkg -P "${all[@]}"

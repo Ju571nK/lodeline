@@ -14,6 +14,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   example `rmcp` and `idna_adapter`) fail on 1.78, and `darling` 0.23 needs
   1.88. A new CI job checks the workspace with the declared toolchain so the
   value stays accurate (#240).
+- The `sigil`, `sigil-sender` and `sigil-server` `.deb` packages can now be
+  installed on the same host. They all shipped
+  `/usr/lib/sysusers.d/sigil.conf`, so dpkg refused the second one;
+  `sigil-sender` and `sigil-server` now install the same content as
+  `sigil-sender.conf` / `sigil-server.conf` (also in `tmpfiles.d` for
+  `sigil-sender`). The `.rpm` packages use the same names. CI now installs all
+  packages together (#252).
 
 ## [0.9.1] - 2026-10-10
 

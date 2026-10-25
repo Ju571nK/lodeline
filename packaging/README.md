@@ -16,6 +16,16 @@ the binary, optional systemd unit, and example config to standard FHS paths.
 All systemd units are installed **disabled**. Nothing starts on install — the
 operator decides.
 
+`sigil`, `sigil-sender` and `sigil-server` share the `sigil` user and group, so
+each ships the same sysusers (and, for `sigil` and `sigil-sender`, tmpfiles)
+entries under its own file name: `sigil.conf`, `sigil-sender.conf`,
+`sigil-server.conf` in `/usr/lib/sysusers.d/` and `/usr/lib/tmpfiles.d/`. dpkg
+refuses two packages owning one path, so a shared name would block installing
+them on the same host (#252). The sources under `packaging/sysusers.d/` and
+`packaging/tmpfiles.d/` carry the same names because cargo-deb names its
+generated postinst calls after the source file; keep the copies identical (CI
+compares them).
+
 `sigil-proxy` runs as its own `sigil-proxy` user and group (its own sysusers file),
 ships no live `/etc/sigil/proxy.yaml` (only the `.example`), its
 post-install does `daemon-reload` only (no enable, no start, no SELinux module),
