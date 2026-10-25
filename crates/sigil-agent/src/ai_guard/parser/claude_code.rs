@@ -30,6 +30,9 @@ impl AiGuardParser for ClaudeCodeParser {
             home_dir.join(".claude").join("scheduled-tasks"),
             // #199 — the other unattended-prompt file, same drift reason.
             home_dir.join(".claude").join("loop.md"),
+            // #199 — skill and subagent frontmatter can declare hooks.
+            home_dir.join(".claude").join("skills"),
+            home_dir.join(".claude").join("agents"),
         ];
         paths.extend(super::policy_controls::claude_paths(
             &super::policy_controls::claude_policy_dir(),
@@ -84,6 +87,7 @@ impl AiGuardParser for ClaudeCodeParser {
             // #199 — a `loop.md` is the same kind of evidence: an unattended
             // prompt exists, so the tool is in use even with no settings file.
             && !claude.join("loop.md").is_file()
+            && super::claude_components::component_files(&claude).is_empty()
         {
             return Ok(Vec::new());
         }
@@ -97,6 +101,7 @@ impl AiGuardParser for ClaudeCodeParser {
         let hooks_dir = claude.join("hooks");
         let mut out = Vec::new();
         emit_hook_reasons(&merged, &hooks_dir, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&claude, &mut out);
         emit_permission_reasons(&merged, &mut out);
         // #191 signal 1 — `permissions.defaultMode` auto-approval posture.
         emit_default_mode_reason(&merged, &mut out);
@@ -761,6 +766,8 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             // #199 — a committed loop prompt drives unattended repeat runs for
             // anyone who clones the repo.
             cd.join("loop.md"),
+            cd.join("skills"),
+            cd.join("agents"),
         ]
     }
 
@@ -810,6 +817,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             && !self.repo_root.join("CLAUDE.md").is_file()
             && !self.repo_root.join("AGENTS.md").is_file()
             && !cd.join("loop.md").is_file()
+            && super::claude_components::component_files(&cd).is_empty()
         {
             return Ok(Vec::new());
         }
@@ -817,6 +825,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         let hooks_dir = cd.join("hooks");
         let mut out = Vec::new();
         emit_hook_reasons(&merged, &hooks_dir, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&cd, &mut out);
         emit_permission_reasons(&merged, &mut out);
         emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
         // #145 — auto-enable posture: emit ONLY when a server-enable key is
@@ -1335,6 +1344,45 @@ mod tests {
             AiGuardReason::DestructiveInInlineCommand { hook_event, .. }
                 if hook_event == "PreToolUse"
         )));
+    }
+
+    #[test]
+    fn skill_frontmatter_hook_is_assessed_without_any_settings_file() {
+        let home = tempdir().unwrap();
+        write_file(
+            home.path(),
+            ".claude/skills/cleanup/SKILL.md",
+            "---\nname: cleanup\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - command: \"rm -rf ~/cache\"\n---\n",
+        );
+        let out = ClaudeCodeParser.assess(home.path()).unwrap();
+        assert!(out.iter().any(|r| matches!(r,
+            AiGuardReason::DestructiveInInlineCommand { hook_event, .. } if hook_event == "PreToolUse")));
+    }
+
+    #[test]
+    fn project_subagent_hook_is_assessed_with_settings_hook_and_one_no_sandbox() {
+        let repo = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo done"}]}]}}"#,
+        );
+        write_file(
+            repo.path(),
+            ".claude/agents/ops/deployer.md",
+            "---\nname: deployer\nhooks:\n  PreToolUse:\n    - matcher: \"*\"\n      hooks:\n        - type: command\n          command: echo hi\n---\n",
+        );
+        let p = ClaudeCodeProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        };
+        let out = p.assess(repo.path()).unwrap();
+        let sandbox = out
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))
+            .count();
+        assert_eq!(sandbox, 1, "{out:?}");
+        assert!(out.iter().any(|r| matches!(r,
+            AiGuardReason::BroadMatcher { matcher, .. } if matcher == "*")));
     }
 
     #[test]

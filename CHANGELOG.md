@@ -7,6 +7,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code hooks declared in skill (`skills/<name>/SKILL.md`) and subagent
+  (`agents/**/*.md`) frontmatter are now assessed, at user and project scope,
+  with the same reasons as `settings.json` hooks. A repository that ships only
+  `.claude/skills/` or `.claude/agents/` is now discovered (#199).
+
 ### Fixed
 
 - The declared minimum supported Rust version is now 1.88 (was 1.78). The
