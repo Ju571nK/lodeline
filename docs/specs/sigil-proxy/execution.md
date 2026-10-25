@@ -14,7 +14,7 @@
 `b17b2d2`에서 운영자가 EC2 2대(t4g.small, AL2023 aarch64)로 [시험서](aws-smoke-test.md#18-aws-run-h-2026-10-25-utc) §4–§13을 D1로 실행했다.
 시나리오 27/27, ledger 22 completed·중복 0, privacy 0건, offline replay 6, 재시작 fail-closed, spool 32×200/48×503(upstream delta 32),
 disable/enable, 관리 감사 seq 0–4 모두 통과. spool 경계 호출 1건이 `started` + `local_record_failed` gap으로 남았고
-`central_outage` gap도 open으로 남았다(미조사). Vendor client(R), D2, manager UI, systemd는 미측정.
+`central_outage` gap은 계약대로 `state: open`이며(close는 `sequence_gap`만), `started_at`/`ended_at`이 §12 서버 중지와 일치해 정상 기록·종료됐다. 서버 중지 3회 중 outage gap은 1건뿐인데, 연속 ingest 실패 3회(`OUTAGE_THRESHOLD`) 기준에 짧은 §11 중지가 못 미친 것으로 추정한다(재시도 횟수 미측정). Vendor client(R), D2, manager UI, systemd는 미측정.
 
 ## 2026-10-24 T-13d / T-12b2 착수
 
