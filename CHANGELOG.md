@@ -15,8 +15,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   `.claude/skills/` or `.claude/agents/` is now discovered (#199).
 - A hook command of the form `bash <script>` (or `sh`, `zsh`, `dash`) now has
   its script scanned, as a command starting with a script path already did.
-  The script scan ignores full-line comments, so a guard script that lists
-  the patterns it blocks in comments is no longer reported as destructive.
+  The command text is still checked inline, so a destructive command after
+  the script is reported.
 
 ### Fixed
 

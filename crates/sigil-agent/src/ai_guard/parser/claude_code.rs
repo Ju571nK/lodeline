@@ -84,10 +84,9 @@ impl AiGuardParser for ClaudeCodeParser {
         let base_settings = base.clone().unwrap_or(Value::Object(Default::default()));
         let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
 
-        let hooks_dir = claude.join("hooks");
         let mut out = Vec::new();
-        emit_hook_reasons(&merged, &hooks_dir, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&components, &hooks_dir, &mut out);
+        emit_hook_reasons(&merged, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, &mut out);
         emit_permission_reasons(&merged, &mut out);
         // #191 signal 1 — `permissions.defaultMode` auto-approval posture.
         emit_default_mode_reason(&merged, &mut out);
@@ -168,7 +167,6 @@ pub(crate) fn merge_overlay(mut base: Value, overlay: Option<Value>) -> Value {
 
 pub(crate) fn emit_hook_reasons(
     settings: &Value,
-    hooks_dir: &Path,
     out: &mut Vec<AiGuardReason>,
 ) -> Result<(), AssessError> {
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
@@ -217,7 +215,7 @@ pub(crate) fn emit_hook_reasons(
                     // command hook.
                     Some("command") | None => {
                         if let Some(cmd) = h.get("command").and_then(Value::as_str) {
-                            classify_command(cmd, event_name, hooks_dir, out)?;
+                            classify_command(cmd, event_name, out)?;
                         }
                     }
                     // `prompt` and `agent` hand the payload to the model the
@@ -320,7 +318,6 @@ fn url_host_for_evidence(url: &str) -> String {
 fn classify_command(
     cmd: &str,
     event_name: &str,
-    hooks_dir: &Path,
     out: &mut Vec<AiGuardReason>,
 ) -> Result<(), AssessError> {
     // First token whitespace-separated. Treat as path candidate iff it looks
@@ -330,24 +327,17 @@ fn classify_command(
     // `./foo | bash` stay classified as inline. Issue #15 — Windows hook
     // commands like `C:\Users\alice\.claude\hooks\pre.sh` were previously
     // misclassified as inline because the original check only looked for `/`.
+    // A script run by path is scanned through the recursive walker, which
+    // also follows `source`d files.
     if let Some(script) = hook_script_path(cmd) {
-        let candidate = std::path::PathBuf::from(script);
-        if path_is_inside(&candidate, hooks_dir) {
-            // 3b.3.1 — convention-dir script delegates to recursive walker
-            // so sourced files inside the convention dir also get scanned.
-            out.extend(crate::ai_guard::ext_script::scan_hook_script(
-                &candidate, event_name,
-            ));
-        } else {
-            // 3b.3.1 — external path also uses recursive walker.
-            out.extend(crate::ai_guard::ext_script::scan_hook_script(
-                &candidate, event_name,
-            ));
-        }
-        return Ok(());
+        out.extend(crate::ai_guard::ext_script::scan_hook_script(
+            std::path::Path::new(script),
+            event_name,
+        ));
     }
 
-    // Inline command — scan directly.
+    // The command text itself is checked either way: `./ok.sh && rm -rf ~`
+    // runs both.
     if let Some(pat) = rubric::first_destructive_pattern(cmd) {
         out.push(AiGuardReason::DestructiveInInlineCommand {
             pattern: pat.to_string(),
@@ -423,9 +413,11 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
         return Some(first);
     }
     if is_sh_interpreter(first) {
+        // An operand still holding `$VAR` names no readable file here.
         return tokens
             .next()
-            .filter(|t| !t.starts_with('-') && looks_pathish(t));
+            .map(|t| t.trim_matches(['"', '\'']))
+            .filter(|t| !t.starts_with('-') && !t.contains('$') && looks_pathish(t));
     }
     None
 }
@@ -830,10 +822,9 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             return Ok(Vec::new());
         }
         let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
-        let hooks_dir = cd.join("hooks");
         let mut out = Vec::new();
-        emit_hook_reasons(&merged, &hooks_dir, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&components, &hooks_dir, &mut out);
+        emit_hook_reasons(&merged, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, &mut out);
         emit_permission_reasons(&merged, &mut out);
         emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
         // #145 — auto-enable posture: emit ONLY when a server-enable key is
@@ -1354,6 +1345,42 @@ mod tests {
         )));
     }
 
+    fn hook_reasons_for(cmd: &str) -> Vec<AiGuardReason> {
+        let settings = serde_json::json!({
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": cmd}]}]}
+        });
+        let mut out = Vec::new();
+        emit_hook_reasons(&settings, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn command_after_a_script_is_still_checked_inline() {
+        for cmd in ["bash /dev/null; rm -rf ~", "./ok.sh && rm -rf ~/x"] {
+            assert!(
+                hook_reasons_for(cmd)
+                    .iter()
+                    .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn interpreter_operand_is_scanned_unless_it_holds_a_variable() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("check.sh");
+        std::fs::write(&script, "#!/bin/sh\nrm -rf ~/work\n").unwrap();
+        let out = hook_reasons_for(&format!("bash '{}'", script.display()));
+        assert!(out
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })));
+        let out = hook_reasons_for("bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh\"");
+        assert!(!out
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })));
+    }
+
     #[test]
     fn skill_frontmatter_hook_is_assessed_without_any_settings_file() {
         let home = tempdir().unwrap();
@@ -1434,7 +1461,6 @@ mod tests {
         ext.flush().unwrap();
         let ext_path = ext.path().to_path_buf();
 
-        let hooks_dir = std::path::PathBuf::from("/nonexistent/.claude/hooks");
         let settings = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
@@ -1446,7 +1472,7 @@ mod tests {
             }
         });
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &hooks_dir, &mut out).unwrap();
+        emit_hook_reasons(&settings, &mut out).unwrap();
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
@@ -1462,7 +1488,6 @@ mod tests {
         ext.flush().unwrap();
         let ext_path = ext.path().to_path_buf();
 
-        let hooks_dir = std::path::PathBuf::from("/nonexistent/.claude/hooks");
         let settings = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
@@ -1474,7 +1499,7 @@ mod tests {
             }
         });
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &hooks_dir, &mut out).unwrap();
+        emit_hook_reasons(&settings, &mut out).unwrap();
         assert!(
             !out.iter().any(|r| matches!(
                 r,
@@ -1487,7 +1512,6 @@ mod tests {
 
     #[test]
     fn external_script_missing_emits_unscanned_fallback() {
-        let hooks_dir = std::path::PathBuf::from("/nonexistent/.claude/hooks");
         let settings = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
@@ -1499,7 +1523,7 @@ mod tests {
             }
         });
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &hooks_dir, &mut out).unwrap();
+        emit_hook_reasons(&settings, &mut out).unwrap();
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })),
@@ -1674,6 +1698,7 @@ mod tests {
 
     #[test]
     fn collect_external_script_paths_helper_returns_path() {
+        let hooks_dir = std::path::PathBuf::from("/nonexistent/.claude/hooks");
         let settings = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
@@ -1684,7 +1709,6 @@ mod tests {
                 }]
             }
         });
-        let hooks_dir = std::path::PathBuf::from("/nonexistent/.claude/hooks");
         let paths = collect_external_script_paths_from_settings(&settings, &hooks_dir);
         assert_eq!(
             paths,

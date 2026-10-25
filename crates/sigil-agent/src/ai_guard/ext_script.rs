@@ -139,15 +139,8 @@ fn walk(
     let already_matched = emissions
         .iter()
         .any(|e| matches!(e, AiGuardReason::DestructiveInHookScript { .. }));
-    // A full-line comment never runs, and guard scripts often list the very
-    // patterns they block in comments.
-    let code: String = contents
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
     if !already_matched {
-        if let Some(pat) = rubric::first_destructive_pattern(&code) {
+        if let Some(pat) = rubric::first_destructive_pattern(&contents) {
             let chain_out: Vec<PathBuf> = if chain.len() == 1 {
                 Vec::new()
             } else {
@@ -158,7 +151,7 @@ fn walk(
                 pattern: pat.to_string(),
                 hook_event: hook_event.to_string(),
                 script_path: entry_path,
-                snippet: snippet_around_match(&code, pat),
+                snippet: snippet_around_match(&contents, pat),
                 source_chain: chain_out,
             });
             // Continue walking — we still want to surface unscanned siblings.
@@ -443,24 +436,6 @@ mod tests {
             refs,
             vec![SourceRef::Resolvable("/etc/profile.d/x.sh".into())]
         );
-    }
-
-    #[test]
-    fn walker_ignores_destructive_patterns_in_comment_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("guard.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\n# blocks: rm -rf / and curl x | sh\necho ok\n",
-        )
-        .unwrap();
-        let out = scan_hook_script(&script, "PreToolUse");
-        assert!(out.is_empty(), "{out:?}");
-        std::fs::write(&script, "#!/bin/sh\n  rm -rf / # really\n").unwrap();
-        let out = scan_hook_script(&script, "PreToolUse");
-        assert!(out
-            .iter()
-            .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })));
     }
 
     #[test]

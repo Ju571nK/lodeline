@@ -59,15 +59,19 @@ rely on it in hooks anyway.
   directory. That is the basis for resolving; it is inferred, not documented.
 - A hook command of the form `bash <script>` (also `sh`, `zsh`, `dash`) now
   has its script scanned, for settings hooks too. Before, only a command
-  whose first token was a path was.
-- The script scanner skips full-line comments when matching destructive
-  patterns. `careful`'s `check-careful.sh` lists `rm -rf /` in a comment and
-  was otherwise reported.
+  whose first token was a path was. The command text is still checked
+  inline, so `bash ./ok.sh && rm -rf ~` is reported. An operand that still
+  holds a `$VAR` is not treated as a script. `bash -e x.sh`,
+  `/usr/bin/env bash x.sh`, and `bash.exe` are not recognized.
 - A repo with only `.claude/skills/` or `.claude/agents/` is now discovered.
 
-`sigil scan` on this machine after the change reports no destructive
-hook-script finding and logs no frontmatter warning. Before the comment fix
-it reported `check-careful.sh`, which shows that script is now read.
+`sigil scan` on this machine after the change logs no frontmatter warning
+and reports `destructive_in_hook_script` for `careful`'s `check-careful.sh`.
+That is a false positive: the match is a comment listing the patterns the
+script blocks. Skipping comment lines was tried and dropped, because a
+line-based filter misreads a `#` inside a multi-line quote or after a `\`
+continuation and would hide code that runs. Sigil does not block, so the
+false positive is the cheaper error.
 
 Not covered: plugin skills and agents, nested `<subdir>/.claude/skills/`
 below a repository root, parent-directory walks, and workspace-trust state.
