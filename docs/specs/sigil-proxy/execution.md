@@ -9,6 +9,13 @@
 - P1 착수. 사용자 창구: 이 대화의 orchestrator. 하위 작업은 구체적인 파일 소유권과 인수 조건을 지정하고, 실행 provider/model 기본값을 유지한다.
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 
+## 2026-10-25 AWS 2노드 실기 (H)
+
+`b17b2d2`에서 운영자가 EC2 2대(t4g.small, AL2023 aarch64)로 [시험서](aws-smoke-test.md#18-aws-run-h-2026-10-25-utc) §4–§13을 D1로 실행했다.
+시나리오 27/27, ledger 22 completed·중복 0, privacy 0건, offline replay 6, 재시작 fail-closed, spool 32×200/48×503(upstream delta 32),
+disable/enable, 관리 감사 seq 0–4 모두 통과. spool 경계 호출 1건이 `started` + `local_record_failed` gap으로 남았고
+`central_outage` gap도 open으로 남았다(미조사). Vendor client(R), D2, manager UI, systemd는 미측정.
+
 ## 2026-10-24 T-13d / T-12b2 착수
 
 기준: main `e5612f8` (#313 merged), 작업 브랜치 `feat/proxy-invocations-sessions`.
