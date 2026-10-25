@@ -15,8 +15,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   `.claude/skills/` or `.claude/agents/` is now discovered (#199).
 - A hook command of the form `bash <script>` (or `sh`, `zsh`, `dash`) now has
   its script scanned, as a command starting with a script path already did.
-  The command text is still checked inline, so a destructive command after
-  the script is reported.
+  A command chained after a script (`./ok.sh && rm -rf ~`) is now checked
+  inline as well; before, a command starting with a script path was not
+  checked inline at all. The script's own arguments are not checked.
 
 ### Fixed
 

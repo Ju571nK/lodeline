@@ -59,8 +59,9 @@ rely on it in hooks anyway.
   directory. That is the basis for resolving; it is inferred, not documented.
 - A hook command of the form `bash <script>` (also `sh`, `zsh`, `dash`) now
   has its script scanned, for settings hooks too. Before, only a command
-  whose first token was a path was. The command text is still checked
-  inline, so `bash ./ok.sh && rm -rf ~` is reported. An operand that still
+  whose first token was a path was. A command chained after the script is
+  checked inline, so `bash ./ok.sh && rm -rf ~` is reported; the script's own
+  arguments are not, since guards often receive the patterns they block. An operand that still
   holds a `$VAR` is not treated as a script. `bash -e x.sh`,
   `/usr/bin/env bash x.sh`, and `bash.exe` are not recognized.
 - A repo with only `.claude/skills/` or `.claude/agents/` is now discovered.

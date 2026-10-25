@@ -329,20 +329,24 @@ fn classify_command(
     // misclassified as inline because the original check only looked for `/`.
     // A script run by path is scanned through the recursive walker, which
     // also follows `source`d files.
-    if let Some(script) = hook_script_path(cmd) {
-        out.extend(crate::ai_guard::ext_script::scan_hook_script(
-            std::path::Path::new(script),
-            event_name,
-        ));
-    }
-
-    // The command text itself is checked either way: `./ok.sh && rm -rf ~`
-    // runs both.
-    if let Some(pat) = rubric::first_destructive_pattern(cmd) {
+    let inline = match hook_script_path(cmd) {
+        Some(script) => {
+            out.extend(crate::ai_guard::ext_script::scan_hook_script(
+                std::path::Path::new(script),
+                event_name,
+            ));
+            // The script's own arguments are data (a guard often receives the
+            // patterns it blocks), but a command chained after it runs too:
+            // `./ok.sh && rm -rf ~`.
+            chained_after(cmd, script)
+        }
+        None => cmd,
+    };
+    if let Some(pat) = rubric::first_destructive_pattern(inline) {
         out.push(AiGuardReason::DestructiveInInlineCommand {
             pattern: pat.to_string(),
             hook_event: event_name.to_string(),
-            snippet: truncate_for_snippet(cmd),
+            snippet: truncate_for_snippet(inline),
         });
     }
     Ok(())
@@ -422,8 +426,16 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
     None
 }
 
+/// The part of `cmd` from the first shell separator after `script`, which is
+/// a subslice of `cmd`; empty when nothing is chained.
+fn chained_after<'a>(cmd: &'a str, script: &str) -> &'a str {
+    let script_end = script.as_ptr() as usize - cmd.as_ptr() as usize + script.len();
+    let rest = &cmd[script_end..];
+    rest.find([';', '&', '|', '\n']).map_or("", |i| &rest[i..])
+}
+
 fn looks_pathish(token: &str) -> bool {
-    let has_shell_meta = token.contains('|') || token.contains('&');
+    let has_shell_meta = token.contains(['|', '&', ';']);
     !has_shell_meta
         && (std::path::Path::new(token).is_absolute()
             || token.starts_with('~')
@@ -1359,6 +1371,22 @@ mod tests {
         for cmd in ["bash /dev/null; rm -rf ~", "./ok.sh && rm -rf ~/x"] {
             assert!(
                 hook_reasons_for(cmd)
+                    .iter()
+                    .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_arguments_and_names_are_not_checked_inline() {
+        for cmd in [
+            "~/.claude/hooks/block-reboot.sh",
+            "/opt/hooks/guard.sh --deny 'rm -rf /'",
+            "bash /opt/hooks/guard.sh --deny 'rm -rf /'",
+        ] {
+            assert!(
+                !hook_reasons_for(cmd)
                     .iter()
                     .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
                 "{cmd}"
