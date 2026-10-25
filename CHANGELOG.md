@@ -7,6 +7,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code hooks declared in skill (`skills/<name>/SKILL.md`) and subagent
+  (`agents/**/*.md`) frontmatter are now assessed, at user and project scope,
+  with the same reasons as `settings.json` hooks. A repository that ships only
+  `.claude/skills/` or `.claude/agents/` is now discovered (#199).
+- A hook command of the form `bash <script>` (or `sh`, `zsh`, `dash`) now has
+  its script scanned, as a command starting with a script path already did.
+  A command chained after a script (`./ok.sh && rm -rf ~`) is now checked
+  inline as well; before, a command starting with a script path was not
+  checked inline at all. The script's own arguments are not checked.
+
 ### Fixed
 
 - The declared minimum supported Rust version is now 1.88 (was 1.78). The

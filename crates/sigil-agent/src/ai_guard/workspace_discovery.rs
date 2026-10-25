@@ -76,6 +76,9 @@ pub fn discover_claude_repos(roots: &[String]) -> Vec<PathBuf> {
     set.extend(discover_per_repo(roots, ".mcp.json"));
     set.extend(discover_per_repo(roots, "CLAUDE.md"));
     set.extend(discover_per_repo(roots, "AGENTS.md"));
+    // #199 — a repo that ships only skills or subagents can still carry hooks.
+    set.extend(discover_per_repo_dir(roots, ".claude/skills"));
+    set.extend(discover_per_repo_dir(roots, ".claude/agents"));
     set.into_iter().collect()
 }
 
@@ -97,7 +100,13 @@ pub fn discover_cursor_repos(roots: &[String]) -> Vec<PathBuf> {
         .into_iter()
         .collect();
     set.extend(discover_per_repo(roots, ".cursorrules"));
-    // `.cursor/rules` is a DIRECTORY marker — discover_per_repo only matches files.
+    set.extend(discover_per_repo_dir(roots, ".cursor/rules"));
+    set.into_iter().collect()
+}
+
+/// Like [`discover_per_repo`], but the marker is a directory.
+fn discover_per_repo_dir(roots: &[String], marker_subpath: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
     for raw in roots {
         let Some(root) = expand_and_canonicalize(raw) else {
             continue;
@@ -107,14 +116,14 @@ pub fn discover_cursor_repos(roots: &[String]) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && path.join(".cursor").join("rules").is_dir() {
+            if path.is_dir() && path.join(marker_subpath).is_dir() {
                 if let Ok(c) = dunce::canonicalize(&path) {
-                    set.insert(c);
+                    out.push(c);
                 }
             }
         }
     }
-    set.into_iter().collect()
+    out
 }
 
 fn expand_and_canonicalize(raw: &str) -> Option<PathBuf> {
@@ -244,6 +253,25 @@ mod tests {
         let found = discover_claude_repos(&roots);
         let canon = dunce::canonicalize(&repo).unwrap();
         assert!(found.contains(&canon), "got {found:?}");
+    }
+
+    #[test]
+    fn discover_claude_repos_finds_skills_or_subagents_only_repo() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join("only-skills");
+        let agents = root.path().join("only-subagents");
+        std::fs::create_dir_all(skills.join(".claude/skills/x")).unwrap();
+        std::fs::create_dir_all(agents.join(".claude/agents")).unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        let found = discover_claude_repos(&roots);
+        assert!(
+            found.contains(&dunce::canonicalize(&skills).unwrap()),
+            "got {found:?}"
+        );
+        assert!(
+            found.contains(&dunce::canonicalize(&agents).unwrap()),
+            "got {found:?}"
+        );
     }
 
     #[test]
