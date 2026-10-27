@@ -7,7 +7,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
 ### Added
+
+- `sigil-server` has an optional `proxy:` config section and a
+  `sigil-server proxy` operator command for the Sigil Proxy that is still in
+  development. With the section set, the server registers proxies, issues
+  their config, and accepts their status, events, metadata and inventory
+  reports. It also serves `/v1/proxies`, `/v1/proxy-invocations` and the
+  management audit log for reading. Without the section the server behaves as
+  before. The `sigil-proxy` binary and packages are not part of this release.
 
 - Claude Code hooks declared in skill (`skills/<name>/SKILL.md`) and subagent
   (`agents/**/*.md`) frontmatter are now assessed, at user and project scope,
