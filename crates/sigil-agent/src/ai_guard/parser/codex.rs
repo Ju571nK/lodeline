@@ -58,11 +58,16 @@ impl AiGuardParser for CodexParser {
     }
 
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
+        let codex_dir = home_dir.join(".codex");
+        let system_dir = super::policy_controls::codex_system_dir();
         vec![
-            home_dir.join(".codex").join("config.toml"),
+            codex_dir.join("config.toml"),
+            codex_dir.join(HOOKS_JSON),
             // #200 — a standing command-approval rule appearing here is an
             // OFF→ON drift, so the daemon must re-assess when the dir changes.
-            home_dir.join(".codex").join("rules"),
+            codex_dir.join("rules"),
+            system_dir.join("config.toml"),
+            system_dir.join(HOOKS_JSON),
             super::policy_controls::codex_requirements_path(),
         ]
     }
@@ -77,53 +82,148 @@ impl AiGuardParser for CodexParser {
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        let codex_dir = home_dir.join(".codex");
-        let path = codex_dir.join("config.toml");
-        let text = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            // #200 — a rules file is evidence of use on its own, so the
-            // absent-config short-circuit must still look there first.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let mut out = Vec::new();
-                emit_rules_reasons(&codex_dir, &mut out);
-                return Ok(out);
-            }
-            Err(source) => return Err(AssessError::Io { path, source }),
-        };
-        // A corrupt config.toml is surfaced, not degraded to "no findings"
-        // (`corrupt_toml_returns_parse_error` pins this). Codex will not start
-        // against a config it cannot parse, so the standing approvals in
-        // `rules/` are not in force either, and the actionable signal for the
-        // operator is that the config is broken.
-        let val: Value = toml::from_str(&text).map_err(|e| AssessError::Parse {
-            path: path.clone(),
-            message: e.to_string(),
-        })?;
-
-        let mut out = Vec::new();
-        emit_sandbox_reasons(&val, &mut out);
-        // #200 — whether a human is asked before a tool runs.
-        emit_approval_policy_reasons(&val, &mut out);
-        let hooks_dir = codex_dir.join("hooks");
-        emit_hook_reasons(&val, &hooks_dir, &mut out);
-        emit_mcp_reasons(&val, &mut out);
-        // #200 — standing command approvals, which live outside config.toml.
-        emit_rules_reasons(&codex_dir, &mut out);
-        Ok(out)
+        assess_user_layers(&super::policy_controls::codex_system_dir(), home_dir)
     }
 
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        let codex_dir = home_dir.join(".codex");
-        let config_path = codex_dir.join("config.toml");
-        let Ok(s) = std::fs::read_to_string(&config_path) else {
-            return Vec::new();
-        };
-        let Ok(cfg) = toml::from_str::<Value>(&s) else {
-            return Vec::new();
-        };
-        let hooks_dir = codex_dir.join("hooks");
-        collect_external_script_paths_from_config(&cfg, &hooks_dir)
+        let system_dir = super::policy_controls::codex_system_dir();
+        let mut out = CodexLayer::read_lenient(&system_dir).external_script_paths();
+        out.extend(CodexLayer::read_lenient(&home_dir.join(".codex")).external_script_paths());
+        out
     }
+}
+
+const HOOKS_JSON: &str = "hooks.json";
+
+/// #200 — one Codex config folder (system, user, or a repo's `.codex/`).
+/// Codex loads hooks from both `config.toml` and the folder's `hooks.json`,
+/// and runs the hooks of every layer, so hooks are read per layer while
+/// scalar settings are merged across layers.
+struct CodexLayer {
+    dir: PathBuf,
+    config: Option<Value>,
+    json_hooks: Option<Value>,
+}
+
+impl CodexLayer {
+    /// A corrupt `config.toml` is an error: Codex will not start against it.
+    /// A corrupt `hooks.json` is skipped with a warning, as Codex does.
+    fn read(dir: &Path) -> Result<Self, AssessError> {
+        let path = dir.join("config.toml");
+        let config = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(toml::from_str(&text).map_err(|e| AssessError::Parse {
+                path: path.clone(),
+                message: e.to_string(),
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => return Err(AssessError::Io { path, source }),
+        };
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            config,
+            json_hooks: read_hooks_json(&dir.join(HOOKS_JSON)),
+        })
+    }
+
+    fn read_lenient(dir: &Path) -> Self {
+        Self::read(dir).unwrap_or_else(|_| Self {
+            dir: dir.to_path_buf(),
+            config: None,
+            json_hooks: read_hooks_json(&dir.join(HOOKS_JSON)),
+        })
+    }
+
+    fn hook_sources(&self) -> impl Iterator<Item = &Value> {
+        self.config.iter().chain(self.json_hooks.iter())
+    }
+
+    fn emit_hook_reasons(&self, out: &mut Vec<AiGuardReason>) {
+        let hooks_dir = self.dir.join("hooks");
+        for source in self.hook_sources() {
+            emit_hook_reasons(source, &hooks_dir, out);
+        }
+    }
+
+    fn external_script_paths(&self) -> Vec<PathBuf> {
+        let hooks_dir = self.dir.join("hooks");
+        self.hook_sources()
+            .flat_map(|source| collect_external_script_paths_from_config(source, &hooks_dir))
+            .collect()
+    }
+}
+
+/// `hooks.json` has the same `{ "hooks": { <Event>: [...] } }` shape as the
+/// `[hooks]` table, so it is converted and fed to the same emitter.
+fn read_hooks_json(path: &Path) -> Option<Value> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "codex hooks.json unreadable; skipped");
+            return None;
+        }
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| e.to_string())
+        .and_then(|json| Value::try_from(json).map_err(|e| e.to_string()));
+    match parsed {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "codex hooks.json invalid; skipped");
+            None
+        }
+    }
+}
+
+/// Codex merges config layers with the higher layer winning: tables merge key
+/// by key, any other value is replaced.
+fn merge_layer(base: &mut Value, overlay: &Value) {
+    match (base, overlay) {
+        (Value::Table(base), Value::Table(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(key) {
+                    Some(existing) => merge_layer(existing, value),
+                    None => {
+                        base.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base, overlay) => *base = overlay.clone(),
+    }
+}
+
+/// #200 — the system layer (`/etc/codex`, `%ProgramData%\OpenAI\Codex`) sits
+/// below `~/.codex` and applies to every user on the host.
+fn assess_user_layers(
+    system_dir: &Path,
+    home_dir: &Path,
+) -> Result<Vec<AiGuardReason>, AssessError> {
+    let codex_dir = home_dir.join(".codex");
+    let layers = [CodexLayer::read(system_dir)?, CodexLayer::read(&codex_dir)?];
+    let mut effective: Option<Value> = None;
+    for config in layers.iter().filter_map(|layer| layer.config.as_ref()) {
+        match effective.as_mut() {
+            Some(base) => merge_layer(base, config),
+            None => effective = Some(config.clone()),
+        }
+    }
+
+    let mut out = Vec::new();
+    if let Some(val) = &effective {
+        emit_sandbox_reasons(val, &mut out);
+        // #200 — whether a human is asked before a tool runs.
+        emit_approval_policy_reasons(val, &mut out);
+    }
+    for layer in &layers {
+        layer.emit_hook_reasons(&mut out);
+    }
+    if let Some(val) = &effective {
+        emit_mcp_reasons(val, &mut out);
+    }
+    // #200 — standing command approvals, which live outside config.toml.
+    emit_rules_reasons(&codex_dir, &mut out);
+    Ok(out)
 }
 
 /// Verified schema: `sandbox_mode` is a **top-level flat key** (not `[sandbox]
@@ -664,41 +764,35 @@ impl AiGuardParser for CodexProjectParser {
     fn watched_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
         vec![
             self.repo_root.join(".codex").join("config.toml"),
+            self.repo_root.join(".codex").join(HOOKS_JSON),
             self.repo_root.join("AGENTS.md"),
         ]
     }
 
     fn assess(&self, _home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        let path = self.repo_root.join(".codex").join("config.toml");
+        let layer = CodexLayer::read(&self.repo_root.join(".codex"))?;
         let mut out = Vec::new();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let val: Value = toml::from_str(&text).map_err(|e| AssessError::Parse {
-                    path: path.clone(),
-                    message: e.to_string(),
-                })?;
-                emit_sandbox_reasons(&val, &mut out);
-                let hooks_dir = self.repo_root.join(".codex").join("hooks");
-                emit_hook_reasons(&val, &hooks_dir, &mut out);
-                // #154 Option B — Codex (current main) loads repo-local
-                // `.codex/config.toml` as a project layer and auto-launches its
-                // `[mcp_servers]` once the one-keypress folder-trust dialog is
-                // accepted, with NO per-server approval (source-verified against
-                // openai/codex @ main: project-layer config walk + trust-gated
-                // `effective_config`, MCP connection-manager spawn loop has no
-                // approval check). Same TrustFall class as Cursor/Gemini, so
-                // amplify — but only off the MCP-derived reasons (slice from
-                // mcp_start), never hook/sandbox findings in the same `out`.
-                let mcp_start = out.len();
-                emit_mcp_reasons(&val, &mut out);
-                if super::mcp_scan::has_local_or_risky_mcp(&out[mcp_start..]) {
-                    out.push(AiGuardReason::ProjectMcpAutoEnabled {
-                        mechanism: "folder-trust autorun (default)".to_string(),
-                    });
-                }
+        if let Some(val) = &layer.config {
+            emit_sandbox_reasons(val, &mut out);
+        }
+        layer.emit_hook_reasons(&mut out);
+        if let Some(val) = &layer.config {
+            // #154 Option B — Codex (current main) loads repo-local
+            // `.codex/config.toml` as a project layer and auto-launches its
+            // `[mcp_servers]` once the one-keypress folder-trust dialog is
+            // accepted, with NO per-server approval (source-verified against
+            // openai/codex @ main: project-layer config walk + trust-gated
+            // `effective_config`, MCP connection-manager spawn loop has no
+            // approval check). Same TrustFall class as Cursor/Gemini, so
+            // amplify — but only off the MCP-derived reasons (slice from
+            // mcp_start), never hook/sandbox findings in the same `out`.
+            let mcp_start = out.len();
+            emit_mcp_reasons(val, &mut out);
+            if super::mcp_scan::has_local_or_risky_mcp(&out[mcp_start..]) {
+                out.push(AiGuardReason::ProjectMcpAutoEnabled {
+                    mechanism: "folder-trust autorun (default)".to_string(),
+                });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(AssessError::Io { path, source }),
         }
         // #146 — AGENTS.md is Codex's first-class instruction file.
         super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
@@ -706,16 +800,7 @@ impl AiGuardParser for CodexProjectParser {
     }
 
     fn collect_external_script_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
-        let codex_dir = self.repo_root.join(".codex");
-        let config_path = codex_dir.join("config.toml");
-        let Ok(s) = std::fs::read_to_string(&config_path) else {
-            return Vec::new();
-        };
-        let Ok(cfg) = toml::from_str::<Value>(&s) else {
-            return Vec::new();
-        };
-        let hooks_dir = codex_dir.join("hooks");
-        collect_external_script_paths_from_config(&cfg, &hooks_dir)
+        CodexLayer::read_lenient(&self.repo_root.join(".codex")).external_script_paths()
     }
 }
 
@@ -1602,6 +1687,179 @@ mcp_elicitations = "on-request"
         assert!(
             watched.contains(&dir.path().join(".codex").join("rules")),
             "got {watched:?}"
+        );
+    }
+
+    // ─── #200: hooks.json and the system config layer ─────────────────────
+
+    const DESTRUCTIVE_HOOKS_JSON: &str = r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"rm -rf /","timeout":5}]}]}}"#;
+
+    fn has_destructive_inline(reasons: &[AiGuardReason]) -> bool {
+        reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+    }
+
+    fn system_and_home() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempdir().unwrap();
+        let system = root.path().join("etc-codex");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        (root, system, home)
+    }
+
+    #[test]
+    fn user_hooks_json_is_scanned_without_config_toml() {
+        let dir = tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("hooks.json"), DESTRUCTIVE_HOOKS_JSON).unwrap();
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(has_destructive_inline(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn invalid_hooks_json_is_skipped_not_fatal() {
+        let dir = tempdir().unwrap();
+        write_config(dir.path(), "sandbox_mode = \"danger-full-access\"\n");
+        std::fs::write(dir.path().join(".codex").join("hooks.json"), "{not json").unwrap();
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(
+            reasons.contains(&AiGuardReason::SandboxDisabled),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn hooks_state_table_is_not_read_as_an_event() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[hooks.state.\"/x/.codex/hooks.json:pre_tool_use:0:0\"]\nenabled = true\ntrusted_hash = \"sha256:00\"\n",
+        );
+        assert!(CodexParser.assess(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn system_layer_applies_when_user_config_is_absent() {
+        let (_root, system, home) = system_and_home();
+        std::fs::write(
+            system.join("config.toml"),
+            "sandbox_mode = \"danger-full-access\"\napproval_policy = \"never\"\n",
+        )
+        .unwrap();
+        let reasons = assess_user_layers(&system, &home).unwrap();
+        assert!(
+            reasons.contains(&AiGuardReason::SandboxDisabled),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons.contains(&AiGuardReason::AutoApprovalEnabled {
+                mode: "never".to_string()
+            }),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn user_scalar_overrides_system_scalar() {
+        let (_root, system, home) = system_and_home();
+        std::fs::write(
+            system.join("config.toml"),
+            "sandbox_mode = \"danger-full-access\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".codex").join("config.toml"),
+            "sandbox_mode = \"read-only\"\n",
+        )
+        .unwrap();
+        let reasons = assess_user_layers(&system, &home).unwrap();
+        assert!(
+            !reasons.contains(&AiGuardReason::SandboxDisabled),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_servers_merge_across_layers() {
+        let (_root, system, home) = system_and_home();
+        std::fs::write(
+            system.join("config.toml"),
+            "[mcp_servers.fleet]\nurl = \"https://fleet.example/mcp\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".codex").join("config.toml"),
+            "[mcp_servers.mine]\nurl = \"https://mine.example/mcp\"\n",
+        )
+        .unwrap();
+        let reasons = assess_user_layers(&system, &home).unwrap();
+        let remote: Vec<_> = reasons
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::McpServerRemote { server_name, .. } => Some(server_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(remote, ["fleet", "mine"], "{reasons:?}");
+    }
+
+    #[test]
+    fn system_hooks_run_alongside_user_hooks() {
+        let (_root, system, home) = system_and_home();
+        std::fs::write(system.join("hooks.json"), DESTRUCTIVE_HOOKS_JSON).unwrap();
+        std::fs::write(
+            home.join(".codex").join("config.toml"),
+            "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"echo done\"\n",
+        )
+        .unwrap();
+        let reasons = assess_user_layers(&system, &home).unwrap();
+        assert!(has_destructive_inline(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn corrupt_system_config_is_a_parse_error() {
+        let (_root, system, home) = system_and_home();
+        std::fs::write(system.join("config.toml"), "[unterminated").unwrap();
+        let err = assess_user_layers(&system, &home).unwrap_err();
+        assert!(matches!(err, AssessError::Parse { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn project_hooks_json_is_scanned() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::write(
+            repo.join(".codex").join("hooks.json"),
+            DESTRUCTIVE_HOOKS_JSON,
+        )
+        .unwrap();
+        let p = CodexProjectParser {
+            repo_root: repo.clone(),
+        };
+        assert!(has_destructive_inline(&p.assess(dir.path()).unwrap()));
+        assert!(p
+            .watched_paths(dir.path())
+            .contains(&repo.join(".codex").join("hooks.json")));
+    }
+
+    #[test]
+    fn hooks_json_external_script_is_collected() {
+        let dir = tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(
+            codex.join("hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/guard/stop.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let paths = CodexParser.collect_external_script_paths(dir.path());
+        assert!(
+            paths.contains(&PathBuf::from("/opt/guard/stop.sh")),
+            "{paths:?}"
         );
     }
 }

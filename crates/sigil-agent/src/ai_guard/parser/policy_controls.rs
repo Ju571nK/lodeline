@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 const MAX_POLICY_BYTES: u64 = 1024 * 1024;
 const MAX_DROP_INS: usize = 128;
 
-pub(super) fn codex_requirements_path() -> PathBuf {
+/// Codex's system config folder, which holds `config.toml`, `hooks.json`, and
+/// `requirements.toml`.
+pub(super) fn codex_system_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("ProgramData")
@@ -18,12 +20,15 @@ pub(super) fn codex_requirements_path() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
             .join("OpenAI")
             .join("Codex")
-            .join("requirements.toml")
     }
     #[cfg(not(target_os = "windows"))]
     {
-        PathBuf::from("/etc/codex/requirements.toml")
+        PathBuf::from("/etc/codex")
     }
+}
+
+pub(super) fn codex_requirements_path() -> PathBuf {
+    codex_system_dir().join("requirements.toml")
 }
 
 pub(super) fn codex_controls(path: &Path) -> Result<Vec<AiGuardControl>, AssessError> {
