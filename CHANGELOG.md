@@ -18,6 +18,15 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   A command chained after a script (`./ok.sh && rm -rf ~`) is now checked
   inline as well; before, a command starting with a script path was not
   checked inline at all. The script's own arguments are not checked.
+- Codex hooks in `hooks.json` are now assessed next to the `[hooks]` table of
+  `config.toml`, in `~/.codex/`, in a repository's `.codex/`, and in the
+  system config folder. A repository that ships only `.codex/hooks.json` is
+  now discovered (#200).
+- The Codex system config layer (`/etc/codex/config.toml`, or
+  `%ProgramData%\OpenAI\Codex\config.toml` on Windows) is now read under the
+  user config, as Codex layers them: `~/.codex/config.toml` overrides its
+  scalar settings, `mcp_servers` tables merge, and the hooks of both layers
+  are assessed (#200).
 
 ### Fixed
 

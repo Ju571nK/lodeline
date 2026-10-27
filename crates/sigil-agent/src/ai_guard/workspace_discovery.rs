@@ -82,13 +82,15 @@ pub fn discover_claude_repos(roots: &[String]) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
-/// #146 — Codex repos by EITHER `.codex/config.toml` OR a committed `AGENTS.md`
-/// (Codex's first-class instruction file). Union, deduped by canonical path.
+/// #146 — Codex repos by `.codex/config.toml`, `.codex/hooks.json` (#200), or
+/// a committed `AGENTS.md` (Codex's first-class instruction file). Union,
+/// deduped by canonical path.
 pub fn discover_codex_repos(roots: &[String]) -> Vec<PathBuf> {
     let mut set: std::collections::BTreeSet<PathBuf> =
         discover_per_repo(roots, ".codex/config.toml")
             .into_iter()
             .collect();
+    set.extend(discover_per_repo(roots, ".codex/hooks.json"));
     set.extend(discover_per_repo(roots, "AGENTS.md"));
     set.into_iter().collect()
 }
@@ -283,6 +285,16 @@ mod tests {
         let roots = vec![root.path().to_string_lossy().to_string()];
         assert!(discover_claude_repos(&roots).contains(&dunce::canonicalize(&repo).unwrap()));
     }
+    #[test]
+    fn discover_codex_repos_finds_hooks_json_only() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("only-hooks");
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::write(repo.join(".codex/hooks.json"), "{}").unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        assert!(discover_codex_repos(&roots).contains(&dunce::canonicalize(&repo).unwrap()));
+    }
+
     #[test]
     fn discover_codex_repos_finds_agents_md_only() {
         let root = tempdir().unwrap();
