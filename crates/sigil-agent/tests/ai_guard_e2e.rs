@@ -458,6 +458,16 @@ command = "rm -rf /tmp/sigil-3b6.2-cdx-b"
 "#,
     )
     .unwrap();
+    // #200 — Codex runs a repo hook only once the user config trusts it.
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(
+        home.join(".codex").join("config.toml"),
+        format!(
+            "[hooks.state.'{}:pre_tool_use:0:0']\ntrusted_hash = \"sha256:00\"\n",
+            repo_b.join(".codex").join("config.toml").display()
+        ),
+    )
+    .unwrap();
 
     let workspace_str = workspace.display().to_string();
     let policy_yaml = format!(

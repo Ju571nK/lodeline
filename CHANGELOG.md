@@ -7,6 +7,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+### Changed
+
+- Codex hooks that Codex will not run are no longer assessed. A hook outside
+  the system layer runs only when `~/.codex/config.toml` records a
+  `trusted_hash` for it under `[hooks.state]` and does not set
+  `enabled = false`. Hooks with no trust entry, or turned off, used to be
+  reported as if they ran. A hook whose trusted hash is out of date is still
+  reported. Hooks run with `--dangerously-bypass-hook-trust` are not seen
+  (#200).
+
 ## [0.10.0] - 2026-10-28
 
 ### Added
