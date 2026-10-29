@@ -36,7 +36,7 @@ not configured: continue-dev, gemini      ·      run `sigil scan --json` for ev
 
 Runs on your machine · no account · nothing leaves the box · macOS / Linux / Windows · Rust · Apache-2.0
 
-[**Try the 60-second tour →**](https://sigil-landing-one.vercel.app/)
+[**Try the 60-second tour →**](https://sigilworks.net/)
 
 ---
 
@@ -131,4 +131,4 @@ no SLA. The Linux runtime is a working foundation with rough edges (watch limits
 coverage signaling) still on the [roadmap](ROADMAP.md). Use it to *see* your
 exposure today; don't treat it as a managed enterprise control yet.
 
-Apache-2.0 · issues and discussions welcome · [landing](https://sigil-landing-one.vercel.app/)
+Apache-2.0 · issues and discussions welcome · [landing](https://sigilworks.net/)
