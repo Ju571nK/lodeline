@@ -15,6 +15,12 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   (`bash -euo pipefail ./check.sh`). These commands used to be checked only
   as inline text, so the script itself was not read (#199).
 
+- Codex hook commands are now read the same way as Claude Code ones. A script
+  run through an interpreter (`bash ./check.sh`) is scanned, and a command
+  chained after a script (`./ok.sh && rm -rf ~`) is checked. Codex used to
+  read a script only when the command started with its path, and then
+  ignored the rest of the line.
+
 ### Changed
 
 - Codex hooks that Codex will not run are no longer assessed. A hook outside

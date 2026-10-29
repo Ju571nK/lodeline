@@ -216,7 +216,7 @@ pub(crate) fn emit_hook_reasons(
                     // command hook.
                     Some("command") | None => {
                         if let Some(cmd) = h.get("command").and_then(Value::as_str) {
-                            classify_command(cmd, event_name, out)?;
+                            classify_command(cmd, event_name, out);
                         }
                     }
                     // `prompt` and `agent` hand the payload to the model the
@@ -315,12 +315,8 @@ fn url_host_for_evidence(url: &str) -> String {
 }
 
 /// Decide whether `cmd` is inline shell, a convention-dir script (we read it),
-/// or an external script (we mark unscanned).
-fn classify_command(
-    cmd: &str,
-    event_name: &str,
-    out: &mut Vec<AiGuardReason>,
-) -> Result<(), AssessError> {
+/// or an external script (we mark unscanned). Codex hooks share it.
+pub(crate) fn classify_command(cmd: &str, event_name: &str, out: &mut Vec<AiGuardReason>) {
     // First token whitespace-separated. Treat as path candidate iff it looks
     // path-like cross-platform (Unix absolute / tilde / any separator, OR a
     // Windows absolute path like `C:\...` which `Path::is_absolute()` catches,
@@ -350,7 +346,6 @@ fn classify_command(
             snippet: truncate_for_snippet(inline),
         });
     }
-    Ok(())
 }
 
 fn path_is_inside(candidate: &Path, root: &Path) -> bool {
@@ -395,7 +390,7 @@ pub(crate) fn collect_external_script_paths_from_settings(
 /// Returns Some(path) if `cmd`'s first token is a path that lies OUTSIDE
 /// `hooks_dir` (i.e., would be classified as external by `classify_command`).
 /// Shares `hook_script_path` with `classify_command`.
-fn external_path_from_command(
+pub(crate) fn external_path_from_command(
     cmd: &str,
     hooks_dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
