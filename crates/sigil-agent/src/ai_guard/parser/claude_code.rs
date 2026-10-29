@@ -2,6 +2,7 @@
 //! `settings.local.json` overlay if present), enumerates hooks + permissions
 //! + mcp servers, and maps findings to `AiGuardReason`.
 
+use crate::ai_guard::command_scan::launcher_basename;
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rubric;
 use serde_json::Value;
@@ -408,33 +409,67 @@ fn external_path_from_command(
 
 /// The script a hook command runs: its first token when that looks like a
 /// path, or the operand of a leading `sh`-family interpreter
-/// (`bash ./check.sh`). Only `sh`-family scripts are worth reading, because
-/// the scanner matches shell patterns.
+/// (`bash ./check.sh`, `bash -eu ./check.sh`). Leading `NAME=value`
+/// assignments and an `env` launcher without options are skipped
+/// (`/usr/bin/env bash ./check.sh`). Only `sh`-family scripts are worth
+/// reading, because the scanner matches shell patterns.
 fn hook_script_path(cmd: &str) -> Option<&str> {
     let mut tokens = cmd.split_whitespace();
-    let first = tokens.next()?;
-    if looks_pathish(first) && !is_sh_interpreter(first) {
-        return Some(first);
+    let mut first = tokens.next()?;
+    while is_assignment(first) || launcher_basename(first) == "env" {
+        first = tokens.next()?;
+        if first.starts_with('-') {
+            return None;
+        }
     }
-    if is_sh_interpreter(first) {
+    if !is_sh_interpreter(first) {
+        return looks_pathish(first).then_some(first);
+    }
+    let mut takes_arg = false;
+    for token in tokens {
+        if std::mem::take(&mut takes_arg) {
+            continue;
+        }
+        let token = token.trim_matches(['"', '\'']);
+        if let Some(long) = token.strip_prefix("--") {
+            takes_arg = matches!(long, "rcfile" | "init-file");
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix(['-', '+']) {
+            // `-c` runs an inline body; `-s` and a lone `-` read stdin.
+            if flags.is_empty() || flags.contains(['c', 's']) {
+                return None;
+            }
+            takes_arg = flags.ends_with(['o', 'O']);
+            continue;
+        }
         // An operand still holding `$VAR` names no readable file here.
-        return tokens
-            .next()
-            .map(|t| t.trim_matches(['"', '\'']))
-            .filter(|t| !t.starts_with('-') && !t.contains('$') && looks_pathish(t));
+        return (!token.contains('$') && looks_pathish(token)).then_some(token);
     }
     None
 }
 
+/// `NAME=value`, a shell assignment prefix.
+fn is_assignment(token: &str) -> bool {
+    token.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 /// The part of `cmd` that runs besides `script` (a subslice of `cmd`): from
-/// the first shell separator after it, or all of `cmd` when an argument holds
-/// a command substitution, which runs before the script does.
+/// the first shell separator after it, or all of `cmd` when the words around
+/// the script hold a command substitution, which runs before the script does.
 fn chained_after<'a>(cmd: &'a str, script: &str) -> &'a str {
-    let script_end = script.as_ptr() as usize - cmd.as_ptr() as usize + script.len();
-    let rest = &cmd[script_end..];
+    let script_start = script.as_ptr() as usize - cmd.as_ptr() as usize;
+    let prefix = &cmd[..script_start];
+    let rest = &cmd[script_start + script.len()..];
     let args_end = rest.find([';', '&', '|', '\n']).unwrap_or(rest.len());
     let args = &rest[..args_end];
-    if ["$(", "`", "<(", ">("].iter().any(|s| args.contains(s)) {
+    if ["$(", "`", "<(", ">("]
+        .iter()
+        .any(|s| prefix.contains(s) || args.contains(s))
+    {
         return cmd;
     }
     &rest[args_end..]
@@ -450,8 +485,10 @@ fn looks_pathish(token: &str) -> bool {
 }
 
 fn is_sh_interpreter(token: &str) -> bool {
-    let name = token.rsplit(['/', '\\']).next().unwrap_or(token);
-    matches!(name, "sh" | "bash" | "zsh" | "dash")
+    matches!(
+        launcher_basename(token).as_str(),
+        "sh" | "bash" | "zsh" | "dash"
+    )
 }
 
 /// Truncate command for inclusion in evidence (max 80 chars, sanitize NULs).
@@ -1414,6 +1451,63 @@ mod tests {
                 "{cmd}: {out:?}"
             );
         }
+    }
+
+    #[test]
+    fn script_operand_is_found_past_env_assignments_and_flags() {
+        for (cmd, script) in [
+            ("/usr/bin/env bash ./x.sh", Some("./x.sh")),
+            ("env FOO=1 sh ./x.sh arg", Some("./x.sh")),
+            ("FOO=1 ./x.sh", Some("./x.sh")),
+            ("env ./x.sh", Some("./x.sh")),
+            ("bash -e ./x.sh", Some("./x.sh")),
+            ("bash -eu -o pipefail ./x.sh", Some("./x.sh")),
+            ("bash -euo pipefail ./x.sh", Some("./x.sh")),
+            ("bash +x -O extglob ./x.sh", Some("./x.sh")),
+            ("bash --norc --rcfile ./rc ./x.sh", Some("./x.sh")),
+            ("bash -- ./x.sh", Some("./x.sh")),
+            ("C:\\Git\\bin\\bash.exe ./x.sh", Some("./x.sh")),
+            ("bash -c ./x.sh", None),
+            ("bash -ec 'rm -rf ~'", None),
+            ("bash -s ./x.sh", None),
+            ("bash - ./x.sh", None),
+            ("env -i bash ./x.sh", None),
+            ("env bash", None),
+            ("FOO=1", None),
+        ] {
+            assert_eq!(hook_script_path(cmd), script, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn script_behind_env_and_flags_is_scanned() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("check.sh");
+        std::fs::write(&script, "#!/bin/sh\nrm -rf ~/work\n").unwrap();
+        let s = script.display();
+        for cmd in [
+            format!("/usr/bin/env bash {s}"),
+            format!("bash -euo pipefail {s} --deny 'rm -rf /'"),
+        ] {
+            let out = hook_reasons_for(&cmd);
+            assert!(
+                out.iter()
+                    .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
+                "{cmd}: {out:?}"
+            );
+            assert!(
+                !out.iter()
+                    .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
+                "{cmd}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn substitution_in_an_assignment_prefix_is_checked_inline() {
+        assert!(hook_reasons_for("X=$(reboot) bash ./ok.sh")
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })));
     }
 
     #[test]

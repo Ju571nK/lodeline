@@ -62,8 +62,13 @@ rely on it in hooks anyway.
   whose first token was a path was. A command chained after the script is
   checked inline, so `bash ./ok.sh && rm -rf ~` is reported; the script's own
   arguments are not, since guards often receive the patterns they block. An operand that still
-  holds a `$VAR` is not treated as a script. `bash -e x.sh`,
-  `/usr/bin/env bash x.sh`, and `bash.exe` are not recognized.
+  holds a `$VAR` is not treated as a script. Since 2026-10-29 the
+  interpreter may follow `NAME=value` assignments or an `env` launcher
+  without options (`/usr/bin/env bash x.sh`), may be `bash.exe`, and may
+  carry flags (`bash -euo pipefail x.sh`, `--rcfile <file>`). `-c`, `-s`,
+  and a lone `-` mean no script file. A command substitution in the words
+  before the script makes the whole command checked inline. `env` with
+  options (`env -i bash x.sh`) is still not recognized.
 - A repo with only `.claude/skills/` or `.claude/agents/` is now discovered.
 
 `sigil scan` on this machine after the change logs no frontmatter warning
