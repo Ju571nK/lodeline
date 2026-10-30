@@ -72,6 +72,7 @@ impl BackoffPolicy {
 use crate::transport::{classify_send_error, classify_status, SendOutcome};
 use crate::wire::{Envelope, EventsAccepted, EventsRequest};
 use reqwest::Client;
+use sigil_core::sink::jsonl::segment_order;
 use std::path::PathBuf;
 use time::OffsetDateTime;
 
@@ -387,38 +388,71 @@ async fn idle_sleep(cancel: &CancellationToken, delay: Duration) -> bool {
     }
 }
 
-/// Find the lexically smallest `events-*.jsonl` segment in `events_dir`.
+/// Find the oldest `events-*.jsonl` segment, in write order, in `events_dir`.
 /// Used on first run when no `current_file` has been persisted yet.
 fn discover_first_segment(events_dir: &std::path::Path) -> Option<String> {
-    let mut entries: Vec<String> = std::fs::read_dir(events_dir)
+    let entries: Vec<String> = std::fs::read_dir(events_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.starts_with("events-") && n.ends_with(".jsonl"))
         .collect();
-    entries.sort();
-    entries.into_iter().next()
+    entries
+        .into_iter()
+        .min_by(|a, b| segment_order(a).cmp(&segment_order(b)))
 }
 
-/// Find the lexically next `events-*.jsonl` segment after the current one.
+/// Find the next `events-*.jsonl` segment after the current one, in write order.
 /// Returns `None` if `current_file` is the latest. Used to roll forward
 /// after the current segment is fully drained.
 fn next_segment(events_dir: &std::path::Path, state: &SenderState) -> Option<String> {
-    let mut entries: Vec<String> = std::fs::read_dir(events_dir)
+    let entries: Vec<String> = std::fs::read_dir(events_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.starts_with("events-") && n.ends_with(".jsonl"))
         .collect();
-    entries.sort();
-    let cur = &state.current_file;
-    entries.into_iter().find(|n| n > cur)
+    let cur = segment_order(&state.current_file);
+    entries
+        .into_iter()
+        .filter(|n| segment_order(n) > cur)
+        .min_by(|a, b| segment_order(a).cmp(&segment_order(b)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manifest::{ByteRange, ManifestEntry};
+
+    #[test]
+    fn segments_are_walked_in_write_order() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in [
+            "events-2026-05-14.jsonl",
+            "events-2026-05-14-001.jsonl",
+            "events-2026-05-15.jsonl",
+        ] {
+            std::fs::write(dir.path().join(n), b"").unwrap();
+        }
+        let mut state = SenderState::empty();
+        let mut seen = Vec::new();
+        state.current_file = discover_first_segment(dir.path()).unwrap();
+        loop {
+            seen.push(state.current_file.clone());
+            match next_segment(dir.path(), &state) {
+                Some(n) => state.current_file = n,
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                "events-2026-05-14.jsonl",
+                "events-2026-05-14-001.jsonl",
+                "events-2026-05-15.jsonl",
+            ]
+        );
+    }
 
     fn entry(id: u128, seq: u64, end: u64) -> ManifestEntry {
         ManifestEntry {

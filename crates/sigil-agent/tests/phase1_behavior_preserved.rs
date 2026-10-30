@@ -31,6 +31,7 @@ async fn empty_environment_emits_no_phase2_events_and_no_above_soft_floor() {
     let gc_ctx = GcTaskCtx {
         host_id: "test-host".into(),
         events_dir: dir.path().join("events"),
+        sender_offset_path: Some(dir.path().join("events/sender-offset.json")),
         current_segment_filename: curr,
         above_soft_floor: above.clone(),
         cfg: GcConfig::defaults(),

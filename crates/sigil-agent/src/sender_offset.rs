@@ -1,12 +1,11 @@
 //! Reader for `sender-offset.json` — the on-disk record of how far the
 //! Plan B `sigil-sender` has consumed in the agent's `events/` directory.
-//!
-//! Schema (spec §3.9):
+//! The sender writes it (`sigil_sender::state::SenderState`):
 //! ```json
 //! {
-//!   "current_segment": "events-2026-05-15-002.jsonl",
+//!   "current_file": "events-2026-05-15-002.jsonl",
 //!   "byte_offset": 1234567,
-//!   "updated_at": "2026-05-15T12:34:56Z"
+//!   "last_acked_sequence": 42
 //! }
 //! ```
 //!
@@ -18,19 +17,22 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
-use time::OffsetDateTime;
 
+/// Where the packaged sigil-sender keeps its offset (its `offset_path`
+/// default). shortcut: an operator who overrides `offset_path` in sender.yaml
+/// leaves the GC without a sender record; plumb a flag if that is ever needed.
+pub const DEFAULT_PATH: &str = "/var/lib/sigil-sender/sender-offset.json";
+
+/// The fields of sigil-sender's `SenderState` the GC needs (#331). Other
+/// fields, such as `last_acked_sequence`, are ignored.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SenderOffset {
     /// Filename (NOT full path) of the segment the sender is currently shipping.
+    #[serde(rename = "current_file")]
     pub current_segment: String,
     /// Byte offset within `current_segment` up to which the sender has
     /// successfully shipped + acknowledged.
     pub byte_offset: u64,
-    /// Last time the sender wrote this file. Informational; the GC does not
-    /// use this — staleness is detected by the soft-floor TIME threshold.
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: OffsetDateTime,
 }
 
 #[derive(Debug, Error)]
@@ -43,11 +45,10 @@ pub enum SenderOffsetError {
     Json(serde_json::Error),
 }
 
-/// Read `sender-offset.json` from `events_dir`.
+/// Read the sender's offset file at `path`.
 /// Returns `Ok(None)` if the file does not exist.
-pub fn read(events_dir: &Path) -> Result<Option<SenderOffset>, SenderOffsetError> {
-    let path = events_dir.join("sender-offset.json");
-    let bytes = match std::fs::read(&path) {
+pub fn read(path: &Path) -> Result<Option<SenderOffset>, SenderOffsetError> {
+    let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(SenderOffsetError::Io(e)),
@@ -60,58 +61,38 @@ pub fn read(events_dir: &Path) -> Result<Option<SenderOffset>, SenderOffsetError
 mod tests {
     use super::*;
     use tempfile::tempdir;
-    use time::macros::datetime;
 
     #[test]
     fn missing_file_returns_none() {
         let dir = tempdir().unwrap();
-        assert_eq!(read(dir.path()).unwrap(), None);
+        assert_eq!(read(&dir.path().join("sender-offset.json")).unwrap(), None);
     }
 
     #[test]
-    fn well_formed_file_round_trips() {
+    fn reads_what_sigil_sender_writes() {
         let dir = tempdir().unwrap();
-        let off = SenderOffset {
-            current_segment: "events-2026-05-15-002.jsonl".into(),
-            byte_offset: 1234567,
-            updated_at: datetime!(2026-05-15 12:34:56 UTC),
-        };
+        let path = dir.path().join("sender-offset.json");
         std::fs::write(
-            dir.path().join("sender-offset.json"),
-            serde_json::to_vec(&off).unwrap(),
+            &path,
+            br#"{"current_file":"events-2026-05-15-002.jsonl","byte_offset":1234567,"last_acked_sequence":42}"#,
         )
         .unwrap();
-        let loaded = read(dir.path()).unwrap().unwrap();
-        assert_eq!(loaded, off);
+        assert_eq!(
+            read(&path).unwrap(),
+            Some(SenderOffset {
+                current_segment: "events-2026-05-15-002.jsonl".into(),
+                byte_offset: 1234567,
+            })
+        );
     }
 
     #[test]
-    fn malformed_json_returns_error() {
+    fn malformed_or_incomplete_json_returns_error() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("sender-offset.json"), b"not json").unwrap();
-        assert!(matches!(read(dir.path()), Err(SenderOffsetError::Json(_))));
-    }
-
-    #[test]
-    fn missing_required_field_returns_error() {
-        let dir = tempdir().unwrap();
-        // missing `byte_offset`
-        std::fs::write(
-            dir.path().join("sender-offset.json"),
-            br#"{"current_segment":"x","updated_at":"2026-05-15T00:00:00Z"}"#,
-        )
-        .unwrap();
-        assert!(matches!(read(dir.path()), Err(SenderOffsetError::Json(_))));
-    }
-
-    #[test]
-    fn timestamp_must_be_rfc3339() {
-        let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("sender-offset.json"),
-            br#"{"current_segment":"x","byte_offset":0,"updated_at":"not-a-date"}"#,
-        )
-        .unwrap();
-        assert!(matches!(read(dir.path()), Err(SenderOffsetError::Json(_))));
+        let path = dir.path().join("sender-offset.json");
+        for body in [&b"not json"[..], br#"{"current_file":"x"}"#] {
+            std::fs::write(&path, body).unwrap();
+            assert!(matches!(read(&path), Err(SenderOffsetError::Json(_))));
+        }
     }
 }

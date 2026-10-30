@@ -245,8 +245,7 @@ fn write_targets(w: &mut impl Write, t: &TargetsPayload) -> io::Result<()> {
 
 /// Return the path of the lexicographically-largest `events-*.jsonl` file in
 /// `events_dir`, or `None` if the directory is missing or contains no matching
-/// segment. Lexicographic order is chronological for the agent's segment
-/// naming convention (`events-YYYY-MM-DD[-NNN].jsonl`).
+/// segment, in the order the sink writes them (`segment_order`).
 #[cfg(feature = "operator-cli")]
 fn latest_segment(events_dir: &std::path::Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(events_dir).ok()?;
@@ -259,7 +258,11 @@ fn latest_segment(events_dir: &std::path::Path) -> Option<PathBuf> {
                 .map(|n| n.starts_with("events-") && n.ends_with(".jsonl"))
                 .unwrap_or(false)
         })
-        .max()
+        .max_by_key(|p| {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+            let (date, seq) = sigil_core::sink::jsonl::segment_order(name);
+            (date.to_owned(), seq)
+        })
 }
 
 /// Snapshot or follow the agent's JSONL events. Wrapper around the
@@ -802,9 +805,10 @@ mod tests {
 
     #[cfg(feature = "operator-cli")]
     #[test]
-    fn latest_segment_picks_lexicographically_largest_jsonl() {
+    fn latest_segment_picks_the_newest_jsonl() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("events-2026-05-12.jsonl"), b"").unwrap();
+        std::fs::write(dir.path().join("events-2026-05-14.jsonl"), b"").unwrap();
         std::fs::write(dir.path().join("events-2026-05-14-001.jsonl"), b"").unwrap();
         std::fs::write(dir.path().join("events-2026-05-13.jsonl"), b"").unwrap();
         // Non-matching files are skipped.

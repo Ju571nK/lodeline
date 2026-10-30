@@ -706,15 +706,18 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         );
     }
 
-    // Best-effort startup snapshot: pick the lexicographically largest segment
-    // as the "current" one. Full rotation-time wiring is a Plan A2 follow-up.
+    // Best-effort startup snapshot: pick the newest segment as the "current"
+    // one. Full rotation-time wiring is a Plan A2 follow-up.
     {
         if let Ok(entries) = std::fs::read_dir(&cfg.events_dir) {
             let latest = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .filter(|n| n.starts_with("events-") && n.ends_with(".jsonl"))
-                .max();
+                .max_by(|a, b| {
+                    sigil_core::sink::jsonl::segment_order(a)
+                        .cmp(&sigil_core::sink::jsonl::segment_order(b))
+                });
             if let Some(n) = latest {
                 *current_segment_filename.write() = n;
             }
@@ -765,6 +768,9 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 crate::jsonl_gc_task::run(crate::jsonl_gc_task::GcTaskCtx {
                     host_id: host_id_g,
                     events_dir: dir_g,
+                    // Only the root agent's spool is the one the packaged sender tails.
+                    sender_offset_path: crate::control::is_root()
+                        .then(|| crate::sender_offset::DEFAULT_PATH.into()),
                     current_segment_filename: cur_g,
                     above_soft_floor: above_g,
                     cfg: crate::gc_config::GcConfig::defaults(),
@@ -1388,6 +1394,11 @@ mod nonroot_path_tests {
         assert_eq!(
             example["events_dir"].as_str().map(PathBuf::from),
             Some(resolve_events_dir_unix(true, None, None))
+        );
+        assert_eq!(
+            example["offset_path"].as_str(),
+            Some(crate::sender_offset::DEFAULT_PATH),
+            "the GC reads the sender's offset from here (#331)"
         );
     }
 
