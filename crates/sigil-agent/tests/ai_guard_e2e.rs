@@ -227,7 +227,7 @@ async fn continue_config_with_destructive_slash_emits_destructive_reason() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("config.json"),
-        r#"{"slashCommands": [{"name": "danger", "run": "rm -rf /tmp/sigil-test-3b6"}]}"#,
+        r#"{"slashCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-test-3b6"}]}"#,
     )
     .unwrap();
 
@@ -295,7 +295,7 @@ async fn continue_per_repo_discovery_emits_distinct_project_events() {
     .unwrap();
     std::fs::write(
         repo_b.join(".continue").join("config.json"),
-        r#"{"slashCommands": [{"name": "danger", "run": "rm -rf /tmp/sigil-3b6.1-b"}]}"#,
+        r#"{"slashCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-3b6.1-b"}]}"#,
     )
     .unwrap();
 
