@@ -21,9 +21,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   `ai_guard_toggle_drift`; readings for the agent's own home and for projects
   omit it as before. sigil-server now reports, per tool, the riskiest of a
   host's readings instead of the last one received, so one clean user or
-  project no longer hides another. A root agent used to report score 0 for a
-  host whose users had risky hooks. Windows services still assess only their
-  own profile (#329).
+  project no longer hides another. Readings older than 48 hours (a removed
+  repo, user or rule pack) stop counting. A root agent used to report score 0
+  for a host whose users had risky hooks. `sigil show risk` and `sigil doctor`
+  print the user next to the scope. Codex MCP tool baselines are now kept per
+  home; an existing baseline still applies to the home that wrote it. Rule
+  packs still assess only the agent's own home. Windows services still assess
+  only their own profile (#329).
 
 ## [0.11.0] - 2026-10-30
 

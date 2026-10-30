@@ -178,9 +178,30 @@ pub(crate) fn assess(
                 .push(tool.clone());
         }
     }
+    let home = home.canonicalize().map_err(|source| AssessError::Io {
+        path: home.into(),
+        source,
+    })?;
+    let home_hash = blake3::hash(home.to_string_lossy().as_bytes())
+        .to_hex()
+        .to_string();
     let mut out = Vec::new();
     for (server, snapshot) in servers {
-        out.extend(assess_server(&server_path(dir, server), home, &snapshot)?);
+        // #329: a root agent assesses every user's home, so each home keeps
+        // its own baselines. A pre-#329 file at the top level still counts
+        // for the home that wrote it, so its standing drift is not reset.
+        let scoped = server_path(&dir.join(&home_hash), server);
+        let legacy = server_path(dir, server);
+        if !scoped.exists() && legacy.exists() {
+            if let Some(reasons) = assess_server(&legacy, &home_hash, &snapshot)? {
+                out.extend(reasons);
+                continue;
+            }
+        }
+        out.extend(
+            assess_server(&scoped, &home_hash, &snapshot)?
+                .ok_or_else(|| parse_error(&scoped, "MCP baseline HOME mismatch"))?,
+        );
     }
     Ok(out)
 }
@@ -189,11 +210,12 @@ fn server_path(dir: &Path, server: &str) -> std::path::PathBuf {
     dir.join(format!("{}.json", blake3::hash(server.as_bytes()).to_hex()))
 }
 
+/// `Ok(None)` means the baseline at `path` belongs to another home.
 fn assess_server(
     path: &Path,
-    home: &Path,
+    home_hash: &str,
     current: &Snapshot,
-) -> Result<Vec<AiGuardReason>, AssessError> {
+) -> Result<Option<Vec<AiGuardReason>>, AssessError> {
     let io_error = |source| AssessError::Io {
         path: path.into(),
         source,
@@ -201,10 +223,6 @@ fn assess_server(
     if current.values().map(Vec::len).sum::<usize>() > MAX_TOOLS {
         return Err(parse_error(path, "MCP snapshot exceeds tool cap"));
     }
-    let home = home.canonicalize().map_err(io_error)?;
-    let home_hash = blake3::hash(home.to_string_lossy().as_bytes())
-        .to_hex()
-        .to_string();
     let baseline = match std::fs::File::open(path) {
         Ok(file) => {
             let mut bytes = Vec::new();
@@ -216,21 +234,21 @@ fn assess_server(
             }
             let baseline: Baseline =
                 serde_json::from_slice(&bytes).map_err(|e| parse_error(path, e))?;
-            if baseline.version != 1 || baseline.home_hash != home_hash {
-                return Err(parse_error(
-                    path,
-                    "unsupported MCP baseline version or HOME mismatch",
-                ));
+            if baseline.version != 1 {
+                return Err(parse_error(path, "unsupported MCP baseline version"));
+            }
+            if baseline.home_hash != home_hash {
+                return Ok(None);
             }
             baseline
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if current.is_empty() {
-                return Ok(Vec::new());
+                return Ok(Some(Vec::new()));
             }
             let baseline = Baseline {
                 version: 1,
-                home_hash,
+                home_hash: home_hash.to_string(),
                 tools: current.clone(),
             };
             let bytes = serde_json::to_vec(&baseline).map_err(|e| parse_error(path, e))?;
@@ -246,7 +264,7 @@ fn assess_server(
             tmp.as_file().sync_all().map_err(io_error)?;
             // A concurrent first writer must not be overwritten.
             tmp.persist_noclobber(path).map_err(|e| io_error(e.error))?;
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         Err(e) => return Err(io_error(e)),
     };
@@ -294,7 +312,7 @@ fn assess_server(
             }
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -314,6 +332,12 @@ mod tests {
         )])
     }
 
+    fn home_hash(home: &Path) -> String {
+        blake3::hash(home.canonicalize().unwrap().to_string_lossy().as_bytes())
+            .to_hex()
+            .to_string()
+    }
+
     #[test]
     fn immutable_baseline_survives_reopen_and_detects_all_drift_classes() {
         let dir = tempfile::tempdir().unwrap();
@@ -323,7 +347,7 @@ mod tests {
             json!({"properties":{"path":{}},"required":["path"]}),
         );
         assert!(assess(&path, dir.path(), &base).unwrap().is_empty());
-        let file = server_path(&path, "server");
+        let file = server_path(&path.join(home_hash(dir.path())), "server");
         let bytes = std::fs::read(&file).unwrap();
         let mut changed = snapshot("updated", json!({"properties":{"path":{},"command":{}}}));
         changed.insert(
@@ -378,7 +402,28 @@ mod tests {
         let base = snapshot("x", json!({}));
         assess(&path, dir.path(), &base).unwrap();
         let other = tempfile::tempdir().unwrap();
-        assert!(assess(&path, other.path(), &base).is_err());
+        let drifted = snapshot("y", json!({}));
+        assert!(assess(&path, other.path(), &drifted).unwrap().is_empty());
+        assert!(!assess(&path, dir.path(), &drifted).unwrap().is_empty());
+        assert!(!assess(&path, other.path(), &base).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_baseline_keeps_its_drift_for_the_home_that_wrote_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baselines");
+        let base = snapshot("x", json!({}));
+        assess(&path, dir.path(), &base).unwrap();
+        std::fs::rename(
+            server_path(&path.join(home_hash(dir.path())), "server"),
+            server_path(&path, "server"),
+        )
+        .unwrap();
+        let drifted = snapshot("y", json!({}));
+        assert!(!assess(&path, dir.path(), &drifted).unwrap().is_empty());
+        let other = tempfile::tempdir().unwrap();
+        assert!(assess(&path, other.path(), &drifted).unwrap().is_empty());
+        assert!(!assess(&path, dir.path(), &drifted).unwrap().is_empty());
     }
 
     #[test]

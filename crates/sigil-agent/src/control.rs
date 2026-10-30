@@ -292,7 +292,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                     Some(filter) => *t == filter,
                     None => true,
                 })
-                .map(|((t, scope, _pid, _user), cached)| {
+                .map(|((t, scope, _pid, user), cached)| {
                     let last = cached
                         .last_assessed_ts
                         .format(&time::format_description::well_known::Rfc3339)
@@ -305,6 +305,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                         bucket: cached.bucket,
                         reasons_count: cached.reasons_count,
                         last_assessed_ts: last,
+                        user: user.clone(),
                     }
                 })
                 .collect();
@@ -392,7 +393,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
             let snapshot = ctx.ai_guard_state.read();
             let mut latest_risk: Vec<RiskSummary> = snapshot
                 .iter()
-                .map(|((t, scope, _pid, _user), cached)| {
+                .map(|((t, scope, _pid, user), cached)| {
                     let last = cached
                         .last_assessed_ts
                         .format(&time::format_description::well_known::Rfc3339)
@@ -405,6 +406,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                         bucket: cached.bucket,
                         reasons_count: cached.reasons_count,
                         last_assessed_ts: last,
+                        user: user.clone(),
                     }
                 })
                 .collect();

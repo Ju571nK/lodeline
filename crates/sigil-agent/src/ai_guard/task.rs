@@ -180,7 +180,8 @@ fn homes_for(parser: &dyn AiGuardParser, ctx: &TaskCtx) -> Vec<AssessHome> {
         user: None,
         dir: ctx.home_dir.clone(),
     };
-    if matches!(parser.scope(), AiGuardScope::Project { .. }) {
+    // Rule packs expand `~` from the agent's own environment, not `home`.
+    if matches!(parser.scope(), AiGuardScope::Project { .. }) || parser.rule_pack_id().is_some() {
         return vec![own];
     }
     std::iter::once(own)
@@ -487,6 +488,15 @@ mod tests {
             ]
         );
         assert_eq!(ctx.state.read().len(), 3);
+        let pack = ScriptedParser {
+            tool: AiTool::Codex,
+            scope: AiGuardScope::UserGlobal,
+            pack_id: Some("pack".into()),
+            tool_label: None,
+            scripts: StdMutex::new(vec![]),
+            watched: vec![],
+        };
+        assert_eq!(homes_for(&pack, &ctx).len(), 1);
     }
 
     /// Receive the next `AiGuardRiskAssessed` event, skipping any

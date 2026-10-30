@@ -430,7 +430,14 @@ fn print_ai_guard_live(rep: &crate::control::DoctorAiGuardReport) {
                 .to_string();
             println!(
                 "         {} / {}    score {:.1}  bucket={}   reasons={}",
-                tool_str, scope_str, r.score, bucket_str, r.reasons_count
+                tool_str,
+                match &r.user {
+                    Some(u) => format!("{scope_str}@{u}"),
+                    None => scope_str,
+                },
+                r.score,
+                bucket_str,
+                r.reasons_count
             );
         }
     }

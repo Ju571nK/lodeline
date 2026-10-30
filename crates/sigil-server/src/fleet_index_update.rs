@@ -60,10 +60,16 @@ pub fn apply_event(host: &mut HostSummary, event: &Event) {
             reasons,
             is_reattestation,
             user,
+            rule_pack_id,
             ..
         } => {
+            // The agent re-sends every reading each 24h, so one older than two
+            // heartbeats is gone (a removed repo, user or pack) and must not
+            // hold the host's risk up.
+            let cutoff = event.ts - time::Duration::hours(48);
+            host.risk_sources.retain(|_, e| e.assessed_ts >= cutoff);
             host.risk_sources.insert(
-                (*tool, scope.clone(), user.clone()),
+                (*tool, scope.clone(), user.clone(), rule_pack_id.clone()),
                 crate::fleet_index::RiskEntry {
                     controls: controls.clone(),
                     score: *score,
@@ -364,7 +370,7 @@ mod tests {
     #[test]
     fn ai_guard_risk_keeps_the_riskiest_user_per_tool() {
         let mut h = HostSummary::new("h".into());
-        let reading = |user: &str, score: f32, minute: u8| {
+        let reading = |user: &str, pack: Option<&str>, score: f32, minutes: i64| {
             ev(
                 Evidence::AiGuardRiskAssessed {
                     controls: None,
@@ -378,27 +384,25 @@ mod tests {
                     },
                     reasons: vec![],
                     is_reattestation: false,
-                    rule_pack_id: None,
+                    rule_pack_id: pack.map(Into::into),
                     tool_label: None,
                     user: Some(user.into()),
                 },
                 Severity::Warn,
-                datetime!(2026-05-17 12:00 UTC) + time::Duration::minutes(minute.into()),
+                datetime!(2026-05-17 12:00 UTC) + time::Duration::minutes(minutes),
             )
         };
-        apply_event(&mut h, &reading("alice", 7.0, 0));
-        apply_event(&mut h, &reading("bob", 0.0, 1));
-        assert_eq!(
-            h.current_risk[&AiTool::ClaudeCode].score,
-            7.0,
-            "bob's clean reading hid alice"
-        );
-        apply_event(&mut h, &reading("alice", 0.0, 2));
-        assert_eq!(
-            h.current_risk[&AiTool::ClaudeCode].score,
-            0.0,
-            "alice fixed her config"
-        );
+        let score = |h: &HostSummary| h.current_risk[&AiTool::ClaudeCode].score;
+        apply_event(&mut h, &reading("alice", None, 7.0, 0));
+        apply_event(&mut h, &reading("bob", None, 0.0, 1));
+        assert_eq!(score(&h), 7.0, "bob's clean reading hid alice");
+        apply_event(&mut h, &reading("alice", Some("pack"), 0.0, 2));
+        assert_eq!(score(&h), 7.0, "a clean pack reading hid the built-in one");
+        apply_event(&mut h, &reading("alice", None, 0.0, 3));
+        assert_eq!(score(&h), 0.0, "alice fixed her config");
+        apply_event(&mut h, &reading("bob", None, 7.0, 4));
+        apply_event(&mut h, &reading("alice", None, 0.0, 49 * 60));
+        assert_eq!(score(&h), 0.0, "bob's reading from 49h ago still counts");
     }
 
     #[test]
