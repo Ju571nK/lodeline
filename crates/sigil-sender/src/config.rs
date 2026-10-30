@@ -135,7 +135,7 @@ server_ca_path: "/etc/sigil/server-ca.pem"
 events_dir: "/var/log/sigil"
 offset_path: "/var/lib/sigil/sender-offset.json"
 agent_control: "/var/run/sigil/control.sock"
-dead_letter_dir: "/var/log/sigil/dead-letter"
+dead_letter_dir: "/var/log/sigil-sender/dead-letter"
 "#,
         );
         let cfg = SenderConfig::load(&p).unwrap();
@@ -242,7 +242,7 @@ server_ca_path: "/etc/sigil/server-ca.pem"
 events_dir: "/var/log/sigil"
 offset_path: "/var/lib/sigil/sender-offset.json"
 agent_control: "/var/run/sigil/control.sock"
-dead_letter_dir: "/var/log/sigil/dead-letter"
+dead_letter_dir: "/var/log/sigil-sender/dead-letter"
 host_id: "abc-123"
 "#,
         );
@@ -264,7 +264,7 @@ server_ca_path: "/etc/sigil/server-ca.pem"
 events_dir: "/var/log/sigil"
 offset_path: "/var/lib/sigil/sender-offset.json"
 agent_control: "/var/run/sigil/control.sock"
-dead_letter_dir: "/var/log/sigil/dead-letter"
+dead_letter_dir: "/var/log/sigil-sender/dead-letter"
 "#,
         );
         let cfg = SenderConfig::load(&p).unwrap();
