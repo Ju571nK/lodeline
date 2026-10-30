@@ -140,8 +140,10 @@ CLI uses `config.yaml`, persistent `~/.continue/permissions.yaml`, and absolute
 mode overrides: `--auto` allows all tools and `--readonly` applies plan policy.
 Headless mode excludes ask-only tools unless explicitly allowed.
 
-Sigil still reads legacy `config.json`, `mcpServers`, and slash/custom commands.
-It does not assess the active YAML config or persistent permissions. Create a
+Sigil still reads legacy `config.json`, `mcpServers`, and custom command
+prompts (slash commands since 2026-10-30, see
+`continue-config-surfaces-2026-10-30.md`, which also finds the repository not
+archived). It does not assess the active YAML config or persistent permissions. Create a
 bounded final-version migration issue; do not design for speculative future
 Continue releases.
 
