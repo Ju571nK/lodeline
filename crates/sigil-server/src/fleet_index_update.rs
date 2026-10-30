@@ -81,19 +81,19 @@ pub fn apply_event(host: &mut HostSummary, event: &Event) {
                 },
             );
             // A clean reading for one user or project must not hide another's;
-            // on a tie the newest reading is shown.
-            if let Some(top) = host
-                .risk_sources
-                .iter()
-                .filter(|(k, _)| k.0 == *tool)
-                .map(|(_, e)| e)
-                .max_by(|a, b| {
-                    a.score
-                        .total_cmp(&b.score)
-                        .then(a.assessed_ts.cmp(&b.assessed_ts))
-                })
-            {
-                host.current_risk.insert(*tool, top.clone());
+            // on a tie the newest reading is shown. Rebuilt for every tool, so
+            // a tool whose readings were all pruned drops out.
+            host.current_risk.clear();
+            for ((t, ..), e) in &host.risk_sources {
+                let keep = host.current_risk.get(t).is_some_and(|top| {
+                    top.score
+                        .total_cmp(&e.score)
+                        .then(top.assessed_ts.cmp(&e.assessed_ts))
+                        .is_ge()
+                });
+                if !keep {
+                    host.current_risk.insert(*t, e.clone());
+                }
             }
         }
         Evidence::Heartbeat {
@@ -401,8 +401,17 @@ mod tests {
         apply_event(&mut h, &reading("alice", None, 0.0, 3));
         assert_eq!(score(&h), 0.0, "alice fixed her config");
         apply_event(&mut h, &reading("bob", None, 7.0, 4));
+        let mut codex = reading("bob", None, 7.0, 5);
+        if let Evidence::AiGuardRiskAssessed { tool, .. } = &mut codex.evidence {
+            *tool = AiTool::Codex;
+        }
+        apply_event(&mut h, &codex);
         apply_event(&mut h, &reading("alice", None, 0.0, 49 * 60));
         assert_eq!(score(&h), 0.0, "bob's reading from 49h ago still counts");
+        assert!(
+            !h.current_risk.contains_key(&AiTool::Codex),
+            "a tool with only pruned readings kept its risk"
+        );
     }
 
     #[test]

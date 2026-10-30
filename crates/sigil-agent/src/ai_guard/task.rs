@@ -17,8 +17,8 @@ use crate::ai_guard::rubric;
 use crate::state_task::CommittableEvent;
 use parking_lot::RwLock;
 use sigil_core::event::{
-    AiGuardBucket, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject,
-    AGENT_VERSION, SCHEMA_VERSION,
+    AiGuardBucket, AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind,
+    Subject, AGENT_VERSION, SCHEMA_VERSION,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,8 +33,8 @@ use tokio::sync::{broadcast, mpsc};
 /// (tool, scope) but belonging to different rule packs never collide; `user`
 /// does the same for one parser assessed against several homes (#329).
 /// Read by the operator IPC handler (Task 7) for `sigil show risk`.
-pub type StateMap =
-    HashMap<(AiTool, AiGuardScope, Option<String>, Option<String>), CachedAssessment>;
+pub type StateMap = HashMap<StateKey, CachedAssessment>;
+pub type StateKey = (AiTool, AiGuardScope, Option<String>, Option<String>);
 
 /// A home a home-relative parser is assessed against. `user: None` is the
 /// agent's own home (`TaskCtx::home_dir`).
@@ -54,6 +54,9 @@ pub struct CachedAssessment {
     pub bucket: AiGuardBucket,
     pub reasons_blake3: [u8; 32],
     pub reasons_count: usize,
+    /// #329 — re-sent on a heartbeat whose assessment fails, so the server's
+    /// 48h prune cannot drop a reading just because the config became unreadable.
+    pub reasons: Vec<AiGuardReason>,
     pub last_assessed_ts: OffsetDateTime,
     /// #147 — the dangerous-toggle kinds present at this assessment. Compared
     /// against the next assessment's set to detect OFF→ON transitions (drift).
@@ -200,10 +203,23 @@ async fn eval_and_maybe_emit(
     home: &AssessHome,
     force_emit: bool,
 ) {
+    let key = (
+        parser.tool(),
+        parser.scope(),
+        parser.rule_pack_id().map(|s| s.to_string()),
+        home.user.clone(),
+    );
     let mut assessment = match parser.assess_posture(&home.dir) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = ?e, tool = ?parser.tool(), "ai_guard assess failed; skip cycle");
+            let prev = ctx.state.read().get(&key).cloned();
+            if let (true, Some(p)) = (force_emit, prev) {
+                send_risk(
+                    ctx, parser, &key, p.controls, p.score, p.bucket, p.reasons, true,
+                )
+                .await;
+            }
             return;
         }
     };
@@ -217,12 +233,6 @@ async fn eval_and_maybe_emit(
     let score = rubric_snapshot.score(&reasons);
     let bucket = rubric::bucket(score);
     let reasons_hash = rubric::canonical_hash(&reasons);
-    let key = (
-        parser.tool(),
-        parser.scope(),
-        parser.rule_pack_id().map(|s| s.to_string()),
-        home.user.clone(),
-    );
     let prev = ctx.state.read().get(&key).cloned();
     let changed = prev
         .as_ref()
@@ -279,6 +289,7 @@ async fn eval_and_maybe_emit(
             bucket,
             reasons_blake3: reasons_hash,
             reasons_count: reasons.len(),
+            reasons: reasons.clone(),
             last_assessed_ts: now,
             dangerous_toggles: new_toggles,
         },
@@ -321,10 +332,34 @@ async fn eval_and_maybe_emit(
         }
     }
 
+    send_risk(
+        ctx,
+        parser,
+        &key,
+        controls,
+        score,
+        bucket,
+        reasons,
+        is_reattestation,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_risk(
+    ctx: &TaskCtx,
+    parser: &dyn AiGuardParser,
+    key: &StateKey,
+    controls: Option<Vec<sigil_core::event::AiGuardControl>>,
+    score: f32,
+    bucket: AiGuardBucket,
+    reasons: Vec<AiGuardReason>,
+    is_reattestation: bool,
+) {
     let event = Event {
         schema_version: SCHEMA_VERSION,
         event_id: uuid::Uuid::now_v7(),
-        ts: now,
+        ts: OffsetDateTime::now_utc(),
         host_id: ctx.host_id.clone(),
         agent_version: AGENT_VERSION.to_string(),
         severity: Severity::Warn,
@@ -433,6 +468,70 @@ mod tests {
             },
             rx,
         )
+    }
+
+    struct FailsAfterFirst(std::sync::atomic::AtomicBool);
+
+    impl AiGuardParser for FailsAfterFirst {
+        fn tool(&self) -> AiTool {
+            AiTool::Codex
+        }
+        fn scope(&self) -> AiGuardScope {
+            AiGuardScope::UserGlobal
+        }
+        fn watched_paths(&self, _home: &std::path::Path) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        fn assess(&self, _home: &std::path::Path) -> Result<Vec<AiGuardReason>, AssessError> {
+            if self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                Err(AssessError::Io {
+                    path: PathBuf::from("/tmp/test-home/.codex"),
+                    source: std::io::Error::other("unreadable"),
+                })
+            } else {
+                Ok(vec![AiGuardReason::SandboxDisabled])
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_resends_the_last_reading_when_assess_fails() {
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (ctx, mut events) = ctx_with(
+            FailsAfterFirst(Default::default()),
+            fc_rx,
+            Duration::from_secs(3600),
+        );
+        let parser = ctx.parsers.read()[0].clone();
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        let first = recv_next_risk_assessed(&mut events).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        assert!(
+            events.try_recv().is_err(),
+            "a failed change-driven read emits nothing"
+        );
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        let again = recv_next_risk_assessed(&mut events).await;
+        let (
+            Evidence::AiGuardRiskAssessed {
+                score: s1,
+                reasons: r1,
+                ..
+            },
+            Evidence::AiGuardRiskAssessed {
+                score: s2,
+                reasons: r2,
+                is_reattestation,
+                ..
+            },
+        ) = (first.event.evidence, again.event.evidence)
+        else {
+            unreachable!()
+        };
+        assert!(s1 > 0.0);
+        assert_eq!((s1, r1), (s2, r2));
+        assert!(is_reattestation);
     }
 
     #[tokio::test]
@@ -624,6 +723,13 @@ mod tests {
         *parser.0.lock().unwrap() = Some(vec![]);
         parser.1.store(true, std::sync::atomic::Ordering::Relaxed);
         eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
+        assert!(
+            matches!(
+                events.try_recv().unwrap().event.evidence,
+                Evidence::AiGuardRiskAssessed { controls, is_reattestation: true, .. } if controls == previous
+            ),
+            "a failed heartbeat read re-sends the last reading"
+        );
         assert!(events.try_recv().is_err());
         assert_eq!(ctx.state.read().values().next().unwrap().controls, previous);
     }
