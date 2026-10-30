@@ -132,10 +132,10 @@ server_base_url: "https://sigil.example.com"
 client_cert_path: "/etc/sigil/client.crt"
 client_key_path: "/etc/sigil/client.key"
 server_ca_path: "/etc/sigil/server-ca.pem"
-events_dir: "/var/log/sigil/events"
+events_dir: "/var/log/sigil"
 offset_path: "/var/lib/sigil/sender-offset.json"
 agent_control: "/var/run/sigil/control.sock"
-dead_letter_dir: "/var/log/sigil/dead-letter"
+dead_letter_dir: "/var/log/sigil-sender/dead-letter"
 "#,
         );
         let cfg = SenderConfig::load(&p).unwrap();
@@ -159,7 +159,7 @@ server_base_url: "https://sigil.example.com"
 client_cert_path: "/etc/sigil/client.crt"
 client_key_path: "/etc/sigil/client.key"
 server_ca_path: "/etc/sigil/server-ca.pem"
-events_dir: "/var/log/sigil/events"
+events_dir: "/var/log/sigil"
 agent_control: "/var/run/sigil/control.sock"
 "#,
         );
@@ -239,10 +239,10 @@ server_base_url: "https://sigil.example.com"
 client_cert_path: "/etc/sigil/client.crt"
 client_key_path: "/etc/sigil/client.key"
 server_ca_path: "/etc/sigil/server-ca.pem"
-events_dir: "/var/log/sigil/events"
+events_dir: "/var/log/sigil"
 offset_path: "/var/lib/sigil/sender-offset.json"
 agent_control: "/var/run/sigil/control.sock"
-dead_letter_dir: "/var/log/sigil/dead-letter"
+dead_letter_dir: "/var/log/sigil-sender/dead-letter"
 host_id: "abc-123"
 "#,
         );
@@ -261,10 +261,10 @@ server_base_url: "https://sigil.example.com"
 client_cert_path: "/etc/sigil/client.crt"
 client_key_path: "/etc/sigil/client.key"
 server_ca_path: "/etc/sigil/server-ca.pem"
-events_dir: "/var/log/sigil/events"
+events_dir: "/var/log/sigil"
 offset_path: "/var/lib/sigil/sender-offset.json"
 agent_control: "/var/run/sigil/control.sock"
-dead_letter_dir: "/var/log/sigil/dead-letter"
+dead_letter_dir: "/var/log/sigil-sender/dead-letter"
 "#,
         );
         let cfg = SenderConfig::load(&p).unwrap();

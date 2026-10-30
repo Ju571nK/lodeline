@@ -1370,6 +1370,16 @@ mod nonroot_path_tests {
     use std::path::PathBuf;
 
     #[test]
+    fn packaged_sender_example_tails_the_root_agent_events_dir() {
+        let example: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../config/sender.example.yaml")).unwrap();
+        assert_eq!(
+            example["events_dir"].as_str().map(PathBuf::from),
+            Some(resolve_events_dir_unix(true, None, None))
+        );
+    }
+
+    #[test]
     fn root_uses_system_paths() {
         let x = Some("/home/u/.config".to_string());
         let xs = Some("/home/u/.local/state".to_string());

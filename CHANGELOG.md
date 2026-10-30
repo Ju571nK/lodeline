@@ -7,6 +7,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+### Fixed
+
+- The packaged `/etc/sigil/sender.yaml.example` now tails `/var/log/sigil`,
+  where the root agent writes `events-*.jsonl`. It pointed at
+  `/var/log/sigil/events`, so a sender configured from it shipped nothing and
+  logged no error. A `sender.yaml` copied from an older example needs
+  `events_dir: "/var/log/sigil"` (#328).
+
 ## [0.11.0] - 2026-10-30
 
 ### Added
