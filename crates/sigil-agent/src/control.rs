@@ -288,11 +288,11 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
             let snapshot = ctx.ai_guard_state.read();
             let mut assessments: Vec<RiskSummary> = snapshot
                 .iter()
-                .filter(|((t, _scope, _pid), _)| match tool {
+                .filter(|((t, _scope, _pid, _user), _)| match tool {
                     Some(filter) => *t == filter,
                     None => true,
                 })
-                .map(|((t, scope, _pid), cached)| {
+                .map(|((t, scope, _pid, _user), cached)| {
                     let last = cached
                         .last_assessed_ts
                         .format(&time::format_description::well_known::Rfc3339)
@@ -392,7 +392,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
             let snapshot = ctx.ai_guard_state.read();
             let mut latest_risk: Vec<RiskSummary> = snapshot
                 .iter()
-                .map(|((t, scope, _pid), cached)| {
+                .map(|((t, scope, _pid, _user), cached)| {
                     let last = cached
                         .last_assessed_ts
                         .format(&time::format_description::well_known::Rfc3339)

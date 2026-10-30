@@ -27,12 +27,22 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::{broadcast, mpsc};
 
-/// Shared state map keyed by `(tool, scope, pack_id)`. Persists between calls
-/// so `eval_and_maybe_emit` can deduplicate identical reason sets across
+/// Shared state map keyed by `(tool, scope, pack_id, user)`. Persists between
+/// calls so `eval_and_maybe_emit` can deduplicate identical reason sets across
 /// triggers. The `pack_id` dimension ensures two parsers sharing the same
-/// (tool, scope) but belonging to different rule packs never collide.
+/// (tool, scope) but belonging to different rule packs never collide; `user`
+/// does the same for one parser assessed against several homes (#329).
 /// Read by the operator IPC handler (Task 7) for `sigil show risk`.
-pub type StateMap = HashMap<(AiTool, AiGuardScope, Option<String>), CachedAssessment>;
+pub type StateMap =
+    HashMap<(AiTool, AiGuardScope, Option<String>, Option<String>), CachedAssessment>;
+
+/// A home a home-relative parser is assessed against. `user: None` is the
+/// agent's own home (`TaskCtx::home_dir`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssessHome {
+    pub user: Option<String>,
+    pub dir: PathBuf,
+}
 
 /// One parser's last emitted state, kept in `StateMap` for change-detection
 /// and IPC introspection. Both hashes participate in emission change detection.
@@ -64,6 +74,9 @@ pub struct TaskCtx {
     pub state: Arc<RwLock<StateMap>>,
     pub heartbeat_interval: Duration,
     pub home_dir: PathBuf,
+    /// #329 — other users' homes a root agent also assesses. Empty when the
+    /// agent runs as a normal user, which then sees only `home_dir`.
+    pub user_homes: Vec<AssessHome>,
     pub host_id: String,
     /// Phase 3b.3 — shared registry of external hook-script paths per parser
     /// (tool, scope). Populated by runtime/reload; read by the dispatch loop
@@ -85,7 +98,9 @@ pub async fn run(mut ctx: TaskCtx) {
     {
         let snapshot: Vec<Arc<dyn AiGuardParser>> = ctx.parsers.read().clone();
         for parser in &snapshot {
-            eval_and_maybe_emit(parser.as_ref(), &ctx, true).await;
+            for home in homes_for(parser.as_ref(), &ctx) {
+                eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+            }
         }
     }
 
@@ -103,16 +118,20 @@ pub async fn run(mut ctx: TaskCtx) {
                         let snapshot: Vec<Arc<dyn AiGuardParser>> = ctx.parsers.read().clone();
                         let ext_map = ctx.ext_scripts.read().clone();
                         for parser in &snapshot {
-                            let in_watched = parser
-                                .watched_paths(&ctx.home_dir)
-                                .iter()
-                                .any(|p| path_matches(&path, p));
+                            // External scripts are registered from the agent's
+                            // own home only, so a hit re-assesses every home.
                             let in_ext_script = ext_map
                                 .get(&(parser.tool(), parser.scope()))
                                 .map(|v| v.iter().any(|p| path_matches(&path, p)))
                                 .unwrap_or(false);
-                            if in_watched || in_ext_script {
-                                eval_and_maybe_emit(parser.as_ref(), &ctx, false).await;
+                            for home in homes_for(parser.as_ref(), &ctx) {
+                                let in_watched = parser
+                                    .watched_paths(&home.dir)
+                                    .iter()
+                                    .any(|p| path_matches(&path, p));
+                                if in_watched || in_ext_script {
+                                    eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+                                }
                             }
                         }
                     }
@@ -128,7 +147,9 @@ pub async fn run(mut ctx: TaskCtx) {
             _ = heartbeat.tick() => {
                 let snapshot: Vec<Arc<dyn AiGuardParser>> = ctx.parsers.read().clone();
                 for parser in &snapshot {
-                    eval_and_maybe_emit(parser.as_ref(), &ctx, true).await;
+                    for home in homes_for(parser.as_ref(), &ctx) {
+                        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+                    }
                 }
             }
         }
@@ -151,8 +172,34 @@ fn path_matches(incoming: &std::path::Path, watched: &std::path::Path) -> bool {
     incoming.starts_with(&watched)
 }
 
-async fn eval_and_maybe_emit(parser: &dyn AiGuardParser, ctx: &TaskCtx, force_emit: bool) {
-    let mut assessment = match parser.assess_posture(&ctx.home_dir) {
+/// The homes `parser` is assessed against: its project root needs only the
+/// agent's own home, while user-level and application parsers also run once
+/// per entry in `ctx.user_homes`.
+fn homes_for(parser: &dyn AiGuardParser, ctx: &TaskCtx) -> Vec<AssessHome> {
+    let own = AssessHome {
+        user: None,
+        dir: ctx.home_dir.clone(),
+    };
+    if matches!(parser.scope(), AiGuardScope::Project { .. }) {
+        return vec![own];
+    }
+    std::iter::once(own)
+        .chain(
+            ctx.user_homes
+                .iter()
+                .filter(|h| h.dir != ctx.home_dir)
+                .cloned(),
+        )
+        .collect()
+}
+
+async fn eval_and_maybe_emit(
+    parser: &dyn AiGuardParser,
+    ctx: &TaskCtx,
+    home: &AssessHome,
+    force_emit: bool,
+) {
+    let mut assessment = match parser.assess_posture(&home.dir) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = ?e, tool = ?parser.tool(), "ai_guard assess failed; skip cycle");
@@ -173,6 +220,7 @@ async fn eval_and_maybe_emit(parser: &dyn AiGuardParser, ctx: &TaskCtx, force_em
         parser.tool(),
         parser.scope(),
         parser.rule_pack_id().map(|s| s.to_string()),
+        home.user.clone(),
     );
     let prev = ctx.state.read().get(&key).cloned();
     let changed = prev
@@ -253,6 +301,7 @@ async fn eval_and_maybe_emit(parser: &dyn AiGuardParser, ctx: &TaskCtx, force_em
                 toggle,
                 rule_pack_id: key.2.clone(),
                 tool_label: parser.tool_label().map(|s| s.to_string()),
+                user: key.3.clone(),
             },
             target_id: None,
         };
@@ -290,6 +339,7 @@ async fn eval_and_maybe_emit(parser: &dyn AiGuardParser, ctx: &TaskCtx, force_em
             is_reattestation,
             rule_pack_id: key.2.clone(),
             tool_label: parser.tool_label().map(|s| s.to_string()),
+            user: key.3.clone(),
         },
         target_id: None,
     };
@@ -311,6 +361,13 @@ async fn eval_and_maybe_emit(parser: &dyn AiGuardParser, ctx: &TaskCtx, force_em
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn own_home(ctx: &TaskCtx) -> AssessHome {
+        AssessHome {
+            user: None,
+            dir: ctx.home_dir.clone(),
+        }
+    }
     use crate::ai_guard::parser::AssessError;
     use sigil_core::event::AiGuardReason;
     use std::sync::Mutex as StdMutex;
@@ -368,12 +425,68 @@ mod tests {
                 state: Arc::new(RwLock::new(HashMap::new())),
                 heartbeat_interval: hb,
                 home_dir: PathBuf::from("/tmp/test-home"),
+                user_homes: Vec::new(),
                 host_id: "test-host".into(),
                 ext_scripts: crate::ai_guard::empty_ext_script_registry(),
                 rubric: crate::ai_guard::default_rubric_handle(),
             },
             rx,
         )
+    }
+
+    #[tokio::test]
+    async fn root_agent_assesses_each_user_home() {
+        let homes = tempfile::tempdir().unwrap();
+        let (alice, bob) = (homes.path().join("alice"), homes.path().join("bob"));
+        std::fs::create_dir_all(alice.join(".claude")).unwrap();
+        std::fs::create_dir_all(&bob).unwrap();
+        std::fs::write(
+            alice.join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"rm -rf ~/work"}]}]}}"#,
+        )
+        .unwrap();
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(
+            crate::ai_guard::parser::claude_code::ClaudeCodeParser,
+            fc_rx,
+            Duration::from_secs(3600),
+        );
+        ctx.home_dir = homes.path().join("root");
+        ctx.user_homes = vec![
+            AssessHome {
+                user: Some("alice".into()),
+                dir: alice,
+            },
+            AssessHome {
+                user: Some("bob".into()),
+                dir: bob,
+            },
+        ];
+        let parser = ctx.parsers.read()[0].clone();
+        for home in homes_for(parser.as_ref(), &ctx) {
+            eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        }
+        let mut seen = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let Evidence::AiGuardRiskAssessed { user, reasons, .. } = ev.event.evidence {
+                seen.push((
+                    user,
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
+                ));
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (None, false),
+                (Some("alice".into()), true),
+                (Some("bob".into()), false)
+            ]
+        );
+        assert_eq!(ctx.state.read().len(), 3);
     }
 
     /// Receive the next `AiGuardRiskAssessed` event, skipping any
@@ -454,7 +567,7 @@ mod tests {
             None,
         ] {
             *parser.0.lock().unwrap() = controls.clone();
-            eval_and_maybe_emit(&parser, &ctx, false).await;
+            eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
             let ev = events.try_recv().unwrap().event;
             match ev.evidence {
                 Evidence::AiGuardRiskAssessed {
@@ -476,7 +589,7 @@ mod tests {
             c.id = "fixture.other".into();
             c
         }]);
-        eval_and_maybe_emit(&parser, &ctx, false).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
         events.try_recv().unwrap();
         {
             let mut lock = parser.0.lock().unwrap();
@@ -484,12 +597,12 @@ mod tests {
             values.reverse();
             values.push(control);
         }
-        eval_and_maybe_emit(&parser, &ctx, false).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
         assert!(
             events.try_recv().is_err(),
             "order and duplicates are not changes"
         );
-        eval_and_maybe_emit(&parser, &ctx, true).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
         assert!(matches!(
             events.try_recv().unwrap().event.evidence,
             Evidence::AiGuardRiskAssessed {
@@ -500,7 +613,7 @@ mod tests {
         let previous = ctx.state.read().values().next().unwrap().controls.clone();
         *parser.0.lock().unwrap() = Some(vec![]);
         parser.1.store(true, std::sync::atomic::Ordering::Relaxed);
-        eval_and_maybe_emit(&parser, &ctx, true).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
         assert!(events.try_recv().is_err());
         assert_eq!(ctx.state.read().values().next().unwrap().controls, previous);
     }
@@ -669,6 +782,7 @@ mod tests {
             state: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp"),
+            user_homes: Vec::new(),
             host_id: "h".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -728,6 +842,7 @@ mod tests {
             state: state.clone(),
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp/test-home"),
+            user_homes: Vec::new(),
             host_id: "test-host".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -740,7 +855,7 @@ mod tests {
             scripts: StdMutex::new(vec![vec![AiGuardReason::SandboxDisabled]]),
             watched: vec![],
         };
-        eval_and_maybe_emit(&parser, &ctx, true).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
         let ev = events.recv().await.expect("tool_label event");
         let j = serde_json::to_value(&ev.event).unwrap();
         assert_eq!(j["evidence"]["tool"], "other");
@@ -759,6 +874,7 @@ mod tests {
             state: state.clone(),
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp/test-home"),
+            user_homes: Vec::new(),
             host_id: "test-host".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -783,12 +899,22 @@ mod tests {
             scripts: StdMutex::new(vec![vec![]]),
             watched: vec![],
         };
-        eval_and_maybe_emit(&a, &ctx, true).await;
-        eval_and_maybe_emit(&b, &ctx, true).await;
+        eval_and_maybe_emit(&a, &ctx, &own_home(&ctx), true).await;
+        eval_and_maybe_emit(&b, &ctx, &own_home(&ctx), true).await;
         let scope = AiGuardScope::Project { path: "/r".into() };
         let s = ctx.state.read();
-        assert!(s.contains_key(&(AiTool::Gemini, scope.clone(), Some("pack-a".to_string()))));
-        assert!(s.contains_key(&(AiTool::Gemini, scope.clone(), Some("pack-b".to_string()))));
+        assert!(s.contains_key(&(
+            AiTool::Gemini,
+            scope.clone(),
+            Some("pack-a".to_string()),
+            None
+        )));
+        assert!(s.contains_key(&(
+            AiTool::Gemini,
+            scope.clone(),
+            Some("pack-b".to_string()),
+            None
+        )));
         assert_eq!(s.len(), 2);
     }
 
@@ -807,6 +933,7 @@ mod tests {
             state: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp/test-home"),
+            user_homes: Vec::new(),
             host_id: "test-host".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -834,16 +961,16 @@ mod tests {
         let (mut ctx, mut events) = drift_ctx();
         ctx.home_dir = home.path().into();
         write("original");
-        eval_and_maybe_emit(&parser, &ctx, false).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
         assert!(drain_drift_toggles(&mut events).is_empty());
         write("changed");
-        eval_and_maybe_emit(&parser, &ctx, false).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
         assert_eq!(
             drain_drift_toggles(&mut events),
             vec!["mcp_tool_surface_drift"]
         );
         write("changed again");
-        eval_and_maybe_emit(&parser, &ctx, false).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
         let event = events.try_recv().unwrap().event;
         assert!(matches!(
             event.evidence,
@@ -853,7 +980,7 @@ mod tests {
             }
         ));
         assert!(events.try_recv().is_err());
-        eval_and_maybe_emit(&parser, &ctx, false).await;
+        eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
         assert!(events.try_recv().is_err());
     }
 
@@ -902,13 +1029,13 @@ mod tests {
         let p = one_shot_parser(vec![AiGuardReason::AutoApprovalEnabled {
             mode: "auto_edit".into(),
         }]);
-        eval_and_maybe_emit(&p, &ctx, true).await;
+        eval_and_maybe_emit(&p, &ctx, &own_home(&ctx), true).await;
         assert!(
             drain_drift_toggles(&mut events).is_empty(),
             "boot assessment must not fire drift"
         );
         // Baseline was recorded.
-        let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None);
+        let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None, None);
         assert!(ctx.state.read()[&key]
             .dangerous_toggles
             .contains("auto_approval_enabled"));
@@ -922,12 +1049,12 @@ mod tests {
         // First (baseline): toggle off — a non-dangerous reason so the reason
         // set is non-empty but carries no dangerous toggle.
         let off = one_shot_parser(vec![AiGuardReason::PermissionsDenyEmpty]);
-        eval_and_maybe_emit(&off, &ctx, true).await;
+        eval_and_maybe_emit(&off, &ctx, &own_home(&ctx), true).await;
         assert!(drain_drift_toggles(&mut events).is_empty());
 
         // Second: toggle on.
         let on = one_shot_parser(vec![AiGuardReason::SandboxDisabled]);
-        eval_and_maybe_emit(&on, &ctx, false).await;
+        eval_and_maybe_emit(&on, &ctx, &own_home(&ctx), false).await;
         assert_eq!(
             drain_drift_toggles(&mut events),
             vec!["sandbox_disabled".to_string()]
@@ -939,13 +1066,13 @@ mod tests {
     async fn drift_already_on_does_not_refire() {
         let (ctx, mut events) = drift_ctx();
         let on1 = one_shot_parser(vec![AiGuardReason::SandboxDisabled]);
-        eval_and_maybe_emit(&on1, &ctx, true).await; // baseline (no drift)
+        eval_and_maybe_emit(&on1, &ctx, &own_home(&ctx), true).await; // baseline (no drift)
         assert!(drain_drift_toggles(&mut events).is_empty());
 
         // Same toggle present again — force_emit so an AiGuardRiskAssessed is
         // produced, but the toggle was already in prev → no drift.
         let on2 = one_shot_parser(vec![AiGuardReason::SandboxDisabled]);
-        eval_and_maybe_emit(&on2, &ctx, true).await;
+        eval_and_maybe_emit(&on2, &ctx, &own_home(&ctx), true).await;
         assert!(
             drain_drift_toggles(&mut events).is_empty(),
             "an already-on toggle must not re-fire"
@@ -957,17 +1084,17 @@ mod tests {
     async fn drift_on_to_off_does_not_fire() {
         let (ctx, mut events) = drift_ctx();
         let on = one_shot_parser(vec![AiGuardReason::SandboxDisabled]);
-        eval_and_maybe_emit(&on, &ctx, true).await; // baseline
+        eval_and_maybe_emit(&on, &ctx, &own_home(&ctx), true).await; // baseline
         let _ = drain_drift_toggles(&mut events);
 
         let off = one_shot_parser(vec![AiGuardReason::PermissionsDenyEmpty]);
-        eval_and_maybe_emit(&off, &ctx, false).await;
+        eval_and_maybe_emit(&off, &ctx, &own_home(&ctx), false).await;
         assert!(
             drain_drift_toggles(&mut events).is_empty(),
             "on→off must not fire drift"
         );
         // Cache reflects the toggle is gone.
-        let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None);
+        let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None, None);
         assert!(ctx.state.read()[&key].dangerous_toggles.is_empty());
     }
 
@@ -978,6 +1105,7 @@ mod tests {
         eval_and_maybe_emit(
             &one_shot_parser(vec![AiGuardReason::SandboxDisabled]),
             &ctx,
+            &own_home(&ctx),
             true,
         )
         .await; // baseline on
@@ -985,6 +1113,7 @@ mod tests {
         eval_and_maybe_emit(
             &one_shot_parser(vec![AiGuardReason::PermissionsDenyEmpty]),
             &ctx,
+            &own_home(&ctx),
             false,
         )
         .await; // off
@@ -992,6 +1121,7 @@ mod tests {
         eval_and_maybe_emit(
             &one_shot_parser(vec![AiGuardReason::SandboxDisabled]),
             &ctx,
+            &own_home(&ctx),
             false,
         )
         .await; // on again
@@ -1009,6 +1139,7 @@ mod tests {
         eval_and_maybe_emit(
             &one_shot_parser(vec![AiGuardReason::PermissionsDenyEmpty]),
             &ctx,
+            &own_home(&ctx),
             true,
         )
         .await;
@@ -1021,7 +1152,7 @@ mod tests {
                 mode: "auto_edit".into(),
             },
         ]);
-        eval_and_maybe_emit(&both, &ctx, false).await;
+        eval_and_maybe_emit(&both, &ctx, &own_home(&ctx), false).await;
         let mut got = drain_drift_toggles(&mut events);
         got.sort();
         assert_eq!(

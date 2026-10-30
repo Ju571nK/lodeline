@@ -15,6 +15,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   logged no error. A `sender.yaml` copied from an older example needs
   `events_dir: "/var/log/sigil"` (#328).
 
+- An agent running as root on Linux or macOS now assesses every user's AI
+  agent configs, not just root's own home. Each user's readings carry a new
+  optional `user` field on `ai_guard_risk_assessed` and
+  `ai_guard_toggle_drift`; readings for the agent's own home and for projects
+  omit it as before. sigil-server now reports, per tool, the riskiest of a
+  host's readings instead of the last one received, so one clean user or
+  project no longer hides another. A root agent used to report score 0 for a
+  host whose users had risky hooks. Windows services still assess only their
+  own profile (#329).
+
 ## [0.11.0] - 2026-10-30
 
 ### Added

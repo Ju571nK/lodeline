@@ -59,10 +59,11 @@ pub fn apply_event(host: &mut HostSummary, event: &Event) {
             bucket,
             reasons,
             is_reattestation,
+            user,
             ..
         } => {
-            host.current_risk.insert(
-                *tool,
+            host.risk_sources.insert(
+                (*tool, scope.clone(), user.clone()),
                 crate::fleet_index::RiskEntry {
                     controls: controls.clone(),
                     score: *score,
@@ -73,6 +74,21 @@ pub fn apply_event(host: &mut HostSummary, event: &Event) {
                     reasons: reasons.clone(),
                 },
             );
+            // A clean reading for one user or project must not hide another's;
+            // on a tie the newest reading is shown.
+            if let Some(top) = host
+                .risk_sources
+                .iter()
+                .filter(|(k, _)| k.0 == *tool)
+                .map(|(_, e)| e)
+                .max_by(|a, b| {
+                    a.score
+                        .total_cmp(&b.score)
+                        .then(a.assessed_ts.cmp(&b.assessed_ts))
+                })
+            {
+                host.current_risk.insert(*tool, top.clone());
+            }
         }
         Evidence::Heartbeat {
             hash_p99_ms,
@@ -183,6 +199,7 @@ mod tests {
                 is_reattestation: false,
                 rule_pack_id: None,
                 tool_label: None,
+                user: None,
             }
         }
 
@@ -197,6 +214,7 @@ mod tests {
                     toggle: "auto_approval_enabled".into(),
                     rule_pack_id: None,
                     tool_label: None,
+                    user: None,
                 },
                 "policy_signature_invalid" => Evidence::PolicySignatureInvalid {
                     reason: PolicySignatureInvalidReason::SignatureInvalid,
@@ -332,6 +350,7 @@ mod tests {
                 is_reattestation: false,
                 rule_pack_id: None,
                 tool_label: None,
+                user: None,
             },
             Severity::Warn,
             datetime!(2026-05-17 12:00 UTC),
@@ -340,6 +359,46 @@ mod tests {
         let entry = h.current_risk.get(&AiTool::ClaudeCode).unwrap();
         assert_eq!(entry.score, 7.2);
         assert_eq!(entry.bucket, AiGuardBucket::Critical);
+    }
+
+    #[test]
+    fn ai_guard_risk_keeps_the_riskiest_user_per_tool() {
+        let mut h = HostSummary::new("h".into());
+        let reading = |user: &str, score: f32, minute: u8| {
+            ev(
+                Evidence::AiGuardRiskAssessed {
+                    controls: None,
+                    tool: AiTool::ClaudeCode,
+                    scope: AiGuardScope::UserGlobal,
+                    score,
+                    bucket: if score >= 7.0 {
+                        AiGuardBucket::Critical
+                    } else {
+                        AiGuardBucket::Low
+                    },
+                    reasons: vec![],
+                    is_reattestation: false,
+                    rule_pack_id: None,
+                    tool_label: None,
+                    user: Some(user.into()),
+                },
+                Severity::Warn,
+                datetime!(2026-05-17 12:00 UTC) + time::Duration::minutes(minute.into()),
+            )
+        };
+        apply_event(&mut h, &reading("alice", 7.0, 0));
+        apply_event(&mut h, &reading("bob", 0.0, 1));
+        assert_eq!(
+            h.current_risk[&AiTool::ClaudeCode].score,
+            7.0,
+            "bob's clean reading hid alice"
+        );
+        apply_event(&mut h, &reading("alice", 0.0, 2));
+        assert_eq!(
+            h.current_risk[&AiTool::ClaudeCode].score,
+            0.0,
+            "alice fixed her config"
+        );
     }
 
     #[test]
@@ -464,6 +523,7 @@ mod tests {
                     is_reattestation: false,
                     rule_pack_id: None,
                     tool_label: None,
+                    user: None,
                 },
                 Severity::Warn,
                 t,
@@ -541,6 +601,7 @@ mod tests {
                     is_reattestation: false,
                     rule_pack_id: None,
                     tool_label: None,
+                    user: None,
                 },
                 Severity::Warn,
                 t,

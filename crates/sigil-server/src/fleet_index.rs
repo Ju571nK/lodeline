@@ -133,7 +133,12 @@ pub struct HostSummary {
 
     pub latest_host_meta: Option<HostMetaSnapshot>,
 
+    /// Per tool, the riskiest of that tool's readings in `risk_sources`.
     pub current_risk: BTreeMap<AiTool, RiskEntry>,
+    /// Latest reading per (tool, scope, user) (#329). Rebuilt from JSONL on
+    /// start, so it is not serialized.
+    #[serde(skip)]
+    pub risk_sources: std::collections::HashMap<(AiTool, AiGuardScope, Option<String>), RiskEntry>,
 
     pub policy_state: PolicyState,
     pub agent_health: AgentHealth,

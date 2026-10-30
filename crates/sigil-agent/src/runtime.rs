@@ -655,6 +655,18 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             state: ai_guard_state.clone(),
             heartbeat_interval: std::time::Duration::from_secs(24 * 3600),
             home_dir: home_dir.clone(),
+            // #329 — a root agent reads every user's configs, not just root's.
+            user_homes: if crate::control::is_root() {
+                UserEnumerator::list(&plat)
+                    .into_iter()
+                    .map(|u| crate::ai_guard::task::AssessHome {
+                        user: Some(u.name),
+                        dir: u.home,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             host_id: host_id.clone(),
             // Phase 3b.3 Task 6 — registry populated from parser configs at
             // boot above. Task 7 will share the same handle with
