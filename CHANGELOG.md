@@ -23,12 +23,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ### Changed
 
-- Continue's `slashCommands[].step` and `.run` and `customCommands[].command`
-  are no longer assessed, and a script named by `step` is no longer watched.
-  Continue runs none of them: `step` is documented as having no effect, a
-  slash command resolves only by name to a built-in, and a custom command is
-  a prompt. Destructive text in these fields used to be reported as a hook
-  command. Prompts are still scanned.
+- Continue's `slashCommands` entries and `customCommands[].command` are no
+  longer assessed, and a script named by `step` is no longer watched.
+  Continue uses none of their `step`, `run` or `prompt` text: `step` is
+  documented as having no effect, a slash command resolves only by name to a
+  built-in, and a custom command has no `command` field. Destructive text in
+  these fields used to be reported as a hook command. A custom command's
+  `prompt`, which Continue sends to the model, is still scanned.
 
 - Codex hooks that Codex will not run are no longer assessed. A hook outside
   the system layer runs only when `~/.codex/config.toml` records a

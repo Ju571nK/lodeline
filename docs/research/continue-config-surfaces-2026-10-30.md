@@ -1,8 +1,10 @@
 # Continue Config Surfaces
 
 Checked 2026-10-30 against `continuedev/continue` main at `5522c6f`
-(2026-07-21; the repository is not archived). Continue is not installed on
-the machine used, so nothing here was observed at runtime.
+(committed 2026-07-21). The GitHub API reports the repository as not
+archived, with a push on 2026-10-29, although
+`generative-ai-compatibility-2026-08-16.md` calls it read-only. Continue is
+not installed on the machine used, so nothing here was observed at runtime.
 
 ## What the source says
 
@@ -26,10 +28,11 @@ the machine used, so nothing here was observed at runtime.
 
 ## What Sigil reads
 
-Since this change Sigil no longer reads `step`, `run`, or
-`customCommands[].command`, and no longer watches scripts named by `step`.
-Prompts in both lists are still scanned for destructive patterns, as text
-handed to the model.
+Since this change Sigil no longer reads `slashCommands` entries (`step`,
+`run`, `prompt`) or `customCommands[].command`, and no longer watches scripts
+named by `step`. A custom command's `prompt` is still scanned for destructive
+patterns, as text handed to the model. A `slashCommands` entry's `prompt` is
+not, since the resolver does not copy it.
 
 Not covered yet: the `cmd` built-in, `experimental.modelContextProtocolServers`,
 `config.yaml` and its `mcpServers`, `.continue/mcpServers/` directories,

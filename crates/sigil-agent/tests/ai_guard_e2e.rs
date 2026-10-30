@@ -216,7 +216,7 @@ targets:
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn continue_config_with_destructive_slash_emits_destructive_reason() {
+async fn continue_config_with_destructive_custom_command_emits_destructive_reason() {
     let _home_guard = HOME_LOCK.lock().await;
     let td = tempfile::TempDir::new().unwrap();
     let home = dunce::canonicalize(td.path()).unwrap();
@@ -227,7 +227,7 @@ async fn continue_config_with_destructive_slash_emits_destructive_reason() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("config.json"),
-        r#"{"slashCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-test-3b6"}]}"#,
+        r#"{"customCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-test-3b6"}]}"#,
     )
     .unwrap();
 
@@ -265,9 +265,9 @@ targets:
     let reasons = ev["evidence"]["reasons"].as_array().expect("reasons array");
     assert!(
         reasons.iter().any(|r| {
-            r["kind"] == "destructive_in_inline_command" && r["hook_event"] == "slash_command"
+            r["kind"] == "destructive_in_inline_command" && r["hook_event"] == "custom_command"
         }),
-        "expected destructive_in_inline_command with hook_event=slash_command in {reasons:?}"
+        "expected destructive_in_inline_command with hook_event=custom_command in {reasons:?}"
     );
 
     agent.join.abort();
@@ -295,7 +295,7 @@ async fn continue_per_repo_discovery_emits_distinct_project_events() {
     .unwrap();
     std::fs::write(
         repo_b.join(".continue").join("config.json"),
-        r#"{"slashCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-3b6.1-b"}]}"#,
+        r#"{"customCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-3b6.1-b"}]}"#,
     )
     .unwrap();
 
@@ -330,7 +330,7 @@ targets: []
     let reasons_a = ev_a["evidence"]["reasons"].as_array().expect("reasons");
     assert!(reasons_a.iter().any(|r| r["kind"] == "mcp_server_remote"));
 
-    // Wait for repoB's event (destructive slash command).
+    // Wait for repoB's event (destructive custom command).
     let ev_b = agent
         .wait_for_event(
             |v| {
@@ -345,7 +345,7 @@ targets: []
         .expect("expected AiGuardRiskAssessed with project scope = repoB");
     let reasons_b = ev_b["evidence"]["reasons"].as_array().expect("reasons");
     assert!(reasons_b.iter().any(|r| {
-        r["kind"] == "destructive_in_inline_command" && r["hook_event"] == "slash_command"
+        r["kind"] == "destructive_in_inline_command" && r["hook_event"] == "custom_command"
     }));
 
     agent.join.abort();

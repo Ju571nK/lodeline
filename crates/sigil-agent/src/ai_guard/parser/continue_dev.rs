@@ -1,6 +1,6 @@
 //! Phase 3b.6 — Continue.dev (VSCode/JetBrains 확장) parser. Reads the
 //! user-global `~/.continue/config.json` and maps mcpServers /
-//! slashCommands / customCommands to `AiGuardReason`.
+//! customCommands to `AiGuardReason`.
 //!
 //! Schema notes: Continue's config.json has evolved across versions.
 //! Top-level `mcpServers` is observed as both an object map ({"name": {...}})
@@ -8,10 +8,10 @@
 //! handles both shapes. Other surfaces (models, contextProviders, rules)
 //! are deliberately out of scope for Phase 3b.6.
 //!
-//! Continue runs no host command from `slashCommands[].step` or `.run`, or
-//! from a `customCommands[].command`: its schema says `step` "has no
-//! effect", a slash command resolves only by `name` to a built-in, and a
-//! custom command is `{name, prompt, description}`. Only prompts are read.
+//! Continue uses nothing but the `name`, `description` and `params` of a
+//! `slashCommands` entry: its schema says `step` "has no effect", and the
+//! name picks a built-in. A custom command is `{name, prompt, description}`,
+//! so its `prompt` is the only text here that reaches the model.
 
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rubric;
@@ -43,7 +43,6 @@ impl AiGuardParser for ContinueDevParser {
         };
         let mut out = Vec::new();
         emit_mcp_reasons(&val, &mut out);
-        emit_slash_command_reasons(&val, &mut out);
         emit_custom_command_reasons(&val, &mut out);
         Ok(out)
     }
@@ -74,16 +73,8 @@ fn emit_one_mcp(name: &str, def: &Value, out: &mut Vec<AiGuardReason>) {
     super::mcp_scan::emit_one_server(name, def, out);
 }
 
-pub(crate) fn emit_slash_command_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
-    emit_prompt_reasons(settings, "slashCommands", "slash_command", out);
-}
-
 pub(crate) fn emit_custom_command_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
-    emit_prompt_reasons(settings, "customCommands", "custom_command", out);
-}
-
-fn emit_prompt_reasons(settings: &Value, key: &str, hook_event: &str, out: &mut Vec<AiGuardReason>) {
-    let Some(arr) = settings.get(key).and_then(Value::as_array) else {
+    let Some(arr) = settings.get("customCommands").and_then(Value::as_array) else {
         return;
     };
     for prompt in arr
@@ -93,7 +84,7 @@ fn emit_prompt_reasons(settings: &Value, key: &str, hook_event: &str, out: &mut 
         if let Some(pat) = rubric::first_destructive_pattern(prompt) {
             out.push(AiGuardReason::DestructiveInInlineCommand {
                 pattern: pat.to_string(),
-                hook_event: hook_event.to_string(),
+                hook_event: "custom_command".to_string(),
                 snippet: prompt.chars().take(80).collect(),
             });
         }
@@ -135,14 +126,13 @@ impl AiGuardParser for ContinueDevProjectParser {
         // new servers refresh=true -> refreshConnections -> connectClient). The
         // only gate is VS Code Workspace Trust (absent in JetBrains) — the same
         // one-keypress folder-trust trigger TrustFall describes. Amplify off the
-        // MCP-only reasons here, BEFORE the slash/custom-command prompt reasons
+        // MCP-only reasons here, BEFORE the custom-command prompt reasons
         // (which can also emit DestructiveInInlineCommand) join `out`.
         if super::mcp_scan::has_local_or_risky_mcp(&out) {
             out.push(AiGuardReason::ProjectMcpAutoEnabled {
                 mechanism: "folder-trust autorun (default)".to_string(),
             });
         }
-        emit_slash_command_reasons(&val, &mut out);
         emit_custom_command_reasons(&val, &mut out);
         Ok(out)
     }
@@ -279,18 +269,18 @@ mod tests {
     }
 
     #[test]
-    fn slash_command_prompt_with_destructive_pattern_emits_destructive() {
+    fn custom_command_prompt_with_destructive_pattern_emits_destructive() {
         let dir = tempdir().unwrap();
         write_config(
             dir.path(),
-            r#"{"slashCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-test"}]}"#,
+            r#"{"customCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-test"}]}"#,
         );
         let p = ContinueDevParser;
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons.iter().any(|r| matches!(
             r,
             AiGuardReason::DestructiveInInlineCommand { hook_event, .. }
-                if hook_event == "slash_command"
+                if hook_event == "custom_command"
         )));
     }
 
@@ -302,7 +292,8 @@ mod tests {
         let config = serde_json::json!({
             "slashCommands": [
                 {"name": "lint", "step": script},
-                {"name": "danger", "run": "rm -rf /tmp/sigil-test"}
+                {"name": "danger", "run": "rm -rf /tmp/sigil-test"},
+                {"name": "edit", "prompt": "rm -rf /tmp/sigil-test"}
             ],
             "customCommands": [
                 {"name": "x", "prompt": "Explain this", "command": "rm -rf /tmp/sigil-test"}
@@ -312,14 +303,19 @@ mod tests {
         let p = ContinueDevParser;
         assert!(p.assess(dir.path()).unwrap().is_empty());
         assert!(p.collect_external_script_paths(dir.path()).is_empty());
+        let project = ContinueDevProjectParser {
+            repo_root: dir.path().to_path_buf(),
+        };
+        assert!(project.assess(dir.path()).unwrap().is_empty());
+        assert!(project.collect_external_script_paths(dir.path()).is_empty());
     }
 
     #[test]
-    fn safe_slash_command_emits_nothing() {
+    fn safe_custom_command_emits_nothing() {
         let dir = tempdir().unwrap();
         write_config(
             dir.path(),
-            r#"{"slashCommands": [{"name": "ok", "prompt": "echo hello"}]}"#,
+            r#"{"customCommands": [{"name": "ok", "prompt": "echo hello"}]}"#,
         );
         let p = ContinueDevParser;
         let reasons = p.assess(dir.path()).unwrap();
@@ -356,14 +352,14 @@ mod tests {
     }
 
     #[test]
-    fn project_parser_destructive_slash_command_is_detected() {
+    fn project_parser_destructive_custom_command_is_detected() {
         let dir = tempdir().unwrap();
         let repo = dir.path().join("repoX");
         let cdir = repo.join(".continue");
         std::fs::create_dir_all(&cdir).unwrap();
         std::fs::write(
             cdir.join("config.json"),
-            r#"{"slashCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-3b6.1"}]}"#,
+            r#"{"customCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-3b6.1"}]}"#,
         )
         .unwrap();
         let p = ContinueDevProjectParser {
@@ -373,7 +369,7 @@ mod tests {
         assert!(reasons.iter().any(|r| matches!(
             r,
             AiGuardReason::DestructiveInInlineCommand { hook_event, .. }
-                if hook_event == "slash_command"
+                if hook_event == "custom_command"
         )));
     }
 
@@ -487,31 +483,31 @@ mod tests {
     #[test]
     fn project_amplifier_ignores_non_mcp_destructive_reasons() {
         // #154: the amplifier keys only on MCP-derived reasons. A destructive
-        // slash command alongside a benign remote-only MCP must NOT auto-enable.
+        // custom command alongside a benign remote-only MCP must NOT auto-enable.
         let dir = tempdir().unwrap();
         write_project_config(
             dir.path(),
             r#"{"mcpServers": {"r": {"url": "https://api.example/mcp"}},
-                "slashCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-test"}]}"#,
+                "customCommands": [{"name": "danger", "prompt": "rm -rf /tmp/sigil-test"}]}"#,
         );
         let out = ContinueDevProjectParser {
             repo_root: dir.path().to_path_buf(),
         }
         .assess(std::path::Path::new("/unused"))
         .unwrap();
-        // Sanity: the destructive slash-command reason IS present (test is real)…
+        // Sanity: the destructive custom-command reason IS present (test is real)…
         assert!(
             out.iter().any(|r| matches!(
                 r, AiGuardReason::DestructiveInInlineCommand { hook_event, .. }
-                    if hook_event == "slash_command"
+                    if hook_event == "custom_command"
             )),
-            "fixture should produce a destructive slash-command reason; got {out:?}"
+            "fixture should produce a destructive custom-command reason; got {out:?}"
         );
         // …but it must NOT be mistaken for an auto-launching project MCP.
         assert!(
             !out.iter()
                 .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
-            "destructive slash command (not MCP) must not trigger the amplifier; got {out:?}"
+            "destructive custom command (not MCP) must not trigger the amplifier; got {out:?}"
         );
     }
 }
