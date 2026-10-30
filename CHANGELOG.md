@@ -7,6 +7,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-30
+
 ### Added
 
 - A Claude Code hook script is now scanned when its interpreter follows
@@ -30,6 +32,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   built-in, and a custom command has no `command` field. Destructive text in
   these fields used to be reported as a hook command. A custom command's
   `prompt`, which Continue sends to the model, is still scanned.
+  Fleet consumers no longer see `hook_event: "slash_command"` from this
+  version on (Ju571nK/sigil-manager#40).
 
 - Codex hooks that Codex will not run are no longer assessed. A hook outside
   the system layer runs only when `~/.codex/config.toml` records a
