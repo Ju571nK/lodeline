@@ -215,8 +215,10 @@ async fn eval_and_maybe_emit(
             tracing::warn!(error = ?e, tool = ?parser.tool(), "ai_guard assess failed; skip cycle");
             let prev = ctx.state.read().get(&key).cloned();
             if let (true, Some(p)) = (force_emit, prev) {
+                let score = ctx.rubric.read().score(&p.reasons);
+                let bucket = rubric::bucket(score);
                 send_risk(
-                    ctx, parser, &key, p.controls, p.score, p.bucket, p.reasons, true,
+                    ctx, parser, &key, p.controls, score, bucket, p.reasons, true,
                 )
                 .await;
             }
