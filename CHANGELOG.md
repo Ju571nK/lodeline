@@ -27,7 +27,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   string order puts `-001` first, so the sender jumped from `events-D.jsonl`
   to the next day and never shipped `-001` onward. The spool GC used the same
   order to pick the live segment and to decide what was shipped. Segments are
-  now ordered by date and sequence number everywhere (#331).
+  now ordered by date and sequence number everywhere, including
+  `sigil show events`. Rotations a sender already skipped before the upgrade
+  stay unshipped. A sender that started on an existing backlog may also
+  re-send or skip a few segments once after upgrading (#331).
 
 - An agent running as root on Linux or macOS now assesses every user's AI
   agent configs, not just root's own home. Each user's readings carry a new
