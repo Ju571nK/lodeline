@@ -70,49 +70,12 @@ const MAINTENANCE_BATCH: i64 = 20;
 /// Unix-seconds clock. Injectable so retention is testable.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-/// Forward wall-clock steps larger than this (beyond the monotonic time that
-/// passed) are not counted as age.
-const CLOCK_JUMP_TOLERANCE_SECS: i64 = 300;
-
 fn system_clock() -> Clock {
-    let start = std::time::Instant::now();
-    jump_guarded(
-        || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        },
-        move || start.elapsed().as_secs() as i64,
-    )
-}
-
-/// Wall seconds minus every forward jump seen while this process runs (#302):
-/// a clock stepped days ahead must not expire the whole unsent spool at once.
-/// Backward steps only delay expiry, so they pass through. shortcut: the
-/// correction is lost on restart, so a jump across a restart still counts;
-/// persist the offset if that matters.
-fn jump_guarded(
-    wall: impl Fn() -> i64 + Send + Sync + 'static,
-    mono: impl Fn() -> i64 + Send + Sync + 'static,
-) -> Clock {
-    let last = Mutex::new(None::<(i64, i64, i64)>);
-    Arc::new(move || {
-        let (w, m) = (wall(), mono());
-        let mut g = last.lock().unwrap_or_else(|p| p.into_inner());
-        let offset = match *g {
-            Some((lw, lm, off)) => {
-                let excess = (w - lw) - (m - lm);
-                if excess > CLOCK_JUMP_TOLERANCE_SECS {
-                    off + excess
-                } else {
-                    off
-                }
-            }
-            None => 0,
-        };
-        *g = Some((w, m, offset));
-        w - offset
+    Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
     })
 }
 
@@ -1798,35 +1761,6 @@ mod tests {
         format!("00000000-0000-4000-8000-{n:012x}")
     }
     const EPOCH: u32 = 5000;
-
-    #[test]
-    fn forward_clock_jumps_do_not_count_as_age() {
-        let (wall, mono) = (
-            Arc::new(AtomicI64::new(1_000_000)),
-            Arc::new(AtomicI64::new(0)),
-        );
-        let (w, m) = (wall.clone(), mono.clone());
-        let clock = jump_guarded(
-            move || w.load(Ordering::SeqCst),
-            move || m.load(Ordering::SeqCst),
-        );
-        assert_eq!(clock(), 1_000_000);
-        wall.fetch_add(60, Ordering::SeqCst);
-        mono.fetch_add(60, Ordering::SeqCst);
-        assert_eq!(clock(), 1_000_060, "normal time passes");
-        wall.fetch_add(10 * 86_400, Ordering::SeqCst);
-        mono.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(
-            clock(),
-            1_000_061,
-            "a 10-day step counts as the 1 s that passed"
-        );
-        wall.fetch_add(30, Ordering::SeqCst);
-        mono.fetch_add(30, Ordering::SeqCst);
-        assert_eq!(clock(), 1_000_091, "time keeps passing after the step");
-        wall.fetch_sub(3_600, Ordering::SeqCst);
-        assert_eq!(clock(), 1_000_091 - 3_600, "a backward step passes through");
-    }
 
     #[cfg(unix)]
     #[test]
