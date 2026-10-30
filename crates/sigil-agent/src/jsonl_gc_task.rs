@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use sigil_core::event::{
     Event, Evidence, Severity, SourceKind, Subject, AGENT_VERSION, SCHEMA_VERSION,
 };
+use sigil_core::sink::jsonl::segment_order;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +22,9 @@ use uuid::Uuid;
 pub struct GcTaskCtx {
     pub host_id: String,
     pub events_dir: PathBuf,
-    /// The sender's offset file; segments before its `current_file` are shipped.
-    pub sender_offset_path: PathBuf,
+    /// The sender's offset file; segments before its `current_file` are
+    /// shipped. `None` when no sender tails this spool.
+    pub sender_offset_path: Option<PathBuf>,
     /// Updated by the JsonlSink each rotation; the task reads it at decision time.
     pub current_segment_filename: Arc<RwLock<String>>,
     /// Heartbeat reads this — set by the task each tick.
@@ -61,9 +63,10 @@ async fn tick(ctx: &GcTaskCtx) {
             return;
         }
     };
-    let off = match sender_offset::read(&ctx.sender_offset_path) {
-        Ok(v) => v,
-        Err(e) => {
+    let off = match ctx.sender_offset_path.as_deref().map(sender_offset::read) {
+        None => None,
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
             tracing::warn!(error = ?e, "jsonl_gc: sender_offset read failed; treating as None");
             None
         }
@@ -75,9 +78,12 @@ async fn tick(ctx: &GcTaskCtx) {
     // this with a sink-pushed update on every rotation.
     {
         let stored = ctx.current_segment_filename.read().clone();
-        let lex_max = segs.iter().map(|s| s.filename.as_str()).max();
-        if let Some(latest) = lex_max {
-            if stored.is_empty() || stored.as_str() < latest {
+        let newest = segs
+            .iter()
+            .map(|s| s.filename.as_str())
+            .max_by(|a, b| segment_order(a).cmp(&segment_order(b)));
+        if let Some(latest) = newest {
+            if stored.is_empty() || segment_order(&stored) < segment_order(latest) {
                 *ctx.current_segment_filename.write() = latest.to_string();
             }
         }
@@ -228,7 +234,7 @@ mod tests {
         let ctx = GcTaskCtx {
             host_id: "h".into(),
             events_dir: dir.to_path_buf(),
-            sender_offset_path: dir.join("sender-offset.json"),
+            sender_offset_path: Some(dir.join("sender-offset.json")),
             current_segment_filename: curr,
             above_soft_floor: above.clone(),
             cfg,
@@ -284,6 +290,27 @@ mod tests {
         assert!(!dir.path().join("events-2026-05-13.jsonl").exists());
         // 05-14 (current segment) MUST still exist.
         assert!(dir.path().join("events-2026-05-14.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn same_day_rotation_is_the_live_segment() {
+        let dir = tempdir().unwrap();
+        write_seg(dir.path(), "events-2026-05-14.jsonl", &[b'x'; 600]);
+        write_seg(dir.path(), "events-2026-05-14-001.jsonl", &[b'x'; 600]);
+        let cfg = GcConfig {
+            soft_floor_bytes: 100,
+            soft_floor_age: Duration::from_secs(3600),
+            hard_ceiling_bytes: 1000,
+            hard_ceiling_age: Duration::from_secs(7200),
+        };
+        let (ctx, _rx, _above) = ctx_for(dir.path(), "events-2026-05-14.jsonl", cfg);
+        tick(&ctx).await;
+        assert_eq!(
+            *ctx.current_segment_filename.read(),
+            "events-2026-05-14-001.jsonl"
+        );
+        assert!(dir.path().join("events-2026-05-14-001.jsonl").exists());
+        assert!(!dir.path().join("events-2026-05-14.jsonl").exists());
     }
 
     #[tokio::test]

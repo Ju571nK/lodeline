@@ -5,6 +5,7 @@
 
 use crate::gc_config::GcConfig;
 use crate::sender_offset::SenderOffset;
+use sigil_core::sink::jsonl::segment_order;
 use std::path::PathBuf;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -60,10 +61,9 @@ pub fn decide(
         };
     }
 
-    // Sort oldest-first by filename. Filename embeds the date + seq, so
-    // lexicographic order is chronological for `events-YYYY-MM-DD-NNN.jsonl`.
+    // Sort oldest-first by the date + seq the filename embeds.
     let mut sorted: Vec<&Segment> = segments.iter().collect();
-    sorted.sort_by(|a, b| a.filename.cmp(&b.filename));
+    sorted.sort_by(|a, b| segment_order(&a.filename).cmp(&segment_order(&b.filename)));
 
     let total_size: u64 = sorted.iter().map(|s| s.size_bytes).sum();
     let oldest_age = sorted
@@ -104,7 +104,7 @@ pub fn decide(
         // Determine if this segment is past the sender. With no sender
         // record, treat ALL segments as not-yet-consumed.
         let past_sender = match sender_seg {
-            Some(curr) => s.filename.as_str() < curr,
+            Some(curr) => segment_order(&s.filename) < segment_order(curr),
             None => false,
         };
 
@@ -228,6 +228,32 @@ mod tests {
         assert!(d.to_delete[1].to_string_lossy().contains("05-14"));
         assert_eq!(d.force_deleted_past_sender, 0);
         assert!(!d.hard_ceiling_fired);
+    }
+
+    #[test]
+    fn same_day_rotations_after_the_sender_are_kept() {
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let segs = vec![
+            seg("events-2026-05-14.jsonl", 80, now - Duration::from_secs(60)),
+            seg(
+                "events-2026-05-14-001.jsonl",
+                80,
+                now - Duration::from_secs(60),
+            ),
+            seg(
+                "events-2026-05-14-002.jsonl",
+                80,
+                now - Duration::from_secs(60),
+            ),
+            seg("events-2026-05-15.jsonl", 80, now - Duration::from_secs(60)),
+        ];
+        let off = SenderOffset {
+            current_segment: "events-2026-05-14-001.jsonl".into(),
+            byte_offset: 0,
+        };
+        let d = decide(&segs, Some(&off), "events-2026-05-15.jsonl", &cfg(), now);
+        assert_eq!(d.to_delete.len(), 1, "got {:?}", d.to_delete);
+        assert!(d.to_delete[0].ends_with("events-2026-05-14.jsonl"));
     }
 
     #[test]

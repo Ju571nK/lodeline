@@ -10,6 +10,25 @@ use time::OffsetDateTime;
 
 pub const ROTATE_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Write-order sort key for a segment filename. `events-D.jsonl` (seq 0) is
+/// written before `events-D-001.jsonl`, but plain string order puts it after,
+/// because `-` sorts before `.` (#331).
+pub fn segment_order(name: &str) -> (&str, u32) {
+    let stem = name
+        .strip_prefix("events-")
+        .and_then(|s| s.strip_suffix(".jsonl"))
+        .unwrap_or(name);
+    match stem.split_at_checked(10) {
+        Some((date, rest)) => (
+            date,
+            rest.strip_prefix('-')
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0),
+        ),
+        None => (stem, 0),
+    }
+}
+
 pub struct JsonlSink {
     dir: PathBuf,
     current_path: PathBuf,
@@ -118,6 +137,27 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use time::macros::datetime;
+
+    #[test]
+    fn segment_order_follows_write_order() {
+        let mut names = vec![
+            "events-2026-05-15.jsonl",
+            "events-2026-05-14-010.jsonl",
+            "events-2026-05-14-002.jsonl",
+            "events-2026-05-14.jsonl",
+        ];
+        names.sort_by_key(|n| segment_order(n));
+        assert_eq!(
+            names,
+            [
+                "events-2026-05-14.jsonl",
+                "events-2026-05-14-002.jsonl",
+                "events-2026-05-14-010.jsonl",
+                "events-2026-05-15.jsonl",
+            ]
+        );
+        assert!(segment_order("") < segment_order("events-2026-05-14.jsonl"));
+    }
 
     fn sample_event(ts: OffsetDateTime) -> Event {
         Event::new_file_change(

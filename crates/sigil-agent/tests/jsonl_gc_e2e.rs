@@ -43,7 +43,7 @@ fn build_ctx(
     let ctx = GcTaskCtx {
         host_id: "h".into(),
         events_dir: dir.to_path_buf(),
-        sender_offset_path: dir.join("sender-offset.json"),
+        sender_offset_path: Some(dir.join("sender-offset.json")),
         current_segment_filename: curr,
         above_soft_floor: above.clone(),
         cfg,

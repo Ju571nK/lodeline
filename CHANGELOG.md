@@ -20,7 +20,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   soft floor never freed shipped segments, and at the hard ceiling the GC
   force-deleted them and raised a data-loss alarm for data already delivered.
   A sender with a non-default `offset_path` still leaves the GC without a
-  sender record (#331).
+  sender record. Only a root agent reads it; a per-user agent's spool is not
+  tailed by the packaged sender (#331).
+- sigil-sender no longer skips the same-day rotations of a segment. The agent
+  writes `events-D.jsonl` and then, past 100 MiB, `events-D-001.jsonl`, but
+  string order puts `-001` first, so the sender jumped from `events-D.jsonl`
+  to the next day and never shipped `-001` onward. The spool GC used the same
+  order to pick the live segment and to decide what was shipped. Segments are
+  now ordered by date and sequence number everywhere (#331).
 
 - An agent running as root on Linux or macOS now assesses every user's AI
   agent configs, not just root's own home. Each user's readings carry a new
