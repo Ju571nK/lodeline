@@ -643,6 +643,10 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
         return Ok(());
     }
     writeln!(w, "TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED")?;
+    let with_user = |scope: String, user: &Option<String>| match user {
+        Some(u) => format!("{scope}@{u}"),
+        None => scope,
+    };
     for s in &p.assessments {
         let scope_str = match &s.scope {
             sigil_core::event::AiGuardScope::UserGlobal => "user-global".to_string(),
@@ -665,7 +669,12 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
         writeln!(
             w,
             "{}\t{}\t{:.1}\t{}\t{}\t{}",
-            tool_str, scope_str, s.score, bucket_str, s.reasons_count, s.last_assessed_ts
+            tool_str,
+            with_user(scope_str, &s.user),
+            s.score,
+            bucket_str,
+            s.reasons_count,
+            s.last_assessed_ts
         )?;
     }
     Ok(())
@@ -986,6 +995,7 @@ mod tests {
                 bucket: AiGuardBucket::Medium,
                 reasons_count: 2,
                 last_assessed_ts: "2026-05-16T06:00:00Z".into(),
+                user: Some("alice".into()),
             }],
         };
         let mut buf = Vec::new();
@@ -993,7 +1003,7 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.starts_with("TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED\n"));
         assert!(
-            out.contains("claude-code\tuser-global\t3.5\tmedium\t2\t2026-05-16T06:00:00Z"),
+            out.contains("claude-code\tuser-global@alice\t3.5\tmedium\t2\t2026-05-16T06:00:00Z"),
             "got: {out}"
         );
     }
@@ -1030,6 +1040,7 @@ mod tests {
                 bucket: AiGuardBucket::Critical,
                 reasons_count: 5,
                 last_assessed_ts: "2026-05-16T06:01:00Z".into(),
+                user: None,
             }],
         };
         let mut buf = Vec::new();

@@ -522,7 +522,13 @@ mod tests {
             r#"{"schema_version":4,"tools":[{"server_name":"third","tool":{"name":"read","description":"Read a record","inputSchema":{"properties":{"id":{}},"required":["id"]}}}]}"#,
         );
         assert!(parser.assess(home.path()).unwrap().is_empty());
-        let file = std::fs::read_dir(&path)
+        let home_dir = std::fs::read_dir(&path)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let file = std::fs::read_dir(home_dir)
             .unwrap()
             .next()
             .unwrap()

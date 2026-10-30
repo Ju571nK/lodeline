@@ -684,6 +684,11 @@ pub enum Evidence {
         /// rule pack's `tool_label`. None (omitted) for built-in tools. Forward-compat.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_label: Option<String>,
+        /// #329 — the OS account whose home was assessed, when a root agent
+        /// assesses each user's configs. None (omitted) for the agent's own
+        /// home and for project scopes, the shape older agents emit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
     },
     /// #147 — a dangerous self-config toggle flipped OFF→ON between snapshots
     /// (auto-approve / sandbox-off / broad-allow / project-MCP-autorun). One-time
@@ -697,6 +702,9 @@ pub enum Evidence {
         rule_pack_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_label: Option<String>,
+        /// #329 — same as `AiGuardRiskAssessed.user`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
     },
     /// Phase 3b.4-pre — periodic snapshot of host identity + network + OS
     /// metadata. Emitted by host_meta_snapshot_task on boot, every 24h, and
@@ -1090,6 +1098,7 @@ mod tests {
             is_reattestation: false,
             rule_pack_id: None,
             tool_label: None,
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(
@@ -1114,6 +1123,7 @@ mod tests {
             toggle: "auto_approval_enabled".into(),
             rule_pack_id: None,
             tool_label: None,
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"kind\":\"ai_guard_toggle_drift\""), "got: {s}");
@@ -1134,6 +1144,7 @@ mod tests {
             toggle: "sandbox_disabled".into(),
             rule_pack_id: Some("my-pack".into()),
             tool_label: Some("acme-ai".into()),
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains(r#""rule_pack_id":"my-pack""#));
@@ -1169,6 +1180,7 @@ mod tests {
             is_reattestation: false,
             rule_pack_id: None,
             tool_label: None,
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(!s.contains("tool_label"));
@@ -1187,6 +1199,7 @@ mod tests {
             is_reattestation: false,
             rule_pack_id: Some("p".into()),
             tool_label: Some("acme-ai".into()),
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains(r#""tool":"other""#) && s.contains(r#""tool_label":"acme-ai""#));
@@ -1230,6 +1243,7 @@ mod tests {
             is_reattestation: false,
             rule_pack_id: None,
             tool_label: None,
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"reasons\":[]"), "got: {s}");
@@ -1527,6 +1541,7 @@ mod tests {
             is_reattestation: false,
             rule_pack_id: None,
             tool_label: None,
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(!s.contains("rule_pack_id"));
@@ -1545,6 +1560,7 @@ mod tests {
             is_reattestation: false,
             rule_pack_id: Some("my-pack".into()),
             tool_label: None,
+            user: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains(r#""rule_pack_id":"my-pack""#));

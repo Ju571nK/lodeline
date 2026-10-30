@@ -73,6 +73,7 @@ where
                     path: repo_root.clone(),
                 },
                 None::<String>,
+                None::<String>,
             ));
         }
     }
@@ -137,7 +138,8 @@ fn reconcile_rule_packs(
     if !gone.is_empty() {
         let mut s = state.write();
         for (tool, scope, id) in gone {
-            s.remove(&(tool, scope, Some(id)));
+            // One entry per assessed home (#329).
+            s.retain(|k, _| !(k.0 == tool && k.1 == scope && k.2.as_deref() == Some(id.as_str())));
         }
     }
 
@@ -925,6 +927,7 @@ mod tests {
                         path: canonical_a.clone(),
                     },
                     None::<String>,
+                    None::<String>,
                 ),
                 crate::ai_guard::task::CachedAssessment {
                     controls: None,
@@ -933,6 +936,7 @@ mod tests {
                     bucket: sigil_core::event::AiGuardBucket::High,
                     reasons_blake3: [0u8; 32],
                     reasons_count: 1,
+                    reasons: vec![],
                     last_assessed_ts: time::OffsetDateTime::now_utc(),
                     dangerous_toggles: std::collections::BTreeSet::new(),
                 },
@@ -962,6 +966,7 @@ mod tests {
                 sigil_core::event::AiGuardScope::Project {
                     path: canonical_a.clone(),
                 },
+                None::<String>,
                 None::<String>,
             );
             assert!(
@@ -1299,6 +1304,7 @@ mod tests {
                         sigil_core::event::AiTool::Gemini,
                         sigil_core::event::AiGuardScope::Project { path: path.clone() },
                         Some(pack_id.to_string()),
+                        None::<String>,
                     ),
                     crate::ai_guard::task::CachedAssessment {
                         controls: None,
@@ -1307,6 +1313,7 @@ mod tests {
                         bucket: sigil_core::event::AiGuardBucket::High,
                         reasons_blake3: [0u8; 32],
                         reasons_count: 1,
+                        reasons: vec![],
                         last_assessed_ts: time::OffsetDateTime::now_utc(),
                         dangerous_toggles: std::collections::BTreeSet::new(),
                     },
@@ -1350,6 +1357,7 @@ mod tests {
                     path: canonical_b.clone(),
                 },
                 Some(pack_id.to_string()),
+                None::<String>,
             );
             assert!(
                 !s.contains_key(&key_b),
@@ -1361,6 +1369,7 @@ mod tests {
                     path: canonical_a.clone(),
                 },
                 Some(pack_id.to_string()),
+                None::<String>,
             );
             assert!(
                 s.contains_key(&key_a),

@@ -5,6 +5,9 @@ use sigil_core::event::{AiGuardBucket, AiGuardReason, AiGuardScope, AiTool, Host
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
+/// Tool, scope, user and rule pack of one AI Guard reading (#329).
+pub type RiskSourceKey = (AiTool, AiGuardScope, Option<String>, Option<String>);
+
 /// One AI Guard risk reading, per tool. Mirrors `AiGuardRiskAssessed` evidence
 /// but stored separately so `/v1/fleet/hosts/{host_id}` can return the latest
 /// without re-reading JSONL.
@@ -133,7 +136,12 @@ pub struct HostSummary {
 
     pub latest_host_meta: Option<HostMetaSnapshot>,
 
+    /// Per tool, the riskiest of that tool's readings in `risk_sources`.
     pub current_risk: BTreeMap<AiTool, RiskEntry>,
+    /// Latest reading per source from the last 48h (#329). Rebuilt from JSONL
+    /// on start, so it is not serialized.
+    #[serde(skip)]
+    pub risk_sources: std::collections::HashMap<RiskSourceKey, RiskEntry>,
 
     pub policy_state: PolicyState,
     pub agent_health: AgentHealth,

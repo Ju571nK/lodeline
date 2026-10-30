@@ -59,10 +59,17 @@ pub fn apply_event(host: &mut HostSummary, event: &Event) {
             bucket,
             reasons,
             is_reattestation,
+            user,
+            rule_pack_id,
             ..
         } => {
-            host.current_risk.insert(
-                *tool,
+            // The agent re-sends every reading each 24h, so one older than two
+            // heartbeats is gone (a removed repo, user or pack) and must not
+            // hold the host's risk up.
+            let cutoff = event.ts - time::Duration::hours(48);
+            host.risk_sources.retain(|_, e| e.assessed_ts >= cutoff);
+            host.risk_sources.insert(
+                (*tool, scope.clone(), user.clone(), rule_pack_id.clone()),
                 crate::fleet_index::RiskEntry {
                     controls: controls.clone(),
                     score: *score,
@@ -73,6 +80,21 @@ pub fn apply_event(host: &mut HostSummary, event: &Event) {
                     reasons: reasons.clone(),
                 },
             );
+            // A clean reading for one user or project must not hide another's;
+            // on a tie the newest reading is shown. Rebuilt for every tool, so
+            // a tool whose readings were all pruned drops out.
+            host.current_risk.clear();
+            for ((t, ..), e) in &host.risk_sources {
+                let keep = host.current_risk.get(t).is_some_and(|top| {
+                    top.score
+                        .total_cmp(&e.score)
+                        .then(top.assessed_ts.cmp(&e.assessed_ts))
+                        .is_ge()
+                });
+                if !keep {
+                    host.current_risk.insert(*t, e.clone());
+                }
+            }
         }
         Evidence::Heartbeat {
             hash_p99_ms,
@@ -183,6 +205,7 @@ mod tests {
                 is_reattestation: false,
                 rule_pack_id: None,
                 tool_label: None,
+                user: None,
             }
         }
 
@@ -197,6 +220,7 @@ mod tests {
                     toggle: "auto_approval_enabled".into(),
                     rule_pack_id: None,
                     tool_label: None,
+                    user: None,
                 },
                 "policy_signature_invalid" => Evidence::PolicySignatureInvalid {
                     reason: PolicySignatureInvalidReason::SignatureInvalid,
@@ -332,6 +356,7 @@ mod tests {
                 is_reattestation: false,
                 rule_pack_id: None,
                 tool_label: None,
+                user: None,
             },
             Severity::Warn,
             datetime!(2026-05-17 12:00 UTC),
@@ -340,6 +365,53 @@ mod tests {
         let entry = h.current_risk.get(&AiTool::ClaudeCode).unwrap();
         assert_eq!(entry.score, 7.2);
         assert_eq!(entry.bucket, AiGuardBucket::Critical);
+    }
+
+    #[test]
+    fn ai_guard_risk_keeps_the_riskiest_user_per_tool() {
+        let mut h = HostSummary::new("h".into());
+        let reading = |user: &str, pack: Option<&str>, score: f32, minutes: i64| {
+            ev(
+                Evidence::AiGuardRiskAssessed {
+                    controls: None,
+                    tool: AiTool::ClaudeCode,
+                    scope: AiGuardScope::UserGlobal,
+                    score,
+                    bucket: if score >= 7.0 {
+                        AiGuardBucket::Critical
+                    } else {
+                        AiGuardBucket::Low
+                    },
+                    reasons: vec![],
+                    is_reattestation: false,
+                    rule_pack_id: pack.map(Into::into),
+                    tool_label: None,
+                    user: Some(user.into()),
+                },
+                Severity::Warn,
+                datetime!(2026-05-17 12:00 UTC) + time::Duration::minutes(minutes),
+            )
+        };
+        let score = |h: &HostSummary| h.current_risk[&AiTool::ClaudeCode].score;
+        apply_event(&mut h, &reading("alice", None, 7.0, 0));
+        apply_event(&mut h, &reading("bob", None, 0.0, 1));
+        assert_eq!(score(&h), 7.0, "bob's clean reading hid alice");
+        apply_event(&mut h, &reading("alice", Some("pack"), 0.0, 2));
+        assert_eq!(score(&h), 7.0, "a clean pack reading hid the built-in one");
+        apply_event(&mut h, &reading("alice", None, 0.0, 3));
+        assert_eq!(score(&h), 0.0, "alice fixed her config");
+        apply_event(&mut h, &reading("bob", None, 7.0, 4));
+        let mut codex = reading("bob", None, 7.0, 5);
+        if let Evidence::AiGuardRiskAssessed { tool, .. } = &mut codex.evidence {
+            *tool = AiTool::Codex;
+        }
+        apply_event(&mut h, &codex);
+        apply_event(&mut h, &reading("alice", None, 0.0, 49 * 60));
+        assert_eq!(score(&h), 0.0, "bob's reading from 49h ago still counts");
+        assert!(
+            !h.current_risk.contains_key(&AiTool::Codex),
+            "a tool with only pruned readings kept its risk"
+        );
     }
 
     #[test]
@@ -464,6 +536,7 @@ mod tests {
                     is_reattestation: false,
                     rule_pack_id: None,
                     tool_label: None,
+                    user: None,
                 },
                 Severity::Warn,
                 t,
@@ -541,6 +614,7 @@ mod tests {
                     is_reattestation: false,
                     rule_pack_id: None,
                     tool_label: None,
+                    user: None,
                 },
                 Severity::Warn,
                 t,

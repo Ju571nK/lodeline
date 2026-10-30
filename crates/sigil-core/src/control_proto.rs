@@ -160,6 +160,9 @@ pub struct RiskSummary {
     pub reasons_count: usize,
     /// RFC 3339.
     pub last_assessed_ts: String,
+    /// #329 — the user whose home a root agent assessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// Phase 3b.5 — serializable snapshot of the agent's AI Guard subsystem
@@ -400,6 +403,7 @@ mod tests {
                     bucket: AiGuardBucket::Medium,
                     reasons_count: 1,
                     last_assessed_ts: "2026-05-16T06:00:00Z".into(),
+                    user: None,
                 }],
             }),
             doctor_ai_guard: None,
@@ -501,6 +505,7 @@ mod tests {
                     bucket: AiGuardBucket::High,
                     reasons_count: 3,
                     last_assessed_ts: "2026-05-29T00:00:00Z".into(),
+                    user: None,
                 }],
                 effective_rubric: vec![RubricEntry {
                     kind_key: "no_sandbox".into(),
