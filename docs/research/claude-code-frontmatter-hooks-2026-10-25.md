@@ -67,8 +67,10 @@ rely on it in hooks anyway.
   without options (`/usr/bin/env bash x.sh`), may be `bash.exe`, and may
   carry flags (`bash -euo pipefail x.sh`, `--rcfile <file>`). `-c`, `-s`,
   and a lone `-` mean no script file. A command substitution in the words
-  before the script makes the whole command checked inline. `env` with
-  options (`env -i bash x.sh`) is still not recognized.
+  before the script makes the whole command checked inline. Since
+  2026-10-30 `env` may carry `-i`, `-0`, `-v`, `-u NAME` and `-P PATH`
+  (and their long forms). `-C`, `-S` and other options leave the command
+  checked inline, because the script path no longer reads off the command.
 - A repo with only `.claude/skills/` or `.claude/agents/` is now discovered.
 
 `sigil scan` on this machine after the change logs no frontmatter warning

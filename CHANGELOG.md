@@ -11,7 +11,7 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 - A Claude Code hook script is now scanned when its interpreter follows
   `NAME=value` assignments or an `env` launcher
-  (`/usr/bin/env bash ./check.sh`), is `bash.exe`, or carries options
+  (`/usr/bin/env -i bash ./check.sh`), is `bash.exe`, or carries options
   (`bash -euo pipefail ./check.sh`). These commands used to be checked only
   as inline text, so the script itself was not read (#199).
 
