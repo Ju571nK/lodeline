@@ -187,6 +187,19 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn wire_names_the_agent_gc_reads_are_stable() {
+        // sigil-agent's spool GC parses `current_file` and `byte_offset` (#331).
+        let json = serde_json::to_value(SenderState {
+            current_file: "events-1.jsonl".into(),
+            byte_offset: 7,
+            last_acked_sequence: 3,
+        })
+        .unwrap();
+        assert_eq!(json["current_file"], "events-1.jsonl");
+        assert_eq!(json["byte_offset"], 7);
+    }
+
+    #[test]
     fn round_trips_through_json() {
         let s = SenderState {
             current_file: "events-2026-05-15-002.jsonl".into(),

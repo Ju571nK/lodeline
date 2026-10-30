@@ -765,6 +765,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 crate::jsonl_gc_task::run(crate::jsonl_gc_task::GcTaskCtx {
                     host_id: host_id_g,
                     events_dir: dir_g,
+                    sender_offset_path: crate::sender_offset::DEFAULT_PATH.into(),
                     current_segment_filename: cur_g,
                     above_soft_floor: above_g,
                     cfg: crate::gc_config::GcConfig::defaults(),
@@ -1388,6 +1389,11 @@ mod nonroot_path_tests {
         assert_eq!(
             example["events_dir"].as_str().map(PathBuf::from),
             Some(resolve_events_dir_unix(true, None, None))
+        );
+        assert_eq!(
+            example["offset_path"].as_str(),
+            Some(crate::sender_offset::DEFAULT_PATH),
+            "the GC reads the sender's offset from here (#331)"
         );
     }
 

@@ -21,6 +21,8 @@ use uuid::Uuid;
 pub struct GcTaskCtx {
     pub host_id: String,
     pub events_dir: PathBuf,
+    /// The sender's offset file; segments before its `current_file` are shipped.
+    pub sender_offset_path: PathBuf,
     /// Updated by the JsonlSink each rotation; the task reads it at decision time.
     pub current_segment_filename: Arc<RwLock<String>>,
     /// Heartbeat reads this — set by the task each tick.
@@ -59,7 +61,7 @@ async fn tick(ctx: &GcTaskCtx) {
             return;
         }
     };
-    let off = match sender_offset::read(&ctx.events_dir) {
+    let off = match sender_offset::read(&ctx.sender_offset_path) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = ?e, "jsonl_gc: sender_offset read failed; treating as None");
@@ -226,6 +228,7 @@ mod tests {
         let ctx = GcTaskCtx {
             host_id: "h".into(),
             events_dir: dir.to_path_buf(),
+            sender_offset_path: dir.join("sender-offset.json"),
             current_segment_filename: curr,
             above_soft_floor: above.clone(),
             cfg,
@@ -292,7 +295,6 @@ mod tests {
         let off = crate::sender_offset::SenderOffset {
             current_segment: "events-2026-05-15.jsonl".into(),
             byte_offset: 0,
-            updated_at: OffsetDateTime::now_utc(),
         };
         std::fs::write(
             dir.path().join("sender-offset.json"),

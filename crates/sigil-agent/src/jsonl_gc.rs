@@ -218,7 +218,6 @@ mod tests {
         let off = SenderOffset {
             current_segment: "events-2026-05-15.jsonl".into(),
             byte_offset: 0,
-            updated_at: now,
         };
         let d = decide(&segs, Some(&off), "events-2026-05-15.jsonl", &cfg(), now);
         // total = 240 > soft (100); both 05-13 and 05-14 are < 05-15 (the sender),
@@ -250,7 +249,6 @@ mod tests {
         let off = SenderOffset {
             current_segment: "events-2026-05-13.jsonl".into(),
             byte_offset: 100,
-            updated_at: now,
         };
         let d = decide(&segs, Some(&off), "events-2026-05-14.jsonl", &cfg(), now);
         assert!(d.hard_ceiling_fired);
@@ -280,7 +278,6 @@ mod tests {
         let off = SenderOffset {
             current_segment: "events-2026-05-15-001.jsonl".into(),
             byte_offset: 10,
-            updated_at: now,
         };
         let d = decide(
             &segs,

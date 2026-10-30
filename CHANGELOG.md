@@ -14,6 +14,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   `/var/log/sigil/events`, so a sender configured from it shipped nothing and
   logged no error. A `sender.yaml` copied from an older example needs
   `events_dir: "/var/log/sigil"` (#328).
+- The agent's spool GC now sees how far sigil-sender has shipped. It looked
+  for `<events_dir>/sender-offset.json` in a format the sender never wrote,
+  while the sender writes `/var/lib/sigil-sender/sender-offset.json`. So the
+  soft floor never freed shipped segments, and at the hard ceiling the GC
+  force-deleted them and raised a data-loss alarm for data already delivered.
+  A sender with a non-default `offset_path` still leaves the GC without a
+  sender record (#331).
 
 - An agent running as root on Linux or macOS now assesses every user's AI
   agent configs, not just root's own home. Each user's readings carry a new

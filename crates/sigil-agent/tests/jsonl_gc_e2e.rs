@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
-use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +20,6 @@ fn write_sender_offset(dir: &Path, current: &str) {
     let off = SenderOffset {
         current_segment: current.into(),
         byte_offset: 0,
-        updated_at: OffsetDateTime::now_utc(),
     };
     std::fs::write(
         dir.join("sender-offset.json"),
@@ -45,6 +43,7 @@ fn build_ctx(
     let ctx = GcTaskCtx {
         host_id: "h".into(),
         events_dir: dir.to_path_buf(),
+        sender_offset_path: dir.join("sender-offset.json"),
         current_segment_filename: curr,
         above_soft_floor: above.clone(),
         cfg,
