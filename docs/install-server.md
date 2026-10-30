@@ -92,9 +92,8 @@ systemd unit and config by hand (sections 4–6).
 cargo build --release -p sigil-server   # → target/release/sigil-server
 ```
 
-> **aarch64 (ARM) servers:** prebuilt packages are x86_64 only today
-> (tracking [#12](https://github.com/Ju571nK/sigil/issues/12)). On ARM, build
-> from source. A debug build (`cargo build -p sigil-server`) is fine for staging.
+> **aarch64 (ARM) servers:** releases ship `aarch64` RPMs and `arm64` debs
+> alongside the x86_64 ones, so an ARM server can use the packages above.
 
 ---
 

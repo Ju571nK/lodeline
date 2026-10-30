@@ -243,9 +243,9 @@ fn write_targets(w: &mut impl Write, t: &TargetsPayload) -> io::Result<()> {
     Ok(())
 }
 
-/// Return the path of the lexicographically-largest `events-*.jsonl` file in
-/// `events_dir`, or `None` if the directory is missing or contains no matching
-/// segment, in the order the sink writes them (`segment_order`).
+/// Return the path of the newest `events-*.jsonl` file in `events_dir`, in the
+/// order the sink writes them (`segment_order`), or `None` if the directory is
+/// missing or contains no matching segment.
 #[cfg(feature = "operator-cli")]
 fn latest_segment(events_dir: &std::path::Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(events_dir).ok()?;
