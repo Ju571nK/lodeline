@@ -405,17 +405,20 @@ pub(crate) fn external_path_from_command(
 /// The script a hook command runs: its first token when that looks like a
 /// path, or the operand of a leading `sh`-family interpreter
 /// (`bash ./check.sh`, `bash -eu ./check.sh`). Leading `NAME=value`
-/// assignments and an `env` launcher without options are skipped
-/// (`/usr/bin/env bash ./check.sh`). Only `sh`-family scripts are worth
+/// assignments and an `env` launcher are skipped
+/// (`/usr/bin/env -i bash ./check.sh`). Only `sh`-family scripts are worth
 /// reading, because the scanner matches shell patterns.
 fn hook_script_path(cmd: &str) -> Option<&str> {
     let mut tokens = cmd.split_whitespace();
     let mut first = tokens.next()?;
-    while is_assignment(first) || launcher_basename(first) == "env" {
-        first = tokens.next()?;
-        if first.starts_with('-') {
-            return None;
-        }
+    loop {
+        first = if is_assignment(first) {
+            tokens.next()?
+        } else if launcher_basename(first) == "env" {
+            after_env_options(&mut tokens)?
+        } else {
+            break;
+        };
     }
     if !is_sh_interpreter(first) {
         return looks_pathish(first).then_some(first);
@@ -442,6 +445,43 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
         return (!token.contains('$') && looks_pathish(token)).then_some(token);
     }
     None
+}
+
+/// The word after `env`'s options. `None` for `-C` and `-S`, which move the
+/// working directory or rebuild the command from a string, and for options
+/// not listed here, since the script path can no longer be read off the
+/// command.
+fn after_env_options<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    loop {
+        let token = tokens.next()?;
+        match token {
+            "-" | "--ignore-environment" | "--null" | "--debug" => continue,
+            "--" => return tokens.next(),
+            "--unset" => {
+                tokens.next()?;
+                continue;
+            }
+            _ if token.starts_with("--unset=") => continue,
+            _ if token.starts_with("--") => return None,
+            _ => {}
+        }
+        let Some(flags) = token.strip_prefix('-') else {
+            return Some(token);
+        };
+        for (i, flag) in flags.char_indices() {
+            match flag {
+                'i' | '0' | 'v' => {}
+                // `-u NAME`, `-uNAME`; `-P` sets the utility search path.
+                'u' | 'P' => {
+                    if i + 1 == flags.len() {
+                        tokens.next()?;
+                    }
+                    break;
+                }
+                _ => return None,
+            }
+        }
+    }
 }
 
 /// `NAME=value`, a shell assignment prefix.
@@ -1466,7 +1506,19 @@ mod tests {
             ("bash -ec 'rm -rf ~'", None),
             ("bash -s ./x.sh", None),
             ("bash - ./x.sh", None),
-            ("env -i bash ./x.sh", None),
+            ("env -i bash ./x.sh", Some("./x.sh")),
+            ("env - bash ./x.sh", Some("./x.sh")),
+            ("env -i PATH=/bin bash ./x.sh", Some("./x.sh")),
+            ("env -u HOME ./x.sh", Some("./x.sh")),
+            ("env -iuHOME -v bash ./x.sh", Some("./x.sh")),
+            ("env -uHOME ./x.sh", Some("./x.sh")),
+            ("env --unset HOME --unset=PWD bash ./x.sh", Some("./x.sh")),
+            ("env -P /bin -- bash ./x.sh", Some("./x.sh")),
+            ("env -C /tmp bash ./x.sh", None),
+            ("env -S bash ./x.sh", None),
+            ("env --chdir=/tmp ./x.sh", None),
+            ("env -x bash ./x.sh", None),
+            ("env -u", None),
             ("env bash", None),
             ("FOO=1", None),
         ] {
