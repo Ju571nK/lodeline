@@ -39,8 +39,8 @@ recognised as a duplicate (equal canonical event) or a 409 (different).
 
 ### Rule
 
-A retransmission of an accepted event happens at most R after its `occurred_at`.
-Acceptance happens at or after `occurred_at`, so the server must recognise the
+A retransmission of an accepted event happens at most R after its spool append.
+Acceptance happens at or after the append, so the server must recognise the
 `event_id` for **at least R + M after acceptance**. Therefore:
 
 ```
@@ -105,8 +105,10 @@ Within the boot of the stamp, age is boot clock now minus the stamp. The boot cl
 counts suspend and ignores wall-clock steps (`CLOCK_BOOTTIME` on Linux). Across
 boots, or with no stamp or no boot clock, age is wall clock now minus `created_at`
 or `quarantined_at`, so a clock step around a reboot can still age rows early or
-late. A guest VM whose clock stops during a pause does not count the pause. On-wire
-timestamps stay wall clock.
+late. A guest VM whose clock stops during a pause does not count the pause. A pause
+of at least M that the boot clock does not count can let a retransmission land past
+the tombstone and duplicate if the ACK was lost. `oldest_unsent_age_seconds` stays on
+the wall clock. On-wire timestamps stay wall clock.
 
 ### Cases (mirrored in `check_schema.py`)
 
@@ -115,7 +117,7 @@ timestamps stay wall clock.
 | R=30d, M=7d, E=90d, T=90d | valid |
 | T < R + M | startup refused |
 | E < R + M | startup refused |
-| resubmission at occurred_at + R, accepted at occurred_at + 1d, T = R + M | recognised |
+| resubmission at append + R, accepted at append + 1d, T = R + M | recognised |
 | resubmission after tombstone expiry | accepted as new; invocation projection flags `duplicate_completion`/`duplicate_start` (L2) |
 
 ## L2. Invocation projection

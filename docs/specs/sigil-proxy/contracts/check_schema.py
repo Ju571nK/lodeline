@@ -1107,7 +1107,7 @@ retention_cases = [
     ("E below R+M refused", retention_valid(R0, M0, R0 + M0 - 1, E0), False),
     ("R above bound refused", retention_valid(91 * DAY, M0, 365 * DAY, 365 * DAY), False),
     ("R at lower bound valid", retention_valid(3600, 3600, 7200, 7200), True),
-    # accepted one day after occurred_at, resubmitted at occurred_at + R: age R - 1d
+    # accepted one day after the append, resubmitted at append + R: age R - 1d
     ("late retransmit recognised", recognised(R0 - DAY, R0 + M0, E0), True),
     ("retransmit at R recognised with T=R+M, E short", recognised(R0, R0 + M0, 2 * DAY), True),
     ("retransmit after both windows", recognised(max(E0, R0 + M0) + 1, R0 + M0, E0), False),
