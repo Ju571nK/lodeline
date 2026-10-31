@@ -1081,14 +1081,14 @@ assert len(w_labels) == len(set(w_labels)), "duplicate W2 positive labels"
 # --- L1 retention invariants ------------------------------------------------------------
 DAY = 86400
 RET_BOUNDS = {"R": (3600, 90 * DAY), "M": (3600, 30 * DAY), "E_max": 365 * DAY,
-              "T_max": 730 * DAY, "Q_max": 730 * DAY}
+              "T_max": 730 * DAY}
 
 
-def retention_valid(R, M, E, T, Q):
+def retention_valid(R, M, E, T):
     lo, hi = RET_BOUNDS["R"]
     mlo, mhi = RET_BOUNDS["M"]
     return (lo <= R <= hi and mlo <= M <= mhi and R + M <= E <= RET_BOUNDS["E_max"]
-            and R + M <= T <= RET_BOUNDS["T_max"] and E <= Q <= RET_BOUNDS["Q_max"])
+            and R + M <= T <= RET_BOUNDS["T_max"])
 
 
 def recognised(accepted_age_at_resubmit, T, E):
@@ -1098,12 +1098,11 @@ def recognised(accepted_age_at_resubmit, T, E):
 
 R0, M0, E0 = 30 * DAY, 7 * DAY, 90 * DAY
 retention_cases = [
-    ("defaults valid", retention_valid(R0, M0, E0, E0, E0), True),
-    ("T below R+M refused", retention_valid(R0, M0, E0, R0 + M0 - 1, E0), False),
-    ("E below R+M refused", retention_valid(R0, M0, R0 + M0 - 1, E0, E0), False),
-    ("Q below E refused", retention_valid(R0, M0, E0, E0, E0 - 1), False),
-    ("R above bound refused", retention_valid(91 * DAY, M0, 365 * DAY, 365 * DAY, 365 * DAY), False),
-    ("R at lower bound valid", retention_valid(3600, 3600, 7200, 7200, 7200), True),
+    ("defaults valid", retention_valid(R0, M0, E0, E0), True),
+    ("T below R+M refused", retention_valid(R0, M0, E0, R0 + M0 - 1), False),
+    ("E below R+M refused", retention_valid(R0, M0, R0 + M0 - 1, E0), False),
+    ("R above bound refused", retention_valid(91 * DAY, M0, 365 * DAY, 365 * DAY), False),
+    ("R at lower bound valid", retention_valid(3600, 3600, 7200, 7200), True),
     # accepted one day after occurred_at, resubmitted at occurred_at + R: age R - 1d
     ("late retransmit recognised", recognised(R0 - DAY, R0 + M0, E0), True),
     ("retransmit at R recognised with T=R+M, E short", recognised(R0, R0 + M0, 2 * DAY), True),
