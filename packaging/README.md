@@ -39,8 +39,9 @@ deferred to hardware verification; until then it runs unconfined.
 The proxy expires unsent spool events by wall clock, so it orders itself after
 `time-sync.target`. That target only waits when a wait service is enabled: enable
 `chrony-wait.service` (Rocky 9) or `systemd-time-wait-sync.service` (with
-systemd-timesyncd) so the proxy starts after time sync. Without it, a clock step
-after start can expire unsent events into quarantine.
+systemd-timesyncd) so the proxy starts after time sync. Without one, the proxy
+can start before the first sync, and that clock step can expire unsent events
+into quarantine.
 
 ## Building
 

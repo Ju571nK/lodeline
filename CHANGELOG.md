@@ -9,10 +9,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ### Fixed
 
-- The sigil-proxy systemd unit now orders itself after `time-sync.target`
-  (with `Wants=`). Spool expiry uses the wall clock, so a host that booted with a
-  wrong RTC could quarantine unsent events on the first clock step. The target
-  only waits when `chrony-wait.service` or `systemd-time-wait-sync.service` is
+- The sigil-proxy systemd unit now orders itself after `time-sync.target`.
+  Spool expiry uses the wall clock, so a host that booted with a wrong RTC could
+  quarantine unsent events on the first clock step. The target only waits when `chrony-wait.service` or `systemd-time-wait-sync.service` is
   enabled; the packaging README says so. The clock and quarantine design stays
   open (#302).
 - On Unix, sigil-proxy opens its spool and registry databases with
