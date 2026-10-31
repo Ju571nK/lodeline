@@ -35,6 +35,15 @@
 //!   layer with [`Spool::pending_gaps`] and removed only after
 //!   [`Spool::gaps_handed_off`], so a crash in between repeats the gap instead
 //!   of losing it.
+//! * R and Q are measured so that a wall-clock step cannot age rows (#302
+//!   decision 4). Each unsent event and each quarantine row has a stamp from the
+//!   [`crate::boot_clock`] in a side table. A row stamped in the current boot ages
+//!   on the boot clock. A row stamped in another boot, or with no stamp (no boot
+//!   clock, or a row an older binary wrote), ages on the wall clock from
+//!   `created_at` or `quarantined_at`. Stamps are in side tables so that an older
+//!   binary still opens the database; triggers remove them with their rows, also
+//!   under that binary. `ack_retention` and every timestamp on the wire stay on
+//!   the wall clock.
 //! * A corrupt, foreign or unreadable database refuses to open
 //!   ([`SpoolError`]); it is never recreated or truncated.
 //!
@@ -56,6 +65,7 @@ use sigil_proxy_api::status::{QuarantineCode, SpoolExpiredGap};
 use sigil_proxy_api::{GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
 use tokio::sync::oneshot;
 
+use crate::boot_clock::{system_boot_clock, BootClock, BootInstant};
 use crate::ingest_client::{EventSource, SourceFuture};
 use crate::limits::Limits;
 
@@ -113,6 +123,7 @@ pub struct SpoolConfig {
     /// How often the writer thread expires and purges by itself.
     pub maintenance_interval: Duration,
     pub clock: Clock,
+    pub boot_clock: BootClock,
 }
 
 impl SpoolConfig {
@@ -136,6 +147,7 @@ impl SpoolConfig {
             ack_retention: Duration::from_secs(86_400),
             maintenance_interval: Duration::from_secs(60),
             clock: system_clock(),
+            boot_clock: system_boot_clock(),
         }
     }
 }
@@ -380,8 +392,15 @@ impl Spool {
         #[cfg(any(test, feature = "test-util"))]
         let cfg = {
             let (base, sh) = (cfg.clock.clone(), shared.clone());
+            let (boot_base, boot_sh) = (cfg.boot_clock.clone(), shared.clone());
             SpoolConfig {
                 clock: Arc::new(move || base() + sh.clock_skew.load(Ordering::SeqCst)),
+                boot_clock: Arc::new(move || {
+                    boot_base().map(|b| BootInstant {
+                        secs: b.secs + boot_sh.clock_skew.load(Ordering::SeqCst),
+                        ..b
+                    })
+                }),
                 ..cfg
             }
         };
@@ -628,7 +647,8 @@ impl Spool {
 
 #[cfg(any(test, feature = "test-util"))]
 impl Spool {
-    /// Test knob: move the spool's clock forward (retention and expiry follow it).
+    /// Test knob: move the spool's wall and boot clocks forward (retention and
+    /// expiry follow them).
     pub fn advance_clock_for_test(&self, secs: i64) {
         self.inner
             .shared
@@ -819,6 +839,10 @@ struct Writer {
     conn: Connection,
     cfg: SpoolConfig,
     shared: Arc<Shared>,
+    /// Every row that needs wall-clock age has a wall timestamp at or below this.
+    /// The wall-clock walks stop here: after a forward step, rows stamped in this
+    /// boot look old on the wall clock and would otherwise be walked every pass.
+    wall_aged_until: i64,
 }
 
 const ADDITIVE_SCHEMA: &str = "
@@ -830,14 +854,65 @@ CREATE TABLE IF NOT EXISTS rewrite_originals (
   rewritten_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_quarantine_at ON quarantine(quarantined_at);
+CREATE INDEX IF NOT EXISTS idx_unsent_created ON events(created_at) WHERE state = 0;
+CREATE TABLE IF NOT EXISTS event_boot_stamps (
+  sequence INTEGER PRIMARY KEY,
+  boot_id TEXT NOT NULL,
+  boot_secs INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_event_boot_stamps ON event_boot_stamps(boot_id, boot_secs);
+CREATE TABLE IF NOT EXISTS quarantine_boot_stamps (
+  sequence INTEGER PRIMARY KEY,
+  boot_id TEXT NOT NULL,
+  boot_secs INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_quarantine_boot_stamps ON quarantine_boot_stamps(boot_id, boot_secs);
+CREATE TRIGGER IF NOT EXISTS event_boot_stamps_on_delete AFTER DELETE ON events BEGIN
+  DELETE FROM event_boot_stamps WHERE sequence = OLD.sequence;
+END;
+CREATE TRIGGER IF NOT EXISTS event_boot_stamps_on_ack AFTER UPDATE OF state ON events
+WHEN NEW.state <> 0 BEGIN
+  DELETE FROM event_boot_stamps WHERE sequence = NEW.sequence;
+END;
+CREATE TRIGGER IF NOT EXISTS quarantine_boot_stamps_on_delete AFTER DELETE ON quarantine BEGIN
+  DELETE FROM quarantine_boot_stamps WHERE sequence = OLD.sequence;
+END;
 ";
 
-/// The Q purge: one batch of the oldest quarantine rows past the cutoff. Ordered
-/// by `quarantined_at` so it walks `idx_quarantine_at` instead of scanning the
-/// table inside the write transaction.
-const PURGE_QUARANTINE: &str = "DELETE FROM quarantine WHERE sequence IN \
-     (SELECT sequence FROM quarantine WHERE quarantined_at < ?1 \
-     ORDER BY quarantined_at LIMIT ?2) RETURNING size, code = ?3";
+/// Unsent events past R on the boot clock, oldest first. `CROSS JOIN` keeps the
+/// stamp index as the outer loop.
+const DUE_BY_BOOT: &str = "SELECT s.sequence, e.event_id FROM event_boot_stamps s \
+     CROSS JOIN events e ON e.sequence = s.sequence \
+     WHERE s.boot_id = ?1 AND s.boot_secs <= ?2 AND e.state = 0 \
+     ORDER BY s.boot_secs LIMIT ?3";
+
+/// Unsent events past R on the wall clock, without a stamp of the current boot.
+const DUE_BY_WALL: &str = "SELECT e.sequence, e.event_id FROM events e \
+     WHERE e.state = 0 AND e.created_at <= ?1 AND NOT EXISTS \
+     (SELECT 1 FROM event_boot_stamps s WHERE s.sequence = e.sequence AND s.boot_id = ?2) \
+     ORDER BY e.created_at LIMIT ?3";
+
+/// The Q purge, one batch of the oldest rows past Q on the boot clock.
+const PURGE_QUARANTINE_BY_BOOT: &str = "DELETE FROM quarantine WHERE sequence IN \
+     (SELECT sequence FROM quarantine_boot_stamps WHERE boot_id = ?1 AND boot_secs < ?2 \
+     ORDER BY boot_secs LIMIT ?3) RETURNING size, code = ?4";
+
+/// The Q purge, one batch of the oldest rows past Q on the wall clock, without a
+/// stamp of the current boot. Ordered by `quarantined_at` so it walks
+/// `idx_quarantine_at` instead of scanning the table inside the write transaction.
+const PURGE_QUARANTINE_BY_WALL: &str = "DELETE FROM quarantine WHERE sequence IN \
+     (SELECT q.sequence FROM quarantine q WHERE q.quarantined_at < ?1 AND NOT EXISTS \
+     (SELECT 1 FROM quarantine_boot_stamps s WHERE s.sequence = q.sequence AND s.boot_id = ?2) \
+     ORDER BY q.quarantined_at LIMIT ?3) RETURNING size, code = ?4";
+
+/// The opening value of [`Writer::wall_aged_until`]. One scan per open, like
+/// `load_counters`.
+const WALL_AGED_UNTIL: &str = "SELECT coalesce(max(at), 0) FROM (\
+     SELECT max(e.created_at) AS at FROM events e WHERE e.state = 0 AND NOT EXISTS \
+     (SELECT 1 FROM event_boot_stamps s WHERE s.sequence = e.sequence AND s.boot_id = ?1) \
+     UNION ALL \
+     SELECT max(q.quarantined_at) FROM quarantine q WHERE NOT EXISTS \
+     (SELECT 1 FROM quarantine_boot_stamps s WHERE s.sequence = q.sequence AND s.boot_id = ?1))";
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -923,20 +998,30 @@ impl Writer {
         if quick != "ok" {
             return Err(SpoolError::Corrupt);
         }
-        let mut w = Writer { conn, cfg, shared };
+        let mut w = Writer {
+            conn,
+            cfg,
+            shared,
+            wall_aged_until: 0,
+        };
         if tables == 0 {
             w.init_schema().map_err(|e| classify_open(&e))?;
         } else {
             w.verify_schema()?;
         }
-        // Additive table (T-13c): the unchanged bytes of events whose `tool` was
-        // rewritten after a registry conflict, plus the index the Q purge uses.
-        // Created in place for databases written before they existed (same
-        // schema version).
+        // Additive tables: the unchanged bytes of events whose `tool` was
+        // rewritten after a registry conflict (T-13c), the boot stamps, and the
+        // indexes maintenance uses. Created in place for databases written before
+        // they existed (same schema version).
         w.conn
             .execute_batch(ADDITIVE_SCHEMA)
             .map_err(|e| classify_open(&e))?;
         w.load_counters().map_err(|e| classify_open(&e))?;
+        let boot = (w.cfg.boot_clock)();
+        w.wall_aged_until = w
+            .conn
+            .query_row(WALL_AGED_UNTIL, [boot.map(|b| b.boot_id)], |r| r.get(0))
+            .map_err(|e| classify_open(&e))?;
         Ok(w)
     }
 
@@ -1038,6 +1123,16 @@ impl Writer {
         self.shared.degraded.store(on, Ordering::Relaxed);
     }
 
+    /// The stamp for rows written at wall time `now`. A row written without one
+    /// ages on the wall clock, so [`Writer::wall_aged_until`] covers it.
+    fn boot_stamp(&mut self, now: i64) -> Option<BootInstant> {
+        let stamp = (self.cfg.boot_clock)();
+        if stamp.is_none() {
+            self.wall_aged_until = self.wall_aged_until.max(now);
+        }
+        stamp
+    }
+
     fn run(&mut self, rx: mpsc::Receiver<Cmd>) {
         // Maintenance is driven by a deadline, not by idleness: a steady stream of
         // commands (the ingest loop polls about once a second) must not starve it.
@@ -1110,12 +1205,13 @@ impl Writer {
         let reserve = self.shared.reserve.load(Ordering::Relaxed);
         let limit = cap.saturating_sub(reserve);
         let now = (self.cfg.clock)();
-        let mut res = self.append_tx(&mut event, now, limit);
+        let boot = self.boot_stamp(now);
+        let mut res = self.append_tx(&mut event, now, boot.as_ref(), limit);
         if matches!(res, Err(AppendTx::PurgeAcked)) {
             // Over capacity only because acknowledged rows are still retained:
             // the server holds them, so drop them before refusing the call.
             res = match self.purge_all_acked() {
-                Ok(()) => self.append_tx(&mut event, now, limit),
+                Ok(()) => self.append_tx(&mut event, now, boot.as_ref(), limit),
                 Err(_) => Err(AppendTx::Refused(AppendError::Storage)),
             };
         }
@@ -1148,6 +1244,7 @@ impl Writer {
         &mut self,
         event: &mut ProxyEvent,
         now: i64,
+        boot: Option<&BootInstant>,
         limit: u64,
     ) -> Result<(i64, u64), AppendTx> {
         let (unsent_bytes, acked_bytes) = {
@@ -1200,6 +1297,7 @@ impl Writer {
             params![seq, event.event_id.as_str(), bytes, size as i64, now],
         )
         .map_err(st)?;
+        stamp_row(&tx, STAMP_EVENT, seq, boot).map_err(st)?;
         tx.execute("UPDATE seq SET last = ?1 WHERE id = 1", [seq])
             .map_err(st)?;
         tx.commit().map_err(st)?;
@@ -1209,11 +1307,12 @@ impl Writer {
     /// Delete every acknowledged row (the server holds them).
     fn purge_all_acked(&mut self) -> Result<(), SpoolError> {
         let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
+        let now = (self.cfg.clock)();
+        let boot = self.boot_stamp(now);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(st)?;
-        let now = (self.cfg.clock)();
         let ids: Vec<String> = {
             let mut q = tx
                 .prepare("SELECT event_id FROM events WHERE state = 1")
@@ -1223,7 +1322,7 @@ impl Writer {
         };
         let mut archived = 0u64;
         for id in &ids {
-            archived += archive_original(&tx, id, now).map_err(st)?;
+            archived += archive_original(&tx, id, now, boot.as_ref()).map_err(st)?;
         }
         tx.execute("DELETE FROM events WHERE state = 1", [])
             .map_err(st)?;
@@ -1318,13 +1417,14 @@ impl Writer {
     /// Move unsent rows to `quarantine` unchanged, inside the caller's decision.
     fn quarantine(&mut self, ids: &[String], code: &str) -> Result<u64, SpoolError> {
         let now = (self.cfg.clock)();
+        let boot = self.boot_stamp(now);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| SpoolError::Storage(code_name(&e)))?;
         let mut moved = Vec::new();
         for id in ids {
-            if let Some(sizes) = move_to_quarantine(&tx, id, code, now)? {
+            if let Some(sizes) = move_to_quarantine(&tx, id, code, now, boot.as_ref())? {
                 moved.push(sizes);
             }
         }
@@ -1446,34 +1546,50 @@ impl Writer {
     fn expire_batch(&mut self) -> Result<(ExpireReport, bool), SpoolError> {
         let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
         let now = (self.cfg.clock)();
+        let boot = self.boot_stamp(now);
+        let boot_id = boot.as_ref().map(|b| &*b.boot_id);
         let retry_age = self.shared.retry_age_secs.load(Ordering::SeqCst);
-        let cutoff = now.saturating_sub(i64::try_from(retry_age).unwrap_or(i64::MAX));
+        let retry_age = i64::try_from(retry_age).unwrap_or(i64::MAX);
+        let wall_aged_until = self.wall_aged_until;
+        let cutoff = now.saturating_sub(retry_age).min(wall_aged_until);
         let ack_cutoff = now - self.cfg.ack_retention.as_secs() as i64;
         let reserve = self.shared.reserve.load(Ordering::Relaxed);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(st)?;
-        let expired: Vec<(i64, String)> = {
-            let mut q = tx
-                .prepare(
-                    "SELECT sequence, event_id FROM events \
-                     WHERE state = 0 AND created_at <= ?1 ORDER BY sequence LIMIT ?2",
-                )
-                .map_err(st)?;
+        let mut expired: Vec<(i64, String)> = Vec::new();
+        if let Some(b) = &boot {
+            let mut q = tx.prepare(DUE_BY_BOOT).map_err(st)?;
+            let boot_cutoff = b.secs.saturating_sub(retry_age);
             let rows = q
-                .query_map(params![cutoff, MAINTENANCE_BATCH], |r| {
+                .query_map(params![b.boot_id, boot_cutoff, MAINTENANCE_BATCH], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })
                 .map_err(st)?;
-            rows.collect::<Result<_, _>>().map_err(st)?
-        };
+            expired = rows.collect::<Result<_, _>>().map_err(st)?;
+        }
+        {
+            let mut q = tx.prepare(DUE_BY_WALL).map_err(st)?;
+            let left = MAINTENANCE_BATCH - expired.len() as i64;
+            let rows = q
+                .query_map(params![cutoff, boot_id, left], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map_err(st)?;
+            for row in rows {
+                expired.push(row.map_err(st)?);
+            }
+        }
+        expired.sort();
         let mut report = ExpireReport::default();
         let (mut bytes, mut expired_q_bytes) = (0u64, 0u64);
         // Contiguous sequence runs: (from, to, count).
         let mut runs: Vec<(i64, i64, i64)> = Vec::new();
         for (seq, id) in &expired {
-            if let Some((unsent, quarantined)) = move_to_quarantine(&tx, id, EXPIRED_CODE, now)? {
+            if let Some((unsent, quarantined)) =
+                move_to_quarantine(&tx, id, EXPIRED_CODE, now, boot.as_ref())?
+            {
                 bytes += unsent;
                 expired_q_bytes += quarantined;
                 report.expired_events += 1;
@@ -1521,7 +1637,7 @@ impl Writer {
             };
             for (seq, id) in due {
                 // The pre-rewrite bytes outlive the purged acknowledged row.
-                archived += archive_original(&tx, &id, now).map_err(st)?;
+                archived += archive_original(&tx, &id, now, boot.as_ref()).map_err(st)?;
                 let sz: i64 = tx
                     .query_row(
                         "DELETE FROM events WHERE sequence = ?1 RETURNING size",
@@ -1536,15 +1652,36 @@ impl Writer {
         let q_secs = self.shared.quarantine_retention_secs.load(Ordering::SeqCst);
         let (mut purged_q_bytes, mut purged_originals) = (0u64, 0u64);
         if q_secs > 0 {
-            let q_cutoff = now.saturating_sub(i64::try_from(q_secs).unwrap_or(i64::MAX));
-            let mut q = tx.prepare(PURGE_QUARANTINE).map_err(st)?;
-            let rows = q
-                .query_map(params![q_cutoff, MAINTENANCE_BATCH, ORIGINAL_CODE], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
-                })
-                .map_err(st)?;
-            for row in rows {
-                let (size, original) = row.map_err(st)?;
+            let q_age = i64::try_from(q_secs).unwrap_or(i64::MAX);
+            // Exclusive, unlike `DUE_BY_WALL`, so the bound is one past the walk's end.
+            let q_cutoff = now
+                .saturating_sub(q_age)
+                .min(wall_aged_until.saturating_add(1));
+            let mut purged = Vec::new();
+            if let Some(b) = &boot {
+                let mut q = tx.prepare(PURGE_QUARANTINE_BY_BOOT).map_err(st)?;
+                let boot_cutoff = b.secs.saturating_sub(q_age);
+                let rows = q
+                    .query_map(
+                        params![b.boot_id, boot_cutoff, MAINTENANCE_BATCH, ORIGINAL_CODE],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+                    )
+                    .map_err(st)?;
+                purged = rows.collect::<Result<_, _>>().map_err(st)?;
+            }
+            {
+                let mut q = tx.prepare(PURGE_QUARANTINE_BY_WALL).map_err(st)?;
+                let left = MAINTENANCE_BATCH - purged.len() as i64;
+                let rows = q
+                    .query_map(params![q_cutoff, boot_id, left, ORIGINAL_CODE], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+                    })
+                    .map_err(st)?;
+                for row in rows {
+                    purged.push(row.map_err(st)?);
+                }
+            }
+            for (size, original) in purged {
                 purged_q_bytes += size as u64;
                 purged_originals += u64::from(original);
                 report.purged_quarantined += 1;
@@ -1677,6 +1814,25 @@ fn append_storage(e: &rusqlite::Error) -> AppendError {
     }
 }
 
+const STAMP_EVENT: &str =
+    "INSERT INTO event_boot_stamps(sequence, boot_id, boot_secs) VALUES (?1, ?2, ?3)";
+const STAMP_QUARANTINE: &str =
+    "INSERT INTO quarantine_boot_stamps(sequence, boot_id, boot_secs) VALUES (?1, ?2, ?3)";
+
+/// Stamp a row written in the caller's transaction. Without a boot clock the row
+/// stays unstamped and ages on the wall clock.
+fn stamp_row(
+    tx: &rusqlite::Transaction<'_>,
+    insert: &str,
+    sequence: i64,
+    boot: Option<&BootInstant>,
+) -> rusqlite::Result<()> {
+    if let Some(b) = boot {
+        tx.execute(insert, params![sequence, b.boot_id, b.secs])?;
+    }
+    Ok(())
+}
+
 /// Copy one unsent row to `quarantine` and delete it. Returns
 /// `(unsent_size, quarantined_size)`, which differ for a rewritten event, or
 /// `None` when the id is not an unsent row.
@@ -1685,17 +1841,20 @@ fn move_to_quarantine(
     id: &str,
     code: &str,
     now: i64,
+    boot: Option<&BootInstant>,
 ) -> Result<Option<(u64, u64)>, SpoolError> {
     let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
-    let size: Option<i64> = tx
+    let row: Option<(i64, i64)> = tx
         .query_row(
-            "SELECT size FROM events WHERE event_id = ?1 AND state = 0",
+            "SELECT sequence, size FROM events WHERE event_id = ?1 AND state = 0",
             [id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .map_err(st)?;
-    let Some(size) = size else { return Ok(None) };
+    let Some((sequence, size)) = row else {
+        return Ok(None);
+    };
     // An event whose `tool` was rewritten goes to quarantine with its ORIGINAL
     // bytes (README M2b / N11): the rewritten form is derived and is not evidence.
     let moved = tx
@@ -1727,21 +1886,29 @@ fn move_to_quarantine(
         .map_err(st)?;
     tx.execute("DELETE FROM rewrite_originals WHERE event_id = ?1", [id])
         .map_err(st)?;
+    stamp_row(tx, STAMP_QUARANTINE, sequence, boot).map_err(st)?;
     Ok(Some((size as u64, quarantined as u64)))
 }
 
 /// Before an acknowledged row is purged: move the pre-rewrite bytes of its event
 /// (if it was rewritten) into `quarantine` under [`ORIGINAL_CODE`] and drop the
 /// originals row, in the caller's transaction. Returns the bytes archived.
-fn archive_original(tx: &rusqlite::Transaction<'_>, id: &str, now: i64) -> rusqlite::Result<u64> {
-    let size: Option<i64> = tx
+fn archive_original(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    now: i64,
+    boot: Option<&BootInstant>,
+) -> rusqlite::Result<u64> {
+    let row: Option<(i64, i64)> = tx
         .query_row(
-            "SELECT length(bytes) FROM rewrite_originals WHERE event_id = ?1",
+            "SELECT sequence, length(bytes) FROM rewrite_originals WHERE event_id = ?1",
             [id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some(size) = size else { return Ok(0) };
+    let Some((sequence, size)) = row else {
+        return Ok(0);
+    };
     tx.execute(
         "INSERT INTO quarantine(sequence, event_id, bytes, size, created_at, quarantined_at, code) \
          SELECT o.sequence, o.event_id, o.bytes, length(o.bytes), e.created_at, ?2, ?3 \
@@ -1750,6 +1917,7 @@ fn archive_original(tx: &rusqlite::Transaction<'_>, id: &str, now: i64) -> rusql
         params![id, now, ORIGINAL_CODE],
     )?;
     tx.execute("DELETE FROM rewrite_originals WHERE event_id = ?1", [id])?;
+    stamp_row(tx, STAMP_QUARANTINE, sequence, boot)?;
     Ok(size as u64)
 }
 
@@ -1865,6 +2033,7 @@ mod tests {
         let mut c = SpoolConfig::new(dir, "px-1", &uid(EPOCH), true, &Limits::default());
         c.maintenance_interval = Duration::from_secs(3600);
         c.clock = Arc::new(move || now.load(Ordering::SeqCst));
+        c.boot_clock = Arc::new(|| None);
         c
     }
 
@@ -2448,29 +2617,59 @@ mod tests {
         );
     }
 
-    /// The Q purge runs inside the append-blocking write transaction, so it must
-    /// walk the `quarantined_at` index, never scan or sort the table.
+    fn query_plan(c: &Connection, sql: &str, args: impl rusqlite::Params) -> String {
+        let mut q = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan: Vec<String> = q
+            .query_map(args, |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        plan.join("\n")
+    }
+
+    /// Expiry and the Q purge run inside the append-blocking write transaction, so
+    /// each query walks an index range, never scans or sorts a table.
     #[test]
-    fn q_purge_uses_the_quarantined_at_index() {
+    fn maintenance_queries_walk_indexes() {
         let d = tempfile::tempdir().unwrap();
         let (s, _) = open(d.path());
         s.close_blocking_for_test();
         let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
-        let mut q = c
-            .prepare(&format!("EXPLAIN QUERY PLAN {PURGE_QUARANTINE}"))
-            .unwrap();
-        let plan: Vec<String> = q
-            .query_map(params![0, MAINTENANCE_BATCH, ORIGINAL_CODE], |r| r.get(3))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        let plan = plan.join("\n");
-        assert!(
-            plan.contains("INDEX idx_quarantine_at (quarantined_at<?)"),
-            "{plan}"
-        );
-        assert!(!plan.contains("SCAN"), "{plan}");
-        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        let cases: [(&str, String, &str); 4] = [
+            (
+                "DUE_BY_BOOT",
+                query_plan(&c, DUE_BY_BOOT, params!["b", 0, MAINTENANCE_BATCH]),
+                "idx_event_boot_stamps (boot_id=? AND boot_secs<?)",
+            ),
+            (
+                "DUE_BY_WALL",
+                query_plan(&c, DUE_BY_WALL, params![0, "b", MAINTENANCE_BATCH]),
+                "idx_unsent_created (created_at<?)",
+            ),
+            (
+                "PURGE_QUARANTINE_BY_BOOT",
+                query_plan(
+                    &c,
+                    PURGE_QUARANTINE_BY_BOOT,
+                    params!["b", 0, MAINTENANCE_BATCH, ORIGINAL_CODE],
+                ),
+                "idx_quarantine_boot_stamps (boot_id=? AND boot_secs<?)",
+            ),
+            (
+                "PURGE_QUARANTINE_BY_WALL",
+                query_plan(
+                    &c,
+                    PURGE_QUARANTINE_BY_WALL,
+                    params![0, "b", MAINTENANCE_BATCH, ORIGINAL_CODE],
+                ),
+                "idx_quarantine_at (quarantined_at<?)",
+            ),
+        ];
+        for (name, plan, index) in cases {
+            assert!(plan.contains(index), "{name}: {plan}");
+            assert!(!plan.contains("SCAN"), "{name}: {plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{name}: {plan}");
+        }
     }
 
     /// A spool written before the index existed gets it on reopen.
@@ -2903,5 +3102,457 @@ mod tests {
         c.new_epoch = false;
         let s = Spool::open(c).unwrap();
         assert_eq!(s.registry_conflict(&mref(1)).unwrap(), vec![uid(1)]);
+    }
+
+    const R: i64 = 3600;
+    const Q: i64 = 7200;
+
+    /// Injected wall and boot clocks. `boot_id` `None` means no boot clock.
+    struct Clocks {
+        wall: Arc<AtomicI64>,
+        boot: Arc<AtomicI64>,
+        boot_id: Arc<Mutex<Option<Arc<str>>>>,
+    }
+
+    impl Clocks {
+        fn new() -> Clocks {
+            Clocks {
+                wall: Arc::new(AtomicI64::new(1_800_000_000)),
+                boot: Arc::new(AtomicI64::new(1000)),
+                boot_id: Arc::new(Mutex::new(Some("boot-a".into()))),
+            }
+        }
+
+        /// Call while no spool is open, as a real reboot would be.
+        fn set_boot(&self, id: Option<&str>, secs: i64) {
+            *self.boot_id.lock().unwrap() = id.map(Arc::from);
+            self.boot.store(secs, Ordering::SeqCst);
+        }
+
+        fn step_wall(&self, secs: i64) {
+            self.wall.fetch_add(secs, Ordering::SeqCst);
+        }
+
+        fn run_boot(&self, secs: i64) {
+            self.boot.fetch_add(secs, Ordering::SeqCst);
+        }
+
+        fn open(&self, dir: &Path) -> Spool {
+            let mut c = cfg(dir, self.wall.clone());
+            c.max_offline_retry_age = Duration::from_secs(R as u64);
+            let (boot, id) = (self.boot.clone(), self.boot_id.clone());
+            c.boot_clock = Arc::new(move || {
+                Some(BootInstant {
+                    boot_id: id.lock().unwrap().clone()?,
+                    secs: boot.load(Ordering::SeqCst),
+                })
+            });
+            let s = Spool::open(c).unwrap();
+            s.set_quarantine_retention(Duration::from_secs(Q as u64));
+            s
+        }
+
+        fn restart(&self, s: Spool, dir: &Path) -> Spool {
+            s.close_blocking_for_test();
+            self.open(dir)
+        }
+    }
+
+    fn expired(s: &Spool) -> u64 {
+        s.expire_now().unwrap().expired_events
+    }
+
+    fn purged(s: &Spool) -> u64 {
+        s.expire_now().unwrap().purged_quarantined
+    }
+
+    /// One quarantined row, as of the clocks at the call.
+    fn quarantined_one(s: &mut Spool, n: u32) {
+        s.append(event(n)).unwrap();
+        s.quarantined(&[uid(n)], QuarantineCode::SemanticInvalid);
+    }
+
+    #[test]
+    fn a_forward_wall_step_does_not_expire_events_within_a_boot() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        clk.step_wall(100 * R);
+        assert_eq!(expired(&s), 0);
+        assert_eq!(s.snapshot().unsent_events, 1);
+        clk.run_boot(R - 1);
+        assert_eq!(expired(&s), 0);
+        clk.run_boot(1);
+        assert_eq!(expired(&s), 1);
+    }
+
+    #[test]
+    fn a_backward_wall_step_does_not_delay_expiry_past_the_boot_age() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        clk.step_wall(-100 * R);
+        clk.run_boot(R - 1);
+        assert_eq!(expired(&s), 0);
+        clk.run_boot(1);
+        assert_eq!(expired(&s), 1);
+    }
+
+    #[test]
+    fn an_event_of_another_boot_ages_on_the_wall_clock() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-b"), 100 * R);
+        let s = clk.open(d.path());
+        clk.step_wall(R - 1);
+        assert_eq!(expired(&s), 0);
+        clk.step_wall(1);
+        assert_eq!(expired(&s), 1);
+    }
+
+    #[test]
+    fn an_event_without_a_stamp_ages_on_the_wall_clock() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        clk.set_boot(None, 0);
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-a"), 1000);
+        let s = clk.open(d.path());
+        clk.run_boot(100 * R);
+        assert_eq!(expired(&s), 0);
+        clk.step_wall(R);
+        assert_eq!(expired(&s), 1);
+    }
+
+    /// A row written when no reading was available is past the bound computed at
+    /// open, and must still age on the wall clock.
+    #[test]
+    fn a_row_written_without_a_reading_while_open_ages_on_the_wall_clock() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        *clk.boot_id.lock().unwrap() = None;
+        s.append(event(1)).unwrap();
+        quarantined_one(&mut s, 2);
+        *clk.boot_id.lock().unwrap() = Some("boot-a".into());
+        clk.step_wall(Q + 1);
+        let r = s.expire_now().unwrap();
+        assert_eq!((r.expired_events, r.purged_quarantined), (1, 1));
+    }
+
+    #[test]
+    fn an_event_keeps_its_boot_age_across_a_restart_in_the_same_boot() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        clk.run_boot(R - 1);
+        clk.step_wall(100 * R);
+        let s = clk.restart(s, d.path());
+        assert_eq!(expired(&s), 0);
+        clk.run_boot(1);
+        assert_eq!(expired(&s), 1);
+    }
+
+    #[test]
+    fn a_forward_wall_step_does_not_purge_quarantine_within_a_boot() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        quarantined_one(&mut s, 1);
+        clk.step_wall(100 * Q);
+        assert_eq!(purged(&s), 0);
+        clk.run_boot(Q);
+        assert_eq!(purged(&s), 0);
+        clk.run_boot(1);
+        assert_eq!(purged(&s), 1);
+        assert_eq!(s.snapshot().quarantined_events, 0);
+    }
+
+    #[test]
+    fn a_backward_wall_step_does_not_delay_the_q_purge_past_the_boot_age() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        quarantined_one(&mut s, 1);
+        clk.step_wall(-100 * Q);
+        clk.run_boot(Q + 1);
+        assert_eq!(purged(&s), 1);
+    }
+
+    #[test]
+    fn a_quarantine_row_of_another_boot_ages_on_the_wall_clock() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        quarantined_one(&mut s, 1);
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-b"), 100 * Q);
+        let s = clk.open(d.path());
+        clk.step_wall(Q);
+        assert_eq!(purged(&s), 0);
+        clk.step_wall(1);
+        assert_eq!(purged(&s), 1);
+    }
+
+    #[test]
+    fn a_quarantine_row_without_a_stamp_ages_on_the_wall_clock() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        clk.set_boot(None, 0);
+        let mut s = clk.open(d.path());
+        quarantined_one(&mut s, 1);
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-a"), 1000);
+        let s = clk.open(d.path());
+        clk.run_boot(100 * Q);
+        assert_eq!(purged(&s), 0);
+        clk.step_wall(Q + 1);
+        assert_eq!(purged(&s), 1);
+    }
+
+    #[test]
+    fn a_quarantine_row_keeps_its_boot_age_across_a_restart_in_the_same_boot() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        quarantined_one(&mut s, 1);
+        clk.run_boot(Q);
+        clk.step_wall(100 * Q);
+        let s = clk.restart(s, d.path());
+        assert_eq!(purged(&s), 0);
+        clk.run_boot(1);
+        assert_eq!(purged(&s), 1);
+    }
+
+    /// An event moved to quarantine ages from the move, on the boot clock, even if
+    /// it came from another boot.
+    #[test]
+    fn expiry_stamps_the_quarantine_row_it_creates() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-b"), 1000);
+        let s = clk.open(d.path());
+        clk.step_wall(R);
+        assert_eq!(expired(&s), 1);
+        clk.step_wall(100 * Q);
+        assert_eq!(purged(&s), 0);
+        clk.run_boot(Q + 1);
+        assert_eq!(purged(&s), 1);
+    }
+
+    /// The archived original of a purged acknowledged event is a quarantine row
+    /// like any other.
+    #[test]
+    fn an_archived_original_ages_on_the_boot_clock() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = clk.open(d.path());
+        let mut src = s.clone();
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        src.acknowledged(&[uid(1)]);
+        clk.step_wall(86_400 + 1);
+        assert_eq!(s.expire_now().unwrap().purged_acked, 1);
+        assert_eq!(quarantine_rows(d.path()), 1);
+        clk.step_wall(100 * Q);
+        assert_eq!(purged(&s), 0);
+        clk.run_boot(Q + 1);
+        assert_eq!(purged(&s), 1);
+    }
+
+    fn expired_ranges(s: &Spool) -> Vec<(i64, i64)> {
+        let mut ranges: Vec<(i64, i64)> = s
+            .pending_gaps()
+            .unwrap()
+            .iter()
+            .map(|g| match g {
+                GapReport::SpoolExpired(x) => (x.from_sequence.get(), x.to_sequence.get()),
+                _ => panic!("kind"),
+            })
+            .collect();
+        ranges.sort();
+        ranges
+    }
+
+    /// `appended` events in boot-a, then `appended_b` in boot-b, all past R, with
+    /// the spool open in boot-b.
+    fn due_on_both_clocks(d: &Path, clk: &Clocks, appended: u32, appended_b: u32) -> Spool {
+        let s = clk.open(d);
+        for n in 1..=appended {
+            s.append(event(n)).unwrap();
+        }
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-b"), 1000);
+        let s = clk.open(d);
+        for n in 1..=appended_b {
+            s.append(event(appended + n)).unwrap();
+        }
+        clk.step_wall(R);
+        clk.run_boot(R);
+        s
+    }
+
+    #[test]
+    fn boot_and_wall_rows_due_together_form_one_sequence_run() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = due_on_both_clocks(d.path(), &clk, 2, 2);
+        assert_eq!(expired(&s), 4);
+        assert_eq!(expired_ranges(&s), vec![(1, 4)]);
+    }
+
+    /// Boot rows and wall rows share one batch: a pass that fills it with boot rows
+    /// leaves the wall rows for the next pass.
+    #[test]
+    fn boot_and_wall_rows_share_one_maintenance_batch() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let batch = MAINTENANCE_BATCH as u32;
+        let s = due_on_both_clocks(d.path(), &clk, 5, batch);
+        assert_eq!(expired(&s), batch as u64 + 5);
+        assert_eq!(expired_ranges(&s), vec![(1, 5), (6, MAINTENANCE_BATCH + 5)]);
+    }
+
+    /// A stamped row can sit below the wall bound after a backward step. Its stamp
+    /// still decides.
+    #[test]
+    fn a_current_stamp_wins_below_the_wall_bound() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        quarantined_one(&mut s, 1);
+        s.append(event(2)).unwrap();
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-b"), 1000);
+        let mut s = clk.open(d.path());
+        clk.step_wall(-100 * Q);
+        s.append(event(3)).unwrap();
+        quarantined_one(&mut s, 4);
+        clk.step_wall(100 * Q);
+        let r = s.expire_now().unwrap();
+        assert_eq!((r.expired_events, r.purged_quarantined), (0, 0));
+    }
+
+    fn stamps(dir: &Path) -> (i64, i64) {
+        let c = Connection::open(dir.join(SPOOL_FILE)).unwrap();
+        let n = |t: &str| {
+            c.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        (n("event_boot_stamps"), n("quarantine_boot_stamps"))
+    }
+
+    /// Ack, quarantine, expiry and the Q purge each leave exactly one stamp per
+    /// unsent event and per quarantine row.
+    #[test]
+    fn stamps_follow_their_rows_on_every_path() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        for n in 1..=4 {
+            s.append(event(n)).unwrap();
+        }
+        assert_eq!(stamps(d.path()), (4, 0));
+        s.acknowledged(&[uid(1)]);
+        assert_eq!(stamps(d.path()), (3, 0));
+        s.quarantined(&[uid(2)], QuarantineCode::SemanticInvalid);
+        assert_eq!(stamps(d.path()), (2, 1));
+        clk.run_boot(R);
+        assert_eq!(expired(&s), 2);
+        assert_eq!(stamps(d.path()), (0, 3));
+        clk.run_boot(Q + 1);
+        assert_eq!(purged(&s), 3);
+        assert_eq!(stamps(d.path()), (0, 0));
+    }
+
+    /// An older binary knows nothing of the stamps. The triggers live in the
+    /// database, so its plain SQL leaves no orphan either.
+    #[test]
+    fn stamps_leave_with_rows_that_an_older_binary_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        s.append(event(2)).unwrap();
+        quarantined_one(&mut s, 3);
+        s.close_blocking_for_test();
+        assert_eq!(stamps(d.path()), (2, 1));
+        let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        c.execute_batch(
+            "UPDATE events SET state = 1, acked_at = 0 WHERE sequence = 1;
+             DELETE FROM events WHERE sequence = 2;
+             DELETE FROM quarantine;",
+        )
+        .unwrap();
+        assert_eq!(stamps(d.path()), (0, 0));
+    }
+
+    /// The schema change is additive: the version stays, and a database from
+    /// before the stamps upgrades in place with its rows aging on the wall clock.
+    #[test]
+    fn databases_without_boot_stamps_are_upgraded_in_place() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let mut s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        quarantined_one(&mut s, 2);
+        s.close_blocking_for_test();
+        let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        let version: String = c
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "1");
+        c.execute_batch(
+            "DROP TRIGGER event_boot_stamps_on_delete;
+             DROP TRIGGER event_boot_stamps_on_ack;
+             DROP TRIGGER quarantine_boot_stamps_on_delete;
+             DROP TABLE event_boot_stamps;
+             DROP TABLE quarantine_boot_stamps;
+             DROP INDEX idx_unsent_created;",
+        )
+        .unwrap();
+        let s = clk.open(d.path());
+        assert_eq!(stamps(d.path()), (0, 0));
+        clk.step_wall(Q + 1);
+        let r = s.expire_now().unwrap();
+        assert_eq!((r.expired_events, r.purged_quarantined), (1, 1));
+    }
+
+    /// The opening bound stays below rows stamped in this boot however far the wall
+    /// clock stepped, and covers every row that needs wall-clock age.
+    #[test]
+    fn the_wall_bound_counts_only_rows_without_a_current_stamp() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let wall = clk.wall.load(Ordering::SeqCst);
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-b"), 1000);
+        let mut s = clk.open(d.path());
+        clk.step_wall(100 * R);
+        s.append(event(2)).unwrap();
+        quarantined_one(&mut s, 3);
+        s.close_blocking_for_test();
+        let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        let bound =
+            |boot: &str| -> i64 { c.query_row(WALL_AGED_UNTIL, [boot], |r| r.get(0)).unwrap() };
+        assert_eq!(bound("boot-b"), wall);
+        assert_eq!(bound("boot-a"), wall + 100 * R);
     }
 }

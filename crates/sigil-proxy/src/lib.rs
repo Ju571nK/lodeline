@@ -5,6 +5,7 @@
 //! writes the local status file and waits for a termination signal.
 
 pub mod body;
+pub mod boot_clock;
 pub mod bootstrap;
 pub mod cli;
 pub mod config_sync;
