@@ -154,10 +154,10 @@ jobs:
           rpms=()
           for pkg in "${all[@]}"; do rpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)"); done
           rpm -i "${rpms[@]}"
-          rpm -e "${all[@]}"
           for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
+          rpm -e "${all[@]}"
 
   # Debian/Ubuntu validation of the .deb packages. The rocky9 leg covers the
   # RPM path; this covers .deb end-to-end: build all five, install each, smoke
