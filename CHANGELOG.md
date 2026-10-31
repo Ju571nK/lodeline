@@ -9,6 +9,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ### Fixed
 
+- On Unix, sigil-proxy opens its spool and registry databases with
+  `SQLITE_OPEN_NOFOLLOW` under the resolved state directory. This closes the
+  gap between the symlink check and the open, where the file could be swapped
+  for a symlink. Windows keeps the check-then-open behaviour (#302).
 - The packaged `/etc/sigil/sender.yaml.example` now tails `/var/log/sigil`,
   where the root agent writes `events-*.jsonl`. It pointed at
   `/var/log/sigil/events`, so a sender configured from it shipped nothing and

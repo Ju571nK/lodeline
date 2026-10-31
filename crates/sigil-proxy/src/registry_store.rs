@@ -376,7 +376,12 @@ impl RegistryStore {
     /// Open (or create) the registry in `dir` (the proxy state directory, which
     /// the caller already created 0700 and locked). Loads K, or generates one.
     pub fn open(dir: &Path, proxy_id: &str) -> Result<(RegistryStore, OpenKind), RegistryError> {
-        let path = dir.join(REGISTRY_DB_FILE);
+        // NOFOLLOW below refuses a symlink in any component, so resolve the
+        // directory first; only the registry file itself must not be a link.
+        let path = dir
+            .canonicalize()
+            .map_err(|e| RegistryError::Io(e.kind()))?
+            .join(REGISTRY_DB_FILE);
         let db_existed = match std::fs::symlink_metadata(&path) {
             Ok(md) if md.is_file() => md.len() > 0,
             Ok(_) => return Err(RegistryError::Corrupt),
@@ -386,7 +391,10 @@ impl RegistryStore {
         if !db_existed {
             create_private(&path)?;
         }
-        let conn = Connection::open(&path)?;
+        let conn = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
             return Err(RegistryError::Storage);

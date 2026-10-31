@@ -42,7 +42,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sigil_proxy_api::status::{QuarantineCode, SpoolExpiredGap};
 use sigil_proxy_api::{GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
 use tokio::sync::oneshot;
@@ -840,7 +840,13 @@ CREATE TABLE gaps (
 
 impl Writer {
     fn open(cfg: SpoolConfig, shared: Arc<Shared>) -> Result<Writer, SpoolError> {
-        let path = cfg.dir.join(SPOOL_FILE);
+        // NOFOLLOW below refuses a symlink in any component, so resolve the
+        // directory first; only the spool file itself must not be a link.
+        let dir = cfg
+            .dir
+            .canonicalize()
+            .map_err(|_| SpoolError::Storage("stat".into()))?;
+        let path = dir.join(SPOOL_FILE);
         match std::fs::symlink_metadata(&path) {
             Ok(md) if !md.is_file() => return Err(SpoolError::BadPath),
             Ok(_) => {}
@@ -852,7 +858,12 @@ impl Writer {
             }
             Err(_) => return Err(SpoolError::Storage("stat".into())),
         }
-        let conn = Connection::open(&path).map_err(|e| classify_open(&e))?;
+        // NOFOLLOW closes the window between the check above and the open.
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|e| classify_open(&e))?;
         // Read-only probe first: an empty file in an existing epoch must stay
         // untouched (the pragmas below would write a header into it).
         let tables: i64 = conn
@@ -1750,6 +1761,22 @@ mod tests {
         format!("00000000-0000-4000-8000-{n:012x}")
     }
     const EPOCH: u32 = 5000;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_spool_file_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let open = |p: &Path| {
+            Connection::open_with_flags(p, OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW)
+        };
+        assert!(open(&dir.join("plain.db")).is_ok(), "a resolved dir opens");
+        std::os::unix::fs::symlink(dir.join("plain.db"), dir.join(SPOOL_FILE)).unwrap();
+        assert!(
+            open(&dir.join(SPOOL_FILE)).is_err(),
+            "SQLite followed the symlink"
+        );
+    }
 
     fn event(n: u32) -> ProxyEvent {
         serde_json::from_value(json!({
