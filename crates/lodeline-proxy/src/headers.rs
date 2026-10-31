@@ -61,9 +61,14 @@ const RESPONSE_ALLOW: &[&str] = &[
     "date",
 ];
 
+// A client that predates the rename still sends its auth header under this prefix.
+const OLD_AUTH_HEADER_PREFIX: &str = "x-sigil-";
+
 fn is_proxy_header(name: &str) -> bool {
     // Any proxy-defined auth header (`x-lodeline-*`) and `x-forwarded-*`.
-    name.starts_with("x-lodeline-") || name.starts_with("x-forwarded-")
+    name.starts_with("x-lodeline-")
+        || name.starts_with(OLD_AUTH_HEADER_PREFIX)
+        || name.starts_with("x-forwarded-")
 }
 
 /// Build the header map sent upstream.
@@ -193,6 +198,13 @@ mod tests {
                 upstream_request_headers(&hm(&[(name, "downstream")]), &auth(), "up:1").unwrap();
             assert!(!out.contains_key(name), "{name} must not be forwarded");
         }
+    }
+
+    #[test]
+    fn old_client_auth_header_never_reaches_upstream() {
+        let name = format!("{OLD_AUTH_HEADER_PREFIX}auth");
+        let out = upstream_request_headers(&hm(&[(&name, "secret")]), &auth(), "up:1").unwrap();
+        assert!(!out.contains_key(&name));
     }
 
     #[test]
