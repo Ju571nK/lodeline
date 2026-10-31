@@ -31,7 +31,7 @@ Status tags: **[DC]** decided-candidate (reviewable, consistent with frozen text
 | M | safety margin for clock skew and a lost ACK (`ack_loss_margin`) |
 | E | `server.event_retention`: how long accepted event rows and projections are kept |
 | T | `server.dedup_tombstone_retention`: how long a tombstone is kept after acceptance |
-| Q | `producer.quarantine_retention` (README N11: at least E) |
+| Q | how long the proxy keeps a quarantined row after `quarantined_at`; Q = E, not configured (README N11: at least E) |
 
 A tombstone is `(proxy_id, event_id, epoch_id, sequence, sha256(canonical event))`.
 It carries no payload and is small by design. A resubmission within the window is
@@ -57,9 +57,9 @@ revision, and the proxy echoes the values it applied in its status report
 (`config.max_offline_retry_age_seconds`, `config.event_retention_seconds`). The
 server validates a configuration before it issues it and refuses (422) any value
 outside the bounds below or any combination that breaks the invariants, so the
-proxy never runs with `T < R + M` or `E < R + M`. Q is not separately configured on
-the proxy: the proxy keeps quarantined originals for `max(configured, E)`, so
-`Q >= E` always holds. T and M are server-side. The proxy has no input to T.
+proxy never runs with `T < R + M` or `E < R + M`. Q is not configured on the proxy:
+the proxy purges quarantined rows at Q = E (#302 decision 1), so `Q >= E` always
+holds. T and M are server-side. The proxy has no input to T.
 
 | Parameter | Default | Bounds |
 |---|---|---|
@@ -67,7 +67,6 @@ the proxy: the proxy keeps quarantined originals for `max(configured, E)`, so
 | `ack_loss_margin` (M) | 7 days | 1 hour – 30 days |
 | `server.event_retention` (E) | 90 days | R+M – 365 days |
 | `server.dedup_tombstone_retention` (T) | = E | R+M – 730 days |
-| `producer.quarantine_retention` (Q) | = E | E – 730 days |
 | spool, acknowledged-event retention | 24 hours | per validation.md (existing D-04 row) |
 
 Related lifetimes:
@@ -107,7 +106,6 @@ unbounded per-epoch ranges and hashes) was rejected.
 | R=30d, M=7d, E=90d, T=90d | valid |
 | T < R + M | startup refused |
 | E < R + M | startup refused |
-| Q < E | startup refused |
 | resubmission at occurred_at + R, accepted at occurred_at + 1d, T = R + M | recognised |
 | resubmission after tombstone expiry | accepted as new; invocation projection flags `duplicate_completion`/`duplicate_start` (L2) |
 

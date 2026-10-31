@@ -20,6 +20,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ### Fixed
 
+- sigil-proxy now deletes a quarantined spool row once its `quarantined_at` is
+  older than Q, the server-issued `event_retention_seconds` (E). This covers
+  every code, `registry_conflict_original` included. Before this, quarantine
+  only grew. The server keeps the matching gap for E after its `detected_at`,
+  which is no later than `quarantined_at`, so local evidence lives at least as
+  long as the server must keep the gap. Two known limits: proxy clock skew, and
+  a gap delivered to the server more than E after the quarantine (an outage
+  of at least E; R + E for `spool_expired`). Nothing is deleted
+  until the proxy has applied a config that carries E. Each maintenance batch
+  that deletes rows logs the count, never the content (#302).
 - The sigil-proxy systemd unit now orders itself after `time-sync.target`.
   Spool expiry uses the wall clock, so a host that booted with a wrong RTC could
   quarantine unsent events on the first clock step. The target only waits when
