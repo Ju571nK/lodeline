@@ -156,7 +156,6 @@ jobs:
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
 
-
   # Debian/Ubuntu validation of the .deb packages. The rocky9 leg covers the
   # RPM path; this covers .deb end-to-end: build all five, install each, smoke
   # `--help`, then purge and verify cleanup. (#11)
