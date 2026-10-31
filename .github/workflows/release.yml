@@ -32,7 +32,7 @@ jobs:
           - target: aarch64-unknown-linux-musl  # static ARM64 — Graviton, Ampere, Pi 4+ (#12)
             os: ubuntu-22.04-arm                 # GitHub-hosted ARM64 Linux runner
           - target: aarch64-apple-darwin        # Apple Silicon only (Intel Macs not supported)
-            os: macos-14
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-2022
           - target: aarch64-pc-windows-msvc     # Arm Windows (Surface Pro X, Arm laptops)
@@ -184,7 +184,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-22.04-arm
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-2022
           - target: aarch64-pc-windows-msvc
