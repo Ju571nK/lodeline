@@ -3112,6 +3112,8 @@ mod tests {
             });
             let s = Spool::open(c).unwrap();
             s.set_quarantine_retention(Duration::from_secs(Q as u64));
+            // Commands queue behind the writer's start pass, so this waits it out.
+            s.expire_now().unwrap();
             s
         }
 
