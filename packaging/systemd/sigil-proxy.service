@@ -12,7 +12,7 @@
 [Unit]
 Description=Sigil Proxy — standalone MCP relay with audit
 Documentation=https://github.com/Ju571nK/sigil
-# Spool expiry uses the wall clock, so start after the clock is synced.
+# Across a reboot spool expiry uses the wall clock, so start after the clock is synced.
 After=network-online.target time-sync.target
 Wants=network-online.target
 

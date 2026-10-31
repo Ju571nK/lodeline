@@ -30,11 +30,20 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   of at least E; R + E for `spool_expired`). Nothing is deleted
   until the proxy has applied a config that carries E. Each maintenance batch
   that deletes rows logs the count, never the content (#302).
+- A wall-clock step no longer ages sigil-proxy spool rows within a boot. An NTP
+  step forward of R or more used to quarantine every unsent event at once, and a
+  step of Q or more purged quarantine evidence early. A backward step delayed
+  both. Each unsent event and quarantine row now has a `(boot_id, boot clock)`
+  stamp, and age uses the boot clock within the boot of the stamp, restarts
+  included. Across boots, or for a row with no stamp, age uses the wall clock as
+  before. Timestamps on the wire stay wall clock. The stamps are in additive
+  tables with the same schema version, so an older binary still opens the
+  database (Refs #302).
 - The sigil-proxy systemd unit now orders itself after `time-sync.target`.
-  Spool expiry uses the wall clock, so a host that booted with a wrong RTC could
-  quarantine unsent events on the first clock step. The target only waits when
-  a wait service is enabled; the packaging README says which one to use. A
-  clock step after start is not covered; that design stays open (#302).
+  Across a reboot spool age uses the wall clock, so a host that booted with a
+  wrong RTC could misjudge the age of older rows until the first clock step. The
+  target only waits when a wait service is enabled; the packaging README says
+  which one to use (#302).
 - On Unix, sigil-proxy opens its spool and registry databases with
   `SQLITE_OPEN_NOFOLLOW` under the resolved state directory. This closes the
   gap between the symlink check and the open, where the file could be swapped

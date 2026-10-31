@@ -27,11 +27,11 @@ Status tags: **[DC]** decided-candidate (reviewable, consistent with frozen text
 
 | Symbol | Meaning |
 |---|---|
-| R | `producer.max_offline_retry_age`: the longest age (now − `occurred_at`) at which the producer still retransmits an unsent event |
+| R | `producer.max_offline_retry_age`: the longest age at which the producer still retransmits an unsent event. Age is measured from the spool append, which follows `occurred_at`, on the rules in "Expiry of unsent events" |
 | M | safety margin for clock skew and a lost ACK (`ack_loss_margin`) |
 | E | `server.event_retention`: how long accepted event rows and projections are kept |
 | T | `server.dedup_tombstone_retention`: how long a tombstone is kept after acceptance |
-| Q | how long the proxy keeps a quarantined row after `quarantined_at`; Q = E, not configured (README N11: at least E) |
+| Q | how long the proxy keeps a quarantined row after it is quarantined, on the same age rules as R; Q = E, not configured (README N11: at least E) |
 
 A tombstone is `(proxy_id, event_id, epoch_id, sequence, sha256(canonical event))`.
 It carries no payload and is small by design. A resubmission within the window is
@@ -39,8 +39,8 @@ recognised as a duplicate (equal canonical event) or a 409 (different).
 
 ### Rule
 
-A retransmission of an accepted event happens at most R after its `occurred_at`.
-Acceptance happens at or after `occurred_at`, so the server must recognise the
+A retransmission of an accepted event happens at most R after its spool append.
+Acceptance happens at or after the append, so the server must recognise the
 `event_id` for **at least R + M after acceptance**. Therefore:
 
 ```
@@ -99,6 +99,17 @@ defaults adopted with the D-04 values. They are initial test values to be adjust
 after measurement, not performance or retention guarantees. Option B (never expire,
 unbounded per-epoch ranges and hashes) was rejected.
 
+R and Q are measured so that a clock step does not age rows (#302 decision 4). The
+spool stamps each unsent event and each quarantine row with `(boot_id, boot clock)`.
+Within the boot of the stamp, age is boot clock now minus the stamp. The boot clock
+counts suspend and ignores wall-clock steps (`CLOCK_BOOTTIME` on Linux). Across
+boots, or with no stamp or no boot clock, age is wall clock now minus `created_at`
+or `quarantined_at`, so a clock step around a reboot can still age rows early or
+late. A guest VM whose clock stops during a pause does not count the pause. A pause
+of at least M that the boot clock does not count can let a retransmission land past
+the tombstone and duplicate if the ACK was lost. `oldest_unsent_age_seconds` stays on
+the wall clock. On-wire timestamps stay wall clock.
+
 ### Cases (mirrored in `check_schema.py`)
 
 | Case | Expected |
@@ -106,7 +117,7 @@ unbounded per-epoch ranges and hashes) was rejected.
 | R=30d, M=7d, E=90d, T=90d | valid |
 | T < R + M | startup refused |
 | E < R + M | startup refused |
-| resubmission at occurred_at + R, accepted at occurred_at + 1d, T = R + M | recognised |
+| resubmission at append + R, accepted at append + 1d, T = R + M | recognised |
 | resubmission after tombstone expiry | accepted as new; invocation projection flags `duplicate_completion`/`duplicate_start` (L2) |
 
 ## L2. Invocation projection

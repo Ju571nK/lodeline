@@ -18,7 +18,7 @@
 | #337 | `sigil-proxy.service`에 `After=time-sync.target`. 대기 서비스는 chrony-wait(180초 상한)를 권장하고 systemd-time-wait-sync(timeout 없음)는 시계 없는 호스트에서 쓰지 않는다. AL2023(systemd 252, chrony 4.3)에서 확인 | #302 |
 | #342 | quarantine 행을 `quarantined_at`이 Q(= 서버가 내려준 E, `event_retention_seconds`)보다 오래되면 maintenance pass에서 삭제(모든 code, `registry_conflict_original` 포함). E를 받기 전에는 삭제하지 않음. 결정 1 | #302 |
 
-- clock-jump guard는 시도 후 리뷰에서 되돌렸다(suspend가 jump로 계산되어 R 이후 재전송 위험). #302에 열린 채 남음: 옵션 `CLOCK_BOOTTIME`, 보정 상한(cap), expiry rate limiting. quarantine 정책은 #302 결정 1–4로 정함(https://github.com/Ju571nK/sigil/issues/302#issuecomment-6537627891): Q = E purge, byte 상한 없음(`quarantined_bytes` 노출), replay·upload 없음, boot-clock 기반 age.
+- clock-jump guard는 시도 후 리뷰에서 되돌렸다(suspend가 jump로 계산되어 R 이후 재전송 위험). 대신 결정 4로 boot-clock age를 구현했다: 행마다 `(boot_id, boot clock)` stamp를 side table에 두고 같은 boot 안에서는 boot clock, boot가 다르거나 stamp가 없으면 wall clock으로 R·Q를 잰다(macOS는 개발 환경, Windows는 wall clock만). quarantine 정책은 #302 결정 1–4로 정함(https://github.com/Ju571nK/sigil/issues/302#issuecomment-6537627891): Q = E purge, byte 상한 없음(`quarantined_bytes` 노출), replay·upload 없음, boot-clock 기반 age.
 - 운영자 로컬 harness로 main에서 AWS 2노드 smoke 재실행(§3–§13, D1): 시나리오 27/27, ledger 22, privacy 0, outage replay 6, 재시작 fail-closed, spool 32×200/48×503(delta 32), disable/enable 정상, 감사 seq 0–4 ok.
 - 미측정: vendor client, D2, stateless/SSE 변형, SELinux.
 - 남은 P1: T-15(sigil-manager#37), T-16, 후속 #302, #307, #279, #269, #284.
