@@ -34,7 +34,9 @@ Group=lodeline-proxy
 # Matches state_dir in proxy.yaml.example (/var/lib/lodeline-proxy).
 StateDirectory=lodeline-proxy
 LogsDirectory=lodeline-proxy
-StateDirectoryMode=0750
+# 0700, not 0750: lodeline-proxy refuses a state dir with group or other bits
+# (state_dir.rs), and systemd reapplies this mode on every start.
+StateDirectoryMode=0700
 LogsDirectoryMode=0750
 NoNewPrivileges=yes
 ProtectSystem=strict

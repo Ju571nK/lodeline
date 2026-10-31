@@ -32,6 +32,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- The lodeline-proxy systemd unit now sets `StateDirectoryMode=0700`. It was
+  0750, which systemd reapplies on every start, and lodeline-proxy refuses a
+  state directory with group or other access, so the packaged proxy could not
+  start at the default path.
 - lodeline-proxy now deletes a quarantined spool row once its `quarantined_at` is
   older than Q, the server-issued `event_retention_seconds` (E). This covers
   every code, `registry_conflict_original` included. Before this, quarantine
