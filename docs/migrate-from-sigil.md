@@ -45,20 +45,34 @@ to finish` also covers removing one: an upgrade finishes the move by itself, but
 removal runs no Lodeline script, so rerun `migrate-from-sigil` afterwards. Another
 program named `sigil` in `/usr/bin`, such as NOMARJ/sigil, does not hold them back.
 
-**Debian and Ubuntu.** Name the old editor package with a trailing `-` so apt
-removes it:
+**Debian and Ubuntu.** First check what the `sigil` package on the host is:
 
 ```sh
-sudo apt-get install ./lodeline*.deb sigil-
+dpkg-query -W -f='${Version}\n' sigil
 ```
 
-Without `sigil-`, a Debian release whose repository carries the Sigil ebook
-editor can satisfy `Conflicts: sigil (<< 0.12)` by upgrading the editor to 1.x
-instead of removing the old package. One test did this: 281 packages, a 174 MB
-download and 768 MB of disk. Your data is not harmed, but old `sigil` stays
-installed. No package metadata can prevent this, so the `sigil-` form is the
-normal command. A host that really wants the editor can install it afterwards
-with `apt-get install sigil`.
+If it prints a 0.x version, it is old Sigil. Name it with a trailing `-` so apt
+removes it. Name one `.deb` for each old package, because a `./lodeline*.deb` glob
+also installs packages the host did not have:
+
+```sh
+sudo apt-get install ./lodeline_*.deb ./lodeline-sender_*.deb sigil-
+```
+
+If it prints 1.x or later, or the package is not installed, leave `sigil-` off. The
+`-` has no version bound, so it would remove a real editor, and on a host whose
+repository has no `sigil` package apt can refuse the name:
+
+```sh
+sudo apt-get install ./lodeline-sender_*.deb ./lodeline-proxy_*.deb
+```
+
+Without `sigil-` on a 0.x host, a release whose repository carries the Sigil ebook
+editor satisfies `Conflicts: sigil (<< 0.12)` by upgrading `sigil` to the editor
+instead of removing it. Every test of this did so: 281 packages, a 174 MB download
+and 768 MB of disk. Your data is not harmed, and the `sigil` package stays installed
+as the editor. No version bound that keeps the editor installable prevents this. A
+host that wants the editor can install it afterwards with `apt-get install sigil`.
 
 apt removes the old packages, unpacks all the new ones, then configures them one
 at a time in an order it picks. dpkg keeps a removed package's conffiles, so
@@ -120,9 +134,9 @@ Rules for each directory:
   it, keeping its owner and mode. The old examples stay at the old path and the
   script reports them as safe to remove, so a non-empty `/etc/sigil` afterwards is
   not a failure. Delete them, or run `dpkg --purge` on the `rc` packages. If
-`sigil` is `ii` because apt upgraded the editor, it is not `rc` and a purge would
-remove the editor. `/etc/sigil` then stays after you purge the others, because the
-editor's package owns it. Delete the old `*.example` files by hand.
+  `sigil` is `ii` because apt upgraded it to the editor, it is not `rc` and a purge
+  would remove the editor. `/etc/sigil` can then stay after you purge the others.
+  Delete the old `*.example` files by hand.
 - The script says `moved` only when everything moved. Otherwise it says
   `kept in <dir>:` and names what is left.
 - Across filesystems, for example when the new directory is its own mount, each
@@ -222,10 +236,9 @@ which is now `/etc/lodeline/proxy/`:
 | `ca_file` | `/etc/lodeline/proxy/ca.pem` |
 | `credentials.<ref>.secret_file`, for upstream secrets | `/etc/lodeline/proxy/example-upstream.secret` |
 
-In `server.yaml`, edit these keys if you set them. The shipped example uses the
-new defaults:
+In `server.yaml`, edit these keys if you set them:
 
-| Key | New default |
+| Key | New path |
 |---|---|
 | `events_out_dir` | `/var/lib/lodeline-server/events` |
 | `policy_bundle_path` | `/var/lib/lodeline-server/signed-policy.json` |
