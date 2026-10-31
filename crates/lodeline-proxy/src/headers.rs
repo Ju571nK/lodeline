@@ -202,9 +202,9 @@ mod tests {
 
     #[test]
     fn old_client_auth_header_never_reaches_upstream() {
-        let name = format!("{OLD_AUTH_HEADER_PREFIX}auth");
-        let out = upstream_request_headers(&hm(&[(&name, "secret")]), &auth(), "up:1").unwrap();
-        assert!(!out.contains_key(&name));
+        let out =
+            upstream_request_headers(&hm(&[("x-sigil-auth", "secret")]), &auth(), "up:1").unwrap();
+        assert!(!out.contains_key("x-sigil-auth"));
     }
 
     #[test]
