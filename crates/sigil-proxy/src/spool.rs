@@ -21,9 +21,12 @@
 //! * A quarantine row of any code is deleted once its `quarantined_at` is older
 //!   than Q (`ledger-and-query.md` L1: Q = E, the server-issued
 //!   `event_retention_seconds`, see [`Spool::set_quarantine_retention`]). The
-//!   server keeps the matching gap for E after `detected_at`, which is stamped
-//!   when the row is quarantined, so local evidence outlives the central loss
-//!   record. Until E is known nothing is deleted.
+//!   server keeps the matching gap for E after its `detected_at`, which is no
+//!   later than `quarantined_at` (stamped just before for `event_quarantined`,
+//!   at conflict time for `registry_conflict`), so local evidence lives at least
+//!   as long as the server must keep the gap. Known limits: proxy clock skew,
+//!   and a gap delivered more than E after quarantine (an outage of at least
+//!   R + E). Until E is known nothing is deleted.
 //! * Admission stops at `capacity - gap_reserve` of unsent event bytes
 //!   ([`AppendError::Full`]); the reserve is only for gap records.
 //! * Unsent events older than [`SpoolConfig::max_offline_retry_age`] (R) are
@@ -818,7 +821,7 @@ struct Writer {
     shared: Arc<Shared>,
 }
 
-const REWRITE_ORIGINALS: &str = "
+const ADDITIVE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS rewrite_originals (
   event_id TEXT PRIMARY KEY,
   sequence INTEGER NOT NULL,
@@ -826,7 +829,15 @@ CREATE TABLE IF NOT EXISTS rewrite_originals (
   bytes BLOB NOT NULL,
   rewritten_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_quarantine_at ON quarantine(quarantined_at);
 ";
+
+/// The Q purge: one batch of the oldest quarantine rows past the cutoff. Ordered
+/// by `quarantined_at` so it walks `idx_quarantine_at` instead of scanning the
+/// table inside the write transaction.
+const PURGE_QUARANTINE: &str = "DELETE FROM quarantine WHERE sequence IN \
+     (SELECT sequence FROM quarantine WHERE quarantined_at < ?1 \
+     ORDER BY quarantined_at LIMIT ?2) RETURNING size, code = ?3";
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -919,10 +930,11 @@ impl Writer {
             w.verify_schema()?;
         }
         // Additive table (T-13c): the unchanged bytes of events whose `tool` was
-        // rewritten after a registry conflict. Created in place for databases
-        // written before it existed (same schema version).
+        // rewritten after a registry conflict, plus the index the Q purge uses.
+        // Created in place for databases written before they existed (same
+        // schema version).
         w.conn
-            .execute_batch(REWRITE_ORIGINALS)
+            .execute_batch(ADDITIVE_SCHEMA)
             .map_err(|e| classify_open(&e))?;
         w.load_counters().map_err(|e| classify_open(&e))?;
         Ok(w)
@@ -1312,20 +1324,21 @@ impl Writer {
             .map_err(|e| SpoolError::Storage(code_name(&e)))?;
         let mut moved = Vec::new();
         for id in ids {
-            if let Some(size) = move_to_quarantine(&tx, id, code, now)? {
-                moved.push(size);
+            if let Some(sizes) = move_to_quarantine(&tx, id, code, now)? {
+                moved.push(sizes);
             }
         }
         tx.commit()
             .map_err(|e| SpoolError::Storage(code_name(&e)))?;
         let oldest = self.oldest_unsent().ok().flatten();
         let n = moved.len() as u64;
-        let bytes: u64 = moved.iter().sum();
+        let unsent_bytes: u64 = moved.iter().map(|(u, _)| u).sum();
+        let quarantined_bytes: u64 = moved.iter().map(|(_, q)| q).sum();
         let mut k = self.counters();
         k.unsent_events = k.unsent_events.saturating_sub(n);
-        k.unsent_bytes = k.unsent_bytes.saturating_sub(bytes);
+        k.unsent_bytes = k.unsent_bytes.saturating_sub(unsent_bytes);
         k.quarantined += n;
-        k.quarantined_bytes += bytes;
+        k.quarantined_bytes += quarantined_bytes;
         k.oldest_created = oldest;
         Ok(n)
     }
@@ -1456,12 +1469,13 @@ impl Writer {
             rows.collect::<Result<_, _>>().map_err(st)?
         };
         let mut report = ExpireReport::default();
-        let mut bytes = 0u64;
+        let (mut bytes, mut expired_q_bytes) = (0u64, 0u64);
         // Contiguous sequence runs: (from, to, count).
         let mut runs: Vec<(i64, i64, i64)> = Vec::new();
         for (seq, id) in &expired {
-            if let Some(size) = move_to_quarantine(&tx, id, EXPIRED_CODE, now)? {
-                bytes += size;
+            if let Some((unsent, quarantined)) = move_to_quarantine(&tx, id, EXPIRED_CODE, now)? {
+                bytes += unsent;
+                expired_q_bytes += quarantined;
                 report.expired_events += 1;
                 match runs.last_mut() {
                     Some((_, to, n)) if *to + 1 == *seq => {
@@ -1523,13 +1537,7 @@ impl Writer {
         let (mut purged_q_bytes, mut purged_originals) = (0u64, 0u64);
         if q_secs > 0 {
             let q_cutoff = now.saturating_sub(i64::try_from(q_secs).unwrap_or(i64::MAX));
-            let mut q = tx
-                .prepare(
-                    "DELETE FROM quarantine WHERE sequence IN \
-                     (SELECT sequence FROM quarantine WHERE quarantined_at < ?1 \
-                     ORDER BY sequence LIMIT ?2) RETURNING size, code = ?3",
-                )
-                .map_err(st)?;
+            let mut q = tx.prepare(PURGE_QUARANTINE).map_err(st)?;
             let rows = q
                 .query_map(params![q_cutoff, MAINTENANCE_BATCH, ORIGINAL_CODE], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
@@ -1562,7 +1570,7 @@ impl Writer {
         k.quarantined = (k.quarantined + report.expired_events)
             .saturating_sub(report.purged_quarantined - purged_originals);
         k.quarantined_bytes =
-            (k.quarantined_bytes + bytes + archived).saturating_sub(purged_q_bytes);
+            (k.quarantined_bytes + expired_q_bytes + archived).saturating_sub(purged_q_bytes);
         k.acked = k.acked.saturating_sub(report.purged_acked);
         k.acked_bytes = k.acked_bytes.saturating_sub(purged_bytes);
         k.gap_bytes += gap_bytes;
@@ -1669,14 +1677,15 @@ fn append_storage(e: &rusqlite::Error) -> AppendError {
     }
 }
 
-/// Copy one unsent row to `quarantine` and delete it. Returns its size, or
+/// Copy one unsent row to `quarantine` and delete it. Returns
+/// `(unsent_size, quarantined_size)`, which differ for a rewritten event, or
 /// `None` when the id is not an unsent row.
 fn move_to_quarantine(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
     code: &str,
     now: i64,
-) -> Result<Option<u64>, SpoolError> {
+) -> Result<Option<(u64, u64)>, SpoolError> {
     let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
     let size: Option<i64> = tx
         .query_row(
@@ -1689,7 +1698,6 @@ fn move_to_quarantine(
     let Some(size) = size else { return Ok(None) };
     // An event whose `tool` was rewritten goes to quarantine with its ORIGINAL
     // bytes (README M2b / N11): the rewritten form is derived and is not evidence.
-    // The returned size stays the unsent row's (the unsent counters use it).
     let moved = tx
         .execute(
             "INSERT INTO quarantine(sequence, event_id, bytes, size, created_at, quarantined_at, code) \
@@ -1708,11 +1716,18 @@ fn move_to_quarantine(
         )
         .map_err(st)?;
     }
+    let quarantined: i64 = tx
+        .query_row(
+            "SELECT size FROM quarantine WHERE event_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(st)?;
     tx.execute("DELETE FROM events WHERE event_id = ?1 AND state = 0", [id])
         .map_err(st)?;
     tx.execute("DELETE FROM rewrite_originals WHERE event_id = ?1", [id])
         .map_err(st)?;
-    Ok(Some(size as u64))
+    Ok(Some((size as u64, quarantined as u64)))
 }
 
 /// Before an acknowledged row is purged: move the pre-rewrite bytes of its event
@@ -2433,6 +2448,59 @@ mod tests {
         );
     }
 
+    /// The Q purge runs inside the append-blocking write transaction, so it must
+    /// walk the `quarantined_at` index, never scan or sort the table.
+    #[test]
+    fn q_purge_uses_the_quarantined_at_index() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.close_blocking_for_test();
+        let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        let mut q = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {PURGE_QUARANTINE}"))
+            .unwrap();
+        let plan: Vec<String> = q
+            .query_map(params![0, MAINTENANCE_BATCH, ORIGINAL_CODE], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("INDEX idx_quarantine_at (quarantined_at<?)"),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+
+    /// A spool written before the index existed gets it on reopen.
+    #[test]
+    fn reopen_adds_the_quarantined_at_index() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.close_blocking_for_test();
+        let has_index = || -> i64 {
+            Connection::open(d.path().join(SPOOL_FILE))
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_quarantine_at'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(has_index(), 1);
+        Connection::open(d.path().join(SPOOL_FILE))
+            .unwrap()
+            .execute_batch("DROP INDEX idx_quarantine_at")
+            .unwrap();
+        assert_eq!(has_index(), 0);
+        let mut c = cfg(d.path(), Arc::new(AtomicI64::new(1_800_000_000)));
+        c.new_epoch = false;
+        Spool::open(c).unwrap().close_blocking_for_test();
+        assert_eq!(has_index(), 1);
+    }
+
     /// Before the applied config provides E, nothing is purged however old.
     #[test]
     fn nothing_is_purged_while_e_is_unknown() {
@@ -2625,6 +2693,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, original);
+    }
+
+    /// A rewritten event is quarantined with its original bytes, so the
+    /// quarantined byte counter must follow the stored row, not the unsent one.
+    #[test]
+    fn quarantining_a_rewritten_event_counts_the_stored_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.quarantined(&[uid(1)], QuarantineCode::SemanticInvalid);
+        let snap = s.snapshot();
+        assert_eq!(snap.unsent_bytes, 0);
+        s.close_blocking_for_test();
+        let on_disk: i64 = Connection::open(d.path().join(SPOOL_FILE))
+            .unwrap()
+            .query_row("SELECT sum(size) FROM quarantine", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(snap.quarantined_bytes, on_disk as u64);
+        let mut c = cfg(d.path(), Arc::new(AtomicI64::new(1_800_000_000)));
+        c.new_epoch = false;
+        let reloaded = Spool::open(c).unwrap().snapshot();
+        assert_eq!(reloaded.quarantined_bytes, snap.quarantined_bytes);
+        assert_eq!(reloaded.unsent_bytes, 0);
+    }
+
+    /// Expiry of a rewritten event counts its stored (original) bytes too.
+    #[test]
+    fn expiring_a_rewritten_event_counts_the_stored_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.set_max_offline_retry_age(Duration::from_secs(10));
+        s.advance_clock_for_test(11);
+        assert_eq!(s.expire_now().unwrap().expired_events, 1);
+        let snap = s.snapshot();
+        assert_eq!(snap.unsent_bytes, 0);
+        s.close_blocking_for_test();
+        let on_disk: i64 = Connection::open(d.path().join(SPOOL_FILE))
+            .unwrap()
+            .query_row("SELECT sum(size) FROM quarantine", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(snap.quarantined_bytes, on_disk as u64);
     }
 
     #[test]
