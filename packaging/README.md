@@ -36,6 +36,12 @@ key and secret files (private files owned by `sigil-proxy`, mode 0600), run
 `systemctl enable --now sigil-proxy`. The SELinux domain for the proxy is
 deferred to hardware verification; until then it runs unconfined.
 
+The proxy expires unsent spool events by wall clock, so it orders itself after
+`time-sync.target`. That target only waits when a wait service is enabled: enable
+`chrony-wait.service` (Rocky 9) or `systemd-time-wait-sync.service` (with
+systemd-timesyncd) so the proxy starts after time sync. Without it, a clock step
+after start can expire unsent events into quarantine.
+
 ## Building
 
 Pure-Rust packagers, so this runs on macOS or Linux:
