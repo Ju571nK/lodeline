@@ -21,6 +21,7 @@ def tree(root):
     }
 
 
+@unittest.skipIf(os.name == "nt", "the script runs in POSIX sh on Linux package hosts")
 class MigrateTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
