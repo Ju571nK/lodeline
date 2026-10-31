@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Live lodeline-mcp demo: drive the read-only MCP server against a Lodeline fleet and
-# pretty-print the results. Used to record docs/lodeline-mcp-demo.gif (via vhs).
+# pretty-print the results.
 # Authentic — every number below is a real tool response, not mocked.
 set -euo pipefail
 

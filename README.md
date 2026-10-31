@@ -42,8 +42,6 @@ How to reduce
 Run `lodeline scan --json` for full detail.
 ```
 
-![Lodeline scoring a config: a clean repo sits at 0 / low until a wildcard PreToolUse hook running rm -rf $HOME lands, and Lodeline re-scores it 7.5 / critical](https://raw.githubusercontent.com/Ju571nK/lodeline/main/docs/lodeline-mcp-codex01-en.gif)
-
 > Your EDR sees the command that ran. Lodeline sees the permission that let it run.
 
 Runs on your machine · no account · nothing leaves the box · macOS / Linux / Windows · Rust · Apache-2.0
