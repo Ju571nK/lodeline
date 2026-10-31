@@ -30,8 +30,9 @@ host. They replace the old ones.
   matching `sigil*` package.
 
 Upgrade every Sigil package on the host in the same run. The shared `/etc/sigil`
-directory moves only after no old binary is left, so a partial upgrade leaves it
-in place and prints a notice.
+and `/var/log/sigil` directories move only after no old binary is left, because a
+running old sender still reads them. A partial upgrade leaves them in place and
+prints a notice.
 
 **Script installs and Windows `.zip`.** Run the new installer. It writes the new
 binary names and does not remove the old ones. Delete the old `sigil*` binaries
@@ -44,29 +45,54 @@ and nothing updates them. Old packages stay until you replace them.
 
 ## 2. Config, state and log paths
 
-The package post-install script runs `migrate-from-sigil` for you. It moves each
-old directory to the new path only when the new path has no real content, and it
-never deletes data.
+The package post-install script runs `migrate-from-sigil` for you. It moves what
+it can to the new path, and it never overwrites or deletes data.
 
 | Old | New | Moved by package |
 |---|---|---|
 | `/etc/sigil` | `/etc/lodeline` | any, once no old binary is left |
 | `/etc/sigil-server` | `/etc/lodeline-server` | `lodeline-server` |
-| `/var/lib/sigil`, `/var/log/sigil` | `/var/lib/lodeline`, `/var/log/lodeline` | `lodeline` |
+| `/var/log/sigil` | `/var/log/lodeline` | any, once no old binary is left |
+| `/var/lib/sigil` | `/var/lib/lodeline` | `lodeline` |
 | `/var/lib/sigil-sender`, `/var/log/sigil-sender` | `/var/lib/lodeline-sender`, `/var/log/lodeline-sender` | `lodeline-sender` |
 | `/var/lib/sigil-server`, `/var/log/sigil-server` | `/var/lib/lodeline-server`, `/var/log/lodeline-server` | `lodeline-server` |
 | `/var/lib/sigil-proxy`, `/var/log/sigil-proxy` | `/var/lib/lodeline-proxy`, `/var/log/lodeline-proxy` | `lodeline-proxy` |
 
 Rules for each directory:
 
-- The new path is absent: the old directory is renamed onto it.
-- The new path is empty or holds only packaged `*.example` files: the old entries
-  move in and the example files stay.
-- The new path has real content: both stay where they are, and the script says
-  so. Merge them by hand.
+- The new path is absent or empty: the old directory is renamed onto it.
+- The new path has entries: each old entry that is not there yet moves in. An
+  entry already at the new path is never overwritten. It stays at the old path
+  and the script lists it. Packaged `*.example` files are left as they are.
+- The script says `moved` only when everything moved. Otherwise it says
+  `kept in <dir>:` and names what is left.
+
+**SQLite databases.** A database moves together with its `-wal`, `-shm` and
+`-journal` files. If a database is at both paths, the script stops for that
+database, moves none of its files and reports it. Do not merge those files.
+Likewise, if the database is already at the new path and its `-wal` is still at
+the old one, the script leaves the `-wal` where it is, because pairing a WAL with
+the wrong database corrupts it. For each case:
+
+1. Keep the service stopped.
+2. If the Lodeline service never ran, the database at the new path is the one you
+   had. Move the leftover `-wal` next to it.
+3. If the service ran and made a fresh database, decide which one to keep. To keep
+   the old one, delete the new database and its sidecars, then rerun the script.
+
+**Symlinked directories.** If an old state or log directory is a symlink, the
+script moves nothing and prints the link target. Lodeline would otherwise start
+on an empty directory, and the agent would make a fresh `state.db` and a new
+`host_id`. Rename the link before you start the service, then rerun the script
+to repair ownership. The link target is never changed.
+
+```sh
+rmdir /var/lib/lodeline && mv /var/lib/sigil /var/lib/lodeline
+```
 
 Files owned by the `sigil` user and group, or by `sigil-proxy`, move to the
-matching `lodeline` account. The old accounts stay on the host.
+matching `lodeline` account. Every run repairs this across all the new
+directories, as soon as the new account exists. The old accounts stay on the host.
 
 If the post-install run was staged or interrupted, finish it by hand. Pick the
 component that matches the package:
@@ -81,8 +107,19 @@ component that matches the package:
 The script is safe to run again.
 
 **Config contents.** The script does not edit files. A config that names an old
-absolute path, such as `/etc/sigil/client.crt` in `sender.yaml`, keeps pointing at
-the old path. The script lists each such file. Edit them.
+absolute path keeps pointing at the old path. Every run lists each such file
+under `/etc`, including while `/etc/sigil` waits. Edit them before you start the
+service. In `sender.yaml` that means:
+
+| Key | New default |
+|---|---|
+| `client_cert_path` | `/etc/lodeline/client.crt` |
+| `client_key_path` | `/etc/lodeline/client.key` |
+| `server_ca_path` | `/etc/lodeline/server-ca.pem` |
+| `events_dir` | `/var/log/lodeline` |
+| `offset_path` | `/var/lib/lodeline-sender/sender-offset.json` |
+| `agent_control` | `/var/run/lodeline/control.sock` |
+| `dead_letter_dir` | `/var/log/lodeline-sender/dead-letter` |
 
 **Per-user paths.** No package owns these, so move them yourself:
 
@@ -106,7 +143,7 @@ defaults, with no policy, keys or history, while your old files sit unused.
 ## 3. Environment variables
 
 Rename every `SIGIL_*` variable to `LODELINE_*`. Only the prefix changes. Update
-shell profiles, unit drop-ins, CI secrets and container definitions.
+shell profiles, unit drop-ins, CI variables and container definitions.
 
 | Variable | Used by |
 |---|---|
@@ -118,10 +155,14 @@ shell profiles, unit drop-ins, CI secrets and container definitions.
 | `LODELINE_LOG` | log filter |
 | `LODELINE_SERVER_BASE_URL`, `LODELINE_SERVER_READ_TOKEN` | `lodeline-mcp` fleet mode |
 | `LODELINE_CA_CERT`, `LODELINE_CLIENT_CERT`, `LODELINE_CLIENT_KEY` | `lodeline-mcp` direct mTLS |
-| `LODELINE_BUILD_SIGNING_KEY`, `LODELINE_BUILD_PUBKEYS`, `LODELINE_BUILD_TARGET` | release builds |
+| `LODELINE_BUILD_PUBKEYS`, `LODELINE_BUILD_TARGET` | release builds |
 
 Other `LODELINE_*` names are test and demo switches. List every name the code
 reads with `git grep -hoE 'LODELINE_[A-Z0-9_]+' | sort -u`.
+
+One name stays. The GitHub Actions secret that signs releases is still
+`SIGIL_BUILD_SIGNING_KEY`. A repository rename keeps its secrets, so there is
+nothing to do, and a renamed secret would silently ship unsigned releases.
 
 **If you do nothing.** The old variables are ignored. A fleet-mode `lodeline-mcp`
 starts without its server URL and token and falls back to local mode. A sender or
@@ -134,7 +175,9 @@ The new packages ship `lodeline.service`, `lodeline-sender.service`,
 `lodeline` user and group, sysusers entries and tmpfiles rules.
 
 Packages never enable or start a service, and the old unit's enabled state does
-not carry over. After the upgrade, enable what you ran before:
+not carry over. Services stay stopped after the upgrade, by design, and the
+post-install output names the `systemctl enable --now` command for its package.
+Finish the config edits in section 2 first, then enable what you ran before:
 
 ```sh
 systemctl daemon-reload
@@ -183,6 +226,11 @@ file still holds `Bash(sigil:*)` in `permissions.allow` and `Bash(sigil run:*)`
 and `Bash(sigil-hook:*)` in `permissions.deny`. Add the `lodeline` equivalents and
 remove the old rules. The installer prints the snippet again when you rerun it.
 
+The legacy Antigravity plugin is the exception. `lodeline-hook install --agent
+antigravity --force` registers a plugin named `lodeline-hook` and leaves any old
+plugin named `sigil-hook` in place. Remove it with `agy plugin uninstall
+sigil-hook`.
+
 **If you do nothing.** Each old entry points at a missing command. The agent
 reports a hook error or skips the hook, depending on the agent. Observation
 and any enforcement stop until you re-register. The scanner still recognises old
@@ -210,12 +258,17 @@ Lodeline's own, so it adds no finding for it.
 ## 7. HTTP headers
 
 The management API reads `x-lodeline-requested-by` instead of
-`x-sigil-requested-by`. Update every client and reverse proxy that sets it. The
-proxy treats any `x-lodeline-*` request header as its own auth header. It no
-longer strips `x-sigil-*`, which now pass through as ordinary headers.
+`x-sigil-requested-by`. Update every client and reverse proxy that sets it,
+including the CLI. An old `sigil-server proxy` command against a new server still
+succeeds, but its `requested_by` is dropped without an error.
+
+The proxy treats `x-lodeline-*` request headers as its own auth headers and never
+forwards them upstream. It strips `x-sigil-*` the same way, so an old client's
+`x-sigil-auth` value does not reach an upstream. The proxy does not accept that
+header. The strip is a security filter, not a compatibility path.
 
 **If you do nothing.** Management calls lose the requester name in the audit
-trail. Do not rely on the old header for any auth decision.
+trail, silently. Clients that send `x-sigil-auth` get no auth from it.
 
 ## 8. Fleet certificates and signed policy
 

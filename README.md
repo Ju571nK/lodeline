@@ -24,15 +24,23 @@ lodeline scan
 ```
 
 ```
-overall  CRITICAL 7.5 · 7 tools · 14 findings
+Lodeline scan — CRITICAL (7.5)
+3 tools assessed · 7 findings
 
-TOOL          SCOPE         SCORE  BUCKET     TOP FINDINGS
-claude-code   user-global    7.5   critical   no_sandbox · broad_matcher (.* PreToolUse) · destructive_in_inline_command
-codex         user-global    5.6   high       no_sandbox · mcp_server_local_command
-cursor        application    2.5   medium     mcp_server_local_command
-antigravity   user-global    0.0   low        clean
+TOOL         SCOPE               SCORE  BUCKET    TOP FINDINGS
+claude-code  user-global           7.5  critical  no_sandbox, broad_matcher (+1 more)
+codex        user-global           2.5  medium    mcp_server_local_command, no_sandbox
+cursor       application:cursor    2.5  medium    mcp_server_local_command, no_sandbox
 
-not configured: continue-dev, gemini      ·      run `lodeline scan --json` for every finding
+5 tools not configured: antigravity, claude-desktop, codex, continue-dev, gemini
+
+How to reduce
+  no_sandbox                     The agent runs with no sandbox boundary — enable the tool's sandbox or limit what it can run.
+  broad_matcher                  A broad hook matcher catches most or all tool calls — scope it to specific tools.
+  destructive_in_inline_command  A hook runs a destructive shell command inline — review and remove it.
+  mcp_server_local_command       An MCP server auto-launches a local command — review or remove it, or run it sandboxed.
+
+Run `lodeline scan --json` for full detail.
 ```
 
 ![Lodeline scoring a config: a clean repo sits at 0 / low until a wildcard PreToolUse hook running rm -rf $HOME lands, and Lodeline re-scores it 7.5 / critical](https://raw.githubusercontent.com/Ju571nK/lodeline/main/docs/lodeline-mcp-codex01-en.gif)
