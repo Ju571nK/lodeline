@@ -139,7 +139,11 @@ merge_entries() {
         case "$kept$NL" in *"$NL$base$NL"*) continue ;; esac
         if ! move_family "$1/$base" "$2/$base"; then
             kept="$kept$NL$base"
-            shown="${shown:+$shown, }$base"
+            # Name every file of the family left at the old path, not just the
+            # database: a sidecar such as state.db-wal may be the one at both paths.
+            for s in "" -wal -shm -journal; do
+                if exists "$1/$base$s"; then shown="${shown:+$shown, }$base$s"; fi
+            done
         fi
     done
     rmdir "$1" 2>/dev/null || :

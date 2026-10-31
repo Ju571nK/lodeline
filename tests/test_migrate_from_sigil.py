@@ -167,7 +167,14 @@ class MigrateTest(unittest.TestCase):
                 "var/lib/lodeline/hook-baseline.json": "baseline",
             },
         )
-        self.assertIn("kept in /var/lib/sigil: state.db.", err)
+        self.assertIn("kept in /var/lib/sigil: state.db, state.db-wal, state.db-shm.", err)
+
+    def test_the_notice_names_the_sidecar_that_is_at_both_paths(self):
+        self.put("var/lib/sigil/state.db", "db")
+        self.put("var/lib/sigil/state.db-wal", "wal")
+        self.put("var/lib/lodeline/state.db-wal", "wal")
+        err = self.run_script()
+        self.assertIn("kept in /var/lib/sigil: state.db, state.db-wal.", err)
 
     def test_rerun_never_pairs_an_old_wal_with_a_db_already_at_the_new_path(self):
         self.put("var/lib/lodeline/state.db", "db")
