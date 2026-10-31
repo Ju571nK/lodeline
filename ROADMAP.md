@@ -1,6 +1,6 @@
 # Lodeline roadmap
 
-The full phase-by-phase log. The [README](README.md#roadmap) carries a short
+The full phase-by-phase log. The [README](README.md) carries a short
 "what's shipped" summary; this file is the authoritative record, including the
 merge SHA for each shipped phase.
 

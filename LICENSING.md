@@ -15,20 +15,20 @@ integrations — is distributed separately and verified by that mechanism.
 
 These modules are public and accept community contributions:
 
-| Crate / module                                    | Role                                             |
-| ------------------------------------------------- | ------------------------------------------------ |
-| `crates/lodeline-core`                              | Event schema, policy types, signing primitives   |
-| `crates/lodeline-agent`                             | Daemon runtime, file watcher, IPC, GC, heartbeat |
-| `crates/lodeline-spool`                             | Generic JSONL spool (producer/consumer/GC)       |
-| `crates/lodeline-rules-basic`                       | Baseline detection ruleset (macOS + Windows)     |
-| `crates/lodeline-core/src/sink/jsonl.rs`            | JSONL output sink                                |
-| `crates/lodeline-core/src/policy/verify.rs`         | Signed-policy verification chain                 |
-| `crates/lodeline-core/src/policy/canonical.rs`      | RFC 8785 canonical JSON for signature input      |
-| `crates/lodeline-core/src/policy/atomic_writer.rs`  | Crash-safe policy.yaml + state.db commit         |
-| `crates/lodeline-agent/src/policy_apply.rs`         | apply_policy IPC handler                         |
-| `crates/lodeline-agent/src/normalizer.rs`           | Default event normalizer/classifier              |
-| `crates/lodeline-agent/src/cli.rs`                  | CLI surface                                      |
-| All Phase 1+ tests                                | Integration + property tests                     |
+| Crate / module                                     | Role                                             |
+|----------------------------------------------------|--------------------------------------------------|
+| `crates/lodeline-core`                             | Event schema, policy types, signing primitives   |
+| `crates/lodeline-agent`                            | Daemon runtime, file watcher, IPC, GC, heartbeat |
+| `crates/lodeline-spool`                            | Generic JSONL spool (producer/consumer/GC)       |
+| `crates/lodeline-rules-basic`                      | Baseline detection ruleset (macOS + Windows)     |
+| `crates/lodeline-core/src/sink/jsonl.rs`           | JSONL output sink                                |
+| `crates/lodeline-core/src/policy/verify.rs`        | Signed-policy verification chain                 |
+| `crates/lodeline-core/src/policy/canonical.rs`     | RFC 8785 canonical JSON for signature input      |
+| `crates/lodeline-core/src/policy/atomic_writer.rs` | Crash-safe policy.yaml + state.db commit         |
+| `crates/lodeline-agent/src/policy_apply.rs`        | apply_policy IPC handler                         |
+| `crates/lodeline-agent/src/normalizer.rs`          | Default event normalizer/classifier              |
+| `crates/lodeline-agent/src/cli.rs`                 | CLI surface                                      |
+| All Phase 1+ tests                                 | Integration + property tests                     |
 
 **Why these stay open**: trust in a security daemon depends on operators
 being able to audit *how* events are captured, *how* policies are
@@ -42,13 +42,13 @@ These deliverables are **not** part of the public repository and ship as
 either signed policy bundles, separate private crates, or hosted
 services. The choice depends on integration depth.
 
-| Deliverable                  | Form                            | Notes                                          |
-| ---------------------------- | ------------------------------- | ---------------------------------------------- |
-| Extended detection rule pack | `lodeline-rules-pro` (private)    | Shadow AI, MCP/IDE configs, SaaS agents, etc.  |
-| Enterprise rule packs        | Signed policy bundle (Phase 2)  | Verified via `lodeline-core::policy::verify`     |
-| `lodeline-sender`              | Binary release (Plan B)         | Signs + ships envelopes to fleet               |
-| Hosted policy service        | Cloud service                   | Enterprise rule distribution + telemetry       |
-| SIEM / EDR connectors        | Separate private crates         | One per upstream (Splunk/Sentinel/CrowdStrike) |
+| Deliverable                  | Form                           | Notes                                          |
+|------------------------------|--------------------------------|------------------------------------------------|
+| Extended detection rule pack | `lodeline-rules-pro` (private) | Shadow AI, MCP/IDE configs, SaaS agents, etc.  |
+| Enterprise rule packs        | Signed policy bundle (Phase 2) | Verified via `lodeline-core::policy::verify`   |
+| `lodeline-sender`            | Binary release (Plan B)        | Signs + ships envelopes to fleet               |
+| Hosted policy service        | Cloud service                  | Enterprise rule distribution + telemetry       |
+| SIEM / EDR connectors        | Separate private crates        | One per upstream (Splunk/Sentinel/CrowdStrike) |
 
 **Why these are separate**: this repository carries the *mechanism* — the code
 that captures, verifies, persists, and enforces. Detection *content* is

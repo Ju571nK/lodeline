@@ -4,9 +4,9 @@ Confines the three de-rooted lodeline daemons (#10) into dedicated SELinux domai
 on RHEL-family systems (Rocky/RHEL/Fedora) instead of leaving them in
 `unconfined_service_t`:
 
-| daemon | domain | binary type |
-|--------|--------|-------------|
-| `lodeline` (agent) | `lodeline_agent_t` | `lodeline_agent_exec_t` |
+| daemon             | domain              | binary type              |
+|--------------------|---------------------|--------------------------|
+| `lodeline` (agent) | `lodeline_agent_t`  | `lodeline_agent_exec_t`  |
 | `lodeline-sender`  | `lodeline_sender_t` | `lodeline_sender_exec_t` |
 | `lodeline-server`  | `lodeline_server_t` | `lodeline_server_exec_t` |
 

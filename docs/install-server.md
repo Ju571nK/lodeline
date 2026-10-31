@@ -106,7 +106,7 @@ do that off localhost.
 You need: a CA, a **server cert** whose SAN matches the address agents will
 connect to, and a **client CA** that signs each host's client cert. A single
 self-managed CA can play both roles. The recipe below mirrors
-[`demo/init.sh`](../demo/init.sh) — the one change that matters in production is
+`demo/init.sh` — the one change that matters in production is
 the **`subjectAltName`**.
 
 ```sh

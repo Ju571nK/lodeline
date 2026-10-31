@@ -1,6 +1,11 @@
 # Lodeline
 
-**Your Claude Code, Codex, and Cursor can run whatever their config allows. Lodeline scores what that is — in one command, before something does.**
+**A config scanner for AI coding agents.** Claude Code, Codex, and Cursor can run
+whatever their config allows. Lodeline scores what that is, in one command,
+before something does.
+
+> Formerly Sigil. Upgrading an existing install? See the
+> [migration guide](docs/migrate-from-sigil.md).
 
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![macOS](https://img.shields.io/badge/macOS-supported-success)
@@ -61,9 +66,9 @@ It re-scores the moment a config changes — a clean repo at `0 / low` jumps to
 
 - A **linter / SAST** reads *your* source. It says nothing about what your agent is *allowed* to do.
 - An **EDR** flags the process *after* it launches. By then the permission that allowed it already existed.
-- **Lodeline** reads that permission surface — sandbox, hooks, MCP, instruction files — and scores it *before* anything runs.
+- **Lodeline** reads that permission surface (sandbox, hooks, MCP, instruction files) and scores it *before* anything runs.
 
-It measures. It doesn't block. (Blocking exists, but it's opt-in and off by default — your agent keeps working.)
+It measures. It doesn't block by default. Blocking exists, but it is opt-in, so your agent keeps working.
 
 ---
 
@@ -117,15 +122,16 @@ them, and emits JSONL posture events. Locally that's all you need. For a fleet,
 `lodeline-sender` ships those events over mTLS to `lodeline-server`, which feeds your
 SIEM and the optional `lodeline-manager` dashboard and pushes signed policy back.
 
-Nine crates with clear roles (`lodeline-agent`, `lodeline-sender`, `lodeline-server`,
-`lodeline-mcp`, `lodeline-hook`, `lodeline-signer`, `lodeline-core`, …); `lodeline-core` is
-`forbid(unsafe_code)`. Built on rustls, ed25519, blake3, notify, and axum.
+The workspace has twelve crates with clear roles (`lodeline-agent`, `lodeline-sender`,
+`lodeline-server`, `lodeline-mcp`, `lodeline-hook`, `lodeline-signer`, `lodeline-core`,
+and others). `lodeline-core` is `forbid(unsafe_code)`. Built on rustls, ed25519,
+blake3, notify, and axum.
 
 ---
 
-## Status — read this
+## Status
 
-Lodeline is **alpha**, built and maintained by one person. It **measures posture; it
+Lodeline is **alpha**, built and maintained by one person. It **measures posture and
 does not block** by default. [`SECURITY.md`](SECURITY.md) is honest that there's
 no SLA. The Linux runtime is a working foundation with rough edges (watch limits,
 coverage signaling) still on the [roadmap](ROADMAP.md). Use it to *see* your
