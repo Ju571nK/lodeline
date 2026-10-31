@@ -1,6 +1,6 @@
 # Sigil Proxy 작업 상태
 
-갱신: 2026-10-24 · T-13d/T-12b2 구현·독립 검토 진행 (기준 커밋 `e5612f8`)
+갱신: 2026-10-31 · spool hardening·AWS 2노드 재시험 (기준 커밋 `fc60da5`)
 
 ## 현재 상태
 
@@ -8,6 +8,19 @@
   계약 종료는 구현·실기 검증 완료가 아니다.
 - P1 착수. 사용자 창구: 이 대화의 orchestrator. 하위 작업은 구체적인 파일 소유권과 인수 조건을 지정하고, 실행 provider/model 기본값을 유지한다.
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
+
+## 2026-10-29–31 spool hardening·실기 재시험
+
+| PR | 작업 | 이슈 |
+|---|---|---|
+| #334 | agent spool GC가 sender의 실제 offset(경로·필드)을 읽도록 수정, 같은 날 rotation 세그먼트를 (날짜, seq) 순으로 정렬(sender 미전송 버그 포함) | #331 |
+| #336 | spool·registry DB를 Unix에서 `SQLITE_OPEN_NOFOLLOW`로 열기(state dir은 canonicalize). Windows는 대응 수단이 없으나 support-matrix.md상 미지원이라 조치하지 않음 | #302 |
+| #337 | `sigil-proxy.service`에 `After=time-sync.target`. 대기 서비스는 chrony-wait(180초 상한)를 권장하고 systemd-time-wait-sync(timeout 없음)는 시계 없는 호스트에서 쓰지 않는다. AL2023(systemd 252, chrony 4.3)에서 확인 | #302 |
+
+- clock-jump guard는 시도 후 리뷰에서 되돌렸다(suspend가 jump로 계산되어 R 이후 재전송 위험). #302에 열린 채 남음: 옵션 `CLOCK_BOOTTIME`, 보정 상한(cap), expiry rate limiting. quarantine 정책(상한·export·replay)도 미결.
+- 운영자 로컬 harness로 main에서 AWS 2노드 smoke 재실행(§3–§13, D1): 시나리오 27/27, ledger 22, privacy 0, outage replay 6, 재시작 fail-closed, spool 32×200/48×503(delta 32), disable/enable 정상, 감사 seq 0–4 ok.
+- 미측정: vendor client, D2, stateless/SSE 변형, SELinux.
+- 남은 P1: T-15(sigil-manager#37), T-16, 후속 #302, #307, #279, #269, #284.
 
 ## 2026-10-25 AWS 2노드 실기 (H)
 
