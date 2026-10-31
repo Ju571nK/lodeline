@@ -46,10 +46,22 @@ class MigrateTest(unittest.TestCase):
         return result.stderr
 
     def dpkg_has(self, **packages):
-        """Package name with `_` for `-`, mapped to a `<dpkg status> <version>` row."""
+        """Package name with `_` for `-`, mapped to a `<dpkg state> <version>` row.
+
+        Rejects any format but the plain fields every dpkg has, as dpkg before 1.19.1
+        prints nothing for `${db:Status-Status}`.
+        """
         self.put("var/lib/dpkg/status", "")
-        rows = "".join(f'{name.replace("_", "-")}) echo "{row}" ;; ' for name, row in packages.items())
-        self.stub_command("dpkg-query", f'for last; do :; done\ncase "$last" in {rows}*) exit 1 ;; esac')
+        rows = "".join(
+            f'{name.replace("_", "-")}) echo "{"deinstall" if row.startswith("config-files") else "install"} ok {row}" ;; '
+            for name, row in packages.items()
+        )
+        self.stub_command(
+            "dpkg-query",
+            "for last; do case \"$last\" in -f=*) fmt=$last ;; esac; done\n"
+            "[ \"$fmt\" = '-f=${Status} ${Version}\\n' ] || exit 1\n"
+            f'case "$last" in {rows}*) exit 1 ;; esac',
+        )
 
     def rpm_has(self, **packages):
         (self.root / "var/lib/rpm").mkdir(parents=True, exist_ok=True)
@@ -65,6 +77,9 @@ class MigrateTest(unittest.TestCase):
             'echo "Filesystem 512-blocks Used Available Capacity Mounted on"\n'
             'echo "$dev 100 1 99 1% /$dev"',
         )
+
+    def stub_ownership_find(self):
+        self.stub_command("find", 'case "$*" in *"-exec ch"*) exit 0 ;; esac\nexec /usr/bin/find "$@"')
 
     def swap_command_from(self, err):
         command = re.search(r"run: (mkdir -p .*?)\. Then rerun", err).group(1)
@@ -228,8 +243,9 @@ class MigrateTest(unittest.TestCase):
             err = self.run_script()
             self.assertIn(f"kept /var/lib/sigil: it is a symlink to {target}", err)
             self.assertIn(
-                "mkdir -p /var/lib/lodeline && rm -f /var/lib/lodeline/*.example"
-                " && rmdir /var/lib/lodeline && mv /var/lib/sigil /var/lib/lodeline",
+                "mkdir -p /var/lib/lodeline && rm -f /var/lib/lodeline/*.example && rmdir /var/lib/lodeline"
+                " && find /var/lib/sigil/ -name '*.example' ! -type d -exec rm -f {} +"
+                " && mv /var/lib/sigil /var/lib/lodeline",
                 err,
             )
             self.assertIn("systemctl enable --now lodeline", err)
@@ -267,7 +283,7 @@ class MigrateTest(unittest.TestCase):
         (self.root / "var/lib/lodeline").symlink_to(self.root / "data/sigil")
         self.accounts = ["sigil", "lodeline"]
         self.write_accounts()
-        self.stub_command("find", "exit 0")
+        self.stub_ownership_find()
         self.assertEqual(self.run_script(), "")
         self.assertIn(f"find {self.root}/var/lib/lodeline/ -user sigil -exec chown -h lodeline {{}} +", self.finds())
 
@@ -287,6 +303,128 @@ class MigrateTest(unittest.TestCase):
                 "etc/sigil/policy.yaml.example": "old example",
             },
         )
+
+    def unpack_new_packages(self):
+        for name in ("policy", "sender", "proxy"):
+            self.put(f"etc/lodeline/{name}.yaml.example.dpkg-new", "new example")
+
+    def old_conffiles_left_by_dpkg(self):
+        for name in ("policy", "sender", "proxy"):
+            self.put(f"etc/sigil/{name}.yaml.example", "old example")
+        self.put("etc/sigil/proxy/upstream.yaml.example", "old nested example")
+
+    def test_each_configure_order_on_debian_never_meets_a_changed_conffile(self):
+        conffile = {"sender": "sender", "agent": "policy", "proxy": "proxy"}
+        for order in (("sender", "agent", "proxy"), ("proxy", "agent", "sender"), ("agent", "proxy", "sender")):
+            with self.subTest(order=order):
+                self.dpkg_has(sigil="config-files 0.11.0", sigil_sender="config-files 0.11.0")
+                self.old_conffiles_left_by_dpkg()
+                self.put("etc/sigil/policy.yaml", "policy")
+                self.put("etc/sigil/proxy/client.key", "key")
+                self.put("var/lib/sigil-proxy/spool.db", "spool")
+                self.unpack_new_packages()
+                for component in order:
+                    new_file = self.root / f"etc/lodeline/{conffile[component]}.yaml.example"
+                    err = self.run_script(component)
+                    self.assertFalse(new_file.exists(), "dpkg would prompt on this file")
+                    self.assertNotIn("still used by", err)
+                    self.assertNotIn("kept in", err)
+                    self.assertIn("left the old packaged *.example files in /etc/sigil", err)
+                    Path(f"{new_file}.dpkg-new").rename(new_file)
+                found = tree(self.root)
+                self.assertEqual(found["etc/lodeline/policy.yaml"], "policy")
+                self.assertEqual(found["etc/lodeline/proxy/client.key"], "key")
+                self.assertEqual(found["var/lib/lodeline-proxy/spool.db"], "spool")
+                self.assertEqual(found["etc/lodeline/proxy.yaml.example"], "new example")
+                self.assertNotIn("etc/lodeline/proxy/upstream.yaml.example", found)
+                self.assertEqual(found["etc/sigil/proxy/upstream.yaml.example"], "old nested example")
+                self.assertEqual(
+                    sorted(k for k in found if k.startswith("etc/sigil/")),
+                    [
+                        "etc/sigil/policy.yaml.example",
+                        "etc/sigil/proxy.yaml.example",
+                        "etc/sigil/proxy/upstream.yaml.example",
+                        "etc/sigil/sender.yaml.example",
+                    ],
+                )
+                shutil.rmtree(self.root / "etc/lodeline")
+                shutil.rmtree(self.root / "etc/sigil")
+                shutil.rmtree(self.root / "var/lib/lodeline-proxy")
+
+    def test_rpm_host_leaves_examples_too_and_reruns_quietly(self):
+        self.rpm_has()
+        self.old_conffiles_left_by_dpkg()
+        self.put("etc/sigil/policy.yaml", "policy")
+        self.put("etc/lodeline/policy.yaml.example", "new example")
+        self.run_script()
+        first = tree(self.root)
+        self.assertEqual(first["etc/lodeline/policy.yaml.example"], "new example")
+        self.assertEqual(first["etc/sigil/proxy.yaml.example"], "old example")
+        self.assertNotIn("etc/lodeline/proxy.yaml.example", first)
+        self.assertNotIn("moved", self.run_script())
+        self.assertEqual(tree(self.root), first)
+
+    def test_a_missing_new_dir_receives_the_tree_without_examples_and_keeps_its_mode(self):
+        self.old_conffiles_left_by_dpkg()
+        self.put("etc/sigil/proxy/client.key", "key")
+        self.put("etc/sigil/policy.yaml", "policy")
+        (self.root / "etc/sigil/proxy").chmod(0o750)
+        self.run_script()
+        self.assertEqual(
+            sorted(k for k in tree(self.root) if k.startswith("etc/lodeline/")),
+            ["etc/lodeline/policy.yaml", "etc/lodeline/proxy/client.key"],
+        )
+        self.assertEqual(stat.S_IMODE((self.root / "etc/lodeline/proxy").stat().st_mode), 0o750)
+
+    def test_examples_at_both_paths_never_hold_back_the_real_config(self):
+        self.old_conffiles_left_by_dpkg()
+        self.put("etc/lodeline/proxy/keep", "new")
+        self.put("etc/sigil/proxy/client.key", "key")
+        err = self.run_script()
+        self.assertIn("kept in /etc/sigil: proxy.", err)
+        self.assertEqual((self.root / "etc/sigil/proxy/client.key").read_text(), "key")
+
+    def test_failed_subdir_move_leaves_the_old_tree_whole_and_a_rerun_finishes(self):
+        self.old_conffiles_left_by_dpkg()
+        self.put("etc/lodeline/rule-packs.yaml", "packs")
+        self.put("etc/sigil/proxy/client.key", "key")
+        self.stub_command("mv", 'case "$1" in *migrate-tmp) exit 1 ;; *) exec /bin/mv "$@" ;; esac')
+        err = self.run_script()
+        self.assertIn("kept in /etc/sigil: proxy.", err)
+        self.assertEqual((self.root / "etc/sigil/proxy/client.key").read_text(), "key")
+        self.assertFalse((self.root / "etc/lodeline/proxy.lodeline-migrate-tmp").exists())
+
+        (self.stub / "mv").unlink()
+        self.assertIn("moved /etc/sigil to /etc/lodeline", self.run_script())
+        self.assertEqual((self.root / "etc/lodeline/proxy/client.key").read_text(), "key")
+        self.assertFalse((self.root / "etc/sigil/proxy/client.key").exists())
+
+    def test_examples_alone_do_not_count_as_old_data(self):
+        self.old_conffiles_left_by_dpkg()
+        err = self.run_script()
+        self.assertFalse((self.root / "etc/lodeline").exists())
+        self.assertIn("safe to remove", err)
+        self.assertNotIn("systemctl enable", err)
+
+    def test_printed_command_leaves_no_old_example_at_the_new_path(self):
+        self.put("data/sigil/policy.yaml", "policy")
+        self.put("data/sigil/proxy.yaml.example", "old")
+        self.put("data/sigil/proxy/x.yaml.example", "old")
+        (self.root / "etc").mkdir()
+        (self.root / "etc/sigil").symlink_to(self.root / "data/sigil")
+        subprocess.run([SHELL, "-c", self.swap_command_from(self.run_script())], check=True)
+        self.assertEqual(tree(self.root / "etc/lodeline"), {"policy.yaml": "policy"})
+
+    def test_dpkg_status_field_reads_every_state(self):
+        for row, waits in (
+            ("installed 0.11.0", True),
+            ("half-configured 0.11.0", True),
+            ("config-files 0.11.0", False),
+        ):
+            self.dpkg_has(sigil=row)
+            self.put("etc/sigil/policy.yaml", "policy")
+            self.assertEqual("still used by sigil" in self.run_script(), waits, row)
+            shutil.rmtree(self.root / "etc/lodeline", ignore_errors=True)
 
     def test_empty_new_dir_from_tmpfiles_still_receives_state(self):
         (self.root / "var/lib/lodeline").mkdir(parents=True)
@@ -500,7 +638,7 @@ class MigrateTest(unittest.TestCase):
             err = self.run_script("sender")
             self.assertIn("/etc/lodeline/sender.yaml still names an old /sigil path", err)
             self.assertIn("/etc/lodeline/host-allowlist.json still names an old /sigil path", err)
-            self.assertNotIn(".example", err)
+            self.assertNotIn(".example still names", err)
         self.assertEqual((self.root / "etc/lodeline/sender.yaml").read_text(), body)
 
     def test_old_paths_are_reported_while_etc_sigil_waits(self):
@@ -526,13 +664,14 @@ class MigrateTest(unittest.TestCase):
         self.put("etc/group", lines)
 
     def finds(self):
-        return self.calls.read_text().splitlines() if self.calls.exists() else []
+        lines = self.calls.read_text().splitlines() if self.calls.exists() else []
+        return [line for line in lines if not line.startswith("find") or "-exec ch" in line]
 
     def test_owner_and_group_follow_the_rename_when_both_accounts_exist(self):
         self.accounts = ["sigil", "lodeline"]
         self.write_accounts()
         self.put("var/lib/sigil/state.db", "db")
-        self.stub_command("find", "exit 0")
+        self.stub_ownership_find()
         self.run_script()
         new = self.root / "var/lib/lodeline"
         self.assertIn(f"find {new}/ -user sigil -exec chown -h lodeline {{}} +", self.finds())
@@ -542,7 +681,7 @@ class MigrateTest(unittest.TestCase):
         self.accounts = ["sigil", "lodeline"]
         self.write_accounts()
         self.put("var/lib/lodeline/state.db", "db")
-        self.stub_command("find", "exit 0")
+        self.stub_ownership_find()
         self.assertEqual(self.run_script(), "")
         self.assertIn(f"find {self.root}/var/lib/lodeline/ -user sigil -exec chown -h lodeline {{}} +", self.finds())
 
@@ -551,7 +690,7 @@ class MigrateTest(unittest.TestCase):
 
     def test_proxy_files_in_shared_etc_get_the_new_owner_when_agent_configures_first(self):
         self.put("etc/sigil/proxy/client.key", "key")
-        self.stub_command("find", "exit 0")
+        self.stub_ownership_find()
         self.accounts = ["sigil", "sigil-proxy", "lodeline"]
         self.write_accounts()
         self.run_script("agent")
@@ -564,7 +703,7 @@ class MigrateTest(unittest.TestCase):
 
     def test_agent_files_in_shared_etc_get_the_new_owner_when_proxy_configures_first(self):
         self.put("etc/sigil/client.key", "key")
-        self.stub_command("find", "exit 0")
+        self.stub_ownership_find()
         self.accounts = ["sigil", "sigil-proxy", "lodeline-proxy"]
         self.write_accounts()
         self.run_script("proxy")
@@ -580,7 +719,7 @@ class MigrateTest(unittest.TestCase):
         self.accounts = ["sigil"]
         self.write_accounts()
         self.put("var/lib/sigil/state.db", "db")
-        self.stub_command("find", "exit 0")
+        self.stub_ownership_find()
         err = self.run_script()
         self.assertEqual(err.count("skipped repairing ownership from sigil to lodeline"), 2)
         self.assertEqual([c for c in self.finds() if c.startswith("find")], [])

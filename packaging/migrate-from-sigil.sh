@@ -10,6 +10,9 @@
 #     the rest. A rerun picks up where an interrupted run stopped. A move across
 #     filesystems never shows a partial file under the real name.
 #   - old path is a symlink: leave it, and print the manual step.
+#   - packaged *.example files never move, at any depth. The new packages own the
+#     same names, so dpkg would meet a changed conffile and stop on a prompt. They
+#     stay behind and are reported as safe to remove.
 # /etc/sigil and /var/log/sigil are shared between packages, so they wait until the
 # package database shows no old Sigil package. Every run then repairs ownership
 # over all the new directories, because each package configures before or after
@@ -38,14 +41,12 @@ note() { printf 'lodeline-migrate: %s\n' "$1" >&2; }
 
 exists() { [ -e "$1" ] || [ -L "$1" ]; }
 
+holds_example() { find "$1" -name '*.example' ! -type d | grep -q .; }
+
 # True when the directory holds anything other than *.example files.
-has_content() {
-    for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
-        exists "$e" || continue
-        case "$e" in *.example) ;; *) return 0 ;; esac
-    done
-    return 1
-}
+has_content() { find "$1" -mindepth 1 ! -name '*.example' \( ! -type d -o -empty \) | grep -q .; }
+
+only_examples() { holds_example "$1" && ! has_content "$1"; }
 
 # <passwd|group> <name>. Outside --root, getent also sees LDAP and sssd accounts.
 known() {
@@ -89,16 +90,19 @@ fs_of() { df -P "$1" 2>/dev/null | awk 'NR == 2 { print $1, $NF }'; }
 
 # mv copies across filesystems, and a run killed mid-copy would leave a partial
 # file under the real name. So a copy gets a temporary name, which a rerun removes,
-# and only a complete copy is renamed into place.
+# and only a complete copy is renamed into place. A tree holding examples takes
+# the copy route on any filesystem, so it arrives whole with its owner and mode,
+# and the examples stay behind.
 # shortcut: df cannot see overlayfs copy-up, where mv still copies. Upgrade if a
 # container image ever migrates in place.
 move_entry() {
     tmp="$2.lodeline-migrate-tmp"
     rm -rf "$tmp"
-    if [ "$(fs_of "${1%/*}")" = "$(fs_of "${2%/*}")" ]; then
+    if [ "$(fs_of "${1%/*}")" = "$(fs_of "${2%/*}")" ] && ! holds_example "$1"; then
         mv "$1" "$2"
-    elif cp -a "$1" "$tmp" && mv "$tmp" "$2"; then
-        rm -rf "$1"
+    elif cp -a "$1" "$tmp" && find "$tmp" -name '*.example' ! -type d -exec rm -f {} + && mv "$tmp" "$2"; then
+        find "$1" ! -type d ! -name '*.example' -exec rm -f {} +
+        find "$1" -depth -type d -exec rmdir {} + 2>/dev/null || :
     else
         rm -rf "$tmp"
         return 1
@@ -125,7 +129,7 @@ merge_entries() {
     for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
         exists "$e" || continue
         name=${e##*/}
-        case "$name" in *.example) if exists "$2/$name"; then continue; fi ;; esac
+        if only_examples "$e"; then continue; fi
         case "$name" in
             ?*-wal) base=${name%-wal} ;;
             ?*-shm) base=${name%-shm} ;;
@@ -143,9 +147,10 @@ merge_entries() {
 }
 
 # Works when the new directory is missing or holds only packaged examples, and
-# stops before the mv when it holds anything else.
+# stops before the mv when it holds anything else. The old examples go first, so
+# none lands where a new package owns that name.
 swap_command() {
-    printf 'mkdir -p %s && rm -f %s/*.example && rmdir %s && mv %s %s' "$2" "$2" "$2" "$1" "$2"
+    printf "mkdir -p %s && rm -f %s/*.example && rmdir %s && find %s/ -name '*.example' ! -type d -exec rm -f {} + && mv %s %s" "$2" "$2" "$2" "$1" "$1" "$2"
 }
 
 move_dir() {
@@ -163,8 +168,7 @@ move_dir() {
     fi
     rmdir "$new" 2>/dev/null
     if [ ! -e "$new" ]; then
-        # Same parent directory, so this is a rename or a failure, never a copy.
-        if mv "$old" "$new"; then note "moved $1 to $2"; else note "could not move $1 to $2"; fi
+        if move_entry "$old" "$new"; then note "moved $1 to $2"; else note "could not move $1 to $2"; fi
     elif merge_entries "$old" "$new"; then
         note "moved $1 to $2"
     else
@@ -181,17 +185,26 @@ warn_old_paths() {
     done
 }
 
+report_old_examples() {
+    for dir in /etc/sigil /etc/sigil-server; do
+        if [ -z "$waiting" ] && [ -d "$R$dir" ] && holds_example "$R$dir"; then
+            note "left the old packaged *.example files in $dir: nothing reads them, and they are safe to remove."
+        fi
+    done
+}
+
 has_dpkg() { [ -f "$R/var/lib/dpkg/status" ] && command -v dpkg-query >/dev/null 2>&1; }
 has_rpm() {
     { [ -d "$R/var/lib/rpm" ] || [ -d "$R/usr/lib/sysimage/rpm" ]; } && command -v rpm >/dev/null 2>&1
 }
 
 # Removed packages stay in dpkg's database, with their version, as config-files.
+# ${Status} works on every dpkg, and ${db:Status-Status} needs 1.19.1.
 installed_versions() {
     if has_dpkg; then
         # shellcheck disable=SC2016
-        dpkg-query --admindir="$R/var/lib/dpkg" -W -f='${db:Status-Status} ${Version}\n' "$1" 2>/dev/null |
-            awk '$1 != "not-installed" && $1 != "config-files" { print $2 }'
+        dpkg-query --admindir="$R/var/lib/dpkg" -W -f='${Status} ${Version}\n' "$1" 2>/dev/null |
+            awk '$3 != "not-installed" && $3 != "config-files" { print $4 }'
     fi
     if has_rpm; then rpm --root "${R:-/}" -q --qf '%{VERSION}\n' "$1" 2>/dev/null; fi
 }
@@ -240,6 +253,7 @@ for dir in /etc/lodeline /etc/lodeline-server \
 done
 
 warn_old_paths
+report_old_examples
 if [ -n "$SAW_OLD" ]; then
     note "$news stays stopped: packages never enable services. Finish any step above, then run: systemctl enable --now $news"
 fi
