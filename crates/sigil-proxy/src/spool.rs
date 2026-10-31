@@ -839,10 +839,6 @@ struct Writer {
     conn: Connection,
     cfg: SpoolConfig,
     shared: Arc<Shared>,
-    /// Every row that needs wall-clock age has a wall timestamp at or below this.
-    /// The wall-clock walks stop here: after a forward step, rows stamped in this
-    /// boot look old on the wall clock and would otherwise be walked every pass.
-    wall_aged_until: i64,
 }
 
 const ADDITIVE_SCHEMA: &str = "
@@ -904,15 +900,6 @@ const PURGE_QUARANTINE_BY_WALL: &str = "DELETE FROM quarantine WHERE sequence IN
      (SELECT q.sequence FROM quarantine q WHERE q.quarantined_at < ?1 AND NOT EXISTS \
      (SELECT 1 FROM quarantine_boot_stamps s WHERE s.sequence = q.sequence AND s.boot_id = ?2) \
      ORDER BY q.quarantined_at LIMIT ?3) RETURNING size, code = ?4";
-
-/// The opening value of [`Writer::wall_aged_until`]. One scan per open, like
-/// `load_counters`.
-const WALL_AGED_UNTIL: &str = "SELECT coalesce(max(at), 0) FROM (\
-     SELECT max(e.created_at) AS at FROM events e WHERE e.state = 0 AND NOT EXISTS \
-     (SELECT 1 FROM event_boot_stamps s WHERE s.sequence = e.sequence AND s.boot_id = ?1) \
-     UNION ALL \
-     SELECT max(q.quarantined_at) FROM quarantine q WHERE NOT EXISTS \
-     (SELECT 1 FROM quarantine_boot_stamps s WHERE s.sequence = q.sequence AND s.boot_id = ?1))";
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -998,12 +985,7 @@ impl Writer {
         if quick != "ok" {
             return Err(SpoolError::Corrupt);
         }
-        let mut w = Writer {
-            conn,
-            cfg,
-            shared,
-            wall_aged_until: 0,
-        };
+        let mut w = Writer { conn, cfg, shared };
         if tables == 0 {
             w.init_schema().map_err(|e| classify_open(&e))?;
         } else {
@@ -1017,11 +999,6 @@ impl Writer {
             .execute_batch(ADDITIVE_SCHEMA)
             .map_err(|e| classify_open(&e))?;
         w.load_counters().map_err(|e| classify_open(&e))?;
-        let boot = (w.cfg.boot_clock)();
-        w.wall_aged_until = w
-            .conn
-            .query_row(WALL_AGED_UNTIL, [boot.map(|b| b.boot_id)], |r| r.get(0))
-            .map_err(|e| classify_open(&e))?;
         Ok(w)
     }
 
@@ -1123,16 +1100,6 @@ impl Writer {
         self.shared.degraded.store(on, Ordering::Relaxed);
     }
 
-    /// The stamp for rows written at wall time `now`. A row written without one
-    /// ages on the wall clock, so [`Writer::wall_aged_until`] covers it.
-    fn boot_stamp(&mut self, now: i64) -> Option<BootInstant> {
-        let stamp = (self.cfg.boot_clock)();
-        if stamp.is_none() {
-            self.wall_aged_until = self.wall_aged_until.max(now);
-        }
-        stamp
-    }
-
     fn run(&mut self, rx: mpsc::Receiver<Cmd>) {
         // Maintenance is driven by a deadline, not by idleness: a steady stream of
         // commands (the ingest loop polls about once a second) must not starve it.
@@ -1205,7 +1172,7 @@ impl Writer {
         let reserve = self.shared.reserve.load(Ordering::Relaxed);
         let limit = cap.saturating_sub(reserve);
         let now = (self.cfg.clock)();
-        let boot = self.boot_stamp(now);
+        let boot = (self.cfg.boot_clock)();
         let mut res = self.append_tx(&mut event, now, boot.as_ref(), limit);
         if matches!(res, Err(AppendTx::PurgeAcked)) {
             // Over capacity only because acknowledged rows are still retained:
@@ -1308,7 +1275,7 @@ impl Writer {
     fn purge_all_acked(&mut self) -> Result<(), SpoolError> {
         let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
         let now = (self.cfg.clock)();
-        let boot = self.boot_stamp(now);
+        let boot = (self.cfg.boot_clock)();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1417,7 +1384,7 @@ impl Writer {
     /// Move unsent rows to `quarantine` unchanged, inside the caller's decision.
     fn quarantine(&mut self, ids: &[String], code: &str) -> Result<u64, SpoolError> {
         let now = (self.cfg.clock)();
-        let boot = self.boot_stamp(now);
+        let boot = (self.cfg.boot_clock)();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1546,12 +1513,11 @@ impl Writer {
     fn expire_batch(&mut self) -> Result<(ExpireReport, bool), SpoolError> {
         let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
         let now = (self.cfg.clock)();
-        let boot = self.boot_stamp(now);
+        let boot = (self.cfg.boot_clock)();
         let boot_id = boot.as_ref().map(|b| &*b.boot_id);
         let retry_age = self.shared.retry_age_secs.load(Ordering::SeqCst);
         let retry_age = i64::try_from(retry_age).unwrap_or(i64::MAX);
-        let wall_aged_until = self.wall_aged_until;
-        let cutoff = now.saturating_sub(retry_age).min(wall_aged_until);
+        let cutoff = now.saturating_sub(retry_age);
         let ack_cutoff = now - self.cfg.ack_retention.as_secs() as i64;
         let reserve = self.shared.reserve.load(Ordering::Relaxed);
         let tx = self
@@ -1653,10 +1619,7 @@ impl Writer {
         let (mut purged_q_bytes, mut purged_originals) = (0u64, 0u64);
         if q_secs > 0 {
             let q_age = i64::try_from(q_secs).unwrap_or(i64::MAX);
-            // Exclusive, unlike `DUE_BY_WALL`, so the bound is one past the walk's end.
-            let q_cutoff = now
-                .saturating_sub(q_age)
-                .min(wall_aged_until.saturating_add(1));
+            let q_cutoff = now.saturating_sub(q_age);
             let mut purged = Vec::new();
             if let Some(b) = &boot {
                 let mut q = tx.prepare(PURGE_QUARANTINE_BY_BOOT).map_err(st)?;
@@ -3231,8 +3194,6 @@ mod tests {
         assert_eq!(expired(&s), 1);
     }
 
-    /// A row written when no reading was available is past the bound computed at
-    /// open, and must still age on the wall clock.
     #[test]
     fn a_row_written_without_a_reading_while_open_ages_on_the_wall_clock() {
         let d = tempfile::tempdir().unwrap();
@@ -3424,10 +3385,37 @@ mod tests {
         assert_eq!(expired_ranges(&s), vec![(1, 5), (6, MAINTENANCE_BATCH + 5)]);
     }
 
-    /// A stamped row can sit below the wall bound after a backward step. Its stamp
-    /// still decides.
+    /// The wall walk skips stamped rows without counting them against the batch.
     #[test]
-    fn a_current_stamp_wins_below_the_wall_bound() {
+    fn stamped_rows_ahead_of_wall_rows_do_not_shrink_the_batch() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let batch = MAINTENANCE_BATCH as u32;
+        let s = clk.open(d.path());
+        for n in 1..=batch + 5 {
+            s.append(event(n)).unwrap();
+        }
+        s.close_blocking_for_test();
+        clk.set_boot(Some("boot-b"), 1000);
+        let s = clk.open(d.path());
+        clk.step_wall(-10 * R);
+        for n in batch + 6..=batch + 10 {
+            s.append(event(n)).unwrap();
+        }
+        clk.step_wall(11 * R + 1);
+        assert_eq!(expired(&s), batch as u64 + 5);
+        let last = MAINTENANCE_BATCH + 5;
+        assert_eq!(
+            expired_ranges(&s),
+            vec![(1, MAINTENANCE_BATCH), (MAINTENANCE_BATCH + 1, last)]
+        );
+        assert_eq!(s.snapshot().unsent_events, 5);
+    }
+
+    /// A stamped row can sit among older rows of another boot after a backward step.
+    /// Its stamp still decides.
+    #[test]
+    fn a_current_stamp_wins_over_wall_age() {
         let d = tempfile::tempdir().unwrap();
         let clk = Clocks::new();
         let mut s = clk.open(d.path());
@@ -3531,28 +3519,5 @@ mod tests {
         clk.step_wall(Q + 1);
         let r = s.expire_now().unwrap();
         assert_eq!((r.expired_events, r.purged_quarantined), (1, 1));
-    }
-
-    /// The opening bound stays below rows stamped in this boot however far the wall
-    /// clock stepped, and covers every row that needs wall-clock age.
-    #[test]
-    fn the_wall_bound_counts_only_rows_without_a_current_stamp() {
-        let d = tempfile::tempdir().unwrap();
-        let clk = Clocks::new();
-        let wall = clk.wall.load(Ordering::SeqCst);
-        let s = clk.open(d.path());
-        s.append(event(1)).unwrap();
-        s.close_blocking_for_test();
-        clk.set_boot(Some("boot-b"), 1000);
-        let mut s = clk.open(d.path());
-        clk.step_wall(100 * R);
-        s.append(event(2)).unwrap();
-        quarantined_one(&mut s, 3);
-        s.close_blocking_for_test();
-        let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
-        let bound =
-            |boot: &str| -> i64 { c.query_row(WALL_AGED_UNTIL, [boot], |r| r.get(0)).unwrap() };
-        assert_eq!(bound("boot-b"), wall);
-        assert_eq!(bound("boot-a"), wall + 100 * R);
     }
 }
