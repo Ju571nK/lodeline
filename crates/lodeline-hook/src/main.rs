@@ -4,6 +4,7 @@ mod emit;
 mod install;
 mod install_antigravity;
 mod install_grok;
+mod legacy;
 mod redact;
 mod verify;
 
@@ -743,7 +744,10 @@ fn cmd_install_grok(exe: &str, write: bool, capture: &str, enforce: bool, on_fai
         return;
     }
     match install_grok::write_file_at(&path, &v) {
-        Ok(()) => println!("installed grok hook → {}", path.display()),
+        Ok(()) => {
+            println!("installed grok hook → {}", path.display());
+            retire_old_grok_file(&path);
+        }
         Err(e) => {
             eprintln!("write failed: {e}");
             std::process::exit(1);
@@ -763,11 +767,23 @@ fn cmd_uninstall_grok(write: bool) {
         return;
     }
     match install_grok::remove_file_at(&path) {
-        Ok(()) => println!("removed {}", path.display()),
+        Ok(()) => {
+            println!("removed {}", path.display());
+            retire_old_grok_file(&path);
+        }
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
+    }
+}
+
+fn retire_old_grok_file(new_path: &std::path::Path) {
+    let old = new_path.with_file_name("sigil-hook.json");
+    match legacy::retire_grok_file(&old) {
+        Ok(true) => println!("removed old hook from {}", old.display()),
+        Ok(false) => {}
+        Err(e) => eprintln!("warning: could not update {}: {e}", old.display()),
     }
 }
 

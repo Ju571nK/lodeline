@@ -292,11 +292,13 @@ pub fn render_block(exe: &str, agent: &str, capture: &str) -> String {
 /// document was modified.
 pub fn merge_into(root: &mut Value, exe: &str, agent: &str, capture: &str) -> bool {
     let cmd = command_string(exe, agent, capture);
-    match agent_format(agent) {
+    let replaced = crate::legacy::strip_entries(root, agent) > 0;
+    let merged = match agent_format(agent) {
         Some(HookFormat::NestedPreToolUse) => merge_claude(pretooluse_array_mut(root), exe, &cmd),
         Some(HookFormat::Cursor) => merge_cursor(root, exe, &cmd),
         None => false,
-    }
+    };
+    replaced || merged
 }
 
 /// Like `render_block`, but the registered command runs the Stage 2 enforce
@@ -319,17 +321,20 @@ pub fn merge_into_enforce(
     on_failure: &str,
 ) -> bool {
     let cmd = command_string_enforce(exe, agent, capture, on_failure);
-    match agent_format(agent) {
+    let replaced = crate::legacy::strip_entries(root, agent) > 0;
+    let merged = match agent_format(agent) {
         Some(HookFormat::NestedPreToolUse) => merge_claude(pretooluse_array_mut(root), exe, &cmd),
         Some(HookFormat::Cursor) => merge_cursor_enforce(root, exe, &cmd, on_failure),
         None => false,
-    }
+    };
+    replaced || merged
 }
 
 /// Remove every lodeline-hook entry for `exe`. Returns `true` if anything was
 /// removed. Leaves unrelated hooks untouched.
 pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
-    match agent_format(agent) {
+    let replaced = crate::legacy::strip_entries(root, agent) > 0;
+    let removed = match agent_format(agent) {
         Some(HookFormat::NestedPreToolUse) => match root["hooks"]["PreToolUse"].as_array_mut() {
             Some(a) => {
                 let before = a.len();
@@ -350,27 +355,31 @@ pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
             removed
         }
         None => false,
-    }
+    };
+    replaced || removed
 }
 
-/// Count lodeline-hook entries for `exe` (across all relevant arrays).
+/// Count lodeline-hook entries for `exe` (across all relevant arrays), plus
+/// entries from before the rename, which uninstall removes as well.
 pub fn count_lodeline_entries(root: &Value, exe: &str, agent: &str) -> usize {
-    match agent_format(agent) {
-        Some(HookFormat::NestedPreToolUse) => root["hooks"]["PreToolUse"]
-            .as_array()
-            .map(|a| a.iter().filter(|e| claude_entry_is_ours(e, exe)).count())
-            .unwrap_or(0),
-        Some(HookFormat::Cursor) => CURSOR_EVENTS
-            .iter()
-            .map(|ev| {
-                root["hooks"][*ev]
-                    .as_array()
-                    .map(|a| a.iter().filter(|e| cursor_entry_is_ours(e, exe)).count())
-                    .unwrap_or(0)
-            })
-            .sum(),
-        None => 0,
-    }
+    let legacy = crate::legacy::count_entries(root, agent);
+    legacy
+        + match agent_format(agent) {
+            Some(HookFormat::NestedPreToolUse) => root["hooks"]["PreToolUse"]
+                .as_array()
+                .map(|a| a.iter().filter(|e| claude_entry_is_ours(e, exe)).count())
+                .unwrap_or(0),
+            Some(HookFormat::Cursor) => CURSOR_EVENTS
+                .iter()
+                .map(|ev| {
+                    root["hooks"][*ev]
+                        .as_array()
+                        .map(|a| a.iter().filter(|e| cursor_entry_is_ours(e, exe)).count())
+                        .unwrap_or(0)
+                })
+                .sum(),
+            None => 0,
+        }
 }
 
 /// The user's home directory, cross-platform: `HOME` (Unix) or `USERPROFILE`
