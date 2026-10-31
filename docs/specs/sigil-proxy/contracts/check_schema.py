@@ -1059,6 +1059,7 @@ for label, doc in [
     ("spool state raw", status(spool=dict(spool_ok, state="canary"))),
     ("spool negative", status(spool=dict(spool_ok, bytes=-1))),
     ("spool negative quarantined_bytes", status(spool=dict(spool_ok, quarantined_bytes=-1))),
+    ("spool null quarantined_bytes", status(spool=dict(spool_ok, quarantined_bytes=None))),
     ("spool zero capacity", status(spool=dict(spool_ok, capacity_bytes=0))),
     ("route state raw", status(routes=[{"upstream_id": "fixture", "state": "canary"}])),
     ("route reason raw", status(routes=[{"upstream_id": "fixture", "state": "degraded",

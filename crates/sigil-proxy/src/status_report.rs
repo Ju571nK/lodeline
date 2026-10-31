@@ -2761,6 +2761,20 @@ mod tests {
         let v = built(&mut b);
         assert_eq!(v["spool"]["unsent_events"], 0);
         assert_eq!(v["last_assigned_sequence"], 2);
+
+        // A quarantined event: the report carries the snapshot's byte count,
+        // not its event count.
+        spool.set_capacity_for_test(1 << 30, 1 << 20);
+        spool.inject_test_event("up-1").await.unwrap();
+        spool.advance_clock_for_test(7200);
+        spool.set_max_offline_retry_age(std::time::Duration::from_secs(3600));
+        assert_eq!(spool.expire_now().unwrap().expired_events, 1);
+        let snap = spool.snapshot();
+        assert!(snap.quarantined_bytes > 0);
+        assert_ne!(snap.quarantined_bytes, snap.quarantined_events);
+        let v = built(&mut b);
+        assert_eq!(v["spool"]["quarantined_events"], snap.quarantined_events);
+        assert_eq!(v["spool"]["quarantined_bytes"], snap.quarantined_bytes);
     }
 
     /// A builder without a spool still validates (unit-test path only).
