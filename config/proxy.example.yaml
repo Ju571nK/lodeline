@@ -1,8 +1,8 @@
-# Sigil Proxy — example bootstrap config.
-# Packaged as /etc/sigil/proxy.yaml.example. Copy to /etc/sigil/proxy.yaml and
+# Lodeline Proxy — example bootstrap config.
+# Packaged as /etc/lodeline/proxy.yaml.example. Copy to /etc/lodeline/proxy.yaml and
 # edit. All paths below are placeholders; no secret value ever lives in this
 # file (secrets are referenced by owner-only file). Validate with:
-#   sigil-proxy check-config --config /etc/sigil/proxy.yaml
+#   lodeline-proxy check-config --config /etc/lodeline/proxy.yaml
 # Relative paths resolve against this file's directory. Unknown keys are errors.
 
 # Identity of this proxy (^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$).
@@ -13,23 +13,23 @@ proxy_id: "proxy-example-01"
 listen: "127.0.0.1:8480"
 
 # Listener TLS material; set both or neither. The key must be owned by the
-# running user (sigil-proxy) with mode 0600; the certificate is public.
-tls_cert_file: "/etc/sigil/proxy/listener.crt"
-tls_key_file: "/etc/sigil/proxy/listener.key"
+# running user (lodeline-proxy) with mode 0600; the certificate is public.
+tls_cert_file: "/etc/lodeline/proxy/listener.crt"
+tls_key_file: "/etc/lodeline/proxy/listener.key"
 
-# Control plane (sigil-server). https:// only; mTLS client auth.
-control_plane_url: "https://sigil-server.example.internal:8443"
+# Control plane (lodeline-server). https:// only; mTLS client auth.
+control_plane_url: "https://lodeline-server.example.internal:8443"
 
-# Writable state directory, separate from every other sigil daemon. The
-# systemd unit creates it via StateDirectory=sigil-proxy. Keep this at
-# /var/lib/sigil-proxy unless the unit's StateDirectory and ReadWritePaths
+# Writable state directory, separate from every other lodeline daemon. The
+# systemd unit creates it via StateDirectory=lodeline-proxy. Keep this at
+# /var/lib/lodeline-proxy unless the unit's StateDirectory and ReadWritePaths
 # change too (ProtectSystem=strict makes everything else read-only).
-state_dir: "/var/lib/sigil-proxy"
+state_dir: "/var/lib/lodeline-proxy"
 
 # mTLS client identity and the CA bundle used to verify the control plane.
-client_cert_file: "/etc/sigil/proxy/client.crt"
-client_key_file: "/etc/sigil/proxy/client.key"   # owner sigil-proxy, mode 0600
-ca_file: "/etc/sigil/proxy/ca.pem"
+client_cert_file: "/etc/lodeline/proxy/client.crt"
+client_key_file: "/etc/lodeline/proxy/client.key"   # owner lodeline-proxy, mode 0600
+ca_file: "/etc/lodeline/proxy/ca.pem"
 
 # Optional limits. Every key is optional; config may only LOWER a value
 # (valid range 1..=default, queue_depth is fixed at 0). Values shown are the
@@ -65,6 +65,6 @@ limits:
 # path; http:// only for loopback). An unbound ref is a start error.
 credentials:
   example-upstream-token:
-    secret_file: "/etc/sigil/proxy/example-upstream.secret"   # owner sigil-proxy, mode 0600
+    secret_file: "/etc/lodeline/proxy/example-upstream.secret"   # owner lodeline-proxy, mode 0600
     upstream_origins:
       - "https://mcp.example.com"

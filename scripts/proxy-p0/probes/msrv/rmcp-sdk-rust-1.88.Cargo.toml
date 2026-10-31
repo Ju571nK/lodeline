@@ -1,4 +1,4 @@
-# T-01 throwaway probe (2026-10-10). Standalone: NOT a member of the sigil workspace.
+# T-01 throwaway probe (2026-10-10). Standalone: NOT a member of the lodeline workspace.
 [package]
 name = "rmcp-sdk-probe"
 version = "0.0.0"

@@ -1,6 +1,6 @@
-# Sigil Licensing & Module-Split Policy
+# Lodeline Licensing & Module-Split Policy
 
-This document describes which parts of Sigil are open source under
+This document describes which parts of Lodeline are open source under
 [Apache License 2.0](LICENSE), and which parts are distributed separately —
 as signed rule-pack bundles, separate repositories, or hosted services. It is
 the canonical reference when adding new modules or rule packs.
@@ -17,17 +17,17 @@ These modules are public and accept community contributions:
 
 | Crate / module                                    | Role                                             |
 | ------------------------------------------------- | ------------------------------------------------ |
-| `crates/sigil-core`                              | Event schema, policy types, signing primitives   |
-| `crates/sigil-agent`                             | Daemon runtime, file watcher, IPC, GC, heartbeat |
-| `crates/sigil-spool`                             | Generic JSONL spool (producer/consumer/GC)       |
-| `crates/sigil-rules-basic`                       | Baseline detection ruleset (macOS + Windows)     |
-| `crates/sigil-core/src/sink/jsonl.rs`            | JSONL output sink                                |
-| `crates/sigil-core/src/policy/verify.rs`         | Signed-policy verification chain                 |
-| `crates/sigil-core/src/policy/canonical.rs`      | RFC 8785 canonical JSON for signature input      |
-| `crates/sigil-core/src/policy/atomic_writer.rs`  | Crash-safe policy.yaml + state.db commit         |
-| `crates/sigil-agent/src/policy_apply.rs`         | apply_policy IPC handler                         |
-| `crates/sigil-agent/src/normalizer.rs`           | Default event normalizer/classifier              |
-| `crates/sigil-agent/src/cli.rs`                  | CLI surface                                      |
+| `crates/lodeline-core`                              | Event schema, policy types, signing primitives   |
+| `crates/lodeline-agent`                             | Daemon runtime, file watcher, IPC, GC, heartbeat |
+| `crates/lodeline-spool`                             | Generic JSONL spool (producer/consumer/GC)       |
+| `crates/lodeline-rules-basic`                       | Baseline detection ruleset (macOS + Windows)     |
+| `crates/lodeline-core/src/sink/jsonl.rs`            | JSONL output sink                                |
+| `crates/lodeline-core/src/policy/verify.rs`         | Signed-policy verification chain                 |
+| `crates/lodeline-core/src/policy/canonical.rs`      | RFC 8785 canonical JSON for signature input      |
+| `crates/lodeline-core/src/policy/atomic_writer.rs`  | Crash-safe policy.yaml + state.db commit         |
+| `crates/lodeline-agent/src/policy_apply.rs`         | apply_policy IPC handler                         |
+| `crates/lodeline-agent/src/normalizer.rs`           | Default event normalizer/classifier              |
+| `crates/lodeline-agent/src/cli.rs`                  | CLI surface                                      |
 | All Phase 1+ tests                                | Integration + property tests                     |
 
 **Why these stay open**: trust in a security daemon depends on operators
@@ -44,9 +44,9 @@ services. The choice depends on integration depth.
 
 | Deliverable                  | Form                            | Notes                                          |
 | ---------------------------- | ------------------------------- | ---------------------------------------------- |
-| Extended detection rule pack | `sigil-rules-pro` (private)    | Shadow AI, MCP/IDE configs, SaaS agents, etc.  |
-| Enterprise rule packs        | Signed policy bundle (Phase 2)  | Verified via `sigil-core::policy::verify`     |
-| `sigil-sender`              | Binary release (Plan B)         | Signs + ships envelopes to fleet               |
+| Extended detection rule pack | `lodeline-rules-pro` (private)    | Shadow AI, MCP/IDE configs, SaaS agents, etc.  |
+| Enterprise rule packs        | Signed policy bundle (Phase 2)  | Verified via `lodeline-core::policy::verify`     |
+| `lodeline-sender`              | Binary release (Plan B)         | Signs + ships envelopes to fleet               |
 | Hosted policy service        | Cloud service                   | Enterprise rule distribution + telemetry       |
 | SIEM / EDR connectors        | Separate private crates         | One per upstream (Splunk/Sentinel/CrowdStrike) |
 
@@ -77,7 +77,7 @@ When adding a new file or crate, ask:
    ML models, threat-intel)?**
    → Closed if it represents non-trivial research or customer value;
    open otherwise (e.g. trivial single-target watch rules belong in
-   `sigil-rules-basic`).
+   `lodeline-rules-basic`).
 
 3. **Does it integrate with an enterprise upstream (SIEM, IdP, ticketing)?**
    → Closed (separate private crate or service).
@@ -93,14 +93,14 @@ after. When rule 1 applies, open it deliberately.
 
 Plan A (already merged) shipped:
 
-- `SignedEnvelope` + RFC 8785 canonical JSON ([signed_envelope.rs](crates/sigil-core/src/policy/signed_envelope.rs), [canonical.rs](crates/sigil-core/src/policy/canonical.rs))
-- 5-check `verify_envelope` chain ([verify.rs](crates/sigil-core/src/policy/verify.rs))
-- Pubkey keystore loader ([pubkeys.rs](crates/sigil-core/src/policy/pubkeys.rs))
-- `apply_policy` IPC handler ([policy_apply.rs](crates/sigil-agent/src/policy_apply.rs))
-- Atomic disk + state.db commit ([atomic_writer.rs](crates/sigil-core/src/policy/atomic_writer.rs))
+- `SignedEnvelope` + RFC 8785 canonical JSON ([signed_envelope.rs](crates/lodeline-core/src/policy/signed_envelope.rs), [canonical.rs](crates/lodeline-core/src/policy/canonical.rs))
+- 5-check `verify_envelope` chain ([verify.rs](crates/lodeline-core/src/policy/verify.rs))
+- Pubkey keystore loader ([pubkeys.rs](crates/lodeline-core/src/policy/pubkeys.rs))
+- `apply_policy` IPC handler ([policy_apply.rs](crates/lodeline-agent/src/policy_apply.rs))
+- Atomic disk + state.db commit ([atomic_writer.rs](crates/lodeline-core/src/policy/atomic_writer.rs))
 
 Together these form a **signed policy bundle pipeline**: a private
-`sigil-rules-pro` build can ship as a signed YAML that the OSS agent
+`lodeline-rules-pro` build can ship as a signed YAML that the OSS agent
 applies via the same code path operators audit. No `.dylib`/`.dll`
 plugin loading, no Rust ABI boundary, no commercial-only code paths in
 the daemon binary itself.
@@ -113,15 +113,15 @@ This is the recommended distribution form for closed rule packs.
 
 - The `main` branch is and remains Apache 2.0.
 - Closed content lives in **separate repositories** (e.g.
-  `sigil-rules-pro`), never as `.gitignored` files in this tree.
-- `sigil-rules-basic` is the boundary marker: anything more specialized
+  `lodeline-rules-pro`), never as `.gitignored` files in this tree.
+- `lodeline-rules-basic` is the boundary marker: anything more specialized
   than its baseline targets is a candidate for the closed track.
 
 ---
 
 ## Distributing the pro rule pack — signed bundles, not build linking
 
-The OSS daemon does **not** link `sigil-rules-pro` at build time. We
+The OSS daemon does **not** link `lodeline-rules-pro` at build time. We
 considered a Cargo `pro` feature gated behind a private git dep, but
 Cargo records every conditional dep in `Cargo.lock` and tries to fetch
 on every build, which (a) breaks OSS CI on forks/PRs without SSH access
@@ -130,14 +130,14 @@ file. The cleaner architecture — already enabled by Plan A — is to ship
 extended rule packs as **signed policy bundles**.
 
 **The pipeline (already shipped in Plan A)**:
-1. `sigil-rules-pro` (private repo) holds the YAML rule sources.
-2. A signing tool (Plan B `sigil-sender` companion) wraps a YAML
-   payload in a [`SignedEnvelope`](crates/sigil-core/src/policy/signed_envelope.rs)
+1. `lodeline-rules-pro` (private repo) holds the YAML rule sources.
+2. A signing tool (Plan B `lodeline-sender` companion) wraps a YAML
+   payload in a [`SignedEnvelope`](crates/lodeline-core/src/policy/signed_envelope.rs)
    using a private ed25519 key.
-3. `sigil-sender` (Plan B) ships the envelope to fleet hosts over the
+3. `lodeline-sender` (Plan B) ships the envelope to fleet hosts over the
    Phase 2 transport (mTLS + apply_policy IPC).
-4. The OSS agent verifies via [`verify_envelope`](crates/sigil-core/src/policy/verify.rs)
-   (5-check chain), commits via [`atomic_write`](crates/sigil-core/src/policy/atomic_writer.rs),
+4. The OSS agent verifies via [`verify_envelope`](crates/lodeline-core/src/policy/verify.rs)
+   (5-check chain), commits via [`atomic_write`](crates/lodeline-core/src/policy/atomic_writer.rs),
    and emits `PolicyReloaded` — all paths operators can audit.
 
 **Why this is better than build-time linking**:
@@ -149,8 +149,8 @@ extended rule packs as **signed policy bundles**.
   describes — the signing key is the only secret the daemon needs to
   trust.
 
-**Status**: `sigil-rules-pro` repo holds the rule YAML sources today
-([github.com/Ju571nK/sigil-rules-pro](https://github.com/Ju571nK/sigil-rules-pro)).
+**Status**: `lodeline-rules-pro` repo holds the rule YAML sources today
+([github.com/Ju571nK/lodeline-rules-pro](https://github.com/Ju571nK/lodeline-rules-pro)).
 The signer + sender pieces land in Plan B; until then the YAML is only
 consumed via the signed-bundle test fixtures used by `verify.rs`.
 
@@ -158,15 +158,15 @@ consumed via the signed-bundle test fixtures used by `verify.rs`.
 
 ## Audit log tamper-evidence (and its limits)
 
-Earlier `sigil-server` releases appended a signed, hash-chained
+Earlier `lodeline-server` releases appended a signed, hash-chained
 `license-audit.jsonl` to the server state directory: each line is an
 ed25519-signed record whose `prev_hash` links to the previous line. Current
 releases no longer write new records to it. An existing chain is kept as-is
 and stays verifiable: the server reads its last line at startup and still
 exposes that head at `GET /v1/meta` (`audit_head`), and the record format is
 frozen so old chains keep verifying. The verification logic lives in OSS
-`sigil-core::audit`; anyone can check a chain with
-`sigil-sign verify-audit --in <file> --pubkey ed25519:<b64>` (add
+`lodeline-core::audit`; anyone can check a chain with
+`lodeline-sign verify-audit --in <file> --pubkey ed25519:<b64>` (add
 `--expect-head <hash>` to assert against a head recorded earlier).
 `audit_head.pubkey` is included only when the server's current key signed the
 head; if the key has changed since, only `pubkey_id` is reported and the
@@ -183,7 +183,7 @@ third-party tampering and accidental corruption.
 own host, so a determined operator who controls that host can re-sign a forged
 chain. The operator is bound only for history *before an externally-observed
 head*: the signed head is exposed at `GET /v1/meta` (`audit_head`), and any
-external party (monitoring, sigil-manager, an auditor) that records a head
+external party (monitoring, lodeline-manager, an auditor) that records a head
 pins the operator to that history. Capture heads off-box to anchor the chain.
 Because no new records are appended, the head of an existing chain no longer
 advances.
@@ -193,19 +193,19 @@ and public timestamping are future work.
 
 ## Build self-verification (and its limits)
 
-`sigil doctor --verify-self` hashes the running binary with blake3 and checks it
-against a vendor-signed build manifest (`sigil-sign manifest`), verified with the
-compiled-in `SIGIL_BUILD_PUBKEYS` trust anchor. The verification logic lives in OSS
-`sigil-core::manifest`.
+`lodeline doctor --verify-self` hashes the running binary with blake3 and checks it
+against a vendor-signed build manifest (`lodeline-sign manifest`), verified with the
+compiled-in `LODELINE_BUILD_PUBKEYS` trust anchor. The verification logic lives in OSS
+`lodeline-core::manifest`.
 
 **What it catches.** Accidental corruption, in-place/partial tampering, version and
 architecture drift, and naive swaps that didn't re-sign — provided the embedded
 trust anchor and verifier are intact.
 
 **What it does NOT prove.** The trust anchor is compiled into the binary, so an
-attacker who fully replaces the binary can also replace `SIGIL_BUILD_PUBKEYS` and the
+attacker who fully replaces the binary can also replace `LODELINE_BUILD_PUBKEYS` and the
 verifier itself. Pair this with the externally-anchored, harder-to-forge
 `gh attestation verify` (Sigstore-backed build provenance) for defense in depth.
 
-This slice ships the mechanism; `SIGIL_BUILD_PUBKEYS` is empty until a signed release
+This slice ships the mechanism; `LODELINE_BUILD_PUBKEYS` is empty until a signed release
 populates it.

@@ -1,0 +1,24 @@
+# Lodeline file contexts (#69). Order: -server / -sender before the bare /var/lib/lodeline
+# regex isn't required (the regex needs a following '/' so '-server' won't match),
+# but list them explicitly for clarity.
+
+/usr/bin/lodeline          --      gen_context(system_u:object_r:lodeline_agent_exec_t,s0)
+/usr/bin/lodeline-sender   --      gen_context(system_u:object_r:lodeline_sender_exec_t,s0)
+/usr/bin/lodeline-server   --      gen_context(system_u:object_r:lodeline_server_exec_t,s0)
+# lodeline-mcp (local mode) and lodeline-hook are short-lived, user/AI-tool-invoked
+# clients, not daemons. They run in the caller's domain (e.g. unconfined_t),
+# so they keep the generic bin_t label rather than a dedicated lodeline exec type.
+# Their access to the agent's /run/lodeline sockets is handled in lodeline.te.
+/usr/bin/lodeline-mcp      --      gen_context(system_u:object_r:bin_t,s0)
+/usr/bin/lodeline-hook     --      gen_context(system_u:object_r:bin_t,s0)
+
+/etc/lodeline(/.*)?                gen_context(system_u:object_r:lodeline_conf_t,s0)
+
+/var/lib/lodeline(/.*)?            gen_context(system_u:object_r:lodeline_var_lib_t,s0)
+/var/log/lodeline(/.*)?            gen_context(system_u:object_r:lodeline_var_log_t,s0)
+
+/var/lib/lodeline-sender(/.*)?     gen_context(system_u:object_r:lodeline_sender_var_lib_t,s0)
+/var/log/lodeline-sender(/.*)?     gen_context(system_u:object_r:lodeline_sender_var_log_t,s0)
+
+/var/lib/lodeline-server(/.*)?     gen_context(system_u:object_r:lodeline_server_var_lib_t,s0)
+/var/log/lodeline-server(/.*)?     gen_context(system_u:object_r:lodeline_server_var_log_t,s0)

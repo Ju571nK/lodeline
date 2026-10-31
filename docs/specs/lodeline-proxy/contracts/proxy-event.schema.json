@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lodeline Proxy P1 invocation audit candidate v0.3",
+  "description": "Candidate contract (T-02-fix-3). Patterns end with (?![\\s\\S]) instead of $ so that ECMA-262 and Python engines both reject a trailing newline. Integer fields must be JSON integer tokens; see README (strict integer rule).",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?![\\s\\S])"
+    },
+    "positive_int64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "nonnegative_int64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "metadata_ref": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\\s\\S])",
+      "description": "RFC 9562 version-8 UUID derived by the proxy-local keyed derivation (README D-05 section)."
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "proxy_id": {
+      "$ref": "#/$defs/id"
+    },
+    "epoch_id": {
+      "$ref": "#/$defs/uuid",
+      "description": "Random producer epoch. A new one is generated on first start and whenever local state cannot be recovered. Sequence uniqueness is per (proxy_id, epoch_id)."
+    },
+    "sequence": {
+      "$ref": "#/$defs/positive_int64"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z(?![\\s\\S])",
+      "description": "UTC RFC 3339 with uppercase T/Z. The pattern is a shape guard only; calendar validity requires the date-time format checker, and ingestion must parse the value as RFC 3339 independently of JSON Schema format support."
+    },
+    "event_type": {
+      "enum": [
+        "invocation.started",
+        "invocation.completed",
+        "invocation.cancel_requested"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "proxy_id",
+    "epoch_id",
+    "sequence",
+    "occurred_at",
+    "event_type",
+    "payload"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "invocation.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "invocation_id": {
+                "$ref": "#/$defs/uuid"
+              },
+              "upstream_id": {
+                "$ref": "#/$defs/id"
+              },
+              "route_revision": {
+                "$ref": "#/$defs/positive_int64"
+              },
+              "protocol_version": {
+                "enum": [
+                  "2025-11-25",
+                  "unknown"
+                ],
+                "description": "Closed audit vocabulary; never a pattern or free string. Use unknown unless validated negotiated context maps to a listed revision; initialize starts are always unknown. Never copy headers or rejected proposals."
+              },
+              "method": {
+                "enum": [
+                  "initialize",
+                  "ping",
+                  "tools/list",
+                  "tools/call",
+                  "unknown"
+                ],
+                "description": "Exact parser-recognized audit constants only; all other, missing or malformed methods (including tasks/*) map to unknown. This vocabulary does not authorize forwarding."
+              },
+              "actor": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Every field comes from the server-issued route/credential configuration matched by proxy-side authentication of this request. No field is taken from client input (clientInfo, headers, _meta, human flags). human is not representable.",
+                "properties": {
+                  "actor_id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "actor_kind": {
+                    "enum": [
+                      "non_human",
+                      "unknown"
+                    ]
+                  },
+                  "authentication_method": {
+                    "enum": [
+                      "bearer",
+                      "mtls"
+                    ]
+                  },
+                  "evidence_source": {
+                    "enum": [
+                      "proxy_credential_mapping"
+                    ],
+                    "description": "The proxy authenticated the request and matched the credential against the credential mapping in its applied central configuration revision."
+                  },
+                  "credential_owner_id": {
+                    "$ref": "#/$defs/id",
+                    "description": "Permission owner recorded in the credential registration. Not evidence of who executed the call. Absent means unknown."
+                  }
+                },
+                "required": [
+                  "actor_id",
+                  "actor_kind",
+                  "authentication_method",
+                  "evidence_source"
+                ]
+              },
+              "tool": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "status": {
+                        "const": "identified"
+                      },
+                      "metadata_ref": {
+                        "$ref": "#/$defs/metadata_ref"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "metadata_ref"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "status": {
+                        "const": "metadata_unavailable"
+                      },
+                      "reason": {
+                        "enum": [
+                          "not_in_inventory",
+                          "no_complete_inventory",
+                          "ambiguous_in_inventory",
+                          "registry_conflict"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "reason"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "status": {
+                        "const": "unavailable"
+                      },
+                      "reason": {
+                        "enum": [
+                          "malformed"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "reason"
+                    ]
+                  }
+                ],
+                "description": "identified: proxy-local keyed reference from the last complete inventory (README D-05 section). metadata_unavailable: the call is forwarded in P1 observe mode but no reference exists. unavailable/malformed: rejected before dispatch. Never a raw tool name, client-supplied ID or unkeyed name hash."
+              }
+            },
+            "required": [
+              "invocation_id",
+              "upstream_id",
+              "route_revision",
+              "protocol_version",
+              "method",
+              "actor"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "method": {
+                      "const": "tools/call"
+                    }
+                  },
+                  "required": [
+                    "method"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "tool"
+                  ]
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "tool"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "method": {
+                      "const": "initialize"
+                    }
+                  },
+                  "required": [
+                    "method"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "protocol_version": {
+                      "const": "unknown"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "invocation.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "invocation_id": {
+                "$ref": "#/$defs/uuid"
+              },
+              "outcome": {
+                "enum": [
+                  "success",
+                  "tool_error",
+                  "protocol_error",
+                  "timeout",
+                  "unknown",
+                  "denied"
+                ]
+              },
+              "delivery_state": {
+                "enum": [
+                  "not_sent",
+                  "sent",
+                  "unknown"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "task_augmentation_unsupported",
+                  "upstream_capability_unsupported",
+                  "upstream_version_unsupported",
+                  "upstream_initialize_unreadable",
+                  "modern_request_unsupported",
+                  "cancel_no_response",
+                  "cancelled_before_dispatch"
+                ],
+                "description": "Optional fixed qualifier: task_augmentation_unsupported with protocol_error (not_sent|sent); upstream_capability_unsupported, upstream_version_unsupported and upstream_initialize_unreadable with protocol_error/sent; modern_request_unsupported with protocol_error/not_sent; cancel_no_response with unknown (sent|unknown); cancelled_before_dispatch with unknown/not_sent."
+              },
+              "duration_ms": {
+                "$ref": "#/$defs/nonnegative_int64"
+              },
+              "response_bytes": {
+                "$ref": "#/$defs/nonnegative_int64"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "outcome",
+              "delivery_state",
+              "duration_ms",
+              "response_bytes"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "outcome": {
+                      "enum": [
+                        "success",
+                        "tool_error"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "delivery_state": {
+                      "const": "sent"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "outcome": {
+                      "const": "denied"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "delivery_state": {
+                      "const": "not_sent"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "reason": {
+                      "const": "task_augmentation_unsupported"
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "outcome": {
+                      "const": "protocol_error"
+                    },
+                    "delivery_state": {
+                      "enum": [
+                        "not_sent",
+                        "sent"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "reason": {
+                      "const": "cancel_no_response"
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "outcome": {
+                      "const": "unknown"
+                    },
+                    "delivery_state": {
+                      "enum": [
+                        "sent",
+                        "unknown"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "reason": {
+                      "const": "cancelled_before_dispatch"
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "outcome": {
+                      "const": "unknown"
+                    },
+                    "delivery_state": {
+                      "const": "not_sent"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "reason": {
+                      "enum": [
+                        "upstream_capability_unsupported",
+                        "upstream_version_unsupported",
+                        "upstream_initialize_unreadable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "outcome": {
+                      "const": "protocol_error"
+                    },
+                    "delivery_state": {
+                      "const": "sent"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "reason": {
+                      "const": "modern_request_unsupported"
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "outcome": {
+                      "const": "protocol_error"
+                    },
+                    "delivery_state": {
+                      "const": "not_sent"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "invocation.cancel_requested"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "invocation_id": {
+                "$ref": "#/$defs/uuid"
+              }
+            },
+            "required": [
+              "invocation_id"
+            ],
+            "description": "Nonterminal observation only; does not prove upstream cancellation, prevent a later completion, or overwrite a completion on late arrival."
+          }
+        }
+      }
+    }
+  ]
+}

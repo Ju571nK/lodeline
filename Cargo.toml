@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/sigil-core", "crates/sigil-agent", "crates/sigil-spool", "crates/sigil-rules-basic", "crates/sigil-sender", "crates/sigil-signer", "crates/sigil-server", "crates/sigil-mcp", "crates/sigil-hook", "crates/sigil-proxy-api", "crates/sigil-proxy", "crates/sigil-proxy-e2e"]
+members = ["crates/lodeline-core", "crates/lodeline-agent", "crates/lodeline-spool", "crates/lodeline-rules-basic", "crates/lodeline-sender", "crates/lodeline-signer", "crates/lodeline-server", "crates/lodeline-mcp", "crates/lodeline-hook", "crates/lodeline-proxy-api", "crates/lodeline-proxy", "crates/lodeline-proxy-e2e"]
 resolver = "2"
 
 [workspace.package]
@@ -7,8 +7,8 @@ version = "0.11.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
-authors = ["Sigil contributors"]
-repository = "https://github.com/Ju571nK/sigil"
+authors = ["Lodeline contributors"]
+repository = "https://github.com/Ju571nK/lodeline"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trusted test MCP server for the Sigil Proxy AWS smoke test (stdlib only).
+"""Trusted test MCP server for the Lodeline Proxy AWS smoke test (stdlib only).
 
 Synthetic, deterministic tools; no real tool execution, no external I/O.
 Speaks MCP Streamable HTTP for revision 2025-11-25 only and advertises the
@@ -69,7 +69,7 @@ def tool_defs(extra):
         EXTRA_TOOL: dict(schema, properties={}),
     }
     names = list(BASE_TOOLS) + ([EXTRA_TOOL] if extra else [])
-    return [{"name": n, "description": "Sigil smoke fixture tool " + n,
+    return [{"name": n, "description": "Lodeline smoke fixture tool " + n,
              "inputSchema": defs[n]} for n in names]
 
 
@@ -134,7 +134,7 @@ class FixtureServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "sigil-smoke-fixture"
+    server_version = "lodeline-smoke-fixture"
     sys_version = ""
 
     def setup(self):
@@ -165,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
             msg["result"] = result
         data = json.dumps(msg, separators=(",", ":")).encode()
         if sse:
-            body = b": sigil-smoke\r\n\r\nevent: message\r\ndata: " + data + b"\r\n\r\n"
+            body = b": lodeline-smoke\r\n\r\nevent: message\r\ndata: " + data + b"\r\n\r\n"
             self.reply(200, body, "text/event-stream", headers)
         else:
             self.reply(200, data, "application/json", headers)
@@ -344,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
                 headers["Mcp-Session-Id"] = sid
         result = {"protocolVersion": REVISION,
                   "capabilities": {"tools": {"listChanged": False}},
-                  "serverInfo": {"name": "sigil-smoke-fixture", "version": "0.1.0"}}
+                  "serverInfo": {"name": "lodeline-smoke-fixture", "version": "0.1.0"}}
         self.rpc(rid, result, headers=headers, sse=srv.opts.initialize_sse)
 
     def notification(self, sid, method, params):
@@ -510,7 +510,7 @@ def main(argv=None):
         print("fixture: %s" % e, file=sys.stderr)
         return 2
     scheme = "https" if opts.tls_cert else "http"
-    print("sigil-smoke-fixture listening on %s://%s%s revision=%s stateless=%s initialize_sse=%s"
+    print("lodeline-smoke-fixture listening on %s://%s%s revision=%s stateless=%s initialize_sse=%s"
           % (scheme, srv.authority, opts.path, REVISION, opts.stateless, opts.initialize_sse),
           flush=True)
     try:

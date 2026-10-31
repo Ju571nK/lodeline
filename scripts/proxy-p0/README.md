@@ -1,7 +1,7 @@
 # P0 local MCP fixture
 
 T-03 preparation, 2026-09-27. **2025-11-25 is a candidate awaiting T-01**;
-this fixture does not establish Sigil proxy or vendor-client compatibility.
+this fixture does not establish Lodeline proxy or vendor-client compatibility.
 Python 3.9+ standard library only; tested with Python 3.14.6 on macOS 26.6.2 arm64.
 No installation, credentials, real MCP server, or external network access is needed.
 
@@ -53,5 +53,5 @@ inventory drift, proxy, audit persistence, or manager integration. The bounded S
 decoder is a fixture helper, not a general MCP client. A 64 KiB fixture body/decoder
 cap and 3-second socket timeout are test settings, not proposed production limits.
 
-See [validation evidence and proposed D-04 limits](../../docs/specs/sigil-proxy/validation.md)
+See [validation evidence and proposed D-04 limits](../../docs/specs/lodeline-proxy/validation.md)
 for actual results, acceptance gaps, and the unmeasured P1 benchmark plan.

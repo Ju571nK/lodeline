@@ -1,0 +1,112 @@
+//! Phase 3b.1 — AI Guard Risk Index.
+//!
+//! Reads AI coding-agent guard surfaces (Claude Code `~/.claude/`,
+//! Codex `~/.codex/`), scores them against a rubric, and emits
+//! `Evidence::AiGuardRiskAssessed` events on file change + on a 24h heartbeat.
+//! Lodeline measures, does not block.
+
+pub mod assess;
+pub mod command_scan;
+pub mod ext_script;
+pub(crate) mod mcp_baseline;
+pub mod parser;
+pub mod remediation;
+pub mod rubric;
+pub mod rule_pack;
+pub mod task;
+pub mod tool_surface;
+pub mod workspace_discovery;
+
+pub use parser::antigravity::{AntigravityParser, AntigravityProjectParser};
+pub use parser::claude_code::{ClaudeCodeParser, ClaudeCodeProjectParser};
+pub use parser::claude_desktop::ClaudeDesktopParser;
+pub use parser::codex::{CodexParser, CodexProjectParser};
+pub use parser::codex_tool_cache::CodexToolCacheParser;
+pub use parser::continue_dev::{ContinueDevParser, ContinueDevProjectParser};
+pub use parser::cursor::{CursorParser, CursorProjectParser};
+pub use parser::gemini::{GeminiParser, GeminiProjectParser};
+pub use rule_pack::parser::RulePackParser;
+pub use task::{run, CachedAssessment, StateMap, TaskCtx};
+
+/// Phase 3b.3 — shared registry mapping each parser's (tool, scope) to the
+/// external hook-script paths it currently references. Populated by runtime
+/// boot + policy_reload_task; read by `ai_guard::task::run` dispatcher to
+/// route fsnotify events on script paths to the right parser.
+pub type ExtScriptRegistry = std::sync::Arc<
+    parking_lot::RwLock<
+        std::collections::HashMap<
+            (
+                lodeline_core::event::AiTool,
+                lodeline_core::event::AiGuardScope,
+            ),
+            Vec<std::path::PathBuf>,
+        >,
+    >,
+>;
+
+/// Construct an empty `ExtScriptRegistry`. Used by tests + runtime bootstrap.
+pub fn empty_ext_script_registry() -> ExtScriptRegistry {
+    std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Phase 3b.5 — shared handle for the operator-tunable rubric. Built at
+/// boot from EffectivePolicy.rubric_overrides; atomically swapped on
+/// policy reload. The dispatcher snapshot-clones via a short read guard
+/// before any `.await`.
+pub type RubricHandle = std::sync::Arc<parking_lot::RwLock<rubric::Rubric>>;
+
+/// Construct a RubricHandle holding defaults() only. Used by tests +
+/// fallback paths. Production runtime builds with overrides applied.
+pub fn default_rubric_handle() -> RubricHandle {
+    std::sync::Arc::new(parking_lot::RwLock::new(rubric::Rubric::defaults()))
+}
+
+/// The built-in user-global parsers. Single source of truth shared by the
+/// daemon boot path (`runtime::run`) and the one-shot `lodeline scan` (#174) so
+/// the two can never drift on which tools are covered. Per-repo / project
+/// parsers are appended separately by each caller.
+///
+/// #148 — `CodexToolCacheParser` is Codex-tool but scope
+/// `Application{app:"codex-mcp-tools"}`, so it renders as its own scan row
+/// distinct from `CodexParser`'s user-global row (scan groups by (tool,scope)).
+pub fn user_global_parsers() -> Vec<std::sync::Arc<dyn parser::AiGuardParser>> {
+    user_global_parsers_with_baseline(None)
+}
+
+pub(crate) fn user_global_parsers_with_baseline(
+    baseline: Option<std::path::PathBuf>,
+) -> Vec<std::sync::Arc<dyn parser::AiGuardParser>> {
+    vec![
+        std::sync::Arc::new(ClaudeCodeParser),
+        std::sync::Arc::new(CodexParser),
+        std::sync::Arc::new(match baseline {
+            Some(path) => CodexToolCacheParser::with_baseline(path),
+            None => CodexToolCacheParser::default(),
+        }),
+        std::sync::Arc::new(ClaudeDesktopParser),
+        std::sync::Arc::new(ContinueDevParser),
+        std::sync::Arc::new(GeminiParser),
+        std::sync::Arc::new(CursorParser),
+        std::sync::Arc::new(AntigravityParser),
+    ]
+}
+
+/// Canonical hyphenated CLI label for an `AiTool`. Single source of truth shared
+/// by `lodeline show risk` (`--tool` parsing, the unknown-tool error message, the
+/// pretty table) and `lodeline scan`, so the accepted set can never drift from the
+/// enum. The exhaustive match means a new `AiTool` variant fails to compile here
+/// until a label is added. Ungated (scan is in the default build).
+pub(crate) fn tool_cli_label(t: lodeline_core::event::AiTool) -> &'static str {
+    use lodeline_core::event::AiTool::*;
+    match t {
+        ClaudeCode => "claude-code",
+        Codex => "codex",
+        ClaudeDesktop => "claude-desktop",
+        ContinueDev => "continue-dev",
+        Gemini => "gemini",
+        Cursor => "cursor",
+        Antigravity => "antigravity",
+        Grok => "grok",
+        Other => "other",
+    }
+}

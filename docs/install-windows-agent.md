@@ -1,12 +1,12 @@
-# sigil agent — Install Guide (Windows)
+# lodeline agent — Install Guide (Windows)
 
-The `sigil` agent watches AI-tool config and posture files (MCP allowlists,
+The `lodeline` agent watches AI-tool config and posture files (MCP allowlists,
 credential files, agent settings, …), hashes them, and emits **JSONL posture
 events**. It measures; it does not block. Events can be read locally, or shipped
-to a [`sigil-server`](install-server.md) by the companion `sigil-sender`.
+to a [`lodeline-server`](install-server.md) by the companion `lodeline-sender`.
 
-On Windows the agent uses a **named pipe** (`\\.\pipe\sigil-control`) for its
-control IPC and stores state under `%ProgramData%\Sigil` by default. It builds
+On Windows the agent uses a **named pipe** (`\\.\pipe\lodeline-control`) for its
+control IPC and stores state under `%ProgramData%\Lodeline` by default. It builds
 and runs natively on both **x64** and **ARM64** Windows.
 
 ---
@@ -15,13 +15,13 @@ and runs natively on both **x64** and **ARM64** Windows.
 
 ### For end users — download the prebuilt binary (recommended)
 
-**Download `sigil.exe` from [GitHub Releases](https://github.com/Ju571nK/sigil/releases)
+**Download `lodeline.exe` from [GitHub Releases](https://github.com/Ju571nK/lodeline/releases)
 and run it. That is the whole story.**
 
 - **No Rust, no Visual Studio, no compiler** is required to *run* the agent.
 - Binaries are published by CI for both architectures:
-  - `sigil-x86_64-pc-windows-msvc.exe` — the vast majority of Windows PCs.
-  - `sigil-aarch64-pc-windows-msvc.exe` — ARM devices (Surface Pro X, ARM laptops).
+  - `lodeline-x86_64-pc-windows-msvc.exe` — the vast majority of Windows PCs.
+  - `lodeline-aarch64-pc-windows-msvc.exe` — ARM devices (Surface Pro X, ARM laptops).
 - Release binaries are built with a **static CRT** (`-C target-feature=+crt-static`),
   so the `.exe` is self-contained — no Visual C++ Redistributable needed.
 
@@ -50,14 +50,14 @@ One-time toolchain setup:
 Then build:
 
 ```powershell
-cargo build --release -p sigil-agent   # → target\release\sigil.exe
+cargo build --release -p lodeline-agent   # → target\release\lodeline.exe
 ```
 
 For a self-contained, redistributable binary (no VC++ runtime dependency):
 
 ```powershell
 $env:RUSTFLAGS = "-C target-feature=+crt-static"
-cargo build --release -p sigil-agent
+cargo build --release -p lodeline-agent
 ```
 
 ---
@@ -69,15 +69,15 @@ these Windows-specific default locations:
 
 | Item | Windows default |
 |---|---|
-| state.db | `%ProgramData%\Sigil\state.db` |
-| events dir | `%ProgramData%\Sigil\events` |
-| control IPC | named pipe `\\.\pipe\sigil-control` |
-| keystore | `%LOCALAPPDATA%\Sigil\policy-signing-pubkeys.pem` |
+| state.db | `%ProgramData%\Lodeline\state.db` |
+| events dir | `%ProgramData%\Lodeline\events` |
+| control IPC | named pipe `\\.\pipe\lodeline-control` |
+| keystore | `%LOCALAPPDATA%\Lodeline\policy-signing-pubkeys.pem` |
 
 Override any of them on the command line:
 
 ```powershell
-sigil --state-db C:\sigil\state.db --events-dir C:\sigil\events run
+lodeline --state-db C:\lodeline\state.db --events-dir C:\lodeline\events run
 ```
 
 `%ProgramData%` resolves to `C:\ProgramData`; writing there needs an elevated
@@ -91,18 +91,18 @@ context. Running as your own (non-admin) user, point `--state-db` /
 ### Foreground (testing)
 
 ```powershell
-sigil doctor                 # check effective config first
-sigil run
+lodeline doctor                 # check effective config first
+lodeline run
 ```
 
 ```powershell
-sigil show config            # merged effective policy
-sigil show paths             # expanded watch paths
-sigil show risk              # AI Guard risk score per detected AI tool
-sigil show stats             # live heartbeat from the running agent
+lodeline show config            # merged effective policy
+lodeline show paths             # expanded watch paths
+lodeline show risk              # AI Guard risk score per detected AI tool
+lodeline show stats             # live heartbeat from the running agent
 ```
 
-Set the diagnostic log level with `SIGIL_LOG` (e.g. `$env:SIGIL_LOG = "debug"`).
+Set the diagnostic log level with `LODELINE_LOG` (e.g. `$env:LODELINE_LOG = "debug"`).
 
 > **Persistent service (Windows Service / Scheduled Task):** TBD — documented
 > after validation on the 2-machine test. The agent runs as a normal console
@@ -112,9 +112,9 @@ Set the diagnostic log level with `SIGIL_LOG` (e.g. `$env:SIGIL_LOG = "debug"`).
 
 ## 4. Ship events to a server / keystore
 
-`sigil-sender`, `host_id`, and the keystore are cross-platform — see
+`lodeline-sender`, `host_id`, and the keystore are cross-platform — see
 [install-macos-agent.md §6–§8](install-macos-agent.md). On Windows the
-`sender.yaml` `agent_control` must be the named pipe `\\.\pipe\sigil-control`
+`sender.yaml` `agent_control` must be the named pipe `\\.\pipe\lodeline-control`
 (not a Unix socket path).
 
 ---

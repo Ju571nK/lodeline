@@ -3,11 +3,11 @@ set -e
 
 #DEBHELPER#
 
-# Sigil hardening (#10 slice 2): create the sigil group/user so the server
-# unit's User=sigil resolves before start. Guarded so non-systemd hosts no-op.
+# Lodeline hardening (#10 slice 2): create the lodeline group/user so the server
+# unit's User=lodeline resolves before start. Guarded so non-systemd hosts no-op.
 # Idempotent (sysusers is declarative; a no-op if the group/user already exist).
 if command -v systemd-sysusers >/dev/null 2>&1; then
-    systemd-sysusers /usr/lib/sysusers.d/sigil-server.conf >/dev/null 2>&1 || true
+    systemd-sysusers /usr/lib/sysusers.d/lodeline-server.conf >/dev/null 2>&1 || true
 fi
 
 exit 0

@@ -1,0 +1,116 @@
+[package]
+name = "lodeline-sender"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lodeline-sender"
+path = "src/main.rs"
+
+[dependencies]
+lodeline-core = { path = "../lodeline-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+parking_lot = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+http = { workspace = true }
+urlencoding = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+
+# -- OS packages -------------------------------------------------------------
+# Build with `packaging/build.sh sender` (needs `cargo install cargo-deb
+# cargo-generate-rpm`). Source paths below are relative to THIS file's
+# directory (crates/lodeline-sender/), so the build script runs the packagers
+# from here. See packaging/README.md.
+
+# .deb (Debian/Ubuntu) — `cargo deb --no-build`
+[package.metadata.deb]
+name = "lodeline-sender"
+maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
+section = "admin"
+priority = "optional"
+# Match the dependencies injected by Debian's dh_installsystemd and
+# dh_installsysusers helpers. The alternatives keep non-systemd hosts usable.
+depends = "libc6, init-system-helpers (>= 1.52), systemd | systemd-standalone-sysusers | systemd-sysusers"
+maintainer-scripts = "../../packaging/debian-sender"
+extended-description = """\
+Lodeline sender. Reads the agent's local JSONL spool and ships posture events \
+to a lodeline-server over mTLS HTTPS. Pulls signed policy bundles back over \
+the same channel and hands them to the agent via control IPC. Ships a \
+systemd unit (disabled by default — enable with \
+`systemctl enable --now lodeline-sender`)."""
+assets = [
+    ["../../target/release/lodeline-sender", "usr/bin/", "755"],
+    ["../../config/sender.example.yaml", "etc/lodeline/sender.yaml.example", "644"],
+    ["../../README.md", "usr/share/doc/lodeline-sender/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/lodeline-sender/LICENSE", "644"],
+    # Ship the lodeline group/user + dir declarations so a standalone sender install
+    # establishes Group=lodeline before the unit starts (#61). Idempotent — a no-op
+    # when the agent package already created them.
+    ["../../packaging/sysusers.d/lodeline-sender.conf", "usr/lib/sysusers.d/lodeline-sender.conf", "644"],
+    ["../../packaging/tmpfiles.d/lodeline-sender.conf", "usr/lib/tmpfiles.d/lodeline-sender.conf", "644"],
+]
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "../../packaging/systemd"
+unit-name = "lodeline-sender"
+enable = false
+start = false
+
+# .rpm (RHEL/Rocky/Fedora) — `cargo generate-rpm`
+[package.metadata.generate-rpm]
+name = "lodeline-sender"
+summary = "Ships lodeline agent posture events to a lodeline-server over mTLS"
+assets = [
+    { source = "../../target/release/lodeline-sender", dest = "/usr/bin/lodeline-sender", mode = "0755" },
+    { source = "../../packaging/systemd/lodeline-sender.service", dest = "/usr/lib/systemd/system/lodeline-sender.service", mode = "0644" },
+    { source = "../../config/sender.example.yaml", dest = "/etc/lodeline/sender.yaml.example", mode = "0644" },
+    { source = "../../README.md", dest = "/usr/share/doc/lodeline-sender/README.md", mode = "0644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/doc/lodeline-sender/LICENSE", mode = "0644", doc = true },
+    { source = "../../packaging/sysusers.d/lodeline-sender.conf", dest = "/usr/lib/sysusers.d/lodeline-sender.conf", mode = "0644" },
+    { source = "../../packaging/tmpfiles.d/lodeline-sender.conf", dest = "/usr/lib/tmpfiles.d/lodeline-sender.conf", mode = "0644" },
+    { source = "../../packaging/selinux/lodeline.te", dest = "/usr/share/selinux/packages/lodeline/lodeline.te", mode = "0644" },
+    { source = "../../packaging/selinux/lodeline.fc", dest = "/usr/share/selinux/packages/lodeline/lodeline.fc", mode = "0644" },
+]
+# Apply sysusers/tmpfiles so a standalone sender install creates the lodeline
+# group/user + dirs before the unit's Group=lodeline resolves (#61). Idempotent.
+# Also load the SELinux module (#69) when the policy devel toolchain is present.
+post_install_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+command -v systemd-sysusers >/dev/null 2>&1 && systemd-sysusers /usr/lib/sysusers.d/lodeline-sender.conf >/dev/null 2>&1 || :
+command -v systemd-tmpfiles >/dev/null 2>&1 && systemd-tmpfiles --create /usr/lib/tmpfiles.d/lodeline-sender.conf >/dev/null 2>&1 || :
+if command -v semodule >/dev/null 2>&1 && [ -f /usr/share/selinux/devel/Makefile ]; then ( cd /usr/share/selinux/packages/lodeline && make -f /usr/share/selinux/devel/Makefile lodeline.pp >/dev/null 2>&1 && semodule -i lodeline.pp >/dev/null 2>&1 ) || : ; command -v restorecon >/dev/null 2>&1 && restorecon -R /usr/bin/lodeline-sender /var/lib/lodeline-sender /var/log/lodeline-sender /etc/lodeline >/dev/null 2>&1 || : ; fi
+"""
+pre_uninstall_script = """\
+if [ "$1" = 0 ] ; then
+    systemctl --no-reload disable --now lodeline-sender.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -ge 1 ] ; then
+    systemctl try-restart lodeline-sender.service >/dev/null 2>&1 || :
+fi
+"""

@@ -1,38 +1,38 @@
-# Sigil sender — example config. Copy to /etc/sigil/sender.yaml and edit.
+# Lodeline sender — example config. Copy to /etc/lodeline/sender.yaml and edit.
 
-# URL of the sigil-server (HTTPS, port included if non-default).
-server_base_url: "https://sigil.example.com"
+# URL of the lodeline-server (HTTPS, port included if non-default).
+server_base_url: "https://lodeline.example.com"
 
 # mTLS material. Generated and signed out-of-band; this host's client cert
 # pins its host_id (handed out at provisioning time).
-client_cert_path: "/etc/sigil/client.crt"
-client_key_path: "/etc/sigil/client.key"
-server_ca_path: "/etc/sigil/server-ca.pem"
+client_cert_path: "/etc/lodeline/client.crt"
+client_key_path: "/etc/lodeline/client.key"
+server_ca_path: "/etc/lodeline/server-ca.pem"
 
 # Where the agent writes its JSONL posture events (`events-*.jsonl`). This is
 # the packaged root agent's default; set it to the agent's --events-dir if you
-# changed that. The sender only READS this dir (the agent owns it root:sigil)
+# changed that. The sender only READS this dir (the agent owns it root:lodeline)
 # and ships unsent records.
-events_dir: "/var/log/sigil"
+events_dir: "/var/log/lodeline"
 
 # The sender's durable read-offset checkpoint (atomic-rename writes). This is
 # sender-owned and writable — it lives in the sender's own state dir so the
 # non-root sender can write it. Defaults to this path if omitted.
-offset_path: "/var/lib/sigil-sender/sender-offset.json"
+offset_path: "/var/lib/lodeline-sender/sender-offset.json"
 
 # Agent control IPC. Used by the sender to forward apply_policy responses
 # pulled from /v1/policy.
-agent_control: "/var/run/sigil/control.sock"
+agent_control: "/var/run/lodeline/control.sock"
 
 # Where the sender quarantines events the server permanently rejects (HTTP
 # 4xx that aren't transient). Sender-owned/writable; defaults to this path if
 # omitted. Operator audits these out-of-band.
-dead_letter_dir: "/var/log/sigil-sender/dead-letter"
+dead_letter_dir: "/var/log/lodeline-sender/dead-letter"
 
 # REQUIRED — this host's identifier. Must equal the agent's host_id (the UUID
-# stored in the agent's state.db, shown by `sigil show host-id`). The server
+# stored in the agent's state.db, shown by `lodeline show host-id`). The server
 # validates that every event's host_id matches the batch envelope host_id and
-# rejects the entire batch if they differ. Overridable by the SIGIL_HOST_ID
+# rejects the entire batch if they differ. Overridable by the LODELINE_HOST_ID
 # env var (env takes precedence over this field). Leaving both unset causes
 # the sender to exit immediately with an error.
 # host_id: "00000000-0000-0000-0000-000000000000"

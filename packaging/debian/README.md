@@ -1,7 +1,7 @@
 # Debian maintainer-script skeletons
 
 These are referenced by `maintainer-scripts` in `[package.metadata.deb]`
-(`crates/sigil-agent/Cargo.toml`). cargo-deb substitutes the `#DEBHELPER#`
+(`crates/lodeline-agent/Cargo.toml`). cargo-deb substitutes the `#DEBHELPER#`
 token in each with the systemd integration snippet derived from
 `[package.metadata.deb.systemd-units]` (daemon-reload on install; stop +
 state-cleanup on remove/purge; **no** enable/start). cargo-deb won't emit any

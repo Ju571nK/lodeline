@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Build Sigil OS packages.
+# Build Lodeline OS packages.
 #
 # Prerequisites (one-time):
 #   cargo install cargo-deb cargo-generate-rpm
@@ -8,10 +8,10 @@
 #   packaging/build.sh                          # all packages, both formats
 #   packaging/build.sh deb                      # all packages, .deb only
 #   packaging/build.sh rpm                      # all packages, .rpm only
-#   packaging/build.sh agent                    # sigil-agent, both formats
-#   packaging/build.sh sender rpm               # sigil-sender, .rpm only
-#   packaging/build.sh signer deb               # sigil-signer, .deb only
-#   packaging/build.sh proxy                    # sigil-proxy, both formats
+#   packaging/build.sh agent                    # lodeline-agent, both formats
+#   packaging/build.sh sender rpm               # lodeline-sender, .rpm only
+#   packaging/build.sh signer deb               # lodeline-signer, .deb only
+#   packaging/build.sh proxy                    # lodeline-proxy, both formats
 #   packaging/build.sh agent rpm --target aarch64-unknown-linux-gnu
 #                                               # cross-build an ARM64 .rpm (#12)
 #
@@ -68,32 +68,32 @@ while [ $# -gt 0 ]; do
 done
 
 case "$WHAT" in
-    all)    CRATES="sigil-agent sigil-sender sigil-server sigil-signer sigil-proxy" ;;
-    agent)  CRATES="sigil-agent" ;;
-    sender) CRATES="sigil-sender" ;;
-    server) CRATES="sigil-server" ;;
-    signer) CRATES="sigil-signer" ;;
-    proxy)  CRATES="sigil-proxy" ;;
+    all)    CRATES="lodeline-agent lodeline-sender lodeline-server lodeline-signer lodeline-proxy" ;;
+    agent)  CRATES="lodeline-agent" ;;
+    sender) CRATES="lodeline-sender" ;;
+    server) CRATES="lodeline-server" ;;
+    signer) CRATES="lodeline-signer" ;;
+    proxy)  CRATES="lodeline-proxy" ;;
 esac
 
-# BUILD_PKGS is a superset of CRATES: the sigil package (sigil-agent metadata)
-# now bundles sigil-mcp and sigil-hook binaries, so we must compile them too
+# BUILD_PKGS is a superset of CRATES: the lodeline package (lodeline-agent metadata)
+# now bundles lodeline-mcp and lodeline-hook binaries, so we must compile them too
 # even though they have no package metadata of their own.
 BUILD_PKGS="$CRATES"
 case "$WHAT" in
-    agent|all) BUILD_PKGS="$BUILD_PKGS sigil-mcp sigil-hook" ;;
+    agent|all) BUILD_PKGS="$BUILD_PKGS lodeline-mcp lodeline-hook" ;;
 esac
 # shellcheck disable=SC2086
 BUILD_PKGS=$(printf '%s\n' $BUILD_PKGS | sort -u | tr '\n' ' ')
 
-# crate -> binary name (the agent ships `sigil`, the signer ships `sigil-sign`).
+# crate -> binary name (the agent ships `lodeline`, the signer ships `lodeline-sign`).
 bin_for() {
     case "$1" in
-        sigil-agent)  echo sigil ;;
-        sigil-sender) echo sigil-sender ;;
-        sigil-server) echo sigil-server ;;
-        sigil-signer) echo sigil-sign ;;
-        sigil-proxy)  echo sigil-proxy ;;
+        lodeline-agent)  echo lodeline ;;
+        lodeline-sender) echo lodeline-sender ;;
+        lodeline-server) echo lodeline-server ;;
+        lodeline-signer) echo lodeline-sign ;;
+        lodeline-proxy)  echo lodeline-proxy ;;
     esac
 }
 
@@ -111,7 +111,7 @@ if [ -n "$TARGET" ]; then
 fi
 
 # Single release build for everything we'll package (including extra binaries
-# bundled into the sigil package: sigil-mcp, sigil-hook).
+# bundled into the lodeline package: lodeline-mcp, lodeline-hook).
 echo ">> building release binaries for: $BUILD_PKGS${TARGET:+ (target: $TARGET)}"
 BUILD_ARGS=""
 for c in $BUILD_PKGS; do
@@ -132,8 +132,8 @@ if [ -n "$TARGET" ]; then
     done
     case "$WHAT" in
         agent|all)
-            cp -f "$ROOT/target/$TARGET/release/sigil-mcp"  "$ROOT/target/release/sigil-mcp"
-            cp -f "$ROOT/target/$TARGET/release/sigil-hook" "$ROOT/target/release/sigil-hook"
+            cp -f "$ROOT/target/$TARGET/release/lodeline-mcp"  "$ROOT/target/release/lodeline-mcp"
+            cp -f "$ROOT/target/$TARGET/release/lodeline-hook" "$ROOT/target/release/lodeline-hook"
             ;;
     esac
 fi

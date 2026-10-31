@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sigil — 2-머신 테스트 &amp; 배포 네트워크/포트 가이드</title>
+<title>Lodeline — 2-머신 테스트 &amp; 배포 네트워크/포트 가이드</title>
 <style>
   :root{--fg:#1a1a1a;--muted:#5a5a5a;--bg:#fff;--accent:#059669;--accent-weak:#d1fae5;
     --border:#e2e2e2;--code-bg:#f6f8fa;--warn-bg:#fff7e6;--warn-border:#f0c36d;--danger:#b42318;
@@ -41,10 +41,10 @@
 <body>
 <div class="wrap">
 
-<p><span class="tag">RUNBOOK</span> &nbsp; Sigil 배포 / 테스트</p>
+<p><span class="tag">RUNBOOK</span> &nbsp; Lodeline 배포 / 테스트</p>
 <h1>2-머신 테스트 + 배포 네트워크·포트 가이드</h1>
 <p class="meta">
-  <b>구성:</b> Mac (agent + sender) ↔ Rocky/RHEL VM (bridged, sigil-server) · 같은 LAN 서브넷 &nbsp;·&nbsp;
+  <b>구성:</b> Mac (agent + sender) ↔ Rocky/RHEL VM (bridged, lodeline-server) · 같은 LAN 서브넷 &nbsp;·&nbsp;
   <b>날짜:</b> 2026-05-25 &nbsp;·&nbsp; <b>예시 IP:</b> VM = <code>192.168.0.50</code> (본인 값으로 치환)
 </p>
 
@@ -57,15 +57,15 @@
 flowchart LR
   subgraph mac["Mac — agent 호스트 · inbound 포트 없음"]
     direction TB
-    agent["sigil (agent)"]
+    agent["lodeline (agent)"]
     spool[("JSONL spool")]
-    sender["sigil-sender"]
+    sender["lodeline-sender"]
     agent --&gt;|"watch·hash·JSONL"| spool
     spool --&gt;|reads| sender
     sender -.-&gt;|"apply_policy (UDS·로컬)"| agent
   end
   subgraph vm["Rocky VM · bridged"]
-    server["sigil-server :8443"]
+    server["lodeline-server :8443"]
     store[("events_out_dir · host_id별 JSONL")]
     server --&gt; store
   end
@@ -75,7 +75,7 @@ flowchart LR
   class agent,spool,sender,server comp;
 </pre>
 <ul>
-  <li><b>agent 는 바깥으로 안 나간다.</b> 네트워크 송신은 <code>sigil-sender</code> 가 전담 → server 로 outbound.</li>
+  <li><b>agent 는 바깥으로 안 나간다.</b> 네트워크 송신은 <code>lodeline-sender</code> 가 전담 → server 로 outbound.</li>
   <li><b>agent ↔ sender 는 같은 호스트의 Unix domain socket</b>(control.sock). 네트워크 포트 불필요.</li>
   <li>서버는 <b>단일 포트(8443)</b> 에 모든 <code>/v1/*</code> 엔드포인트 (data + control + read API 동일 bind).</li>
 </ul>
@@ -84,23 +84,23 @@ flowchart LR
 <table>
   <tr><th>컴포넌트 (호스트)</th><th>방향</th><th>포트</th><th>프로토콜</th><th>용도</th><th>상대</th></tr>
   <tr>
-    <td><b>sigil-server</b> (서버 VM)</td><td>inbound</td><td><span class="pill">8443/tcp</span><br><span class="small">(<code>bind</code> 설정값)</span></td><td>TLS (mTLS)</td>
-    <td><code>POST /v1/events</code> 수신 · <code>GET /v1/policy</code> 서빙 · <code>/v1/healthz</code> · <code>/v1/meta</code>+read API — <b>전부 같은 포트</b></td><td>agent 호스트들, (옵션) sigil-manager / 운영자</td>
+    <td><b>lodeline-server</b> (서버 VM)</td><td>inbound</td><td><span class="pill">8443/tcp</span><br><span class="small">(<code>bind</code> 설정값)</span></td><td>TLS (mTLS)</td>
+    <td><code>POST /v1/events</code> 수신 · <code>GET /v1/policy</code> 서빙 · <code>/v1/healthz</code> · <code>/v1/meta</code>+read API — <b>전부 같은 포트</b></td><td>agent 호스트들, (옵션) lodeline-manager / 운영자</td>
   </tr>
   <tr>
-    <td><b>agent 호스트</b> (Mac/엔드포인트)</td><td>outbound</td><td>8443/tcp</td><td>TLS</td><td>sigil-sender → server (이벤트 push + 정책 pull)</td><td>→ sigil-server</td>
+    <td><b>agent 호스트</b> (Mac/엔드포인트)</td><td>outbound</td><td>8443/tcp</td><td>TLS</td><td>lodeline-sender → server (이벤트 push + 정책 pull)</td><td>→ lodeline-server</td>
   </tr>
   <tr>
-    <td>agent 호스트</td><td>outbound</td><td>443/tcp 또는 SIEM 포트<br><span class="small">(예: Splunk HEC 8088)</span></td><td>TLS</td><td>sigil-sender → SIEM <b>직접 경로</b> 쓸 때만</td><td>→ SIEM</td>
+    <td>agent 호스트</td><td>outbound</td><td>443/tcp 또는 SIEM 포트<br><span class="small">(예: Splunk HEC 8088)</span></td><td>TLS</td><td>lodeline-sender → SIEM <b>직접 경로</b> 쓸 때만</td><td>→ SIEM</td>
   </tr>
   <tr>
     <td>agent ↔ sender</td><td>로컬</td><td><b>네트워크 포트 없음</b></td><td>Unix socket</td><td>apply_policy IPC (같은 호스트)</td><td>n/a</td>
   </tr>
   <tr>
-    <td>(옵션) <b>sigil-manager</b></td><td>outbound</td><td>8443/tcp</td><td>TLS+bearer</td><td>server read API(<code>/v1/meta</code>, fleet) 조회</td><td>→ sigil-server</td>
+    <td>(옵션) <b>lodeline-manager</b></td><td>outbound</td><td>8443/tcp</td><td>TLS+bearer</td><td>server read API(<code>/v1/meta</code>, fleet) 조회</td><td>→ lodeline-server</td>
   </tr>
   <tr>
-    <td>(옵션) sigil-manager</td><td>inbound</td><td>자체 웹 포트<br><span class="small">(예: 8080)</span></td><td>TLS</td><td>fleet 웹 콘솔</td><td>운영자 브라우저</td>
+    <td>(옵션) lodeline-manager</td><td>inbound</td><td>자체 웹 포트<br><span class="small">(예: 8080)</span></td><td>TLS</td><td>fleet 웹 콘솔</td><td>운영자 브라우저</td>
   </tr>
 </table>
 <div class="callout">
@@ -112,7 +112,7 @@ flowchart LR
 <p class="small">데모 <code>demo/init.sh</code> 의 openssl 묶음 그대로, <b>server cert 의 SAN 만 조정</b>.</p>
 <pre><code># CA
 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout ca.key -out ca.crt -subj "/CN=sigil-test-ca" \
+  -keyout ca.key -out ca.crt -subj "/CN=lodeline-test-ca" \
   -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
 
 # 서버 cert — SAN 에 hostname(권장) + IP. sender 가 접속할 주소가 SAN 에 있어야 함.
@@ -120,9 +120,9 @@ cat &gt; server.ext &lt;&lt;'EOF'
 basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:sigil-server, IP:192.168.0.50
+subjectAltName = DNS:lodeline-server, IP:192.168.0.50
 EOF
-openssl req -new -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=sigil-server"
+openssl req -new -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=lodeline-server"
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 3650 \
   -extfile server.ext -out server.crt
 
@@ -136,74 +136,74 @@ openssl req -new -newkey rsa:2048 -nodes -keyout client.key -out client.csr -sub
 openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 3650 \
   -extfile client.ext -out client.crt</code></pre>
 <p>정책 서명 키 + keystore + signed bundle (control-plane 용; data-plane 만 볼 거면 생략 가능):</p>
-<pre><code>sigil-sign keygen --id test-key --out signing-key.json
+<pre><code>lodeline-sign keygen --id test-key --out signing-key.json
 PUB=$(jq -r .ed25519_pubkey_b64 signing-key.json)
 cat &gt; policy-signing-pubkeys.pem &lt;&lt;EOF
 { "pubkeys": [ { "id":"test-key","ed25519_pubkey_b64":"$PUB","valid_from":"2020-01-01T00:00:00Z","valid_until":"2099-01-01T00:00:00Z" } ] }
 EOF
 cp config/policy.example.yaml policy.yaml
-sigil-sign sign --in policy.yaml --key signing-key.json \
+lodeline-sign sign --in policy.yaml --key signing-key.json \
   --policy-version 2 --valid-until 2099-01-01T00:00:00Z --out signed-policy.json</code></pre>
 
-<h2 id="vm">4. VM (Rocky aarch64, bridged) — sigil-server</h2>
+<h2 id="vm">4. VM (Rocky aarch64, bridged) — lodeline-server</h2>
 <div class="callout warn">
   <p><b>ARM64 주의.</b> Apple Silicon Mac 의 VM 은 aarch64. <b>prebuilt/x86_64 rpm 은 안 됨</b>(cross-arch 패키징 미구현 — open issue #12). VM 에서 <b>소스 빌드</b>가 정답.</p>
 </div>
 <pre><code># Rocky aarch64 — 소스 빌드
 sudo dnf install -y gcc git
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh &amp;&amp; source "$HOME/.cargo/env"
-git clone https://github.com/Ju571nK/sigil &amp;&amp; cd sigil
-cargo build --release -p sigil-server         # → target/release/sigil-server (네이티브 aarch64)
-sudo mkdir -p /etc/sigil-server /var/lib/sigil-server/events
+git clone https://github.com/Ju571nK/lodeline &amp;&amp; cd lodeline
+cargo build --release -p lodeline-server         # → target/release/lodeline-server (네이티브 aarch64)
+sudo mkdir -p /etc/lodeline-server /var/lib/lodeline-server/events
 # A에서 만든 것 전송: server.crt server.key ca.crt signed-policy.json
-sudo cp server.crt server.key ca.crt signed-policy.json /etc/sigil-server/</code></pre>
-<p><code>/etc/sigil-server/server.yaml</code>:</p>
+sudo cp server.crt server.key ca.crt signed-policy.json /etc/lodeline-server/</code></pre>
+<p><code>/etc/lodeline-server/server.yaml</code>:</p>
 <pre><code>bind: "0.0.0.0:8443"
-events_out_dir: "/var/lib/sigil-server/events"
-policy_bundle_path: "/etc/sigil-server/signed-policy.json"
-tls_cert_path: "/etc/sigil-server/server.crt"
-tls_key_path: "/etc/sigil-server/server.key"
-client_ca_path: "/etc/sigil-server/ca.crt"     # ← 3개 다 켜야 mTLS ON (안 켜면 PLAIN HTTP 경고)</code></pre>
+events_out_dir: "/var/lib/lodeline-server/events"
+policy_bundle_path: "/etc/lodeline-server/signed-policy.json"
+tls_cert_path: "/etc/lodeline-server/server.crt"
+tls_key_path: "/etc/lodeline-server/server.key"
+client_ca_path: "/etc/lodeline-server/ca.crt"     # ← 3개 다 켜야 mTLS ON (안 켜면 PLAIN HTTP 경고)</code></pre>
 <pre><code># 방화벽 (Rocky/firewalld)
 sudo firewall-cmd --add-port=8443/tcp --permanent &amp;&amp; sudo firewall-cmd --reload
 # SELinux enforcing 면: 8443 은 보통 http_port_t 에 포함. 커스텀 포트 쓰면:
 #   sudo semanage port -a -t http_port_t -p tcp &lt;port&gt;
 # 실행
-./target/release/sigil-server serve --config /etc/sigil-server/server.yaml
+./target/release/lodeline-server serve --config /etc/lodeline-server/server.yaml
 ip addr | grep 192.168          # VM 의 LAN IP 확인 (bridged 면 LAN 대역)</code></pre>
 
 <h2 id="mac">5. Mac — agent + sender</h2>
-<pre><code>echo "192.168.0.50  sigil-server" | sudo tee -a /etc/hosts   # hostname SAN 매핑
-mkdir -p ~/sigil-test/{events,state,run}
+<pre><code>echo "192.168.0.50  lodeline-server" | sudo tee -a /etc/hosts   # hostname SAN 매핑
+mkdir -p ~/lodeline-test/{events,state,run}
 # 소스 빌드 (Apple Silicon = aarch64-apple-darwin 네이티브)
-cargo build --release -p sigil-agent -p sigil-sender
+cargo build --release -p lodeline-agent -p lodeline-sender
 # A에서: ca.crt client.crt client.key policy-signing-pubkeys.pem policy.yaml 가져오기</code></pre>
-<p><code>~/sigil-test/sender.yaml</code>:</p>
-<pre><code>server_base_url: "https://sigil-server:8443"
-client_cert_path: "/Users/ju571nk3n/sigil-test/client.crt"
-client_key_path:  "/Users/ju571nk3n/sigil-test/client.key"
-server_ca_path:   "/Users/ju571nk3n/sigil-test/ca.crt"
-events_dir:       "/Users/ju571nk3n/sigil-test/events"
-offset_path:      "/Users/ju571nk3n/sigil-test/state/sender-offset.json"
-agent_control:    "/Users/ju571nk3n/sigil-test/run/control.sock"
-dead_letter_dir:  "/Users/ju571nk3n/sigil-test/events/dead-letter"
+<p><code>~/lodeline-test/sender.yaml</code>:</p>
+<pre><code>server_base_url: "https://lodeline-server:8443"
+client_cert_path: "/Users/ju571nk3n/lodeline-test/client.crt"
+client_key_path:  "/Users/ju571nk3n/lodeline-test/client.key"
+server_ca_path:   "/Users/ju571nk3n/lodeline-test/ca.crt"
+events_dir:       "/Users/ju571nk3n/lodeline-test/events"
+offset_path:      "/Users/ju571nk3n/lodeline-test/state/sender-offset.json"
+agent_control:    "/Users/ju571nk3n/lodeline-test/run/control.sock"
+dead_letter_dir:  "/Users/ju571nk3n/lodeline-test/events/dead-letter"
 policy_poll_interval: 10</code></pre>
 <pre><code># 터미널 1 — agent (events-dir / control 경로를 sender.yaml 과 일치)
-./target/release/sigil run --policy ~/sigil-test/policy.yaml \
-  --events-dir ~/sigil-test/events --state-db ~/sigil-test/state/state.db
+./target/release/lodeline run --policy ~/lodeline-test/policy.yaml \
+  --events-dir ~/lodeline-test/events --state-db ~/lodeline-test/state/state.db
 # 터미널 2 — sender
-./target/release/sigil-sender --config ~/sigil-test/sender.yaml start</code></pre>
+./target/release/lodeline-sender --config ~/lodeline-test/sender.yaml start</code></pre>
 <div class="callout warn">
-  <p><b>경로 정합이 핵심.</b> sender 의 <code>events_dir</code>/<code>agent_control</code> 는 Mac agent 의 <b>실제</b> events·control 경로와 같아야 함. agent 의 control socket override 플래그가 없으면 <code>sigil show config</code> 로 실제 경로를 확인하고 sender.yaml 을 맞추세요.</p>
+  <p><b>경로 정합이 핵심.</b> sender 의 <code>events_dir</code>/<code>agent_control</code> 는 Mac agent 의 <b>실제</b> events·control 경로와 같아야 함. agent 의 control socket override 플래그가 없으면 <code>lodeline show config</code> 로 실제 경로를 확인하고 sender.yaml 을 맞추세요.</p>
 </div>
 
 <h2 id="verify">6. 검증</h2>
 <pre><code># Mac → VM mTLS 도달 (인증 없는 healthz, 단 클라이언트 cert 는 필요)
-curl --cacert ca.crt --cert client.crt --key client.key https://sigil-server:8443/v1/healthz
+curl --cacert ca.crt --cert client.crt --key client.key https://lodeline-server:8443/v1/healthz
 # Mac 의 watch 대상 한번 건드리기 (예시)
 touch ~/.claude/settings.json   # 또는 policy.yaml 의 targets 경로
 # VM: host_id 별 JSONL 이 생기는지
-ls -R /var/lib/sigil-server/events</code></pre>
+ls -R /var/lib/lodeline-server/events</code></pre>
 <p class="small"><code>/v1/meta</code>·fleet 등 read API 는 bearer 토큰이 설정돼 있어야 200 (없으면 404). reachability 확인은 <code>/v1/healthz</code> 로.</p>
 
 <h2 id="prod">7. 실무 배포 노트</h2>
@@ -212,17 +212,17 @@ ls -R /var/lib/sigil-server/events</code></pre>
   <li><b>Reverse proxy 주의.</b> 서버가 mTLS 클라이언트 cert 를 <i>직접</i> 검증한다. 앞단 L7 proxy 가 TLS 종료하면 client cert 가 안 넘어가 인증 실패 → <b>L4 TLS passthrough</b> 또는 직결로.</li>
   <li><b>시간 동기(chrony/NTP).</b> cert 유효기간 · 라이선스 <code>not_after</code> · audit/이벤트 timestamp 가 시계에 의존. 양쪽 skew 크면 TLS 만료·서명 검증 오판.</li>
   <li><b>DNS.</b> 실무는 서버 FQDN A레코드 + server cert SAN = 그 FQDN. <code>server_base_url</code> 은 FQDN. (테스트만 <code>/etc/hosts</code>.)</li>
-  <li><b>SELinux (RHEL 계열).</b> enforcing 환경에서 비표준 포트 바인드 / <code>/var/lib/sigil-server</code> 쓰기에 라벨 필요할 수 있음. <code>sigil doctor</code> 가 SELinux·소켓 perms·systemd·events 디렉터리 4-check 로 점검.</li>
+  <li><b>SELinux (RHEL 계열).</b> enforcing 환경에서 비표준 포트 바인드 / <code>/var/lib/lodeline-server</code> 쓰기에 라벨 필요할 수 있음. <code>lodeline doctor</code> 가 SELinux·소켓 perms·systemd·events 디렉터리 4-check 로 점검.</li>
   <li><b>아키텍처.</b> cross-arch(aarch64/armv7) prebuilt 패키징은 미구현(issue #12). ARM 호스트는 소스 빌드(네이티브) 또는 해당 arch 에서 직접 rpm 빌드.</li>
   <li><b>per-host 클라이언트 cert.</b> 실무는 호스트마다 client cert 발급(provisioning). CA 로테이션·만료 운영 필요. host_id 는 cert 와 분리된 state.db UUIDv4.</li>
   <li><b>host 화이트리스트(옵션).</b> server.yaml 의 <code>host_allowlist_path</code>(JSON <code>{"hosts":["uuid",...]}</code>)로 수용 host_id 제한 가능.</li>
-  <li><b>SIEM 직접 경로.</b> sigil-server 대신 기존 SIEM 으로 바로 보낼 땐 sender 의 <code>server_base_url</code> 을 SIEM HTTPS 엔드포인트로 — 그 경우 열 포트는 SIEM 쪽 규격(예 Splunk HEC 8088, 일반 443).</li>
+  <li><b>SIEM 직접 경로.</b> lodeline-server 대신 기존 SIEM 으로 바로 보낼 땐 sender 의 <code>server_base_url</code> 을 SIEM HTTPS 엔드포인트로 — 그 경우 열 포트는 SIEM 쪽 규격(예 Splunk HEC 8088, 일반 443).</li>
 </ul>
 
 <h2 id="fail">8. 흔한 실패 3 + α</h2>
 <ol>
   <li><b>VM 이 NAT (bridged 아님)</b> → Mac 에서 <code>curl</code> timeout. bridged 로 VM 이 LAN IP 받게.</li>
-  <li><b>server cert SAN 에 접속 주소 없음</b> → TLS handshake 실패. SAN 에 <code>DNS:sigil-server</code>(+/etc/hosts) 또는 <code>IP:192.168.0.50</code>.</li>
+  <li><b>server cert SAN 에 접속 주소 없음</b> → TLS handshake 실패. SAN 에 <code>DNS:lodeline-server</code>(+/etc/hosts) 또는 <code>IP:192.168.0.50</code>.</li>
   <li><b>agent 실제 events/control 경로 ≠ sender.yaml</b> → sender 가 spool 못 읽음/apply_policy 못 보냄. 양쪽 경로 명시·일치.</li>
   <li>방화벽 8443 미개방 / 서버가 <code>127.0.0.1</code> 바인드 → 외부 도달 불가. <code>0.0.0.0:8443</code> + firewalld 허용.</li>
   <li>server.yaml 의 TLS 3필드 중 일부만 설정 → mTLS OFF(PLAIN HTTP 경고). 셋 다 켜야 mTLS.</li>

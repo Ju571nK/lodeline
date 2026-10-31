@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sigil Proxy AWS smoke client (stdlib only).
+"""Lodeline Proxy AWS smoke client (stdlib only).
 
 Subcommands:
   scenario    MCP flow through the proxy: auth/session/protocol rejections,
@@ -7,7 +7,7 @@ Subcommands:
               mutation, cross-session cancel isolation, DELETE.
   call        open one session and make N echo calls (outage / spool tests).
   counters    read the fixture's out-of-band counters (test oracle).
-  query       GET one sigil-server read route over mTLS + read bearer.
+  query       GET one lodeline-server read route over mTLS + read bearer.
   ledger      check invocations on the server: uniqueness, lifecycle, outcomes,
               duplicate event ids, and canary absence in ordinary responses.
   scan        count canary / secret occurrences in files (spool, logs).
@@ -165,7 +165,7 @@ class McpClient:
 
     def initialize(self, with_session=False, **kw):
         params = {"protocolVersion": REVISION, "capabilities": {},
-                  "clientInfo": {"name": "sigil-smoke-client", "version": "0.1.0"}}
+                  "clientInfo": {"name": "lodeline-smoke-client", "version": "0.1.0"}}
         st, h, msg = self.rpc("initialize", params, session=with_session, version=False, **kw)
         sid = (h.get("mcp-session-id") or [None])[0]
         if st == 200 and sid:
@@ -226,8 +226,8 @@ def scenario(a):
     token = read_secret_file(a.token_file)
     c = Checks()
     run_id = secrets.token_hex(6)
-    canary_args = "SIGIL-CANARY-ARG-%s" % secrets.token_hex(12)
-    canary_sse = "SIGIL-CANARY-SSE-%s" % secrets.token_hex(12)
+    canary_args = "LODELINE-CANARY-ARG-%s" % secrets.token_hex(12)
+    canary_sse = "LODELINE-CANARY-SSE-%s" % secrets.token_hex(12)
     started_at = utc_now()
 
     m = McpClient(a.url, token, ca=a.ca)
@@ -385,7 +385,7 @@ def call_loop(a):
         return 1
     statuses = []
     for i in range(a.count):
-        marker = "SIGIL-CANARY-LOOP-%s" % secrets.token_hex(8) if a.canary else "loop-%d" % i
+        marker = "LODELINE-CANARY-LOOP-%s" % secrets.token_hex(8) if a.canary else "loop-%d" % i
         st, h, msg = m.rpc("tools/call", {"name": "smoke_echo", "arguments": {"marker": marker}})
         text, _ = result_text(msg)
         ok = st == 200 and text == "echo:" + marker

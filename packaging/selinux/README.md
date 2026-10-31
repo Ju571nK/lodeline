@@ -1,17 +1,17 @@
-# Sigil SELinux policy (#69)
+# Lodeline SELinux policy (#69)
 
-Confines the three de-rooted sigil daemons (#10) into dedicated SELinux domains
+Confines the three de-rooted lodeline daemons (#10) into dedicated SELinux domains
 on RHEL-family systems (Rocky/RHEL/Fedora) instead of leaving them in
 `unconfined_service_t`:
 
 | daemon | domain | binary type |
 |--------|--------|-------------|
-| `sigil` (agent) | `sigil_agent_t` | `sigil_agent_exec_t` |
-| `sigil-sender`  | `sigil_sender_t` | `sigil_sender_exec_t` |
-| `sigil-server`  | `sigil_server_t` | `sigil_server_exec_t` |
+| `lodeline` (agent) | `lodeline_agent_t` | `lodeline_agent_exec_t` |
+| `lodeline-sender`  | `lodeline_sender_t` | `lodeline_sender_exec_t` |
+| `lodeline-server`  | `lodeline_server_t` | `lodeline_server_exec_t` |
 
-State/log/runtime get dedicated file types (`sigil_var_lib_t`, `sigil_var_log_t`,
-`sigil_conf_t`, `sigil_*_var_lib_t`, …). The agent can read any file (it does
+State/log/runtime get dedicated file types (`lodeline_var_lib_t`, `lodeline_var_log_t`,
+`lodeline_conf_t`, `lodeline_*_var_lib_t`, …). The agent can read any file (it does
 file-integrity monitoring by design) but is otherwise tightly confined; the
 sender/server only touch their own state, the agent's event log/socket, and the
 network they need.
@@ -30,20 +30,20 @@ no unit drop-in.
 
 ```sh
 sudo dnf install -y selinux-policy-devel   # provides the devel Makefile
-make -f /usr/share/selinux/devel/Makefile sigil.pp
-sudo semodule -i sigil.pp
-sudo restorecon -Rv /usr/bin/sigil* /var/lib/sigil* /var/log/sigil* /etc/sigil
-sudo systemctl restart sigil sigil-server sigil-sender   # whichever are installed
+make -f /usr/share/selinux/devel/Makefile lodeline.pp
+sudo semodule -i lodeline.pp
+sudo restorecon -Rv /usr/bin/lodeline* /var/lib/lodeline* /var/log/lodeline* /etc/lodeline
+sudo systemctl restart lodeline lodeline-server lodeline-sender   # whichever are installed
 ```
 
 Verify confinement + zero denials:
 
 ```sh
-ps -eZ | grep sigil          # → sigil_agent_t / sigil_sender_t / sigil_server_t
-sudo ausearch -m avc -ts recent | grep sigil   # → nothing
+ps -eZ | grep lodeline          # → lodeline_agent_t / lodeline_sender_t / lodeline_server_t
+sudo ausearch -m avc -ts recent | grep lodeline   # → nothing
 ```
 
-Remove: `sudo semodule -r sigil`.
+Remove: `sudo semodule -r lodeline`.
 
 Verified enforcing-clean on Rocky Linux 9.7 (aarch64) with all three daemons
 running (0 AVC denials, even with `dontaudit` disabled).

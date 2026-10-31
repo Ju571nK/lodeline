@@ -1,4 +1,4 @@
-# Welcome to Sigil
+# Welcome to Lodeline
 
 ## How We Use Claude
 
@@ -20,7 +20,7 @@ Top MCP Servers:
 ## Your Setup Checklist
 
 ### Codebases
-- [ ] sigil — https://github.com/ju571nk/sigil
+- [ ] lodeline — https://github.com/ju571nk/lodeline
 
 ### MCP Servers to Activate
 - [ ] (none required — the team isn't using MCP servers yet)
@@ -41,8 +41,8 @@ Top MCP Servers:
 
 ## Get Started
 
-1. Clone https://github.com/ju571nk/sigil and skim `CLAUDE.md`.
-2. Skim `README.md` to see what Sigil does and how the crates fit together.
+1. Clone https://github.com/ju571nk/lodeline and skim `CLAUDE.md`.
+2. Skim `README.md` to see what Lodeline does and how the crates fit together.
 3. Try `/superpowers:writing-plans` on a small task to learn the team's plan-first flow.
 
 <!-- INSTRUCTION FOR CLAUDE: A new teammate just pasted this guide for how the

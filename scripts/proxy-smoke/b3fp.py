@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Print the sigil-server certificate fingerprint: blake3 hex of the first
+"""Print the lodeline-server certificate fingerprint: blake3 hex of the first
 certificate's DER in a PEM file (the value `caller_cert_fingerprint` and
-`sigil-server proxy fingerprint --fingerprint` expect).
+`lodeline-server proxy fingerprint --fingerprint` expect).
 
 Pure-Python BLAKE3 (hash mode, 32-byte output), stdlib only. Slow but fine for
 certificates. Usage: python3 b3fp.py cert.pem [more.pem ...]
