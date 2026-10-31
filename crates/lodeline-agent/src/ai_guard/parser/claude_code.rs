@@ -328,10 +328,15 @@ pub(crate) fn classify_command(cmd: &str, event_name: &str, out: &mut Vec<AiGuar
     // also follows `source`d files.
     let inline = match hook_script_path(cmd) {
         Some(script) => {
-            out.extend(crate::ai_guard::ext_script::scan_hook_script(
-                std::path::Path::new(script),
-                event_name,
-            ));
+            let own = crate::ai_guard::own_entries::is_own_hook_command(cmd);
+            out.extend(
+                crate::ai_guard::ext_script::scan_hook_script(
+                    std::path::Path::new(script),
+                    event_name,
+                )
+                .into_iter()
+                .filter(|r| !own || !matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })),
+            );
             // The script's own arguments are data (a guard often receives the
             // patterns it blocks), but a command chained after it runs too:
             // `./ok.sh && rm -rf ~`.

@@ -48,13 +48,15 @@ pub(crate) fn emit_one_server(name: &str, def: &Value, out: &mut Vec<AiGuardReas
         });
     }
     if let Some(command) = def.get("command").and_then(Value::as_str) {
-        out.push(AiGuardReason::McpServerLocalCommand {
-            server_name: name.to_string(),
-            command: command.to_string(),
-        });
-        out.push(AiGuardReason::NoSandbox {
-            executor: "mcp_command".into(),
-        });
+        if !crate::ai_guard::own_entries::is_own_mcp_server(name, command) {
+            out.push(AiGuardReason::McpServerLocalCommand {
+                server_name: name.to_string(),
+                command: command.to_string(),
+            });
+            out.push(AiGuardReason::NoSandbox {
+                executor: "mcp_command".into(),
+            });
+        }
         let args: &[Value] = def
             .get("args")
             .and_then(Value::as_array)

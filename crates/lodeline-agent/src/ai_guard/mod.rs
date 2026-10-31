@@ -9,6 +9,7 @@ pub mod assess;
 pub mod command_scan;
 pub mod ext_script;
 pub(crate) mod mcp_baseline;
+mod own_entries;
 pub mod parser;
 pub mod remediation;
 pub mod rubric;
