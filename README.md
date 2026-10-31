@@ -25,11 +25,10 @@ lodeline scan
 
 ```
 Lodeline scan — CRITICAL (7.5)
-3 tools assessed · 7 findings
+2 tools assessed · 5 findings
 
 TOOL         SCOPE               SCORE  BUCKET    TOP FINDINGS
 claude-code  user-global           7.5  critical  no_sandbox, broad_matcher (+1 more)
-codex        user-global           2.5  medium    mcp_server_local_command, no_sandbox
 cursor       application:cursor    2.5  medium    mcp_server_local_command, no_sandbox
 
 5 tools not configured: antigravity, claude-desktop, codex, continue-dev, gemini
