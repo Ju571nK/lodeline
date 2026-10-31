@@ -277,7 +277,8 @@ fn status_json(applied: Option<i64>, state: &str) -> Value {
         "spool": {"state": "degraded", "depth_events": 4, "unsent_events": 3, "bytes": 99,
             "capacity_bytes": 1000, "oldest_unsent_age_seconds": 7, "quarantined_events": 1, "quarantined_bytes": 512},
         "registry": {"pending_entries": 2, "sync_stalled": false},
-        "central": {"last_ingest_ack_at": "2026-10-11T00:00:00Z", "consecutive_failures": 1},
+        "central": {"last_ingest_ack_at": "2026-10-11T00:00:00Z", "consecutive_failures": 1,
+            "ingest_stopped": true},
         "routes": [{"upstream_id": "up1", "state": "degraded", "reason": "health_check_failed"}],
         "counters": {"auth_failures": [], "unmatched_cancels": []},
         "gaps": [], "last_assigned_sequence": 7,
@@ -933,7 +934,8 @@ async fn proxy_detail_gaps_outages_counters() {
     );
     assert_eq!(
         j["central"],
-        json!({"last_ingest_ack_at": "2026-10-11T00:00:00Z", "consecutive_failures": 1})
+        json!({"last_ingest_ack_at": "2026-10-11T00:00:00Z", "consecutive_failures": 1,
+            "ingest_stopped": true})
     );
     // 20 reported outages -> newest 16
     let outages = j["outages"].as_array().unwrap();

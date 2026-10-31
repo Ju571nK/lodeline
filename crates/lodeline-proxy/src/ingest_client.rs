@@ -27,8 +27,10 @@
 //! | 403 `disabled`/`retired` | long backoff, nothing changes locally (the config fetch is the authority) |
 //! | anything else (404, 401, unreadable 200, ...) | backoff |
 //!
-//! [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] is the limit: past it, these answers
-//! quarantine nothing and back off, and only a 200 clears the count.
+//! [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] is the limit: past it the client is
+//! stopped. These answers back off and quarantine one event per `max_backoff`, so
+//! a stuck head leaves slowly and good events behind it resume. The stop shows as
+//! `central.ingest_stopped`, and only a 200 clears it and the count.
 //!
 //! An event is never rewritten and never given a new id: the bytes sent for an
 //! event are those it serialized to from the source, on every retry.
@@ -66,11 +68,13 @@ pub const OUTAGE_THRESHOLD: u32 = 3;
 pub const MAX_HELD_EVENTS: usize = 1024;
 /// Holds in a row after which the registry sync counts as stalled.
 pub const STALL_ATTEMPTS: u32 = 5;
-/// Answers that quarantine on the server's say-so (422 by index, unattributed
-/// 422/409 or 413 on a single event) without a 200 in between. Past it,
-/// quarantining stops and the client backs off: a server that rejects everything
-/// must not drain the queue into quarantine. One answer counts once, however
-/// many events it names. A 409 by item neither counts nor clears the count: the
+/// Answers, not events, that quarantine on the server's say-so (422 by index,
+/// unattributed 422/409 or 413 on a single event) without a 200 in between. One
+/// answer counts once, however many events it names, so SV-3..SV-5 answers can
+/// quarantine up to 100 events each. Past it the client is stopped and loses at
+/// most one event per `max_backoff`: a server that rejects everything must not
+/// drain the queue into quarantine, and a permanent refusal must not hold the
+/// good events behind it. A 409 by item neither counts nor clears the count: the
 /// server parsed that batch, so it is not this failure, and it is not a success.
 pub const MAX_CONSECUTIVE_SINGLE_QUARANTINES: u32 = 8;
 /// `{"events":[` and `]}`.
@@ -406,6 +410,11 @@ pub struct IngestClient {
     failures: u32,
     /// See [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`].
     single_quarantines: u32,
+    /// Some while stopped: when the next event may be quarantined. See
+    /// [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`].
+    slow_quarantine_at: Option<Instant>,
+    /// Told when the stop starts and ends.
+    stop_hook: Option<Box<dyn FnMut(bool) + Send>>,
     holds: HashMap<String, Hold>,
     outage: Outage,
     /// Mirror of [`IngestClient::registry_sync_stalled`] for the status report
@@ -429,6 +438,8 @@ impl IngestClient {
             cap: MAX_BATCH_EVENTS,
             failures: 0,
             single_quarantines: 0,
+            slow_quarantine_at: None,
+            stop_hook: None,
             holds: HashMap::new(),
             outage: Outage {
                 open,
@@ -442,6 +453,12 @@ impl IngestClient {
     /// request, readable while the client runs in its task.
     pub fn registry_stalled_flag(&self) -> Arc<AtomicBool> {
         self.stalled.clone()
+    }
+
+    /// Tell the owner when ingest stops and when a 200 ends the stop.
+    pub fn with_stop_hook(mut self, hook: Box<dyn FnMut(bool) + Send>) -> IngestClient {
+        self.stop_hook = Some(hook);
+        self
     }
 
     /// Test knob: smaller batch limits.
@@ -572,6 +589,13 @@ impl IngestClient {
         let step = self.send_once_inner(transport, source, now).await;
         self.stalled
             .store(self.registry_sync_stalled(), Ordering::Relaxed);
+        let stopped = self.slow_quarantine_at.is_some();
+        if stopped != self.central.ingest_stopped() {
+            self.central.set_ingest_stopped(stopped);
+            if let Some(h) = self.stop_hook.as_mut() {
+                h(stopped);
+            }
+        }
         step
     }
 
@@ -676,20 +700,29 @@ impl IngestClient {
         }
     }
 
-    /// Quarantine events on the server's say-so, unless that has already
-    /// happened [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] times without a success.
-    /// Returns whether they were quarantined.
+    /// Quarantine events on the server's say-so. After
+    /// [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] such answers without a success the
+    /// client is stopped: only the first event goes, once per `max_backoff`.
+    /// Returns whether any event was quarantined.
     async fn quarantine_single(
         &mut self,
         source: &mut dyn EventSource,
         ids: &[String],
         code: QuarantineCode,
+        now: Instant,
     ) -> bool {
-        if self.single_quarantines >= MAX_CONSECUTIVE_SINGLE_QUARANTINES {
-            tracing::error!("the server keeps rejecting events: quarantine paused, backing off");
-            return false;
-        }
-        self.single_quarantines += 1;
+        let ids = if self.single_quarantines < MAX_CONSECUTIVE_SINGLE_QUARANTINES {
+            self.single_quarantines += 1;
+            ids
+        } else {
+            let period = self.params.max_backoff;
+            if now < *self.slow_quarantine_at.get_or_insert(now + period) {
+                tracing::error!("the server keeps rejecting events: ingest stopped, backing off");
+                return false;
+            }
+            self.slow_quarantine_at = Some(now + period);
+            &ids[..ids.len().min(1)]
+        };
         self.quarantine(source, ids, code).await;
         true
     }
@@ -730,6 +763,7 @@ impl IngestClient {
                     .record_ingest_ack(time::OffsetDateTime::now_utc());
                 self.cap = (self.cap * 2).clamp(1, self.max_events);
                 self.single_quarantines = 0;
+                self.slow_quarantine_at = None;
             }
             IngestOutcome::Quarantine { items } => {
                 for code in [
@@ -744,7 +778,7 @@ impl IngestClient {
                         .collect();
                     if code != QuarantineCode::SemanticInvalid || ids.is_empty() {
                         self.quarantine(source, &ids, code).await;
-                    } else if !self.quarantine_single(source, &ids, code).await {
+                    } else if !self.quarantine_single(source, &ids, code, now).await {
                         progressed = false;
                     }
                 }
@@ -760,7 +794,7 @@ impl IngestClient {
                     } else {
                         QuarantineCode::SemanticInvalid
                     };
-                    if !self.quarantine_single(source, sent, code).await {
+                    if !self.quarantine_single(source, sent, code, now).await {
                         self.mode = Mode::Batch;
                         progressed = false;
                     }
@@ -795,7 +829,7 @@ impl IngestClient {
                 if sent.len() > 1 {
                     self.cap = (sent.len() / 2).max(1);
                 } else if !self
-                    .quarantine_single(source, sent, QuarantineCode::SemanticInvalid)
+                    .quarantine_single(source, sent, QuarantineCode::SemanticInvalid, now)
                     .await
                 {
                     progressed = false;
@@ -1819,6 +1853,7 @@ mod tests {
         assert_eq!(gap_kinds(&g).len(), CAP);
         assert_eq!(central.consecutive_failures(), 0);
         assert!(central.last_ingest_ack_at().is_none());
+        assert!(central.ingest_stopped());
         let stopped = c.send_once(&t, &mut s, Instant::now()).await;
         c.next_delay(&stopped);
         assert_eq!(c.failures, 1);
@@ -1831,6 +1866,7 @@ mod tests {
         assert!(done.progressed);
         assert_eq!(s.acked.len(), 40 - CAP);
         assert_eq!((c.single_quarantines, c.failures), (0, 0));
+        assert!(!central.ingest_stopped());
 
         // A later storm has the whole limit again.
         s.unsent = (41..=60).map(event).collect();
@@ -2011,7 +2047,10 @@ mod tests {
     #[tokio::test]
     async fn good_traffic_resumes_behind_a_permanent_refusal() {
         for t in [Server::parse_path(1..=12), Server::semantic_path(1..=12)] {
-            let (mut c, _g, _) = client();
+            let (c, _g, central) = client();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let hook_seen = seen.clone();
+            let mut c = c.with_stop_hook(Box::new(move |v| hook_seen.lock().unwrap().push(v)));
             let period = c.params.max_backoff;
             let mut s = Mem::default();
             let start = Instant::now();
@@ -2020,6 +2059,7 @@ mod tests {
                 s.unsent.push(event(n));
                 drive(&mut c, &t, &mut s, &mut now).await;
             }
+            assert!(central.ingest_stopped(), "set while stopped");
             for n in 13..=112 {
                 s.unsent.push(event(n));
                 drive(&mut c, &t, &mut s, &mut now).await;
@@ -2032,6 +2072,8 @@ mod tests {
             }
             assert_eq!((s.quarantined.len(), s.acked.len()), (12, 100));
             assert!(now - start >= period * 4, "four events, four periods");
+            assert!(!central.ingest_stopped(), "cleared by the first 200");
+            assert_eq!(*seen.lock().unwrap(), [true, false]);
         }
     }
 

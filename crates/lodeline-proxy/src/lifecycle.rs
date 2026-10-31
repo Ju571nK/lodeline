@@ -46,6 +46,10 @@ pub struct LocalStatus {
     /// would be lost on a restart. Absent (false) in the normal case.
     #[serde(default, skip_serializing_if = "is_false")]
     pub gap_queue_persist_failed: bool,
+    /// The server keeps refusing events: ingest passed its quarantine limit.
+    /// Absent (false) in the normal case.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ingest_stopped: bool,
     pub updated_at: String,
 }
 
@@ -119,6 +123,7 @@ impl Lifecycle {
             forwarding: false,
             status_sequence_wedged: false,
             gap_queue_persist_failed: false,
+            ingest_stopped: false,
             updated_at: now_rfc3339(),
         };
         let mut lc = Lifecycle {
@@ -265,6 +270,12 @@ impl Lifecycle {
     /// F1: publish whether the status sequence looks stuck.
     pub fn set_sequence_wedged(&mut self, wedged: bool) -> Result<(), StateError> {
         self.status.status_sequence_wedged = wedged;
+        self.publish()
+    }
+
+    /// Publish whether ingest is stopped.
+    pub fn set_ingest_stopped(&mut self, stopped: bool) -> Result<(), StateError> {
+        self.status.ingest_stopped = stopped;
         self.publish()
     }
 
@@ -589,6 +600,7 @@ async fn run_inner(
             invocation_sink = Some(isink);
             invocation_handle = Some(ihandle);
             let lc7 = lc.clone();
+            let lc8 = lc.clone();
             // Shared by the reporter (its `central` section) and the ingest
             // client (acks, answers, failures).
             let central = crate::status_report::CentralHealth::new();
@@ -597,7 +609,12 @@ async fn run_inner(
                 gaps.clone(),
                 central.clone(),
                 ingest_params,
-            );
+            )
+            .with_stop_hook(Box::new(move |stopped| {
+                if let Err(e) = lock(&lc8).set_ingest_stopped(stopped) {
+                    tracing::error!(error = %e, "cannot publish the ingest stop");
+                }
+            }));
             // Inventory and registry sync (T-13c), when a registry is open.
             let mut conflicts = None;
             let mut registry_probe = None;
@@ -993,6 +1010,7 @@ mod tests {
             forwarding: false,
             status_sequence_wedged: false,
             gap_queue_persist_failed: false,
+            ingest_stopped: false,
             updated_at: String::new(),
         };
         assert_eq!(startup_config_state(None), ConfigState::None);
@@ -1181,6 +1199,19 @@ mod tests {
         lc.set_sequence_wedged(false).unwrap();
         let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
         assert!(!s.contains("wedged"), "absent when false");
+    }
+
+    /// #339: a stopped ingest client reaches the local status file and clears.
+    #[test]
+    fn ingest_stop_is_shown_in_the_local_status() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        lc.set_ingest_stopped(true).unwrap();
+        assert!(health(&b.state_dir).status.unwrap().ingest_stopped);
+        lc.set_ingest_stopped(false).unwrap();
+        let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
+        assert!(!s.contains("ingest_stopped"), "absent when false");
     }
 
     /// M4: a failing gap queue write shows in the local status and clears.

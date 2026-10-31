@@ -152,6 +152,7 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   inventory chain 순서는 proxy 시계(`observed_at`)로 정하고, server 수신 시각보다 300초 넘게 미래인 보고는 422 `semantic_invalid`로 거절한다.
   status `registry` 블록에 선택 필드 `quarantined_entries`·`poisoned_entries`·`discarded_reports`를 둔다. status DTO는 모르는 필드를 거절하므로 server를 proxy보다 먼저 올린다.
   2026-10-31(#302): status `spool` 블록에 선택 필드 `quarantined_bytes`를 둔다. 같은 이유로 server를 proxy보다 먼저 올린다. read API `spool`은 `quarantined_events`와 `quarantined_bytes`를 노출한다.
+  2026-11-01(#339): status `central` 블록에 선택 필드 `ingest_stopped`를 둔다. 같은 이유로 server를 proxy보다 먼저 올린다. read API는 `central`을 그대로 노출하며, 목록 화면을 위해 proxy는 stopped 동안 `spool.state`를 `ok` 대신 `degraded`로 보고한다.
   canonical JSON은 2^53을 넘는 정수도 RFC 8785대로 double로 반올림한다.
   orchestrator 결정: inventory body 한도는 4 MiB(P1 초기 시험값)이며 parse 전에 413 `payload_too_large`로 막는다. `pending_previous` 대기는 proxy당 256개이며 넘으면 503 `storage_limit`이다.
 

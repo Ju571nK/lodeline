@@ -51,6 +51,7 @@ fn main() -> ExitCode {
                     println!("run_state: {:?}", s.run_state);
                     println!("config_state: {:?}", s.config_state);
                     println!("forwarding: {}", s.forwarding);
+                    println!("ingest_stopped: {}", s.ingest_stopped);
                     println!("updated_at: {}", s.updated_at);
                 }
                 None => println!("alive: {}\nstatus: unavailable", h.alive),

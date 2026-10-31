@@ -298,7 +298,7 @@ must show `status_as_of` and `connection_state` together (PX-016, AC-12).
 |---|---|
 | `registry` | `{pending_entries, sync_stalled}` plus optional `quarantined_entries`, `poisoned_entries`, `discarded_reports` (proxy-status.schema.json; absent from older proxies) |
 | `routes` | `[{upstream_id, state, reason?}]` route health, fixed enums (proxy-status.schema.json) |
-| `central` | `{last_ingest_ack_at, consecutive_failures}` proxy-reported |
+| `central` | `{last_ingest_ack_at, consecutive_failures}` plus optional `ingest_stopped` (L5, #339; absent from older proxies), proxy-reported |
 | `outages` | recent proxy-reported central outages (`central_outage` gaps), max 16 |
 | `counters` | L6 |
 | `audit_gaps` | newest-first, max 50, plus `audit_gaps_total` |
@@ -434,19 +434,26 @@ quarantine the item unchanged, report `event_quarantined`, resubmit the rest.
 Never rewrite or re-ID (README N2). A batch with any failing item accepts nothing
 (README M2a), so the producer must remove only the named indexes before resend.
 
-The producer stops this quarantine after 8 answers with no 200 between them
-(#339). The answers that count are a 422 by index, an unattributed 409 or 422 on a
-single event, and a 413 on a single event. One answer counts once, however many
-indexes it names. A 409 by item and a 424 neither count nor clear the count. Past
-the limit the producer quarantines nothing more and backs off. The events stay
-unsent and are retried, so R still governs their expiry, and the first 200 clears
-the count. The stop protects against a server that refuses every event, such as a
-proxy upgraded before the server. Nothing reports the stop as a state: it shows as
-a stale `last_ingest_ack_at` with growing `unsent_events` and
-`oldest_unsent_age_seconds`, while `consecutive_failures` stays 0. While the
-producer is stopped, every event behind the refused one waits too, because a batch
-with a failing item accepts nothing. A shape the server refuses only on some events
-is not stopped when clean batches get 200s between them.
+The producer limits this quarantine to 8 answers with no 200 between them (#339).
+The limit counts answers, not events. The answers that count are a 422 by index, an
+unattributed 409 or 422 on a single event, and a 413 on a single event. One answer
+counts once, however many indexes it names, so SV-3..SV-5 answers can quarantine up
+to 800 events before the limit. A 409 by item and a 424 neither count nor clear the
+count. The limit protects against a server that refuses every event, such as a proxy
+upgraded before the server.
+
+Past the limit the producer is stopped. While stopped it backs off, reports
+`central.ingest_stopped: true`, and reports `spool.state` `degraded` instead of `ok`.
+It quarantines one event per max backoff period (300 s by default), the first the
+answer names, however many it names. A batch with a failing item accepts nothing,
+so every event behind the refused one waits for that head to leave. Once it has
+left, the next 200 clears the count and `ingest_stopped`. The events stay unsent
+until then, so R still governs their expiry. The slow rate means a permanently
+refused event cannot hold good traffic until R, and a server that refuses everything
+loses at most 288 events per day past the first 8 answers. Retries back off with
+jitter of +/-20%, so after a server upgrade the next retry comes within 360 s. A
+shape the server refuses only on some events does not stop the producer when clean
+batches get 200s between them.
 
 ### Test cases (mirrored in the checker)
 

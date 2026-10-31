@@ -7,13 +7,30 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Added
+
+- lodeline-proxy status reports now carry `central.ingest_stopped`, true while
+  ingest is stopped (see Fixed), and the proxy reports `spool.state` as `degraded`
+  instead of `ok` during that time. The server's proxy detail API returns the new
+  field under `central`. `lodeline-proxy health` prints it too; its exit code does
+  not change. Upgrade lodeline-server first: its status parser rejects unknown
+  fields, so a proxy that sends the new field to an older server has its status
+  reports refused. Downgrading lodeline-server after a new proxy has reported fails
+  at boot until `ingest_stopped` is removed from the stored proxy state, because
+  older servers reject unknown fields. (#339)
+
 ### Fixed
 
 - `lodeline-proxy`: a server that refuses every event by index no longer moves the
   whole queue into quarantine. These answers now count toward the existing limit of
-  8, and only a 200 clears the count. Past the limit the proxy keeps the events
-  unsent and backs off, so a proxy upgraded before its server resumes after the
-  server upgrade. (#339)
+  8 answers, not 8 events, and only a 200 clears the count. An SV-3..SV-5 answer
+  names every bad event in its batch, so a 2000-event storm quarantines 800 events
+  before the limit, and an unparseable shape quarantines 8. Past the limit ingest is
+  stopped: the proxy backs off and quarantines one event per max backoff period
+  (300 s), however many events the answer names. That keeps loss to 288 events per
+  day and stops a permanent refusal from blocking good events behind it until R.
+  After a server upgrade the next retry comes within 360 s (300 s max backoff plus
+  20% jitter) and the first 200 clears the stop. (#339)
 
 ## [0.12.0] - 2026-10-31
 

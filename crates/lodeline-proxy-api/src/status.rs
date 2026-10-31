@@ -134,6 +134,11 @@ wire_struct! {
         #[serde(deserialize_with = "crate::helpers::nullable")]
         pub last_ingest_ack_at: Option<Timestamp>,
         pub consecutive_failures: NonNegativeI64,
+        /// The server keeps refusing events and the proxy passed its quarantine
+        /// limit (ledger-and-query.md L5). Cleared by the next accepted batch.
+        /// Optional: proxies that predate it omit the field.
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub ingest_stopped: Option<bool>,
     }
 }
 

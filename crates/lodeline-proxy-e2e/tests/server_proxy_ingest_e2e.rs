@@ -995,7 +995,13 @@ async fn shape_the_server_cannot_parse_stops_at_the_limit_and_resumes() {
     let px = Proxy::new(&h);
     px.tap.newer_shape.store(true, Ordering::SeqCst);
     px.fx.push((1..=30).map(ping));
-    let run = spawn_ingest(&px.tap, &px.fx, px.client());
+    // A long period keeps the slow exit out of this test.
+    let params = IngestParams {
+        max_backoff: Duration::from_secs(30),
+        ..fast_params()
+    };
+    let client = IngestClient::new(px.gaps.clone(), px.central.clone(), params);
+    let run = spawn_ingest(&px.tap, &px.fx, client);
     eventually("the client keeps retrying past the limit", || {
         px.tap.count_status(422) >= cap + 3
     })
@@ -1015,12 +1021,14 @@ async fn shape_the_server_cannot_parse_stops_at_the_limit_and_resumes() {
     assert_eq!(px.gaps.pending_batch().len(), cap);
     assert_eq!(px.central.consecutive_failures(), 0);
     assert!(px.central.last_ingest_ack_at().is_none());
+    assert!(px.central.ingest_stopped());
 
     px.tap.newer_shape.store(false, Ordering::SeqCst);
     eventually("the rest is accepted after the upgrade", || {
         px.fx.acked_count() == 30 - cap
     })
     .await;
+    assert!(!px.central.ingest_stopped());
     run.stop().await;
     assert_eq!(px.fx.quarantined().len(), cap);
     assert_eq!(px.fx.unsent_count(), 0);
@@ -1042,23 +1050,72 @@ async fn good_traffic_resumes_behind_a_permanent_refusal() {
     px.tap.newer_upto.store(12, Ordering::SeqCst);
     px.fx.push((1..=12).map(ping));
     let run = spawn_ingest(&px.tap, &px.fx, px.client());
-    eventually("the limit is reached", || {
-        px.tap.count_status(422) > cap && px.fx.quarantined().len() >= cap
-    })
-    .await;
+    let (rep, _tx) = spawn_reporter(&h.fetcher, &px.gaps, &px.central);
+    let reported_stop = || {
+        h.ctx()
+            .store
+            .entry(PROXY)
+            .and_then(|e| e.status)
+            .and_then(|s| s.central.ingest_stopped)
+    };
+    eventually("the server sees the stop", || reported_stop() == Some(true)).await;
     let stopped_at = Instant::now();
+    assert!(px.fx.quarantined().len() >= cap);
+    assert_eq!(px.central.consecutive_failures(), 0);
     px.fx.push((13..=112).map(ping));
     eventually("every good event is accepted", || {
         px.fx.acked_count() == 100
     })
     .await;
+    eventually("the server sees the stop end", || {
+        reported_stop() == Some(false)
+    })
+    .await;
     run.stop().await;
-    assert!(stopped_at.elapsed() >= fast_params().max_backoff * 3);
+    rep.stop().await;
+    assert!(stopped_at.elapsed() >= fast_params().max_backoff * 2);
     assert_eq!(px.fx.quarantined().len(), 12);
     assert_eq!(px.fx.unsent_count(), 0);
     assert!(!h.stored(12));
     assert!(h.stored(13));
     assert!(h.stored(112));
+}
+
+/// #339, SV-4: the server names every bad event of a batch. Eight answers take
+/// three events each, then one event leaves per period, and good traffic resumes.
+#[tokio::test]
+async fn named_refusals_leave_one_event_per_period_when_stopped() {
+    let Some(h) = H::new(|_| {}).await else {
+        return;
+    };
+    let cap = MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize;
+    let px = Proxy::new(&h);
+    h.upload_metadata(&mref(1)).await;
+    px.fx
+        .push((1..=30).map(|n| ev(n, 1, n, Some(&mref(1)), "up2")));
+    let run = spawn_ingest(
+        &px.tap,
+        &px.fx,
+        px.client().with_batch_limits(3, usize::MAX),
+    );
+    eventually("the limit is reached", || px.central.ingest_stopped()).await;
+    let stopped_at = Instant::now();
+    assert_eq!(px.tap.count_status(200), 0);
+    assert!(
+        px.fx.quarantined().len() >= 3 * cap,
+        "each answer named three"
+    );
+    assert!(px.fx.quarantined().len() < 30, "the limit held");
+    px.fx.push((31..=130).map(ping));
+    eventually("every good event is accepted", || {
+        px.fx.acked_count() == 100
+    })
+    .await;
+    run.stop().await;
+    assert!(stopped_at.elapsed() >= fast_params().max_backoff * 4);
+    assert_eq!(px.fx.quarantined().len(), 30);
+    assert_eq!(px.fx.unsent_count(), 0);
+    assert!(!px.central.ingest_stopped());
 }
 
 /// Happy path: events reach the ledger; the source is acknowledged only after
