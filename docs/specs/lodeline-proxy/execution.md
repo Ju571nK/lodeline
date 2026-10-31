@@ -4,6 +4,7 @@
 
 ## 현재 상태
 
+- **이름 변경.** Sigil Proxy는 Lodeline Proxy가 됐다. 이 문서의 2026-10-31 이전 기록도 새 이름으로 읽는다(`sigil-proxy` → `lodeline-proxy`). hash·서명 domain, `canon` 값 `sigil-tooldef-fp-v1`, SAN `*.proxy.sigil.invalid`는 기존 데이터 호환을 위해 그대로다. 근거 커밋의 hash는 rename 전 기록이다. 절차는 [migrate-from-sigil.md](../../migrate-from-sigil.md).
 - **P0 종료(2026-10-11, 계약 수준, 사용자 결정).** 잔여 항목과 담당 P1 작업은 [decisions.md "P0 종료"](decisions.md).
   계약 종료는 구현·실기 검증 완료가 아니다.
 - P1 착수. 사용자 창구: 이 대화의 orchestrator. 하위 작업은 구체적인 파일 소유권과 인수 조건을 지정하고, 실행 provider/model 기본값을 유지한다.

@@ -7,6 +7,15 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Sigil is now Lodeline. Binaries, packages, units, paths, `SIGIL_*`
+  env vars and `x-sigil-*` headers all take the new name, and there is no `sigil`
+  shim. Hash and signature domains, the release key id and the proxy SAN keep
+  their old bytes so existing bundles, stored data and certificates still verify.
+  The new `.deb` and `.rpm` packages replace the old ones and move config and state
+  to the new paths; see [docs/migrate-from-sigil.md](docs/migrate-from-sigil.md).
+
 ### Added
 
 - sigil-proxy status reports now carry `spool.quarantined_bytes`, and the
