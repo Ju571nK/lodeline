@@ -796,6 +796,8 @@ struct Tap {
     /// Add a field the server's closed envelope refuses, as a proxy upgraded
     /// before the server would. The client's own parse has already passed.
     newer_shape: AtomicBool,
+    /// Limit `newer_shape` to events up to this sequence; 0 means every event.
+    newer_upto: AtomicUsize,
     /// Source whose acknowledged count is noted whenever a reply is dropped.
     watch: Mutex<Option<Fixture>>,
     acked_at_drop: Mutex<Vec<usize>>,
@@ -808,6 +810,7 @@ impl Tap {
             log: Mutex::default(),
             drop_replies: AtomicUsize::new(0),
             newer_shape: AtomicBool::new(false),
+            newer_upto: AtomicUsize::new(0),
             watch: Mutex::default(),
             acked_at_drop: Mutex::default(),
         })
@@ -820,10 +823,12 @@ impl Tap {
     }
 }
 
-fn with_newer_shape(body: &[u8]) -> Vec<u8> {
+fn with_newer_shape(body: &[u8], upto: usize) -> Vec<u8> {
     let mut v: Value = serde_json::from_slice(body).unwrap();
     for e in v["events"].as_array_mut().unwrap() {
-        e["field_of_a_newer_proxy"] = json!(1);
+        if upto == 0 || e["sequence"].as_u64().unwrap() as usize <= upto {
+            e["field_of_a_newer_proxy"] = json!(1);
+        }
     }
     serde_json::to_vec(&v).unwrap()
 }
@@ -842,7 +847,7 @@ impl IngestTransport for Tap {
                 })
                 .unwrap_or_default();
             let body = if self.newer_shape.load(Ordering::SeqCst) {
-                with_newer_shape(&body)
+                with_newer_shape(&body, self.newer_upto.load(Ordering::SeqCst))
             } else {
                 body
             };
@@ -1022,6 +1027,38 @@ async fn shape_the_server_cannot_parse_stops_at_the_limit_and_resumes() {
     assert!(!h.stored(cap as u32));
     assert!(h.stored(cap as u32 + 1));
     assert!(h.stored(30));
+}
+
+/// #339: twelve events the server refuses for good, then a hundred good ones.
+/// The refused ones leave slowly and every good one is accepted.
+#[tokio::test]
+async fn good_traffic_resumes_behind_a_permanent_refusal() {
+    let Some(h) = H::new(|_| {}).await else {
+        return;
+    };
+    let cap = MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize;
+    let px = Proxy::new(&h);
+    px.tap.newer_shape.store(true, Ordering::SeqCst);
+    px.tap.newer_upto.store(12, Ordering::SeqCst);
+    px.fx.push((1..=12).map(ping));
+    let run = spawn_ingest(&px.tap, &px.fx, px.client());
+    eventually("the limit is reached", || {
+        px.tap.count_status(422) > cap && px.fx.quarantined().len() >= cap
+    })
+    .await;
+    let stopped_at = Instant::now();
+    px.fx.push((13..=112).map(ping));
+    eventually("every good event is accepted", || {
+        px.fx.acked_count() == 100
+    })
+    .await;
+    run.stop().await;
+    assert!(stopped_at.elapsed() >= fast_params().max_backoff * 3);
+    assert_eq!(px.fx.quarantined().len(), 12);
+    assert_eq!(px.fx.unsent_count(), 0);
+    assert!(!h.stored(12));
+    assert!(h.stored(13));
+    assert!(h.stored(112));
 }
 
 /// Happy path: events reach the ledger; the source is acknowledged only after

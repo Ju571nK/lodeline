@@ -1994,6 +1994,80 @@ mod tests {
         assert!(!c.isolating());
     }
 
+    /// One real request on a virtual clock: the client's own delay, no wait.
+    async fn drive(
+        c: &mut IngestClient,
+        t: &Arc<Server>,
+        s: &mut Mem,
+        now: &mut Instant,
+    ) -> IngestStep {
+        let step = c.send_once(t, s, *now).await;
+        *now += c.next_delay(&step);
+        step
+    }
+
+    /// #339: a permanent refusal at the head of a quiet queue must not hold the
+    /// good events behind it. Twelve refused, then a hundred good ones.
+    #[tokio::test]
+    async fn good_traffic_resumes_behind_a_permanent_refusal() {
+        for t in [Server::parse_path(1..=12), Server::semantic_path(1..=12)] {
+            let (mut c, _g, _) = client();
+            let period = c.params.max_backoff;
+            let mut s = Mem::default();
+            let start = Instant::now();
+            let mut now = start;
+            for n in 1..=12 {
+                s.unsent.push(event(n));
+                drive(&mut c, &t, &mut s, &mut now).await;
+            }
+            for n in 13..=112 {
+                s.unsent.push(event(n));
+                drive(&mut c, &t, &mut s, &mut now).await;
+            }
+            for _ in 0..200 {
+                if s.unsent.is_empty() {
+                    break;
+                }
+                drive(&mut c, &t, &mut s, &mut now).await;
+            }
+            assert_eq!((s.quarantined.len(), s.acked.len()), (12, 100));
+            assert!(now - start >= period * 4, "four events, four periods");
+        }
+    }
+
+    /// While stopped the client loses at most one event per `max_backoff`, on
+    /// both server paths, and an all-bad queue still drains.
+    #[tokio::test]
+    async fn a_stopped_client_loses_one_event_per_period() {
+        for (t, total, at_cap) in [
+            (Server::parse_path(1..=40), 40, CAP),
+            (Server::semantic_path(1..=60), 60, 5 * CAP),
+        ] {
+            let (c, _g, _) = client();
+            let mut c = c.with_batch_limits(5, MAX_BATCH_BYTES);
+            let period = c.params.max_backoff;
+            let mut s = Mem::with(1..=total);
+            let mut now = Instant::now();
+            let mut slow_at = Vec::new();
+            for _ in 0..2000 {
+                if s.unsent.is_empty() {
+                    break;
+                }
+                let before = s.quarantined.len();
+                let at = now;
+                drive(&mut c, &t, &mut s, &mut now).await;
+                let lost = s.quarantined.len() - before;
+                if before >= at_cap && lost > 0 {
+                    assert_eq!(lost, 1, "one event, however many the answer names");
+                    slow_at.push(at);
+                }
+            }
+            assert_eq!(s.quarantined.len(), total as usize);
+            assert_eq!(slow_at.len(), total as usize - at_cap);
+            assert!(slow_at.windows(2).all(|w| w[1] - w[0] >= period));
+        }
+    }
+
     /// L1: a local quarantine during isolation ends isolation.
     #[tokio::test]
     async fn local_quarantine_during_isolation_returns_to_batches() {
