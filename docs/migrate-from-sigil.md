@@ -24,6 +24,9 @@ Each section below ends with what happens if you do nothing.
 **Linux packages.** Install the new `.deb` or `.rpm` for each Sigil package on the
 host. They replace the old ones.
 
+The `lodeline-proxy` package is not in the release assets yet. On a proxy host,
+build it with `packaging/build.sh deb` or `packaging/build.sh rpm`.
+
 - `.deb`: each `lodeline*` package declares Conflicts and Replaces for the
   matching `sigil*` package below version 0.12.
 - `.rpm`: each `lodeline*` package declares Obsoletes for the matching `sigil*`
@@ -64,7 +67,7 @@ If it prints 1.x or later, or the package is not installed, leave `sigil-` off. 
 repository has no `sigil` package apt can refuse the name:
 
 ```sh
-sudo apt-get install ./lodeline-sender_*.deb ./lodeline-proxy_*.deb
+sudo apt-get install ./lodeline-sender_*.deb ./lodeline-server_*.deb
 ```
 
 Without `sigil-` on a 0.x host, a release whose repository carries the Sigil ebook
