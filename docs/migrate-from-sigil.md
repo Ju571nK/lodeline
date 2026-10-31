@@ -449,9 +449,11 @@ sign-in that began before the upgrade fails once and works on retry.
 
 ## What stays the same
 
-Hash and signature domains, the release key id, the proxy SAN suffix and the
-`sigilworks.net` domain keep their old bytes or names on purpose, because
-changing them would break verification of existing bundles and stored data.
+Hash and signature domains, the release key id and the proxy SAN suffix keep
+their old bytes or names on purpose, because changing them would break
+verification of existing bundles and stored data.
+
+The site moved to `lodeline.dev`. `sigilworks.net` redirects there.
 
 Everything else keeps its meaning: the policy format, the event schema, the
 exit codes and the "measures, does not block by default" behaviour.
