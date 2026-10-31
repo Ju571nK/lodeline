@@ -22,7 +22,7 @@ on:
       - 'docs/specs/lodeline-proxy/contracts/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -54,6 +54,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # test-support is enabled by dev-dependencies, so clippy and cargo test never
+      # compile the production feature set.
+      - name: check (without dev-dependency features)
+        run: cargo check --workspace
       - name: test (workspace)
         run: cargo test --workspace
       - name: release build

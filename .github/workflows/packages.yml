@@ -5,6 +5,8 @@ name: Packages
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
   pull_request:
     paths:
       - 'packaging/**'
@@ -19,7 +21,7 @@ on:
       - '.github/workflows/packages.yml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -152,6 +154,7 @@ jobs:
           rpms=()
           for pkg in "${all[@]}"; do rpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)"); done
           rpm -i "${rpms[@]}"
+          rpm -e "${all[@]}"
           for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
