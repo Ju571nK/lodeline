@@ -275,7 +275,7 @@ fn status_json(applied: Option<i64>, state: &str) -> Value {
             "max_offline_retry_age_seconds": 2592000, "event_retention_seconds": 7776000,
             "config_hash": "0".repeat(64)},
         "spool": {"state": "degraded", "depth_events": 4, "unsent_events": 3, "bytes": 99,
-            "capacity_bytes": 1000, "oldest_unsent_age_seconds": 7, "quarantined_events": 1},
+            "capacity_bytes": 1000, "oldest_unsent_age_seconds": 7, "quarantined_events": 1, "quarantined_bytes": 512},
         "registry": {"pending_entries": 2, "sync_stalled": false},
         "central": {"last_ingest_ack_at": "2026-10-11T00:00:00Z", "consecutive_failures": 1},
         "routes": [{"upstream_id": "up1", "state": "degraded", "reason": "health_check_failed"}],
@@ -380,11 +380,14 @@ impl Fx {
         }
         txn.commit("px-a", a).unwrap();
         let txn = ctx.store.begin();
+        let mut b_status = status_json(Some(1), "expired");
+        b_status["spool"]
+            .as_object_mut()
+            .unwrap()
+            .remove("quarantined_bytes");
         let b = ProxyEntry {
             config: Some(config_with(2)),
-            status: Some(
-                parse_status(status_json(Some(1), "expired").to_string().as_bytes()).unwrap(),
-            ),
+            status: Some(parse_status(b_status.to_string().as_bytes()).unwrap()),
             last_seen: Some(rfc(now - 3600)),
             ..Default::default()
         };
@@ -603,12 +606,17 @@ async fn proxies_list_filters_order_and_dto() {
     assert_eq!(a["current_epoch_id"], EP1);
     assert_eq!(a["spool"]["state"], "degraded");
     assert_eq!(a["spool"]["unsent_events"], 3);
+    assert_eq!(a["spool"]["quarantined_events"], 1);
+    assert_eq!(a["spool"]["quarantined_bytes"], 512);
     // server time the status was applied, not the proxy's sent_at
     assert_eq!(a["spool"]["as_of"], rfc(fx.now - 20));
     assert_eq!(a["status_as_of"], rfc(fx.now - 20));
     // px-b's state predates status_received_at: null, never a guessed time
     let b0 = &r.json()["items"][1];
     assert!(b0["status_as_of"].is_null() && b0["spool"]["as_of"].is_null());
+    // an older proxy never reported bytes: null, not zero
+    assert_eq!(b0["spool"]["quarantined_events"], 1);
+    assert!(b0["spool"]["quarantined_bytes"].is_null());
     // Server-derived: the sequence jump 5 -> 7 opened one sequence_gap.
     assert_eq!(a["open_gap_count"], 1);
     let b = &r.json()["items"][1];

@@ -342,6 +342,9 @@ pub struct SpoolDto {
     pub bytes: i64,
     pub capacity_bytes: i64,
     pub oldest_unsent_age_seconds: Option<i64>,
+    pub quarantined_events: i64,
+    /// Null for a proxy that predates the field.
+    pub quarantined_bytes: Option<i64>,
     /// Server time at which the report these numbers come from was applied
     /// (`status_received_at`). Null for state written before it was recorded.
     pub as_of: Option<String>,
@@ -567,6 +570,8 @@ fn summary_of(rec: &ProxyRecord, st: Option<&StoreSummary>, now: i64) -> ProxySu
                 bytes: sp.bytes.get(),
                 capacity_bytes: sp.capacity_bytes.get(),
                 oldest_unsent_age_seconds: sp.oldest_unsent_age_seconds.map(|v| v.get()),
+                quarantined_events: sp.quarantined_events.get(),
+                quarantined_bytes: sp.quarantined_bytes.map(|v| v.get()),
                 as_of: x.status_received_at.clone(),
             })
         }),

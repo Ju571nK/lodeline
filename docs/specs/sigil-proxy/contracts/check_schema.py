@@ -911,7 +911,7 @@ def status(**over):
                    "event_retention_seconds": 90 * 86400},
         "spool": {"state": "ok", "depth_events": 12, "unsent_events": 3, "bytes": 4096,
                   "capacity_bytes": 1073741824, "oldest_unsent_age_seconds": 40,
-                  "quarantined_events": 0},
+                  "quarantined_events": 0, "quarantined_bytes": 0},
         "registry": {"pending_entries": 0, "sync_stalled": False},
         "central": {"last_ingest_ack_at": "2026-10-10T01:59:30Z", "consecutive_failures": 0},
         "routes": [{"upstream_id": "fixture", "state": "supported"},
@@ -996,6 +996,8 @@ w_neg.append(("status response raw id", stat_resp, {
 w_pos.append(("status epoch change report", stat, status(
     epoch_id="9b2e4c71-0d3a-4f6b-8e5c-1a7d9f3b2c64", status_sequence=1)))
 spool_ok = status()["spool"]
+w_pos.append(("status spool without quarantined_bytes (older proxy)", stat, status(
+    spool={k: v for k, v in spool_ok.items() if k != "quarantined_bytes"})))
 for label, doc in [
     ("raw name in gap", status(gaps=[dict(GAPS["registry_conflict"], name="json_ok")])),
     ("gap carries fingerprint", status(gaps=[dict(GAPS["registry_conflict"],
@@ -1056,6 +1058,8 @@ for label, doc in [
     ("config error raw", status(config=dict(status()["config"], last_update_error="canary"))),
     ("spool state raw", status(spool=dict(spool_ok, state="canary"))),
     ("spool negative", status(spool=dict(spool_ok, bytes=-1))),
+    ("spool negative quarantined_bytes", status(spool=dict(spool_ok, quarantined_bytes=-1))),
+    ("spool null quarantined_bytes", status(spool=dict(spool_ok, quarantined_bytes=None))),
     ("spool zero capacity", status(spool=dict(spool_ok, capacity_bytes=0))),
     ("route state raw", status(routes=[{"upstream_id": "fixture", "state": "canary"}])),
     ("route reason raw", status(routes=[{"upstream_id": "fixture", "state": "degraded",

@@ -7,6 +7,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ## [Unreleased]
 
+### Added
+
+- sigil-proxy status reports now carry `spool.quarantined_bytes`, and the
+  server's proxy list API returns `spool.quarantined_events` and
+  `spool.quarantined_bytes` (the latter null for a proxy that has not reported
+  it), so operators can watch quarantine growth. Upgrade sigil-server first:
+  its status parser rejects unknown fields, so a proxy that sends the new field
+  to an older server has its status reports refused (#302). Downgrading sigil-server after a new
+  proxy has reported fails at boot until `quarantined_bytes` is removed from the
+  stored proxy state, because older servers reject unknown fields.
+
 ### Fixed
 
 - The sigil-proxy systemd unit now orders itself after `time-sync.target`.

@@ -538,6 +538,10 @@
         },
         "quarantined_events": {
           "$ref": "#/$defs/nonnegative_int64"
+        },
+        "quarantined_bytes": {
+          "$ref": "#/$defs/nonnegative_int64",
+          "description": "Bytes held in local quarantine. Optional: older proxies omit it."
         }
       },
       "required": [
