@@ -1002,7 +1002,7 @@ w_pos.append(("status spool without quarantined_bytes (older proxy)", stat, stat
 central_ok = status()["central"]
 w_pos.append(("status central ingest stopped", stat, status(
     central=dict(central_ok, ingest_stopped=True))))
-w_pos.append(("status central without ingest_stopped (older proxy)", stat, status(
+w_pos.append(("status central without ingest_stopped (not stopped)", stat, status(
     central={k: v for k, v in central_ok.items() if k != "ingest_stopped"})))
 for label, doc in [
     ("raw name in gap", status(gaps=[dict(GAPS["registry_conflict"], name="json_ok")])),

@@ -298,7 +298,7 @@ must show `status_as_of` and `connection_state` together (PX-016, AC-12).
 |---|---|
 | `registry` | `{pending_entries, sync_stalled}` plus optional `quarantined_entries`, `poisoned_entries`, `discarded_reports` (proxy-status.schema.json; absent from older proxies) |
 | `routes` | `[{upstream_id, state, reason?}]` route health, fixed enums (proxy-status.schema.json) |
-| `central` | `{last_ingest_ack_at, consecutive_failures}` plus optional `ingest_stopped` (L5, #339; absent from older proxies), proxy-reported |
+| `central` | `{last_ingest_ack_at, consecutive_failures}` plus optional `ingest_stopped` (L5, #339; sent only when true, absent reads as false), proxy-reported |
 | `outages` | recent proxy-reported central outages (`central_outage` gaps), max 16 |
 | `counters` | L6 |
 | `audit_gaps` | newest-first, max 50, plus `audit_gaps_total` |
@@ -450,10 +450,27 @@ so every event behind the refused one waits for that head to leave. Once it has
 left, the next 200 clears the count and `ingest_stopped`. The events stay unsent
 until then, so R still governs their expiry. The slow rate means a permanently
 refused event cannot hold good traffic until R, and a server that refuses everything
-loses at most 288 events per day past the first 8 answers. Retries back off with
-jitter of +/-20%, so after a server upgrade the next retry comes within 360 s. A
-shape the server refuses only on some events does not stop the producer when clean
-batches get 200s between them.
+loses at most 288 events per day past the first 8 answers. That is the upper bound.
+The measured mean on the by-index paths is about 380 s per event, about 225 per day,
+so about R/380 s events drain: about 6800 in a 30-day R. R governs what remains.
+Retries back off with jitter of +/-20%, so after a server upgrade the next retry
+comes within 360 s.
+
+Three cases fall outside "backs off" and "at most 288 events per day":
+
+- A restart clears the count and the slow period, so each restart can lose another
+  8 answers' worth (#361).
+- The unattributed path clears its backoff at each Isolate step, so its retries do
+  not slow down. The clock still holds it to one event per period (#363).
+- A 409 by item is quarantined at once, stopped or not, and has no limit.
+
+A shape the server refuses only on some events does not stop the producer while
+clean batches get 200s between them. SV-3..SV-5 answers name every bad event of a
+batch, so 1 in 10 refused does not stop them. The parse path names one per answer.
+At the production batch size of 100, about 7.4% of events refused on that path,
+about 8 in 108, stops ingest: 1 in 14 did not stop it and 1 in 13 did. At 1 in 10
+refused, throughput falls to about 0.09 events/s. Nothing is lost: only refused
+events are quarantined, and the rest are acked unless R expires them first.
 
 ### Test cases (mirrored in the checker)
 

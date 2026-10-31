@@ -1877,21 +1877,46 @@ mod tests {
         assert_eq!(s.quarantined.len(), 2 * CAP);
     }
 
-    /// One bad event among good ones: the good ones are accepted on the resend,
-    /// and that 200 clears the count, so no run of such batches trips the limit.
+    /// Bad events among good ones at the production batch size. Below about 8 in
+    /// 108 a clean batch gets the 200 that clears the count before the limit.
     #[tokio::test]
     async fn bad_events_among_good_ones_do_not_trip_the_cap() {
         for t in [
-            Server::parse_path((1..=300).filter(|n| n % 10 == 0)),
-            Server::semantic_path((1..=300).filter(|n| n % 10 == 0)),
+            Server::parse_path((1..=1000).filter(|n| n % 14 == 0)),
+            Server::semantic_path((1..=1000).filter(|n| n % 14 == 0)),
         ] {
-            let (c, _g, _) = client();
-            let mut c = c.with_batch_limits(5, MAX_BATCH_BYTES);
-            let mut s = Mem::with(1..=300);
+            let (mut c, _g, central) = client();
+            let mut s = Mem::with(1..=1000);
             while !s.unsent.is_empty() {
                 let st = c.send_once(&t, &mut s, Instant::now()).await;
                 assert!(st.progressed, "never stops");
+                assert!(!central.ingest_stopped());
             }
+            assert_eq!((s.quarantined.len(), s.acked.len()), (71, 929));
+        }
+    }
+
+    /// One in ten at the production batch size. The parse path names one event
+    /// per answer, so a batch stays dirty past the limit and ingest stops, yet only
+    /// refused events are quarantined. SV-3..SV-5 name them all and never stop.
+    #[tokio::test]
+    async fn dense_refusals_at_batch_100_stop_only_the_parse_path_and_lose_no_good_event() {
+        for (t, stops) in [
+            (Server::parse_path((1..=300).filter(|n| n % 10 == 0)), true),
+            (
+                Server::semantic_path((1..=300).filter(|n| n % 10 == 0)),
+                false,
+            ),
+        ] {
+            let (mut c, _g, central) = client();
+            let mut s = Mem::with(1..=300);
+            let mut now = Instant::now();
+            let mut stopped = false;
+            while !s.unsent.is_empty() {
+                drive(&mut c, &t, &mut s, &mut now).await;
+                stopped |= central.ingest_stopped();
+            }
+            assert_eq!(stopped, stops);
             assert_eq!((s.quarantined.len(), s.acked.len()), (30, 270));
         }
     }

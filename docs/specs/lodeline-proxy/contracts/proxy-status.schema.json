@@ -600,7 +600,7 @@
         },
         "ingest_stopped": {
           "type": "boolean",
-          "description": "The server keeps refusing events and the proxy passed its quarantine limit (ledger-and-query.md L5). Cleared by the next accepted batch. Optional: older proxies omit it."
+          "description": "The server keeps refusing events and the proxy passed its quarantine limit (ledger-and-query.md L5). Cleared by the next accepted batch. Sent only when true. Absent reads as false."
         }
       },
       "required": [

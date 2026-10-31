@@ -9,15 +9,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Added
 
-- lodeline-proxy status reports now carry `central.ingest_stopped`, true while
+- lodeline-proxy status reports now carry `central.ingest_stopped: true` while
   ingest is stopped (see Fixed), and the proxy reports `spool.state` as `degraded`
-  instead of `ok` during that time. The server's proxy detail API returns the new
-  field under `central`. `lodeline-proxy health` prints it too; its exit code does
-  not change. Upgrade lodeline-server first: its status parser rejects unknown
-  fields, so a proxy that sends the new field to an older server has its status
-  reports refused. Downgrading lodeline-server after a new proxy has reported fails
-  at boot until `ingest_stopped` is removed from the stored proxy state, because
-  older servers reject unknown fields. (#339)
+  instead of `ok` during that time. The field is sent only when true, and absent
+  reads as false. The server's proxy detail API returns it under `central`.
+  `lodeline-proxy health` prints it too; its exit code does not change. Upgrade
+  lodeline-server first: its status parser rejects unknown fields, so an older
+  server refuses the status reports of a stopped proxy. A proxy that is not stopped
+  reports to an older server as before. Downgrading lodeline-server fails at boot
+  only while the stored proxy state holds `ingest_stopped`, because older servers
+  reject unknown fields. The server stores it when a proxy's last report was sent
+  while stopped, and the next report after the stop ends removes it. Otherwise
+  remove the field from the stored proxy state by hand. (#339)
 
 ### Fixed
 
@@ -27,10 +30,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   names every bad event in its batch, so a 2000-event storm quarantines 800 events
   before the limit, and an unparseable shape quarantines 8. Past the limit ingest is
   stopped: the proxy backs off and quarantines one event per max backoff period
-  (300 s), however many events the answer names. That keeps loss to 288 events per
-  day and stops a permanent refusal from blocking good events behind it until R.
-  After a server upgrade the next retry comes within 360 s (300 s max backoff plus
-  20% jitter) and the first 200 clears the stop. (#339)
+  (300 s), however many events the answer names. That keeps loss to at most 288
+  events per day and stops a permanent refusal from blocking good events behind it
+  until R. The measured mean is about 380 s per event, about 225 per day, so about
+  R/380 s events drain: about 6800 in a 30-day R. After a server upgrade the next
+  retry comes within 360 s (300 s max backoff plus 20% jitter) and the first 200
+  clears the stop. At a batch size of 100, about 7.4% of events refused on the parse
+  path, about 8 in 108, stops ingest. At 1 in 10 refused, throughput falls to about
+  0.09 events/s, and only refused events are quarantined. (#339)
 
 ## [0.12.0] - 2026-10-31
 

@@ -948,6 +948,12 @@ impl StatusBuilder {
                 None => json!({"upstream_id": u, "state": route_state}),
             })
             .collect();
+        let mut central = json!({"last_ingest_ack_at": self.central.last_ingest_ack_at(),
+            "consecutive_failures": self.central.consecutive_failures()});
+        // Only when true: an older server refuses the whole report for this field.
+        if ingest_stopped {
+            central["ingest_stopped"] = json!(true);
+        }
         let body = json!({
             "schema_version": 1,
             "report_id": uuid::Uuid::new_v4().to_string(),
@@ -958,9 +964,7 @@ impl StatusBuilder {
             "config": config,
             "spool": spool_section,
             "registry": registry_section,
-            "central": {"last_ingest_ack_at": self.central.last_ingest_ack_at(),
-                "consecutive_failures": self.central.consecutive_failures(),
-                "ingest_stopped": ingest_stopped},
+            "central": central,
             "routes": routes,
             "counters": {"auth_failures": [], "unmatched_cancels": []},
             "gaps": gaps,
@@ -2580,11 +2584,16 @@ mod tests {
         let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
         assert_eq!(s.central.consecutive_failures.get(), 0);
         assert!(s.central.last_ingest_ack_at.is_some());
-        assert_eq!(s.central.ingest_stopped, Some(false));
+        assert_eq!(s.central.ingest_stopped, None, "absent while not stopped");
         central.set_ingest_stopped(true);
         let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
         assert_eq!(s.central.ingest_stopped, Some(true));
         central.set_ingest_stopped(false);
+        let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
+        assert_eq!(
+            s.central.ingest_stopped, None,
+            "absent again after the stop"
+        );
         // an expired config does not claim its routes are supported
         let mut expired = view(ConfigState::Expired);
         expired.route_upstreams = vec!["up-r1".into()];

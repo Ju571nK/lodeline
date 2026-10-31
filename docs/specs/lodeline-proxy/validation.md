@@ -90,7 +90,7 @@ macOS arm64는 현재 fixture 개발 환경일 뿐 production 검증 대상 확�
 | connect / response idle / 호출 전체 | 5초 / 30초 / 120초 | 단계별 timeout; upstream 전송 후에는 미실행으로 단정 금지 |
 | 종료 grace | 30초 | 새 수락 중단, 진행 호출 drain; 잔여 호출 불명/감사 복구 |
 | tool inventory | 100 page, 10,000 tool, 총 16 MiB | 불완전 snapshot 표시; baseline 삭제 판단 금지 |
-| 감사 event / spool | event 16 KiB, spool 1 GiB + 별도 gap reserve 16 MiB | 80% degraded, 100% 기본 새 호출 중단; 기존 in-flight 완료 기록용 여유 설계 |
+| 감사 event / spool | event 16 KiB, spool 1 GiB + 별도 gap reserve 16 MiB | 80% degraded (also reported below 80% while ingest is stopped, `central.ingest_stopped`, ledger L5), 100% 기본 새 호출 중단; 기존 in-flight 완료 기록용 여유 설계 |
 | spool 보관 | 미전송 event는 최대 재시도 기간 R 경과 후 quarantine으로 이동하고 `spool_expired` gap 보고(O-1 A, 2026-10-10 결정, 삭제 없음); ack 이후 24시간 보관 상한 | 공간 부족 시 ack된 자료부터 정리, 미전송 자료 삭제로 정상처럼 보이지 않음 |
 | 프로세스 resource budget | steady RSS 256 MiB 목표, cgroup memory.max 512 MiB, CPU 2 core | hard kill 복구 시험 필수; 상한 도달 전에 admission/backpressure |
 

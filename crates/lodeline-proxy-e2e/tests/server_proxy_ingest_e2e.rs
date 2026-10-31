@@ -1067,10 +1067,8 @@ async fn good_traffic_resumes_behind_a_permanent_refusal() {
         px.fx.acked_count() == 100
     })
     .await;
-    eventually("the server sees the stop end", || {
-        reported_stop() == Some(false)
-    })
-    .await;
+    // The proxy stops sending the field, so the stored true must go with it.
+    eventually("the server sees the stop end", || reported_stop().is_none()).await;
     run.stop().await;
     rep.stop().await;
     assert!(stopped_at.elapsed() >= fast_params().max_backoff * 2);
