@@ -109,7 +109,7 @@ flowchart LR
 <p class="small"><b>인증 계층 구분:</b> data/control 경로(<code>/v1/events</code>, <code>/v1/policy</code>)는 <b>mTLS 클라이언트 cert</b> 로 인증. read API(<code>/v1/meta</code>, fleet)는 그 위에 <b>bearer 토큰</b> 게이트(Phase 3b.4) — 토큰 미설정이면 404. <code>/v1/healthz</code> 만 인증 없음(단 여전히 mTLS 핸드셰이크는 필요).</p>
 
 <h2 id="pki">3. PKI 한 번 생성 (아무 박스, 예: Mac)</h2>
-<p class="small">데모 <code>demo/init.sh</code> 의 openssl 묶음 그대로, <b>server cert 의 SAN 만 조정</b>.</p>
+<p class="small">아래 openssl 묶음에서 <b>server cert 의 SAN 만 조정</b>.</p>
 <pre><code># CA
 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -keyout ca.key -out ca.crt -subj "/CN=lodeline-test-ca" \

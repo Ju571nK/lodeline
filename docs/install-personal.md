@@ -28,7 +28,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/
 `personal` is the default profile, so no environment variable is required. You can be explicit:
 
 ```sh
-LODELINE_PROFILE=personal curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | LODELINE_PROFILE=personal sh
 ```
 
 ### Linux package (.rpm / .deb)

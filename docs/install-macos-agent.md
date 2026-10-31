@@ -45,8 +45,8 @@ of the **fleet** profile, so install that instead to add the server-side
 binaries on top of the personal three:
 
 ```sh
-LODELINE_PROFILE=fleet curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | LODELINE_PROFILE=fleet sh
 ```
 
 `fleet` adds `lodeline-sender`, `lodeline-server`, and `lodeline-sign`.

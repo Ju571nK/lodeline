@@ -101,7 +101,7 @@ operators. It's there when you need it and invisible when you don't.
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
 
 # fleet: adds lodeline-sender + lodeline-server + lodeline-sign
-LODELINE_PROFILE=fleet curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | LODELINE_PROFILE=fleet sh
 ```
 
 Linux `.deb`/`.rpm` and Windows `.zip` are on the [releases page](https://github.com/Ju571nK/lodeline/releases/latest).

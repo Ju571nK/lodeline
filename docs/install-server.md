@@ -79,7 +79,7 @@ the signed policy bundle — install the `lodeline-signer` package or use `insta
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
+  https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | LODELINE_PROFILE=fleet sh
 ```
 
 Installs the six release binaries (`lodeline`, `lodeline-sender`, `lodeline-server`,
@@ -105,9 +105,8 @@ do that off localhost.
 
 You need: a CA, a **server cert** whose SAN matches the address agents will
 connect to, and a **client CA** that signs each host's client cert. A single
-self-managed CA can play both roles. The recipe below mirrors
-`demo/init.sh` — the one change that matters in production is
-the **`subjectAltName`**.
+self-managed CA can play both roles. The one change that matters in production
+is the **`subjectAltName`**.
 
 ```sh
 cd /etc/lodeline   # or wherever you keep PKI material
