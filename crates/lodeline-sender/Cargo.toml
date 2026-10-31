@@ -48,8 +48,8 @@ tower = { workspace = true }
 # .deb (Debian/Ubuntu) — `cargo deb --no-build`
 [package.metadata.deb]
 name = "lodeline-sender"
-conflicts = "sigil-sender"
-replaces = "sigil-sender"
+conflicts = "sigil-sender (<< 0.12)"
+replaces = "sigil-sender (<< 0.12)"
 provides = "sigil-sender"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
@@ -86,7 +86,7 @@ start = false
 # .rpm (RHEL/Rocky/Fedora) — `cargo generate-rpm`
 [package.metadata.generate-rpm]
 name = "lodeline-sender"
-obsoletes = { "sigil-sender" = "*" }
+obsoletes = { "sigil-sender" = "< 0.12" }
 provides = { "sigil-sender" = "*" }
 # Old packages are erased after %post, so the data moves in %posttrans.
 post_trans_script = "/usr/libexec/lodeline-sender/migrate-from-sigil sender || :"

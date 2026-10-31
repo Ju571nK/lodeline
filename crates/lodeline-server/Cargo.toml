@@ -68,8 +68,8 @@ http = { workspace = true }
 
 [package.metadata.deb]
 name = "lodeline-server"
-conflicts = "sigil-server"
-replaces = "sigil-server"
+conflicts = "sigil-server (<< 0.12)"
+replaces = "sigil-server (<< 0.12)"
 provides = "sigil-server"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
@@ -104,7 +104,7 @@ start = false
 
 [package.metadata.generate-rpm]
 name = "lodeline-server"
-obsoletes = { "sigil-server" = "*" }
+obsoletes = { "sigil-server" = "< 0.12" }
 provides = { "sigil-server" = "*" }
 # Old packages are erased after %post, so the data moves in %posttrans.
 post_trans_script = "/usr/libexec/lodeline-server/migrate-from-sigil server || :"

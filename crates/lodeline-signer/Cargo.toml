@@ -36,8 +36,8 @@ tempfile = { workspace = true }
 
 [package.metadata.deb]
 name = "lodeline-signer"
-conflicts = "sigil-signer"
-replaces = "sigil-signer"
+conflicts = "sigil-signer (<< 0.12)"
+replaces = "sigil-signer (<< 0.12)"
 provides = "sigil-signer"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
@@ -56,7 +56,7 @@ assets = [
 
 [package.metadata.generate-rpm]
 name = "lodeline-signer"
-obsoletes = { "sigil-signer" = "*" }
+obsoletes = { "sigil-signer" = "< 0.12" }
 provides = { "sigil-signer" = "*" }
 summary = "Operator CLI: keygen / sign / verify / inspect for lodeline signed policy envelopes"
 assets = [

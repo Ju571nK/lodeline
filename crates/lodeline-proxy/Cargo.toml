@@ -69,8 +69,8 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.deb]
 name = "lodeline-proxy"
-conflicts = "sigil-proxy"
-replaces = "sigil-proxy"
+conflicts = "sigil-proxy (<< 0.12)"
+replaces = "sigil-proxy (<< 0.12)"
 provides = "sigil-proxy"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
@@ -99,7 +99,7 @@ start = false
 
 [package.metadata.generate-rpm]
 name = "lodeline-proxy"
-obsoletes = { "sigil-proxy" = "*" }
+obsoletes = { "sigil-proxy" = "< 0.12" }
 provides = { "sigil-proxy" = "*" }
 # Old packages are erased after %post, so the data moves in %posttrans.
 post_trans_script = "/usr/libexec/lodeline-proxy/migrate-from-sigil proxy || :"

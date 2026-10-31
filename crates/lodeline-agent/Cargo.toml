@@ -73,9 +73,9 @@ operator-cli = []
 # .deb (Debian/Ubuntu) — `cargo deb --no-build`
 [package.metadata.deb]
 name = "lodeline"
-conflicts = "sigil"
-replaces = "sigil"
-provides = "sigil"
+# Bounded and with no Provides: distros ship an unrelated ebook editor named sigil.
+conflicts = "sigil (<< 0.12)"
+replaces = "sigil (<< 0.12)"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
 priority = "optional"
@@ -115,8 +115,8 @@ start = false
 # .rpm (RHEL/Rocky/Fedora) — `cargo generate-rpm`
 [package.metadata.generate-rpm]
 name = "lodeline"
-obsoletes = { "sigil" = "*" }
-provides = { "sigil" = "*" }
+# Bounded and with no Provides: distros ship an unrelated ebook editor named sigil.
+obsoletes = { "sigil" = "< 0.12" }
 # Old packages are erased after %post, so the data moves in %posttrans.
 post_trans_script = "/usr/libexec/lodeline/migrate-from-sigil agent || :"
 summary = "Watches policy-defined files and emits hash-anchored posture events for your SIEM"

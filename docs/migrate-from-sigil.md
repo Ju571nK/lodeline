@@ -24,15 +24,27 @@ Each section below ends with what happens if you do nothing.
 **Linux packages.** Install the new `.deb` or `.rpm` for each Sigil package on the
 host. They replace the old ones.
 
-- `.deb`: each `lodeline*` package declares Conflicts, Replaces and Provides for
-  the matching `sigil*` package.
-- `.rpm`: each `lodeline*` package declares Obsoletes and Provides for the
-  matching `sigil*` package.
+- `.deb`: each `lodeline*` package declares Conflicts and Replaces for the
+  matching `sigil*` package below version 0.12.
+- `.rpm`: each `lodeline*` package declares Obsoletes for the matching `sigil*`
+  package below version 0.12.
+- `lodeline-sender`, `lodeline-server`, `lodeline-signer` and `lodeline-proxy` also
+  Provide their old names. `lodeline` does not Provide `sigil`.
+
+The bound protects the Sigil ebook editor, which Debian, Ubuntu and Fedora package
+as `sigil` at version 1.x or later. Installing Lodeline leaves that editor alone.
+On Debian ports and end-of-life Ubuntu releases the editor is still at 0.9.x and
+counts as old. No Lodeline package ships for those.
 
 Upgrade every Sigil package on the host in the same run. The shared `/etc/sigil`
-and `/var/log/sigil` directories move only after no old binary is left, because a
-running old sender still reads them. A partial upgrade leaves them in place and
-prints a notice.
+and `/var/log/sigil` directories move only after `dpkg-query` or `rpm -q` shows no
+`sigil`, `sigil-sender`, `sigil-server` or `sigil-proxy` package below version
+0.12, because a running old sender still reads them. A partial upgrade leaves them
+in place and prints a notice that names the packages. Another program named
+`sigil` in `/usr/bin`, such as NOMARJ/sigil, does not hold them back.
+
+On a host with no package database, the script cannot tell what `/usr/bin/sigil`
+is. It keeps the shared directories and prints the command that moves them.
 
 **Script installs and Windows `.zip`.** Run the new installer. It writes the new
 binary names and does not remove the old ones. Delete the old `sigil*` binaries
@@ -50,9 +62,9 @@ it can to the new path, and it never overwrites or deletes data.
 
 | Old | New | Moved by package |
 |---|---|---|
-| `/etc/sigil` | `/etc/lodeline` | any, once no old binary is left |
+| `/etc/sigil` | `/etc/lodeline` | any, once no old package is left |
 | `/etc/sigil-server` | `/etc/lodeline-server` | `lodeline-server` |
-| `/var/log/sigil` | `/var/log/lodeline` | any, once no old binary is left |
+| `/var/log/sigil` | `/var/log/lodeline` | any, once no old package is left |
 | `/var/lib/sigil` | `/var/lib/lodeline` | `lodeline` |
 | `/var/lib/sigil-sender`, `/var/log/sigil-sender` | `/var/lib/lodeline-sender`, `/var/log/lodeline-sender` | `lodeline-sender` |
 | `/var/lib/sigil-server`, `/var/log/sigil-server` | `/var/lib/lodeline-server`, `/var/log/lodeline-server` | `lodeline-server` |
@@ -66,17 +78,38 @@ Rules for each directory:
   and the script lists it. Packaged `*.example` files are left as they are.
 - The script says `moved` only when everything moved. Otherwise it says
   `kept in <dir>:` and names what is left.
+- Across filesystems, for example when the new directory is its own mount, each
+  entry is copied to `<name>.lodeline-migrate-tmp` in the new directory, renamed,
+  and only then removed from the old one. A killed run never leaves a partial file
+  under the real name, and a rerun removes its temporary file and copies again. If
+  a run dies between the rename and the removal, the file is at both paths and is
+  reported as kept. Check with `cmp`, delete the old copy, and rerun.
 
 **SQLite databases.** A database moves together with its `-wal`, `-shm` and
 `-journal` files. If a database is at both paths, the script stops for that
 database, moves none of its files and reports it. Do not merge those files.
-Likewise, if the database is already at the new path and its `-wal` is still at
-the old one, the script leaves the `-wal` where it is, because pairing a WAL with
-the wrong database corrupts it. For each case:
+Likewise, if the database is at the new path and its `-wal` is still at the old
+one, the script leaves the `-wal` where it is, because pairing a WAL with the wrong
+database corrupts it. The script moves a database last, so it never leaves this
+state itself: something else put that database there. For each case:
 
-1. Keep the service stopped.
-2. If the Lodeline service never ran, the database at the new path is the one you
-   had. Move the leftover `-wal` next to it.
+1. Keep the service stopped, and back up both directories with `cp -a`.
+2. Only where the database came from can prove the pair. Move the `-wal` next to
+   it only if you moved that database out of the old path yourself, with every
+   service stopped, and nothing has opened it since. `PRAGMA integrity_check` does
+   not settle this: a WAL from another database can pass it and silently replace
+   pages. It can only rule a pair out, so try the pair on a copy first:
+
+   ```sh
+   mkdir /root/wal-check
+   cp /var/lib/lodeline/state.db /var/lib/sigil/state.db-wal /root/wal-check/
+   sqlite3 /root/wal-check/state.db 'PRAGMA integrity_check;'
+   sqlite3 /root/wal-check/state.db '.tables'
+   ```
+
+   If it prints `ok` and the tables you expect, move the `-wal` next to the database
+   and delete the old `-shm`. SQLite rebuilds it. Keep the backup from step 1 until
+   the service has run. In every other case, leave the `-wal` alone and go to step 3.
 3. If the service ran and made a fresh database, decide which one to keep. To keep
    the old one, delete the new database and its sidecars, then rerun the script.
 
@@ -87,12 +120,17 @@ on an empty directory, and the agent would make a fresh `state.db` and a new
 to repair ownership. The link target is never changed.
 
 ```sh
-rmdir /var/lib/lodeline && mv /var/lib/sigil /var/lib/lodeline
+mkdir -p /var/lib/lodeline && rm -f /var/lib/lodeline/*.example && rmdir /var/lib/lodeline && mv /var/lib/sigil /var/lib/lodeline
 ```
+
+This works whether the new directory is missing, empty or holds only packaged
+`*.example` files. If it holds anything else, `rmdir` fails and nothing moves.
 
 Files owned by the `sigil` user and group, or by `sigil-proxy`, move to the
 matching `lodeline` account. Every run repairs this across all the new
 directories, as soon as the new account exists. The old accounts stay on the host.
+Accounts from LDAP or sssd count. When only one account of a pair resolves, the
+script skips the repair for that pair and prints a note. Fix the lookup, then rerun.
 
 If the post-install run was staged or interrupted, finish it by hand. Pick the
 component that matches the package:

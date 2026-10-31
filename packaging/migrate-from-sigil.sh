@@ -7,12 +7,14 @@
 # Rules for each old directory:
 #   - new path absent or empty: rename the old directory onto it, which is atomic.
 #   - new path has entries: move each old entry that is not there yet, and report
-#     the rest. A rerun picks up where an interrupted run stopped.
+#     the rest. A rerun picks up where an interrupted run stopped. A move across
+#     filesystems never shows a partial file under the real name.
 #   - old path is a symlink: leave it, and print the manual step.
-# /etc/sigil and /var/log/sigil are shared between packages, so they wait until no
-# old binary is left. Every run then repairs ownership over all the new
-# directories, because each package configures before or after the account of
-# another exists, and warns about old paths in config. Services stay stopped.
+# /etc/sigil and /var/log/sigil are shared between packages, so they wait until the
+# package database shows no old Sigil package. Every run then repairs ownership
+# over all the new directories, because each package configures before or after
+# the account of another exists, and warns about old paths in config. Services
+# stay stopped.
 set -u
 
 COMPONENT="${1:-}"
@@ -28,6 +30,9 @@ case "$COMPONENT" in
 esac
 
 SAW_OLD=""
+REPAIRS=""
+NL='
+'
 
 note() { printf 'lodeline-migrate: %s\n' "$1" >&2; }
 
@@ -35,28 +40,69 @@ exists() { [ -e "$1" ] || [ -L "$1" ]; }
 
 # True when the directory holds anything other than *.example files.
 has_content() {
-    for e in "$1"/* "$1"/.[!.]*; do
+    for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
         exists "$e" || continue
         case "$e" in *.example) ;; *) return 0 ;; esac
     done
     return 1
 }
 
-known() { grep -q "^$1:" "$2" 2>/dev/null; }
+# <passwd|group> <name>. Outside --root, getent also sees LDAP and sssd accounts.
+known() {
+    if [ -n "$R" ]; then
+        grep -q "^$2:" "$R/etc/$1" 2>/dev/null
+    else
+        getent "$1" "$2" >/dev/null 2>&1
+    fi
+}
 
-fix_ownership() {
-    DIR="$1"
+plan_repairs() {
     for pair in "sigil lodeline" "sigil-proxy lodeline-proxy"; do
         # shellcheck disable=SC2086
         set -- $pair
-        if known "$1" "$R/etc/passwd" && known "$2" "$R/etc/passwd"; then
-            find "$DIR" -user "$1" -exec chown -h "$2" {} + || note "could not chown $DIR from $1 to $2"
+        for db in passwd group; do
+            if known "$db" "$1" && known "$db" "$2"; then
+                REPAIRS="$REPAIRS $db $1 $2"
+            elif known "$db" "$1" || { [ -n "$SAW_OLD" ] && known "$db" "$2"; }; then
+                note "skipped repairing ownership from $1 to $2: one of them is not in $db, so those files keep their owner. Each package's run tries again. If this stays, check that the account resolves, then rerun $0 $COMPONENT."
+            fi
+        done
+    done
+}
+
+fix_ownership() {
+    DIR="$1"
+    # shellcheck disable=SC2086
+    set -- $REPAIRS
+    while [ $# -gt 0 ]; do
+        if [ "$1" = passwd ]; then
+            find "$DIR" -user "$2" -exec chown -h "$3" {} + || note "could not chown $DIR from $2 to $3"
+        else
+            find "$DIR" -group "$2" -exec chgrp -h "$3" {} + || note "could not chgrp $DIR from $2 to $3"
         fi
-        if known "$1" "$R/etc/group" && known "$2" "$R/etc/group"; then
-            find "$DIR" -group "$1" -exec chgrp -h "$2" {} + || note "could not chgrp $DIR from $1 to $2"
-        fi
+        shift 3
     done
     if command -v restorecon >/dev/null 2>&1; then restorecon -R "$DIR" >/dev/null 2>&1 || :; fi
+}
+
+fs_of() { df -P "$1" 2>/dev/null | awk 'NR == 2 { print $1, $NF }'; }
+
+# mv copies across filesystems, and a run killed mid-copy would leave a partial
+# file under the real name. So a copy gets a temporary name, which a rerun removes,
+# and only a complete copy is renamed into place.
+# shortcut: df cannot see overlayfs copy-up, where mv still copies. Upgrade if a
+# container image ever migrates in place.
+move_entry() {
+    tmp="$2.lodeline-migrate-tmp"
+    rm -rf "$tmp"
+    if [ "$(fs_of "${1%/*}")" = "$(fs_of "${2%/*}")" ]; then
+        mv "$1" "$2"
+    elif cp -a "$1" "$tmp" && mv "$tmp" "$2"; then
+        rm -rf "$1"
+    else
+        rm -rf "$tmp"
+        return 1
+    fi
 }
 
 # Move one entry and its SQLite sidecars. The database goes last and only after
@@ -69,29 +115,44 @@ move_family() {
         if exists "$1$s" && { exists "$2" || exists "$2$s"; }; then return 1; fi
     done
     for s in -wal -shm -journal ""; do
-        if exists "$1$s"; then mv "$1$s" "$2$s" || return 1; fi
+        if exists "$1$s"; then move_entry "$1$s" "$2$s" || return 1; fi
     done
 }
 
 merge_entries() {
     kept=""
-    for e in "$1"/* "$1"/.[!.]*; do
+    shown=""
+    for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
         exists "$e" || continue
         name=${e##*/}
         case "$name" in *.example) if exists "$2/$name"; then continue; fi ;; esac
-        base=${name%-wal}; base=${base%-shm}; base=${base%-journal}
-        case " $kept " in *" $base "*) continue ;; esac
-        move_family "$1/$base" "$2/$base" || kept="$kept $base"
+        case "$name" in
+            ?*-wal) base=${name%-wal} ;;
+            ?*-shm) base=${name%-shm} ;;
+            ?*-journal) base=${name%-journal} ;;
+            *) base=$name ;;
+        esac
+        case "$kept$NL" in *"$NL$base$NL"*) continue ;; esac
+        if ! move_family "$1/$base" "$2/$base"; then
+            kept="$kept$NL$base"
+            shown="${shown:+$shown, }$base"
+        fi
     done
     rmdir "$1" 2>/dev/null || :
     [ -z "$kept" ]
+}
+
+# Works when the new directory is missing or holds only packaged examples, and
+# stops before the mv when it holds anything else.
+swap_command() {
+    printf 'mkdir -p %s && rm -f %s/*.example && rmdir %s && mv %s %s' "$2" "$2" "$2" "$1" "$2"
 }
 
 move_dir() {
     old="$R$1"; new="$R$2"
     if [ -L "$old" ]; then
         SAW_OLD=1
-        note "kept $1: it is a symlink to $(readlink "$old"), so nothing moved. $2 would start empty, and the agent would make a new host_id. Before starting the service, run: rmdir $2 && mv $1 $2. Then rerun $0 $COMPONENT to repair ownership."
+        note "kept $1: it is a symlink to $(readlink "$old"), so nothing moved. $2 would start empty, and the agent would make a new host_id. Before starting the service, run: $(swap_command "$1" "$2"). Then rerun $0 $COMPONENT to repair ownership."
         return 0
     fi
     if [ ! -d "$old" ] || ! has_content "$old"; then return 0; fi
@@ -102,11 +163,12 @@ move_dir() {
     fi
     rmdir "$new" 2>/dev/null
     if [ ! -e "$new" ]; then
+        # Same parent directory, so this is a rename or a failure, never a copy.
         if mv "$old" "$new"; then note "moved $1 to $2"; else note "could not move $1 to $2"; fi
     elif merge_entries "$old" "$new"; then
         note "moved $1 to $2"
     else
-        note "kept in $1:$kept. Each could not move or is already in $2, so nothing was overwritten. Merge them by hand before starting the service. Keep a database with its -wal and -shm files."
+        note "kept in $1: $shown. Each could not move or is already in $2, so nothing was overwritten. Merge them by hand before starting the service. Keep a database with its -wal and -shm files."
     fi
 }
 
@@ -119,9 +181,37 @@ warn_old_paths() {
     done
 }
 
-old_binaries=""
-for b in sigil sigil-sender sigil-server sigil-proxy; do
-    if [ -e "$R/usr/bin/$b" ]; then old_binaries="$old_binaries $b"; fi
+has_dpkg() { [ -f "$R/var/lib/dpkg/status" ] && command -v dpkg-query >/dev/null 2>&1; }
+has_rpm() {
+    { [ -d "$R/var/lib/rpm" ] || [ -d "$R/usr/lib/sysimage/rpm" ]; } && command -v rpm >/dev/null 2>&1
+}
+
+# Removed packages stay in dpkg's database, with their version, as config-files.
+installed_versions() {
+    if has_dpkg; then
+        # shellcheck disable=SC2016
+        dpkg-query --admindir="$R/var/lib/dpkg" -W -f='${db:Status-Status} ${Version}\n' "$1" 2>/dev/null |
+            awk '$1 != "not-installed" && $1 != "config-files" { print $2 }'
+    fi
+    if has_rpm; then rpm --root "${R:-/}" -q --qf '%{VERSION}\n' "$1" 2>/dev/null; fi
+}
+
+# shortcut: the ebook editor at 0.x, on Debian ports and end-of-life Ubuntu where
+# no Lodeline package ships, reads as ours. Upgrade if those become targets.
+is_old_sigil_version() {
+    case "$1" in 0.[0-9] | 0.1[01] | 0.[0-9][.~+-]* | 0.1[01][.~+-]*) return 0 ;; esac
+    return 1
+}
+
+waiting=""
+for p in sigil sigil-sender sigil-server sigil-proxy; do
+    if has_dpkg || has_rpm; then
+        for v in $(installed_versions "$p"); do
+            if is_old_sigil_version "$v"; then waiting="$waiting $p"; break; fi
+        done
+    elif [ -e "$R/usr/bin/$p" ]; then
+        waiting="$waiting $p"
+    fi
 done
 
 olds=${STATE%%:*}; news=${STATE##*:}
@@ -130,14 +220,19 @@ if [ "$COMPONENT" != agent ]; then move_dir "/var/log/$olds" "/var/log/$news"; f
 if [ "$COMPONENT" = server ]; then move_dir /etc/sigil-server /etc/lodeline-server; fi
 
 for shared in /etc /var/log; do
-    if [ -z "$old_binaries" ]; then
+    if [ -z "$waiting" ]; then
         move_dir "$shared/sigil" "$shared/lodeline"
     elif [ -d "$R$shared/sigil" ] && has_content "$R$shared/sigil"; then
         SAW_OLD=1
-        note "kept $shared/sigil: still used by$old_binaries. Upgrade those packages to finish."
+        if has_dpkg || has_rpm; then
+            note "kept $shared/sigil: still used by$waiting. Upgrade those packages to finish."
+        else
+            note "kept $shared/sigil: no package database here, and /usr/bin has$waiting, which may be an old Sigil binary still using it. If it is not, run: $(swap_command "$shared/sigil" "$shared/lodeline"). Then rerun $0 $COMPONENT."
+        fi
     fi
 done
 
+plan_repairs
 for dir in /etc/lodeline /etc/lodeline-server \
     /var/lib/lodeline /var/lib/lodeline-sender /var/lib/lodeline-server /var/lib/lodeline-proxy \
     /var/log/lodeline /var/log/lodeline-sender /var/log/lodeline-server /var/log/lodeline-proxy; do
