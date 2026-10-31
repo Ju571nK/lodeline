@@ -8,7 +8,7 @@
 //! | others | none | none: the spool ages rows on the wall clock |
 //!
 //! `Instant` is not usable: it excludes suspend (`CLOCK_MONOTONIC` on Linux,
-//! `CLOCK_UPTIME_RAW` on macOS). On macOS, `clock_gettime(2)` documents
+//! `CLOCK_UPTIME_RAW` on macOS). On macOS, `clock_gettime(3)` documents
 //! `CLOCK_MONOTONIC_RAW` as counting sleep and as unaffected by time adjustments.
 
 use std::sync::Arc;
@@ -57,8 +57,12 @@ mod platform {
             tv_sec: 0,
             tv_nsec: 0,
         };
+        // SAFETY: `t` is a valid, exclusive `timespec` for the duration of the call.
         let rc = unsafe { libc::clock_gettime(CLOCK, &mut t) };
-        (rc == 0).then_some(t.tv_sec)
+        // `time_t` is `i32` on armv7 and `i64` on the other targets.
+        #[allow(clippy::unnecessary_cast)]
+        let secs = t.tv_sec as i64;
+        (rc == 0).then_some(secs)
     }
 
     #[cfg(target_os = "linux")]
@@ -72,6 +76,8 @@ mod platform {
     pub(super) fn boot_id() -> Option<String> {
         let mut buf = [0u8; 64];
         let mut len = buf.len();
+        // SAFETY: the name is NUL-terminated, `buf` is writable for `len` bytes, and
+        // a null `newp` with length 0 makes this a read.
         let rc = unsafe {
             libc::sysctlbyname(
                 c"kern.bootsessionuuid".as_ptr(),
