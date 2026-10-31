@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixture self-tests, not Sigil proxy or vendor-client acceptance tests."""
+"""Fixture self-tests, not Lodeline proxy or vendor-client acceptance tests."""
 
 import http.client
 import io

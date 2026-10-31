@@ -26,6 +26,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: release manifest regressions
         run: python3 -m unittest discover -s tests -p test_release_manifest.py -v
+      - name: migration regressions
+        run: python3 -m unittest discover -s tests -p test_migrate_from_sigil.py -v
+      - name: packaged unit regressions
+        run: python3 -m unittest discover -s tests -p test_systemd_units.py -v
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -36,8 +40,8 @@ jobs:
         run: cargo test --workspace
       - name: release build
         run: cargo build --release --workspace
-      - name: hardened build (sigil-agent, --no-default-features)
-        run: cargo build -p sigil-agent --no-default-features
+      - name: hardened build (lodeline-agent, --no-default-features)
+        run: cargo build -p lodeline-agent --no-default-features
 
   # Keeps `rust-version` in Cargo.toml honest (#240). rust-toolchain.toml pins
   # `stable`, so the MSRV toolchain is selected explicitly with `cargo +<ver>`.
@@ -81,8 +85,8 @@ jobs:
         run: cargo test --workspace
       - name: release build
         run: cargo build --release --workspace
-      - name: hardened build (sigil-agent, --no-default-features)
-        run: cargo build -p sigil-agent --no-default-features
+      - name: hardened build (lodeline-agent, --no-default-features)
+        run: cargo build -p lodeline-agent --no-default-features
       - name: build .rpm
         run: |
           cargo install cargo-generate-rpm --locked
@@ -96,26 +100,26 @@ jobs:
           # `systemctl is-enabled`, and scan /proc for a process or a listener.
           proxy_assert_disabled_and_silent() {
             if command -v systemctl >/dev/null 2>&1; then
-              st=$(systemctl is-enabled sigil-proxy 2>&1 || true)
-              echo "systemctl is-enabled sigil-proxy: $st"
-              case "$st" in enabled*) echo "::error::sigil-proxy is enabled"; exit 1 ;; esac
+              st=$(systemctl is-enabled lodeline-proxy 2>&1 || true)
+              echo "systemctl is-enabled lodeline-proxy: $st"
+              case "$st" in enabled*) echo "::error::lodeline-proxy is enabled"; exit 1 ;; esac
             fi
-            if ls /etc/systemd/system/*.wants/sigil-proxy.service >/dev/null 2>&1; then
-              echo "::error::sigil-proxy has a wants symlink (enabled)"
+            if ls /etc/systemd/system/*.wants/lodeline-proxy.service >/dev/null 2>&1; then
+              echo "::error::lodeline-proxy has a wants symlink (enabled)"
               exit 1
             fi
             for c in /proc/[0-9]*/comm; do
-              if [ "$(cat "$c" 2>/dev/null)" = sigil-proxy ]; then
-                echo "::error::sigil-proxy process is running"
+              if [ "$(cat "$c" 2>/dev/null)" = lodeline-proxy ]; then
+                echo "::error::lodeline-proxy process is running"
                 exit 1
               fi
             done
             # `run` without --config must refuse to start (exit 2), never fall back
             # to a default path.
             rc=0
-            /usr/bin/sigil-proxy run >/dev/null 2>&1 || rc=$?
+            /usr/bin/lodeline-proxy run >/dev/null 2>&1 || rc=$?
             if [ "$rc" != 2 ]; then
-              echo "::error::sigil-proxy run without --config exited $rc, expected 2"
+              echo "::error::lodeline-proxy run without --config exited $rc, expected 2"
               exit 1
             fi
             # The process and port scans are only a smoke test (the binary never
@@ -128,8 +132,8 @@ jobs:
           }
 
           while IFS='|' read -r pkg bin unit example; do
-            # Anchor on a digit after the dash so `sigil-*.rpm` doesn't match
-            # sigil-sender / sigil-server / sigil-signer too (issue #7).
+            # Anchor on a digit after the dash so `lodeline-*.rpm` doesn't match
+            # lodeline-sender / lodeline-server / lodeline-signer too (issue #7).
             rpm=$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)
             echo "=== inspecting $rpm ==="
             rpm -qpi "$rpm"
@@ -141,20 +145,20 @@ jobs:
               exit 1
             fi
             rpm -qpl "$rpm" | grep -qx "/usr/bin/${bin}"
-            if [ "$pkg" = sigil-proxy ]; then
+            if [ "$pkg" = lodeline-proxy ]; then
               # AC-14: installed disabled, no live config, no auto enable/start,
               # no SELinux module load from this package.
-              if rpm -qpl "$rpm" | grep -qx '/etc/sigil/proxy.yaml'; then
-                echo "::error::sigil-proxy must not ship a live /etc/sigil/proxy.yaml"
+              if rpm -qpl "$rpm" | grep -qx '/etc/lodeline/proxy.yaml'; then
+                echo "::error::lodeline-proxy must not ship a live /etc/lodeline/proxy.yaml"
                 exit 1
               fi
               scripts=$(rpm -qp --scripts "$rpm")
               if grep -Eq 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(enable|start)([[:space:]]|$)' <<< "$scripts"; then
-                echo "::error::sigil-proxy scripts must not enable or start the service"
+                echo "::error::lodeline-proxy scripts must not enable or start the service"
                 exit 1
               fi
               if grep -Eq 'semodule' <<< "$scripts"; then
-                echo "::error::sigil-proxy scripts must not load an SELinux module"
+                echo "::error::lodeline-proxy scripts must not load an SELinux module"
                 exit 1
               fi
             fi
@@ -167,9 +171,9 @@ jobs:
             echo "=== installing $rpm ==="
             rpm -i "$rpm"
             "/usr/bin/${bin}" --help >/dev/null
-            if [ "$pkg" = sigil-proxy ]; then
-              /usr/bin/sigil-proxy --version
-              /usr/bin/sigil-proxy version
+            if [ "$pkg" = lodeline-proxy ]; then
+              /usr/bin/lodeline-proxy --version
+              /usr/bin/lodeline-proxy version
               proxy_assert_disabled_and_silent
             fi
             if [ -n "$unit" ]; then
@@ -182,19 +186,19 @@ jobs:
             rpm -e "$pkg"
             test ! -e "/usr/bin/${bin}"
           done <<-'TABLE'
-          	sigil|sigil|sigil.service|/etc/sigil/policy.yaml.example
-          	sigil-sender|sigil-sender|sigil-sender.service|/etc/sigil/sender.yaml.example
-          	sigil-server|sigil-server|sigil-server.service|/etc/sigil/server.yaml.example
-          	sigil-signer|sigil-sign||
-          	sigil-proxy|sigil-proxy|sigil-proxy.service|/etc/sigil/proxy.yaml.example
+          	lodeline|lodeline|lodeline.service|/etc/lodeline/policy.yaml.example
+          	lodeline-sender|lodeline-sender|lodeline-sender.service|/etc/lodeline/sender.yaml.example
+          	lodeline-server|lodeline-server|lodeline-server.service|/etc/lodeline/server.yaml.example
+          	lodeline-signer|lodeline-sign||
+          	lodeline-proxy|lodeline-proxy|lodeline-proxy.service|/etc/lodeline/proxy.yaml.example
           	TABLE
 
           # Co-install (#252), matching the deb leg.
-          all=(sigil sigil-sender sigil-server sigil-signer sigil-proxy)
+          all=(lodeline lodeline-sender lodeline-server lodeline-signer lodeline-proxy)
           rpms=()
           for pkg in "${all[@]}"; do rpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)"); done
           rpm -i "${rpms[@]}"
-          for f in sigil sigil-sender sigil-server sigil-proxy; do
+          for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
           rpm -e "${all[@]}"
@@ -229,26 +233,26 @@ jobs:
           # `systemctl is-enabled`, and scan /proc for a process or a listener.
           proxy_assert_disabled_and_silent() {
             if command -v systemctl >/dev/null 2>&1; then
-              st=$(systemctl is-enabled sigil-proxy 2>&1 || true)
-              echo "systemctl is-enabled sigil-proxy: $st"
-              case "$st" in enabled*) echo "::error::sigil-proxy is enabled"; exit 1 ;; esac
+              st=$(systemctl is-enabled lodeline-proxy 2>&1 || true)
+              echo "systemctl is-enabled lodeline-proxy: $st"
+              case "$st" in enabled*) echo "::error::lodeline-proxy is enabled"; exit 1 ;; esac
             fi
-            if ls /etc/systemd/system/*.wants/sigil-proxy.service >/dev/null 2>&1; then
-              echo "::error::sigil-proxy has a wants symlink (enabled)"
+            if ls /etc/systemd/system/*.wants/lodeline-proxy.service >/dev/null 2>&1; then
+              echo "::error::lodeline-proxy has a wants symlink (enabled)"
               exit 1
             fi
             for c in /proc/[0-9]*/comm; do
-              if [ "$(cat "$c" 2>/dev/null)" = sigil-proxy ]; then
-                echo "::error::sigil-proxy process is running"
+              if [ "$(cat "$c" 2>/dev/null)" = lodeline-proxy ]; then
+                echo "::error::lodeline-proxy process is running"
                 exit 1
               fi
             done
             # `run` without --config must refuse to start (exit 2), never fall back
             # to a default path.
             rc=0
-            /usr/bin/sigil-proxy run >/dev/null 2>&1 || rc=$?
+            /usr/bin/lodeline-proxy run >/dev/null 2>&1 || rc=$?
             if [ "$rc" != 2 ]; then
-              echo "::error::sigil-proxy run without --config exited $rc, expected 2"
+              echo "::error::lodeline-proxy run without --config exited $rc, expected 2"
               exit 1
             fi
             # The process and port scans are only a smoke test (the binary never
@@ -261,13 +265,13 @@ jobs:
           }
 
           for entry in \
-            "sigil|sigil|sigil.service|/etc/sigil/policy.yaml.example" \
-            "sigil-sender|sigil-sender|sigil-sender.service|/etc/sigil/sender.yaml.example" \
-            "sigil-server|sigil-server|sigil-server.service|/etc/sigil/server.yaml.example" \
-            "sigil-signer|sigil-sign||" \
-            "sigil-proxy|sigil-proxy|sigil-proxy.service|/etc/sigil/proxy.yaml.example"; do
+            "lodeline|lodeline|lodeline.service|/etc/lodeline/policy.yaml.example" \
+            "lodeline-sender|lodeline-sender|lodeline-sender.service|/etc/lodeline/sender.yaml.example" \
+            "lodeline-server|lodeline-server|lodeline-server.service|/etc/lodeline/server.yaml.example" \
+            "lodeline-signer|lodeline-sign||" \
+            "lodeline-proxy|lodeline-proxy|lodeline-proxy.service|/etc/lodeline/proxy.yaml.example"; do
             IFS='|' read -r pkg bin unit example <<< "$entry"
-            # the `_` after the name keeps sigil_ from matching sigil-sender_ etc.
+            # the `_` after the name keeps lodeline_ from matching lodeline-sender_ etc.
             deb=$(echo target/debian/${pkg}_[0-9]*.deb)
             echo "=== $pkg :: $deb ==="
             dpkg --info "$deb"
@@ -279,23 +283,23 @@ jobs:
             grep -qE "/usr/bin/${bin}$" <<< "$contents"
             [ -z "$unit" ]    || grep -qE "/systemd/system/${unit}$" <<< "$contents"
             [ -z "$example" ] || grep -qE "${example}$" <<< "$contents"
-            if [ "$pkg" = sigil-proxy ]; then
+            if [ "$pkg" = lodeline-proxy ]; then
               # AC-14: no live config shipped; maintainer scripts never enable or
               # start the unit (debhelper's guarded was-enabled upgrade path and
               # try-restart are the only systemd calls).
-              if grep -qE '/etc/sigil/proxy\.yaml$' <<< "$contents"; then
-                echo "::error::sigil-proxy must not ship a live /etc/sigil/proxy.yaml"
+              if grep -qE '/etc/lodeline/proxy\.yaml$' <<< "$contents"; then
+                echo "::error::lodeline-proxy must not ship a live /etc/lodeline/proxy.yaml"
                 exit 1
               fi
               ctl=$(mktemp -d)
               dpkg-deb -e "$deb" "$ctl"
               scripts=$(cat "$ctl/postinst" "$ctl/prerm" "$ctl/postrm")
               if grep -Eq 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(enable|start)([[:space:]]|$)|deb-systemd-invoke[[:space:]]+(start|restart)([[:space:]]|$)' <<< "$scripts"; then
-                echo "::error::sigil-proxy scripts must not enable or start the service"
+                echo "::error::lodeline-proxy scripts must not enable or start the service"
                 exit 1
               fi
               if grep -Eq 'semodule' <<< "$scripts"; then
-                echo "::error::sigil-proxy scripts must not load an SELinux module"
+                echo "::error::lodeline-proxy scripts must not load an SELinux module"
                 exit 1
               fi
             fi
@@ -304,9 +308,9 @@ jobs:
             apt-get install -y "./$deb"
             "/usr/bin/${bin}" --help >/dev/null
             [ -z "$example" ] || test -f "$example"
-            if [ "$pkg" = sigil-proxy ]; then
-              /usr/bin/sigil-proxy --version
-              /usr/bin/sigil-proxy version
+            if [ "$pkg" = lodeline-proxy ]; then
+              /usr/bin/lodeline-proxy --version
+              /usr/bin/lodeline-proxy version
               proxy_assert_disabled_and_silent
             fi
             dpkg -P "$pkg"
@@ -315,16 +319,16 @@ jobs:
 
           # Co-install (#252): dpkg refuses a package that owns a path another
           # installed package owns, which the one-at-a-time loop above never hits.
-          all=(sigil sigil-sender sigil-server sigil-signer sigil-proxy)
+          all=(lodeline lodeline-sender lodeline-server lodeline-signer lodeline-proxy)
           debs=()
           for pkg in "${all[@]}"; do debs+=("./$(echo target/debian/${pkg}_[0-9]*.deb)"); done
           apt-get install -y "${debs[@]}"
-          for f in sigil sigil-sender sigil-server sigil-proxy; do
+          for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
           # The per-package copies must stay identical (they define one shared
-          # `sigil` user and its directories).
-          cmp /usr/lib/sysusers.d/sigil.conf /usr/lib/sysusers.d/sigil-sender.conf
-          cmp /usr/lib/sysusers.d/sigil.conf /usr/lib/sysusers.d/sigil-server.conf
-          cmp /usr/lib/tmpfiles.d/sigil.conf /usr/lib/tmpfiles.d/sigil-sender.conf
+          # `lodeline` user and its directories).
+          cmp /usr/lib/sysusers.d/lodeline.conf /usr/lib/sysusers.d/lodeline-sender.conf
+          cmp /usr/lib/sysusers.d/lodeline.conf /usr/lib/sysusers.d/lodeline-server.conf
+          cmp /usr/lib/tmpfiles.d/lodeline.conf /usr/lib/tmpfiles.d/lodeline-sender.conf
           dpkg -P "${all[@]}"

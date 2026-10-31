@@ -28,7 +28,7 @@ class ReleaseManifestTests(unittest.TestCase):
     def archive(self, target, names=release.BINARIES, duplicate=False, symlink=False,
                 windows_separators=False):
         path = self.dist / release.archive_name(self.version, target)
-        prefix = f"sigil-{self.version}-{target}"
+        prefix = f"lodeline-{self.version}-{target}"
         entries = list(names) + ([names[0]] if duplicate else [])
         if path.suffix == ".zip":
             with zipfile.ZipFile(path, "w") as bundle:
@@ -144,9 +144,9 @@ class ReleaseManifestTests(unittest.TestCase):
         ):
             with self.subTest(code=code, message=message):
                 def run(command, **kwargs):
-                    self.assertTrue(command[0].endswith("sigil.exe"))
+                    self.assertTrue(command[0].endswith("lodeline.exe"))
                     if command[1] == "--version":
-                        return subprocess.CompletedProcess(command, 0, f"sigil {self.version}\n")
+                        return subprocess.CompletedProcess(command, 0, f"lodeline {self.version}\n")
                     if Path(command[-1]) == manifest.resolve():
                         self.assertTrue(kwargs["check"])
                         return subprocess.CompletedProcess(command, 0)
@@ -167,13 +167,13 @@ class ReleaseManifestTests(unittest.TestCase):
         self.archive(target)
         (self.dist / "build-manifest.json").write_text(json.dumps(self.manifest()))
         with patch.object(release.subprocess, "run", return_value=
-                          subprocess.CompletedProcess([], 0, "sigil 0.8.0")) as run:
+                          subprocess.CompletedProcess([], 0, "lodeline 0.8.0")) as run:
             with self.assertRaisesRegex(ValueError, "version mismatch"):
                 release.verify(self.dist, self.version, target, "test-sha")
             self.assertEqual(run.call_count, 1)
         with patch.object(release.subprocess, "run", side_effect=[
-            subprocess.CompletedProcess([], 0, f"sigil {self.version}"),
-            subprocess.CalledProcessError(1, ["sigil", "doctor"]),
+            subprocess.CompletedProcess([], 0, f"lodeline {self.version}"),
+            subprocess.CalledProcessError(1, ["lodeline", "doctor"]),
         ]) as run:
             with self.assertRaises(subprocess.CalledProcessError):
                 release.verify(self.dist, self.version, target, "test-sha")

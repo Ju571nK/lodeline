@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Sigil AI-Guard money-shot demo — fully sandboxed, no sudo, never touches your
+# Lodeline AI-Guard money-shot demo — fully sandboxed, no sudo, never touches your
 # real ~/.claude. A clean per-repo Claude Code config (acme-api/.claude/
 # settings.json) gains a `PreToolUse` hook with a `.*` matcher that runs
-# `rm -rf $HOME` in the host shell, and Sigil re-scores that repo 7.5 / critical
+# `rm -rf $HOME` in the host shell, and Lodeline re-scores that repo 7.5 / critical
 # in real time (destructive_in_inline_command + no_sandbox + broad_matcher).
 #
 # Run it yourself from the repo root:
@@ -17,7 +17,7 @@
 #     parser keys off the repo path, not $HOME.
 #   * We still run with HOME=$SANDBOX so the *global* parser reads an empty home
 #     and no real ~/.claude risk leaks into the recording.
-#   * The control socket lives at the hardcoded /var/run/sigil/control.sock,
+#   * The control socket lives at the hardcoded /var/run/lodeline/control.sock,
 #     which a non-root user can't bind — that's non-fatal; we read events
 #     straight from the JSONL spool (`show events`), which needs no socket.
 
@@ -27,17 +27,17 @@ set -euo pipefail
 # Canonicalized (`pwd -P`) because on macOS /tmp is a symlink to /private/tmp:
 # the watcher stores raw watched paths but the hasher canonicalizes incoming
 # paths, so a non-canonical sandbox makes file-change triggers silently miss.
-if [ -n "${SIGIL_DEMO_HOME:-}" ]; then
-  SB="$SIGIL_DEMO_HOME"
+if [ -n "${LODELINE_DEMO_HOME:-}" ]; then
+  SB="$LODELINE_DEMO_HOME"
 else
-  SB="$(cd /tmp && pwd -P)/sigil-demo"
+  SB="$(cd /tmp && pwd -P)/lodeline-demo"
 fi
 case "$SB" in
-  */sigil-demo) : ;;   # `down` does rm -rf "$SB"; refuse anything not clearly the sandbox
-  *) echo "refusing: sandbox path must end in /sigil-demo ($SB)" >&2; exit 2 ;;
+  */lodeline-demo) : ;;   # `down` does rm -rf "$SB"; refuse anything not clearly the sandbox
+  *) echo "refusing: sandbox path must end in /lodeline-demo ($SB)" >&2; exit 2 ;;
 esac
 
-SIGIL="${SIGIL:-target/release/sigil}"   # or: SIGIL='cargo run -q -p sigil-agent --'
+LODELINE="${LODELINE:-target/release/lodeline}"   # or: LODELINE='cargo run -q -p lodeline-agent --'
 # Native FS events (instant) by default. On a VM-backed bind mount where native
 # events don't fire (Docker/Rancher Desktop), set POLL=--poll (5s interval).
 POLL="${POLL:-}"
@@ -101,7 +101,7 @@ up() {
   mkdir -p "$REPO/.claude" "$EVENTS"
   benign_config
   write_policy
-  HOME="$SB" $SIGIL --policy "$POLICY" --events-dir "$EVENTS" --state-db "$SB/state.db" run $POLL \
+  HOME="$SB" $LODELINE --policy "$POLICY" --events-dir "$EVENTS" --state-db "$SB/state.db" run $POLL \
     > "$SB/agent.log" 2>&1 &
   echo $! > "$PIDFILE"
 }
@@ -109,11 +109,11 @@ up() {
 attack() { dangerous_config; }
 
 show() {
-  echo "› sigil show events --pretty   (AI-guard assessments)"
-  HOME="$SB" $SIGIL --events-dir "$EVENTS" show events --pretty -n 40 2>/dev/null \
+  echo "› lodeline show events --pretty   (AI-guard assessments)"
+  HOME="$SB" $LODELINE --events-dir "$EVENTS" show events --pretty -n 40 2>/dev/null \
     | grep ai_guard_risk_assessed | tail -8 || true
   echo
-  echo "› the project-scoped Claude Code assessment Sigil emitted for acme-api:"
+  echo "› the project-scoped Claude Code assessment Lodeline emitted for acme-api:"
   grep -h ai_guard_risk_assessed "$EVENTS"/events-*.jsonl 2>/dev/null \
     | jq -c 'select(.evidence.tool == "claude_code" and .evidence.scope.kind == "project")' \
     | tail -1 \
@@ -134,7 +134,7 @@ case "${1:-demo}" in
     trap down EXIT
     up;            sleep "$SETTLE"
     echo "› acme-api/.claude/settings.json — clean, read-only:"; cat "$SETTINGS"; echo
-    attack;        echo "› a dangerous hook just landed — watching Sigil react…"; sleep "$SETTLE"
+    attack;        echo "› a dangerous hook just landed — watching Lodeline react…"; sleep "$SETTLE"
     show
     ;;
   *) echo "usage: $0 {demo|up|attack|show|down}" >&2; exit 1 ;;

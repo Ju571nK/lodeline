@@ -1,10 +1,10 @@
-# sigil agent — Install Guide (macOS)
+# lodeline agent — Install Guide (macOS)
 
-The `sigil` agent watches AI-tool config and posture files (MCP allowlists,
+The `lodeline` agent watches AI-tool config and posture files (MCP allowlists,
 credential files, agent settings, …), hashes them, and emits **JSONL posture
 events**. It measures; it does not block. Events can be read locally by a SIEM
-agent, or shipped to a [`sigil-server`](install-server.md) by the companion
-`sigil-sender`.
+agent, or shipped to a [`lodeline-server`](install-server.md) by the companion
+`lodeline-sender`.
 
 > **Just want your own machine's score? (30 seconds)**
 > Install the personal profile and run a one-shot scan — no daemon, no Full Disk
@@ -12,17 +12,17 @@ agent, or shipped to a [`sigil-server`](install-server.md) by the companion
 >
 > ```sh
 > curl --proto '=https' --tlsv1.2 -fsSL \
->   https://raw.githubusercontent.com/Ju571nK/sigil/main/install.sh | sh
-> sigil scan
+>   https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
+> lodeline scan
 > ```
 >
-> That installs three binaries (`sigil`, `sigil-mcp`, `sigil-hook`) and prints a
+> That installs three binaries (`lodeline`, `lodeline-mcp`, `lodeline-hook`) and prints a
 > posture score. For the full personal guide (local rule packs, MCP, hook
 > enforcement) see [install-personal.md](install-personal.md).
 
 This guide covers a **production / operator** macOS deployment — running the
 agent persistently (root launchd), granting Full Disk Access for fleet-wide
-coverage, and shipping events to a [`sigil-server`](install-server.md). For the
+coverage, and shipping events to a [`lodeline-server`](install-server.md). For the
 server side, see [install-server.md](install-server.md).
 
 ---
@@ -33,28 +33,28 @@ server side, see [install-server.md](install-server.md).
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/Ju571nK/sigil/main/install.sh | sh
+  https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
 ```
 
-Installs the **personal** profile by default — `sigil`, `sigil-mcp`, and
-`sigil-hook` — to `~/.local/bin` (verifies SHA-256). Make sure `~/.local/bin` is
+Installs the **personal** profile by default — `lodeline`, `lodeline-mcp`, and
+`lodeline-hook` — to `~/.local/bin` (verifies SHA-256). Make sure `~/.local/bin` is
 on your `PATH`.
 
-This operator deployment also ships events with `sigil-sender` (§7). It is part
+This operator deployment also ships events with `lodeline-sender` (§7). It is part
 of the **fleet** profile, so install that instead to add the server-side
 binaries on top of the personal three:
 
 ```sh
-SIGIL_PROFILE=fleet curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/Ju571nK/sigil/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | LODELINE_PROFILE=fleet sh
 ```
 
-`fleet` adds `sigil-sender`, `sigil-server`, and `sigil-sign`.
+`fleet` adds `lodeline-sender`, `lodeline-server`, and `lodeline-sign`.
 
 ### Option B — build from source
 
 ```sh
-cargo build --release -p sigil-agent   # → target/release/sigil
+cargo build --release -p lodeline-agent   # → target/release/lodeline
 ```
 
 > **Intel Macs** are not shipped as prebuilt binaries — build from source.
@@ -71,8 +71,8 @@ it emits a `PermissionMissing` event per affected target.
 1. **System Settings → Privacy & Security → Full Disk Access.**
 2. Add the program that runs the agent:
    - running by hand → add your **terminal app** (Terminal / iTerm);
-   - running via launchd → add the **`sigil` binary** itself.
-3. `sigil doctor` reports the FDA state — run it after granting (section 5).
+   - running via launchd → add the **`lodeline` binary** itself.
+3. `lodeline doctor` reports the FDA state — run it after granting (section 5).
 
 ---
 
@@ -98,17 +98,17 @@ this matters on macOS because the system locations aren't user-writable:
 
 | Item | Default as root | Default as non-root user |
 |---|---|---|
-| state.db | `/var/lib/sigil/state.db` | pass `--state-db ~/.local/state/sigil/state.db` |
-| events dir | `/var/log/sigil` | pass `--events-dir ~/.local/state/sigil/events` |
-| control socket | `/var/run/sigil/control.sock` | `$XDG_RUNTIME_DIR/sigil/control.sock` → else `/tmp/sigil-<uid>/control.sock` (auto) |
-| keystore | `/etc/sigil/policy-signing-pubkeys.pem` | `$XDG_CONFIG_HOME/sigil/...` → else `~/.config/sigil/...` (auto) |
+| state.db | `/var/lib/lodeline/state.db` | pass `--state-db ~/.local/state/lodeline/state.db` |
+| events dir | `/var/log/lodeline` | pass `--events-dir ~/.local/state/lodeline/events` |
+| control socket | `/var/run/lodeline/control.sock` | `$XDG_RUNTIME_DIR/lodeline/control.sock` → else `/tmp/lodeline-<uid>/control.sock` (auto) |
+| keystore | `/etc/lodeline/policy-signing-pubkeys.pem` | `$XDG_CONFIG_HOME/lodeline/...` → else `~/.config/lodeline/...` (auto) |
 
 The **control socket** and **keystore** now fall back to user-writable
 locations automatically when you're not root, so the control plane and policy
 verification work without `sudo`. Override any path explicitly:
 
 ```sh
-sigil --control-socket /tmp/sigil.sock --keystore ~/.config/sigil/pubkeys.pem run
+lodeline --control-socket /tmp/lodeline.sock --keystore ~/.config/lodeline/pubkeys.pem run
 ```
 
 `--state-db` and `--events-dir` have **no** auto-fallback — point them at
@@ -128,54 +128,54 @@ writable paths when running as your user.
 ### Foreground (testing)
 
 ```sh
-sigil doctor                 # check config + FDA first
-sigil --state-db ~/.local/state/sigil/state.db \
-      --events-dir ~/.local/state/sigil/events run
+lodeline doctor                 # check config + FDA first
+lodeline --state-db ~/.local/state/lodeline/state.db \
+      --events-dir ~/.local/state/lodeline/events run
 ```
 
 ### Persistent (launchd LaunchDaemon, runs as root)
 
-`/Library/LaunchDaemons/com.sigil.agent.plist`:
+`/Library/LaunchDaemons/com.lodeline.agent.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.sigil.agent</string>
+  <key>Label</key><string>com.lodeline.agent</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/sigil</string>
+    <string>/usr/local/bin/lodeline</string>
     <string>run</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/var/log/sigil/agent.err.log</string>
+  <key>StandardErrorPath</key><string>/var/log/lodeline/agent.err.log</string>
 </dict></plist>
 ```
 
 ```sh
-sudo cp target/release/sigil /usr/local/bin/sigil
-sudo launchctl load -w /Library/LaunchDaemons/com.sigil.agent.plist
+sudo cp target/release/lodeline /usr/local/bin/lodeline
+sudo launchctl load -w /Library/LaunchDaemons/com.lodeline.agent.plist
 ```
 
-Set the diagnostic log level with `SIGIL_LOG` (e.g. `SIGIL_LOG=debug`).
+Set the diagnostic log level with `LODELINE_LOG` (e.g. `LODELINE_LOG=debug`).
 
 ---
 
 ## 5. Verify
 
 ```sh
-sigil doctor              # config + permissions (FDA), does not start the daemon
-sigil show config         # merged effective policy
-sigil show paths          # fully expanded watch paths
-sigil show risk           # AI Guard risk score per tool (queries the running daemon)
-sigil show stats          # live heartbeat from the running daemon
+lodeline doctor              # config + permissions (FDA), does not start the daemon
+lodeline show config         # merged effective policy
+lodeline show paths          # fully expanded watch paths
+lodeline show risk           # AI Guard risk score per tool (queries the running daemon)
+lodeline show stats          # live heartbeat from the running daemon
 ```
 
-`sigil show risk` is the core AI-SPM read: it scores each detected AI tool
+`lodeline show risk` is the core AI-SPM read: it scores each detected AI tool
 (`claude-code`, `codex`, `gemini`, `cursor`) from its real on-disk config.
-Without a running daemon, `sigil scan` produces the same per-tool scores in one
+Without a running daemon, `lodeline scan` produces the same per-tool scores in one
 shot (and exits 0) — handy for a quick check before the daemon is set up.
 
 ---
@@ -187,8 +187,8 @@ first run and persists it in `state.db`. It's printed at startup:
 
 ```sh
 # launchd: check the diagnostic log / Console for:
-#   INFO sigil_agent::runtime: agent host_id resolved host_id=<uuid>
-grep "agent host_id resolved" /var/log/sigil/agent.err.log
+#   INFO lodeline_agent::runtime: agent host_id resolved host_id=<uuid>
+grep "agent host_id resolved" /var/log/lodeline/agent.err.log
 ```
 
 It also appears as the `host_id` field on every emitted event.
@@ -197,33 +197,33 @@ It also appears as the `host_id` field on every emitted event.
 
 ## 7. Ship events to a server (optional)
 
-To forward events to a [`sigil-server`](install-server.md), run `sigil-sender`.
+To forward events to a [`lodeline-server`](install-server.md), run `lodeline-sender`.
 First get this host's client cert + `ca.crt` from the server operator
 ([install-server.md § 3](install-server.md)). Then write `sender.yaml`:
 
 ```yaml
-# ~/.config/sigil/sender.yaml  (or /etc/sigil/sender.yaml as root)
-server_base_url: "https://sigil.example.com:8443"
+# ~/.config/lodeline/sender.yaml  (or /etc/lodeline/sender.yaml as root)
+server_base_url: "https://lodeline.example.com:8443"
 client_cert_path: "/path/to/client-hostA.crt"
 client_key_path:  "/path/to/client-hostA.key"
 server_ca_path:   "/path/to/ca.crt"
 
-events_dir: "~/.local/state/sigil/events"     # MUST equal the agent's --events-dir
-offset_path: "~/.local/state/sigil/sender-offset.json"
-dead_letter_dir: "~/.local/state/sigil/dead-letter"
+events_dir: "~/.local/state/lodeline/events"     # MUST equal the agent's --events-dir
+offset_path: "~/.local/state/lodeline/sender-offset.json"
+dead_letter_dir: "~/.local/state/lodeline/dead-letter"
 
 # REQUIRED — must equal the agent's host_id (section 6). A mismatch makes the
 # server reject the entire batch with host_id_payload_mismatch.
 host_id: "<agent host_id from section 6>"
 
 # Control IPC — must equal the agent's control socket. As your user that is the
-# auto fallback (e.g. /tmp/sigil-<uid>/control.sock), or whatever you passed to
-# `sigil --control-socket`.
-agent_control: "/tmp/sigil-501/control.sock"
+# auto fallback (e.g. /tmp/lodeline-<uid>/control.sock), or whatever you passed to
+# `lodeline --control-socket`.
+agent_control: "/tmp/lodeline-501/control.sock"
 ```
 
 ```sh
-sigil-sender --config ~/.config/sigil/sender.yaml start
+lodeline-sender --config ~/.config/lodeline/sender.yaml start
 ```
 
 Three alignment rules (each is a real failure mode found in testing):
@@ -239,7 +239,7 @@ Three alignment rules (each is a real failure mode found in testing):
 
 If you use the control plane (server-pushed signed policy), the agent verifies
 signatures against a keystore. Put the **public** key from the operator's
-signing key (`sigil-sign keygen` produced `ed25519_pubkey_b64`) at the keystore
+signing key (`lodeline-sign keygen` produced `ed25519_pubkey_b64`) at the keystore
 path (section 3):
 
 ```json
@@ -261,12 +261,12 @@ does **not** need a keystore.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `sigil doctor` reports FDA denied / few targets | No Full Disk Access | Grant FDA to the runner (§2) |
+| `lodeline doctor` reports FDA denied / few targets | No Full Disk Access | Grant FDA to the runner (§2) |
 | Permission denied writing state/events as your user | System default paths need root | Pass `--state-db`/`--events-dir` to writable paths (§3) |
 | Sender: server rejects all events | `host_id` ≠ agent's | Align `host_id` (§6, §7) |
 | Sender tails nothing | `events_dir` ≠ agent's `--events-dir` | Match them (§7) |
 | `keystore unavailable` warning | No keystore file | Expected if not using pushed policy (§8) |
-| Control plane / `sigil show stats` can't connect | socket path mismatch | Align `agent_control` with `--control-socket` (§7) |
+| Control plane / `lodeline show stats` can't connect | socket path mismatch | Align `agent_control` with `--control-socket` (§7) |
 
 ---
 

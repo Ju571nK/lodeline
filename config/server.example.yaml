@@ -1,4 +1,4 @@
-# Sigil OSS reference server — example config. Copy to /etc/sigil/server.yaml.
+# Lodeline OSS reference server — example config. Copy to /etc/lodeline/server.yaml.
 
 # TLS bind address. Use 0.0.0.0 to accept from any interface, 127.0.0.1 to
 # localhost-only (useful behind a reverse proxy).
@@ -6,47 +6,47 @@ bind: "0.0.0.0:8443"
 
 # Per-host events directory root. Each host_id gets a date-rotated jsonl
 # subdir under here.
-events_out_dir: "/var/lib/sigil-server/events"
+events_out_dir: "/var/lib/lodeline-server/events"
 
 # Signed policy bundle served at GET /v1/policy. Operators produce this with
-# `sigil-sign sign ...` and place it here.
-policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
+# `lodeline-sign sign ...` and place it here.
+policy_bundle_path: "/var/lib/lodeline-server/signed-policy.json"
 
 # Optional — mTLS. When all three are set the server requires client certs
 # signed by `client_ca_path`. Without these, mTLS is OFF (development only).
-# tls_cert_path: "/etc/sigil/server.crt"
-# tls_key_path: "/etc/sigil/server.key"
-# client_ca_path: "/etc/sigil/client-ca.pem"
+# tls_cert_path: "/etc/lodeline/server.crt"
+# tls_key_path: "/etc/lodeline/server.key"
+# client_ca_path: "/etc/lodeline/client-ca.pem"
 
 # Optional — restrict accepted host_ids. JSON: {"hosts": ["uuid-a", "uuid-b"]}.
 # Without this, every authenticated client is accepted.
-# host_allowlist_path: "/etc/sigil/host-allowlist.json"
+# host_allowlist_path: "/etc/lodeline/host-allowlist.json"
 
 # Optional — per-host event-id high-water file (at-least-once dedup). If
 # unset, the server uses <events_out_dir>/.high-water.json.
-# high_water_path: "/var/lib/sigil-server/high_water.json"
+# high_water_path: "/var/lib/lodeline-server/high_water.json"
 
 # Optional — signed rule-pack bundle served at GET /v1/rule-packs. Produced by
-# `sigil-sign` like the policy bundle. Absent ⇒ that route returns 404.
-# rule_packs_bundle_path: "/var/lib/sigil-server/signed-rule-packs.json"
+# `lodeline-sign` like the policy bundle. Absent ⇒ that route returns 404.
+# rule_packs_bundle_path: "/var/lib/lodeline-server/signed-rule-packs.json"
 
 # Optional (#182) — directory of operator-populated, signed agent release
 # artifacts (tarballs/zips, .deb/.rpm, SHA256SUMS, build-manifest.json), served
 # read-only at GET /v1/artifacts[/ <file>] so an air-gapped fleet/PMS can pull
 # clients from the server instead of GitHub. Bearer-gated, path-traversal-hardened.
 # Absent ⇒ /v1/artifacts* returns 404 (feature off).
-# artifacts_dir: "/var/lib/sigil-server/artifacts"
+# artifacts_dir: "/var/lib/lodeline-server/artifacts"
 
 # --- Automated enrollment / B-mint (#184) --------------------------------------
 # POST /v1/enroll signs a per-host CSR into a short-lived mTLS client cert using
 # an operator-provided INTERMEDIATE CA (keep the root offline). Requires mTLS
 # above AND a restrictive host_allowlist_path — the server refuses to enable
 # enrollment otherwise. Mint a single-use token with:
-#   sigil-server enroll-token --config server.yaml --host-id <uuid> [--ttl 1h]
+#   lodeline-server enroll-token --config server.yaml --host-id <uuid> [--ttl 1h]
 #
-# enroll_ca_cert_path: "/etc/sigil/enroll-intermediate.crt"   # CA:TRUE, PEM
-# enroll_ca_key_path:  "/etc/sigil/enroll-intermediate.key"   # 0600, matches cert
-# enroll_tokens_path:  "/var/lib/sigil-server/enroll-tokens.json"
+# enroll_ca_cert_path: "/etc/lodeline/enroll-intermediate.crt"   # CA:TRUE, PEM
+# enroll_ca_key_path:  "/etc/lodeline/enroll-intermediate.key"   # 0600, matches cert
+# enroll_tokens_path:  "/var/lib/lodeline-server/enroll-tokens.json"
 # enroll_cert_days: 30                                          # issued-cert TTL (default 30)
 
 # Optional (#194.1) — bind /v1/enroll to specific caller certs. Each entry is the
@@ -72,15 +72,15 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 # `path` is ignored. Both log a warning at startup.)
 # active_window_days: 30
 
-# Optional (T-11, Sigil Proxy) — proxy identity + registry. Absent ⇒ every proxy
+# Optional (T-11, Lodeline Proxy) — proxy identity + registry. Absent ⇒ every proxy
 # route is absent and host behaviour is unchanged. Requires mTLS (the server
 # refuses to start otherwise). `ca_path` is the proxy client CA (PEM); it must
 # ALSO be appended to `client_ca_path`, and its subject DN must differ from every
 # other CA in that bundle (boot refuses otherwise). Proxy certs are rejected on
 # host routes and host certs on proxy routes.
 # proxy:
-#   ca_path: "/etc/sigil/proxy-ca.pem"
-#   registry_path: "/var/lib/sigil-server/proxies.json"   # not group/world-writable, not a symlink
+#   ca_path: "/etc/lodeline/proxy-ca.pem"
+#   registry_path: "/var/lib/lodeline-server/proxies.json"   # not group/world-writable, not a symlink
 #   registry_init: false   # true = create an empty registry if the file is missing (first boot only)
 #   # Management API (register / fingerprint / disable / enable / retire + audit read).
 #   # Absent = those routes do not exist (404). Present = must load at boot, or the
@@ -89,7 +89,7 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   #     "scope":"identity|config","caller_cert_fingerprint":"<blake3 hex of the caller cert DER>",
 #   #     "not_after":"2027-01-01T00:00:00Z"}]}
 #   # At most 2 non-expired entries per scope. Generate an entry with
-#   # `sigil-server proxy verifier-new --scope identity --caller-fingerprint <fp>`.
+#   # `lodeline-server proxy verifier-new --scope identity --caller-fingerprint <fp>`.
 #   # Edit it via a new file + rename over the old one (tmp + rename), or send SIGHUP
 #   # after an in-place edit. Changes are also picked up automatically; a half-written
 #   # file reads as broken. A broken file on
@@ -97,11 +97,11 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # The caller cert must come from the host CA (never the proxy CA) and must
 #   # not be used for any other route; it is rejected on host and proxy routes.
 #   # Audit stream: <dir of high_water_path>/proxy-management-audit.jsonl (signed).
-#   management_verifiers: "/etc/sigil/proxy-management-verifiers.json"
+#   management_verifiers: "/etc/lodeline/proxy-management-verifiers.json"
 #   # Config/status store (S3): latest config, status snapshot and gaps per proxy.
 #   # JSON, owner-only 0600, not a symlink. Default: proxy-state.json next to registry_path.
 #   # A missing file starts empty (warning); a corrupt or group/world-accessible one refuses boot.
-#   # state_path: "/var/lib/sigil-server/proxy-state.json"
+#   # state_path: "/var/lib/lodeline-server/proxy-state.json"
 #   # Boot cross-check: the management audit is written before the state store. If the audit
 #   # records a config PUT to a revision the store does not hold (store file lost, restored from
 #   # a backup, or a crash between audit and write), boot is REFUSED. Set state_init: true for
@@ -115,7 +115,7 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # ack_loss_margin_seconds: 604800
 #   # Event ledger (T-11 S4). SQLite file, created owner-only (0600). Default:
 #   # proxy-ledger.sqlite next to state_path.
-#   # ledger_path: /var/lib/sigil-server/proxy-ledger.sqlite
+#   # ledger_path: /var/lib/lodeline-server/proxy-ledger.sqlite
 #   # Dedup tombstone retention T (seconds, 3600..63072000, default 7776000). Boot is REFUSED
 #   # unless T >= max_offline_retry_age_seconds + ack_loss_margin_seconds for every stored
 #   # proxy config, and a config PUT that would break it is refused (422).
@@ -130,7 +130,7 @@ policy_bundle_path: "/var/lib/sigil-server/signed-policy.json"
 #   # ledger_max_bytes_total: 4294967296
 #   # Registry-entry store for POST /v1/proxy-metadata (SQLite, 0600). Default:
 #   # proxy-metadata.sqlite next to state_path. Caps answer 503 storage_limit (unmeasured values).
-#   # metadata_path: /var/lib/sigil-server/proxy-metadata.sqlite
+#   # metadata_path: /var/lib/lodeline-server/proxy-metadata.sqlite
 #   # metadata_max_entries_per_proxy: 10000       # 1..10000000
 #   # metadata_max_bytes_per_proxy: 134217728     # <= metadata_max_bytes_total
 #   # metadata_max_bytes_total: 1073741824        # 1048576..1099511627776

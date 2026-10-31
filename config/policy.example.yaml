@@ -1,5 +1,5 @@
-# Example user-override policy. Drop into /etc/sigil/policy.yaml or
-# %ProgramData%\Sigil\policy.yaml.
+# Example user-override policy. Drop into /etc/lodeline/policy.yaml or
+# %ProgramData%\Lodeline\policy.yaml.
 version: 1
 host_id_strategy: machine_id
 
@@ -20,7 +20,7 @@ targets:
     follow_symlinks: false
 
 # Optional (Phase 3b): tune the AI Guard risk rubric. Keys are rubric kind_key
-# values — run `sigil doctor` to see the full effective table with current
+# values — run `lodeline doctor` to see the full effective table with current
 # weights. Unknown keys are logged and ignored; an absent section = built-in
 # defaults. Higher weight ⇒ that finding contributes more to a host's risk score.
 rubric_overrides:

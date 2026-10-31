@@ -20,7 +20,7 @@ TARGETS = (
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
 )
-BINARIES = ("sigil", "sigil-sender", "sigil-server", "sigil-sign", "sigil-mcp", "sigil-hook")
+BINARIES = ("lodeline", "lodeline-sender", "lodeline-server", "lodeline-sign", "lodeline-mcp", "lodeline-hook")
 MAX_BINARY_BYTES = 256 * 1024 * 1024
 
 
@@ -30,13 +30,13 @@ def archive_name(version, target):
     if target not in TARGETS:
         raise ValueError("unsupported release target")
     suffix = ".zip" if target.endswith("-windows-msvc") else ".tar.gz"
-    return f"sigil-{version}-{target}{suffix}"
+    return f"lodeline-{version}-{target}{suffix}"
 
 
 def extract_binaries(dist, version, target, work):
     """Read only exact regular-file members; never extract archive-supplied paths."""
     archive = dist / archive_name(version, target)
-    prefix = f"sigil-{version}-{target}"
+    prefix = f"lodeline-{version}-{target}"
     suffix = ".exe" if target.endswith("-windows-msvc") else ""
     expected = {f"{prefix}/{name}{suffix}": name for name in BINARIES}
     files = {}
@@ -99,10 +99,10 @@ def sign(dist, version, key, git_sha, run_url, signer=None):
     if found != expected:
         raise ValueError(f"archive set mismatch: missing={sorted(expected - found)}, extra={sorted(found - expected)}")
     # Nothing is signed until every archive and every binary has been checked.
-    with tempfile.TemporaryDirectory(prefix="sigil-manifest-") as temp:
+    with tempfile.TemporaryDirectory(prefix="lodeline-manifest-") as temp:
         work = Path(temp)
         artifacts = {target: extract_binaries(dist, version, target, work) for target in TARGETS}
-        executable = signer or artifacts["x86_64-unknown-linux-musl"]["sigil-sign"]
+        executable = signer or artifacts["x86_64-unknown-linux-musl"]["lodeline-sign"]
         output = work / "build-manifest.json"
         command = [str(executable), "manifest", "--key", str(key),
                    "--git-sha", git_sha, "--run-url", run_url, "--out", str(output)]
@@ -122,18 +122,18 @@ def sign(dist, version, key, git_sha, run_url, signer=None):
 def verify(dist, version, target, git_sha):
     manifest = (dist / "build-manifest.json").resolve()
     signed = validate_manifest(manifest, git_sha)
-    with tempfile.TemporaryDirectory(prefix="sigil-verify-") as temp:
+    with tempfile.TemporaryDirectory(prefix="lodeline-verify-") as temp:
         work = Path(temp)
-        executable = extract_binaries(dist, version, target, work)["sigil"]
+        executable = extract_binaries(dist, version, target, work)["lodeline"]
         result = subprocess.run([str(executable), "--version"], check=True,
                                 capture_output=True, text=True)
-        if result.stdout.strip() != f"sigil {version}":
+        if result.stdout.strip() != f"lodeline {version}":
             raise ValueError("downloaded binary version mismatch")
         command = [str(executable), "doctor", "--verify-self", "--manifest"]
         subprocess.run(command + [str(manifest)], check=True)
         # Verify that the same native binary rejects a modified signed payload.
         entry = next(e for e in signed["manifest"]["artifacts"]
-                     if e["name"] == "sigil" and e["target"] == target)
+                     if e["name"] == "lodeline" and e["target"] == target)
         entry["blake3"] = ("1" if entry["blake3"][0] == "0" else "0") + entry["blake3"][1:]
         tampered = work / "tampered-manifest.json"
         tampered.write_text(json.dumps(signed), encoding="utf-8")

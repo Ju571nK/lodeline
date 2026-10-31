@@ -1,0 +1,43 @@
+# Lodeline sender — systemd unit (Linux).
+#
+# Installed automatically by the .deb / .rpm packages to
+# /usr/lib/systemd/system/lodeline-sender.service. Runs the sender daemon that
+# tails the agent's JSONL spool and ships events to a lodeline-server over
+# mTLS HTTPS. Reads its config from /etc/lodeline/sender.yaml — copy
+# /etc/lodeline/sender.yaml.example and edit before enabling.
+
+[Unit]
+Description=Lodeline sender — ships JSONL posture events to lodeline-server (mTLS)
+Documentation=https://github.com/Ju571nK/lodeline
+After=network-online.target lodeline.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lodeline-sender --config /etc/lodeline/sender.yaml start
+Restart=on-failure
+RestartSec=5
+# Runs as the unprivileged lodeline user (#10 slice 2). Group=lodeline lets it READ
+# the agent's root:lodeline spool (/var/log/lodeline) and connect to the
+# agent's control socket (/run/lodeline/control.sock, root:lodeline 0660). It WRITES
+# only its own state/log dirs, which systemd owns as lodeline:lodeline 0750. The
+# lodeline user is created by this package at install (sysusers.d). NOTE: existing
+# sender.yaml files must move offset_path/dead_letter_dir to the sender-owned
+# dirs below (see CHANGELOG); fresh configs that omit them get these defaults.
+User=lodeline
+Group=lodeline
+StateDirectoryMode=0750
+LogsDirectoryMode=0750
+StateDirectory=lodeline-sender
+LogsDirectory=lodeline-sender
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lodeline-sender /var/log/lodeline-sender
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

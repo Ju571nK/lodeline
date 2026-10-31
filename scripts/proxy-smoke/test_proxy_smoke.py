@@ -146,11 +146,11 @@ class ClientTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             canary = os.path.join(d, "canaries.json")
             with open(canary, "w") as f:
-                json.dump({"canaries": ["SIGIL-CANARY-X"], "tool_names": []}, f)
+                json.dump({"canaries": ["LODELINE-CANARY-X"], "tool_names": []}, f)
             data = os.path.join(d, "data")
             os.mkdir(data)
             with open(os.path.join(data, "a.log"), "wb") as f:
-                f.write(b"x" * (1 << 20) + b"SIGIL-CANARY-X" + TOKEN.encode())
+                f.write(b"x" * (1 << 20) + b"LODELINE-CANARY-X" + TOKEN.encode())
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 rc = smoke_client.main(["scan", "--canary-file", canary,

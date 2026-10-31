@@ -1,0 +1,55 @@
+# Lodeline agent — systemd unit (Linux).
+#
+# Installed automatically by the .deb / .rpm packages (see packaging/README.md)
+# to /usr/lib/systemd/system/lodeline.service alongside /usr/bin/lodeline. To install
+# by hand from a source build instead:
+#   sudo install -m 0755 target/release/lodeline /usr/bin/lodeline
+#   sudo install -m 0644 packaging/systemd/lodeline.service /etc/systemd/system/lodeline.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lodeline
+#
+# Default paths the agent uses on Linux (override with --policy / --state-db /
+# --events-dir on ExecStart if you want something else):
+#   policy : /etc/lodeline/policy.yaml          (optional; built-in defaults apply if absent)
+#   state  : /var/lib/lodeline/state.db
+#   events : /var/log/lodeline/events-*.jsonl   (point your SIEM agent here)
+#   IPC    : /var/run/lodeline/control.sock
+#
+# Runs as root so the watcher can read other users' home directories
+# (~/.cursor/mcp.json, ~/.aws/credentials, etc.). To run unprivileged,
+# set User=/Group= to a dedicated account and accept that coverage is
+# limited to files that account can read. See `lodeline doctor`.
+# As of #10 the unit runs root:lodeline — dirs + control socket are root:lodeline 0750/0660.
+
+[Unit]
+Description=Lodeline — AI-Native Detection Engine for Device Assurance (agent)
+Documentation=https://github.com/Ju571nK/lodeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lodeline run
+Restart=on-failure
+RestartSec=5
+User=root
+Group=lodeline
+RuntimeDirectoryMode=0750
+StateDirectoryMode=0750
+LogsDirectoryMode=0750
+# State / log directories the agent writes to (created by systemd if missing).
+StateDirectory=lodeline
+LogsDirectory=lodeline
+RuntimeDirectory=lodeline
+# Mild hardening — the agent only reads files and writes to its own dirs.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lodeline /var/log/lodeline /var/run/lodeline
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

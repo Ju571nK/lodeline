@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in contributing to Sigil.
+Thank you for your interest in contributing to Lodeline.
 
 ## Contribution Guidelines
 
@@ -15,7 +15,7 @@ Thank you for your interest in contributing to Sigil.
 
 ## Good first contributions — Linux runtime
 
-The Linux runtime (`crates/sigil-agent/src/platform/linux.rs`) landed as a
+The Linux runtime (`crates/lodeline-agent/src/platform/linux.rs`) landed as a
 minimal foundation in Phase 3a: it watches files (via `notify`'s inotify
 backend), enumerates users from `/etc/passwd`, and computes the hardware
 fingerprint. Several refinements are deliberately left open and marked
@@ -25,20 +25,20 @@ fingerprint. Several refinements are deliberately left open and marked
   `/proc/sys/fs/inotify/max_user_watches` causes `notify` to fail on some
   subdirectories. Today those errors are logged; a better treatment emits a
   posture event ("coverage degraded — N subtrees unwatched") and has
-  `sigil doctor` warn when the sysctl looks low relative to the policy's path
+  `lodeline doctor` warn when the sysctl looks low relative to the policy's path
   count.
 - **`fda_state()` nuance.** It returns `Granted` unconditionally on Linux
   (there is no Full-Disk-Access gate). It could instead reflect whether the
   daemon runs as root / with `CAP_DAC_READ_SEARCH` vs. a limited user and
-  surface that in `sigil doctor`.
+  surface that in `lodeline doctor`.
 - **LDAP / Active Directory users.** `list()` parses `/etc/passwd` directly.
   On directory-joined hosts, real users may only appear via `getent passwd`.
   An opt-in (config-gated) `getent` path would broaden coverage — gated
   because AD homes are often NFS-mounted and slow.
-- **Init-system-agnostic service status.** `sigil doctor` does not check
+- **Init-system-agnostic service status.** `lodeline doctor` does not check
   whether the agent service is running. A check that handles systemd /
   OpenRC / runit would be useful (systemd unit ships in
-  `packaging/systemd/sigil.service`).
+  `packaging/systemd/lodeline.service`).
 
 Linux runtime tests run in CI on `ubuntu-22.04`, so platform-specific test
 gaps in the existing agent integration suite are also fair game.

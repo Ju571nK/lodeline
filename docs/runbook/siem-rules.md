@@ -1,12 +1,12 @@
-# Recommended SIEM rules for Sigil
+# Recommended SIEM rules for Lodeline
 
-Sigil itself does not enforce these rules — they live in the customer's SIEM.
+Lodeline itself does not enforce these rules — they live in the customer's SIEM.
 
 ## Splunk inputs.conf
 
 ```
-[monitor:///var/log/sigil/events-*.jsonl]
-sourcetype = sigil:event:json
+[monitor:///var/log/lodeline/events-*.jsonl]
+sourcetype = lodeline:event:json
 disabled   = false
 ```
 
@@ -15,9 +15,9 @@ disabled   = false
 ```yaml
 logs:
   - type: file
-    path: /var/log/sigil/events-*.jsonl
-    service: sigil
-    source: sigil
+    path: /var/log/lodeline/events-*.jsonl
+    service: lodeline
+    source: lodeline
 ```
 
 ## Heartbeat absence (host went silent)

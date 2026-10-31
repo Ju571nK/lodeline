@@ -171,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
             with self.server.lock:
                 self.server.sessions[sid] = False
             self.result(rid, {"protocolVersion": REVISION, "capabilities": {"tools": {}},
-                              "serverInfo": {"name": "sigil-p0-fixture", "version": "0.1.0"}},
+                              "serverInfo": {"name": "lodeline-p0-fixture", "version": "0.1.0"}},
                         headers={"MCP-Session-Id": sid})
             return
         sid = self.session()

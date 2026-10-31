@@ -1,0 +1,166 @@
+policy_module(lodeline, 0.1.0)
+
+## Lodeline SELinux policy (#69). Confines the three de-rooted lodeline daemons (#10)
+## into dedicated domains instead of unconfined_service_t. Authored from the
+## observed access on Rocky/RHEL 9 (audit2allow), tightened to interfaces.
+
+require {
+    type cgroup_t;
+    type var_run_t;
+}
+
+########################################
+# Domains. The units keep systemd's NoNewPrivileges=yes + sandboxing;
+# init_nnp_daemon_domain grants nnp_transition so the exec-time domain
+# transition still happens under NNP — both hardenings coexist, no drop-in.
+########################################
+type lodeline_agent_t;
+type lodeline_agent_exec_t;
+init_daemon_domain(lodeline_agent_t, lodeline_agent_exec_t)
+init_nnp_daemon_domain(lodeline_agent_t)
+
+type lodeline_sender_t;
+type lodeline_sender_exec_t;
+init_daemon_domain(lodeline_sender_t, lodeline_sender_exec_t)
+init_nnp_daemon_domain(lodeline_sender_t)
+
+type lodeline_server_t;
+type lodeline_server_exec_t;
+init_daemon_domain(lodeline_server_t, lodeline_server_exec_t)
+init_nnp_daemon_domain(lodeline_server_t)
+
+########################################
+# File / dir / socket / port types.
+########################################
+type lodeline_conf_t;
+files_config_file(lodeline_conf_t)
+
+type lodeline_var_lib_t;
+files_type(lodeline_var_lib_t)
+
+type lodeline_var_log_t;
+logging_log_file(lodeline_var_log_t)
+
+type lodeline_sender_var_lib_t;
+files_type(lodeline_sender_var_lib_t)
+
+type lodeline_sender_var_log_t;
+logging_log_file(lodeline_sender_var_log_t)
+
+type lodeline_server_var_lib_t;
+files_type(lodeline_server_var_lib_t)
+
+type lodeline_server_var_log_t;
+logging_log_file(lodeline_server_var_log_t)
+
+########################################
+# Common to all three daemons.
+########################################
+# systemd places each service in a cgroup it reads at startup.
+allow lodeline_agent_t cgroup_t:dir search;
+allow lodeline_agent_t cgroup_t:file getattr;
+allow lodeline_sender_t cgroup_t:dir search;
+allow lodeline_sender_t cgroup_t:file getattr;
+allow lodeline_server_t cgroup_t:dir search;
+allow lodeline_server_t cgroup_t:file getattr;
+
+# Read /etc/lodeline (config + mTLS material).
+read_files_pattern(lodeline_agent_t, lodeline_conf_t, lodeline_conf_t)
+list_dirs_pattern(lodeline_agent_t, lodeline_conf_t, lodeline_conf_t)
+read_files_pattern(lodeline_sender_t, lodeline_conf_t, lodeline_conf_t)
+list_dirs_pattern(lodeline_sender_t, lodeline_conf_t, lodeline_conf_t)
+read_files_pattern(lodeline_server_t, lodeline_conf_t, lodeline_conf_t)
+list_dirs_pattern(lodeline_server_t, lodeline_conf_t, lodeline_conf_t)
+
+########################################
+# Agent — file-integrity monitoring (reads arbitrary files by design),
+# user enumeration, host fingerprint, own state/events/control-socket.
+########################################
+# FIM: read any file/dir and watch them for changes (inotify).
+files_read_all_files(lodeline_agent_t)
+files_list_all(lodeline_agent_t)
+files_getattr_all_dirs(lodeline_agent_t)
+# Reading other users' files as root needs DAC override.
+allow lodeline_agent_t self:capability { dac_read_search dac_override };
+# inotify watches across the tree.
+allow lodeline_agent_t { file_type }:dir watch;
+allow lodeline_agent_t { file_type }:file watch;
+
+# User enumeration (passwd / nsswitch).
+auth_use_nsswitch(lodeline_agent_t)
+
+# Host fingerprint: hostname, resolv.conf, network interfaces (runs `ip`/ifconfig,
+# reads /proc/net + netlink).
+sysnet_read_config(lodeline_agent_t)
+sysnet_exec_ifconfig(lodeline_agent_t)
+kernel_read_network_state(lodeline_agent_t)
+kernel_read_system_state(lodeline_agent_t)
+corecmd_exec_bin(lodeline_agent_t)
+allow lodeline_agent_t self:netlink_route_socket { bind create getattr nlmsg_read read setopt write };
+allow lodeline_agent_t self:unix_dgram_socket { create ioctl };
+
+# Own state.db (/var/lib/lodeline) + events JSONL (/var/log/lodeline).
+manage_dirs_pattern(lodeline_agent_t, lodeline_var_lib_t, lodeline_var_lib_t)
+manage_files_pattern(lodeline_agent_t, lodeline_var_lib_t, lodeline_var_lib_t)
+allow lodeline_agent_t lodeline_var_lib_t:file map;
+manage_dirs_pattern(lodeline_agent_t, lodeline_var_log_t, lodeline_var_log_t)
+manage_files_pattern(lodeline_agent_t, lodeline_var_log_t, lodeline_var_log_t)
+
+# Control socket. systemd's RuntimeDirectory=lodeline creates /run/lodeline and
+# labels it var_run_t; the agent creates + listens on the stream socket there.
+allow lodeline_agent_t var_run_t:dir { search getattr add_name remove_name write };
+allow lodeline_agent_t var_run_t:sock_file manage_sock_file_perms;
+allow lodeline_agent_t self:unix_stream_socket { create bind listen accept getattr getopt setopt };
+
+########################################
+# Client access to the agent sockets (#134).
+# lodeline-mcp (local mode) and lodeline-hook connect to the agent's control and
+# hook-decide stream sockets under /run/lodeline (var_run_t, owned by
+# lodeline_agent_t). They run in the CALLER's domain (unconfined_t on a targeted
+# desktop/CLI, which is already permitted). A site that invokes them from a
+# CONFINED domain <caller_t> must grant, mirroring the sender:
+#     allow <caller_t> var_run_t:sock_file { getattr write };
+#     allow <caller_t> lodeline_agent_t:unix_stream_socket connectto;
+# We do NOT hard-code unconfined_t rules here; that is the distro policy's job.
+########################################
+
+########################################
+# Sender — reads the agent spool, connects the control socket, ships over the
+# network (mTLS), writes its own state/dead-letter.
+########################################
+# Read the agent's events spool (lodeline_var_log_t).
+list_dirs_pattern(lodeline_sender_t, lodeline_var_log_t, lodeline_var_log_t)
+read_files_pattern(lodeline_sender_t, lodeline_var_log_t, lodeline_var_log_t)
+
+# Own state + dead-letter.
+manage_dirs_pattern(lodeline_sender_t, lodeline_sender_var_lib_t, lodeline_sender_var_lib_t)
+manage_files_pattern(lodeline_sender_t, lodeline_sender_var_lib_t, lodeline_sender_var_lib_t)
+manage_dirs_pattern(lodeline_sender_t, lodeline_sender_var_log_t, lodeline_sender_var_log_t)
+manage_files_pattern(lodeline_sender_t, lodeline_sender_var_log_t, lodeline_sender_var_log_t)
+
+# Connect to the agent's control socket (under /run/lodeline = var_run_t).
+allow lodeline_sender_t var_run_t:dir search;
+allow lodeline_sender_t var_run_t:sock_file { getattr write };
+allow lodeline_sender_t lodeline_agent_t:unix_stream_socket connectto;
+
+# Network egress (HTTPS/mTLS to the server) + DNS.
+allow lodeline_sender_t self:tcp_socket { create connect getattr getopt setopt read write };
+corenet_tcp_connect_all_ports(lodeline_sender_t)
+corenet_tcp_sendrecv_generic_node(lodeline_sender_t)
+sysnet_dns_name_resolve(lodeline_sender_t)
+auth_use_nsswitch(lodeline_sender_t)
+
+########################################
+# Server — listens on its TCP port, accepts mTLS, writes its own state.
+########################################
+manage_dirs_pattern(lodeline_server_t, lodeline_server_var_lib_t, lodeline_server_var_lib_t)
+manage_files_pattern(lodeline_server_t, lodeline_server_var_lib_t, lodeline_server_var_lib_t)
+manage_dirs_pattern(lodeline_server_t, lodeline_server_var_log_t, lodeline_server_var_log_t)
+manage_files_pattern(lodeline_server_t, lodeline_server_var_log_t, lodeline_server_var_log_t)
+
+# Listen + accept on the lodeline port.
+allow lodeline_server_t self:tcp_socket { create bind listen accept getattr getopt setopt shutdown read write };
+corenet_tcp_bind_generic_node(lodeline_server_t)
+corenet_tcp_bind_all_unreserved_ports(lodeline_server_t)
+sysnet_dns_name_resolve(lodeline_server_t)
+auth_use_nsswitch(lodeline_server_t)

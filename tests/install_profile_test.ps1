@@ -18,89 +18,89 @@ function Assert-Eq($desc, $expected, $actual) {
 
 # profile -> binaries
 function Profile-Run($p) {
-  $env:SIGIL_PROFILE = $p
-  $env:SIGIL_PROFILE_DRYRUN = '1'
+  $env:LODELINE_PROFILE = $p
+  $env:LODELINE_PROFILE_DRYRUN = '1'
   try { (& pwsh -NoProfile -File $ps1).Trim() } finally {
-    Remove-Item Env:SIGIL_PROFILE -ErrorAction SilentlyContinue
-    Remove-Item Env:SIGIL_PROFILE_DRYRUN -ErrorAction SilentlyContinue
+    Remove-Item Env:LODELINE_PROFILE -ErrorAction SilentlyContinue
+    Remove-Item Env:LODELINE_PROFILE_DRYRUN -ErrorAction SilentlyContinue
   }
 }
-Assert-Eq 'personal subset'    'sigil sigil-mcp sigil-hook' (Profile-Run 'personal')
-Assert-Eq 'fleet superset'     'sigil sigil-mcp sigil-hook sigil-sender sigil-server sigil-sign' (Profile-Run 'fleet')
+Assert-Eq 'personal subset'    'lodeline lodeline-mcp lodeline-hook' (Profile-Run 'personal')
+Assert-Eq 'fleet superset'     'lodeline lodeline-mcp lodeline-hook lodeline-sender lodeline-server lodeline-sign' (Profile-Run 'fleet')
 
-$env:SIGIL_PROFILE_DRYRUN = '1'
+$env:LODELINE_PROFILE_DRYRUN = '1'
 $defaultBins = (& pwsh -NoProfile -File $ps1).Trim()
-Remove-Item Env:SIGIL_PROFILE_DRYRUN -ErrorAction SilentlyContinue
-Assert-Eq 'default is personal' 'sigil sigil-mcp sigil-hook' $defaultBins
+Remove-Item Env:LODELINE_PROFILE_DRYRUN -ErrorAction SilentlyContinue
+Assert-Eq 'default is personal' 'lodeline lodeline-mcp lodeline-hook' $defaultBins
 
-$env:SIGIL_PROFILE = 'bogus'; $env:SIGIL_PROFILE_DRYRUN = '1'
+$env:LODELINE_PROFILE = 'bogus'; $env:LODELINE_PROFILE_DRYRUN = '1'
 & pwsh -NoProfile -File $ps1 *> $null
 if ($LASTEXITCODE -eq 0) { Write-Host 'FAIL: bogus profile should exit non-zero'; $fail = 1 }
 else { Write-Host 'ok: bogus profile rejected' }
-Remove-Item Env:SIGIL_PROFILE, Env:SIGIL_PROFILE_DRYRUN -ErrorAction SilentlyContinue
+Remove-Item Env:LODELINE_PROFILE, Env:LODELINE_PROFILE_DRYRUN -ErrorAction SilentlyContinue
 
 # arch -> release target (#172: both Windows targets resolve)
 function Target-Run($arch) {
-  $env:SIGIL_ARCH_OVERRIDE = $arch
-  $env:SIGIL_TARGET_DRYRUN = '1'
+  $env:LODELINE_ARCH_OVERRIDE = $arch
+  $env:LODELINE_TARGET_DRYRUN = '1'
   try { (& pwsh -NoProfile -File $ps1).Trim() } finally {
-    Remove-Item Env:SIGIL_ARCH_OVERRIDE -ErrorAction SilentlyContinue
-    Remove-Item Env:SIGIL_TARGET_DRYRUN -ErrorAction SilentlyContinue
+    Remove-Item Env:LODELINE_ARCH_OVERRIDE -ErrorAction SilentlyContinue
+    Remove-Item Env:LODELINE_TARGET_DRYRUN -ErrorAction SilentlyContinue
   }
 }
 Assert-Eq 'x64 target'   'x86_64-pc-windows-msvc'  (Target-Run 'X64')
 Assert-Eq 'arm64 target' 'aarch64-pc-windows-msvc' (Target-Run 'Arm64')
 
-$env:SIGIL_ARCH_OVERRIDE = 'X86'; $env:SIGIL_TARGET_DRYRUN = '1'
+$env:LODELINE_ARCH_OVERRIDE = 'X86'; $env:LODELINE_TARGET_DRYRUN = '1'
 & pwsh -NoProfile -File $ps1 *> $null
 if ($LASTEXITCODE -eq 0) { Write-Host 'FAIL: x86 (32-bit) should exit non-zero'; $fail = 1 }
 else { Write-Host 'ok: 32-bit x86 rejected' }
-Remove-Item Env:SIGIL_ARCH_OVERRIDE, Env:SIGIL_TARGET_DRYRUN -ErrorAction SilentlyContinue
+Remove-Item Env:LODELINE_ARCH_OVERRIDE, Env:LODELINE_TARGET_DRYRUN -ErrorAction SilentlyContinue
 
-# base URL resolution (#182): default = GitHub Releases; SIGIL_BASE_URL overrides.
+# base URL resolution (#182): default = GitHub Releases; LODELINE_BASE_URL overrides.
 function Asset-Url($baseUrl) {
-  $env:SIGIL_ARCH_OVERRIDE = 'X64'; $env:SIGIL_VERSION = 'v0.6.2'
-  $env:SIGIL_URL_DRYRUN = '1'
-  if ($baseUrl) { $env:SIGIL_BASE_URL = $baseUrl }
+  $env:LODELINE_ARCH_OVERRIDE = 'X64'; $env:LODELINE_VERSION = 'v0.6.2'
+  $env:LODELINE_URL_DRYRUN = '1'
+  if ($baseUrl) { $env:LODELINE_BASE_URL = $baseUrl }
   try { (& pwsh -NoProfile -File $ps1)[0] } finally {
-    Remove-Item Env:SIGIL_ARCH_OVERRIDE, Env:SIGIL_VERSION, Env:SIGIL_URL_DRYRUN, Env:SIGIL_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:LODELINE_ARCH_OVERRIDE, Env:LODELINE_VERSION, Env:LODELINE_URL_DRYRUN, Env:LODELINE_BASE_URL -ErrorAction SilentlyContinue
   }
 }
 Assert-Eq 'default base = github releases' `
-  'https://github.com/Ju571nK/sigil/releases/download/v0.6.2/sigil-0.6.2-x86_64-pc-windows-msvc.zip' `
+  'https://github.com/Ju571nK/lodeline/releases/download/v0.6.2/lodeline-0.6.2-x86_64-pc-windows-msvc.zip' `
   (Asset-Url $null)
-Assert-Eq 'SIGIL_BASE_URL overrides base' `
-  'https://srv.example:8443/v1/artifacts/sigil-0.6.2-x86_64-pc-windows-msvc.zip' `
+Assert-Eq 'LODELINE_BASE_URL overrides base' `
+  'https://srv.example:8443/v1/artifacts/lodeline-0.6.2-x86_64-pc-windows-msvc.zip' `
   (Asset-Url 'https://srv.example:8443/v1/artifacts')
 
-$env:SIGIL_ARCH_OVERRIDE = 'X64'; $env:SIGIL_VERSION = 'v0.6.2'; $env:SIGIL_BASE_TOKEN = 'x'; $env:SIGIL_URL_DRYRUN = '1'
+$env:LODELINE_ARCH_OVERRIDE = 'X64'; $env:LODELINE_VERSION = 'v0.6.2'; $env:LODELINE_BASE_TOKEN = 'x'; $env:LODELINE_URL_DRYRUN = '1'
 & pwsh -NoProfile -File $ps1 *> $null
-if ($LASTEXITCODE -eq 0) { Write-Host 'FAIL: SIGIL_BASE_TOKEN without SIGIL_BASE_URL should exit non-zero'; $fail = 1 }
-else { Write-Host 'ok: SIGIL_BASE_TOKEN requires SIGIL_BASE_URL' }
-Remove-Item Env:SIGIL_ARCH_OVERRIDE, Env:SIGIL_VERSION, Env:SIGIL_BASE_TOKEN, Env:SIGIL_URL_DRYRUN -ErrorAction SilentlyContinue
+if ($LASTEXITCODE -eq 0) { Write-Host 'FAIL: LODELINE_BASE_TOKEN without LODELINE_BASE_URL should exit non-zero'; $fail = 1 }
+else { Write-Host 'ok: LODELINE_BASE_TOKEN requires LODELINE_BASE_URL' }
+Remove-Item Env:LODELINE_ARCH_OVERRIDE, Env:LODELINE_VERSION, Env:LODELINE_BASE_TOKEN, Env:LODELINE_URL_DRYRUN -ErrorAction SilentlyContinue
 
-$env:SIGIL_ARCH_OVERRIDE = 'X64'; $env:SIGIL_BASE_URL = 'https://srv.example/v1/artifacts'; $env:SIGIL_URL_DRYRUN = '1'
+$env:LODELINE_ARCH_OVERRIDE = 'X64'; $env:LODELINE_BASE_URL = 'https://srv.example/v1/artifacts'; $env:LODELINE_URL_DRYRUN = '1'
 & pwsh -NoProfile -File $ps1 *> $null
-if ($LASTEXITCODE -eq 0) { Write-Host 'FAIL: SIGIL_BASE_URL without SIGIL_VERSION should exit non-zero'; $fail = 1 }
-else { Write-Host 'ok: SIGIL_BASE_URL requires SIGIL_VERSION' }
-Remove-Item Env:SIGIL_ARCH_OVERRIDE, Env:SIGIL_BASE_URL, Env:SIGIL_URL_DRYRUN -ErrorAction SilentlyContinue
+if ($LASTEXITCODE -eq 0) { Write-Host 'FAIL: LODELINE_BASE_URL without LODELINE_VERSION should exit non-zero'; $fail = 1 }
+else { Write-Host 'ok: LODELINE_BASE_URL requires LODELINE_VERSION' }
+Remove-Item Env:LODELINE_ARCH_OVERRIDE, Env:LODELINE_BASE_URL, Env:LODELINE_URL_DRYRUN -ErrorAction SilentlyContinue
 
-# #188 — Claude allowlist offer (personal only), via SIGIL_ALLOWLIST_DRYRUN.
+# #188 — Claude allowlist offer (personal only), via LODELINE_ALLOWLIST_DRYRUN.
 function Allowlist-Snip($prof) {
-  $env:SIGIL_PROFILE = $prof; $env:SIGIL_ALLOWLIST_DRYRUN = '1'
+  $env:LODELINE_PROFILE = $prof; $env:LODELINE_ALLOWLIST_DRYRUN = '1'
   try { (& pwsh -NoProfile -File $ps1 2>&1 | Out-String) } finally {
-    Remove-Item Env:SIGIL_PROFILE, Env:SIGIL_ALLOWLIST_DRYRUN -ErrorAction SilentlyContinue
+    Remove-Item Env:LODELINE_PROFILE, Env:LODELINE_ALLOWLIST_DRYRUN -ErrorAction SilentlyContinue
   }
 }
 $snip = Allowlist-Snip 'personal'
-if ($snip -match '"allow": \["Bash\(sigil:\*\)"\]' -and $snip -match 'Bash\(sigil run:\*\)' -and $snip -match 'Bash\(sigil-hook:\*\)') {
+if ($snip -match '"allow": \["Bash\(lodeline:\*\)"\]' -and $snip -match 'Bash\(lodeline run:\*\)' -and $snip -match 'Bash\(lodeline-hook:\*\)') {
   Write-Host 'ok: personal allowlist snippet (broad allow + deny run/hook)'
 } else { Write-Host 'FAIL: personal allowlist snippet missing expected rules'; Write-Host $snip; $fail = 1 }
 $fsnip = Allowlist-Snip 'fleet'
 if ($fsnip -match 'skipped \(profile=fleet\)') { Write-Host 'ok: fleet profile does not offer allowlist' }
 else { Write-Host 'FAIL: fleet should skip the allowlist offer'; $fail = 1 }
 
-# #188 — Merge-SigilAllowlist must be idempotent, order-preserving, non-clobbering.
+# #188 — Merge-LodelineAllowlist must be idempotent, order-preserving, non-clobbering.
 # Dot-source only the function block by extracting it is overkill; instead exercise
 # the same native-JSON merge logic the installer uses, asserting array output.
 $td = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
@@ -114,8 +114,8 @@ $merge = {
   $perm = $cfg.permissions
   if (-not $perm.PSObject.Properties['allow']) { $perm | Add-Member -NotePropertyName allow -NotePropertyValue @() }
   if (-not $perm.PSObject.Properties['deny'])  { $perm | Add-Member -NotePropertyName deny  -NotePropertyValue @() }
-  $a = @($perm.allow); if ($a -notcontains 'Bash(sigil:*)') { $a += 'Bash(sigil:*)' }; $perm.allow = $a
-  $dn = @($perm.deny); foreach ($r in @('Bash(sigil run:*)','Bash(sigil-hook:*)')) { if ($dn -notcontains $r) { $dn += $r } }; $perm.deny = $dn
+  $a = @($perm.allow); if ($a -notcontains 'Bash(lodeline:*)') { $a += 'Bash(lodeline:*)' }; $perm.allow = $a
+  $dn = @($perm.deny); foreach ($r in @('Bash(lodeline run:*)','Bash(lodeline-hook:*)')) { if ($dn -notcontains $r) { $dn += $r } }; $perm.deny = $dn
   $json = $cfg | ConvertTo-Json -Depth 10
   $json = [regex]::Replace($json, '("(?:allow|deny)"\s*:\s*)("(?:[^"\\]|\\.)*")(\s*[,\r\n}])', '$1[$2]$3')
   Set-Content -Path $path -Value $json -Encoding UTF8

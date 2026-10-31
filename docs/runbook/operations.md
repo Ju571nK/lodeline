@@ -2,14 +2,14 @@
 
 ## Default paths
 
-| Item             | macOS                              | Windows                              |
-|------------------|------------------------------------|--------------------------------------|
-| Binary           | /usr/local/bin/sigil              | %PROGRAMFILES%\Sigil\sigil.exe     |
-| Policy           | /etc/sigil/policy.yaml            | %ProgramData%\Sigil\policy.yaml     |
-| Events           | /var/log/sigil/                   | %ProgramData%\Sigil\events\         |
-| State            | /var/lib/sigil/state.db           | %ProgramData%\Sigil\state.db        |
-| Service id       | com.sigil.agent (launchd label)   | Sigil (Windows Service name)        |
-| Control IPC      | /var/run/sigil/control.sock       | \\.\pipe\sigil-control              |
+| Item        | macOS                              | Windows                              |
+|-------------|------------------------------------|--------------------------------------|
+| Binary      | /usr/local/bin/lodeline            | %PROGRAMFILES%\Lodeline\lodeline.exe |
+| Policy      | /etc/lodeline/policy.yaml          | %ProgramData%\Lodeline\policy.yaml   |
+| Events      | /var/log/lodeline/                 | %ProgramData%\Lodeline\events\       |
+| State       | /var/lib/lodeline/state.db         | %ProgramData%\Lodeline\state.db      |
+| Service id  | com.lodeline.agent (launchd label) | Lodeline (Windows Service name)      |
+| Control IPC | /var/run/lodeline/control.sock     | \\.\pipe\lodeline-control            |
 
 ## Signal handling
 
@@ -22,7 +22,7 @@
   second for blocking workers.
 - A pipeline panic triggers cancellation immediately and a best-effort
   `AgentDying` event before sink closure; exit 101 unless draining times out.
-- Use `sigil reload` for policy reload. `SIGHUP` is not a reload interface.
+- Use `lodeline reload` for policy reload. `SIGHUP` is not a reload interface.
 
 ## Watch-root recovery
 
@@ -39,4 +39,4 @@
 
 - JSONL events: as configured above. SIEM consumes.
 - Diag log: `tracing` to stderr (captured by launchd / Windows Event Log).
-  Configure level via `SIGIL_LOG=debug,sigil_core=info`.
+  Configure level via `LODELINE_LOG=debug,lodeline_core=info`.

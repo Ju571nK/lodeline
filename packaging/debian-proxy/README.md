@@ -1,7 +1,7 @@
-# Debian maintainer-script skeletons (sigil-proxy)
+# Debian maintainer-script skeletons (lodeline-proxy)
 
 Referenced by `maintainer-scripts` in `[package.metadata.deb]`
-(`crates/sigil-proxy/Cargo.toml`). cargo-deb substitutes the `#DEBHELPER#`
+(`crates/lodeline-proxy/Cargo.toml`). cargo-deb substitutes the `#DEBHELPER#`
 token in each with the systemd integration snippet derived from
 `[package.metadata.deb.systemd-units]` (daemon-reload on install; stop on
 remove; **no** enable/start). The proxy package never loads an SELinux module:

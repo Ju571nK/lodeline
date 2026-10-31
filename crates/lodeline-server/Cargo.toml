@@ -1,0 +1,141 @@
+[package]
+name = "lodeline-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OSS reference policy/event server for Lodeline (POST /v1/events, GET /v1/policy)."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lodeline-server"
+path = "src/main.rs"
+
+[dependencies]
+lodeline-core = { path = "../lodeline-core" }
+# T-11 — fixed ApiError bodies for the proxy routes (404 proxy_unknown etc.).
+lodeline-proxy-api = { path = "../lodeline-proxy-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+time = { workspace = true, features = ["parsing"] }
+uuid = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+axum = { workspace = true, features = ["query"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+# #194 — peer-cert identity plumbing (custom Accept + per-request Extension).
+tokio-rustls = { workspace = true }
+tower = { workspace = true }
+x509-parser = { workspace = true }
+blake3 = { workspace = true }
+parking_lot = { workspace = true }
+ed25519-dalek = { workspace = true }
+data-encoding = { workspace = true }
+rand_core = { version = "0.6", features = ["std"] }
+# T-11 — operator CLI (`lodeline-server proxy ...`) is an mTLS HTTPS client.
+reqwest = { workspace = true }
+# T-11 S4 — proxy event ledger (SQLite) and tombstone digests.
+rusqlite = { workspace = true }
+sha2 = "0.10"
+# #184 — enrollment: runtime temp files (CSR/ext/cert, atomic writes) + flock.
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[features]
+# Exposes ProxyRegistry::seed_for_test to integration tests (enabled via the
+# self dev-dependency below). Never enable in production builds.
+test-support = []
+
+[dev-dependencies]
+lodeline-server = { path = ".", features = ["test-support"] }
+http = { workspace = true }
+
+# -- OS packages -------------------------------------------------------------
+# Build with `packaging/build.sh server`. See packaging/README.md.
+
+[package.metadata.deb]
+name = "lodeline-server"
+conflicts = "sigil-server (<< 0.12)"
+replaces = "sigil-server (<< 0.12)"
+provides = "sigil-server"
+maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
+section = "admin"
+priority = "optional"
+# Match the dependencies injected by Debian's dh_installsystemd and
+# dh_installsysusers helpers. The alternatives keep non-systemd hosts usable.
+depends = "libc6, init-system-helpers (>= 1.52), systemd | systemd-standalone-sysusers | systemd-sysusers"
+maintainer-scripts = "../../packaging/debian-server"
+extended-description = """\
+Lodeline OSS reference server. Receives lodeline agent posture events over HTTPS \
+(mTLS when configured) and writes them to per-host JSONL. Serves signed policy bundles at \
+GET /v1/policy. Ships a systemd unit (disabled by default — enable with \
+`systemctl enable --now lodeline-server`)."""
+assets = [
+    ["../../packaging/migrate-from-sigil.sh", "usr/libexec/lodeline-server/migrate-from-sigil", "755"],
+    ["../../target/release/lodeline-server", "usr/bin/", "755"],
+    ["../../config/server.example.yaml", "etc/lodeline/server.yaml.example", "644"],
+    ["../../README.md", "usr/share/doc/lodeline-server/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/lodeline-server/LICENSE", "644"],
+    # Create the lodeline group/user so the unit's User=lodeline resolves at start
+    # (#10 slice 2). Idempotent. No tmpfiles here: systemd StateDirectory=
+    # lodeline-server owns /var/lib/lodeline-server as lodeline:lodeline; the agent's
+    # /var/lib/lodeline is not used on a server-only host.
+    ["../../packaging/sysusers.d/lodeline-server.conf", "usr/lib/sysusers.d/lodeline-server.conf", "644"],
+]
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "../../packaging/systemd"
+unit-name = "lodeline-server"
+enable = false
+start = false
+
+[package.metadata.generate-rpm]
+name = "lodeline-server"
+obsoletes = { "sigil-server" = "< 0.12" }
+provides = { "sigil-server" = "*" }
+# Old packages are erased after %post, so the data moves in %posttrans.
+post_trans_script = "/usr/libexec/lodeline-server/migrate-from-sigil server || :"
+summary = "OSS reference server: receives lodeline agent events over HTTPS (mTLS when configured)"
+assets = [
+    { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline-server/migrate-from-sigil", mode = "0755" },
+    { source = "../../target/release/lodeline-server", dest = "/usr/bin/lodeline-server", mode = "0755" },
+    { source = "../../packaging/systemd/lodeline-server.service", dest = "/usr/lib/systemd/system/lodeline-server.service", mode = "0644" },
+    { source = "../../config/server.example.yaml", dest = "/etc/lodeline/server.yaml.example", mode = "0644" },
+    { source = "../../README.md", dest = "/usr/share/doc/lodeline-server/README.md", mode = "0644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/doc/lodeline-server/LICENSE", mode = "0644", doc = true },
+    { source = "../../packaging/sysusers.d/lodeline-server.conf", dest = "/usr/lib/sysusers.d/lodeline-server.conf", mode = "0644" },
+    { source = "../../packaging/selinux/lodeline.te", dest = "/usr/share/selinux/packages/lodeline/lodeline.te", mode = "0644" },
+    { source = "../../packaging/selinux/lodeline.fc", dest = "/usr/share/selinux/packages/lodeline/lodeline.fc", mode = "0644" },
+]
+# Create the lodeline user/group so the unit's User=lodeline resolves before start
+# (#10 slice 2). Idempotent; no-op when the agent package already created it.
+# Also load the SELinux module (#69) when the policy devel toolchain is present.
+post_install_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+command -v systemd-sysusers >/dev/null 2>&1 && systemd-sysusers /usr/lib/sysusers.d/lodeline-server.conf >/dev/null 2>&1 || :
+if command -v semodule >/dev/null 2>&1 && [ -f /usr/share/selinux/devel/Makefile ]; then ( cd /usr/share/selinux/packages/lodeline && make -f /usr/share/selinux/devel/Makefile lodeline.pp >/dev/null 2>&1 && semodule -i lodeline.pp >/dev/null 2>&1 ) || : ; command -v restorecon >/dev/null 2>&1 && restorecon -R /usr/bin/lodeline-server /var/lib/lodeline-server /var/log/lodeline-server /etc/lodeline >/dev/null 2>&1 || : ; fi
+"""
+pre_uninstall_script = """\
+if [ "$1" = 0 ] ; then
+    systemctl --no-reload disable --now lodeline-server.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -ge 1 ] ; then
+    systemctl try-restart lodeline-server.service >/dev/null 2>&1 || :
+fi
+"""

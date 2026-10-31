@@ -1,0 +1,44 @@
+# Lodeline OSS reference server — systemd unit (Linux).
+#
+# Installed automatically by the .deb / .rpm packages to
+# /usr/lib/systemd/system/lodeline-server.service. Reads its config from
+# /etc/lodeline/server.yaml — copy /etc/lodeline/server.yaml.example and edit
+# before enabling.
+
+[Unit]
+Description=Lodeline OSS reference server — receives posture events over HTTPS (mTLS when configured)
+Documentation=https://github.com/Ju571nK/lodeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Note: server's --config is subcommand-level (Serve { config }), so it
+# follows the `serve` subcommand. Sender's --config is global (Cli level)
+# so it precedes its `start` subcommand. Both are correct for their CLIs.
+ExecStart=/usr/bin/lodeline-server serve --config /etc/lodeline/server.yaml
+Restart=on-failure
+RestartSec=5
+# Runs as the unprivileged lodeline user (#10 slice 2). systemd creates
+# StateDirectory/LogsDirectory owned lodeline:lodeline. The lodeline user/group is
+# created by this package at install (sysusers.d). NOTE: when mTLS is enabled,
+# the operator must make tls_key_path readable by the lodeline user (e.g.
+# `chown root:lodeline server.key && chmod 0640 server.key`) — the private key is
+# operator-provided, not packaged.
+User=lodeline
+Group=lodeline
+StateDirectory=lodeline-server
+LogsDirectory=lodeline-server
+StateDirectoryMode=0750
+LogsDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lodeline-server /var/log/lodeline-server
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

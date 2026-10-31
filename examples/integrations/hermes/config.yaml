@@ -1,25 +1,25 @@
-# Hermes Agent — register Sigil as an MCP server so tasks can pre-flight actions.
+# Hermes Agent — register Lodeline as an MCP server so tasks can pre-flight actions.
 #
-# Merge this into your Hermes `config.yaml`. `sigil-mcp` in its default (local)
-# mode is "sigil-check": it reads THIS host's running sigil-agent and exposes the
+# Merge this into your Hermes `config.yaml`. `lodeline-mcp` in its default (local)
+# mode is "lodeline-check": it reads THIS host's running lodeline-agent and exposes the
 # host's own posture plus the `assess` tool — no server, no fleet.
 #
 # Print a copy with the absolute binary path already filled in:
-#   sigil-mcp --print-config hermes
+#   lodeline-mcp --print-config hermes
 #
-# IMPORTANT: use the ABSOLUTE path to sigil-mcp. Hermes (like most MCP clients)
+# IMPORTANT: use the ABSOLUTE path to lodeline-mcp. Hermes (like most MCP clients)
 # may not inherit your interactive-shell PATH.
 
 mcp_servers:
-  sigil-check:
-    command: "/absolute/path/to/sigil-mcp"
+  lodeline-check:
+    command: "/absolute/path/to/lodeline-mcp"
     # No args/env needed for local mode. (Fleet mode: add a SECOND server
-    # `sigil-fleet` with env SIGIL_SERVER_BASE_URL + SIGIL_SERVER_READ_TOKEN.)
+    # `lodeline-fleet` with env LODELINE_SERVER_BASE_URL + LODELINE_SERVER_READ_TOKEN.)
 
-# Hermes auto-discovers the server's tools as the `mcp-sigil-check` toolset
+# Hermes auto-discovers the server's tools as the `mcp-lodeline-check` toolset
 # (which includes `assess`). Enable it for the platforms you run, e.g.:
 platform_toolsets:
-  cli: [hermes-cli, mcp-sigil-check]
+  cli: [hermes-cli, mcp-lodeline-check]
 
 # Then, in your agent's instructions / a skill, encode the pre-flight contract:
 #

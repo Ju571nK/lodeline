@@ -1,0 +1,154 @@
+[package]
+name = "lodeline-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Hash-anchored file-posture event agent for SIEMs"
+
+[lib]
+name = "lodeline_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lodeline"
+path = "src/main.rs"
+
+[dependencies]
+lodeline-core = { path = "../lodeline-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+notify = { workspace = true }
+clap = { workspace = true }
+parking_lot = { workspace = true }
+dunce = { workspace = true }
+regex = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+mac_address = "1.1"
+if-addrs = "0.13"
+os_info = "3"
+blake3 = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+same-file = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }
+uuid = { workspace = true }
+data-encoding = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { version = "0.6", features = ["std"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = ["operator-cli"]
+# Operator introspection CLI: `lodeline show policy-status`, `lodeline show targets`,
+# `lodeline reload`. Default-on. Drop with `--no-default-features` for hardened
+# deploys that don't want the introspection surface compiled in.
+operator-cli = []
+
+# -- OS packages -------------------------------------------------------------
+# Build both with `packaging/build.sh` (needs `cargo install cargo-deb
+# cargo-generate-rpm`). Source paths below are relative to THIS file's
+# directory (crates/lodeline-agent/), so the build script runs the packagers
+# from here. See packaging/README.md.
+
+# .deb (Debian/Ubuntu) — `cargo deb --no-build`
+[package.metadata.deb]
+name = "lodeline"
+# Bounded and with no Provides: distros package the unrelated Sigil ebook editor.
+conflicts = "sigil (<< 0.12)"
+replaces = "sigil (<< 0.12)"
+maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
+section = "admin"
+priority = "optional"
+# Match the dependencies injected by Debian's dh_installsystemd and
+# dh_installsysusers helpers. The alternatives keep non-systemd hosts usable.
+depends = "libc6, init-system-helpers (>= 1.52), systemd | systemd-standalone-sysusers | systemd-sysusers"
+# cargo-deb only emits the systemd maintainer scripts when this is set; the
+# files in packaging/debian/ are skeletons whose #DEBHELPER# token cargo-deb
+# substitutes with the systemd integration snippet.
+maintainer-scripts = "../../packaging/debian"
+extended-description = """\
+Lodeline is an enterprise device-assurance agent. It watches the files named by a \
+signed policy (MCP allowlists, agent credentials, shadow-AI binaries, …), hashes \
+them on change, and writes hash-anchored posture events to JSONL for ingestion by \
+a SIEM. Ships a systemd unit (disabled by default — enable with \
+`systemctl enable --now lodeline`)."""
+assets = [
+    ["../../packaging/migrate-from-sigil.sh", "usr/libexec/lodeline/migrate-from-sigil", "755"],
+    ["../../target/release/lodeline", "usr/bin/", "755"],
+    ["../../target/release/lodeline-mcp", "usr/bin/", "755"],
+    ["../../target/release/lodeline-hook", "usr/bin/", "755"],
+    ["../../config/policy.example.yaml", "etc/lodeline/policy.yaml.example", "644"],
+    ["../../README.md", "usr/share/doc/lodeline/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/lodeline/LICENSE", "644"],
+    ["../../packaging/sysusers.d/lodeline.conf", "usr/lib/sysusers.d/lodeline.conf", "644"],
+    ["../../packaging/tmpfiles.d/lodeline.conf", "usr/lib/tmpfiles.d/lodeline.conf", "644"],
+]
+
+# cargo-deb picks up lodeline.service from `unit-scripts`, installs it to
+# /lib/systemd/system/, and generates the postinst/prerm. Unit stays disabled.
+[package.metadata.deb.systemd-units]
+unit-scripts = "../../packaging/systemd"
+unit-name = "lodeline"
+enable = false
+start = false
+
+# .rpm (RHEL/Rocky/Fedora) — `cargo generate-rpm`
+[package.metadata.generate-rpm]
+name = "lodeline"
+# Bounded and with no Provides: distros package the unrelated Sigil ebook editor.
+obsoletes = { "sigil" = "< 0.12" }
+# Old packages are erased after %post, so the data moves in %posttrans.
+post_trans_script = "/usr/libexec/lodeline/migrate-from-sigil agent || :"
+summary = "Watches policy-defined files and emits hash-anchored posture events for your SIEM"
+assets = [
+    { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline/migrate-from-sigil", mode = "0755" },
+    { source = "../../target/release/lodeline", dest = "/usr/bin/lodeline", mode = "0755" },
+    { source = "../../target/release/lodeline-mcp", dest = "/usr/bin/lodeline-mcp", mode = "0755" },
+    { source = "../../target/release/lodeline-hook", dest = "/usr/bin/lodeline-hook", mode = "0755" },
+    { source = "../../packaging/systemd/lodeline.service", dest = "/usr/lib/systemd/system/lodeline.service", mode = "0644" },
+    { source = "../../config/policy.example.yaml", dest = "/etc/lodeline/policy.yaml.example", mode = "0644" },
+    { source = "../../README.md", dest = "/usr/share/doc/lodeline/README.md", mode = "0644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/doc/lodeline/LICENSE", mode = "0644", doc = true },
+    { source = "../../packaging/sysusers.d/lodeline.conf", dest = "/usr/lib/sysusers.d/lodeline.conf", mode = "0644" },
+    { source = "../../packaging/tmpfiles.d/lodeline.conf", dest = "/usr/lib/tmpfiles.d/lodeline.conf", mode = "0644" },
+    { source = "../../packaging/selinux/lodeline.te", dest = "/usr/share/selinux/packages/lodeline/lodeline.te", mode = "0644" },
+    { source = "../../packaging/selinux/lodeline.fc", dest = "/usr/share/selinux/packages/lodeline/lodeline.fc", mode = "0644" },
+]
+# No hard runtime deps beyond glibc, which is always present; leave Requires empty.
+post_install_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+command -v systemd-sysusers >/dev/null 2>&1 && systemd-sysusers /usr/lib/sysusers.d/lodeline.conf >/dev/null 2>&1 || :
+command -v systemd-tmpfiles >/dev/null 2>&1 && systemd-tmpfiles --create /usr/lib/tmpfiles.d/lodeline.conf >/dev/null 2>&1 || :
+if command -v semodule >/dev/null 2>&1 && [ -f /usr/share/selinux/devel/Makefile ]; then ( cd /usr/share/selinux/packages/lodeline && make -f /usr/share/selinux/devel/Makefile lodeline.pp >/dev/null 2>&1 && semodule -i lodeline.pp >/dev/null 2>&1 ) || : ; command -v restorecon >/dev/null 2>&1 && restorecon -R /usr/bin/lodeline /var/lib/lodeline /var/log/lodeline /etc/lodeline >/dev/null 2>&1 || : ; fi
+"""
+pre_uninstall_script = """\
+if [ "$1" = 0 ] ; then
+    systemctl --no-reload disable --now lodeline.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -ge 1 ] ; then
+    systemctl try-restart lodeline.service >/dev/null 2>&1 || :
+fi
+"""

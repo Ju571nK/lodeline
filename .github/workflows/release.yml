@@ -5,8 +5,8 @@ name: Release
 # This builds prebuilt binaries for each target (x86_64 + aarch64), publishes
 # them to a GitHub Release with a SHA256SUMS file, attaches build-provenance
 # attestations, and — when the SIGIL_BUILD_SIGNING_KEY secret is set — an
-# ed25519-signed build manifest (per-arch blake3) that `sigil doctor
-# --verify-self` checks against the compiled-in SIGIL_BUILD_PUBKEYS (#13).
+# ed25519-signed build manifest (per-arch blake3) that `lodeline doctor
+# --verify-self` checks against the compiled-in LODELINE_BUILD_PUBKEYS (#13).
 on:
   push:
     tags: ["v*"]
@@ -57,9 +57,9 @@ jobs:
         run: |
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
-          dist="sigil-${ver}-${{ matrix.target }}"
+          dist="lodeline-${ver}-${{ matrix.target }}"
           mkdir "$dist"
-          for b in sigil sigil-sender sigil-server sigil-sign sigil-mcp sigil-hook; do
+          for b in lodeline lodeline-sender lodeline-server lodeline-sign lodeline-mcp lodeline-hook; do
             cp "target/${{ matrix.target }}/release/$b" "$dist/"
           done
           cp README.md LICENSE NOTICE "$dist/" 2>/dev/null || true
@@ -70,9 +70,9 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${env:GITHUB_REF_NAME}" -replace '^v',''
-          $dist = "sigil-$ver-${{ matrix.target }}"
+          $dist = "lodeline-$ver-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $dist | Out-Null
-          foreach ($b in 'sigil','sigil-sender','sigil-server','sigil-sign','sigil-mcp','sigil-hook') {
+          foreach ($b in 'lodeline','lodeline-sender','lodeline-server','lodeline-sign','lodeline-mcp','lodeline-hook') {
             Copy-Item "target/${{ matrix.target }}/release/$b.exe" $dist
           }
           Copy-Item README.md,LICENSE,NOTICE $dist -ErrorAction SilentlyContinue
@@ -82,8 +82,8 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            sigil-*.tar.gz
-            sigil-*.zip
+            lodeline-*.tar.gz
+            lodeline-*.zip
           if-no-files-found: error
 
   packages:
@@ -123,7 +123,7 @@ jobs:
           cp target/${{ matrix.target }}/debian/*.deb pkgs/
           cp target/generate-rpm/*.rpm pkgs/
           # #245: no relay until T-12; remove when the proxy is usable
-          rm -f pkgs/sigil-proxy*
+          rm -f pkgs/lodeline-proxy*
           ls -l pkgs/
 
       - uses: actions/upload-artifact@v7
@@ -223,8 +223,8 @@ jobs:
           merge-multiple: true
       - name: Checksums
         working-directory: dist
-        # Include the agent .deb, whose filename begins with sigil_ (#138).
-        run: sha256sum sigil* | tee SHA256SUMS
+        # Include the agent .deb, whose filename begins with lodeline_ (#138).
+        run: sha256sum lodeline* | tee SHA256SUMS
 
       # Supplementary supply-chain attestation. The enforced trust root is the
       # ed25519 build-manifest signature produced in the build step above; this
@@ -236,9 +236,9 @@ jobs:
         continue-on-error: true
         uses: actions/attest-build-provenance@v4
         with:
-          # `sigil*` so the agent .deb (`sigil_<ver>-1_<arch>.deb`, underscore)
-          # is attested too — `sigil-*` would skip it. (#138)
-          subject-path: "dist/sigil*"
+          # `lodeline*` so the agent .deb (`lodeline_<ver>-1_<arch>.deb`, underscore)
+          # is attested too — `lodeline-*` would skip it. (#138)
+          subject-path: "dist/lodeline*"
 
       - name: Publish GitHub Release
         env:
@@ -249,23 +249,23 @@ jobs:
           ## Install (macOS / Linux)
 
           ```sh
-          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/sigil/main/install.sh | sh
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | sh
           ```
 
-          Pin a version with `SIGIL_VERSION`, or install elsewhere with `SIGIL_INSTALL_DIR`.
+          Pin a version with `LODELINE_VERSION`, or install elsewhere with `LODELINE_INSTALL_DIR`.
 
           ## Verify a download
 
           ```sh
           sha256sum -c SHA256SUMS                              # integrity
-          gh attestation verify <archive> --repo Ju571nK/sigil # provenance
+          gh attestation verify <archive> --repo Ju571nK/lodeline # provenance
           ```
 
           If `build-manifest.json` is attached, an installed agent can verify itself
           against it:
 
           ```sh
-          sigil doctor --verify-self --manifest build-manifest.json
+          lodeline doctor --verify-self --manifest build-manifest.json
           ```
 
           ## Windows
@@ -273,20 +273,20 @@ jobs:
           Download the `.zip` for your architecture (`x86_64` for most PCs,
           `aarch64` for Arm devices such as Surface Pro X) and add it to your PATH.
 
-          Every archive contains all six binaries: `sigil`, `sigil-sender`, `sigil-server`, `sigil-sign`, `sigil-mcp`, `sigil-hook`.
+          Every archive contains all six binaries: `lodeline`, `lodeline-sender`, `lodeline-server`, `lodeline-sign`, `lodeline-mcp`, `lodeline-hook`.
 
-          `sigil-mcp` is the read-only fleet MCP server — point an MCP client (Claude Desktop/Code) at a `sigil-server`'s read API to query and reason over fleet posture. See [crates/sigil-mcp/README.md](https://github.com/Ju571nK/sigil/blob/main/crates/sigil-mcp/README.md).
+          `lodeline-mcp` is the read-only fleet MCP server — point an MCP client (Claude Desktop/Code) at a `lodeline-server`'s read API to query and reason over fleet posture. See [crates/lodeline-mcp/README.md](https://github.com/Ju571nK/lodeline/blob/main/crates/lodeline-mcp/README.md).
 
           ## Server + agent (Linux, x86_64 and aarch64)
 
           Prebuilt `.deb` / `.rpm` packages (static binaries — work on RHEL/Rocky and
-          Debian/Ubuntu, on both x86_64 and ARM64). See [docs/install-server.md](https://github.com/Ju571nK/sigil/blob/main/docs/install-server.md).
+          Debian/Ubuntu, on both x86_64 and ARM64). See [docs/install-server.md](https://github.com/Ju571nK/lodeline/blob/main/docs/install-server.md).
 
           ```sh
-          sudo dnf install ./sigil-server-*.x86_64.rpm     # RHEL / Rocky / Fedora (x86_64)
-          sudo dnf install ./sigil-server-*.aarch64.rpm    # … ARM64
-          sudo apt  install ./sigil-server_*_amd64.deb     # Debian / Ubuntu (x86_64)
-          sudo apt  install ./sigil-server_*_arm64.deb     # … ARM64
+          sudo dnf install ./lodeline-server-*.x86_64.rpm     # RHEL / Rocky / Fedora (x86_64)
+          sudo dnf install ./lodeline-server-*.aarch64.rpm    # … ARM64
+          sudo apt  install ./lodeline-server_*_amd64.deb     # Debian / Ubuntu (x86_64)
+          sudo apt  install ./lodeline-server_*_arm64.deb     # … ARM64
           ```
 
           Each package ships a hardened, disabled-by-default systemd unit + config example.
@@ -307,4 +307,4 @@ jobs:
             --verify-tag \
             $prerelease \
             --notes-file notes.md \
-            dist/sigil* dist/SHA256SUMS $manifest
+            dist/lodeline* dist/SHA256SUMS $manifest

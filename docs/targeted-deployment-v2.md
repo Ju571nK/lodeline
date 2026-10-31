@@ -5,13 +5,13 @@ Date: 2026-09-23. Tracks #230; consumed by #229 (server) and #231 (signer).
 ## Status and Boundary
 
 The core wire verifier and the next storage/preparation stage are implemented:
-`sigil_core::policy::deployment`, `deployment_store`, and
-`sigil_agent::deployment`. This is not yet a deployed protocol.
+`lodeline_core::policy::deployment`, `deployment_store`, and
+`lodeline_agent::deployment`. This is not yet a deployed protocol.
 The agent does not advertise v2 capability, accept v2 IPC, activate a deployment,
 or send deployment acknowledgements yet. Server export/import and signer CLI
 integration remain pending. Existing fleet-wide envelopes are unchanged.
 
-This work changes Sigil's control-plane contract, not any generative AI product
+This work changes Lodeline's control-plane contract, not any generative AI product
 adapter, permission mode, or hook. No product compatibility gate is relaxed.
 
 ## Wire and Signature
@@ -57,7 +57,7 @@ signature. BLAKE3 reuses the repository's existing hashing dependency; this v2
 contract does not reinterpret legacy ETags.
 
 The public test vector is
-`crates/sigil-core/tests/fixtures/targeted-deployment-v2.json`. It pins exact
+`crates/lodeline-core/tests/fixtures/targeted-deployment-v2.json`. It pins exact
 signing bytes, public key, signature, manifest digest, and artifact bytes. Its
 test seed is public and MUST NOT be used for production keys.
 
@@ -151,7 +151,7 @@ Before advertising capability or sending `applied`, #230 must implement:
 Run targeted tests:
 
 ```sh
-cargo test -p sigil-core --test deployment_contract
-cargo test -p sigil-core policy::deployment_store
-cargo test -p sigil-agent --test deployment_generation
+cargo test -p lodeline-core --test deployment_contract
+cargo test -p lodeline-core policy::deployment_store
+cargo test -p lodeline-agent --test deployment_generation
 ```

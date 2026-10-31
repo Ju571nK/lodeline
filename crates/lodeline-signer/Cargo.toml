@@ -1,0 +1,66 @@
+[package]
+name = "lodeline-signer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Operator CLI for signing Lodeline policy bundles (keygen / sign / verify / inspect)."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lodeline-sign"
+path = "src/main.rs"
+
+[dependencies]
+lodeline-core = { path = "../lodeline-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+time = { workspace = true }
+ed25519-dalek = { workspace = true }
+data-encoding = { workspace = true }
+blake3 = { workspace = true }
+rand_core = { version = "0.6", features = ["std"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# -- OS packages -------------------------------------------------------------
+# Build with `packaging/build.sh signer`. Operator CLI — no systemd unit,
+# no /etc/lodeline config. See packaging/README.md.
+
+[package.metadata.deb]
+name = "lodeline-signer"
+conflicts = "sigil-signer (<< 0.12)"
+replaces = "sigil-signer (<< 0.12)"
+provides = "sigil-signer"
+maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
+section = "admin"
+priority = "optional"
+depends = "libc6"
+extended-description = """\
+Lodeline-signer (binary `lodeline-sign`). Operator CLI: generate ed25519 keypairs, \
+sign policy bundles for distribution, verify signatures, inspect signed \
+envelopes. Used to produce the signed_envelope payloads that lodeline-server \
+hands to lodeline-sender."""
+assets = [
+    ["../../target/release/lodeline-sign", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/lodeline-signer/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/lodeline-signer/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "lodeline-signer"
+obsoletes = { "sigil-signer" = "< 0.12" }
+provides = { "sigil-signer" = "*" }
+summary = "Operator CLI: keygen / sign / verify / inspect for lodeline signed policy envelopes"
+assets = [
+    { source = "../../target/release/lodeline-sign", dest = "/usr/bin/lodeline-sign", mode = "0755" },
+    { source = "../../README.md", dest = "/usr/share/doc/lodeline-signer/README.md", mode = "0644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/doc/lodeline-signer/LICENSE", mode = "0644", doc = true },
+]

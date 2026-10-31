@@ -104,7 +104,7 @@ class CaptureHandler(fixture.Handler):
         if self.headers.get("Authorization") == "Bearer %s" % self.server.token:
             del self.headers["Authorization"]  # base fixture rejects any Authorization
             return True
-        self.reply(401, headers={"WWW-Authenticate": 'Bearer realm="sigil-t01-probe"'})
+        self.reply(401, headers={"WWW-Authenticate": 'Bearer realm="lodeline-t01-probe"'})
         return False
 
     def _finish(self, rec):

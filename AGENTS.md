@@ -13,11 +13,11 @@
 - Use a lower-cost model for broad changelog discovery and classification, then use a stronger model to validate security implications, resolve contradictions, and define implementation scope.
 - Keep research scoped per product and date-stamped so later issue work can reuse it without repeating full discovery.
 
-## Sigil Proxy Agent Workflow
+## Lodeline Proxy Agent Workflow
 
-For Sigil Proxy work, read [the specification entry point](docs/specs/sigil-proxy/README.md),
-[agent roles and operating rules](docs/specs/sigil-proxy/agents/README.md), and
-[current execution status](docs/specs/sigil-proxy/execution.md) before starting.
+For Lodeline Proxy work, read [the specification entry point](docs/specs/lodeline-proxy/README.md),
+[agent roles and operating rules](docs/specs/lodeline-proxy/agents/README.md), and
+[current execution status](docs/specs/lodeline-proxy/execution.md) before starting.
 
 - The primary assistant is the orchestrator and the user's single reporting interface.
 - Delegate scoped research, coding, independent review, and verification as the authorized task requires.
@@ -25,4 +25,4 @@ For Sigil Proxy work, read [the specification entry point](docs/specs/sigil-prox
 - Assign one writer per file; link assignments and results to requirement and acceptance IDs.
 - Preserve compatibility gates and distinguish implementation, review, and hardware verification.
 - Maintain execution status and report integrated results to the user.
-- Read sigil-manager's own repository instructions before assigning work there.
+- Read lodeline-manager's own repository instructions before assigning work there.

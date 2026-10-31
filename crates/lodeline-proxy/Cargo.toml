@@ -1,0 +1,132 @@
+[package]
+name = "lodeline-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Lodeline Proxy: standalone MCP relay with audit (skeleton: CLI, bootstrap, limits, lifecycle)."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lodeline-proxy"
+path = "src/main.rs"
+
+[dependencies]
+lodeline-proxy-api = { path = "../lodeline-proxy-api" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+getrandom = "0.2"
+# Registry key derivations (T-13b). Already in Cargo.lock (sha2 0.10, as lodeline-proxy-api).
+sha2 = "0.10"
+# Relay (T-12 slice A, #258). Raw hyper on the forwarding path; no MCP SDK (D-01).
+# All already in Cargo.lock (hyper 1.9, hyper-util 0.1.20, http-body-util 0.1.3).
+hyper = { version = "1", default-features = false, features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server", "server-graceful", "http1"] }
+http-body-util = "0.1"
+http-body = "1"
+bytes = "1"
+http = { workspace = true }
+# Durable event spool (T-14a): SQLite WAL, same engine as the server ledger.
+rusqlite = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+# TLS (listener for non-loopback binds, https upstreams). Unix only: ring needs a
+# C toolchain and the Windows proxy service is unsupported until verified
+# (contracts/README.md "Bootstrap 구성 후보"). Versions already in Cargo.lock.
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = "1"
+
+[features]
+# Test-only pacing knob and pre-bound listener (`lifecycle::RunTuning`). Enabled
+# only by the lodeline-proxy-e2e dev-dependency; never in release builds.
+test-util = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+libc = { workspace = true }
+# Paused clock for the poll-loop TTL test (same crate as the runtime dependency).
+tokio = { workspace = true, features = ["test-util"] }
+
+# OS packages (#245). Build with `packaging/build.sh proxy`. See packaging/README.md.
+# Installed DISABLED: no live /etc/lodeline/proxy.yaml is shipped (only .example),
+# post-install does daemon-reload only (no enable, no start, no semodule). The
+# SELinux domain is deferred to hardware verification; the proxy runs unconfined.
+
+[package.metadata.deb]
+name = "lodeline-proxy"
+conflicts = "sigil-proxy (<< 0.12)"
+replaces = "sigil-proxy (<< 0.12)"
+provides = "sigil-proxy"
+maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
+section = "admin"
+priority = "optional"
+depends = "libc6, init-system-helpers (>= 1.52), systemd | systemd-standalone-sysusers | systemd-sysusers"
+maintainer-scripts = "../../packaging/debian-proxy"
+extended-description = """\
+Lodeline Proxy: standalone MCP relay with audit. Ships a systemd unit (disabled by \
+default, no live config installed: copy /etc/lodeline/proxy.yaml.example to \
+/etc/lodeline/proxy.yaml, edit, then `systemctl enable --now lodeline-proxy`)."""
+assets = [
+    ["../../packaging/migrate-from-sigil.sh", "usr/libexec/lodeline-proxy/migrate-from-sigil", "755"],
+    ["../../target/release/lodeline-proxy", "usr/bin/", "755"],
+    ["../../config/proxy.example.yaml", "etc/lodeline/proxy.yaml.example", "644"],
+    ["../../README.md", "usr/share/doc/lodeline-proxy/README.md", "644"],
+    ["../../LICENSE", "usr/share/doc/lodeline-proxy/LICENSE", "644"],
+    # Creates the dedicated lodeline-proxy group/user so User=lodeline-proxy resolves. Idempotent.
+    ["../../packaging/sysusers.d/lodeline-proxy.conf", "usr/lib/sysusers.d/lodeline-proxy.conf", "644"],
+]
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "../../packaging/systemd"
+unit-name = "lodeline-proxy"
+enable = false
+start = false
+
+[package.metadata.generate-rpm]
+name = "lodeline-proxy"
+obsoletes = { "sigil-proxy" = "< 0.12" }
+provides = { "sigil-proxy" = "*" }
+# Old packages are erased after %post, so the data moves in %posttrans.
+post_trans_script = "/usr/libexec/lodeline-proxy/migrate-from-sigil proxy || :"
+summary = "Standalone MCP relay with audit (installed disabled, no live config)"
+assets = [
+    { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline-proxy/migrate-from-sigil", mode = "0755" },
+    { source = "../../target/release/lodeline-proxy", dest = "/usr/bin/lodeline-proxy", mode = "0755" },
+    { source = "../../packaging/systemd/lodeline-proxy.service", dest = "/usr/lib/systemd/system/lodeline-proxy.service", mode = "0644" },
+    { source = "../../config/proxy.example.yaml", dest = "/etc/lodeline/proxy.yaml.example", mode = "0644" },
+    { source = "../../README.md", dest = "/usr/share/doc/lodeline-proxy/README.md", mode = "0644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/doc/lodeline-proxy/LICENSE", mode = "0644", doc = true },
+    { source = "../../packaging/sysusers.d/lodeline-proxy.conf", dest = "/usr/lib/sysusers.d/lodeline-proxy.conf", mode = "0644" },
+]
+# Create the lodeline-proxy user/group (idempotent) and reload units. No enable, no
+# start, no semodule.
+post_install_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+command -v systemd-sysusers >/dev/null 2>&1 && systemd-sysusers /usr/lib/sysusers.d/lodeline-proxy.conf >/dev/null 2>&1 || :
+"""
+pre_uninstall_script = """\
+if [ "$1" = 0 ] ; then
+    systemctl --no-reload disable --now lodeline-proxy.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """\
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -ge 1 ] ; then
+    systemctl try-restart lodeline-proxy.service >/dev/null 2>&1 || :
+fi
+"""
