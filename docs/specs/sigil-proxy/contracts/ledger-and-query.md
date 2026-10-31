@@ -273,7 +273,7 @@ cursor `{v:1, after_proxy_id, filter_hash}` (unique key, no tie-breaker needed).
 | `config_state` | `none` \| `valid` \| `expired` (proxy-reported) |
 | `config_expires_at` | proxy-reported |
 | `current_epoch_id` | latest announced epoch |
-| `spool` | `{state, depth_events, bytes, capacity_bytes, oldest_unsent_age_seconds, unsent_events, as_of}` from the last heartbeat; `as_of` equals `status_as_of` |
+| `spool` | `{state, depth_events, bytes, capacity_bytes, oldest_unsent_age_seconds, unsent_events, quarantined_events, quarantined_bytes, as_of}` from the last heartbeat (`quarantined_bytes` is null for a proxy that predates it, #302); `as_of` equals `status_as_of` |
 | `open_gap_count` | open audit gaps (L4) |
 | `status_as_of` | server time at which the server applied the status report the status fields come from (not the proxy's `sent_at`); `null` when no report has been applied since the field was added |
 

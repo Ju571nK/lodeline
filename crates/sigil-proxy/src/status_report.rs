@@ -886,6 +886,7 @@ impl StatusBuilder {
                     "capacity_bytes": s.capacity_bytes.max(1),
                     "oldest_unsent_age_seconds": s.oldest_unsent_age_seconds,
                     "quarantined_events": s.quarantined_events,
+                    "quarantined_bytes": s.quarantined_bytes.min(i64::MAX as u64),
                 }),
                 s.last_assigned_sequence,
             ),
@@ -2737,6 +2738,7 @@ mod tests {
         assert!(v["spool"]["bytes"].as_u64().unwrap() > 0);
         assert!(v["spool"]["oldest_unsent_age_seconds"].is_u64());
         assert_eq!(v["spool"]["quarantined_events"], 0);
+        assert_eq!(v["spool"]["quarantined_bytes"], 0);
 
         // Full: admission is closed and the state says so.
         let one = spool.snapshot().unsent_bytes / 2;

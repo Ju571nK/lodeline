@@ -102,6 +102,10 @@ wire_struct! {
         #[serde(deserialize_with = "crate::helpers::nullable")]
         pub oldest_unsent_age_seconds: Option<NonNegativeI64>,
         pub quarantined_events: NonNegativeI64,
+        /// Bytes held in local quarantine. Optional: proxies that predate it omit
+        /// the field.
+        #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
+        pub quarantined_bytes: Option<NonNegativeI64>,
     }
 }
 

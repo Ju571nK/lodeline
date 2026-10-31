@@ -2445,6 +2445,31 @@ fn error_item_metadata_ref_for_registry_conflict() {
 }
 
 #[test]
+fn spool_quarantined_bytes_is_optional_and_round_trips() {
+    use sigil_proxy_api::parse_status;
+    let old = parse_status(&serde_json::to_vec(&status()).unwrap()).unwrap();
+    assert!(old.spool.quarantined_bytes.is_none());
+    assert!(serde_json::to_value(&old).unwrap()["spool"]
+        .get("quarantined_bytes")
+        .is_none());
+
+    let mut v = status();
+    v["spool"]["quarantined_bytes"] = json!(4096);
+    let new = parse_status(&serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_eq!(new.spool.quarantined_bytes.unwrap().get(), 4096);
+    assert_eq!(serde_json::to_value(&new).unwrap()["spool"], v["spool"]);
+
+    for bad in [json!(-1), json!(1.5), json!("1"), json!(null)] {
+        let mut b = status();
+        b["spool"]["quarantined_bytes"] = bad.clone();
+        assert!(
+            parse_status(&serde_json::to_vec(&b).unwrap()).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn registry_counters_are_optional_and_round_trip() {
     use sigil_proxy_api::parse_status;
     // Old shape (a proxy that predates the counters): accepted, fields absent,
