@@ -44,7 +44,7 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   is added to existing spools on open, with no schema version change.
 
 - `lodeline scan` no longer lists a tool as not configured when another scope of
-  the same tool was assessed.
+  the same tool was assessed or failed to parse.
 
 ## [0.12.0] - 2026-10-31
 
