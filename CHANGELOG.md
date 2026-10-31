@@ -39,6 +39,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   path, about 8 in 108, stops ingest. At 1 in 10 refused, throughput falls to about
   0.09 events/s, and only refused events are quarantined. (#339)
 
+- lodeline-proxy no longer scans the spool's `events` table for acknowledged rows
+  on each maintenance pass, so appends wait less behind it. The new partial index
+  is added to existing spools on open, with no schema version change.
+
 ## [0.12.0] - 2026-10-31
 
 ### Changed
