@@ -18,18 +18,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
 
 ### Added
 
-- sigil-proxy status reports now carry `spool.quarantined_bytes`, and the
+- lodeline-proxy status reports now carry `spool.quarantined_bytes`, and the
   server's proxy list API returns `spool.quarantined_events` and
   `spool.quarantined_bytes` (the latter null for a proxy that has not reported
-  it), so operators can watch quarantine growth. Upgrade sigil-server first:
+  it), so operators can watch quarantine growth. Upgrade lodeline-server first:
   its status parser rejects unknown fields, so a proxy that sends the new field
-  to an older server has its status reports refused (#302). Downgrading sigil-server after a new
+  to an older server has its status reports refused (#302). Downgrading lodeline-server after a new
   proxy has reported fails at boot until `quarantined_bytes` is removed from the
   stored proxy state, because older servers reject unknown fields.
 
 ### Fixed
 
-- sigil-proxy now deletes a quarantined spool row once its `quarantined_at` is
+- lodeline-proxy now deletes a quarantined spool row once its `quarantined_at` is
   older than Q, the server-issued `event_retention_seconds` (E). This covers
   every code, `registry_conflict_original` included. Before this, quarantine
   only grew. The server keeps the matching gap for E after its `detected_at`,
@@ -39,7 +39,7 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   of at least E; R + E for `spool_expired`). Nothing is deleted
   until the proxy has applied a config that carries E. Each maintenance batch
   that deletes rows logs the count, never the content (#302).
-- A wall-clock step no longer ages sigil-proxy spool rows within a boot. An NTP
+- A wall-clock step no longer ages lodeline-proxy spool rows within a boot. An NTP
   step forward of R or more used to quarantine every unsent event at once, and a
   step of Q or more purged quarantine evidence early. A backward step delayed
   both. Each unsent event and quarantine row now has a `(boot_id, boot clock)`
@@ -48,35 +48,35 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   before. Timestamps on the wire stay wall clock. The stamps are in additive
   tables with the same schema version, so an older binary still opens the
   database (Refs #302).
-- The sigil-proxy systemd unit now orders itself after `time-sync.target`.
+- The lodeline-proxy systemd unit now orders itself after `time-sync.target`.
   Across a reboot spool age uses the wall clock, so a host that booted with a
   wrong RTC could misjudge the age of older rows until the first clock step. The
   target only waits when a wait service is enabled; the packaging README says
   which one to use (#302).
-- On Unix, sigil-proxy opens its spool and registry databases with
+- On Unix, lodeline-proxy opens its spool and registry databases with
   `SQLITE_OPEN_NOFOLLOW` under the resolved state directory. This closes the
   gap between the symlink check and the open, where the file could be swapped
   for a symlink. Windows keeps the check-then-open behaviour (#302).
-- The packaged `/etc/sigil/sender.yaml.example` now tails `/var/log/sigil`,
+- The packaged `/etc/lodeline/sender.yaml.example` now tails `/var/log/lodeline`,
   where the root agent writes `events-*.jsonl`. It pointed at
-  `/var/log/sigil/events`, so a sender configured from it shipped nothing and
+  `/var/log/lodeline/events`, so a sender configured from it shipped nothing and
   logged no error. A `sender.yaml` copied from an older example needs
-  `events_dir: "/var/log/sigil"` (#328).
-- The agent's spool GC now sees how far sigil-sender has shipped. It looked
+  `events_dir: "/var/log/lodeline"` (#328).
+- The agent's spool GC now sees how far lodeline-sender has shipped. It looked
   for `<events_dir>/sender-offset.json` in a format the sender never wrote,
-  while the sender writes `/var/lib/sigil-sender/sender-offset.json`. So the
+  while the sender writes `/var/lib/lodeline-sender/sender-offset.json`. So the
   soft floor never freed shipped segments, and at the hard ceiling the GC
   force-deleted them and raised a data-loss alarm for data already delivered.
   A sender with a non-default `offset_path` still leaves the GC without a
   sender record. Only a root agent reads it; a per-user agent's spool is not
   tailed by the packaged sender (#331).
-- sigil-sender no longer skips the same-day rotations of a segment. The agent
+- lodeline-sender no longer skips the same-day rotations of a segment. The agent
   writes `events-D.jsonl` and then, past 100 MiB, `events-D-001.jsonl`, but
   string order puts `-001` first, so the sender jumped from `events-D.jsonl`
   to the next day and never shipped `-001` onward. The spool GC used the same
   order to pick the live segment and to decide what was shipped. Segments are
   now ordered by date and sequence number everywhere, including
-  `sigil show events`. Rotations a sender already skipped before the upgrade
+  `lodeline show events`. Rotations a sender already skipped before the upgrade
   stay unshipped. A sender that started on an existing backlog may also
   re-send or skip a few segments once after upgrading (#331).
 
@@ -84,13 +84,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   agent configs, not just root's own home. Each user's readings carry a new
   optional `user` field on `ai_guard_risk_assessed` and
   `ai_guard_toggle_drift`; readings for the agent's own home and for projects
-  omit it as before. sigil-server now reports, per tool, the riskiest of a
+  omit it as before. lodeline-server now reports, per tool, the riskiest of a
   host's readings instead of the last one received, so one clean user or
   project no longer hides another. Readings older than 48 hours (a removed
   repo, user or rule pack) stop counting; when a config cannot be read on the
   daily heartbeat, the agent re-sends its last reading so the risk does not age
   out. A root agent used to report score 0
-  for a host whose users had risky hooks. `sigil show risk` and `sigil doctor`
+  for a host whose users had risky hooks. `lodeline show risk` and `lodeline doctor`
   print the user next to the scope. Codex MCP tool baselines are now kept per
   home; an existing baseline still applies to the home that wrote it. Rule
   packs still assess only the agent's own home. Windows services still assess
