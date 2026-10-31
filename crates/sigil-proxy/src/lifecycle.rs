@@ -834,7 +834,8 @@ pub(crate) fn invocation_gap_handover(
 
 /// Keep the spool's R equal to the `max_offline_retry_age_seconds` of the applied
 /// server config (it is `None` until the first apply of this process; the
-/// spool's own default holds until then).
+/// spool's own default holds until then), and its quarantine purge horizon Q
+/// equal to `event_retention_seconds` (no purge until then).
 async fn follow_retention(
     spool: &crate::spool::Spool,
     mut rx: tokio::sync::watch::Receiver<crate::config_sync::ConfigView>,
@@ -842,9 +843,16 @@ async fn follow_retention(
 ) {
     tokio::pin!(shutdown);
     loop {
-        let secs = rx.borrow_and_update().max_offline_retry_age_seconds;
-        if let Some(r) = secs.and_then(|v| u64::try_from(v).ok()).filter(|v| *v > 0) {
+        let (r, e) = {
+            let v = rx.borrow_and_update();
+            (v.max_offline_retry_age_seconds, v.event_retention_seconds)
+        };
+        let positive = |s: Option<i64>| s.and_then(|v| u64::try_from(v).ok()).filter(|v| *v > 0);
+        if let Some(r) = positive(r) {
             spool.set_max_offline_retry_age(Duration::from_secs(r));
+        }
+        if let Some(e) = positive(e) {
+            spool.set_quarantine_retention(Duration::from_secs(e));
         }
         tokio::select! {
             _ = &mut shutdown => return,
@@ -894,6 +902,51 @@ mod tests {
             limits: Default::default(),
             credentials: Default::default(),
         }
+    }
+
+    /// The applied `event_retention_seconds` becomes the spool's purge horizon Q.
+    #[test]
+    fn applied_event_retention_sets_the_quarantine_purge_horizon() {
+        use crate::ingest_client::EventSource;
+        let d = tempfile::tempdir().unwrap();
+        let cfg = crate::spool::SpoolConfig::new(
+            d.path(),
+            "px-1",
+            "00000000-0000-4000-8000-000000000001",
+            true,
+            &Default::default(),
+        );
+        let mut spool = crate::spool::Spool::open(cfg).unwrap();
+        spool.inject_test_event_blocking("up-1").unwrap();
+        let ids: Vec<String> = spool
+            .next_events(1, &Default::default())
+            .iter()
+            .map(|e| e.event_id.as_str().to_string())
+            .collect();
+        spool.quarantined(
+            &ids,
+            sigil_proxy_api::status::QuarantineCode::SemanticInvalid,
+        );
+        let view = crate::config_sync::ConfigView {
+            state: sigil_proxy_api::status::ConfigState::Valid,
+            last_update_error: None,
+            applied_revision: Some(1),
+            config_hash: None,
+            observed_revision: Some(1),
+            expires_at: None,
+            max_offline_retry_age_seconds: Some(2_592_000),
+            event_retention_seconds: Some(3600),
+            route_upstreams: Vec::new(),
+        };
+        let (_tx, rx) = tokio::sync::watch::channel(view);
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(follow_retention(&spool, rx, async {}));
+        spool.advance_clock_for_test(3600);
+        assert_eq!(spool.expire_now().unwrap().purged_quarantined, 0);
+        spool.advance_clock_for_test(1);
+        assert_eq!(spool.expire_now().unwrap().purged_quarantined, 1);
     }
 
     /// AC-12: restart with an unreachable server never reports forwarding;

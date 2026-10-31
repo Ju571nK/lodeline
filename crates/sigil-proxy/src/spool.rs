@@ -18,6 +18,12 @@
 //!   start's `tool` (README M2b): its ORIGINAL bytes are kept in `quarantine` when
 //!   the event is quarantined, and under [`ORIGINAL_CODE`] when the acknowledged
 //!   rewritten row is purged.
+//! * A quarantine row of any code is deleted once its `quarantined_at` is older
+//!   than Q (`ledger-and-query.md` L1: Q = E, the server-issued
+//!   `event_retention_seconds`, see [`Spool::set_quarantine_retention`]). The
+//!   server keeps the matching gap for E after `detected_at`, which is stamped
+//!   when the row is quarantined, so local evidence outlives the central loss
+//!   record. Until E is known nothing is deleted.
 //! * Admission stops at `capacity - gap_reserve` of unsent event bytes
 //!   ([`AppendError::Full`]); the reserve is only for gap records.
 //! * Unsent events older than [`SpoolConfig::max_offline_retry_age`] (R) are
@@ -245,6 +251,8 @@ pub struct ExpireReport {
     pub expired_events: u64,
     pub gaps_recorded: u64,
     pub purged_acked: u64,
+    /// Quarantine rows deleted because they outlived Q (all codes).
+    pub purged_quarantined: u64,
 }
 
 // ------------------------------------------------------------------ internals
@@ -272,6 +280,8 @@ struct Shared {
     reserve: AtomicU64,
     /// R in seconds; the applied server config can change it at runtime.
     retry_age_secs: AtomicU64,
+    /// Q in seconds; 0 until the applied server config provides E (no purge).
+    quarantine_retention_secs: AtomicU64,
     /// Sticky: a gap record did not fit `spool_gap_reserve_bytes`. Set when that
     /// happens and cleared only once gaps were handed off (room came back) or a
     /// later gap fit, so the reported state does not flap with every append.
@@ -355,6 +365,7 @@ impl Spool {
             capacity: AtomicU64::new(cfg.capacity_bytes),
             reserve: AtomicU64::new(cfg.gap_reserve_bytes),
             retry_age_secs: AtomicU64::new(cfg.max_offline_retry_age.as_secs()),
+            quarantine_retention_secs: AtomicU64::new(0),
             gap_exhausted: AtomicBool::new(false),
             #[cfg(any(test, feature = "test-util"))]
             inject_failure: AtomicBool::new(false),
@@ -477,6 +488,15 @@ impl Spool {
         self.inner
             .shared
             .retry_age_secs
+            .store(age.as_secs(), Ordering::SeqCst);
+    }
+
+    /// Set Q, the purge horizon of quarantined rows (the server-issued
+    /// `event_retention_seconds`). Applies from the next maintenance pass.
+    pub fn set_quarantine_retention(&self, age: Duration) {
+        self.inner
+            .shared
+            .quarantine_retention_secs
             .store(age.as_secs(), Ordering::SeqCst);
     }
 
@@ -1402,6 +1422,7 @@ impl Writer {
             total.expired_events += r.expired_events;
             total.gaps_recorded += r.gaps_recorded;
             total.purged_acked += r.purged_acked;
+            total.purged_quarantined += r.purged_quarantined;
             if !more {
                 return Ok(total);
             }
@@ -1498,18 +1519,50 @@ impl Writer {
                 report.purged_acked += 1;
             }
         }
+        let q_secs = self.shared.quarantine_retention_secs.load(Ordering::SeqCst);
+        let (mut purged_q_bytes, mut purged_originals) = (0u64, 0u64);
+        if q_secs > 0 {
+            let q_cutoff = now.saturating_sub(i64::try_from(q_secs).unwrap_or(i64::MAX));
+            let mut q = tx
+                .prepare(
+                    "DELETE FROM quarantine WHERE sequence IN \
+                     (SELECT sequence FROM quarantine WHERE quarantined_at < ?1 \
+                     ORDER BY sequence LIMIT ?2) RETURNING size, code = ?3",
+                )
+                .map_err(st)?;
+            let rows = q
+                .query_map(params![q_cutoff, MAINTENANCE_BATCH, ORIGINAL_CODE], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+                })
+                .map_err(st)?;
+            for row in rows {
+                let (size, original) = row.map_err(st)?;
+                purged_q_bytes += size as u64;
+                purged_originals += u64::from(original);
+                report.purged_quarantined += 1;
+            }
+        }
         tx.commit().map_err(st)?;
+        if report.purged_quarantined > 0 {
+            tracing::info!(
+                count = report.purged_quarantined,
+                "quarantined rows purged after retention"
+            );
+        }
         if report.gaps_recorded > 0 && gap_bytes > 0 {
             self.shared.gap_exhausted.store(false, Ordering::SeqCst);
         }
         let more = report.expired_events >= MAINTENANCE_BATCH as u64
-            || report.purged_acked >= MAINTENANCE_BATCH as u64;
+            || report.purged_acked >= MAINTENANCE_BATCH as u64
+            || report.purged_quarantined >= MAINTENANCE_BATCH as u64;
         let oldest = self.oldest_unsent().ok().flatten();
         let mut k = self.counters();
         k.unsent_events = k.unsent_events.saturating_sub(report.expired_events);
         k.unsent_bytes = k.unsent_bytes.saturating_sub(bytes);
-        k.quarantined += report.expired_events;
-        k.quarantined_bytes += bytes + archived;
+        k.quarantined = (k.quarantined + report.expired_events)
+            .saturating_sub(report.purged_quarantined - purged_originals);
+        k.quarantined_bytes =
+            (k.quarantined_bytes + bytes + archived).saturating_sub(purged_q_bytes);
         k.acked = k.acked.saturating_sub(report.purged_acked);
         k.acked_bytes = k.acked_bytes.saturating_sub(purged_bytes);
         k.gap_bytes += gap_bytes;
@@ -2200,6 +2253,7 @@ mod tests {
             capacity: AtomicU64::new(1 << 30),
             reserve: AtomicU64::new(1 << 20),
             retry_age_secs: AtomicU64::new(3600),
+            quarantine_retention_secs: AtomicU64::new(0),
             gap_exhausted: AtomicBool::new(false),
             inject_failure: AtomicBool::new(false),
             delivery_paused: AtomicBool::new(false),
@@ -2314,6 +2368,102 @@ mod tests {
         s.set_max_offline_retry_age(Duration::from_secs(3600));
         assert_eq!(s.expire_now().unwrap().expired_events, 1);
         assert_eq!(s.pending_gaps().unwrap().len(), 1);
+    }
+
+    fn quarantine_rows(dir: &Path) -> i64 {
+        Connection::open(dir.join(SPOOL_FILE))
+            .unwrap()
+            .query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Q purge: a quarantined row is deleted only once it is older than Q.
+    #[test]
+    fn quarantined_rows_are_purged_once_older_than_q() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.set_quarantine_retention(Duration::from_secs(3600));
+        s.append(event(1)).unwrap();
+        s.append(event(2)).unwrap();
+        s.quarantined(&[uid(1)], QuarantineCode::SemanticInvalid);
+        s.advance_clock_for_test(3600);
+        assert_eq!(s.expire_now().unwrap().purged_quarantined, 0);
+        assert_eq!(s.snapshot().quarantined_events, 1);
+        assert_eq!(quarantine_rows(d.path()), 1);
+        s.advance_clock_for_test(1);
+        assert_eq!(s.expire_now().unwrap().purged_quarantined, 1);
+        let snap = s.snapshot();
+        assert_eq!((snap.quarantined_events, snap.quarantined_bytes), (0, 0));
+        assert_eq!(snap.unsent_events, 1);
+        assert_eq!(quarantine_rows(d.path()), 0);
+    }
+
+    /// Every code is purged, including registry-conflict originals, and the
+    /// counters match what a restart would load from the database.
+    #[test]
+    fn q_purge_covers_originals_and_keeps_counters_exact() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(call_event(1, 1)).unwrap();
+        s.registry_conflict(&mref(1)).unwrap();
+        s.acknowledged(&[uid(1)]);
+        s.advance_clock_for_test(86_400 + 1);
+        s.expire_now().unwrap();
+        s.append(event(2)).unwrap();
+        s.append(event(3)).unwrap();
+        s.quarantined(&[uid(2)], QuarantineCode::SemanticInvalid);
+        assert_eq!(s.snapshot().quarantined_events, 1);
+        s.advance_clock_for_test(1001);
+        s.quarantined(&[uid(3)], QuarantineCode::SemanticInvalid);
+        let (_, _, newest_size) = quarantined_row(d.path(), &uid(3));
+        s.set_quarantine_retention(Duration::from_secs(1000));
+        assert_eq!(s.expire_now().unwrap().purged_quarantined, 2);
+        let snap = s.snapshot();
+        assert_eq!(snap.quarantined_events, 1);
+        assert_eq!(snap.quarantined_bytes, newest_size as u64);
+        assert_eq!(quarantined_row(d.path(), &uid(3)).0, "semantic_invalid");
+        s.close_blocking_for_test();
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut c = cfg(d.path(), now);
+        c.new_epoch = false;
+        let reloaded = Spool::open(c).unwrap().snapshot();
+        assert_eq!(
+            (reloaded.quarantined_events, reloaded.quarantined_bytes),
+            (snap.quarantined_events, snap.quarantined_bytes)
+        );
+    }
+
+    /// Before the applied config provides E, nothing is purged however old.
+    #[test]
+    fn nothing_is_purged_while_e_is_unknown() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(event(1)).unwrap();
+        s.quarantined(&[uid(1)], QuarantineCode::SemanticInvalid);
+        s.advance_clock_for_test(1000 * 86_400);
+        assert_eq!(s.expire_now().unwrap().purged_quarantined, 0);
+        assert_eq!(s.snapshot().quarantined_events, 1);
+        assert_eq!(quarantine_rows(d.path()), 1);
+    }
+
+    #[test]
+    fn q_purge_is_batched() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let total = MAINTENANCE_BATCH as u32 * 2 + 10;
+        for n in 1..=total {
+            s.append(event(n)).unwrap();
+        }
+        s.set_max_offline_retry_age(Duration::from_secs(10));
+        s.advance_clock_for_test(11);
+        assert_eq!(s.expire_now().unwrap().expired_events, total as u64);
+        s.set_quarantine_retention(Duration::from_secs(3600));
+        s.advance_clock_for_test(3601);
+        // More rows than one maintenance transaction purges.
+        assert_eq!(s.expire_now().unwrap().purged_quarantined, total as u64);
+        let snap = s.snapshot();
+        assert_eq!((snap.quarantined_events, snap.quarantined_bytes), (0, 0));
+        assert_eq!(quarantine_rows(d.path()), 0);
     }
 
     /// Admission: full is a typed refusal and nothing is stored; space returns as
