@@ -40,8 +40,28 @@ Upgrade every Sigil package on the host in the same run. The shared `/etc/sigil`
 and `/var/log/sigil` directories move only after `dpkg-query` or `rpm -q` shows no
 `sigil`, `sigil-sender`, `sigil-server` or `sigil-proxy` package below version
 0.12, because a running old sender still reads them. A partial upgrade leaves them
-in place and prints a notice that names the packages. Another program named
-`sigil` in `/usr/bin`, such as NOMARJ/sigil, does not hold them back.
+in place and prints a notice that names the packages. Its `Upgrade those packages
+to finish` also covers removing one: an upgrade finishes the move by itself, but a
+removal runs no Lodeline script, so rerun `migrate-from-sigil` afterwards. Another
+program named `sigil` in `/usr/bin`, such as NOMARJ/sigil, does not hold them back.
+
+**Debian and Ubuntu.** `apt-get` removes the old packages, unpacks all the new
+ones, then configures them one at a time in an order it picks. dpkg keeps a
+removed package's conffiles, so `dpkg -l` lists each old package as `rc` and
+`/etc/sigil` still holds its `*.example` files. An `rc` entry does not hold the
+move back, and the script leaves those files alone (section 2).
+
+If a package stops at a conffile prompt, or `apt-get` with no terminal exits 100
+with `dpkg: error processing package`, an old example is already at the new path,
+for example from an earlier test build or a copy made by hand. Finish with:
+
+```sh
+apt-get -f install -o Dpkg::Options::=--force-confold
+```
+
+This keeps the file that is there and leaves the packaged example beside it as
+`<name>.dpkg-dist`. The stopped packages then configure, and their scripts move
+what is left.
 
 On a host with no package database, the script cannot tell what `/usr/bin/sigil`
 is. It keeps the shared directories and prints the command that moves them.
@@ -72,10 +92,17 @@ it can to the new path, and it never overwrites or deletes data.
 
 Rules for each directory:
 
-- The new path is absent or empty: the old directory is renamed onto it.
+- The new path is absent or empty: the old directory is renamed onto it. If it
+  holds packaged examples, it is copied there without them.
 - The new path has entries: each old entry that is not there yet moves in. An
   entry already at the new path is never overwritten. It stays at the old path
-  and the script lists it. Packaged `*.example` files are left as they are.
+  and the script lists it.
+- Packaged `*.example` files never move, at any depth, including under
+  `/etc/sigil/proxy/`. The new packages own those names, and a changed file there
+  stops dpkg at a conffile prompt. A subdirectory that holds one is copied without
+  it, keeping its owner and mode. The old examples stay at the old path and the
+  script reports them as safe to remove, so a non-empty `/etc/sigil` afterwards is
+  not a failure. Delete them, or run `dpkg --purge` on the `rc` packages.
 - The script says `moved` only when everything moved. Otherwise it says
   `kept in <dir>:` and names what is left.
 - Across filesystems, for example when the new directory is its own mount, each
@@ -120,11 +147,12 @@ on an empty directory, and the agent would make a fresh `state.db` and a new
 to repair ownership. The link target is never changed.
 
 ```sh
-mkdir -p /var/lib/lodeline && rm -f /var/lib/lodeline/*.example && rmdir /var/lib/lodeline && mv /var/lib/sigil /var/lib/lodeline
+mkdir -p /var/lib/lodeline && rm -f /var/lib/lodeline/*.example && rmdir /var/lib/lodeline && find /var/lib/sigil/ -name '*.example' ! -type d -exec rm -f {} + && mv /var/lib/sigil /var/lib/lodeline
 ```
 
 This works whether the new directory is missing, empty or holds only packaged
-`*.example` files. If it holds anything else, `rmdir` fails and nothing moves.
+`*.example` files. If it holds anything else, `rmdir` fails and nothing moves. The
+old examples are deleted just before the `mv`, so none arrives at the new path.
 
 Files owned by the `sigil` user and group, or by `sigil-proxy`, move to the
 matching `lodeline` account. Every run repairs this across all the new
@@ -158,6 +186,19 @@ service. In `sender.yaml` that means:
 | `offset_path` | `/var/lib/lodeline-sender/sender-offset.json` |
 | `agent_control` | `/var/run/lodeline/control.sock` |
 | `dead_letter_dir` | `/var/log/lodeline-sender/dead-letter` |
+
+In `proxy.yaml`, certificates and keys default to the subdirectory `/etc/sigil/proxy/`,
+which is now `/etc/lodeline/proxy/`:
+
+| Key | New default |
+|---|---|
+| `state_dir` | `/var/lib/lodeline-proxy` |
+| `tls_cert_file` | `/etc/lodeline/proxy/listener.crt` |
+| `tls_key_file` | `/etc/lodeline/proxy/listener.key` |
+| `client_cert_file` | `/etc/lodeline/proxy/client.crt` |
+| `client_key_file` | `/etc/lodeline/proxy/client.key` |
+| `ca_file` | `/etc/lodeline/proxy/ca.pem` |
+| `credentials.<ref>.secret_file`, for upstream secrets | `/etc/lodeline/proxy/example-upstream.secret` |
 
 **Per-user paths.** No package owns these, so move them yourself:
 
