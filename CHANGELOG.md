@@ -1,11 +1,13 @@
 # Changelog
 
-All notable changes to Sigil are recorded here. The format is based on
+All notable changes to Lodeline are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the workspace uses a
 single SemVer version across all crates. Full release notes for tagged releases
-also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
+also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases).
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-10-31
 
 ### Changed
 
@@ -14,7 +16,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   shim. Hash and signature domains, the release key id and the proxy SAN keep
   their old bytes so existing bundles, stored data and certificates still verify.
   The new `.deb` and `.rpm` packages replace the old ones and move config and state
-  to the new paths; see [docs/migrate-from-sigil.md](docs/migrate-from-sigil.md).
+  to the new paths. Follow [docs/migrate-from-sigil.md](docs/migrate-from-sigil.md)
+  when you upgrade: it lists every step an operator must take.
 
 ### Added
 
