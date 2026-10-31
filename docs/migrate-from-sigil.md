@@ -45,11 +45,28 @@ to finish` also covers removing one: an upgrade finishes the move by itself, but
 removal runs no Lodeline script, so rerun `migrate-from-sigil` afterwards. Another
 program named `sigil` in `/usr/bin`, such as NOMARJ/sigil, does not hold them back.
 
-**Debian and Ubuntu.** `apt-get` removes the old packages, unpacks all the new
-ones, then configures them one at a time in an order it picks. dpkg keeps a
-removed package's conffiles, so `dpkg -l` lists each old package as `rc` and
-`/etc/sigil` still holds its `*.example` files. An `rc` entry does not hold the
-move back, and the script leaves those files alone (section 2).
+**Debian and Ubuntu.** Name the old editor package with a trailing `-` so apt
+removes it:
+
+```sh
+sudo apt-get install ./lodeline*.deb sigil-
+```
+
+Without `sigil-`, a Debian release whose repository carries the Sigil ebook
+editor can satisfy `Conflicts: sigil (<< 0.12)` by upgrading the editor to 1.x
+instead of removing the old package. One test did this: 281 packages, a 174 MB
+download and 768 MB of disk. Your data is not harmed, but old `sigil` stays
+installed. No package metadata can prevent this, so the `sigil-` form is the
+normal command. A host that really wants the editor can install it afterwards
+with `apt-get install sigil`.
+
+apt removes the old packages, unpacks all the new ones, then configures them one
+at a time in an order it picks. dpkg keeps a removed package's conffiles, so
+`dpkg -l` lists each removed package as `rc` and `/etc/sigil` still holds its
+`*.example` files. An `rc` entry does not hold the move back, and the script
+leaves those files alone (section 2). If you left `sigil-` off and apt upgraded the
+editor, `sigil` shows as `ii` at 1.x, not `rc`, and the editor is not an old
+package.
 
 If a package stops at a conffile prompt, or `apt-get` with no terminal exits 100
 with `dpkg: error processing package`, an old example is already at the new path,
@@ -102,7 +119,10 @@ Rules for each directory:
   stops dpkg at a conffile prompt. A subdirectory that holds one is copied without
   it, keeping its owner and mode. The old examples stay at the old path and the
   script reports them as safe to remove, so a non-empty `/etc/sigil` afterwards is
-  not a failure. Delete them, or run `dpkg --purge` on the `rc` packages.
+  not a failure. Delete them, or run `dpkg --purge` on the `rc` packages. If
+`sigil` is `ii` because apt upgraded the editor, it is not `rc` and a purge would
+remove the editor. `/etc/sigil` then stays after you purge the others, because the
+editor's package owns it. Delete the old `*.example` files by hand.
 - The script says `moved` only when everything moved. Otherwise it says
   `kept in <dir>:` and names what is left.
 - Across filesystems, for example when the new directory is its own mount, each
@@ -110,7 +130,9 @@ Rules for each directory:
   and only then removed from the old one. A killed run never leaves a partial file
   under the real name, and a rerun removes its temporary file and copies again. If
   a run dies between the rename and the removal, the file is at both paths and is
-  reported as kept. Check with `cmp`, delete the old copy, and rerun.
+  reported as kept, and the notice names every file still at the old path,
+  including a sidecar such as `state.db-wal`. Check each pair with `cmp`, delete
+  the old copy, and rerun.
 
 **SQLite databases.** A database moves together with its `-wal`, `-shm` and
 `-journal` files. If a database is at both paths, the script stops for that
@@ -200,6 +222,20 @@ which is now `/etc/lodeline/proxy/`:
 | `ca_file` | `/etc/lodeline/proxy/ca.pem` |
 | `credentials.<ref>.secret_file`, for upstream secrets | `/etc/lodeline/proxy/example-upstream.secret` |
 
+In `server.yaml`, edit these keys if you set them. The shipped example uses the
+new defaults:
+
+| Key | New default |
+|---|---|
+| `events_out_dir` | `/var/lib/lodeline-server/events` |
+| `policy_bundle_path` | `/var/lib/lodeline-server/signed-policy.json` |
+| `tls_cert_path` | `/etc/lodeline/server.crt` |
+| `tls_key_path` | `/etc/lodeline/server.key` |
+| `client_ca_path` | `/etc/lodeline/client-ca.pem` |
+
+Other path keys, such as `host_allowlist_path` and the `enroll_*` paths, need the
+same edit when they name an old directory.
+
 **Per-user paths.** No package owns these, so move them yourself:
 
 | Platform | Old | New |
@@ -265,6 +301,11 @@ systemctl enable --now lodeline-sender
 systemctl enable --now lodeline-server
 systemctl enable --now lodeline-proxy
 ```
+
+`lodeline-proxy` requires its state directory to be mode 0700, and the packaged
+unit sets `StateDirectoryMode=0700`. If you use a custom `state_dir` or a drop-in,
+keep that directory at 0700 and owned by `lodeline-proxy`, or the proxy refuses to
+start.
 
 Move any unit drop-ins from `/etc/systemd/system/sigil*.service.d/` to
 `/etc/systemd/system/lodeline*.service.d/`. On SELinux hosts the policy module is
@@ -361,8 +402,8 @@ id (`sigil-build-2026b`) did not change.
 Check three things on each fleet host after the move:
 
 - The sender's config points at the new certificate paths under `/etc/lodeline`.
-- The server's `client_ca_path` and the manager's CA path resolve under the new
-  directories.
+- The server's `tls_cert_path`, `tls_key_path` and `client_ca_path`, and the
+  manager's CA path, resolve under the new directories.
 - `lodeline-sign verify` still passes on your current policy bundle.
 
 **If you do nothing.** The certificates are fine. A sender that still names
@@ -410,6 +451,9 @@ lodeline scan
 lodeline doctor
 systemctl status lodeline lodeline-sender lodeline-server lodeline-proxy
 ```
+
+`Unit lodeline-server.service could not be found` is harmless on a host that does
+not run the server. Name only the units you installed.
 
 `lodeline scan` should print a `Lodeline scan` summary. If it reports no policy or
 no history on a host that had both, the move in section 2 did not run. Run
