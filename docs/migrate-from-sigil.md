@@ -24,8 +24,25 @@ Each section below ends with what happens if you do nothing.
 **Linux packages.** Install the new `.deb` or `.rpm` for each Sigil package on the
 host. They replace the old ones.
 
-The `lodeline-proxy` package is not in the release assets yet. On a proxy host,
-build it with `packaging/build.sh deb` or `packaging/build.sh rpm`.
+No release publishes a `lodeline-proxy` package yet, so there is nothing to
+download for it. On a host with `sigil-proxy`, build the package first and name it
+in the same `apt-get` or `dnf` run as the others. If you leave it out, `sigil-proxy`
+holds back the `/etc/sigil` move, and `lodeline-sender` stays down because
+`/etc/lodeline/sender.yaml` does not exist yet.
+
+Check out the release tag, for example `git checkout v0.12.0`. Install `cargo-deb`
+or `cargo-generate-rpm`, then build:
+
+```sh
+packaging/build.sh proxy deb    # target/debian/lodeline-proxy_*.deb
+packaging/build.sh proxy rpm    # target/generate-rpm/lodeline-proxy-*.rpm
+```
+
+As a precaution, build on the distribution you will install on, or pass
+`--target x86_64-unknown-linux-musl`, which writes the `.deb` to
+`target/x86_64-unknown-linux-musl/debian/`. The `.deb` depends on `libc6` with no
+version, so a package built against a newer glibc could install and then fail at
+start.
 
 - `.deb`: each `lodeline*` package declares Conflicts and Replaces for the
   matching `sigil*` package below version 0.12.
@@ -47,6 +64,14 @@ in place and prints a notice that names the packages. Its `Upgrade those package
 to finish` also covers removing one: an upgrade finishes the move by itself, but a
 removal runs no Lodeline script, so rerun `migrate-from-sigil` afterwards. Another
 program named `sigil` in `/usr/bin`, such as NOMARJ/sigil, does not hold them back.
+
+Removing `sigil-proxy` without installing `lodeline-proxy` leaves
+`/var/lib/sigil-proxy` behind, and nothing tells you. Every Lodeline package ships
+the same script, so move the directory with whichever one is installed:
+
+```sh
+/usr/libexec/lodeline/migrate-from-sigil proxy
+```
 
 **Debian and Ubuntu.** First check what the `sigil` package on the host is:
 
