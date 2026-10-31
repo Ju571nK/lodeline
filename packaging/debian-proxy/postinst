@@ -9,5 +9,6 @@ set -e
 if command -v systemd-sysusers >/dev/null 2>&1; then
     systemd-sysusers /usr/lib/sysusers.d/lodeline-proxy.conf >/dev/null 2>&1 || true
 fi
+/usr/libexec/lodeline-proxy/migrate-from-sigil proxy || true
 
 exit 0

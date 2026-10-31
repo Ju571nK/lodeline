@@ -68,6 +68,9 @@ http = { workspace = true }
 
 [package.metadata.deb]
 name = "lodeline-server"
+conflicts = "sigil-server"
+replaces = "sigil-server"
+provides = "sigil-server"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
 priority = "optional"
@@ -81,6 +84,7 @@ Lodeline OSS reference server. Receives lodeline agent posture events over HTTPS
 GET /v1/policy. Ships a systemd unit (disabled by default — enable with \
 `systemctl enable --now lodeline-server`)."""
 assets = [
+    ["../../packaging/migrate-from-sigil.sh", "usr/libexec/lodeline-server/migrate-from-sigil", "755"],
     ["../../target/release/lodeline-server", "usr/bin/", "755"],
     ["../../config/server.example.yaml", "etc/lodeline/server.yaml.example", "644"],
     ["../../README.md", "usr/share/doc/lodeline-server/README.md", "644"],
@@ -100,8 +104,13 @@ start = false
 
 [package.metadata.generate-rpm]
 name = "lodeline-server"
+obsoletes = { "sigil-server" = "*" }
+provides = { "sigil-server" = "*" }
+# Old packages are erased after %post, so the data moves in %posttrans.
+post_trans_script = "/usr/libexec/lodeline-server/migrate-from-sigil server || :"
 summary = "OSS reference server: receives lodeline agent events over HTTPS (mTLS when configured)"
 assets = [
+    { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline-server/migrate-from-sigil", mode = "0755" },
     { source = "../../target/release/lodeline-server", dest = "/usr/bin/lodeline-server", mode = "0755" },
     { source = "../../packaging/systemd/lodeline-server.service", dest = "/usr/lib/systemd/system/lodeline-server.service", mode = "0644" },
     { source = "../../config/server.example.yaml", dest = "/etc/lodeline/server.yaml.example", mode = "0644" },

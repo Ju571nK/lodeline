@@ -26,6 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: release manifest regressions
         run: python3 -m unittest discover -s tests -p test_release_manifest.py -v
+      - name: migration regressions
+        run: python3 -m unittest discover -s tests -p test_migrate_from_sigil.py -v
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy

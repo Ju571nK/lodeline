@@ -69,6 +69,9 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.deb]
 name = "lodeline-proxy"
+conflicts = "sigil-proxy"
+replaces = "sigil-proxy"
+provides = "sigil-proxy"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
 priority = "optional"
@@ -79,6 +82,7 @@ Lodeline Proxy: standalone MCP relay with audit. Ships a systemd unit (disabled 
 default, no live config installed: copy /etc/lodeline/proxy.yaml.example to \
 /etc/lodeline/proxy.yaml, edit, then `systemctl enable --now lodeline-proxy`)."""
 assets = [
+    ["../../packaging/migrate-from-sigil.sh", "usr/libexec/lodeline-proxy/migrate-from-sigil", "755"],
     ["../../target/release/lodeline-proxy", "usr/bin/", "755"],
     ["../../config/proxy.example.yaml", "etc/lodeline/proxy.yaml.example", "644"],
     ["../../README.md", "usr/share/doc/lodeline-proxy/README.md", "644"],
@@ -95,8 +99,13 @@ start = false
 
 [package.metadata.generate-rpm]
 name = "lodeline-proxy"
+obsoletes = { "sigil-proxy" = "*" }
+provides = { "sigil-proxy" = "*" }
+# Old packages are erased after %post, so the data moves in %posttrans.
+post_trans_script = "/usr/libexec/lodeline-proxy/migrate-from-sigil proxy || :"
 summary = "Standalone MCP relay with audit (installed disabled, no live config)"
 assets = [
+    { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline-proxy/migrate-from-sigil", mode = "0755" },
     { source = "../../target/release/lodeline-proxy", dest = "/usr/bin/lodeline-proxy", mode = "0755" },
     { source = "../../packaging/systemd/lodeline-proxy.service", dest = "/usr/lib/systemd/system/lodeline-proxy.service", mode = "0644" },
     { source = "../../config/proxy.example.yaml", dest = "/etc/lodeline/proxy.yaml.example", mode = "0644" },

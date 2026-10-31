@@ -48,6 +48,9 @@ tower = { workspace = true }
 # .deb (Debian/Ubuntu) — `cargo deb --no-build`
 [package.metadata.deb]
 name = "lodeline-sender"
+conflicts = "sigil-sender"
+replaces = "sigil-sender"
+provides = "sigil-sender"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
 priority = "optional"
@@ -62,6 +65,7 @@ the same channel and hands them to the agent via control IPC. Ships a \
 systemd unit (disabled by default — enable with \
 `systemctl enable --now lodeline-sender`)."""
 assets = [
+    ["../../packaging/migrate-from-sigil.sh", "usr/libexec/lodeline-sender/migrate-from-sigil", "755"],
     ["../../target/release/lodeline-sender", "usr/bin/", "755"],
     ["../../config/sender.example.yaml", "etc/lodeline/sender.yaml.example", "644"],
     ["../../README.md", "usr/share/doc/lodeline-sender/README.md", "644"],
@@ -82,8 +86,13 @@ start = false
 # .rpm (RHEL/Rocky/Fedora) — `cargo generate-rpm`
 [package.metadata.generate-rpm]
 name = "lodeline-sender"
+obsoletes = { "sigil-sender" = "*" }
+provides = { "sigil-sender" = "*" }
+# Old packages are erased after %post, so the data moves in %posttrans.
+post_trans_script = "/usr/libexec/lodeline-sender/migrate-from-sigil sender || :"
 summary = "Ships lodeline agent posture events to a lodeline-server over mTLS"
 assets = [
+    { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline-sender/migrate-from-sigil", mode = "0755" },
     { source = "../../target/release/lodeline-sender", dest = "/usr/bin/lodeline-sender", mode = "0755" },
     { source = "../../packaging/systemd/lodeline-sender.service", dest = "/usr/lib/systemd/system/lodeline-sender.service", mode = "0644" },
     { source = "../../config/sender.example.yaml", dest = "/etc/lodeline/sender.yaml.example", mode = "0644" },

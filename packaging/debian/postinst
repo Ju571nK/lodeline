@@ -8,6 +8,7 @@ set -e
 if command -v systemd-sysusers >/dev/null 2>&1; then
     systemd-sysusers /usr/lib/sysusers.d/lodeline.conf >/dev/null 2>&1 || true
 fi
+/usr/libexec/lodeline/migrate-from-sigil agent || true
 if command -v systemd-tmpfiles >/dev/null 2>&1; then
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/lodeline.conf >/dev/null 2>&1 || true
 fi

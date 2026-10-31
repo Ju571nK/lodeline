@@ -73,6 +73,9 @@ operator-cli = []
 # .deb (Debian/Ubuntu) — `cargo deb --no-build`
 [package.metadata.deb]
 name = "lodeline"
+conflicts = "sigil"
+replaces = "sigil"
+provides = "sigil"
 maintainer = "Lodeline contributors <lodeline@users.noreply.github.com>"
 section = "admin"
 priority = "optional"
@@ -90,6 +93,7 @@ them on change, and writes hash-anchored posture events to JSONL for ingestion b
 a SIEM. Ships a systemd unit (disabled by default — enable with \
 `systemctl enable --now lodeline`)."""
 assets = [
+    ["../../packaging/migrate-from-sigil.sh", "usr/libexec/lodeline/migrate-from-sigil", "755"],
     ["../../target/release/lodeline", "usr/bin/", "755"],
     ["../../target/release/lodeline-mcp", "usr/bin/", "755"],
     ["../../target/release/lodeline-hook", "usr/bin/", "755"],
@@ -111,8 +115,13 @@ start = false
 # .rpm (RHEL/Rocky/Fedora) — `cargo generate-rpm`
 [package.metadata.generate-rpm]
 name = "lodeline"
+obsoletes = { "sigil" = "*" }
+provides = { "sigil" = "*" }
+# Old packages are erased after %post, so the data moves in %posttrans.
+post_trans_script = "/usr/libexec/lodeline/migrate-from-sigil agent || :"
 summary = "Watches policy-defined files and emits hash-anchored posture events for your SIEM"
 assets = [
+    { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline/migrate-from-sigil", mode = "0755" },
     { source = "../../target/release/lodeline", dest = "/usr/bin/lodeline", mode = "0755" },
     { source = "../../target/release/lodeline-mcp", dest = "/usr/bin/lodeline-mcp", mode = "0755" },
     { source = "../../target/release/lodeline-hook", dest = "/usr/bin/lodeline-hook", mode = "0755" },
