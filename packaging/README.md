@@ -36,6 +36,16 @@ key and secret files (private files owned by `sigil-proxy`, mode 0600), run
 `systemctl enable --now sigil-proxy`. The SELinux domain for the proxy is
 deferred to hardware verification; until then it runs unconfined.
 
+The proxy expires unsent spool events by wall clock, so it orders itself after
+`time-sync.target`. That target only waits when a wait service is enabled.
+With chrony, enable `chrony-wait.service`: it gives up after 3 minutes, so a
+host that cannot reach a time source still starts the proxy. With
+systemd-timesyncd, `systemd-time-wait-sync.service` waits with no timeout, so
+the proxy never starts until the clock syncs; do not enable it on hosts that
+may run without a time source. Without a wait service, the proxy can start
+before the first sync, and that clock step can expire unsent events into
+quarantine.
+
 ## Building
 
 Pure-Rust packagers, so this runs on macOS or Linux:
