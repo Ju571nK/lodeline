@@ -909,13 +909,14 @@ mod tests {
     fn applied_event_retention_sets_the_quarantine_purge_horizon() {
         use crate::ingest_client::EventSource;
         let d = tempfile::tempdir().unwrap();
-        let cfg = crate::spool::SpoolConfig::new(
+        let mut cfg = crate::spool::SpoolConfig::new(
             d.path(),
             "px-1",
             "00000000-0000-4000-8000-000000000001",
             true,
             &Default::default(),
         );
+        cfg.clock = std::sync::Arc::new(|| 1_800_000_000);
         let mut spool = crate::spool::Spool::open(cfg).unwrap();
         spool.inject_test_event_blocking("up-1").unwrap();
         let ids: Vec<String> = spool

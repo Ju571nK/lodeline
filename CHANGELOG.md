@@ -15,8 +15,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/sigil/releases).
   only grew. The server keeps the matching gap for E after its `detected_at`,
   which is no later than `quarantined_at`, so local evidence lives at least as
   long as the server must keep the gap. Two known limits: proxy clock skew, and
-  a gap delivered to the server more than E after quarantine (which takes an
-  outage of at least R + E). Nothing is deleted
+  a gap delivered to the server more than E after the quarantine (an outage
+  of at least E; R + E for `spool_expired`). Nothing is deleted
   until the proxy has applied a config that carries E. Each maintenance batch
   that deletes rows logs the count, never the content (#302).
 - The sigil-proxy systemd unit now orders itself after `time-sync.target`.

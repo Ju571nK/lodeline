@@ -25,8 +25,8 @@
 //!   later than `quarantined_at` (stamped just before for `event_quarantined`,
 //!   at conflict time for `registry_conflict`), so local evidence lives at least
 //!   as long as the server must keep the gap. Known limits: proxy clock skew,
-//!   and a gap delivered more than E after quarantine (an outage of at least
-//!   R + E). Until E is known nothing is deleted.
+//!   and a gap delivered more than E after the quarantine (an outage of at
+//!   least E; R + E for `spool_expired`). Until E is known nothing is deleted.
 //! * Admission stops at `capacity - gap_reserve` of unsent event bytes
 //!   ([`AppendError::Full`]); the reserve is only for gap records.
 //! * Unsent events older than [`SpoolConfig::max_offline_retry_age`] (R) are
