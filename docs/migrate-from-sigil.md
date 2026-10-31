@@ -30,8 +30,8 @@ in the same `apt-get` or `dnf` run as the others. If you leave it out, `sigil-pr
 holds back the `/etc/sigil` move, and `lodeline-sender` stays down because
 `/etc/lodeline/sender.yaml` does not exist yet.
 
-Check out the release tag, for example `git checkout v0.12.0`. Install `cargo-deb`
-or `cargo-generate-rpm`, then build:
+Check out the release tag, for example `git checkout v0.12.0`. Install `cargo-deb`,
+or `cargo-generate-rpm` and the `rpm-build` system package, then build:
 
 ```sh
 packaging/build.sh proxy deb    # target/debian/lodeline-proxy_*.deb
@@ -67,10 +67,12 @@ program named `sigil` in `/usr/bin`, such as NOMARJ/sigil, does not hold them ba
 
 Removing `sigil-proxy` without installing `lodeline-proxy` leaves
 `/var/lib/sigil-proxy` behind, and nothing tells you. Every Lodeline package ships
-the same script, so move the directory with whichever one is installed:
+the same script under its own directory, so move the state with the one installed:
 
 ```sh
-/usr/libexec/lodeline/migrate-from-sigil proxy
+/usr/libexec/lodeline/migrate-from-sigil proxy         # lodeline
+/usr/libexec/lodeline-sender/migrate-from-sigil proxy  # lodeline-sender
+/usr/libexec/lodeline-server/migrate-from-sigil proxy  # lodeline-server
 ```
 
 **Debian and Ubuntu.** First check what the `sigil` package on the host is:
