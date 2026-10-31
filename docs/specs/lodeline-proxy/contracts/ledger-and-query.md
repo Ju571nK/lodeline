@@ -451,8 +451,8 @@ left, the next 200 clears the count and `ingest_stopped`. The events stay unsent
 until then, so R still governs their expiry. The slow rate means a permanently
 refused event cannot hold good traffic until R, and a server that refuses everything
 loses at most 288 events per day past the first 8 answers. That is the upper bound.
-The measured mean on the by-index paths is about 380 s per event, about 225 per day,
-so about R/380 s events drain: about 6800 in a 30-day R. R governs what remains.
+The measured mean on the by-index paths is about 395 s per event, about 219 per day,
+so about R/395 s events drain: about 6560 in a 30-day R. R governs what remains.
 Retries back off with jitter of +/-20%, so after a server upgrade the next retry
 comes within 360 s.
 

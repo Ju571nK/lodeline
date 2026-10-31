@@ -32,8 +32,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   stopped: the proxy backs off and quarantines one event per max backoff period
   (300 s), however many events the answer names. That keeps loss to at most 288
   events per day and stops a permanent refusal from blocking good events behind it
-  until R. The measured mean is about 380 s per event, about 225 per day, so about
-  R/380 s events drain: about 6800 in a 30-day R. After a server upgrade the next
+  until R. The measured mean is about 395 s per event, about 219 per day, so about
+  R/395 s events drain: about 6560 in a 30-day R. After a server upgrade the next
   retry comes within 360 s (300 s max backoff plus 20% jitter) and the first 200
   clears the stop. At a batch size of 100, about 7.4% of events refused on the parse
   path, about 8 in 108, stops ingest. At 1 in 10 refused, throughput falls to about
