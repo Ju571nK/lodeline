@@ -52,6 +52,12 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- `lodeline-sender` now waits before it retries after it fails to save its offset.
+  Before, it sent the same batch again at once, in a tight loop, and wrote the
+  server's per-event rejections to the dead-letter directory each time. It now uses
+  the same backoff as a server error, 5 seconds doubling to 5 minutes. The offset
+  stays where it was, so the batch is sent again whole and no event is skipped.
+
 - `lodeline-sender` now caps the server text it stores in the dead-letter directory
   at 512 bytes, cut on a character boundary and marked with `…`. Before, a status
   body, an unparseable reply, a batch rejection, or a per-event rejection reason went

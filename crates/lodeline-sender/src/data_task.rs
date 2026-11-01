@@ -339,7 +339,6 @@ pub async fn run(ctx: DataTaskCtx) {
                         continue;
                     }
                 };
-                consecutive_failures = 0;
                 tls_streak = false;
                 ctx.stats
                     .write()
@@ -368,8 +367,14 @@ pub async fn run(ctx: DataTaskCtx) {
                 }
                 if let Err(e) = state::store(&ctx.config.offset_path, &new_state) {
                     tracing::warn!(error = ?e, "state::store failed; will retry");
+                    consecutive_failures += 1;
+                    let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
+                    if !idle_sleep(&ctx.shutdown, delay).await {
+                        break;
+                    }
                     continue;
                 }
+                consecutive_failures = 0;
                 state = new_state;
             }
             BatchOutcome::PermanentReject { status, body } => {
