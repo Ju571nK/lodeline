@@ -102,6 +102,9 @@ async fn loop_fires_once_then_shuts_down() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let cancel = tokio_util::sync::CancellationToken::new();
     let cancel_c = cancel.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let (policy_etag_path, packs_etag_path) = (dir.path().join("p"), dir.path().join("r"));
+    let agent_control = dir.path().join("control.sock");
     let handle = tokio::spawn(async move {
         lodeline_sender::control_task::run(lodeline_sender::control_task::ControlLoopCtx {
             client,
@@ -110,6 +113,10 @@ async fn loop_fires_once_then_shuts_down() {
             poll_interval: std::time::Duration::from_millis(20),
             shutdown: cancel_c,
             outcomes: tx,
+            stats: lodeline_sender::heartbeat::shared(),
+            agent_control,
+            policy_etag_path,
+            packs_etag_path,
         })
         .await;
     });
@@ -124,4 +131,58 @@ async fn loop_fires_once_then_shuts_down() {
     ));
     cancel.cancel();
     handle.await.unwrap();
+}
+
+async fn policy_answering(status: u16, body: &'static str) -> String {
+    let app = axum::Router::new().route(
+        "/v1/policy",
+        axum::routing::get(move || async move {
+            (axum::http::StatusCode::from_u16(status).unwrap(), body)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn a_server_without_a_policy_is_not_an_unknown_host() {
+    let base = policy_answering(404, r#"{"error":"no_policy"}"#).await;
+    let outcome = poll_policy(&reqwest::Client::new(), &base, "h", None).await;
+    assert!(matches!(outcome, PollOutcome::Unmodified), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn a_404_for_this_host_is_host_unknown() {
+    let base = policy_answering(404, r#"{"error":"host_unknown","host_id":"h"}"#).await;
+    let outcome = poll_policy(&reqwest::Client::new(), &base, "h", None).await;
+    assert!(matches!(outcome, PollOutcome::HostUnknown), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn an_unexpected_status_keeps_its_code() {
+    let base = policy_answering(403, "denied").await;
+    let outcome = poll_policy(&reqwest::Client::new(), &base, "h", None).await;
+    assert!(
+        matches!(
+            outcome,
+            PollOutcome::ProtocolViolation {
+                status: Some(403),
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unparseable_policy_keeps_no_part_of_the_url() {
+    let base = policy_answering(200, "not json").await;
+    let outcome = poll_policy(&reqwest::Client::new(), &base, "h", None).await;
+    let PollOutcome::ProtocolViolation { detail, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(!detail.contains("127.0.0.1"), "{detail}");
+    assert!(detail.contains("expected"), "{detail}");
 }

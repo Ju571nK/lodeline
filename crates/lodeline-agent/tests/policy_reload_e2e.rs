@@ -70,9 +70,7 @@ async fn apply_policy_reloads_live_watch_targets() {
     let ev = ev_x.expect("policy A: file_change for X");
     assert_eq!(ev["schema_version"], 1);
 
-    // Apply policy B (watch file Y instead) over the real control IPC. The boot
-    // reconciliation set last_applied_policy_version to the on-disk schema
-    // version (1), so the new envelope must be version >= 2.
+    // Apply policy B (watch file Y instead) over the real control IPC.
     let policy_b = policy_for_paths(&[file_y.to_str().unwrap()], "standard");
     let env = SignedEnvelope {
         policy_version: 2,

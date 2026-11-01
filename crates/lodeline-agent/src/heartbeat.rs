@@ -65,7 +65,7 @@ pub(crate) async fn emit(
     let last_applied_policy_version = cache
         .lock()
         .host_meta_get()
-        .map(|m| m.last_applied_policy_version)
+        .map(|m| m.policy.version())
         .unwrap_or(0);
     let policy_expired = *policy_expired_active.read();
     let jsonl_above_soft_floor = *jsonl_above_soft_floor_flag.read();
@@ -109,7 +109,9 @@ pub(crate) async fn emit(
 #[cfg(test)]
 mod field_tests {
     use super::*;
+    use lodeline_core::policy::deployment::ArtifactKind;
     use lodeline_core::state::HashCache;
+    use lodeline_core::PendingEnvelope;
     use parking_lot::{Mutex, RwLock};
     use tempfile::tempdir;
 
@@ -117,7 +119,15 @@ mod field_tests {
     async fn heartbeat_carries_policy_fields() {
         let dir = tempdir().unwrap();
         let cache = HashCache::open(&dir.path().join("state.db")).unwrap();
-        cache.host_meta_set_policy_version(42).unwrap();
+        let pending = PendingEnvelope {
+            version: 42,
+            hash_hex: String::new(),
+            valid_until: time::OffsetDateTime::now_utc(),
+        };
+        cache
+            .record_pending(ArtifactKind::Policy, &pending)
+            .unwrap();
+        cache.promote_pending(ArtifactKind::Policy).unwrap();
         let cache = Arc::new(Mutex::new(cache));
         let expired = Arc::new(RwLock::new(true));
         let jsonl_above = Arc::new(RwLock::new(false));

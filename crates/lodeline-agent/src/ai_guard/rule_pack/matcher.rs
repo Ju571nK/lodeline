@@ -22,6 +22,13 @@ pub fn matches_value(
     }
 }
 
+fn compile(rule_id: &str, matcher: &Matcher) -> Result<Option<regex::Regex>, CompileError> {
+    matcher.compile().map_err(|source| CompileError {
+        rule_id: rule_id.to_owned(),
+        source,
+    })
+}
+
 /// Compile all Regex-typed matchers in a pack's rules into a parallel Vec.
 /// Returns `Vec<Option<Regex>>` with the same length as `rules` — element
 /// is `Some` iff the rule's matcher is `Matcher::Regex`. Returns `Err` at
@@ -30,21 +37,7 @@ pub fn matches_value(
 pub fn compile_pack_regexes(
     rules: &[lodeline_core::policy::RuleEntry],
 ) -> Result<Vec<Option<regex::Regex>>, CompileError> {
-    rules
-        .iter()
-        .map(|r| match &r.matcher {
-            Matcher::Regex { pattern } => {
-                regex::Regex::new(pattern)
-                    .map(Some)
-                    .map_err(|source| CompileError {
-                        rule_id: r.id.clone(),
-                        pattern: pattern.clone(),
-                        source,
-                    })
-            }
-            _ => Ok(None),
-        })
-        .collect()
+    rules.iter().map(|r| compile(&r.id, &r.matcher)).collect()
 }
 
 /// Compile the Regex matchers of every rule's `when` conditions. Returns a Vec
@@ -59,26 +52,16 @@ pub fn compile_condition_regexes(
         .map(|r| {
             r.when
                 .iter()
-                .map(|c| match &c.matcher {
-                    lodeline_core::policy::Matcher::Regex { pattern } => regex::Regex::new(pattern)
-                        .map(Some)
-                        .map_err(|source| CompileError {
-                            rule_id: r.id.clone(),
-                            pattern: pattern.clone(),
-                            source,
-                        }),
-                    _ => Ok(None),
-                })
+                .map(|c| compile(&r.id, &c.matcher))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("rule '{rule_id}': regex pattern '{pattern}' failed to compile: {source}")]
+#[error("rule '{rule_id}': {source}")]
 pub struct CompileError {
     pub rule_id: String,
-    pub pattern: String,
     pub source: regex::Error,
 }
 

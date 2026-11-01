@@ -69,11 +69,13 @@ impl BackoffPolicy {
     }
 }
 
-use crate::transport::{classify_send_error, classify_status, SendOutcome};
+use crate::transport::{
+    cap_server_text, classify_body_error, classify_send_error, classify_status, SendOutcome,
+};
 use crate::wire::{Envelope, EventsAccepted, EventsRequest};
 use lodeline_core::sink::jsonl::segment_order;
 use reqwest::Client;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 /// Inputs for one batch send (no loop).
@@ -95,7 +97,26 @@ pub enum BatchOutcome {
     ServerBusy { status: u16, body: String },
     TlsFailure(String),
     Network(String),
-    ProtocolViolation(String),
+    ProtocolViolation { status: Option<u16>, detail: String },
+}
+
+impl BatchOutcome {
+    fn link_result(&self) -> Result<(), LinkFailure> {
+        match self {
+            BatchOutcome::Accepted(_) => Ok(()),
+            BatchOutcome::PermanentReject { status, .. }
+            | BatchOutcome::ServerBusy { status, .. }
+            | BatchOutcome::ProtocolViolation {
+                status: Some(status),
+                ..
+            } => Err(LinkFailure::Response {
+                last_response_code: *status,
+            }),
+            BatchOutcome::TlsFailure(_) => Err(LinkFailure::Tls),
+            BatchOutcome::Network(_) => Err(LinkFailure::Network),
+            BatchOutcome::ProtocolViolation { status: None, .. } => Err(LinkFailure::Protocol),
+        }
+    }
 }
 
 pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
@@ -113,18 +134,12 @@ pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
     let url = format!("{}/v1/events", ctx.server_base_url.trim_end_matches('/'));
     let resp = match ctx.client.post(&url).json(&req).send().await {
         Ok(r) => r,
-        Err(e) => match classify_send_error::<EventsAccepted>(e) {
-            SendOutcome::TlsFailure(s) => return BatchOutcome::TlsFailure(s),
-            SendOutcome::Network(s) => return BatchOutcome::Network(s),
-            other => return BatchOutcome::ProtocolViolation(format!("{other:?}")),
-        },
+        Err(e) => return classify_send_error(e).into(),
     };
     let status = resp.status().as_u16();
     let body_bytes = match resp.bytes().await {
         Ok(b) => b,
-        Err(e) => {
-            return BatchOutcome::ProtocolViolation(format!("body read: {e}"));
-        }
+        Err(e) => return classify_body_error(e, "body read").into(),
     };
     let body_text = String::from_utf8_lossy(&body_bytes).to_string();
     let parsed: Option<EventsAccepted> = if (200..300).contains(&status) {
@@ -132,15 +147,23 @@ pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
     } else {
         None
     };
-    match classify_status(status, body_text.clone(), parsed) {
-        SendOutcome::Ok2xx(r) => BatchOutcome::Accepted(r),
-        SendOutcome::PermanentReject { status, body } => {
-            BatchOutcome::PermanentReject { status, body }
+    classify_status(status, body_text, parsed).into()
+}
+
+impl From<SendOutcome<EventsAccepted>> for BatchOutcome {
+    fn from(outcome: SendOutcome<EventsAccepted>) -> Self {
+        match outcome {
+            SendOutcome::Ok2xx(r) => BatchOutcome::Accepted(r),
+            SendOutcome::PermanentReject { status, body } => {
+                BatchOutcome::PermanentReject { status, body }
+            }
+            SendOutcome::ServerBusy { status, body } => BatchOutcome::ServerBusy { status, body },
+            SendOutcome::TlsFailure(s) => BatchOutcome::TlsFailure(s),
+            SendOutcome::Network(s) => BatchOutcome::Network(s),
+            SendOutcome::ProtocolViolation { status, detail } => {
+                BatchOutcome::ProtocolViolation { status, detail }
+            }
         }
-        SendOutcome::ServerBusy { status, body } => BatchOutcome::ServerBusy { status, body },
-        SendOutcome::TlsFailure(s) => BatchOutcome::TlsFailure(s),
-        SendOutcome::Network(s) => BatchOutcome::Network(s),
-        SendOutcome::ProtocolViolation(s) => BatchOutcome::ProtocolViolation(s),
     }
 }
 
@@ -151,12 +174,17 @@ fn _path_marker(_p: PathBuf) {}
 use crate::batch_reader::read_next_batch;
 use crate::config::SenderConfig;
 use crate::dead_letter;
-use crate::heartbeat::SharedStats;
+use crate::heartbeat::{Plane, SharedStats};
 use crate::state;
 use lodeline_core::event::{
     Event, Evidence, Severity, SourceKind, Subject, AGENT_VERSION, SCHEMA_VERSION,
 };
+use lodeline_core::sender_status::LinkFailure;
 use tokio_util::sync::CancellationToken;
+
+/// Most per-event rejections of one batch that get a dead letter each. The server
+/// controls the length of `rejected`, so the rest are counted in one summary entry.
+pub const MAX_REJECTION_DEAD_LETTERS: usize = 20;
 
 /// Idle poll interval when no batch is available.
 const IDLE_POLL: Duration = Duration::from_millis(500);
@@ -189,6 +217,18 @@ pub fn local_event(host_id: &str, evidence: Evidence) -> Event {
     }
 }
 
+/// Appends one `tls_failure` event per failure streak. A TLS failure repeats at every
+/// retry or poll and this directory keeps a file a day with no size limit, so a loop sets `in_streak` here
+/// and clears it on a success. The reason text is ignored: rustls prints the check
+/// time in expired and not-yet-valid errors, so it differs on every retry.
+pub fn dead_letter_tls_failure(dir: &Path, host_id: &str, in_streak: &mut bool, reason: String) {
+    if std::mem::replace(in_streak, true) {
+        return;
+    }
+    let evt = local_event(host_id, Evidence::TlsFailure { reason });
+    let _ = dead_letter::append(dir, &evt);
+}
+
 /// Top-level data plane loop: read JSONL → POST /v1/events → apply_ack
 /// → state::store → dead-letter rejections → update stats. Handles all
 /// `BatchOutcome` variants per spec §3.8.2.
@@ -203,6 +243,7 @@ pub async fn run(ctx: DataTaskCtx) {
         }
     };
     let mut consecutive_failures: u32 = 0;
+    let mut tls_streak = false;
 
     loop {
         if ctx.shutdown.is_cancelled() {
@@ -262,14 +303,24 @@ pub async fn run(ctx: DataTaskCtx) {
             events,
         })
         .await;
+        if let Err(failure) = outcome.link_result() {
+            ctx.stats
+                .write()
+                .record(Plane::Events, Err(failure), OffsetDateTime::now_utc());
+        }
 
         match outcome {
             BatchOutcome::Accepted(accepted) => {
-                consecutive_failures = 0;
                 let new_state = match apply_ack(&manifest, accepted.high_water_event_id) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!(error = ?e, "apply_ack failed");
+                        consecutive_failures += 1;
+                        ctx.stats.write().record(
+                            Plane::Events,
+                            Err(LinkFailure::Protocol),
+                            OffsetDateTime::now_utc(),
+                        );
                         let evt = local_event(
                             &ctx.host_id,
                             Evidence::ServerProtocolViolation {
@@ -277,13 +328,21 @@ pub async fn run(ctx: DataTaskCtx) {
                             },
                         );
                         let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
+                        let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
+                        if !idle_sleep(&ctx.shutdown, delay).await {
+                            break;
+                        }
                         continue;
                     }
                 };
-                for r in &accepted.rejected {
+                tls_streak = false;
+                ctx.stats
+                    .write()
+                    .record(Plane::Events, Ok(()), OffsetDateTime::now_utc());
+                for r in accepted.rejected.iter().take(MAX_REJECTION_DEAD_LETTERS) {
                     tracing::warn!(
                         host_id = %ctx.host_id,
-                        reason = %r.reason,
+                        reason = %cap_server_text(&r.reason),
                         event_id = %r.event_id,
                         "server rejected event; dead-lettering"
                     );
@@ -291,7 +350,7 @@ pub async fn run(ctx: DataTaskCtx) {
                         &ctx.host_id,
                         Evidence::EventUnprocessableLocal {
                             original_event_id: r.event_id,
-                            server_reason: r.reason.clone(),
+                            server_reason: cap_server_text(&r.reason),
                         },
                     );
                     if let Err(e) = dead_letter::append(&ctx.config.dead_letter_dir, &evt) {
@@ -302,17 +361,35 @@ pub async fn run(ctx: DataTaskCtx) {
                         );
                     }
                 }
+                let dropped = accepted
+                    .rejected
+                    .len()
+                    .saturating_sub(MAX_REJECTION_DEAD_LETTERS);
+                if dropped > 0 {
+                    tracing::warn!(
+                        host_id = %ctx.host_id,
+                        dropped,
+                        "server rejected more events than are dead-lettered"
+                    );
+                    let evt = local_event(
+                        &ctx.host_id,
+                        Evidence::ServerProtocolViolation {
+                            detail: format!("{dropped} more per-event rejections not recorded"),
+                        },
+                    );
+                    let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
+                }
                 if let Err(e) = state::store(&ctx.config.offset_path, &new_state) {
                     tracing::warn!(error = ?e, "state::store failed; will retry");
+                    consecutive_failures += 1;
+                    let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
+                    if !idle_sleep(&ctx.shutdown, delay).await {
+                        break;
+                    }
                     continue;
                 }
+                consecutive_failures = 0;
                 state = new_state;
-                {
-                    let mut s = ctx.stats.write();
-                    s.last_server_ack_at = Some(OffsetDateTime::now_utc());
-                    s.last_server_response_code = Some(200);
-                    s.lag_events = s.lag_events.saturating_sub(batch_size as u64);
-                }
             }
             BatchOutcome::PermanentReject { status, body } => {
                 consecutive_failures += 1;
@@ -325,25 +402,20 @@ pub async fn run(ctx: DataTaskCtx) {
                 let evt = local_event(
                     &ctx.host_id,
                     Evidence::ServerProtocolViolation {
-                        detail: format!("batch rejected status={status}: {body}"),
+                        detail: format!(
+                            "batch rejected status={status}: {}",
+                            cap_server_text(&body)
+                        ),
                     },
                 );
                 let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
-                {
-                    let mut s = ctx.stats.write();
-                    s.last_server_response_code = Some(status);
-                }
                 let delay = backoff_perm.next_delay(consecutive_failures.saturating_sub(1));
                 if !idle_sleep(&ctx.shutdown, delay).await {
                     break;
                 }
             }
-            BatchOutcome::ServerBusy { status, .. } => {
+            BatchOutcome::ServerBusy { .. } => {
                 consecutive_failures += 1;
-                {
-                    let mut s = ctx.stats.write();
-                    s.last_server_response_code = Some(status);
-                }
                 let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
                 if !idle_sleep(&ctx.shutdown, delay).await {
                     break;
@@ -351,8 +423,12 @@ pub async fn run(ctx: DataTaskCtx) {
             }
             BatchOutcome::TlsFailure(reason) => {
                 consecutive_failures += 1;
-                let evt = local_event(&ctx.host_id, Evidence::TlsFailure { reason });
-                let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
+                dead_letter_tls_failure(
+                    &ctx.config.dead_letter_dir,
+                    &ctx.host_id,
+                    &mut tls_streak,
+                    reason,
+                );
                 let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
                 if !idle_sleep(&ctx.shutdown, delay).await {
                     break;
@@ -366,7 +442,7 @@ pub async fn run(ctx: DataTaskCtx) {
                     break;
                 }
             }
-            BatchOutcome::ProtocolViolation(detail) => {
+            BatchOutcome::ProtocolViolation { detail, .. } => {
                 consecutive_failures += 1;
                 let evt = local_event(&ctx.host_id, Evidence::ServerProtocolViolation { detail });
                 let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
@@ -423,6 +499,84 @@ fn next_segment(events_dir: &std::path::Path, state: &SenderState) -> Option<Str
 mod tests {
     use super::*;
     use crate::manifest::{ByteRange, ManifestEntry};
+
+    #[test]
+    fn two_different_reasons_in_one_streak_write_one_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut in_streak = false;
+        for reason in [
+            "expired at 10:00:01",
+            "expired at 10:00:09",
+            "unknown issuer",
+        ] {
+            dead_letter_tls_failure(dir.path(), "h", &mut in_streak, reason.into());
+        }
+        let file = std::fs::read_dir(dir.path()).unwrap().next().unwrap();
+        let body = std::fs::read_to_string(file.unwrap().path()).unwrap();
+        assert_eq!(body.lines().count(), 1, "{body}");
+        in_streak = false;
+        dead_letter_tls_failure(dir.path(), "h", &mut in_streak, "expired again".into());
+        let n: usize = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|f| {
+                std::fs::read_to_string(f.unwrap().path())
+                    .unwrap()
+                    .lines()
+                    .count()
+            })
+            .sum();
+        assert_eq!(n, 2, "a success ends the streak, the next failure writes");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_ends_the_request_and_shows_as_a_network_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let client = crate::transport::build_client_with_timeouts(
+            Duration::from_millis(300),
+            Duration::from_millis(300),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let url = format!("http://{addr}");
+        let send = send_one_batch(BatchSendCtx {
+            client: &client,
+            server_base_url: &url,
+            host_id: "h",
+            agent_version: "1",
+            sender_version: "1",
+            events: Vec::new(),
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(5), send)
+            .await
+            .expect("the request was still open after 5 seconds");
+        assert!(matches!(outcome, BatchOutcome::Network(_)), "{outcome:?}");
+        let stats = crate::heartbeat::shared();
+        stats.write().record(
+            Plane::Events,
+            outcome.link_result(),
+            OffsetDateTime::now_utc(),
+        );
+        assert!(
+            matches!(
+                stats.read().contact(),
+                lodeline_core::sender_status::Contact::Failing {
+                    failure: LinkFailure::Network,
+                    ..
+                }
+            ),
+            "{:?}",
+            stats.read().contact()
+        );
+    }
 
     #[test]
     fn segments_are_walked_in_write_order() {

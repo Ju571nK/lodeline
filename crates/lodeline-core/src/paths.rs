@@ -13,3 +13,8 @@ pub fn default_sender_config() -> PathBuf {
         PathBuf::from(r"C:\ProgramData\Lodeline\sender.yaml")
     }
 }
+
+/// Where `lodeline-sender` keeps its read offset when `offset_path` is omitted.
+pub fn default_sender_offset() -> PathBuf {
+    PathBuf::from("/var/lib/lodeline-sender/sender-offset.json")
+}

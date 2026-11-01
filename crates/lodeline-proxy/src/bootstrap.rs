@@ -527,6 +527,13 @@ mod tests {
         let b = fx.load("limits:\n  max_concurrent_calls: 8\n").unwrap();
         assert_eq!(b.limits.max_concurrent_calls, 8);
         assert!(fx.load("limits:\n  max_concurrent_calls: 1000\n").is_err());
+        let small_spool = "limits:\n  spool_max_bytes: 20000\n  spool_gap_reserve_bytes: 16384\n";
+        assert!(matches!(
+            fx.load(small_spool),
+            Err(BootstrapError::Limits(
+                LimitsError::SpoolRoomBelowEvent { .. }
+            ))
+        ));
     }
 
     #[test]

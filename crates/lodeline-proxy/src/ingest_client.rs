@@ -703,7 +703,9 @@ impl IngestClient {
     /// Quarantine events on the server's say-so. After
     /// [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] such answers without a success the
     /// client is stopped: only the first event goes, once per `max_backoff`.
-    /// Returns whether any event was quarantined.
+    /// Returns whether the answer made progress: an event quarantined under the
+    /// limit. A stopped client's slow quarantine is not progress, or it would
+    /// clear the backoff that holds the pace at one request per `max_backoff`.
     async fn quarantine_single(
         &mut self,
         source: &mut dyn EventSource,
@@ -711,20 +713,20 @@ impl IngestClient {
         code: QuarantineCode,
         now: Instant,
     ) -> bool {
-        let ids = if self.single_quarantines < MAX_CONSECUTIVE_SINGLE_QUARANTINES {
+        if self.single_quarantines < MAX_CONSECUTIVE_SINGLE_QUARANTINES {
             self.single_quarantines += 1;
-            ids
-        } else {
-            let period = self.params.max_backoff;
-            if now < *self.slow_quarantine_at.get_or_insert(now + period) {
-                tracing::error!("the server keeps rejecting events: ingest stopped, backing off");
-                return false;
-            }
-            self.slow_quarantine_at = Some(now + period);
-            &ids[..ids.len().min(1)]
-        };
-        self.quarantine(source, ids, code).await;
-        true
+            self.quarantine(source, ids, code).await;
+            return true;
+        }
+        let period = self.params.max_backoff;
+        if now < *self.slow_quarantine_at.get_or_insert(now + period) {
+            tracing::error!("the server keeps rejecting events: ingest stopped, backing off");
+            return false;
+        }
+        self.slow_quarantine_at = Some(now + period);
+        self.quarantine(source, &ids[..ids.len().min(1)], code)
+            .await;
+        false
     }
 
     /// Settle one answer. Returns whether it made progress (otherwise the caller
@@ -785,9 +787,12 @@ impl IngestClient {
             }
             IngestOutcome::Unattributed { status } => {
                 if sent.len() > 1 {
-                    // Not attributable: quarantine nothing. Singles find it.
+                    // Not attributable: quarantine nothing. Singles find it. Only a
+                    // stopped client backs off here: it must not clear the
+                    // backoff its single sends build up.
                     self.mode = Mode::Isolate;
                     self.isolate_sends = 0;
+                    progressed = self.slow_quarantine_at.is_none();
                 } else {
                     let code = if *status == 409 {
                         QuarantineCode::Conflict
@@ -2133,6 +2138,52 @@ mod tests {
             assert_eq!(slow_at.len(), total as usize - at_cap);
             assert!(slow_at.windows(2).all(|w| w[1] - w[0] >= period));
         }
+    }
+
+    /// #363: a server that answers every request, batch or single, with a 409/422
+    /// that names nothing. Once stopped, the client sends one request per
+    /// `max_backoff` (never faster than its 20% jitter allows) and still loses at
+    /// most one event per period. Paused clock, the production pacing.
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_client_on_unattributed_answers_sends_one_request_per_period() {
+        let mut c = IngestClient::new(
+            GapQueue::new(),
+            CentralHealth::new(),
+            IngestParams::default(),
+        );
+        let period = c.params.max_backoff;
+        let t = Fake::new(vec![err(422, "semantic_invalid", json!([]))]);
+        let mut s = Mem::with(1..=100);
+        let start = Instant::now();
+        let window = period * 20;
+        let settled = start + period * 5;
+        let mut sends = Vec::new();
+        while Instant::now() < start + window {
+            let at = Instant::now();
+            let st = c.send_once(&t, &mut s, at).await;
+            if st.outcome.is_some() {
+                sends.push(at);
+            }
+            tokio::time::sleep(c.next_delay(&st)).await;
+        }
+        let late: Vec<_> = sends.iter().filter(|at| **at >= settled).collect();
+        assert!(
+            late.windows(2)
+                .all(|w| *w[1] - *w[0] >= period.mul_f32(0.8)),
+            "{} requests after the backoff should have settled",
+            late.len()
+        );
+        // 15 periods of jittered delays: between 4500 / 360 s and 4500 / 240 s.
+        assert!(
+            (11..=19).contains(&late.len()),
+            "{} requests in 15 periods",
+            late.len()
+        );
+        assert!(
+            s.quarantined.len() <= CAP + 1 + 20,
+            "{} events lost",
+            s.quarantined.len()
+        );
     }
 
     /// L1: a local quarantine during isolation ends isolation.

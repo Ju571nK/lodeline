@@ -19,10 +19,7 @@ async fn empty_environment_emits_no_phase2_events_and_no_above_soft_floor() {
     let cache = HashCache::open(&dir.path().join("state.db")).unwrap();
 
     // host_meta starts at version 0, no envelope ever applied.
-    assert_eq!(
-        cache.host_meta_get().unwrap().last_applied_policy_version,
-        0
-    );
+    assert_eq!(cache.host_meta_get().unwrap().policy.version(), 0);
 
     // GC tick on an empty events/ dir.
     let (tx, mut rx) = mpsc::channel(8);

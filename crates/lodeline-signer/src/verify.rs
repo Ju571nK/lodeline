@@ -91,7 +91,7 @@ mod tests {
         let key_path = dir.path().join("k.json");
         let key_file = keygen("k1", &key_path).unwrap();
         let yaml = dir.path().join("p.yaml");
-        std::fs::write(&yaml, "x: 1\n").unwrap();
+        std::fs::write(&yaml, "version: 1\n").unwrap();
         let signed = dir.path().join("signed.json");
         sign_to_file(
             SignArgs {

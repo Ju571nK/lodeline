@@ -265,8 +265,8 @@ pub async fn run(mut ctx: ReloadCtx) {
 
 /// Re-derive targets/roots from `policy.yaml` on disk and apply them to the
 /// live pipeline + watcher. On any parse/merge failure, log and keep the
-/// previous state untouched (can't happen via `apply_policy` — `lodeline-sign`
-/// parses before it signs — but a hand-edited file shouldn't kill the agent).
+/// previous state untouched (`apply_policy` refuses what boot could not load, but
+/// a hand-edited file shouldn't kill the agent).
 pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     let version = *ctx.policy_version_rx.borrow();
 

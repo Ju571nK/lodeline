@@ -89,12 +89,15 @@ also installs packages the host did not have:
 sudo apt-get install ./lodeline_*.deb ./lodeline-sender_*.deb sigil-
 ```
 
+Drop `./lodeline-sender_*.deb` if the host had no `sigil-sender`.
+
 If it prints 1.x or later, or the package is not installed, leave `sigil-` off. The
 `-` has no version bound, so it would remove a real editor, and on a host whose
-repository has no `sigil` package apt can refuse the name:
+repository has no `sigil` package apt can refuse the name. Name only the packages
+the host already has. On a sender-only host:
 
 ```sh
-sudo apt-get install ./lodeline-sender_*.deb ./lodeline-server_*.deb
+sudo apt-get install ./lodeline-sender_*.deb
 ```
 
 Without `sigil-` on a 0.x host, a release whose repository carries the Sigil ebook
@@ -333,9 +336,10 @@ The new packages ship `lodeline.service`, `lodeline-sender.service`,
 `lodeline` user and group, sysusers entries and tmpfiles rules.
 
 Packages never enable or start a service, and the old unit's enabled state does
-not carry over. Services stay stopped after the upgrade, by design, and the
-post-install output names the `systemctl enable --now` command for its package.
-Finish the config edits in section 2 first, then enable what you ran before:
+not carry over. Services stay stopped after the upgrade, by design. Post-install
+names the `systemctl enable --now` command only when that run found old paths, so
+use the commands below. Finish the config edits in section 2 first, then enable
+what you ran before:
 
 ```sh
 systemctl daemon-reload

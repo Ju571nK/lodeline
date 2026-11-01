@@ -1974,6 +1974,7 @@ dependencies = [
  "parking_lot",
  "rand_core 0.6.4",
  "regex",
+ "rusqlite",
  "same-file",
  "serde",
  "serde_json",
@@ -2004,6 +2005,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "rand_core 0.6.4",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2027,6 +2029,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "time",
  "tokio",
 ]
 
@@ -2139,8 +2142,11 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "data-encoding",
+ "ed25519-dalek",
  "http 1.4.0",
  "lodeline-core",
+ "lodeline-diag",
  "parking_lot",
  "reqwest",
  "rustls",
@@ -2158,6 +2164,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]

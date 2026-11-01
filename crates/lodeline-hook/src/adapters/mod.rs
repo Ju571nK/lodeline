@@ -6,11 +6,11 @@ pub mod codex;
 pub mod cursor;
 pub mod grok;
 
-/// What a deny verdict renders to for a given agent: the text to print (the
-/// deny response, if any) and the process exit code. claude-code/codex/
-/// antigravity: the JSON rides stdout with exit 0; the exit_code field lets a
-/// future agent whose deny path needs a non-zero exit express that.
-pub struct DenyOutput {
+/// What ends a run for a given agent: the response line to print, if any, and
+/// the process exit code. Every deny today is JSON on stdout with exit 0; the
+/// exit_code field lets a future agent whose deny path needs a non-zero exit
+/// express that.
+pub struct HookOutput {
     pub stdout: Option<String>,
     pub exit_code: i32,
 }
@@ -18,7 +18,7 @@ pub struct DenyOutput {
 /// Shared PreToolUse deny: `{"hookSpecificOutput":{"hookEventName":"PreToolUse",
 /// "permissionDecision":"deny","permissionDecisionReason":"Blocked by Lodeline rule
 /// <id>: <reason>"}}` on stdout, exit 0. Used by every Claude-shaped agent.
-pub(crate) fn pretooluse_deny(rule_id: &str, reason: &str) -> DenyOutput {
+pub(crate) fn pretooluse_deny(rule_id: &str, reason: &str) -> HookOutput {
     let v = serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -26,7 +26,7 @@ pub(crate) fn pretooluse_deny(rule_id: &str, reason: &str) -> DenyOutput {
             "permissionDecisionReason": format!("Blocked by Lodeline rule {rule_id}: {reason}")
         }
     });
-    DenyOutput {
+    HookOutput {
         stdout: Some(v.to_string()),
         exit_code: 0,
     }
@@ -35,12 +35,12 @@ pub(crate) fn pretooluse_deny(rule_id: &str, reason: &str) -> DenyOutput {
 /// Grok-shaped deny: `{"decision":"deny","reason":"…"}` on stdout, exit 0.
 /// Grok honors the deny decision regardless of exit code. (Cursor uses a
 /// different `permission`-keyed shape — see `permission_deny`.)
-pub(crate) fn decision_deny(rule_id: &str, reason: &str) -> DenyOutput {
+pub(crate) fn decision_deny(rule_id: &str, reason: &str) -> HookOutput {
     let v = serde_json::json!({
         "decision": "deny",
         "reason": format!("Blocked by Lodeline rule {rule_id}: {reason}"),
     });
-    DenyOutput {
+    HookOutput {
         stdout: Some(v.to_string()),
         exit_code: 0,
     }
@@ -53,12 +53,12 @@ pub(crate) fn decision_deny(rule_id: &str, reason: &str) -> DenyOutput {
 ///
 /// agy is fail-OPEN — empty stdout, an explicit allow, and a non-zero exit all
 /// allow the call — so this must always be emitted and the exit code stays 0.
-pub(crate) fn allow_tool_deny(rule_id: &str, reason: &str) -> DenyOutput {
+pub(crate) fn allow_tool_deny(rule_id: &str, reason: &str) -> HookOutput {
     let v = serde_json::json!({
         "allow_tool": false,
         "deny_reason": format!("Blocked by Lodeline rule {rule_id}: {reason}"),
     });
-    DenyOutput {
+    HookOutput {
         stdout: Some(v.to_string()),
         exit_code: 0,
     }
@@ -68,14 +68,14 @@ pub(crate) fn allow_tool_deny(rule_id: &str, reason: &str) -> DenyOutput {
 /// on stdout, exit 0. Cursor's `beforeShellExecution`/`beforeMCPExecution` honor a
 /// stdout `permission` field on exit 0 (verified against its bundled hook skill).
 /// Distinct from Grok's `decision_deny` — different field name.
-pub(crate) fn permission_deny(rule_id: &str, reason: &str) -> DenyOutput {
+pub(crate) fn permission_deny(rule_id: &str, reason: &str) -> HookOutput {
     let msg = format!("Blocked by Lodeline rule {rule_id}: {reason}");
     let v = serde_json::json!({
         "permission": "deny",
         "agent_message": msg,
         "user_message": msg,
     });
-    DenyOutput {
+    HookOutput {
         stdout: Some(v.to_string()),
         exit_code: 0,
     }
@@ -94,7 +94,7 @@ pub trait HookAdapter {
     /// Translate a Deny verdict into this agent's deny-UX wire output. Default =
     /// the shared PreToolUse permissionDecision JSON; override only when an
     /// agent's deny contract differs.
-    fn deny_output(&self, rule_id: &str, reason: &str) -> DenyOutput {
+    fn deny_output(&self, rule_id: &str, reason: &str) -> HookOutput {
         pretooluse_deny(rule_id, reason)
     }
 

@@ -1,4 +1,4 @@
-use super::{allow_tool_deny, DenyOutput, HookAdapter};
+use super::{allow_tool_deny, HookAdapter, HookOutput};
 use crate::redact::capture;
 use lodeline_core::event::AiTool;
 use lodeline_core::hook_proto::*;
@@ -135,7 +135,7 @@ impl HookAdapter for Antigravity {
         })
     }
 
-    fn deny_output(&self, rule_id: &str, reason: &str) -> DenyOutput {
+    fn deny_output(&self, rule_id: &str, reason: &str) -> HookOutput {
         allow_tool_deny(rule_id, reason)
     }
 }

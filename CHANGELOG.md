@@ -9,6 +9,25 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Added
 
+- `lodeline status` shows whether a fleet host really reaches `lodeline-server`. A
+  running `lodeline-sender` now writes `sender-status.json` next to its offset file,
+  at start, on a change of state, and every 30 seconds. The file has mode `0640` and
+  holds only timestamps and enums, never a URL, token, or server message. `status`
+  reads the file with no network call and shows never reported, awaiting contact,
+  connected, failing, stale (no report for 90 seconds), or unreadable. It also shows
+  whether the client certificate is valid, expires within 7 days, or has expired.
+  In `lodeline status --json`, `fleet.link` carries these states and
+  `fleet.client_cert` is new. `schema_version` is now 2 because the `unknown` link
+  state is gone. The status file is not authenticated: it is a local diagnostic, and
+  anyone able to write its directory can make it say anything. In the packaged layout
+  that is the `lodeline` user and root.
+
+- `lodeline-sender doctor` now runs real checks: config, certificate and key files
+  and their permissions, certificate expiry, events directory, agent control
+  endpoint, and status file. It exits 1 on a failure. It previously printed four
+  `[OK]` lines without checking anything. It makes no network call and never reads
+  the key.
+
 - `lodeline status` and `lodeline status --json` show whether Lodeline is healthy
   on this host: which components are installed, whether the agent is running, and
   the configured `lodeline-server`. A host with no sender config reads as single
@@ -33,6 +52,140 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- The agent keeps the applied version and expiry of a signed policy or rule-pack
+  bundle across a restart. An apply now records its version, the blake3 of its bytes,
+  and its `valid_until` in `state.db` before the file moves, and promotes them after
+  the rename. Boot compares that record with the file on disk: if the bytes match, the
+  apply is finished, and if not, the record is dropped and a retry applies. Before, a
+  stop between the rename and the record left the version behind the file, and an
+  older signed version could then replace the newest. If this repair fails, the agent
+  stops at boot instead of serving a stale version.
+  - A running agent makes the same check before every apply. Before, an apply that
+    failed after the rename, at the directory sync or the record write, left the
+    version behind the file while the agent kept running, and an older signed version
+    could then replace the newest. It is now refused with `version_regression`, and
+    the status, the expiry, and the loaded policy follow the finished apply. If the
+    check fails, that apply returns an error and writes nothing. A retry of the
+    document that failed finishes it and gets `version_regression`, because it is
+    already applied.
+  - `policy_status` now reports the real `active_envelope_valid_until` and
+    `policy_expired_active` after a restart. The expiry monitor checks at boot, so a
+    restart on an expired policy reports `policy_expired_active` at once instead of
+    after 60 seconds.
+  - Boot no longer reads the YAML `version:` key of `policy.yaml` as an envelope
+    version. A host that has only a local policy now reports version 0, and a first
+    envelope v1 applies. Before, it reported 1 and refused v1 with
+    `version_regression`.
+  - Upgrade: new tables are added to `state.db` at open. A host keeps its recorded
+    version. Its expiry is unknown until the next apply: `active_envelope_valid_until`
+    stays `null`, `policy_expired_active` stays `false`, `lodeline show policy-status` prints
+    `(unknown until the next apply)` and `unknown`, and `lodeline status` prints
+    `expiry unknown until the next apply`. A recorded policy version of exactly 1 with
+    no expiry reads as no envelope, because older agents wrote it for any local file.
+    This also applies to a host that really applied v1: it reports version 0 until the
+    next apply, and accepts v1 again. No envelope is lower than v1, so this cannot
+    lower a policy.
+  - Downgrade: an older agent ignores the new tables and keeps reading the same
+    version columns. A version it applies has no expiry row, so a later upgrade reads
+    that expiry as unknown.
+  - `lodeline status --json` adds `valid_until` to `signed_policy`.
+
+- `lodeline-sender` now waits before it retries after it fails to save its offset.
+  Before, it sent the same batch again at once, in a tight loop, and wrote the
+  server's per-event rejections to the dead-letter directory each time. It now uses
+  the same backoff as a server error, 5 seconds doubling to 5 minutes. The offset
+  stays where it was, so the batch is sent again whole and no event is skipped.
+
+- `lodeline-sender` now caps the server text it stores in the dead-letter directory
+  at 512 bytes, cut on a character boundary and marked with `…`. Before, a status
+  body, an unparseable reply, a batch rejection, or a per-event rejection reason went
+  in whole, so a misbehaving server could fill the disk of a host. The directory
+  holds one file a day. When it starts a new file it keeps 30 at most, removes the
+  oldest, and logs how many. It never removes the file it just wrote, even when the
+  clock was set back. A batch reply gets at most 20 per-event rejection entries. The
+  rest are counted in one `server_protocol_violation` entry, so each batch adds at
+  most 21 entries however many events the server rejects. A file has no size limit
+  within its day beyond these bounds.
+
+- `lodeline-sender` now gives up on a request to `lodeline-server` that gets no answer.
+  The HTTP client had no timeout, so a server that accepted a connection and never
+  replied held the request open and the link state stayed `connected` with an aging
+  last success. A connection now has 10 seconds to open and a whole request 120
+  seconds. A full 1 MiB batch, the default size, fits that on a link of about 70
+  kbit/s. A timed-out request counts as a network failure and the link state shows
+  `failing`. So does a timeout or a dropped connection while the sender reads the
+  response body. Before, that counted as a protocol violation and wrote a dead letter
+  on each retry, and on a policy poll that got a 404 it read as an unknown host. The
+  same holds when the status is an error: a 409 whose body is cut off is now retried
+  as a network failure, not treated as a permanent rejection. A
+  body that arrives and does not parse is still a protocol violation.
+
+- `lodeline-hook --enforce --on-failure closed` now covers a panic and a watchdog exit.
+  Both left empty stdout and exit 0, which most agents read as allow, so an operator
+  who chose closed mode got allow on those paths. Each now gives the agent's deny
+  output, the same as when no verdict is available. The hook writes one response at
+  most, so a late failure path cannot add a second one. The default open mode does
+  not change: a panic or a watchdog exit stays silent with exit 0. A signal or an
+  abort still ends the process with nothing written.
+  With `--enforce --on-failure closed`, an unknown agent name now exits 2 with a reason
+  on stderr, where it exited 0 before. With `--on-failure open` it still exits 0.
+
+- A path template with non-ASCII text, such as `$HOME/한국어/설정.json`, now expands
+  to that same text. Before, `expand` pushed each byte of the literal text as a
+  separate character, so the path came out as mojibake and a target with a
+  non-ASCII path never matched a file. `lodeline doctor` reported such a file as
+  "not present". Token parsing is unchanged, and a bad token still returns
+  `Malformed`. (#379)
+
+- Policy and rule-pack applies now run one at a time. Before, an older version sent
+  at the same moment as a newer one could pass the version check and land last, so
+  the file on disk and the recorded version moved backward. An apply now reads the
+  recorded version, verifies, writes, and publishes the result under one lock, so an
+  older version is refused with `version_regression` and changes nothing. Status
+  requests and policy reloads do not take that lock. The recorded versions also
+  refuse to go down on their own: a lower version returns
+  `StateError::WouldLowerVersion` and leaves the value as it was, and `apply` reports
+  that as an internal error.
+
+- A signed policy or rule-pack bundle that the agent could not load at boot is now
+  refused. Before, such a document passed `apply`, advanced the version, and then
+  stopped the next boot or turned hook deny rules off. `apply` now rejects it with
+  `parse_failed` before anything is written, so the policy on disk, the version, and
+  the running policy stay as they were. This covers an unsupported `version`, text
+  that is not UTF-8, a hook deny rule or rule-pack regex that does not compile, a
+  target path that does not compile as a glob, a `hook_silence.tick_secs` of 0 with
+  an agent enabled, and a policy that does not merge over the defaults of the host.
+  `lodeline-sign sign` now stops on the same mistakes before it signs, and it writes
+  no bundle, with two limits. It does not check the merge, because the file does not
+  say whether it is a policy or a bundle, and only a policy has to merge. It checks the target paths for its own OS and for `platform: any`, so
+  a target for another OS is checked by `apply` on that OS.
+  `lodeline-sign verify` reports the same document errors.
+
+- `lodeline-sender` stopped asking for a policy or rule-pack bundle when the server
+  sent it, before the agent answered. If the agent was down, every later poll got a
+  `304` and the document stayed undelivered until the next publish or a sender
+  restart. The sender now asks until the agent settles the document. It retries at
+  the poll interval after an outage or an agent failure. It stops when the agent
+  applies the document or refuses it as an old version, which only a new document
+  can change. Every other refusal can lift with the document unchanged, because the
+  host's clock, its keystore, or the agent's version also decides it. The sender
+  offers such a document on every 12th poll with no restart, which is 24 full fetches
+  a day at the default interval. Each refused offer also records a warning event.
+  `policy-etag.txt` and `rule-packs-etag.txt` now take effect at startup, so a
+  restart no longer fetches a settled document and the agent no longer records a
+  version regression for it. If you reset the agent's `state.db` and keep the sender
+  state, publish a new document or remove those two files.
+
+- `lodeline-sender` reported every TLS failure as a network failure, so the
+  `tls_failure` dead-letter event was never written. It now finds the TLS cause in
+  the error chain, and it writes one event per failure streak, whatever the reason text,
+  separately for events and policy, because that directory has no rotation.
+  Stored reasons hold the cause only, never the request URL.
+
+- `lodeline-sender` treated the 404 of a server with no policy as an unknown host and
+  wrote a `host_id_conflict` dead-letter event at each poll. It now treats that
+  answer as no change.
+
 - `lodeline-proxy`: a server that refuses every event by index no longer moves the
   whole queue into quarantine. These answers now count toward the existing limit of
   8 answers, not 8 events, and only a 200 clears the count. An SV-3..SV-5 answer
@@ -41,16 +194,40 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   stopped: the proxy backs off and quarantines one event per max backoff period
   (300 s), however many events the answer names. That keeps loss to at most 288
   events per day and stops a permanent refusal from blocking good events behind it
-  until R. The measured mean is about 395 s per event, about 219 per day, so about
-  R/395 s events drain: about 6560 in a 30-day R. After a server upgrade the next
+  until R. The measured mean is about 449 s per event, about 192 per day, so about
+  R/449 s events drain: about 5770 in a 30-day R. After a server upgrade the next
   retry comes within 360 s (300 s max backoff plus 20% jitter) and the first 200
   clears the stop. At a batch size of 100, about 7.4% of events refused on the parse
-  path, about 8 in 108, stops ingest. At 1 in 10 refused, throughput falls to about
-  0.09 events/s, and only refused events are quarantined. (#339)
+  path, about 8 in 108, stops ingest. At 1 in 10 refused, throughput falls below
+  0.1 events/s, and only refused events are quarantined. (#339)
 
 - lodeline-proxy no longer scans the spool's `events` table for acknowledged rows
   on each maintenance pass, so appends wait less behind it. The new partial index
   is added to existing spools on open, with no schema version change.
+
+- lodeline-proxy no longer sorts every unsent event to find the oldest one after each
+  acknowledged batch. At 1M unsent events that took about 21 ms on the writer
+  thread, so appends waited behind it. The query now walks `idx_unsent` and takes
+  about 2 microseconds. (#359)
+
+- lodeline-proxy status said the spool was `ok` while the relay already refused calls.
+  The status reported `full` only when no byte was left, but admission refuses any
+  event larger than the room that remains. Both now use one rule. The status is
+  `full` when an event of `event_max_bytes` (16 KiB by default) no longer fits, so
+  `ok` means every allowed event is admitted. A smaller event can still fit while
+  the status says `full`. (#362)
+
+- lodeline-proxy refuses a `limits:` config whose `spool_max_bytes` minus
+  `spool_gap_reserve_bytes` is below `event_max_bytes`. Such a spool reported
+  `full` from the start while it still admitted smaller events. (#362)
+
+- lodeline-proxy, stopped by a server that answers 409 or 422 without naming an
+  event: the client sent two requests every 5 seconds, because each unnamed answer
+  cleared the backoff. It now sends one request per max backoff (300 s with 20%
+  jitter), and loses at most one event per period. In a 4500 s paused-clock test,
+  requests fell from about 1750 to between 11 and 19. Once the client is stopped, a
+  good event behind a refused one waits one to two backoff periods, about 449 s on
+  average and about 660 s at most. (#363)
 
 - `lodeline scan` no longer lists a tool as not configured when another scope of
   the same tool was assessed or failed to parse.

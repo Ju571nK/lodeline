@@ -179,6 +179,45 @@ lodeline show stats          # live heartbeat from the running daemon
 Without a running daemon, `lodeline scan` produces the same per-tool scores in one
 shot (and exits 0) — handy for a quick check before the daemon is set up.
 
+On a fleet host, `lodeline status` also shows whether this host reaches
+`lodeline-server`. A running `lodeline-sender` writes `sender-status.json` next to
+its `offset_path`: at start, when the link state changes, and every 30 seconds. The
+command reads only that file, so it makes no network call and needs no running
+process. The `sender link` line shows one of these states:
+
+| State | Meaning |
+|---|---|
+| `no status file` | The sender has not run with this config. |
+| `running, no server answer yet` | The sender started and no request has finished. |
+| `connected` | The latest events and policy requests succeeded. |
+| `failing` | A request failed. The line names a network failure, a TLS failure, a server status code, or an unusable answer. |
+| `stale` | The last report is older than 90 seconds. The sender stopped or hung. |
+| `cannot read the status file` | The file is denied, corrupt, oversize, or not a regular file, or `offset_path` is relative. |
+
+The states show the last result, not a live test. An idle sender contacts the
+server only at each `policy_poll_interval` (default 5 minutes), so `connected` can
+last that long after a server stops. A stopped sender stays `connected` for up to
+90 seconds. `failing` lasts until the next successful request of the same kind.
+
+The `client certificate` line shows the expiry of the certificate that the running
+sender loaded. It warns from 7 days before expiry, and it shows an error after
+expiry. Restart the sender after you replace the certificate.
+
+The file has mode `0640` on Unix. In the packaged Linux layout its directory is
+`lodeline:lodeline 0750`, so run the command as root or as a member of the
+`lodeline` group. Another user sees `cannot read the status file`. On Windows the
+file takes the ACL of its directory.
+
+The status file is not authenticated. It is a local diagnostic, and anyone able to
+write its directory can make it say anything. In the packaged layout that is the
+`lodeline` user and root.
+
+`lodeline-sender doctor` checks the config, the certificate and key files, the
+certificate expiry, the events directory, the agent control endpoint, and the status
+file. It exits 1 on a failure, and it makes no network call. It reads the permission
+bits of the key file but never the key. On Windows it checks only that the
+certificate and key files exist, not their ACLs.
+
 ---
 
 ## 6. Find this host's `host_id`
@@ -209,9 +248,9 @@ client_cert_path: "/path/to/client-hostA.crt"
 client_key_path:  "/path/to/client-hostA.key"
 server_ca_path:   "/path/to/ca.crt"
 
-events_dir: "~/.local/state/lodeline/events"     # MUST equal the agent's --events-dir
-offset_path: "~/.local/state/lodeline/sender-offset.json"
-dead_letter_dir: "~/.local/state/lodeline/dead-letter"
+events_dir: "/Users/<you>/.local/state/lodeline/events"     # MUST equal the agent's --events-dir
+offset_path: "/Users/<you>/.local/state/lodeline/sender-offset.json"
+dead_letter_dir: "/Users/<you>/.local/state/lodeline/dead-letter"
 
 # REQUIRED — must equal the agent's host_id (section 6). A mismatch makes the
 # server reject the entire batch with host_id_payload_mismatch.
@@ -222,6 +261,9 @@ host_id: "<agent host_id from section 6>"
 # `lodeline --control-socket`.
 agent_control: "/tmp/lodeline-501/control.sock"
 ```
+
+Replace `<you>` with your user name. The sender does not expand `~` or `$HOME` in
+`sender.yaml`, so every path there must be absolute.
 
 ```sh
 lodeline-sender --config ~/.config/lodeline/sender.yaml start

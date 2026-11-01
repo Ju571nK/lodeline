@@ -4,13 +4,14 @@
 //! is the per-host monotonic event counter. Both advance atomically on
 //! server-ack via a single fsync.
 
+use lodeline_core::sender_status::SenderReport;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Atomically persist `state` to `path` via tmp+fsync+rename + parent dir
-/// fsync (POSIX). Safe across crash: caller never observes a partial write.
-pub fn store(path: &Path, state: &SenderState) -> Result<(), StateError> {
+/// tmp+fsync+rename + parent dir fsync (POSIX). Safe across crash: a reader never
+/// sees a partial write. `mode` is the Unix permission bits before the umask.
+fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), StateError> {
     use std::io::Write;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| StateError::Io {
@@ -21,21 +22,21 @@ pub fn store(path: &Path, state: &SenderState) -> Result<(), StateError> {
         ".{}.{}.tmp",
         path.file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("sender-offset.json"),
+            .unwrap_or("sender-state"),
         std::process::id()
     ));
-    let bytes = serde_json::to_vec(state).expect("serialize SenderState");
     {
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)
-            .map_err(|source| StateError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-        f.write_all(&bytes).map_err(|source| StateError::Io {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
+        #[cfg(not(unix))]
+        let _ = mode;
+        let mut f = options.open(&tmp).map_err(|source| StateError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        f.write_all(bytes).map_err(|source| StateError::Io {
             path: tmp.clone(),
             source,
         })?;
@@ -63,6 +64,15 @@ pub fn store(path: &Path, state: &SenderState) -> Result<(), StateError> {
         })?;
     }
     Ok(())
+}
+
+/// The mode `OpenOptions` uses by default.
+const DEFAULT_MODE: u32 = 0o666;
+
+/// Atomically persist `state` to `path`.
+pub fn store(path: &Path, state: &SenderState) -> Result<(), StateError> {
+    let bytes = serde_json::to_vec(state).expect("serialize SenderState");
+    write_atomic(path, &bytes, DEFAULT_MODE)
 }
 
 /// Boot recovery: loads state from disk, falling back to `empty()` if
@@ -93,46 +103,15 @@ pub fn load(path: &Path) -> Result<Option<SenderState>, StateError> {
 }
 
 /// Atomically persist a small string (the latest policy ETag) to `path`.
-/// Reuses the same tmp+fsync+rename pattern as `store`.
 pub fn store_etag(path: &Path, etag: &str) -> Result<(), StateError> {
-    use std::io::Write;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|source| StateError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("policy-etag.txt"),
-        std::process::id()
-    ));
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)
-            .map_err(|source| StateError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-        f.write_all(etag.as_bytes())
-            .map_err(|source| StateError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-        f.sync_all().map_err(|source| StateError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-    }
-    std::fs::rename(&tmp, path).map_err(|source| StateError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
+    write_atomic(path, etag.as_bytes(), DEFAULT_MODE)
+}
+
+/// Atomically persist the status report. Group-readable, so an operator in the
+/// sender's group can read it, and never world-writable whatever the umask.
+pub fn store_report(path: &Path, report: &SenderReport) -> Result<(), StateError> {
+    let bytes = serde_json::to_vec(report).expect("serialize SenderReport");
+    write_atomic(path, &bytes, 0o640)
 }
 
 /// Load the persisted policy ETag; returns `Ok(None)` if absent.

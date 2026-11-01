@@ -80,9 +80,11 @@ pub fn expand(input: &str, vars: &impl VarLookup) -> Result<PathBuf, ExpandError
                 out.push_str(&value);
                 i = end + 1;
             }
-            other => {
-                out.push(other as char);
-                i += 1;
+            _ => {
+                // Tokens are ASCII, so `i` is always on a char boundary here.
+                let c = input[i..].chars().next().expect("i < len");
+                out.push(c);
+                i += c.len_utf8();
             }
         }
     }
@@ -221,6 +223,44 @@ mod tests {
         assert_eq!(
             expand("%APPDATA", &m).unwrap_err(),
             ExpandError::Malformed(0)
+        );
+    }
+
+    #[test]
+    fn keeps_non_ascii_literal_text() {
+        let m = mock(None, &[]);
+        for path in [
+            "/t/한/x",
+            "/t/日本語/設定.json",
+            "/t/🙂/x",
+            r"C:\Users\김\AppData",
+        ] {
+            assert_eq!(expand(path, &m).unwrap(), PathBuf::from(path));
+        }
+    }
+
+    #[test]
+    fn keeps_non_ascii_text_around_tokens() {
+        let m = mock(
+            Some("/Users/alice"),
+            &[("HOME", "/Users/alice"), ("APPDATA", "/ap")],
+        );
+        assert_eq!(
+            expand("~/문서/$HOME/한글/%APPDATA%/日本", &m).unwrap(),
+            PathBuf::from("/Users/alice/문서//Users/alice/한글//ap/日本")
+        );
+        assert_eq!(
+            expand("$HOME/한", &m).unwrap(),
+            PathBuf::from("/Users/alice/한")
+        );
+    }
+
+    #[test]
+    fn non_ascii_after_dollar_stays_malformed() {
+        let m = mock(None, &[]);
+        assert_eq!(
+            expand("/한/$한", &m).unwrap_err(),
+            ExpandError::Malformed(5)
         );
     }
 

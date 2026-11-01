@@ -100,10 +100,10 @@ impl Limits {
     }
 }
 
-// NOTE: no cross-field check yet. Each value is only bounded by its own default,
-// so a config may lower a total below a sub-limit (for example
-// max_concurrent_calls below max_calls_per_route, or spool_max_bytes below
-// spool_gap_reserve_bytes). Cross-field validation is deliberately deferred.
+// Cross-field checks are few on purpose: each value is otherwise bounded only by
+// its own default, so a config may lower a total below a sub-limit (for example
+// max_concurrent_calls below max_calls_per_route). Only the spool room is
+// checked, see [`Limits::check_spool_room`].
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LimitsError {
@@ -114,6 +114,33 @@ pub enum LimitsError {
         min: u64,
         max: u64,
     },
+    #[error("limits.spool_max_bytes = {spool_max_bytes} minus limits.spool_gap_reserve_bytes = {gap_reserve} leaves {room} bytes for events, below limits.event_max_bytes = {event_max_bytes}; the spool would report full forever")]
+    SpoolRoomBelowEvent {
+        spool_max_bytes: u64,
+        gap_reserve: u64,
+        room: u64,
+        event_max_bytes: u64,
+    },
+}
+
+impl Limits {
+    /// Admission stops at `spool_max_bytes - spool_gap_reserve_bytes`. If that is
+    /// below one event of `event_max_bytes`, the status is `full` from the start
+    /// while smaller events are still admitted, so such a config is refused.
+    fn check_spool_room(&self) -> Result<(), LimitsError> {
+        let room = self
+            .spool_max_bytes
+            .saturating_sub(self.spool_gap_reserve_bytes);
+        if room < self.event_max_bytes {
+            return Err(LimitsError::SpoolRoomBelowEvent {
+                spool_max_bytes: self.spool_max_bytes,
+                gap_reserve: self.spool_gap_reserve_bytes,
+                room,
+                event_max_bytes: self.event_max_bytes,
+            });
+        }
+        Ok(())
+    }
 }
 
 macro_rules! limits_overrides {
@@ -141,6 +168,7 @@ macro_rules! limits_overrides {
                         out.$field = v;
                     }
                 )*
+                out.check_spool_room()?;
                 Ok(out)
             }
         }
@@ -264,6 +292,38 @@ mod tests {
         }
         .resolve();
         assert!(queue.is_err(), "queue depth may not be raised above 0");
+    }
+
+    /// The spool must keep room for one event of `event_max_bytes` under
+    /// `spool_max_bytes - spool_gap_reserve_bytes`, or its status is `full` forever
+    /// while smaller events are admitted.
+    #[test]
+    fn spool_room_must_hold_one_event() {
+        let with = |max, reserve, event| {
+            LimitsOverrides {
+                spool_max_bytes: Some(max),
+                spool_gap_reserve_bytes: Some(reserve),
+                event_max_bytes: Some(event),
+                ..Default::default()
+            }
+            .resolve()
+        };
+        assert!(LimitsOverrides::default().resolve().is_ok());
+        // Smallest valid: room equals one event.
+        assert!(with(3, 1, 2).is_ok());
+        // One byte short, and a reserve at or above the whole spool.
+        for (max, reserve, event) in [(2, 1, 2), (1, 1, 1), (1, 5, 1)] {
+            let err = with(max, reserve, event).unwrap_err();
+            assert!(
+                matches!(err, LimitsError::SpoolRoomBelowEvent { .. }),
+                "{err}"
+            );
+        }
+        let msg = with(2, 1, 2).unwrap_err().to_string();
+        assert!(
+            msg.contains("spool_max_bytes = 2") && msg.contains("event_max_bytes = 2"),
+            "{msg}"
+        );
     }
 
     #[test]

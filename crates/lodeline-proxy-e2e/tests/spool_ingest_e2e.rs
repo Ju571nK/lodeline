@@ -950,6 +950,7 @@ async fn full_spool_blocks_admission_and_reopens_after_draining() {
     inject(&px.spool, 1).await;
     let one = px.spool.snapshot().unsent_bytes;
     px.spool.set_capacity_for_test(one * 3 + 5, 5);
+    px.spool.set_event_max_bytes_for_test(one);
     inject(&px.spool, 2).await;
 
     for _ in 0..3 {

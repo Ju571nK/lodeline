@@ -46,13 +46,9 @@ struct FieldMatch {
 
 impl FieldMatch {
     fn compile(m: &Matcher) -> Result<Self, regex::Error> {
-        let regex = match m {
-            Matcher::Regex { pattern } => Some(regex::Regex::new(pattern)?),
-            _ => None,
-        };
         Ok(FieldMatch {
             matcher: m.clone(),
-            regex,
+            regex: m.compile()?,
         })
     }
 

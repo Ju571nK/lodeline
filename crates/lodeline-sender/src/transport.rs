@@ -4,7 +4,9 @@
 
 use reqwest::{Client, ClientBuilder, Identity};
 use std::path::Path;
+use std::time::Duration;
 use thiserror::Error;
+use time::OffsetDateTime;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -23,6 +25,29 @@ pub enum TransportError {
     Build(reqwest::Error),
 }
 
+/// Longest wait for a TCP and TLS connection.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longest time for one request, from the first byte sent to the last byte of the
+/// response. A full event batch is 1 MiB by default, so 120 seconds still fits it on a
+/// link of about 70 kbit/s. It stays under the 300 second default policy poll interval.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Longest server text, in bytes, that a dead-letter event may hold.
+pub const MAX_STORED_SERVER_TEXT: usize = 512;
+
+/// `text` cut to [`MAX_STORED_SERVER_TEXT`] bytes on a character boundary.
+pub fn cap_server_text(text: &str) -> String {
+    if text.len() <= MAX_STORED_SERVER_TEXT {
+        return text.to_owned();
+    }
+    let end = (0..=MAX_STORED_SERVER_TEXT)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}…", &text[..end])
+}
+
 /// Build a reqwest client. mTLS is applied when both `client_cert_pem` and
 /// `client_key_pem` are supplied; a `server_ca_pem` pins the server cert to
 /// that CA (built-in roots disabled). With all three `None`, a plain client is
@@ -33,7 +58,27 @@ pub fn build_client(
     client_key_pem: Option<&Path>,
     server_ca_pem: Option<&Path>,
 ) -> Result<Client, TransportError> {
-    let mut builder = ClientBuilder::new().use_rustls_tls();
+    build_client_with_timeouts(
+        CONNECT_TIMEOUT,
+        REQUEST_TIMEOUT,
+        client_cert_pem,
+        client_key_pem,
+        server_ca_pem,
+    )
+}
+
+/// [`build_client`] with the timeouts given, so a test can use short ones.
+pub fn build_client_with_timeouts(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    client_cert_pem: Option<&Path>,
+    client_key_pem: Option<&Path>,
+    server_ca_pem: Option<&Path>,
+) -> Result<Client, TransportError> {
+    let mut builder = ClientBuilder::new()
+        .use_rustls_tls()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout);
 
     match (client_cert_pem, client_key_pem) {
         (Some(cert_path), Some(key_path)) => {
@@ -71,6 +116,19 @@ pub fn build_client(
     builder.build().map_err(TransportError::Build)
 }
 
+/// When the first certificate in the PEM file at `path` expires.
+pub fn client_cert_expiry(path: &Path) -> anyhow::Result<OffsetDateTime> {
+    let pem = std::fs::read(path)?;
+    let der = rustls_pemfile::certs(&mut pem.as_slice())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no certificate in the file"))??;
+    let (_, cert) = x509_parser::parse_x509_certificate(&der)
+        .map_err(|_| anyhow::anyhow!("not a valid X.509 certificate"))?;
+    Ok(OffsetDateTime::from_unix_timestamp(
+        cert.validity().not_after.timestamp(),
+    )?)
+}
+
 /// High-level outcome of an HTTP send. The data_task uses this to decide
 /// retry vs. permanent-pause vs. event emission.
 #[derive(Debug)]
@@ -85,8 +143,9 @@ pub enum SendOutcome<R> {
     TlsFailure(String),
     /// Network failure (DNS, connect, timeout) — retry.
     Network(String),
-    /// Unparseable body or other unexpected protocol issue.
-    ProtocolViolation(String),
+    /// Unparseable body or other unexpected protocol issue. `status` is set when
+    /// the status itself was the problem.
+    ProtocolViolation { status: Option<u16>, detail: String },
 }
 
 /// Classify a `reqwest::Error` (or status) into a `SendOutcome`. Caller
@@ -95,26 +154,70 @@ pub fn classify_status<R>(status: u16, body: String, parsed: Option<R>) -> SendO
     if (200..300).contains(&status) {
         match parsed {
             Some(r) => SendOutcome::Ok2xx(r),
-            None => SendOutcome::ProtocolViolation(format!("2xx without parseable body: {body}")),
+            None => SendOutcome::ProtocolViolation {
+                status: None,
+                detail: format!("2xx without parseable body: {}", cap_server_text(&body)),
+            },
         }
     } else if status == 409 || status == 426 {
         SendOutcome::PermanentReject { status, body }
     } else if (500..600).contains(&status) || status == 503 {
         SendOutcome::ServerBusy { status, body }
     } else {
-        SendOutcome::ProtocolViolation(format!("unexpected status {status}: {body}"))
+        SendOutcome::ProtocolViolation {
+            status: Some(status),
+            detail: format!("unexpected status {status}: {}", cap_server_text(&body)),
+        }
     }
 }
 
 /// Maps a `reqwest::Error` from the *send/connect* phase (no HTTP status
 /// available) to either a TLS or network failure.
 pub fn classify_send_error<R>(err: reqwest::Error) -> SendOutcome<R> {
-    let msg = err.to_string();
-    if msg.contains("tls") || msg.contains("certificate") || msg.contains("handshake") {
-        SendOutcome::TlsFailure(msg)
+    let is_tls = error_chain(&err).any(|e| e.is::<rustls::Error>());
+    let cause = failure_cause(err);
+    if is_tls {
+        SendOutcome::TlsFailure(cause)
     } else {
-        SendOutcome::Network(msg)
+        SendOutcome::Network(cause)
     }
+}
+
+/// Maps a `reqwest::Error` from reading a response body. A transport error, such as a
+/// timeout or a dropped connection, is the same failure as one during send. Only a
+/// body that arrived and does not parse is a protocol violation. `reqwest` reports
+/// both as a decode error, so the cause tells them apart.
+pub fn classify_body_error<R>(err: reqwest::Error, what: &str) -> SendOutcome<R> {
+    if error_chain(&err).any(|e| e.is::<serde_json::Error>()) {
+        SendOutcome::ProtocolViolation {
+            status: None,
+            detail: format!("{what}: {}", failure_cause(err)),
+        }
+    } else {
+        classify_send_error(err)
+    }
+}
+
+/// The text that is safe to store: the deepest cause, because `reqwest` puts the
+/// request URL and its query in its own message and prints no cause there. A decode
+/// error can quote the server's text, so it is capped.
+pub fn failure_cause(err: reqwest::Error) -> String {
+    let err = err.without_url();
+    error_chain(&err)
+        .last()
+        .map_or(String::new(), |e| cap_server_text(&e.to_string()))
+}
+
+/// `io::Error::source` skips the error it wraps, so `get_ref` must look there.
+fn error_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(err), |&e| {
+        e.downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+            .map(|inner| inner as &(dyn std::error::Error + 'static))
+            .or(e.source())
+    })
 }
 
 /// Returns `Some(latest_mtime)` if any of the cert / key / CA files have
@@ -136,6 +239,100 @@ pub fn newest_pem_mtime(paths: &[&Path]) -> std::io::Result<Option<std::time::Sy
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn a_failed_tls_handshake_is_a_tls_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"HTTP/1.1 400 not tls\r\n\r\n").await.ok();
+            // Closing with the hello unread sends a reset, and Windows then drops the answer.
+            tokio::io::copy(&mut stream, &mut tokio::io::sink())
+                .await
+                .ok();
+        });
+        let err = build_client(None, None, None)
+            .unwrap()
+            .get(format!("https://{addr}/"))
+            .send()
+            .await
+            .unwrap_err();
+        let outcome = classify_send_error::<()>(err);
+        assert!(matches!(outcome, SendOutcome::TlsFailure(_)), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_stores_its_cause_and_no_part_of_the_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = build_client(None, None, None)
+            .unwrap()
+            .get(format!("http://u:s3cret@{addr}/base?token=t0ken"))
+            .send()
+            .await
+            .unwrap_err();
+        let SendOutcome::Network(cause) = classify_send_error::<()>(err) else {
+            panic!("not a network failure");
+        };
+        assert_ne!(cause, "error sending request");
+        for leak in ["s3cret", "t0ken", "/base", "127.0.0.1"] {
+            assert!(!cause.contains(leak), "{leak} in {cause}");
+        }
+    }
+
+    #[test]
+    fn capped_text_ends_on_a_character_boundary() {
+        for pad in 0..4 {
+            let text = format!("{}{}", "a".repeat(pad), "é€😀".repeat(400));
+            let capped = cap_server_text(&text);
+            assert!(capped.len() <= MAX_STORED_SERVER_TEXT + '…'.len_utf8());
+            assert!(capped.ends_with('…'), "{capped}");
+            assert!(text.starts_with(capped.trim_end_matches('…')));
+        }
+        assert_eq!(cap_server_text("short"), "short");
+        let exact = "a".repeat(MAX_STORED_SERVER_TEXT);
+        assert_eq!(cap_server_text(&exact), exact);
+    }
+
+    #[test]
+    fn an_unexpected_status_and_an_unparseable_2xx_store_capped_text() {
+        let body = "x".repeat(100_000);
+        for (status, parsed) in [(418, None), (200, None)] {
+            let SendOutcome::<()>::ProtocolViolation { detail, .. } =
+                classify_status(status, body.clone(), parsed)
+            else {
+                panic!("not a protocol violation");
+            };
+            assert!(
+                detail.len() < MAX_STORED_SERVER_TEXT + 100,
+                "{}",
+                detail.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_parse_stores_a_capped_cause() {
+        let long = "y".repeat(100_000);
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .body(format!("\"{long}\""))
+                .unwrap(),
+        );
+        let err = response
+            .json::<crate::wire::SignedPolicyResponse>()
+            .await
+            .unwrap_err();
+        let cause = failure_cause(err);
+        assert!(
+            cause.len() < MAX_STORED_SERVER_TEXT + 100,
+            "{}",
+            cause.len()
+        );
+    }
 
     #[test]
     fn missing_cert_returns_read_error() {
@@ -233,6 +430,9 @@ mod tests {
     #[test]
     fn classify_2xx_without_body_is_protocol_violation() {
         let outcome: SendOutcome<()> = classify_status(200, "".into(), None);
-        assert!(matches!(outcome, SendOutcome::ProtocolViolation(_)));
+        assert!(matches!(
+            outcome,
+            SendOutcome::ProtocolViolation { status: None, .. }
+        ));
     }
 }

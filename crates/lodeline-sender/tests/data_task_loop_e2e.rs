@@ -4,6 +4,7 @@
 
 mod common;
 
+use lodeline_core::sender_status::{Contact, LinkFailure};
 use lodeline_sender::config::SenderConfig;
 use lodeline_sender::data_task::{self, DataTaskCtx};
 use lodeline_sender::heartbeat;
@@ -99,9 +100,10 @@ async fn happy_path_advances_offset_and_updates_stats() {
     assert_eq!(final_state.byte_offset, bytes_on_disk);
     assert_eq!(final_state.current_file, "events-1.jsonl");
 
-    let s = stats.read();
-    assert_eq!(s.last_server_response_code, Some(200));
-    assert!(s.last_server_ack_at.is_some());
+    assert!(matches!(
+        stats.read().contact(),
+        lodeline_core::sender_status::Contact::Reached { .. }
+    ));
 }
 
 #[tokio::test]
@@ -171,6 +173,68 @@ async fn rejected_events_go_to_dead_letter_and_offset_still_advances() {
     assert!(body.contains(&id_b.to_string()));
 }
 
+/// Real backoff, so it takes 5 seconds.
+#[tokio::test]
+async fn an_ack_outside_the_batch_is_a_failure_that_keeps_its_start_and_waits() {
+    let (addr, mock) = common::spawn_mock().await;
+    mock.lock().await.foreign_high_water = true;
+    let events = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    write_jsonl(
+        events.path(),
+        "events-1.jsonl",
+        &[(Uuid::from_u128(1), r#""a""#)],
+    );
+
+    let stats = heartbeat::shared();
+    let cancel = CancellationToken::new();
+    let ctx = DataTaskCtx {
+        client: reqwest::Client::new(),
+        config: cfg(events.path(), state_dir.path(), &addr.to_string()),
+        host_id: "h-1".into(),
+        agent_version: "0.2.0".into(),
+        sender_version: "0.2.0".into(),
+        stats: stats.clone(),
+        shutdown: cancel.clone(),
+    };
+    let handle = tokio::spawn(data_task::run(ctx));
+
+    let failing_since = || match stats.read().contact() {
+        Contact::Failing {
+            since,
+            failure: LinkFailure::Protocol,
+            last_ok_at,
+        } => Some((since, last_ok_at)),
+        _ => None,
+    };
+    let start = Instant::now();
+    while failing_since().is_none() || mock.lock().await.received_batches.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(5), "never failed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let first = Instant::now();
+    let (since, last_ok_at) = failing_since().unwrap();
+    // The backoff is 5s, so no second batch may arrive in the next second.
+    while first.elapsed() < Duration::from_secs(1) {
+        assert_eq!(
+            mock.lock().await.received_batches.len(),
+            1,
+            "retried at once"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    while mock.lock().await.received_batches.len() < 2 {
+        assert!(first.elapsed() < Duration::from_secs(10), "never retried");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.cancel();
+    let _ = handle.await;
+
+    assert_eq!(last_ok_at, None);
+    assert_eq!(failing_since(), Some((since, None)));
+}
+
 #[tokio::test]
 async fn discovers_first_segment_when_state_empty() {
     let (addr, _mock) = common::spawn_mock().await;
@@ -206,4 +270,44 @@ async fn discovers_first_segment_when_state_empty() {
     cancel.cancel();
     let _ = handle.await;
     assert_eq!(s.current_file, "events-2026-05-11-001.jsonl");
+}
+
+/// An offset path whose parent is a file, so every `state::store` fails.
+#[tokio::test]
+async fn a_failed_offset_write_waits_before_it_sends_the_batch_again() {
+    let (addr, mock) = common::spawn_mock().await;
+    let events = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let id = Uuid::from_u128(1);
+    write_jsonl(events.path(), "events-1.jsonl", &[(id, r#""a""#)]);
+    let blocker = state_dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"").unwrap();
+    let mut config = cfg(events.path(), state_dir.path(), &addr.to_string());
+    config.offset_path = blocker.join("sender-offset.json");
+
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(data_task::run(DataTaskCtx {
+        client: reqwest::Client::new(),
+        config,
+        host_id: "h-1".into(),
+        agent_version: "0.2.0".into(),
+        sender_version: "0.2.0".into(),
+        stats: heartbeat::shared(),
+        shutdown: cancel.clone(),
+    }));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("the loop ignored shutdown while it waited")
+        .unwrap();
+
+    let batches = &mock.lock().await.received_batches;
+    assert_eq!(
+        batches.len(),
+        1,
+        "sent {} batches in 1 second",
+        batches.len()
+    );
+    assert_eq!(batches[0].events[0].event_id, id);
 }

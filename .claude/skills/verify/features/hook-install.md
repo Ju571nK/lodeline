@@ -1,6 +1,6 @@
 # Hook install
 
-`lodeline-hook install` prints the hook registration for an AI agent and changes nothing unless the user passes `--write`. Written registrations can be checked for drift with `verify` and removed with `uninstall`. The hook observes by default. Blocking needs `--enforce`, and with no verdict available it fails open unless the user chose `--on-failure closed`.
+`lodeline-hook install` prints the hook registration for an AI agent and changes nothing unless the user passes `--write`. Written registrations can be checked for drift with `verify` and removed with `uninstall`. The hook observes by default. Blocking needs `--enforce`, and with no verdict available, a panic, or a watchdog exit it fails open unless the user chose `--on-failure closed`.
 
 ## Sub-features
 
@@ -10,6 +10,8 @@
 - `hook-uninstall` previews, then removes only the Lodeline entry.
 - `hook-enforce-open` allows when no verdict is available.
 - `hook-enforce-closed` denies when no verdict is available and fail-closed was chosen.
+- `hook-enforce-closed-watchdog` denies when the watchdog ends the run and fail-closed was chosen.
+- `hook-enforce-open-watchdog` stays silent when the watchdog ends the run in the default mode.
 
 ## How to get to it (user POV)
 
@@ -35,10 +37,13 @@ Preconditions:
 - **Uninstall.** Reinstall, preview the removal, then apply it. Run `drive.sh run "$RUN" hook-rewrite -- lodeline-hook install --agent claude-code --write`, `drive.sh run "$RUN" hook-uninstall-preview -- lodeline-hook uninstall --agent claude-code`, and `drive.sh run "$RUN" hook-uninstall -- lodeline-hook uninstall --agent claude-code --write`. The preview's stderr holds `would remove 1 entry/entries`, the apply's holds `removed 1 entry/entries`, and `.claude/settings.json` then has an empty `PreToolUse` array.
 - **Default does not block.** Send a destructive payload through the hook with no daemon. Run `printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"},"hook_event_name":"PreToolUse"}' | drive.sh run "$RUN" hook-enforce-open -- lodeline-hook claude-code --enforce`. Exit code `0` and empty stdout.
 - **Opt-in fail-closed.** Run `printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"},"hook_event_name":"PreToolUse"}' | drive.sh run "$RUN" hook-enforce-closed -- lodeline-hook claude-code --enforce --on-failure closed`. Exit code `0`, and stdout holds `"permissionDecision":"deny"` and `rule fail_closed`.
+- **Watchdog in closed mode.** Hold stdin open past the 800 ms watchdog. Run `sleep 2 | drive.sh run "$RUN" hook-enforce-closed-watchdog -- lodeline-hook claude-code --enforce --on-failure closed`. Exit code `0`, and stdout holds one line with `"permissionDecision":"deny"` and `rule fail_closed`.
+- **Watchdog in the default mode.** Run `sleep 2 | drive.sh run "$RUN" hook-enforce-open-watchdog -- lodeline-hook claude-code --enforce`. Exit code `0` and empty stdout.
 
 ## Gotchas
 
 - A deny for Claude Code is JSON on stdout with exit code `0`. Assert on stdout, not on the exit code.
+- No input reaches a panic. The panic paths stay with `cargo test -p lodeline-hook`, which sets `LODELINE_HOOK_TEST_SEAM`. Debug builds read that variable and release builds do not contain it.
 - `hook-enforce-closed` shows the failure path only. A real rule deny needs a live daemon, so it stays with `cargo test -p lodeline-hook`.
 - Registered commands hold the absolute path of the binary, which is a personal path. Replace it before you quote it.
 - Without `LODELINE_HOOK_SOCKET` and `LODELINE_HOOK_DECIDE_SOCKET`, the hook prefers `/var/run/lodeline/*.sock` when those exist. `drive.sh` sets both.
