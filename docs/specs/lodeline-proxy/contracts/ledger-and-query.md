@@ -451,17 +451,15 @@ left, the next 200 clears the count and `ingest_stopped`. The events stay unsent
 until then, so R still governs their expiry. The slow rate means a permanently
 refused event cannot hold good traffic until R, and a server that refuses everything
 loses at most 288 events per day past the first 8 answers. That is the upper bound.
-The measured mean on the by-index paths is about 395 s per event, about 219 per day,
-so about R/395 s events drain: about 6560 in a 30-day R. R governs what remains.
+The measured mean on the by-index paths is about 449 s per event, about 192 per day,
+so about R/449 s events drain: about 5770 in a 30-day R. R governs what remains.
 Retries back off with jitter of +/-20%, so after a server upgrade the next retry
 comes within 360 s.
 
-Three cases fall outside "backs off" and "at most 288 events per day":
+Two cases fall outside "backs off" and "at most 288 events per day":
 
 - A restart clears the count and the slow period, so each restart can lose another
   8 answers' worth (#361).
-- The unattributed path clears its backoff at each Isolate step, so its retries do
-  not slow down. The clock still holds it to one event per period (#363).
 - A 409 by item is quarantined at once, stopped or not, and has no limit.
 
 A shape the server refuses only on some events does not stop the producer while
@@ -469,7 +467,7 @@ clean batches get 200s between them. SV-3..SV-5 answers name every bad event of 
 batch, so 1 in 10 refused does not stop them. The parse path names one per answer.
 At the production batch size of 100, about 7.4% of events refused on that path,
 about 8 in 108, stops ingest: 1 in 14 did not stop it and 1 in 13 did. At 1 in 10
-refused, throughput falls to about 0.09 events/s. Nothing is lost: only refused
+refused, throughput falls to about 0.07 events/s. Nothing is lost: only refused
 events are quarantined, and the rest are acked unless R expires them first.
 
 ### Test cases (mirrored in the checker)
