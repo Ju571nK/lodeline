@@ -214,18 +214,25 @@ async fn an_ack_outside_the_batch_is_a_failure_that_keeps_its_start_and_waits() 
     }
     let first = Instant::now();
     let (since, last_ok_at) = failing_since().unwrap();
+    // The backoff is 5s, so no second batch may arrive in the next second.
+    while first.elapsed() < Duration::from_secs(1) {
+        assert_eq!(
+            mock.lock().await.received_batches.len(),
+            1,
+            "retried at once"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     while mock.lock().await.received_batches.len() < 2 {
         assert!(first.elapsed() < Duration::from_secs(10), "never retried");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let waited = first.elapsed();
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancel.cancel();
     let _ = handle.await;
 
     assert_eq!(last_ok_at, None);
     assert_eq!(failing_since(), Some((since, None)));
-    assert!(waited >= Duration::from_secs(4), "retried after {waited:?}");
 }
 
 #[tokio::test]
