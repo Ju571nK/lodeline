@@ -58,8 +58,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   `parse_failed` before anything is written, so the policy on disk, the version, and
   the running policy stay as they were. This covers an unsupported `version`, text
   that is not UTF-8, a hook deny rule or rule-pack regex that does not compile, a
-  target path that does not compile as a glob, and a policy that does not merge over
-  the defaults of the host. `lodeline-sign sign` now stops on the same mistakes before
+  target path that does not compile as a glob, a `hook_silence.tick_secs` of 0 with
+  an agent enabled, and a policy that does not merge over the defaults of the host. `lodeline-sign sign` now stops on the same mistakes before
   it signs, and it writes no bundle, with two limits. It does not check the merge,
   because the file does not say whether it is a policy or a bundle, and only a policy
   has to merge. It checks the target paths for its own OS and for `platform: any`, so

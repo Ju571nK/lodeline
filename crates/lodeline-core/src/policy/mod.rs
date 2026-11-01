@@ -330,6 +330,8 @@ pub enum PolicyError {
     },
     #[error("target {id}: {detail}")]
     TargetGlob { id: String, detail: String },
+    #[error("hook_silence.tick_secs must be above 0 when an agent is enabled")]
+    HookSilenceTick,
     #[error("policy is not UTF-8")]
     NotUtf8(#[from] std::str::Utf8Error),
 }
@@ -356,9 +358,10 @@ pub fn parse(yaml: &str) -> Result<PolicyDocument, PolicyError> {
 
 /// Parse a document that travels in a signed envelope. Beyond [`parse`], this
 /// refuses text that is not UTF-8, which boot cannot read, a deny rule that does
-/// not compile, which makes boot run with no deny rules at all, and what boot
-/// would skip with only a log line: a rule-pack regex that does not compile, and
-/// a target path that does not compile as a glob on this OS.
+/// not compile, which makes boot run with no deny rules at all, a hook-silence
+/// tick of zero, which stops boot, and what boot would skip with only a log line:
+/// a rule-pack regex that does not compile, and a target path that does not
+/// compile as a glob on this OS.
 ///
 /// A policy and a bundle share this check. Only a policy has to merge, and that
 /// depends on the host's defaults: see [`merge_on_this_host`].
@@ -371,6 +374,10 @@ pub fn parse_signed(bytes: &[u8]) -> Result<PolicyDocument, PolicyError> {
                 detail: e.to_string(),
             })?;
         }
+    }
+    let silence = &doc.hook_silence;
+    if !silence.enabled_agents.is_empty() && silence.tick_secs == 0 {
+        return Err(PolicyError::HookSilenceTick);
     }
     for pack in &doc.rule_packs {
         for rule in &pack.rules {
