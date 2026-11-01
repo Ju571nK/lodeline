@@ -209,25 +209,9 @@ pub fn run(args: AssessArgs) -> i32 {
 fn resolve_policy_paths(policy_override: Option<&Path>) -> (PathBuf, PathBuf) {
     let policy = policy_override
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(default_policy_yaml_path);
+        .unwrap_or_else(crate::runtime::default_policy_yaml_path);
     let rule_packs = policy.with_file_name("rule-packs.yaml");
     (policy, rule_packs)
-}
-
-/// Platform-specific default for `policy.yaml`. Mirrors `runtime.rs`.
-fn default_policy_yaml_path() -> PathBuf {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        PathBuf::from("/etc/lodeline/policy.yaml")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        PathBuf::from(r"C:\ProgramData\Lodeline\policy.yaml")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        PathBuf::from("/etc/lodeline/policy.yaml")
-    }
 }
 
 /// Human-readable name of the top-level JSON type (for error messages).

@@ -596,12 +596,22 @@ impl Drop for ChildAgent {
     }
 }
 
+fn spawn_agent(mut agent: Command) -> ChildAgent {
+    let child = agent
+        .arg("run")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    ChildAgent(child)
+}
+
 impl Host {
-    fn spawn_child(&self) -> ChildAgent {
-        let child = Command::new(env!("CARGO_BIN_EXE_lodeline"))
-            .arg("run")
-            .arg("--policy")
-            .arg(self.path("policy.yaml"))
+    fn agent_command(&self) -> Command {
+        let mut agent = Command::new(env!("CARGO_BIN_EXE_lodeline"));
+        agent
+            .env("HOME", self.path("."))
+            .env("XDG_CONFIG_HOME", self.path("config"))
             .arg("--state-db")
             .arg(self.path("state.db"))
             .arg("--events-dir")
@@ -610,12 +620,14 @@ impl Host {
             .arg(self.path("c.sock"))
             .arg("--keystore")
             .arg(self.path("keystore.json"))
-            .arg("--poll")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        ChildAgent(child)
+            .arg("--poll");
+        agent
+    }
+
+    fn spawn_child(&self) -> ChildAgent {
+        let mut agent = self.agent_command();
+        agent.arg("--policy").arg(self.path("policy.yaml"));
+        spawn_agent(agent)
     }
 
     fn wait_until_serving(&self) {
@@ -765,4 +777,146 @@ fn sigkill_between_the_policy_record_and_the_rename_leaves_the_host_unchanged() 
 #[test]
 fn sigkill_between_the_rule_pack_record_and_the_rename_leaves_the_host_unchanged() {
     sigkill_between_the_record_and_the_rename_leaves_the_host_unchanged(RULE_PACKS);
+}
+
+const DENY_RULE_AND_TARGET: &str = "version: 1
+hook_deny_rules:
+  - id: blocked
+    match:
+      kind: bash
+      command:
+        kind: regex
+        pattern: 'forbidden-command'
+targets:
+  - id: extra
+    description: extra
+    tier: standard
+    platform: any
+    paths: ['/tmp/lodeline-default-path-*.json']
+";
+
+const NOT_A_POLICY: &str = ": this is not : valid : yaml :::\n";
+
+/// Under root the default policy path is the real `/etc/lodeline`.
+fn default_path_is_real() -> bool {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    if root {
+        eprintln!("skipped: the default policy path of root is outside the test");
+    }
+    root
+}
+
+#[track_caller]
+fn assert_stops_at_boot(mut agent: ChildAgent, what: &str) {
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    loop {
+        if let Some(status) = agent.0.try_wait().unwrap() {
+            assert!(!status.success(), "{what}: {status}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what}: the agent kept running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+impl Host {
+    fn default_policy_file(&self) -> std::path::PathBuf {
+        self.path("config/lodeline/policy.yaml")
+    }
+
+    fn write_default_policy(&self, yaml: &str) {
+        std::fs::create_dir_all(self.path("config/lodeline")).unwrap();
+        std::fs::write(self.default_policy_file(), yaml).unwrap();
+    }
+
+    fn denies(&self, command: &str) -> bool {
+        let input = json!({"kind": "command", "command": command, "args": []});
+        let reply = self.control(&json!({"cmd": "assess", "input": input}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        !reply["assess_verdict"]["deny_match"].is_null()
+    }
+}
+
+#[test]
+fn restart_without_the_policy_flag_keeps_the_applied_policy_in_force() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new("version: 1\n");
+    let mut agent = spawn_agent(host.agent_command());
+    host.wait_until_serving();
+    assert!(!host.denies("forbidden-command"), "before the apply");
+    assert_accepted(&host.apply_policy(5, DENY_RULE_AND_TARGET), 5);
+    wait_until("the applied policy loaded", || {
+        host.denies("forbidden-command")
+    });
+    agent.0.kill().unwrap();
+    agent.0.wait().unwrap();
+    drop(agent);
+
+    let _agent = spawn_agent(host.agent_command());
+    host.wait_until_serving();
+
+    assert_eq!(host.status()["last_applied_policy_version"], 5);
+    assert!(host.denies("forbidden-command"), "deny rule after restart");
+    assert!(host.has_target("extra"), "target after restart");
+}
+
+#[test]
+fn boot_without_the_policy_flag_loads_a_hand_written_policy() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new("version: 1\n");
+    host.write_default_policy(DENY_RULE_AND_TARGET);
+
+    let _agent = spawn_agent(host.agent_command());
+    host.wait_until_serving();
+
+    assert!(host.denies("forbidden-command"), "deny rule");
+    assert!(host.has_target("extra"), "target");
+    assert_eq!(host.status()["last_applied_policy_version"], 0);
+}
+
+#[test]
+fn a_policy_that_cannot_load_stops_the_boot_with_or_without_the_policy_flag() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new(NOT_A_POLICY);
+    host.write_default_policy(NOT_A_POLICY);
+    assert_stops_at_boot(host.spawn_child(), "malformed with the flag");
+    assert_stops_at_boot(
+        spawn_agent(host.agent_command()),
+        "malformed without the flag",
+    );
+
+    let unreadable = std::fs::Permissions::from_mode(0o000);
+    std::fs::set_permissions(host.path("policy.yaml"), unreadable.clone()).unwrap();
+    std::fs::set_permissions(host.default_policy_file(), unreadable).unwrap();
+    assert_stops_at_boot(host.spawn_child(), "unreadable with the flag");
+    assert_stops_at_boot(
+        spawn_agent(host.agent_command()),
+        "unreadable without the flag",
+    );
+}
+
+#[test]
+fn show_assess_and_doctor_read_the_default_policy_without_the_flag() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new("version: 1\n");
+    host.write_default_policy(DENY_RULE_AND_TARGET);
+    let stdout = |args: &[&str]| {
+        let run = host.agent_command().args(args).output().unwrap();
+        String::from_utf8(run.stdout).unwrap()
+    };
+
+    assert!(stdout(&["show", "config"]).contains("id: extra"));
+    assert!(stdout(&["assess", "--command", "forbidden-command"]).contains("blocked"));
+
+    host.write_default_policy(NOT_A_POLICY);
+    assert!(stdout(&["doctor"]).contains("[ERROR] policy parse failed"));
 }

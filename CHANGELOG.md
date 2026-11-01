@@ -52,6 +52,24 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- `lodeline run` without `--policy`, which is how the packaged service runs it, now
+  loads the policy at its default path at boot. Before, boot read a policy file only
+  with `--policy`, while a signed apply and a reload used the default path. A restart
+  dropped the deny rules and targets of an applied policy while `lodeline status`
+  still showed its version, and redelivering that version did not restore them. The
+  default path is `/etc/lodeline/policy.yaml` as root, and
+  `$XDG_CONFIG_HOME/lodeline/policy.yaml` or `~/.config/lodeline/policy.yaml`
+  otherwise.
+  - A policy you placed at that path by hand now loads at boot too, as the install
+    guides describe. A file that cannot be read or parsed, or that overrides a
+    built-in id this OS does not have, stops the boot, as it does with `--policy`.
+    Check any file at that path before you upgrade.
+  - `lodeline show config`, `show paths`, and `doctor` read the same file when
+    `--policy` is absent. `lodeline assess` uses the same default path, so as a
+    non-root user it reads your config directory instead of `/etc/lodeline`.
+  - `config/policy.example.yaml` no longer overrides a macOS-only target, which would
+    stop the boot on Linux and Windows.
+
 - The agent keeps the applied version and expiry of a signed policy or rule-pack
   bundle across a restart. An apply now records its version, the blake3 of its bytes,
   and its `valid_until` in `state.db` before the file moves, and promotes them after

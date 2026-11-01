@@ -1374,6 +1374,19 @@ host_id_strategy: hostname
     }
 
     #[test]
+    fn shipped_policy_example_loads_on_every_platform() {
+        let example = include_str!("../../../../config/policy.example.yaml");
+        for (default_yaml, platform) in [
+            (lodeline_rules_basic::DEFAULTS_MACOS, Platform::Macos),
+            (lodeline_rules_basic::DEFAULTS_LINUX, Platform::Linux),
+            (lodeline_rules_basic::DEFAULTS_WINDOWS, Platform::Windows),
+        ] {
+            let defaults = parse(default_yaml).unwrap();
+            merge(defaults, Some(parse(example).unwrap()), None, platform).unwrap();
+        }
+    }
+
+    #[test]
     fn merge_forwards_user_rubric_overrides() {
         let defaults = defaults().unwrap();
         // PolicyDocument doesn't derive Default (HostIdStrategy has no Default
