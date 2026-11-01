@@ -685,6 +685,50 @@ mod tests {
         assert!(matches!(parse_signed(&utf16), Err(PolicyError::NotUtf8(_))));
     }
 
+    fn doc_with_pack_regexes(matcher: &str, when: &str) -> String {
+        format!(
+            "version: 1\nrule_packs:\n  - id: acme\n    pack_version: 2\n    tool: gemini\n    scope: {{kind: user_global}}\n    watched_paths: []\n    rules:\n      - id: r\n        on_file: x\n        format: json\n        selector: $.x\n        matcher: {{kind: regex, pattern: '{matcher}'}}\n        emit: {{kind: sandbox_disabled}}\n        when:\n          - selector: $.y\n            matcher: {{kind: regex, pattern: '{when}'}}\n"
+        )
+    }
+
+    fn doc_with_target(platform: &str, disabled: bool, path: &str) -> String {
+        format!(
+            "version: 1\ntargets:\n  - id: t\n    description: d\n    tier: standard\n    platform: {platform}\n    disabled: {disabled}\n    paths: ['{path}']\n"
+        )
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_bad_regex_anywhere_in_a_rule_pack() {
+        for yaml in [
+            doc_with_pack_regexes("(", "ok"),
+            doc_with_pack_regexes("ok", "("),
+        ] {
+            let err = parse_signed(yaml.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("acme"), "{err}");
+        }
+        parse_signed(doc_with_pack_regexes("ok", "ok").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_glob_this_host_would_drop() {
+        let err = parse_signed(doc_with_target("any", false, "/tmp/[").as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("target t"), "{err}");
+    }
+
+    #[test]
+    fn parse_signed_ignores_a_target_this_host_never_compiles() {
+        let other_os = if cfg!(windows) { "linux" } else { "windows" };
+        parse_signed(doc_with_target(other_os, false, "/tmp/[").as_bytes()).unwrap();
+        parse_signed(doc_with_target("any", true, "/tmp/[").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn parse_signed_accepts_path_tokens() {
+        for path in ["~/.x/*.json", "$HOME/.x", "%APPDATA%/x/*.json"] {
+            parse_signed(doc_with_target("any", false, path).as_bytes()).unwrap();
+        }
+    }
+
     fn doc_overriding(id: &str) -> PolicyDocument {
         parse(&format!(
             "version: 1\noverrides:\n  - id: {id}\n    disabled: true\n"

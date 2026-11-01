@@ -28,6 +28,20 @@ fn doc_denying(rule_id: &str, pattern: &str) -> String {
     )
 }
 
+/// A rule pack that reports `file` when its `mode` is `off`. `tool: other` keeps
+/// the report apart from what the built-in parsers say about the test user's home.
+fn doc_with_pack(file: &str, pattern: &str, when_pattern: &str) -> String {
+    format!(
+        "version: 1\nrule_packs:\n  - id: reported\n    pack_version: 2\n    tool: other\n    tool_label: acme\n    scope: {{kind: user_global}}\n    watched_paths: ['{file}']\n    rules:\n      - id: r\n        on_file: '{file}'\n        format: json\n        selector: $.mode\n        matcher: {{kind: regex, pattern: '{pattern}'}}\n        emit: {{kind: sandbox_disabled}}\n        when:\n          - selector: $.mode\n            matcher: {{kind: regex, pattern: '{when_pattern}'}}\n"
+    )
+}
+
+fn doc_with_target(glob: &str) -> String {
+    format!(
+        "version: 1\ntargets:\n  - id: extra\n    description: extra\n    tier: standard\n    platform: any\n    paths: ['{glob}']\n"
+    )
+}
+
 struct Host {
     td: TempDir,
     sk: SigningKey,
@@ -152,6 +166,40 @@ impl Host {
         !reply["assess_verdict"]["deny_match"].is_null()
     }
 
+    fn tool_config(&self) -> String {
+        let path = self.path("tool.json");
+        std::fs::write(&path, r#"{"mode": "off"}"#).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    fn pack_reports(&self) -> bool {
+        let reply = self.control(&json!({"cmd": "risk", "tool": "other"}));
+        reply["risk"]["assessments"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|r| r["reasons_count"].as_u64() > Some(0)))
+    }
+
+    fn wait_until_pack_reports(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if self.pack_reports() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the rule pack never reported");
+    }
+
+    fn target_globs(&self, id: &str) -> Vec<Value> {
+        let reply = self.control(&json!({"cmd": "targets"}));
+        reply["targets"]["targets"]
+            .as_array()
+            .and_then(|all| all.iter().find(|t| t["id"] == id))
+            .and_then(|t| t["globs"].as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn wait_until_denied(&self, command: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
@@ -225,6 +273,21 @@ fn override_of_an_unknown_target_is_refused_and_the_host_is_unchanged() {
 }
 
 #[test]
+fn rule_pack_regex_that_does_not_compile_is_refused_and_the_host_is_unchanged() {
+    host_is_unchanged_after_refusing(&doc_with_pack("/no/such/file", "(", "off"));
+}
+
+#[test]
+fn rule_pack_condition_regex_that_does_not_compile_is_refused_and_the_host_is_unchanged() {
+    host_is_unchanged_after_refusing(&doc_with_pack("/no/such/file", "off", "("));
+}
+
+#[test]
+fn target_glob_that_does_not_compile_is_refused_and_the_host_is_unchanged() {
+    host_is_unchanged_after_refusing(&doc_with_target("/no/such/["));
+}
+
+#[test]
 fn accepted_policy_takes_effect_and_survives_a_restart() {
     let host = Host::new(&doc_denying("first", "marker-a"));
     let rt = host.boot().expect("first boot");
@@ -244,6 +307,66 @@ fn accepted_policy_takes_effect_and_survives_a_restart() {
     assert_eq!(host.watermark(), version);
     assert!(host.denies("marker-b"), "new rule enforced after restart");
     assert!(!host.denies("marker-a"), "old rule gone after restart");
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn accepted_rule_pack_and_target_glob_still_load_after_a_restart() {
+    let host = Host::new("version: 1\n");
+    let file = host.tool_config();
+    let rt = host.boot().expect("first boot");
+    let target = doc_with_target("/no/such/*.json");
+    let target = target.strip_prefix("version: 1\n").unwrap();
+    let next = format!("{}{target}", doc_with_pack(&file, "^off$", "off"));
+
+    let reply = host.apply_policy(host.watermark() + 1, &next);
+
+    assert_eq!(reply["apply_policy"]["outcome"], "accepted", "{reply}");
+    rt.shutdown_timeout(STOP_DEADLINE);
+    let rt = host.boot().expect("restart after an accepted policy");
+    host.wait_until_pack_reports();
+    assert_eq!(host.target_globs("extra").len(), 1, "target glob compiled");
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn refused_bundle_keeps_the_running_rule_pack_across_a_restart() {
+    let host = Host::new("version: 1\n");
+    let file = host.tool_config();
+    let rt = host.boot().expect("first boot");
+    let reply = host.apply_rule_packs(1, &doc_with_pack(&file, "off", "off"));
+    assert_eq!(reply["apply_policy"]["outcome"], "accepted", "{reply}");
+    let bundle_before = host.read("rule-packs.yaml");
+
+    assert_refused(&host.apply_rule_packs(2, &doc_with_pack(&file, "(", "off")));
+
+    assert_eq!(
+        host.read("rule-packs.yaml"),
+        bundle_before,
+        "bundle on disk"
+    );
+    rt.shutdown_timeout(STOP_DEADLINE);
+    let rt = host.boot().expect("restart after a refused bundle");
+    host.wait_until_pack_reports();
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn bundle_applies_whatever_its_policy_only_fields_say() {
+    let host = Host::new("version: 1\n");
+    let rt = host.boot().expect("first boot");
+    let bundle = format!(
+        "{}overrides:\n  - id: no-such-target\n    disabled: true\n",
+        doc_denying("bundled", "marker-a")
+    );
+
+    let reply = host.apply_rule_packs(1, &bundle);
+
+    assert_eq!(reply["apply_policy"]["outcome"], "accepted", "{reply}");
+    host.wait_until_denied("marker-a");
+    rt.shutdown_timeout(STOP_DEADLINE);
+    let rt = host.boot().expect("restart after an accepted bundle");
+    assert!(host.denies("marker-a"), "bundled rule survives the restart");
     rt.shutdown_timeout(STOP_DEADLINE);
 }
 

@@ -53,9 +53,38 @@ fn sign_refuses_a_document_the_agent_cannot_load() {
         "bad",
     );
     assert_sign_refuses(
-        "version: 1\noverrides:\n  - id: no-such-target\n    disabled: true\n",
-        "no-such-target",
+        "version: 1\nrule_packs:\n  - id: bad-pack\n    pack_version: 1\n    tool: gemini\n    scope: {kind: user_global}\n    watched_paths: []\n    rules:\n      - id: r\n        on_file: x\n        format: json\n        selector: $.x\n        matcher: {kind: regex, pattern: '('}\n        emit: {kind: sandbox_disabled}\n",
+        "bad-pack",
     );
+    assert_sign_refuses(
+        "version: 1\ntargets:\n  - id: bad-target\n    description: d\n    tier: standard\n    platform: any\n    paths: ['/tmp/[']\n",
+        "bad-target",
+    );
+}
+
+#[test]
+fn sign_leaves_a_merge_to_the_host_because_a_bundle_never_merges_overrides() {
+    let (out, wrote_file) =
+        sign_cli("version: 1\noverrides:\n  - id: no-such-target\n    disabled: true\n");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(wrote_file);
+}
+
+#[test]
+fn sign_accepts_a_target_written_for_another_os() {
+    let (out, wrote_file) = sign_cli(
+        "version: 1\ntargets:\n  - id: tools\n    description: d\n    tier: standard\n    platform: windows\n    recursive: true\n    paths: ['C:\\tools\\']\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(wrote_file);
 }
 
 #[test]
