@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
+use lodeline_core::paths::default_sender_config;
 use lodeline_sender::cli::{Cli, Command};
 use lodeline_sender::config::SenderConfig;
 use lodeline_sender::runtime::{run, RuntimeCtx};
-use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 /// Resolve the sender's host_id. Precedence: LODELINE_HOST_ID env (override) >
@@ -30,22 +30,11 @@ fn resolve_host_id(env: Option<String>, cfg: Option<&str>) -> anyhow::Result<Str
     )
 }
 
-fn default_config_path() -> PathBuf {
-    #[cfg(unix)]
-    {
-        PathBuf::from("/etc/lodeline/sender.yaml")
-    }
-    #[cfg(windows)]
-    {
-        PathBuf::from(r"C:\ProgramData\Lodeline\sender.yaml")
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-    let config_path = cli.config.unwrap_or_else(default_config_path);
+    let config_path = cli.config.unwrap_or_else(default_sender_config);
     match cli.command {
         Command::Start => {
             // NOTE: control plane only today (policy poll + apply_policy IPC).

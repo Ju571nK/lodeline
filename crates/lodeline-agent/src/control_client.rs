@@ -40,31 +40,15 @@ pub(crate) async fn query_unix(
     socket: &std::path::Path,
     req: &Request,
 ) -> anyhow::Result<Response> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-    let stream = UnixStream::connect(socket).await?;
-    let (rd, mut wr) = stream.into_split();
-    let mut bytes = serde_json::to_vec(req)?;
-    bytes.push(b'\n');
-    wr.write_all(&bytes).await?;
-    wr.shutdown().await.ok();
-    let mut line = String::new();
-    BufReader::new(rd).read_line(&mut line).await?;
-    Ok(serde_json::from_str(line.trim())?)
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    Ok(lodeline_core::control_client::exchange(stream, req).await?)
 }
 
 #[cfg(windows)]
 pub(crate) async fn query_windows(pipe_name: &str, req: &Request) -> anyhow::Result<Response> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
-    let mut client = ClientOptions::new().open(pipe_name)?;
-    let mut bytes = serde_json::to_vec(req)?;
-    bytes.push(b'\n');
-    client.write_all(&bytes).await?;
-    client.flush().await?;
-    let mut line = String::new();
-    BufReader::new(&mut client).read_line(&mut line).await?;
-    Ok(serde_json::from_str(line.trim())?)
+    let client = ClientOptions::new().open(pipe_name)?;
+    Ok(lodeline_core::control_client::exchange(client, req).await?)
 }
 
 #[cfg(all(test, unix))]

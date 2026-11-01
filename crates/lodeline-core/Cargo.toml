@@ -23,6 +23,12 @@ hdrhistogram = { workspace = true }
 parking_lot = { workspace = true }
 data-encoding = { workspace = true }
 ed25519-dalek = { workspace = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+# The async control IPC client. Off by default so this crate stays tokio-free
+# for callers that only need the wire types.
+control-client = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

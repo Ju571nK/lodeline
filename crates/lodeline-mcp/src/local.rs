@@ -10,6 +10,8 @@
 
 use crate::config::LocalConfig;
 use lodeline_core::assess::AssessInput;
+#[cfg(unix)]
+use lodeline_core::control_proto::peer_trusted;
 use lodeline_core::control_proto::{AssessVerdict, DoctorAiGuardReport, Request, Response};
 use rmcp::ErrorData as McpError;
 use std::path::PathBuf;
@@ -39,14 +41,6 @@ pub enum LocalError {
     Empty,
     #[error("agent returned no assess verdict (built without operator-cli?)")]
     EmptyVerdict,
-}
-
-/// The control socket is trusted only if its peer is root (the system agent) or
-/// the same user as this process (the individual-developer case). Any other
-/// local user owning the socket is treated as a spoofing attempt (#57).
-#[cfg(unix)]
-fn peer_trusted(peer_euid: u32, self_uid: u32) -> bool {
-    peer_euid == 0 || peer_euid == self_uid
 }
 
 impl From<LocalError> for McpError {
@@ -162,16 +156,6 @@ mod tests {
     use lodeline_core::control_proto::{DoctorAiGuardReport, PerRepoSummary, Response};
     use lodeline_core::event::AiGuardBucket;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    #[test]
-    fn peer_trusted_accepts_root_and_self_rejects_others() {
-        assert!(peer_trusted(0, 501), "root agent is trusted");
-        assert!(peer_trusted(501, 501), "same user is trusted");
-        assert!(
-            !peer_trusted(1001, 501),
-            "a different local user is rejected"
-        );
-    }
 
     #[tokio::test]
     async fn doctor_report_round_trips_against_canned_agent() {
