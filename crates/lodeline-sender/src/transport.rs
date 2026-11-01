@@ -4,6 +4,7 @@
 
 use reqwest::{Client, ClientBuilder, Identity};
 use std::path::Path;
+use std::time::Duration;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -24,6 +25,29 @@ pub enum TransportError {
     Build(reqwest::Error),
 }
 
+/// Longest wait for a TCP and TLS connection.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longest time for one request, from the first byte sent to the last byte of the
+/// response. A full event batch is 1 MiB by default, so 120 seconds still fits it on a
+/// link of about 70 kbit/s. It stays under the 300 second default policy poll interval.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Longest server text, in bytes, that a dead-letter event may hold.
+pub const MAX_STORED_SERVER_TEXT: usize = 512;
+
+/// `text` cut to [`MAX_STORED_SERVER_TEXT`] bytes on a character boundary.
+pub fn cap_server_text(text: &str) -> String {
+    if text.len() <= MAX_STORED_SERVER_TEXT {
+        return text.to_owned();
+    }
+    let end = (0..=MAX_STORED_SERVER_TEXT)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}…", &text[..end])
+}
+
 /// Build a reqwest client. mTLS is applied when both `client_cert_pem` and
 /// `client_key_pem` are supplied; a `server_ca_pem` pins the server cert to
 /// that CA (built-in roots disabled). With all three `None`, a plain client is
@@ -34,7 +58,27 @@ pub fn build_client(
     client_key_pem: Option<&Path>,
     server_ca_pem: Option<&Path>,
 ) -> Result<Client, TransportError> {
-    let mut builder = ClientBuilder::new().use_rustls_tls();
+    build_client_with_timeouts(
+        CONNECT_TIMEOUT,
+        REQUEST_TIMEOUT,
+        client_cert_pem,
+        client_key_pem,
+        server_ca_pem,
+    )
+}
+
+/// [`build_client`] with the timeouts given, so a test can use short ones.
+pub fn build_client_with_timeouts(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    client_cert_pem: Option<&Path>,
+    client_key_pem: Option<&Path>,
+    server_ca_pem: Option<&Path>,
+) -> Result<Client, TransportError> {
+    let mut builder = ClientBuilder::new()
+        .use_rustls_tls()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout);
 
     match (client_cert_pem, client_key_pem) {
         (Some(cert_path), Some(key_path)) => {
@@ -112,7 +156,7 @@ pub fn classify_status<R>(status: u16, body: String, parsed: Option<R>) -> SendO
             Some(r) => SendOutcome::Ok2xx(r),
             None => SendOutcome::ProtocolViolation {
                 status: None,
-                detail: format!("2xx without parseable body: {body}"),
+                detail: format!("2xx without parseable body: {}", cap_server_text(&body)),
             },
         }
     } else if status == 409 || status == 426 {
@@ -122,7 +166,7 @@ pub fn classify_status<R>(status: u16, body: String, parsed: Option<R>) -> SendO
     } else {
         SendOutcome::ProtocolViolation {
             status: Some(status),
-            detail: format!("unexpected status {status}: {body}"),
+            detail: format!("unexpected status {status}: {}", cap_server_text(&body)),
         }
     }
 }
@@ -139,13 +183,29 @@ pub fn classify_send_error<R>(err: reqwest::Error) -> SendOutcome<R> {
     }
 }
 
+/// Maps a `reqwest::Error` from reading a response body. A transport error, such as a
+/// timeout or a dropped connection, is the same failure as one during send. Only a
+/// body that arrived and does not parse is a protocol violation. `reqwest` reports
+/// both as a decode error, so the cause tells them apart.
+pub fn classify_body_error<R>(err: reqwest::Error, what: &str) -> SendOutcome<R> {
+    if error_chain(&err).any(|e| e.is::<serde_json::Error>()) {
+        SendOutcome::ProtocolViolation {
+            status: None,
+            detail: format!("{what}: {}", failure_cause(err)),
+        }
+    } else {
+        classify_send_error(err)
+    }
+}
+
 /// The text that is safe to store: the deepest cause, because `reqwest` puts the
-/// request URL and its query in its own message and prints no cause there.
+/// request URL and its query in its own message and prints no cause there. A decode
+/// error can quote the server's text, so it is capped.
 pub fn failure_cause(err: reqwest::Error) -> String {
     let err = err.without_url();
     error_chain(&err)
         .last()
-        .map_or(String::new(), |e| e.to_string())
+        .map_or(String::new(), |e| cap_server_text(&e.to_string()))
 }
 
 /// `io::Error::source` skips the error it wraps, so `get_ref` must look there.
@@ -221,6 +281,57 @@ mod tests {
         for leak in ["s3cret", "t0ken", "/base", "127.0.0.1"] {
             assert!(!cause.contains(leak), "{leak} in {cause}");
         }
+    }
+
+    #[test]
+    fn capped_text_ends_on_a_character_boundary() {
+        for pad in 0..4 {
+            let text = format!("{}{}", "a".repeat(pad), "é€😀".repeat(400));
+            let capped = cap_server_text(&text);
+            assert!(capped.len() <= MAX_STORED_SERVER_TEXT + '…'.len_utf8());
+            assert!(capped.ends_with('…'), "{capped}");
+            assert!(text.starts_with(capped.trim_end_matches('…')));
+        }
+        assert_eq!(cap_server_text("short"), "short");
+        let exact = "a".repeat(MAX_STORED_SERVER_TEXT);
+        assert_eq!(cap_server_text(&exact), exact);
+    }
+
+    #[test]
+    fn an_unexpected_status_and_an_unparseable_2xx_store_capped_text() {
+        let body = "x".repeat(100_000);
+        for (status, parsed) in [(418, None), (200, None)] {
+            let SendOutcome::<()>::ProtocolViolation { detail, .. } =
+                classify_status(status, body.clone(), parsed)
+            else {
+                panic!("not a protocol violation");
+            };
+            assert!(
+                detail.len() < MAX_STORED_SERVER_TEXT + 100,
+                "{}",
+                detail.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_parse_stores_a_capped_cause() {
+        let long = "y".repeat(100_000);
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .body(format!("\"{long}\""))
+                .unwrap(),
+        );
+        let err = response
+            .json::<crate::wire::SignedPolicyResponse>()
+            .await
+            .unwrap_err();
+        let cause = failure_cause(err);
+        assert!(
+            cause.len() < MAX_STORED_SERVER_TEXT + 100,
+            "{}",
+            cause.len()
+        );
     }
 
     #[test]

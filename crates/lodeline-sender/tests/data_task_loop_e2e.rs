@@ -271,3 +271,43 @@ async fn discovers_first_segment_when_state_empty() {
     let _ = handle.await;
     assert_eq!(s.current_file, "events-2026-05-11-001.jsonl");
 }
+
+/// An offset path whose parent is a file, so every `state::store` fails.
+#[tokio::test]
+async fn a_failed_offset_write_waits_before_it_sends_the_batch_again() {
+    let (addr, mock) = common::spawn_mock().await;
+    let events = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let id = Uuid::from_u128(1);
+    write_jsonl(events.path(), "events-1.jsonl", &[(id, r#""a""#)]);
+    let blocker = state_dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"").unwrap();
+    let mut config = cfg(events.path(), state_dir.path(), &addr.to_string());
+    config.offset_path = blocker.join("sender-offset.json");
+
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(data_task::run(DataTaskCtx {
+        client: reqwest::Client::new(),
+        config,
+        host_id: "h-1".into(),
+        agent_version: "0.2.0".into(),
+        sender_version: "0.2.0".into(),
+        stats: heartbeat::shared(),
+        shutdown: cancel.clone(),
+    }));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("the loop ignored shutdown while it waited")
+        .unwrap();
+
+    let batches = &mock.lock().await.received_batches;
+    assert_eq!(
+        batches.len(),
+        1,
+        "sent {} batches in 1 second",
+        batches.len()
+    );
+    assert_eq!(batches[0].events[0].event_id, id);
+}
