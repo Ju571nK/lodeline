@@ -1,7 +1,7 @@
 //! `lodeline status` — renders the `lodeline-diag` snapshot. Always exits 0
 //! (informational), like `lodeline scan`.
 
-use lodeline_diag::{AgentRun, FleetLink, HostStatus, LinkState, Presence, Probe};
+use lodeline_diag::{safe, AgentRun, FleetLink, HostStatus, Presence, Probe};
 use std::path::{Path, PathBuf};
 
 pub struct StatusArgs {
@@ -21,33 +21,14 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let status = rt.block_on(lodeline_diag::collect(&probe));
+    let now = time::OffsetDateTime::now_utc();
+    let status = rt.block_on(lodeline_diag::collect(&probe, now));
     if args.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
         print!("{}", render(&status));
     }
     Ok(())
-}
-
-/// Values from config files, the environment, and the daemon can hold terminal
-/// escape sequences, or characters that hide or reorder what the reader sees.
-fn safe(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| if is_unsafe(c) { '\u{FFFD}' } else { c })
-        .collect()
-}
-
-fn is_unsafe(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{200B}'..='\u{200F}'
-                | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{2069}'
-                | '\u{FEFF}'
-        )
 }
 
 fn safe_path(path: &Path) -> String {
@@ -93,38 +74,48 @@ fn render(status: &HostStatus) -> String {
             lines.push(format!("[WARN] agent: unreachable: {}", safe(reason)));
         }
     }
-    lines.push(match &status.fleet {
-        FleetLink::NotConfigured => "[INFO] fleet: not configured (single host)".to_string(),
+    match &status.fleet {
+        FleetLink::NotConfigured => {
+            lines.push("[INFO] fleet: not configured (single host)".to_string());
+        }
         FleetLink::Configured {
             server_url,
             config_path,
             link,
+            client_cert,
         } => {
-            let link = match link {
-                LinkState::Unknown => "link state unknown",
-            };
-            format!(
-                "[INFO] fleet: lodeline-server {} (from {}, {link})",
+            lines.push(format!(
+                "[INFO] fleet: lodeline-server {} (from {})",
                 safe(server_url),
                 safe_path(config_path)
-            )
+            ));
+            let (level, text) = link.summary();
+            lines.push(format!("{} sender link: {text}", level.tag()));
+            lines.extend(
+                client_cert
+                    .summary()
+                    .map(|(level, text)| format!("{} client certificate: {text}", level.tag())),
+            );
         }
         FleetLink::Unreadable {
             config_path,
             reason,
-        } => format!(
+        } => lines.push(format!(
             "[WARN] fleet: cannot read {}: {}",
             safe_path(config_path),
             safe(reason)
-        ),
-    });
+        )),
+    }
     lines.join("\n") + "\n"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lodeline_diag::{Component, ComponentName, SCHEMA_VERSION};
+    use lodeline_diag::{
+        ClientCert, Component, ComponentName, LinkFailure, LinkState, SCHEMA_VERSION,
+    };
+    use time::macros::datetime;
 
     fn status(agent: AgentRun, fleet: FleetLink) -> HostStatus {
         HostStatus {
@@ -160,6 +151,92 @@ mod tests {
         assert!(out.contains("fleet: not configured (single host)"), "{out}");
     }
 
+    fn fleet_output(link: LinkState, client_cert: ClientCert) -> String {
+        render(&status(
+            AgentRun::Stopped,
+            FleetLink::Configured {
+                server_url: "https://s.example:8443".to_string(),
+                config_path: PathBuf::from("/etc/lodeline/sender.yaml"),
+                link,
+                client_cert,
+            },
+        ))
+    }
+
+    #[test]
+    fn each_link_state_reads_as_itself() {
+        let at = datetime!(2026-11-01 12:00 UTC);
+        for (link, expected) in [
+            (
+                LinkState::NeverReported,
+                "[WARN] sender link: no status file",
+            ),
+            (
+                LinkState::Unreadable {
+                    reason: "denied".to_string(),
+                },
+                "[WARN] sender link: cannot read the status file: denied",
+            ),
+            (
+                LinkState::AwaitingContact { last_report_at: at },
+                "[INFO] sender link: lodeline-sender is running, no server answer yet",
+            ),
+            (
+                LinkState::Connected {
+                    last_report_at: at,
+                    last_ok_at: at,
+                },
+                "[OK]   sender link: connected, last success 2026-11-01T12:00:00Z",
+            ),
+            (
+                LinkState::Failing {
+                    last_report_at: at,
+                    since: at,
+                    failure: LinkFailure::Response {
+                        last_response_code: 503,
+                    },
+                    last_ok_at: None,
+                },
+                "[ERROR] sender link: failing since 2026-11-01T12:00:00Z: server answered 503, \
+                 no success yet",
+            ),
+            (
+                LinkState::Stale {
+                    last_report_at: at,
+                    stale_after_secs: 90,
+                    last_ok_at: None,
+                },
+                "[WARN] sender link: stale: last report 2026-11-01T12:00:00Z",
+            ),
+        ] {
+            let out = fleet_output(link, ClientCert::NotReported);
+            assert!(out.contains(expected), "{out}");
+            assert!(!out.contains("client certificate"), "{out}");
+        }
+    }
+
+    #[test]
+    fn expired_and_expiring_soon_certificates_read_differently() {
+        let expires_at = datetime!(2026-11-01 12:00 UTC);
+        for (cert, expected) in [
+            (
+                ClientCert::Valid { expires_at },
+                "[OK]   client certificate: expires 2026-11-01T12:00:00Z",
+            ),
+            (
+                ClientCert::ExpiringSoon { expires_at },
+                "[WARN] client certificate: expires soon, 2026-11-01T12:00:00Z",
+            ),
+            (
+                ClientCert::Expired { expires_at },
+                "[ERROR] client certificate: expired 2026-11-01T12:00:00Z",
+            ),
+        ] {
+            let out = fleet_output(LinkState::NeverReported, cert);
+            assert!(out.contains(expected), "{out}");
+        }
+    }
+
     #[test]
     fn terminal_escapes_in_untrusted_values_do_not_reach_the_terminal() {
         let esc = "\u{1b}]0;pwned\u{7}\u{9b}31m";
@@ -171,7 +248,10 @@ mod tests {
                 FleetLink::Configured {
                     server_url: format!("https://s{esc}"),
                     config_path: PathBuf::from(format!("/etc/{esc}")),
-                    link: LinkState::Unknown,
+                    link: LinkState::Unreadable {
+                        reason: format!("r{esc}"),
+                    },
+                    client_cert: ClientCert::NotReported,
                 },
             ),
             (
