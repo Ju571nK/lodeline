@@ -33,7 +33,7 @@ pub enum PollOutcome {
 }
 
 impl PollOutcome {
-    fn link_result(&self) -> Result<(), LinkFailure> {
+    pub(crate) fn link_result(&self) -> Result<(), LinkFailure> {
         match self {
             PollOutcome::NewPolicy { .. }
             | PollOutcome::NewRulePacks { .. }

@@ -12,7 +12,7 @@
 use crate::agent_ipc::ApplyPolicyResult;
 use crate::config::SenderConfig;
 use crate::control_task::{ControlLoopCtx, PollOutcome};
-use crate::data_task::{self, local_event, DataTaskCtx};
+use crate::data_task::{self, dead_letter_tls_failure, local_event, DataTaskCtx};
 use crate::dead_letter;
 use crate::heartbeat;
 use crate::state;
@@ -94,11 +94,15 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
         // first successful apply_policy doesn't re-store an unchanged value.
         let _ = initial_etag;
         async move {
+            let mut tls_reason: Option<String> = None;
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel_r.cancelled() => break,
                     maybe = poll_rx.recv() => {
+                        if maybe.as_ref().is_some_and(|p| p.link_result().is_ok()) {
+                            tls_reason = None;
+                        }
                         match maybe {
                             Some(PollOutcome::NewPolicy { etag, response }) => {
                                 match crate::agent_ipc::apply_policy(&agent_socket, &response).await {
@@ -140,8 +144,7 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
                                 let _ = dead_letter::append(&dead_letter_dir, &evt);
                             }
                             Some(PollOutcome::TlsFailure(reason)) => {
-                                let evt = local_event(&host_id, Evidence::TlsFailure { reason });
-                                let _ = dead_letter::append(&dead_letter_dir, &evt);
+                                dead_letter_tls_failure(&dead_letter_dir, &host_id, &mut tls_reason, reason);
                             }
                             Some(PollOutcome::Network(reason)) => {
                                 tracing::warn!(reason = %reason, "policy poll network failure");

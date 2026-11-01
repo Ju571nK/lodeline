@@ -73,7 +73,7 @@ use crate::transport::{classify_send_error, classify_status, failure_cause, Send
 use crate::wire::{Envelope, EventsAccepted, EventsRequest};
 use lodeline_core::sink::jsonl::segment_order;
 use reqwest::Client;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 /// Inputs for one batch send (no loop).
@@ -219,6 +219,28 @@ pub fn local_event(host_id: &str, evidence: Evidence) -> Event {
     }
 }
 
+/// Appends a `tls_failure` event unless `last_reason` is already this reason. A TLS
+/// failure repeats at every retry or poll and this directory has no rotation, so a
+/// loop keeps the reason here and clears it on a success.
+pub fn dead_letter_tls_failure(
+    dir: &Path,
+    host_id: &str,
+    last_reason: &mut Option<String>,
+    reason: String,
+) {
+    if last_reason.as_ref() == Some(&reason) {
+        return;
+    }
+    let evt = local_event(
+        host_id,
+        Evidence::TlsFailure {
+            reason: reason.clone(),
+        },
+    );
+    let _ = dead_letter::append(dir, &evt);
+    *last_reason = Some(reason);
+}
+
 /// Top-level data plane loop: read JSONL → POST /v1/events → apply_ack
 /// → state::store → dead-letter rejections → update stats. Handles all
 /// `BatchOutcome` variants per spec §3.8.2.
@@ -233,6 +255,7 @@ pub async fn run(ctx: DataTaskCtx) {
         }
     };
     let mut consecutive_failures: u32 = 0;
+    let mut tls_reason: Option<String> = None;
 
     loop {
         if ctx.shutdown.is_cancelled() {
@@ -301,6 +324,7 @@ pub async fn run(ctx: DataTaskCtx) {
         match outcome {
             BatchOutcome::Accepted(accepted) => {
                 consecutive_failures = 0;
+                tls_reason = None;
                 let new_state = match apply_ack(&manifest, accepted.high_water_event_id) {
                     Ok(s) => s,
                     Err(e) => {
@@ -377,8 +401,12 @@ pub async fn run(ctx: DataTaskCtx) {
             }
             BatchOutcome::TlsFailure(reason) => {
                 consecutive_failures += 1;
-                let evt = local_event(&ctx.host_id, Evidence::TlsFailure { reason });
-                let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
+                dead_letter_tls_failure(
+                    &ctx.config.dead_letter_dir,
+                    &ctx.host_id,
+                    &mut tls_reason,
+                    reason,
+                );
                 let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
                 if !idle_sleep(&ctx.shutdown, delay).await {
                     break;
@@ -449,6 +477,18 @@ fn next_segment(events_dir: &std::path::Path, state: &SenderState) -> Option<Str
 mod tests {
     use super::*;
     use crate::manifest::{ByteRange, ManifestEntry};
+
+    #[test]
+    fn a_new_tls_reason_is_written_and_a_repeat_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut last = None;
+        for reason in ["expired", "expired", "unknown issuer", "unknown issuer"] {
+            dead_letter_tls_failure(dir.path(), "h", &mut last, reason.into());
+        }
+        let file = std::fs::read_dir(dir.path()).unwrap().next().unwrap();
+        let body = std::fs::read_to_string(file.unwrap().path()).unwrap();
+        assert_eq!(body.lines().count(), 2, "{body}");
+    }
 
     #[test]
     fn segments_are_walked_in_write_order() {

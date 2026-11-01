@@ -52,7 +52,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 - `lodeline-sender` reported every TLS failure as a network failure, so the
   `tls_failure` dead-letter event was never written. It now finds the TLS cause in
-  the error chain.
+  the error chain, and it writes one event when a failure streak starts or its reason
+  changes, separately for events and policy, because that directory has no rotation.
+  Stored reasons hold the cause only, never the request URL.
 
 - `lodeline-sender` treated the 404 of a server with no policy as an unknown host and
   wrote a `host_id_conflict` dead-letter event at each poll. It now treats that
