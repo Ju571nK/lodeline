@@ -52,6 +52,44 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- The agent keeps the applied version and expiry of a signed policy or rule-pack
+  bundle across a restart. An apply now records its version, the blake3 of its bytes,
+  and its `valid_until` in `state.db` before the file moves, and promotes them after
+  the rename. Boot compares that record with the file on disk: if the bytes match, the
+  apply is finished, and if not, the record is dropped and a retry applies. Before, a
+  stop between the rename and the record left the version behind the file, and an
+  older signed version could then replace the newest. If this repair fails, the agent
+  stops at boot instead of serving a stale version.
+  - A running agent makes the same check before every apply. Before, an apply that
+    failed after the rename, at the directory sync or the record write, left the
+    version behind the file while the agent kept running, and an older signed version
+    could then replace the newest. It is now refused with `version_regression`, and
+    the status, the expiry, and the loaded policy follow the finished apply. If the
+    check fails, that apply returns an error and writes nothing. A retry of the
+    document that failed finishes it and gets `version_regression`, because it is
+    already applied.
+  - `policy_status` now reports the real `active_envelope_valid_until` and
+    `policy_expired_active` after a restart. The expiry monitor checks at boot, so a
+    restart on an expired policy reports `policy_expired_active` at once instead of
+    after 60 seconds.
+  - Boot no longer reads the YAML `version:` key of `policy.yaml` as an envelope
+    version. A host that has only a local policy now reports version 0, and a first
+    envelope v1 applies. Before, it reported 1 and refused v1 with
+    `version_regression`.
+  - Upgrade: new tables are added to `state.db` at open. A host keeps its recorded
+    version. Its expiry is unknown until the next apply: `active_envelope_valid_until`
+    stays `null`, `policy_expired_active` stays `false`, `lodeline show policy-status` prints
+    `(unknown until the next apply)` and `unknown`, and `lodeline status` prints
+    `expiry unknown until the next apply`. A recorded policy version of exactly 1 with
+    no expiry reads as no envelope, because older agents wrote it for any local file.
+    This also applies to a host that really applied v1: it reports version 0 until the
+    next apply, and accepts v1 again. No envelope is lower than v1, so this cannot
+    lower a policy.
+  - Downgrade: an older agent ignores the new tables and keeps reading the same
+    version columns. A version it applies has no expiry row, so a later upgrade reads
+    that expiry as unknown.
+  - `lodeline status --json` adds `valid_until` to `signed_policy`.
+
 - `lodeline-sender` now waits before it retries after it fails to save its offset.
   Before, it sent the same batch again at once, in a tight loop, and wrote the
   server's per-event rejections to the dead-letter directory each time. It now uses
@@ -105,9 +143,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   recorded version, verifies, writes, and publishes the result under one lock, so an
   older version is refused with `version_regression` and changes nothing. Status
   requests and policy reloads do not take that lock. The recorded versions also
-  refuse to go down on their own: `host_meta_set_policy_version` and
-  `set_last_applied_rule_packs_version` return `StateError::WouldLowerVersion` and
-  leave the value as it was, and `apply` reports that as an internal error.
+  refuse to go down on their own: a lower version returns
+  `StateError::WouldLowerVersion` and leaves the value as it was, and `apply` reports
+  that as an internal error.
 
 - A signed policy or rule-pack bundle that the agent could not load at boot is now
   refused. Before, such a document passed `apply`, advanced the version, and then

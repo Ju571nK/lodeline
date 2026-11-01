@@ -26,6 +26,9 @@ impl HashCache {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.pragma_update(None, "mmap_size", 0i64)?;
+        // On macOS `record_pending` needs this for its commit to reach the disk.
+        // Checkpoints use it too, and they are rare.
+        conn.pragma_update(None, "fullfsync", true)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS baseline (
                 path TEXT PRIMARY KEY,
@@ -53,6 +56,21 @@ impl HashCache {
             "ALTER TABLE host_meta ADD COLUMN last_applied_rule_packs_version INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // The expiry of each applied envelope, and the apply in progress. An older
+        // agent ignores both tables. `host_meta` still holds the applied versions.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS applied_envelope (
+                kind TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                valid_until TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pending_envelope (
+                kind TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                hash_hex TEXT NOT NULL,
+                valid_until TEXT NOT NULL
+            );",
+        )?;
         // Ensure singleton row 1 exists. Idempotent.
         conn.execute(
             "INSERT OR IGNORE INTO host_meta (id, host_id, hw_fingerprint, last_applied_policy_version)

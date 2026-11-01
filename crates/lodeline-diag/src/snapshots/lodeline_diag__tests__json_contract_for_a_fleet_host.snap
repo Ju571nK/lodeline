@@ -26,7 +26,8 @@ expression: "serde_json::to_string_pretty(&status).unwrap()"
     "events_emitted_total": 7,
     "signed_policy": {
       "version": 3,
-      "expired": false
+      "expired": false,
+      "valid_until": "2026-11-02T00:00:00Z"
     }
   },
   "fleet": {

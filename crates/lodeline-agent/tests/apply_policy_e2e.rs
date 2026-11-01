@@ -87,14 +87,7 @@ async fn apply_policy_writes_yaml_advances_version_emits_reloaded_and_no_expiry_
     assert_eq!(bytes, b"version: 1\nrules: []\n");
 
     // state.db.
-    assert_eq!(
-        cache
-            .lock()
-            .host_meta_get()
-            .unwrap()
-            .last_applied_policy_version,
-        1
-    );
+    assert_eq!(cache.lock().host_meta_get().unwrap().policy.version(), 1);
 
     // PolicyReloaded event.
     let ev = event_rx.recv().await.unwrap();

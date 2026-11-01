@@ -62,6 +62,8 @@ fn render(status: &HostStatus) -> String {
                 let version = policy.version;
                 if policy.expired {
                     format!("[WARN] signed policy: version {version} expired")
+                } else if policy.valid_until.is_none() {
+                    format!("[OK]   signed policy: version {version}, expiry unknown until the next apply")
                 } else {
                     format!("[OK]   signed policy: version {version}")
                 }
@@ -113,7 +115,7 @@ fn render(status: &HostStatus) -> String {
 mod tests {
     use super::*;
     use lodeline_diag::{
-        ClientCert, Component, ComponentName, LinkFailure, LinkState, SCHEMA_VERSION,
+        ClientCert, Component, ComponentName, LinkFailure, LinkState, SignedPolicy, SCHEMA_VERSION,
     };
     use time::macros::datetime;
 
@@ -149,6 +151,37 @@ mod tests {
         assert!(out.contains("[INFO] lodeline-sender: not found"), "{out}");
         assert!(out.contains("[WARN] agent: stopped"), "{out}");
         assert!(out.contains("fleet: not configured (single host)"), "{out}");
+    }
+
+    #[test]
+    fn signed_policy_reads_as_valid_expired_or_of_unknown_expiry() {
+        let time = "2026-11-02T00:00:00Z";
+        for (expired, valid_until, expected) in [
+            (false, Some(time), "[OK]   signed policy: version 7\n"),
+            (
+                true,
+                Some(time),
+                "[WARN] signed policy: version 7 expired\n",
+            ),
+            (
+                false,
+                None,
+                "[OK]   signed policy: version 7, expiry unknown until the next apply\n",
+            ),
+        ] {
+            let out = render(&status(
+                AgentRun::Running {
+                    events_emitted_total: 0,
+                    signed_policy: Some(SignedPolicy {
+                        version: 7,
+                        expired,
+                        valid_until: valid_until.map(str::to_owned),
+                    }),
+                },
+                FleetLink::NotConfigured,
+            ));
+            assert!(out.contains(expected), "{out}");
+        }
     }
 
     fn fleet_output(link: LinkState, client_cert: ClientCert) -> String {

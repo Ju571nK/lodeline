@@ -1,12 +1,16 @@
-//! Crash-safe writer for policy.yaml + last_applied_policy_version.
+//! Crash-safe writer for one signed artifact file and its recorded version.
 //!
-//! Spec §4.4. The on-disk + state.db tuple must be advanced atomically (or
-//! recoverably) even across abrupt power loss between the two writes.
+//! Spec §4.4. A file and a state.db row cannot change together, so state.db records
+//! the apply before the file moves. A stop or a failure at any step leaves a state
+//! that the next boot or apply resolves from what is on disk, with [`settle_pending`].
 
+use super::deployment::ArtifactKind;
+use crate::host_meta::PendingEnvelope;
 use crate::state::{HashCache, StateError};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use time::OffsetDateTime;
 
 /// Errors produced by the atomic writer.
 #[derive(Debug, Error)]
@@ -14,69 +18,80 @@ pub enum AtomicWriteError {
     /// I/O failure during write/rename/fsync.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    /// state.db update failure after disk write succeeded — caller should
-    /// log loudly; the disk file is ahead of state.db, but boot reconciliation
-    /// in `reconcile_on_boot` will recover. A lower version refused by state.db
-    /// also lands here, after the file has moved: `apply` runs one at a time so
-    /// that it cannot.
+    /// state.db refused or failed the apply before the file moved, so the file
+    /// and the applied version are unchanged. A lower version lands here.
+    #[error("state.db update failed before disk write: {0}")]
+    StateBeforeDisk(StateError),
+    /// The file may be ahead of the applied version. The next boot or apply settles it.
     #[error("state.db update failed AFTER disk write: {0}")]
     StateAfterDisk(StateError),
 }
 
-/// Atomically write `policy_bytes` to `target` and advance `last_applied_policy_version`
-/// to `new_version`. Steps:
-///   1. Write `policy_bytes` to `target.{pid}.tmp`, fsync the file.
-///   2. Rename temp → target.
-///   3. fsync the parent directory.
-///   4. UPDATE host_meta SET last_applied_policy_version = new_version.
-///
-/// A crash between steps 3 and 4 leaves disk ahead of state.db; the boot
-/// reconciliation step (Task A6.5) detects this and re-emits the
-/// `policy_reloaded` event.
+/// Atomically write `bytes` to `target` and advance the applied version of `kind`
+/// to `version`. Steps:
+///   1. Record the version, the blake3 of `bytes`, and `valid_until` as pending.
+///   2. Write `bytes` to a temp file, fsync it, rename it over `target`, fsync the
+///      parent directory.
+///   3. Promote pending to applied.
 pub fn atomic_write(
+    kind: ArtifactKind,
     target: &Path,
-    policy_bytes: &[u8],
+    bytes: &[u8],
     cache: &HashCache,
-    new_version: i64,
+    version: i64,
+    valid_until: OffsetDateTime,
 ) -> Result<(), AtomicWriteError> {
-    // 1–3. Crash-safe file write (tmp + fsync + rename + dir fsync).
-    write_file_durably(target, policy_bytes)?;
-
-    // 4. Advance state.db. If THIS step fails, disk is ahead; boot
-    //    reconciliation handles it. We surface the error so the caller can
-    //    log it for operator triage.
+    let pending = PendingEnvelope {
+        version,
+        hash_hex: blake3::hash(bytes).to_hex().to_string(),
+        valid_until,
+    };
     cache
-        .host_meta_set_policy_version(new_version)
-        .map_err(AtomicWriteError::StateAfterDisk)?;
-
-    Ok(())
+        .record_pending(kind, &pending)
+        .map_err(AtomicWriteError::StateBeforeDisk)?;
+    write_file_durably(target, bytes)?;
+    cache
+        .promote_pending(kind)
+        .map_err(AtomicWriteError::StateAfterDisk)
 }
 
-/// Sibling of [`atomic_write`] for a signed rule-packs bundle: the SAME
-/// crash-safe file write, but it advances the RULE-PACKS watermark
-/// (`last_applied_rule_packs_version`) instead of the policy version. Same
-/// `AtomicWriteError` semantics: a crash between the disk write and the state.db
-/// update leaves disk ahead, recovered by boot reconciliation.
-pub fn atomic_write_rule_packs(
+/// Resolve an apply that stopped or failed partway. Run it at boot and before every
+/// apply. `target` holding the pending bytes means the rename happened, so the apply
+/// is finished, and its record is returned. Otherwise the rename never happened, or
+/// an older agent has since gone past this version, and the pending record is dropped.
+/// Safe to run again after a stop at any point.
+pub fn settle_pending(
+    kind: ArtifactKind,
     target: &Path,
-    rule_packs_bytes: &[u8],
     cache: &HashCache,
-    new_version: i64,
-) -> Result<(), AtomicWriteError> {
-    // 1–3. Crash-safe file write (tmp + fsync + rename + dir fsync).
-    write_file_durably(target, rule_packs_bytes)?;
-
-    // 4. Advance the rule-packs watermark in state.db.
+) -> Result<Option<PendingEnvelope>, AtomicWriteError> {
+    let Some(pending) = cache
+        .pending(kind)
+        .map_err(AtomicWriteError::StateAfterDisk)?
+    else {
+        return Ok(None);
+    };
+    let on_disk = match std::fs::read(target) {
+        Ok(bytes) => Some(blake3::hash(&bytes).to_hex().to_string()),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    if on_disk.as_deref() == Some(pending.hash_hex.as_str()) {
+        match cache.promote_pending(kind) {
+            Ok(()) => return Ok(Some(pending)),
+            Err(StateError::WouldLowerVersion { .. }) => {}
+            Err(e) => return Err(AtomicWriteError::StateAfterDisk(e)),
+        }
+    }
     cache
-        .set_last_applied_rule_packs_version(new_version)
+        .clear_pending(kind)
         .map_err(AtomicWriteError::StateAfterDisk)?;
-
-    Ok(())
+    Ok(None)
 }
 
-/// Shared crash-safe file write (steps 1–3 of the atomic-write protocol):
-/// write `bytes` to a pid-scoped temp file, fsync it, rename it over `target`,
-/// then fsync the parent directory (POSIX only). Does NOT touch state.db.
+/// Crash-safe file write: write `bytes` to a pid-scoped temp file, fsync it, rename
+/// it over `target`, then fsync the parent directory (POSIX only). Does NOT touch
+/// state.db.
 fn write_file_durably(target: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
     let parent = target
         .parent()
@@ -123,9 +138,40 @@ fn write_file_durably(target: &Path, bytes: &[u8]) -> Result<(), AtomicWriteErro
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use time::macros::datetime;
+    use ArtifactKind::{Policy, RulePacks};
+
+    const UNTIL: OffsetDateTime = datetime!(2030-01-01 0:00 UTC);
 
     fn fresh_cache(dir: &tempfile::TempDir) -> HashCache {
         HashCache::open(&dir.path().join("state.db")).unwrap()
+    }
+
+    fn write(
+        kind: ArtifactKind,
+        target: &Path,
+        bytes: &[u8],
+        cache: &HashCache,
+        version: i64,
+    ) -> Result<(), AtomicWriteError> {
+        atomic_write(kind, target, bytes, cache, version, UNTIL)
+    }
+
+    fn applied(cache: &HashCache, kind: ArtifactKind) -> i64 {
+        let meta = cache.host_meta_get().unwrap();
+        match kind {
+            Policy => meta.policy.version(),
+            RulePacks => meta.rule_packs.version(),
+        }
+    }
+
+    fn record_pending(cache: &HashCache, kind: ArtifactKind, bytes: &[u8], version: i64) {
+        let pending = PendingEnvelope {
+            version,
+            hash_hex: blake3::hash(bytes).to_hex().to_string(),
+            valid_until: UNTIL,
+        };
+        cache.record_pending(kind, &pending).unwrap();
     }
 
     #[test]
@@ -133,12 +179,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let cache = fresh_cache(&dir);
         let target = dir.path().join("policy.yaml");
-        atomic_write(&target, b"version: 5\nrules: []\n", &cache, 5).unwrap();
+        write(Policy, &target, b"version: 5\nrules: []\n", &cache, 5).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), b"version: 5\nrules: []\n");
+        assert_eq!(applied(&cache, Policy), 5);
         assert_eq!(
-            cache.host_meta_get().unwrap().last_applied_policy_version,
-            5
+            cache.host_meta_get().unwrap().policy.valid_until(),
+            Some(UNTIL)
         );
     }
 
@@ -147,24 +194,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let cache = fresh_cache(&dir);
         let target = dir.path().join("rule_packs.yaml");
-        atomic_write_rule_packs(&target, b"version: 1\nrule_packs: []\n", &cache, 3).unwrap();
+        write(
+            RulePacks,
+            &target,
+            b"version: 1\nrule_packs: []\n",
+            &cache,
+            3,
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read(&target).unwrap(),
             b"version: 1\nrule_packs: []\n"
         );
-        assert_eq!(
-            cache
-                .host_meta_get()
-                .unwrap()
-                .last_applied_rule_packs_version,
-            3
-        );
-        // The policy watermark is untouched by the rule-packs writer.
-        assert_eq!(
-            cache.host_meta_get().unwrap().last_applied_policy_version,
-            0
-        );
+        assert_eq!(applied(&cache, RulePacks), 3);
+        // The policy watermark is untouched by a rule-packs write.
+        assert_eq!(applied(&cache, Policy), 0);
     }
 
     #[test]
@@ -172,35 +217,124 @@ mod tests {
         let dir = tempdir().unwrap();
         let cache = fresh_cache(&dir);
         let target = dir.path().join("policy.yaml");
-        atomic_write(&target, b"version: 1\n", &cache, 1).unwrap();
-        atomic_write(&target, b"version: 2\n", &cache, 2).unwrap();
+        write(Policy, &target, b"version: 1\n", &cache, 1).unwrap();
+        write(Policy, &target, b"version: 2\n", &cache, 2).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), b"version: 2\n");
-        assert_eq!(
-            cache.host_meta_get().unwrap().last_applied_policy_version,
-            2
-        );
+        assert_eq!(applied(&cache, Policy), 2);
     }
 
     #[test]
-    fn a_refused_version_reaches_the_caller_as_an_error() {
+    fn a_refused_version_leaves_the_file_and_the_record_alone() {
         let dir = tempdir().unwrap();
         let cache = fresh_cache(&dir);
         let target = dir.path().join("policy.yaml");
-        atomic_write(&target, b"version: 2\n", &cache, 2).unwrap();
+        write(Policy, &target, b"two\n", &cache, 2).unwrap();
 
-        let refused = atomic_write(&target, b"version: 1\n", &cache, 1);
+        let refused = write(Policy, &target, b"one\n", &cache, 1);
 
         assert!(matches!(
             refused,
-            Err(AtomicWriteError::StateAfterDisk(
+            Err(AtomicWriteError::StateBeforeDisk(
                 StateError::WouldLowerVersion { requested: 1 }
             ))
         ));
-        assert_eq!(
-            cache.host_meta_get().unwrap().last_applied_policy_version,
-            2
-        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"two\n");
+        assert_eq!(applied(&cache, Policy), 2);
+    }
+
+    #[test]
+    fn a_write_with_a_pending_record_outstanding_is_refused_and_leaves_the_file() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let target = dir.path().join("policy.yaml");
+        write(Policy, &target, b"two\n", &cache, 2).unwrap();
+        record_pending(&cache, Policy, b"five\n", 5);
+
+        let refused = write(Policy, &target, b"six\n", &cache, 6);
+
+        assert!(matches!(refused, Err(AtomicWriteError::StateBeforeDisk(_))));
+        assert_eq!(std::fs::read(&target).unwrap(), b"two\n");
+        assert_eq!(cache.pending(Policy).unwrap().unwrap().version, 5);
+    }
+
+    #[test]
+    fn settling_finishes_an_apply_whose_rename_happened_and_twice_changes_nothing() {
+        for kind in [Policy, RulePacks] {
+            let dir = tempdir().unwrap();
+            let cache = fresh_cache(&dir);
+            let target = dir.path().join("artifact.yaml");
+            record_pending(&cache, kind, b"five\n", 5);
+            std::fs::write(&target, b"five\n").unwrap();
+
+            let settled = settle_pending(kind, &target, &cache).unwrap();
+            assert_eq!(settled.map(|pending| pending.version), Some(5));
+            assert_eq!(settle_pending(kind, &target, &cache).unwrap(), None);
+
+            assert_eq!(applied(&cache, kind), 5);
+            assert_eq!(cache.pending(kind).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn settling_drops_an_apply_whose_rename_never_happened() {
+        for kind in [Policy, RulePacks] {
+            let dir = tempdir().unwrap();
+            let cache = fresh_cache(&dir);
+            let target = dir.path().join("artifact.yaml");
+            write(kind, &target, b"two\n", &cache, 2).unwrap();
+            record_pending(&cache, kind, b"five\n", 5);
+
+            assert_eq!(settle_pending(kind, &target, &cache).unwrap(), None);
+
+            assert_eq!(applied(&cache, kind), 2);
+            assert_eq!(cache.pending(kind).unwrap(), None);
+            assert_eq!(std::fs::read(&target).unwrap(), b"two\n");
+        }
+    }
+
+    #[test]
+    fn settling_drops_an_apply_when_the_file_does_not_exist() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        record_pending(&cache, Policy, b"one\n", 1);
+
+        let settled = settle_pending(Policy, &dir.path().join("missing.yaml"), &cache);
+
+        assert_eq!(settled.unwrap(), None);
+        assert_eq!(applied(&cache, Policy), 0);
+        assert_eq!(cache.pending(Policy).unwrap(), None);
+    }
+
+    #[test]
+    fn settling_never_lowers_a_version_an_older_agent_went_past() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let target = dir.path().join("policy.yaml");
+        record_pending(&cache, Policy, b"same\n", 5);
+        std::fs::write(&target, b"same\n").unwrap();
+        cache
+            .conn
+            .execute("UPDATE host_meta SET last_applied_policy_version = 9", [])
+            .unwrap();
+
+        assert_eq!(settle_pending(Policy, &target, &cache).unwrap(), None);
+
+        assert_eq!(applied(&cache, Policy), 9);
+        assert_eq!(cache.pending(Policy).unwrap(), None);
+    }
+
+    #[test]
+    fn settling_keeps_the_pending_record_when_the_file_cannot_be_read() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        record_pending(&cache, Policy, b"five\n", 5);
+
+        // A directory is one error that is not "not found" on every platform.
+        let settled = settle_pending(Policy, dir.path(), &cache);
+
+        assert!(matches!(settled, Err(AtomicWriteError::Io(_))));
+        assert!(cache.pending(Policy).unwrap().is_some());
     }
 
     #[test]
@@ -208,7 +342,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cache = fresh_cache(&dir);
         let target = dir.path().join("policy.yaml");
-        atomic_write(&target, b"x", &cache, 1).unwrap();
+        write(Policy, &target, b"x", &cache, 1).unwrap();
 
         let leftover: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -226,7 +360,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cache = fresh_cache(&dir);
         let target = dir.path().join("nested/sub/policy.yaml");
-        atomic_write(&target, b"version: 1\n", &cache, 1).unwrap();
+        write(Policy, &target, b"version: 1\n", &cache, 1).unwrap();
         assert!(target.exists());
     }
 }

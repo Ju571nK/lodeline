@@ -217,7 +217,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                 .cache
                 .lock()
                 .host_meta_get()
-                .map(|m| m.last_applied_policy_version)
+                .map(|m| m.policy.version())
                 .unwrap_or(0);
             let valid_until_snapshot = *ctx.active_valid_until.read();
             let valid_until_str = valid_until_snapshot.and_then(|t| {

@@ -1,17 +1,18 @@
 //! Server-of-record for the `apply_policy` IPC handler.
 //!
 //! Spec §4.4. The handler is pure orchestration:
-//!   1. Run the A5 verifier, then merge the policy the way boot does.
-//!   2. On Ok: atomic_write(policy.yaml, version) → notify watchers → ack.
-//!   3. On Err with reason: emit PolicySignatureInvalid → reject ack.
-//!   4. On Err::Internal: log + 5xx-equivalent (re-tries OK).
+//!   1. Settle an earlier apply that failed partway, the way boot does.
+//!   2. Run the A5 verifier, then merge the policy the way boot does.
+//!   3. On Ok: atomic_write(policy.yaml, version, valid_until) → notify watchers → ack.
+//!   4. On Err with reason: emit PolicySignatureInvalid → reject ack.
+//!   5. On Err::Internal: log + 5xx-equivalent (re-tries OK).
 
 use lodeline_core::event::{
     Event, Evidence, PolicySignatureInvalidReason, Severity, SourceKind, Subject, AGENT_VERSION,
     SCHEMA_VERSION,
 };
 use lodeline_core::policy::{
-    atomic_write, atomic_write_rule_packs, merge_on_this_host, pubkeys::Keystore,
+    atomic_write, deployment::ArtifactKind, merge_on_this_host, pubkeys::Keystore, settle_pending,
     signed_envelope::SignedPolicyResponse, verify_envelope, AtomicWriteError, VerifyError,
 };
 use lodeline_core::state::HashCache;
@@ -29,7 +30,8 @@ use crate::state_task::CommittableEvent;
 pub enum ApplyOutcome {
     /// Verifier accepted; disk + state.db advanced.
     Accepted { applied_policy_version: i64 },
-    /// Verifier rejected; event emitted; nothing changed on disk or in state.db.
+    /// Verifier rejected; event emitted; this document changed nothing on disk or
+    /// in state.db.
     Rejected {
         reason: PolicySignatureInvalidReason,
     },
@@ -48,8 +50,9 @@ pub struct ApplyContext {
     /// Broadcasts the new `last_applied_policy_version` whenever a
     /// successful apply commits. Receivers re-derive what they need.
     pub policy_version_tx: watch::Sender<i64>,
-    /// Shared cell — written by `apply` on every successful commit, read
-    /// by `policy_expiry_task` and the IPC `PolicyStatus` handler.
+    /// Shared cell — seeded at boot from state.db, written by `apply` on every
+    /// successful commit, read by `policy_expiry_task` and the IPC `PolicyStatus`
+    /// handler.
     pub active_valid_until: Arc<RwLock<Option<OffsetDateTime>>>,
     /// Destination for a verified rule-pack bundle. Sits beside `policy.yaml`
     /// but is advanced by the SEPARATE rule-packs watermark.
@@ -68,11 +71,14 @@ pub struct ApplyContext {
 /// Apply a freshly-received `SignedPolicyResponse`.
 pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> ApplyOutcome {
     let _applying = ctx.apply_lock.lock().await;
+    if let Err(e) = settle_earlier_apply(ctx, ArtifactKind::Policy).await {
+        return settle_failed(e);
+    }
     let now = OffsetDateTime::now_utc();
     let last_applied = {
         let cache = ctx.cache.lock();
         match cache.host_meta_get() {
-            Ok(m) => m.last_applied_policy_version,
+            Ok(m) => m.policy.version(),
             Err(e) => {
                 return ApplyOutcome::Internal {
                     detail: format!("host_meta_get: {e}"),
@@ -114,50 +120,42 @@ pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> Apply
     let write_result = {
         let cache = ctx.cache.lock();
         atomic_write(
+            ArtifactKind::Policy,
             &ctx.policy_yaml_path,
             &verified.policy_bytes,
             &cache,
             verified.policy_version,
+            new_valid_until,
         )
     };
     match write_result {
         Ok(()) => {
-            // Update the shared cell so the expiry monitor + IPC PolicyStatus
-            // can see the new envelope's valid_until.
-            *ctx.active_valid_until.write() = Some(new_valid_until);
-            // Notify subscribers (heartbeat, expiry monitor) that the
-            // active policy version advanced. Send is best-effort; if no
-            // receiver is alive we still consider apply successful.
-            let _ = ctx.policy_version_tx.send(verified.policy_version);
-            emit_reloaded(ctx, verified.policy_version).await;
+            publish_policy(ctx, verified.policy_version, new_valid_until).await;
             ApplyOutcome::Accepted {
                 applied_policy_version: verified.policy_version,
             }
         }
-        Err(AtomicWriteError::Io(e)) => ApplyOutcome::Internal {
-            detail: format!("atomic disk write: {e}"),
+        // The sender retries, and the next apply or boot settles a file that moved.
+        Err(e) => ApplyOutcome::Internal {
+            detail: e.to_string(),
         },
-        Err(AtomicWriteError::StateAfterDisk(e)) => {
-            // Disk is ahead of state.db. Surface as Internal so the sender
-            // retries; reconciliation on next boot will fix the gap.
-            ApplyOutcome::Internal {
-                detail: format!("state-after-disk: {e}"),
-            }
-        }
     }
 }
 
 /// Apply a freshly-received signed rule-pack bundle. Mirrors [`apply`] but uses
-/// the SEPARATE rule-packs watermark (`last_applied_rule_packs_version`) and
-/// `atomic_write_rule_packs`: it writes `rule-packs.yaml` and advances the
-/// rule-packs version. It NEVER touches policy.yaml or the policy version.
+/// the SEPARATE rule-packs watermark (`last_applied_rule_packs_version`): it writes
+/// `rule-packs.yaml` and advances the rule-packs version. It NEVER touches
+/// policy.yaml or the policy version.
 pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyResponse) -> ApplyOutcome {
     let _applying = ctx.apply_lock.lock().await;
+    if let Err(e) = settle_earlier_apply(ctx, ArtifactKind::RulePacks).await {
+        return settle_failed(e);
+    }
     let now = OffsetDateTime::now_utc();
     let last_applied = {
         let cache = ctx.cache.lock();
         match cache.host_meta_get() {
-            Ok(m) => m.last_applied_rule_packs_version,
+            Ok(m) => m.rule_packs.version(),
             Err(e) => {
                 return ApplyOutcome::Internal {
                     detail: format!("host_meta_get: {e}"),
@@ -187,30 +185,72 @@ pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyRespons
     // reload (Task 5) reads only its `.rule_packs` (merge ignores the rest).
     let write_result = {
         let cache = ctx.cache.lock();
-        atomic_write_rule_packs(
+        atomic_write(
+            ArtifactKind::RulePacks,
             &ctx.rule_packs_yaml_path,
             &verified.policy_bytes,
             &cache,
             verified.policy_version,
+            response.signed_envelope.valid_until,
         )
     };
     match write_result {
         Ok(()) => {
-            // Notify the reload task (Task 5) that the rule-packs version
-            // advanced. Best-effort; no live receiver is not an error.
-            let _ = ctx.rule_packs_version_tx.send(verified.policy_version);
-            emit_rule_packs_applied(ctx, verified.policy_version).await;
+            publish_rule_packs(ctx, verified.policy_version).await;
             ApplyOutcome::Accepted {
                 applied_policy_version: verified.policy_version,
             }
         }
-        Err(AtomicWriteError::Io(e)) => ApplyOutcome::Internal {
-            detail: format!("rule-packs disk write: {e}"),
-        },
-        Err(AtomicWriteError::StateAfterDisk(e)) => ApplyOutcome::Internal {
-            detail: format!("state-after-disk: {e}"),
+        Err(e) => ApplyOutcome::Internal {
+            detail: e.to_string(),
         },
     }
+}
+
+/// Resolve an earlier apply of `kind` that failed partway, so this one is checked
+/// against what is really on disk. The earlier failure published nothing, so a
+/// finished apply publishes here, and the running agent loads its file.
+async fn settle_earlier_apply(
+    ctx: &ApplyContext,
+    kind: ArtifactKind,
+) -> Result<(), AtomicWriteError> {
+    let target = match kind {
+        ArtifactKind::Policy => &ctx.policy_yaml_path,
+        ArtifactKind::RulePacks => &ctx.rule_packs_yaml_path,
+    };
+    let finished = settle_pending(kind, target, &ctx.cache.lock())?;
+    if let Some(pending) = finished {
+        match kind {
+            ArtifactKind::Policy => publish_policy(ctx, pending.version, pending.valid_until).await,
+            ArtifactKind::RulePacks => publish_rule_packs(ctx, pending.version).await,
+        }
+    }
+    Ok(())
+}
+
+fn settle_failed(e: AtomicWriteError) -> ApplyOutcome {
+    tracing::error!(error = %e, "could not settle an earlier apply, refusing this one");
+    ApplyOutcome::Internal {
+        detail: format!("settling an earlier apply: {e}"),
+    }
+}
+
+async fn publish_policy(ctx: &ApplyContext, version: i64, valid_until: OffsetDateTime) {
+    // Update the shared cell so the expiry monitor + IPC PolicyStatus
+    // can see the new envelope's valid_until.
+    *ctx.active_valid_until.write() = Some(valid_until);
+    // Notify subscribers (heartbeat, expiry monitor) that the
+    // active policy version advanced. Send is best-effort; if no
+    // receiver is alive we still consider apply successful.
+    let _ = ctx.policy_version_tx.send(version);
+    emit_reloaded(ctx, version).await;
+}
+
+async fn publish_rule_packs(ctx: &ApplyContext, version: i64) {
+    // Notify the reload task (Task 5) that the rule-packs version
+    // advanced. Best-effort; no live receiver is not an error.
+    let _ = ctx.rule_packs_version_tx.send(version);
+    emit_rule_packs_applied(ctx, version).await;
 }
 
 async fn emit_invalid(
@@ -304,6 +344,7 @@ mod tests {
     use lodeline_core::policy::canonical::to_canonical_bytes;
     use lodeline_core::policy::pubkeys::KeystoreEntry;
     use lodeline_core::policy::signed_envelope::SignedEnvelope;
+    use lodeline_core::PendingEnvelope;
     use rand_core::RngCore;
     use tempfile::tempdir;
 
@@ -317,10 +358,20 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
+    fn record_applied(cache: &HashCache, kind: ArtifactKind, version: i64, now: OffsetDateTime) {
+        let pending = PendingEnvelope {
+            version,
+            hash_hex: String::new(),
+            valid_until: now,
+        };
+        cache.record_pending(kind, &pending).unwrap();
+        cache.promote_pending(kind).unwrap();
+    }
+
     fn build_harness(now: OffsetDateTime, last_applied: i64) -> Harness {
         let dir = tempdir().unwrap();
         let cache = HashCache::open(&dir.path().join("state.db")).unwrap();
-        cache.host_meta_set_policy_version(last_applied).unwrap();
+        record_applied(&cache, ArtifactKind::Policy, last_applied, now);
         let cache = Arc::new(Mutex::new(cache));
 
         let mut secret = [0u8; 32];
@@ -371,11 +422,12 @@ mod tests {
         last_applied_rule_packs: i64,
     ) -> Harness {
         let h = build_harness(now, last_applied_policy);
-        h.ctx
-            .cache
-            .lock()
-            .set_last_applied_rule_packs_version(last_applied_rule_packs)
-            .unwrap();
+        record_applied(
+            &h.ctx.cache.lock(),
+            ArtifactKind::RulePacks,
+            last_applied_rule_packs,
+            now,
+        );
         h
     }
 
@@ -436,13 +488,7 @@ mod tests {
         assert_eq!(written, b"version: 1\nrules: []\n");
 
         // state.db advanced.
-        let v = h
-            .ctx
-            .cache
-            .lock()
-            .host_meta_get()
-            .unwrap()
-            .last_applied_policy_version;
+        let v = h.ctx.cache.lock().host_meta_get().unwrap().policy.version();
         assert_eq!(v, 1);
 
         // active_valid_until cell mutated to the envelope's valid_until.
@@ -478,13 +524,7 @@ mod tests {
         );
 
         assert!(!h.ctx.policy_yaml_path.exists());
-        let v = h
-            .ctx
-            .cache
-            .lock()
-            .host_meta_get()
-            .unwrap()
-            .last_applied_policy_version;
+        let v = h.ctx.cache.lock().host_meta_get().unwrap().policy.version();
         assert_eq!(v, 5);
 
         // PolicySignatureInvalid event emitted.
@@ -495,6 +535,82 @@ mod tests {
             }
             other => panic!("expected PolicySignatureInvalid, got {other:?}"),
         }
+    }
+
+    fn record_pending_for_file(
+        h: &Harness,
+        kind: ArtifactKind,
+        valid_until: OffsetDateTime,
+        target: &std::path::Path,
+    ) {
+        std::fs::write(target, b"five\n").unwrap();
+        let pending = PendingEnvelope {
+            version: 5,
+            hash_hex: blake3::hash(b"five\n").to_hex().to_string(),
+            valid_until,
+        };
+        h.ctx.cache.lock().record_pending(kind, &pending).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_publishes_an_earlier_apply_it_finishes() {
+        let now = OffsetDateTime::now_utc();
+        let mut h = build_harness(now, 2);
+        let valid_until = now + time::Duration::hours(2);
+        record_pending_for_file(
+            &h,
+            ArtifactKind::Policy,
+            valid_until,
+            &h.ctx.policy_yaml_path,
+        );
+        let resp = sign(&h.sk, well_formed_envelope(3, now), now);
+
+        let outcome = apply(&h.ctx, &resp).await;
+
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Rejected {
+                reason: PolicySignatureInvalidReason::VersionRegression
+            }
+        );
+        assert_eq!(std::fs::read(&h.ctx.policy_yaml_path).unwrap(), b"five\n");
+        assert!(h.rx_version.has_changed().unwrap());
+        assert_eq!(*h.rx_version.borrow(), 5);
+        assert_eq!(*h.active_valid_until.read(), Some(valid_until));
+        let finished = h.rx_event.recv().await.unwrap().event.evidence;
+        assert!(matches!(
+            finished,
+            Evidence::PolicyReloaded { policy_version: 5 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_rule_packs_publishes_an_earlier_apply_it_finishes() {
+        let now = OffsetDateTime::now_utc();
+        let mut h = build_harness_with_rule_packs(now, 0, 2);
+        record_pending_for_file(
+            &h,
+            ArtifactKind::RulePacks,
+            now,
+            &h.ctx.rule_packs_yaml_path,
+        );
+        let resp = sign(&h.sk, rule_packs_envelope(3, now), now);
+
+        let outcome = apply_rule_packs(&h.ctx, &resp).await;
+
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Rejected {
+                reason: PolicySignatureInvalidReason::VersionRegression
+            }
+        );
+        assert!(h.rx_rule_packs_version.has_changed().unwrap());
+        assert_eq!(*h.rx_rule_packs_version.borrow(), 5);
+        let finished = h.rx_event.recv().await.unwrap().event.evidence;
+        assert!(matches!(
+            finished,
+            Evidence::RulePackBundleApplied { version: 5 }
+        ));
     }
 
     #[tokio::test]
@@ -553,8 +669,8 @@ mod tests {
         // The SEPARATE rule-packs watermark advanced; the policy watermark
         // (and active_valid_until) are untouched.
         let meta = h.ctx.cache.lock().host_meta_get().unwrap();
-        assert_eq!(meta.last_applied_rule_packs_version, 1);
-        assert_eq!(meta.last_applied_policy_version, 7);
+        assert_eq!(meta.rule_packs.version(), 1);
+        assert_eq!(meta.policy.version(), 7);
         assert_eq!(*h.active_valid_until.read(), None);
 
         // RulePackBundleApplied event emitted (NOT PolicyReloaded).
@@ -590,8 +706,8 @@ mod tests {
         assert!(!h.ctx.rule_packs_yaml_path.exists());
         assert!(!h.ctx.policy_yaml_path.exists());
         let meta = h.ctx.cache.lock().host_meta_get().unwrap();
-        assert_eq!(meta.last_applied_rule_packs_version, 0);
-        assert_eq!(meta.last_applied_policy_version, 0);
+        assert_eq!(meta.rule_packs.version(), 0);
+        assert_eq!(meta.policy.version(), 0);
 
         // The invalid event is emitted (reused PolicySignatureInvalid).
         let ev = h.rx_event.recv().await.unwrap();
@@ -666,8 +782,8 @@ mod tests {
         assert!(!h.ctx.rule_packs_yaml_path.exists());
         assert!(!h.ctx.policy_yaml_path.exists());
         let meta = h.ctx.cache.lock().host_meta_get().unwrap();
-        assert_eq!(meta.last_applied_rule_packs_version, 0);
-        assert_eq!(meta.last_applied_policy_version, 0);
+        assert_eq!(meta.rule_packs.version(), 0);
+        assert_eq!(meta.policy.version(), 0);
 
         // The invalid event is emitted (reused PolicySignatureInvalid /
         // ParseFailed). Guards against an accidental removal of emit_invalid.
@@ -708,8 +824,8 @@ mod tests {
         assert!(!h.ctx.rule_packs_yaml_path.exists());
         assert!(!h.ctx.policy_yaml_path.exists());
         let meta = h.ctx.cache.lock().host_meta_get().unwrap();
-        assert_eq!(meta.last_applied_rule_packs_version, 0);
-        assert_eq!(meta.last_applied_policy_version, 0);
+        assert_eq!(meta.rule_packs.version(), 0);
+        assert_eq!(meta.policy.version(), 0);
 
         // The invalid event is emitted (reused PolicySignatureInvalid /
         // ParseFailed). Guards against an accidental removal of emit_invalid.
@@ -767,7 +883,7 @@ mod tests {
                 b"version: 1\n"
             );
             let meta = h.ctx.cache.lock().host_meta_get().unwrap();
-            assert_eq!(meta.last_applied_policy_version, 3);
+            assert_eq!(meta.policy.version(), 3);
             assert_eq!(*h.active_valid_until.read(), None);
             assert!(!h.rx_version.has_changed().unwrap());
             assert_parse_failed_event(&mut h).await;
@@ -790,7 +906,7 @@ mod tests {
         );
         assert!(!h.ctx.rule_packs_yaml_path.exists());
         let meta = h.ctx.cache.lock().host_meta_get().unwrap();
-        assert_eq!(meta.last_applied_rule_packs_version, 0);
+        assert_eq!(meta.rule_packs.version(), 0);
         assert_parse_failed_event(&mut h).await;
     }
 

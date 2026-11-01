@@ -91,6 +91,9 @@ pub enum Presence {
 pub struct SignedPolicy {
     pub version: i64,
     pub expired: bool,
+    /// RFC 3339. `None`: an older agent applied this version and did not record its
+    /// expiry, so `expired` is unknown until the next apply.
+    pub valid_until: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,6 +587,7 @@ async fn ask_daemon(endpoint: &Path, self_uid: u32) -> io::Result<AgentRun> {
         signed_policy: (policy.last_applied_policy_version > 0).then_some(SignedPolicy {
             version: policy.last_applied_policy_version,
             expired: policy.policy_expired_active,
+            valid_until: policy.active_envelope_valid_until,
         }),
     })
 }
@@ -1086,6 +1090,7 @@ mod tests {
                 signed_policy: Some(SignedPolicy {
                     version: 3,
                     expired: false,
+                    valid_until: Some("2026-11-02T00:00:00Z".to_string()),
                 }),
             },
             FleetLink::Configured {
@@ -1542,7 +1547,8 @@ mod tests {
                 r#"{"cmd":"policy_status"}"# => {
                     response.policy_status = Some(PolicyStatusPayload {
                         last_applied_policy_version: policy_version,
-                        active_envelope_valid_until: None,
+                        active_envelope_valid_until: (policy_version > 0)
+                            .then(|| "2026-11-02T00:00:00Z".to_string()),
                         policy_expired_active: expired,
                     })
                 }
@@ -1581,7 +1587,8 @@ mod tests {
                     events_emitted_total: 7,
                     signed_policy: Some(SignedPolicy {
                         version: 3,
-                        expired: true
+                        expired: true,
+                        valid_until: Some("2026-11-02T00:00:00Z".to_string()),
                     }),
                 }
             );

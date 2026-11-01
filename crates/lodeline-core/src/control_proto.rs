@@ -132,9 +132,11 @@ pub enum ApplyPolicyResult {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PolicyStatusPayload {
     pub last_applied_policy_version: i64,
-    /// RFC 3339; `None` if no envelope has ever been applied.
+    /// RFC 3339. `None` with `last_applied_policy_version` at 0: no envelope was
+    /// applied. `None` with a version: an older agent applied it and did not record
+    /// its expiry, so the expiry is unknown until the next apply.
     pub active_envelope_valid_until: Option<String>,
-    /// `true` iff `now >= active_envelope_valid_until`.
+    /// `true` iff `now >= active_envelope_valid_until`. `false` while that is `None`.
     pub policy_expired_active: bool,
 }
 

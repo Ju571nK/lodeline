@@ -27,4 +27,4 @@ pub mod state;
 pub mod stats;
 
 pub use event::PolicySignatureInvalidReason;
-pub use host_meta::HostMeta;
+pub use host_meta::{AppliedEnvelope, HostMeta, PendingEnvelope};
