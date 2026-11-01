@@ -126,10 +126,12 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     let active_valid_until = Arc::new(parking_lot::RwLock::new(applied_policy.valid_until()));
     let (policy_version_tx, _policy_version_rx_init) = watch::channel(applied_policy.version());
 
-    // 1. Load + merge policy.
-    let user_doc = match cfg.policy_path.as_ref() {
-        Some(p) if p.exists() => Some(lodeline_core::policy::parse(&std::fs::read_to_string(p)?)?),
-        _ => None,
+    // 1. Load + merge policy, from the file a signed apply writes.
+    let user_doc = if policy_path_for_apply.exists() {
+        let yaml = std::fs::read_to_string(&policy_path_for_apply)?;
+        Some(lodeline_core::policy::parse(&yaml)?)
+    } else {
+        None
     };
     // #134 review — ensure the config dir exists so the dedicated rule-packs
     // watcher can arm itself on first boot (it watches the parent dir; a missing
@@ -1248,7 +1250,7 @@ mod keystore_path_tests {
 /// the sibling `rule-packs.yaml` it derives (see `rule_packs_yaml_path`) — from
 /// its own config dir, matching `docs/install-personal.md` (#159). Mirrors
 /// `resolve_keystore_path_unix`.
-fn default_policy_yaml_path() -> PathBuf {
+pub fn default_policy_yaml_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         PathBuf::from(r"C:\ProgramData\Lodeline\policy.yaml")
@@ -1263,6 +1265,12 @@ fn default_policy_yaml_path() -> PathBuf {
             std::env::var("HOME").ok().filter(|s| !s.is_empty()),
         )
     }
+}
+
+/// The policy file a one-shot command reads: `--policy`, else the default file if
+/// there is one.
+pub fn policy_path_for_command(policy_override: Option<PathBuf>) -> Option<PathBuf> {
+    policy_override.or_else(|| Some(default_policy_yaml_path()).filter(|p| p.exists()))
 }
 
 /// Pure resolver for the Unix `policy.yaml` default. Root → `/etc/lodeline`;

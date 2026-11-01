@@ -53,7 +53,7 @@ pub fn run(
         return show_risk(tool, pretty);
     }
 
-    let user_doc = match policy_override.as_ref() {
+    let user_doc = match crate::runtime::policy_path_for_command(policy_override) {
         Some(p) => Some(lodeline_core::policy::parse(&std::fs::read_to_string(p)?)?),
         None => None,
     };

@@ -77,6 +77,11 @@ pub fn settle_pending(
         Err(e) => return Err(e.into()),
     };
     if on_disk.as_deref() == Some(pending.hash_hex.as_str()) {
+        // An apply can stop before its own directory sync, and the record must not
+        // outlive a rename that a power loss could undo.
+        if let Some(dir) = target.parent() {
+            sync_dir(dir)?;
+        }
         match cache.promote_pending(kind) {
             Ok(()) => return Ok(Some(pending)),
             Err(StateError::WouldLowerVersion { .. }) => {}
@@ -123,14 +128,27 @@ fn write_file_durably(target: &Path, bytes: &[u8]) -> Result<(), AtomicWriteErro
     // 2. Rename atomically.
     std::fs::rename(&tmp, target)?;
 
-    // 3. fsync parent directory (POSIX only — no-op on Windows where
-    //    rename's durability semantics differ).
-    #[cfg(unix)]
-    {
-        let dir = std::fs::OpenOptions::new().read(true).open(&parent)?;
-        dir.sync_all()?;
-    }
+    // 3. fsync parent directory.
+    sync_dir(&parent)?;
 
+    Ok(())
+}
+
+/// fsync a directory, so a rename inside it survives a power loss. A file with no
+/// directory in its path has an empty parent, which is the current directory.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// No-op on Windows, where rename's durability semantics differ.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -335,6 +353,39 @@ mod tests {
 
         assert!(matches!(settled, Err(AtomicWriteError::Io(_))));
         assert!(cache.pending(Policy).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settling_keeps_the_pending_record_until_the_directory_can_be_synced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let artifacts = dir.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        let target = artifacts.join("policy.yaml");
+        record_pending(&cache, Policy, b"five\n", 5);
+        std::fs::write(&target, b"five\n").unwrap();
+        let set_mode = |mode| {
+            let mode = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&artifacts, mode).unwrap();
+        };
+        set_mode(0o300);
+        if std::fs::File::open(&artifacts).is_ok() {
+            eprintln!("skipped: root ignores directory modes");
+            set_mode(0o700);
+            return;
+        }
+
+        let settled = settle_pending(Policy, &target, &cache);
+        set_mode(0o700);
+
+        assert!(matches!(settled, Err(AtomicWriteError::Io(_))));
+        assert_eq!(applied(&cache, Policy), 0);
+        assert!(cache.pending(Policy).unwrap().is_some());
+        let settled = settle_pending(Policy, &target, &cache).unwrap();
+        assert_eq!(settled.map(|pending| pending.version), Some(5));
+        assert_eq!(applied(&cache, Policy), 5);
     }
 
     #[test]

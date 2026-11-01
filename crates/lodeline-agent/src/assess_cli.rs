@@ -214,7 +214,8 @@ fn resolve_policy_paths(policy_override: Option<&Path>) -> (PathBuf, PathBuf) {
     (policy, rule_packs)
 }
 
-/// Platform-specific default for `policy.yaml`. Mirrors `runtime.rs`.
+/// Platform-specific system `policy.yaml`. Non-root callers read it too, so an
+/// integration running as a user gets the rules of the root agent on that host.
 fn default_policy_yaml_path() -> PathBuf {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -308,6 +309,13 @@ mod tests {
             rule_packs.to_str().unwrap().ends_with("rule-packs.yaml"),
             "rule-packs path should end in rule-packs.yaml: {rule_packs:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_policy_paths_reads_the_system_policy_as_any_user() {
+        let (policy, _) = resolve_policy_paths(None);
+        assert_eq!(policy, Path::new("/etc/lodeline/policy.yaml"));
     }
 
     #[test]

@@ -98,6 +98,7 @@ this matters on macOS because the system locations aren't user-writable:
 
 | Item | Default as root | Default as non-root user |
 |---|---|---|
+| policy | `/etc/lodeline/policy.yaml` | `$XDG_CONFIG_HOME/lodeline/policy.yaml` → else `~/.config/lodeline/policy.yaml` (auto) |
 | state.db | `/var/lib/lodeline/state.db` | pass `--state-db ~/.local/state/lodeline/state.db` |
 | events dir | `/var/log/lodeline` | pass `--events-dir ~/.local/state/lodeline/events` |
 | control socket | `/var/run/lodeline/control.sock` | `$XDG_RUNTIME_DIR/lodeline/control.sock` → else `/tmp/lodeline-<uid>/control.sock` (auto) |
