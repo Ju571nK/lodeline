@@ -36,7 +36,8 @@ rustc-ice-*.txt
 /.run/
 
 # Local agent/context files
-.claude/
+.claude/*
+!.claude/skills/
 .context/
 docs/superpowers
 docs/**/superpowers*
