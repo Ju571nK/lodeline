@@ -18,7 +18,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   whether the client certificate is valid, expires within 7 days, or has expired.
   In `lodeline status --json`, `fleet.link` carries these states and
   `fleet.client_cert` is new. `schema_version` is now 2 because the `unknown` link
-  state is gone.
+  state is gone. The status file is not authenticated: it is a local diagnostic, and
+  anyone able to write its directory can make it say anything. In the packaged layout
+  that is the `lodeline` user and root.
 
 - `lodeline-sender doctor` now runs real checks: config, certificate and key files
   and their permissions, certificate expiry, events directory, agent control

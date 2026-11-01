@@ -208,6 +208,10 @@ The file has mode `0640` on Unix. In the packaged Linux layout its directory is
 `lodeline` group. Another user sees `cannot read the status file`. On Windows the
 file takes the ACL of its directory.
 
+The status file is not authenticated. It is a local diagnostic, and anyone able to
+write its directory can make it say anything. In the packaged layout that is the
+`lodeline` user and root.
+
 `lodeline-sender doctor` checks the config, the certificate and key files, the
 certificate expiry, the events directory, the agent control endpoint, and the status
 file. It exits 1 on a failure, and it makes no network call. It reads the permission
