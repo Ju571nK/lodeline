@@ -60,6 +60,10 @@ fn sign_refuses_a_document_the_agent_cannot_load() {
         "version: 1\ntargets:\n  - id: bad-target\n    description: d\n    tier: standard\n    platform: any\n    paths: ['/tmp/[']\n",
         "bad-target",
     );
+    assert_sign_refuses(
+        "version: 1\nhook_silence:\n  enabled_agents: [claude_code]\n  tick_secs: 0\n",
+        "tick_secs",
+    );
 }
 
 #[test]

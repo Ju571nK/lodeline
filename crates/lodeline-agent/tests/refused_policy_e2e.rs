@@ -288,6 +288,13 @@ fn target_glob_that_does_not_compile_is_refused_and_the_host_is_unchanged() {
 }
 
 #[test]
+fn hook_silence_tick_of_zero_is_refused_and_the_host_is_unchanged() {
+    host_is_unchanged_after_refusing(
+        "version: 1\nhook_silence:\n  enabled_agents: [claude_code]\n  tick_secs: 0\n",
+    );
+}
+
+#[test]
 fn accepted_policy_takes_effect_and_survives_a_restart() {
     let host = Host::new(&doc_denying("first", "marker-a"));
     let rt = host.boot().expect("first boot");
