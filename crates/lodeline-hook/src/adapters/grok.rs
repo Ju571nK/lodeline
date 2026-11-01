@@ -1,4 +1,4 @@
-use super::{decision_deny, DenyOutput, HookAdapter};
+use super::{decision_deny, HookAdapter, HookOutput};
 use crate::redact::capture;
 use lodeline_core::event::AiTool;
 use lodeline_core::hook_proto::*;
@@ -63,7 +63,7 @@ impl HookAdapter for Grok {
         })
     }
 
-    fn deny_output(&self, rule_id: &str, reason: &str) -> DenyOutput {
+    fn deny_output(&self, rule_id: &str, reason: &str) -> HookOutput {
         decision_deny(rule_id, reason)
     }
 }

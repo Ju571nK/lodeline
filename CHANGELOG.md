@@ -82,6 +82,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   as a network failure, not treated as a permanent rejection. A
   body that arrives and does not parse is still a protocol violation.
 
+- `lodeline-hook --enforce --on-failure closed` now covers a panic and a watchdog exit.
+  Both left empty stdout and exit 0, which most agents read as allow, so an operator
+  who chose closed mode got allow on those paths. Each now gives the agent's deny
+  output, the same as when no verdict is available. The hook writes one response at
+  most, so a late failure path cannot add a second one. The default open mode does
+  not change: a panic or a watchdog exit stays silent with exit 0. A signal or an
+  abort still ends the process with nothing written.
+  With `--enforce --on-failure closed`, an unknown agent name now exits 2 with a reason
+  on stderr, where it exited 0 before. With `--on-failure open` it still exits 0.
+
 - A path template with non-ASCII text, such as `$HOME/한국어/설정.json`, now expands
   to that same text. Before, `expand` pushed each byte of the literal text as a
   separate character, so the path came out as mojibake and a target with a
