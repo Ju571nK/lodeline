@@ -52,6 +52,36 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- `lodeline-sender` now waits before it retries after it fails to save its offset.
+  Before, it sent the same batch again at once, in a tight loop, and wrote the
+  server's per-event rejections to the dead-letter directory each time. It now uses
+  the same backoff as a server error, 5 seconds doubling to 5 minutes. The offset
+  stays where it was, so the batch is sent again whole and no event is skipped.
+
+- `lodeline-sender` now caps the server text it stores in the dead-letter directory
+  at 512 bytes, cut on a character boundary and marked with `…`. Before, a status
+  body, an unparseable reply, a batch rejection, or a per-event rejection reason went
+  in whole, so a misbehaving server could fill the disk of a host. The directory
+  holds one file a day. When it starts a new file it keeps 30 at most, removes the
+  oldest, and logs how many. It never removes the file it just wrote, even when the
+  clock was set back. A batch reply gets at most 20 per-event rejection entries. The
+  rest are counted in one `server_protocol_violation` entry, so each batch adds at
+  most 21 entries however many events the server rejects. A file has no size limit
+  within its day beyond these bounds.
+
+- `lodeline-sender` now gives up on a request to `lodeline-server` that gets no answer.
+  The HTTP client had no timeout, so a server that accepted a connection and never
+  replied held the request open and the link state stayed `connected` with an aging
+  last success. A connection now has 10 seconds to open and a whole request 120
+  seconds. A full 1 MiB batch, the default size, fits that on a link of about 70
+  kbit/s. A timed-out request counts as a network failure and the link state shows
+  `failing`. So does a timeout or a dropped connection while the sender reads the
+  response body. Before, that counted as a protocol violation and wrote a dead letter
+  on each retry, and on a policy poll that got a 404 it read as an unknown host. The
+  same holds when the status is an error: a 409 whose body is cut off is now retried
+  as a network failure, not treated as a permanent rejection. A
+  body that arrives and does not parse is still a protocol violation.
+
 - `lodeline-hook --enforce --on-failure closed` now covers a panic and a watchdog exit.
   Both left empty stdout and exit 0, which most agents read as allow, so an operator
   who chose closed mode got allow on those paths. Each now gives the agent's deny

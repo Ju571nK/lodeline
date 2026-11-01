@@ -3,7 +3,7 @@
 use crate::agent_ipc::{self, Settlement};
 use crate::heartbeat::{Plane, SharedStats};
 use crate::state;
-use crate::transport::{classify_send_error, failure_cause, SendOutcome};
+use crate::transport::{cap_server_text, classify_body_error, classify_send_error, SendOutcome};
 use crate::wire::SignedPolicyResponse;
 use lodeline_core::sender_status::LinkFailure;
 use reqwest::Client;
@@ -62,10 +62,29 @@ fn protocol_violation(detail: String) -> PollOutcome {
     }
 }
 
+/// A request that failed before or while reading the response, as a poll outcome.
+fn transport_failure(outcome: SendOutcome<()>) -> PollOutcome {
+    match outcome {
+        SendOutcome::TlsFailure(s) => PollOutcome::TlsFailure(s),
+        SendOutcome::Network(s) => PollOutcome::Network(s),
+        SendOutcome::ProtocolViolation { status, detail } => {
+            PollOutcome::ProtocolViolation { status, detail }
+        }
+        other => protocol_violation(format!("{other:?}")),
+    }
+}
+
+/// The text of a response body, or the failure that cut the read short.
+async fn body_text(resp: reqwest::Response) -> Result<String, Box<PollOutcome>> {
+    resp.text()
+        .await
+        .map_err(|e| Box::new(transport_failure(classify_body_error(e, "body read"))))
+}
+
 fn bad_status(status: u16, body: &str) -> PollOutcome {
     PollOutcome::ProtocolViolation {
         status: Some(status),
-        detail: format!("status {status}: {body}"),
+        detail: format!("status {status}: {}", cap_server_text(body)),
     }
 }
 
@@ -86,11 +105,7 @@ pub async fn poll_policy(
     }
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(e) => match classify_send_error::<()>(e) {
-            SendOutcome::TlsFailure(s) => return PollOutcome::TlsFailure(s),
-            SendOutcome::Network(s) => return PollOutcome::Network(s),
-            other => return protocol_violation(format!("{other:?}")),
-        },
+        Err(e) => return transport_failure(classify_send_error(e)),
     };
     let status = resp.status().as_u16();
     if status == 304 {
@@ -98,7 +113,10 @@ pub async fn poll_policy(
     }
     if status == 404 {
         // The server also answers 404 when it holds no policy, for a host it knows.
-        let body = resp.text().await.unwrap_or_default();
+        let body = match body_text(resp).await {
+            Ok(b) => b,
+            Err(outcome) => return *outcome,
+        };
         let error = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("error")?.as_str().map(str::to_owned));
@@ -108,8 +126,10 @@ pub async fn poll_policy(
         };
     }
     if !(200..300).contains(&status) {
-        let body = resp.text().await.unwrap_or_default();
-        return bad_status(status, &body);
+        return match body_text(resp).await {
+            Ok(body) => bad_status(status, &body),
+            Err(outcome) => *outcome,
+        };
     }
     let etag = resp
         .headers()
@@ -119,7 +139,7 @@ pub async fn poll_policy(
         .unwrap_or_default();
     match resp.json::<SignedPolicyResponse>().await {
         Ok(response) => PollOutcome::NewPolicy { etag, response },
-        Err(e) => protocol_violation(format!("policy json: {}", failure_cause(e))),
+        Err(e) => transport_failure(classify_body_error(e, "policy json")),
     }
 }
 
@@ -148,11 +168,7 @@ pub async fn poll_rule_packs(
     }
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(e) => match classify_send_error::<()>(e) {
-            SendOutcome::TlsFailure(s) => return PollOutcome::TlsFailure(s),
-            SendOutcome::Network(s) => return PollOutcome::Network(s),
-            other => return protocol_violation(format!("{other:?}")),
-        },
+        Err(e) => return transport_failure(classify_send_error(e)),
     };
     let status = resp.status().as_u16();
     if status == 304 {
@@ -163,8 +179,10 @@ pub async fn poll_rule_packs(
         return PollOutcome::Unmodified;
     }
     if !(200..300).contains(&status) {
-        let body = resp.text().await.unwrap_or_default();
-        return bad_status(status, &body);
+        return match body_text(resp).await {
+            Ok(body) => bad_status(status, &body),
+            Err(outcome) => *outcome,
+        };
     }
     let etag = resp
         .headers()
@@ -174,7 +192,7 @@ pub async fn poll_rule_packs(
         .unwrap_or_default();
     match resp.json::<SignedPolicyResponse>().await {
         Ok(response) => PollOutcome::NewRulePacks { etag, response },
-        Err(e) => protocol_violation(format!("rule-packs json: {}", failure_cause(e))),
+        Err(e) => transport_failure(classify_body_error(e, "rule-packs json")),
     }
 }
 
