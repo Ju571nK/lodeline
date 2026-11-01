@@ -95,7 +95,26 @@ pub enum BatchOutcome {
     ServerBusy { status: u16, body: String },
     TlsFailure(String),
     Network(String),
-    ProtocolViolation(String),
+    ProtocolViolation { status: Option<u16>, detail: String },
+}
+
+impl BatchOutcome {
+    fn link_result(&self) -> Result<(), LinkFailure> {
+        match self {
+            BatchOutcome::Accepted(_) => Ok(()),
+            BatchOutcome::PermanentReject { status, .. }
+            | BatchOutcome::ServerBusy { status, .. }
+            | BatchOutcome::ProtocolViolation {
+                status: Some(status),
+                ..
+            } => Err(LinkFailure::Response {
+                last_response_code: *status,
+            }),
+            BatchOutcome::TlsFailure(_) => Err(LinkFailure::Tls),
+            BatchOutcome::Network(_) => Err(LinkFailure::Network),
+            BatchOutcome::ProtocolViolation { status: None, .. } => Err(LinkFailure::Protocol),
+        }
+    }
 }
 
 pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
@@ -116,14 +135,22 @@ pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
         Err(e) => match classify_send_error::<EventsAccepted>(e) {
             SendOutcome::TlsFailure(s) => return BatchOutcome::TlsFailure(s),
             SendOutcome::Network(s) => return BatchOutcome::Network(s),
-            other => return BatchOutcome::ProtocolViolation(format!("{other:?}")),
+            other => {
+                return BatchOutcome::ProtocolViolation {
+                    status: None,
+                    detail: format!("{other:?}"),
+                }
+            }
         },
     };
     let status = resp.status().as_u16();
     let body_bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            return BatchOutcome::ProtocolViolation(format!("body read: {e}"));
+            return BatchOutcome::ProtocolViolation {
+                status: None,
+                detail: format!("body read: {e}"),
+            };
         }
     };
     let body_text = String::from_utf8_lossy(&body_bytes).to_string();
@@ -140,7 +167,9 @@ pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
         SendOutcome::ServerBusy { status, body } => BatchOutcome::ServerBusy { status, body },
         SendOutcome::TlsFailure(s) => BatchOutcome::TlsFailure(s),
         SendOutcome::Network(s) => BatchOutcome::Network(s),
-        SendOutcome::ProtocolViolation(s) => BatchOutcome::ProtocolViolation(s),
+        SendOutcome::ProtocolViolation { status, detail } => {
+            BatchOutcome::ProtocolViolation { status, detail }
+        }
     }
 }
 
@@ -151,11 +180,12 @@ fn _path_marker(_p: PathBuf) {}
 use crate::batch_reader::read_next_batch;
 use crate::config::SenderConfig;
 use crate::dead_letter;
-use crate::heartbeat::SharedStats;
+use crate::heartbeat::{Plane, SharedStats};
 use crate::state;
 use lodeline_core::event::{
     Event, Evidence, Severity, SourceKind, Subject, AGENT_VERSION, SCHEMA_VERSION,
 };
+use lodeline_core::sender_status::LinkFailure;
 use tokio_util::sync::CancellationToken;
 
 /// Idle poll interval when no batch is available.
@@ -262,6 +292,11 @@ pub async fn run(ctx: DataTaskCtx) {
             events,
         })
         .await;
+        ctx.stats.write().record(
+            Plane::Events,
+            outcome.link_result(),
+            OffsetDateTime::now_utc(),
+        );
 
         match outcome {
             BatchOutcome::Accepted(accepted) => {
@@ -270,6 +305,11 @@ pub async fn run(ctx: DataTaskCtx) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!(error = ?e, "apply_ack failed");
+                        ctx.stats.write().record(
+                            Plane::Events,
+                            Err(LinkFailure::Protocol),
+                            OffsetDateTime::now_utc(),
+                        );
                         let evt = local_event(
                             &ctx.host_id,
                             Evidence::ServerProtocolViolation {
@@ -307,12 +347,6 @@ pub async fn run(ctx: DataTaskCtx) {
                     continue;
                 }
                 state = new_state;
-                {
-                    let mut s = ctx.stats.write();
-                    s.last_server_ack_at = Some(OffsetDateTime::now_utc());
-                    s.last_server_response_code = Some(200);
-                    s.lag_events = s.lag_events.saturating_sub(batch_size as u64);
-                }
             }
             BatchOutcome::PermanentReject { status, body } => {
                 consecutive_failures += 1;
@@ -329,21 +363,13 @@ pub async fn run(ctx: DataTaskCtx) {
                     },
                 );
                 let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
-                {
-                    let mut s = ctx.stats.write();
-                    s.last_server_response_code = Some(status);
-                }
                 let delay = backoff_perm.next_delay(consecutive_failures.saturating_sub(1));
                 if !idle_sleep(&ctx.shutdown, delay).await {
                     break;
                 }
             }
-            BatchOutcome::ServerBusy { status, .. } => {
+            BatchOutcome::ServerBusy { .. } => {
                 consecutive_failures += 1;
-                {
-                    let mut s = ctx.stats.write();
-                    s.last_server_response_code = Some(status);
-                }
                 let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
                 if !idle_sleep(&ctx.shutdown, delay).await {
                     break;
@@ -366,7 +392,7 @@ pub async fn run(ctx: DataTaskCtx) {
                     break;
                 }
             }
-            BatchOutcome::ProtocolViolation(detail) => {
+            BatchOutcome::ProtocolViolation { detail, .. } => {
                 consecutive_failures += 1;
                 let evt = local_event(&ctx.host_id, Evidence::ServerProtocolViolation { detail });
                 let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);

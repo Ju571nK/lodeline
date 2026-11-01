@@ -57,7 +57,7 @@ pub struct SenderConfig {
 }
 
 fn default_offset_path() -> PathBuf {
-    PathBuf::from("/var/lib/lodeline-sender/sender-offset.json")
+    lodeline_core::paths::default_sender_offset()
 }
 fn default_dead_letter_dir() -> PathBuf {
     PathBuf::from("/var/log/lodeline-sender/dead-letter")

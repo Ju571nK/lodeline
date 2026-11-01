@@ -4,6 +4,7 @@
 //! is the per-host monotonic event counter. Both advance atomically on
 //! server-ack via a single fsync.
 
+use lodeline_core::sender_status::SenderReport;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -104,6 +105,13 @@ pub fn load(path: &Path) -> Result<Option<SenderState>, StateError> {
 /// Atomically persist a small string (the latest policy ETag) to `path`.
 pub fn store_etag(path: &Path, etag: &str) -> Result<(), StateError> {
     write_atomic(path, etag.as_bytes(), DEFAULT_MODE)
+}
+
+/// Atomically persist the status report. Group-readable, so an operator in the
+/// sender's group can read it, and never world-writable whatever the umask.
+pub fn store_report(path: &Path, report: &SenderReport) -> Result<(), StateError> {
+    let bytes = serde_json::to_vec(report).expect("serialize SenderReport");
+    write_atomic(path, &bytes, 0o640)
 }
 
 /// Load the persisted policy ETag; returns `Ok(None)` if absent.

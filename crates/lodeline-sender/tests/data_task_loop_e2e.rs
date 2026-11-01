@@ -99,9 +99,10 @@ async fn happy_path_advances_offset_and_updates_stats() {
     assert_eq!(final_state.byte_offset, bytes_on_disk);
     assert_eq!(final_state.current_file, "events-1.jsonl");
 
-    let s = stats.read();
-    assert_eq!(s.last_server_response_code, Some(200));
-    assert!(s.last_server_ack_at.is_some());
+    assert!(matches!(
+        stats.read().contact(),
+        lodeline_core::sender_status::Contact::Reached { .. }
+    ));
 }
 
 #[tokio::test]

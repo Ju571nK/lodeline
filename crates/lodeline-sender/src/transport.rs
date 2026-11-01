@@ -5,6 +5,7 @@
 use reqwest::{Client, ClientBuilder, Identity};
 use std::path::Path;
 use thiserror::Error;
+use time::OffsetDateTime;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -71,6 +72,19 @@ pub fn build_client(
     builder.build().map_err(TransportError::Build)
 }
 
+/// When the first certificate in the PEM file at `path` expires.
+pub fn client_cert_expiry(path: &Path) -> anyhow::Result<OffsetDateTime> {
+    let pem = std::fs::read(path)?;
+    let der = rustls_pemfile::certs(&mut pem.as_slice())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no certificate in the file"))??;
+    let (_, cert) = x509_parser::parse_x509_certificate(&der)
+        .map_err(|_| anyhow::anyhow!("not a valid X.509 certificate"))?;
+    Ok(OffsetDateTime::from_unix_timestamp(
+        cert.validity().not_after.timestamp(),
+    )?)
+}
+
 /// High-level outcome of an HTTP send. The data_task uses this to decide
 /// retry vs. permanent-pause vs. event emission.
 #[derive(Debug)]
@@ -85,8 +99,9 @@ pub enum SendOutcome<R> {
     TlsFailure(String),
     /// Network failure (DNS, connect, timeout) — retry.
     Network(String),
-    /// Unparseable body or other unexpected protocol issue.
-    ProtocolViolation(String),
+    /// Unparseable body or other unexpected protocol issue. `status` is set when
+    /// the status itself was the problem.
+    ProtocolViolation { status: Option<u16>, detail: String },
 }
 
 /// Classify a `reqwest::Error` (or status) into a `SendOutcome`. Caller
@@ -95,14 +110,20 @@ pub fn classify_status<R>(status: u16, body: String, parsed: Option<R>) -> SendO
     if (200..300).contains(&status) {
         match parsed {
             Some(r) => SendOutcome::Ok2xx(r),
-            None => SendOutcome::ProtocolViolation(format!("2xx without parseable body: {body}")),
+            None => SendOutcome::ProtocolViolation {
+                status: None,
+                detail: format!("2xx without parseable body: {body}"),
+            },
         }
     } else if status == 409 || status == 426 {
         SendOutcome::PermanentReject { status, body }
     } else if (500..600).contains(&status) || status == 503 {
         SendOutcome::ServerBusy { status, body }
     } else {
-        SendOutcome::ProtocolViolation(format!("unexpected status {status}: {body}"))
+        SendOutcome::ProtocolViolation {
+            status: Some(status),
+            detail: format!("unexpected status {status}: {body}"),
+        }
     }
 }
 
@@ -269,6 +290,9 @@ mod tests {
     #[test]
     fn classify_2xx_without_body_is_protocol_violation() {
         let outcome: SendOutcome<()> = classify_status(200, "".into(), None);
-        assert!(matches!(outcome, SendOutcome::ProtocolViolation(_)));
+        assert!(matches!(
+            outcome,
+            SendOutcome::ProtocolViolation { status: None, .. }
+        ));
     }
 }
