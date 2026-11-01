@@ -169,3 +169,14 @@ async fn an_unexpected_status_keeps_its_code() {
         "{outcome:?}"
     );
 }
+
+#[tokio::test]
+async fn an_unparseable_policy_keeps_no_part_of_the_url() {
+    let base = policy_answering(200, "not json").await;
+    let outcome = poll_policy(&reqwest::Client::new(), &base, "h", None).await;
+    let PollOutcome::ProtocolViolation { detail, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(!detail.contains("127.0.0.1"), "{detail}");
+    assert!(detail.contains("expected"), "{detail}");
+}

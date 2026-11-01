@@ -69,7 +69,7 @@ impl BackoffPolicy {
     }
 }
 
-use crate::transport::{classify_send_error, classify_status, SendOutcome};
+use crate::transport::{classify_send_error, classify_status, failure_cause, SendOutcome};
 use crate::wire::{Envelope, EventsAccepted, EventsRequest};
 use lodeline_core::sink::jsonl::segment_order;
 use reqwest::Client;
@@ -149,7 +149,7 @@ pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
         Err(e) => {
             return BatchOutcome::ProtocolViolation {
                 status: None,
-                detail: format!("body read: {e}"),
+                detail: format!("body read: {}", failure_cause(e)),
             };
         }
     };

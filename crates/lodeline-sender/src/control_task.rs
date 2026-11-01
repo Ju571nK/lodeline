@@ -1,7 +1,7 @@
 //! Control plane: poll /v1/policy, hand 200 results to the agent IPC.
 
 use crate::heartbeat::{Plane, SharedStats};
-use crate::transport::{classify_send_error, SendOutcome};
+use crate::transport::{classify_send_error, failure_cause, SendOutcome};
 use crate::wire::SignedPolicyResponse;
 use lodeline_core::sender_status::LinkFailure;
 use reqwest::Client;
@@ -117,7 +117,7 @@ pub async fn poll_policy(
         .unwrap_or_default();
     match resp.json::<SignedPolicyResponse>().await {
         Ok(response) => PollOutcome::NewPolicy { etag, response },
-        Err(e) => protocol_violation(format!("policy json: {e}")),
+        Err(e) => protocol_violation(format!("policy json: {}", failure_cause(e))),
     }
 }
 
@@ -172,7 +172,7 @@ pub async fn poll_rule_packs(
         .unwrap_or_default();
     match resp.json::<SignedPolicyResponse>().await {
         Ok(response) => PollOutcome::NewRulePacks { etag, response },
-        Err(e) => protocol_violation(format!("rule-packs json: {e}")),
+        Err(e) => protocol_violation(format!("rule-packs json: {}", failure_cause(e))),
     }
 }
 

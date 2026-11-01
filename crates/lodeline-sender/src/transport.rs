@@ -130,29 +130,34 @@ pub fn classify_status<R>(status: u16, body: String, parsed: Option<R>) -> SendO
 /// Maps a `reqwest::Error` from the *send/connect* phase (no HTTP status
 /// available) to either a TLS or network failure.
 pub fn classify_send_error<R>(err: reqwest::Error) -> SendOutcome<R> {
-    let msg = err.to_string();
-    if is_tls_failure(&err) {
-        SendOutcome::TlsFailure(msg)
+    let is_tls = error_chain(&err).any(|e| e.is::<rustls::Error>());
+    let cause = failure_cause(err);
+    if is_tls {
+        SendOutcome::TlsFailure(cause)
     } else {
-        SendOutcome::Network(msg)
+        SendOutcome::Network(cause)
     }
 }
 
-/// `reqwest` prints only "error sending request", so the cause is in the source
-/// chain. `io::Error::source` skips the error it wraps, so `get_ref` must look there.
-fn is_tls_failure(err: &(dyn std::error::Error + 'static)) -> bool {
-    let mut next = Some(err);
-    while let Some(e) = next {
-        if e.is::<rustls::Error>() {
-            return true;
-        }
-        let wrapped = e
-            .downcast_ref::<std::io::Error>()
+/// The text that is safe to store: the deepest cause, because `reqwest` puts the
+/// request URL and its query in its own message and prints no cause there.
+pub fn failure_cause(err: reqwest::Error) -> String {
+    let err = err.without_url();
+    error_chain(&err)
+        .last()
+        .map_or(String::new(), |e| e.to_string())
+}
+
+/// `io::Error::source` skips the error it wraps, so `get_ref` must look there.
+fn error_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(err), |&e| {
+        e.downcast_ref::<std::io::Error>()
             .and_then(|io| io.get_ref())
-            .map(|inner| inner as &(dyn std::error::Error + 'static));
-        next = wrapped.or(e.source());
-    }
-    false
+            .map(|inner| inner as &(dyn std::error::Error + 'static))
+            .or(e.source())
+    })
 }
 
 /// Returns `Some(latest_mtime)` if any of the cert / key / CA files have
@@ -192,6 +197,26 @@ mod tests {
             .unwrap_err();
         let outcome = classify_send_error::<()>(err);
         assert!(matches!(outcome, SendOutcome::TlsFailure(_)), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_stores_its_cause_and_no_part_of_the_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = build_client(None, None, None)
+            .unwrap()
+            .get(format!("http://u:s3cret@{addr}/base?token=t0ken"))
+            .send()
+            .await
+            .unwrap_err();
+        let SendOutcome::Network(cause) = classify_send_error::<()>(err) else {
+            panic!("not a network failure");
+        };
+        assert_ne!(cause, "error sending request");
+        for leak in ["s3cret", "t0ken", "/base", "127.0.0.1"] {
+            assert!(!cause.contains(leak), "{leak} in {cause}");
+        }
     }
 
     #[test]
