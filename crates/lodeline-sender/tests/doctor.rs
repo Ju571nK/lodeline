@@ -4,12 +4,26 @@ use lodeline_core::sender_status::{Contact, LinkFailure, SenderReport, REPORT_SC
 use lodeline_diag::Level;
 use lodeline_sender::doctor::{self, Check};
 use lodeline_sender::state;
+use lodeline_sender::transport::client_cert_expiry;
 use std::fs;
 use std::path::PathBuf;
 use time::macros::datetime;
 use time::OffsetDateTime;
 
-const CERT: &str = include_str!("fixtures/client.crt");
+/// Self-signed, and its key is gone. It lives in this file because `.gitignore` drops
+/// `*.crt`, so a fixture file would exist only on the machine that made it.
+const CERT: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBdzCCAR6gAwIBAgIUOvoB9w/UTtqtZNvgsPgaUX7cE7EwCgYIKoZIzj0EAwIw
+IjEgMB4GA1UEAwwXbG9kZWxpbmUtZG9jdG9yLWZpeHR1cmUwHhcNMjYxMTAxMDgw
+NTI2WhcNMzYxMDI5MDgwNTI2WjAiMSAwHgYDVQQDDBdsb2RlbGluZS1kb2N0b3It
+Zml4dHVyZTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAlnXTs82+3WAIjg68/S
+ujPp9CNLDw1P6642FRVvnOt6+l7beav88qr+NVeOyXWweWBWc93Zup5H0Rmf1nKR
+FI6jMjAwMB0GA1UdDgQWBBQ/4hF13MC/sETcM/EsvFZnroimwzAPBgNVHRMBAf8E
+BTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIA5IKq6JmFxaMuw3bAbNdokTDO/khlzd
++GuRyNQmgBLfAiAxAZSqCVzq/klBFBZbKO9fd9krC1gtMAs7LrNdypiZ4g==
+-----END CERTIFICATE-----
+";
 const CERT_EXPIRES: OffsetDateTime = datetime!(2036-10-29 08:05:26 UTC);
 const NOW: OffsetDateTime = datetime!(2026-11-01 12:00 UTC);
 const KEY_MARKER: &str = "not-a-key-and-must-never-be-printed";
@@ -75,6 +89,15 @@ fn output(checks: &[Check]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn client_cert_expiry_reads_not_after() {
+    let host = Host::new();
+    assert_eq!(
+        client_cert_expiry(&host.path("client.crt")).unwrap(),
+        CERT_EXPIRES
+    );
 }
 
 #[tokio::test]
