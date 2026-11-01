@@ -192,7 +192,7 @@ process. The `sender link` line shows one of these states:
 | `connected` | The latest events and policy requests succeeded. |
 | `failing` | A request failed. The line names a network failure, a TLS failure, a server status code, or an unusable answer. |
 | `stale` | The last report is older than 90 seconds. The sender stopped or hung. |
-| `cannot read the status file` | The file is denied, corrupt, oversize, or not a regular file. |
+| `cannot read the status file` | The file is denied, corrupt, oversize, or not a regular file, or `offset_path` is relative. |
 
 The states show the last result, not a live test. An idle sender contacts the
 server only at each `policy_poll_interval` (default 5 minutes), so `connected` can

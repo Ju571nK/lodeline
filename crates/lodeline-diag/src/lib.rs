@@ -647,6 +647,9 @@ fn read_capped(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+const RELATIVE_OFFSET_PATH: &str =
+    "offset_path is relative, so it depends on the working directory of the sender";
+
 /// Reads only what status needs. `lodeline-sender`'s own config type would link its
 /// TLS stack into this crate.
 #[derive(Deserialize)]
@@ -669,8 +672,19 @@ fn parse_fleet(path: &Path, bytes: &[u8], now: OffsetDateTime) -> FleetLink {
             reason: "no usable server_base_url".to_string(),
         };
     };
-    let status_path = status_path_for(&offset_path.unwrap_or_else(default_sender_offset));
-    let (link, client_cert) = read_report(&status_path, now);
+    let (link, client_cert) = match offset_path {
+        // Only a configured path: the default is a POSIX path, which Windows calls relative.
+        Some(path) if path.is_relative() => (
+            LinkState::Unreadable {
+                reason: RELATIVE_OFFSET_PATH.to_string(),
+            },
+            ClientCert::NotReported,
+        ),
+        path => read_report(
+            &status_path_for(&path.unwrap_or_else(default_sender_offset)),
+            now,
+        ),
+    };
     FleetLink::Configured {
         server_url,
         config_path: path.to_path_buf(),
@@ -1215,6 +1229,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_relative_offset_path_cannot_be_read_from_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("sender.yaml");
+        fs::write(
+            &config,
+            "server_base_url: https://s.example\noffset_path: state/sender-offset.json\n",
+        )
+        .unwrap();
+        let FleetLink::Configured {
+            link, client_cert, ..
+        } = read_fleet(&[config], NOW)
+        else {
+            panic!("not configured");
+        };
+        assert_eq!(
+            link,
+            LinkState::Unreadable {
+                reason: RELATIVE_OFFSET_PATH.to_string()
+            }
+        );
+        assert_eq!(client_cert, ClientCert::NotReported);
     }
 
     #[test]
