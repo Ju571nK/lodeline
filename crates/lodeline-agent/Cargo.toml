@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 lodeline-core = { path = "../lodeline-core", features = ["control-client"] }
+lodeline-diag = { path = "../lodeline-diag", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -60,9 +61,9 @@ tokio = { workspace = true, features = ["test-util"] }
 [features]
 default = ["operator-cli"]
 # Operator introspection CLI: `lodeline show policy-status`, `lodeline show targets`,
-# `lodeline reload`. Default-on. Drop with `--no-default-features` for hardened
-# deploys that don't want the introspection surface compiled in.
-operator-cli = []
+# `lodeline reload`, `lodeline status`. Default-on. Drop with `--no-default-features`
+# for hardened deploys that don't want the introspection surface compiled in.
+operator-cli = ["dep:lodeline-diag"]
 
 # -- OS packages -------------------------------------------------------------
 # Build both with `packaging/build.sh` (needs `cargo install cargo-deb

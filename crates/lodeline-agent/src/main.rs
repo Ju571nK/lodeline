@@ -66,6 +66,17 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(code);
         }
         #[cfg(feature = "operator-cli")]
+        cli::Command::Status {
+            json,
+            sender_config,
+        } => {
+            lodeline_agent::status_cli::run(lodeline_agent::status_cli::StatusArgs {
+                json,
+                sender_config,
+                control_socket: cli.control_socket.clone(),
+            })?;
+        }
+        #[cfg(feature = "operator-cli")]
         cli::Command::Reload => {
             let code = reload();
             std::process::exit(code);

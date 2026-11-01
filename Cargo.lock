@@ -1967,6 +1967,7 @@ dependencies = [
  "insta",
  "libc",
  "lodeline-core",
+ "lodeline-diag",
  "mac_address",
  "notify",
  "os_info",

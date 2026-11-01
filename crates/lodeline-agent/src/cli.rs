@@ -74,6 +74,19 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show whether Lodeline is healthy on this host: installed components, the
+    /// agent, and the link to lodeline-server. Read-only: needs no daemon and no
+    /// fleet, makes no network call. Always exits 0 (informational).
+    #[cfg(feature = "operator-cli")]
+    Status {
+        /// Emit the status as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// The sender config to read, for a sender started with `--config`.
+        /// Default: the sender's default path, then the user config directory.
+        #[arg(long)]
+        sender_config: Option<PathBuf>,
+    },
     /// Ask the running daemon to re-read the on-disk policy.yaml without going
     /// through `apply_policy`. Useful after a hand-edit.
     #[cfg(feature = "operator-cli")]
@@ -173,6 +186,27 @@ mod cli_tests {
             Some(Path::new("/tmp/c.sock"))
         );
         assert_eq!(cli.keystore.as_deref(), Some(Path::new("/tmp/ks.pem")));
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn parses_status_flags() {
+        let cli = Cli::parse_from([
+            "lodeline",
+            "status",
+            "--json",
+            "--sender-config",
+            "/tmp/s.yaml",
+        ]);
+        let super::Command::Status {
+            json,
+            sender_config,
+        } = cli.command
+        else {
+            panic!("expected the status command");
+        };
+        assert!(json);
+        assert_eq!(sender_config.as_deref(), Some(Path::new("/tmp/s.yaml")));
     }
 
     #[test]
