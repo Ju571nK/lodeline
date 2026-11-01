@@ -198,7 +198,11 @@ mod seam {
             let closed = drive(agent, "closed", Stdin::Payload, Some("before_adapter"));
             assert_eq!(closed.code, 2, "{agent}: closed exit code");
             assert!(closed.stdout.is_empty(), "{agent}: {:?}", closed.stdout);
-            assert!(closed.stderr.is_empty(), "{agent}: {:?}", closed.stderr);
+            assert!(
+                closed.stderr.contains("Blocked by Lodeline"),
+                "{agent}: an exit 2 needs its reason on stderr, got {:?}",
+                closed.stderr
+            );
 
             drive(agent, "open", Stdin::Payload, Some("before_adapter")).assert_silent_allow(agent);
         }

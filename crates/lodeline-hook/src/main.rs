@@ -8,8 +8,9 @@ mod legacy;
 mod redact;
 mod verify;
 
+use adapters::HookOutput;
 use lodeline_core::hook_proto::*;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,7 +24,7 @@ fn run_hook(agent: &str, capture: CaptureLevel) -> ! {
     // Spec §7: a panic on the hot path must never print to stderr and must
     // still exit 0 so the agent's tool call is never blocked.
     std::panic::set_hook(Box::new(|_| std::process::exit(0)));
-    emit::arm_watchdog(Duration::from_millis(200));
+    emit::arm_watchdog(Duration::from_millis(200), || std::process::exit(0));
     let adapter = match adapters::for_agent(agent) {
         Some(a) => a,
         None => std::process::exit(0),
@@ -162,7 +163,7 @@ enum Cmd {
         /// Stage 2: run the synchronous deny-decision path instead of observe.
         #[arg(long)]
         enforce: bool,
-        /// Behavior when no verdict is obtainable. Default open (fail-open).
+        /// Behavior on no verdict, a panic or a watchdog exit. Default open (fail-open).
         #[arg(long, value_enum, default_value_t = OnFailureArg::Open)]
         on_failure: OnFailureArg,
     },
@@ -174,7 +175,7 @@ enum Cmd {
         /// Stage 2: run the synchronous deny-decision path instead of observe.
         #[arg(long)]
         enforce: bool,
-        /// Behavior when no verdict is obtainable. Default open (fail-open).
+        /// Behavior on no verdict, a panic or a watchdog exit. Default open (fail-open).
         #[arg(long, value_enum, default_value_t = OnFailureArg::Open)]
         on_failure: OnFailureArg,
     },
@@ -186,7 +187,7 @@ enum Cmd {
         /// Stage 2: run the synchronous deny-decision path instead of observe.
         #[arg(long)]
         enforce: bool,
-        /// Behavior when no verdict is obtainable. Default open (fail-open).
+        /// Behavior on no verdict, a panic or a watchdog exit. Default open (fail-open).
         #[arg(long, value_enum, default_value_t = OnFailureArg::Open)]
         on_failure: OnFailureArg,
     },
@@ -200,7 +201,7 @@ enum Cmd {
         /// Stage 2: run the synchronous deny-decision path instead of observe.
         #[arg(long)]
         enforce: bool,
-        /// Behavior when no verdict is obtainable. Default open (fail-open).
+        /// Behavior on no verdict, a panic or a watchdog exit. Default open (fail-open).
         #[arg(long, value_enum, default_value_t = OnFailureArg::Open)]
         on_failure: OnFailureArg,
     },
@@ -212,7 +213,7 @@ enum Cmd {
         /// Stage 2: run the synchronous deny-decision path instead of observe.
         #[arg(long)]
         enforce: bool,
-        /// Behavior when no verdict is obtainable. Default open (fail-open).
+        /// Behavior on no verdict, a panic or a watchdog exit. Default open (fail-open).
         #[arg(long, value_enum, default_value_t = OnFailureArg::Open)]
         on_failure: OnFailureArg,
     },
@@ -292,20 +293,73 @@ enum OnFailureArg {
 /// Maximum elapsed time waiting for a verdict before falling back to on_failure.
 const DECISION_DEADLINE: Duration = Duration::from_millis(250);
 
+/// What an enforce run does when no verdict decides it. Chosen once, before
+/// any risky work, so the panic hook, the watchdog and the no-verdict path
+/// cannot drift apart.
+enum Failure {
+    /// The default. A crash stays silent, and no verdict is a deliberate allow.
+    Open,
+    /// The operator opted in. Every failure path gives this deny.
+    Closed(HookOutput),
+}
+
+impl Failure {
+    fn choose(adapter: &dyn adapters::HookAdapter, on_failure: OnFailureArg) -> Self {
+        match on_failure {
+            OnFailureArg::Open => Failure::Open,
+            OnFailureArg::Closed => Failure::Closed(
+                adapter.deny_output("fail_closed", "decision unavailable; on_failure=closed"),
+            ),
+        }
+    }
+
+    fn on_crash(&self) -> &HookOutput {
+        static SILENT: HookOutput = HookOutput {
+            stdout: None,
+            exit_code: 0,
+        };
+        match self {
+            Failure::Open => &SILENT,
+            Failure::Closed(deny) => deny,
+        }
+    }
+}
+
+/// End a run that has no adapter, so no deny format is known. Open mode stays
+/// silent. Closed mode exits 2, the block that Claude Code, Codex, Cursor and
+/// Grok document, with the reason on stderr because Codex 0.164 reports an
+/// exit 2 without one as a hook failure. Antigravity documents no exit code and #202 measured a
+/// non-zero exit as allow on 1.1.7. Only one thread exists here, and nothing
+/// else in this run writes to stderr, so no one holds its lock.
+fn exit_without_adapter(on_failure: OnFailureArg) -> ! {
+    if matches!(on_failure, OnFailureArg::Open) {
+        std::process::exit(0);
+    }
+    let _ = std::io::stderr().write_all(b"Blocked by Lodeline: no adapter; on_failure=closed\n");
+    std::process::exit(2);
+}
+
 /// Per-agent enforce entrypoint. Panic-safe; never hangs past the watchdog.
 /// On Deny → emit the agent's deny output; on a deliberate Allow → emit the
-/// agent's allow output (empty for agents where silence==allow). A
-/// panic/watchdog exits silently (empty stdout), which Cursor's failClosed
-/// converts to a block in closed mode.
-/// No verdict (daemon down / timeout / malformed) → apply on_failure.
+/// agent's allow output (empty for agents where silence==allow).
+/// No verdict (daemon down / timeout / malformed), a panic or a watchdog exit →
+/// apply `Failure`. With `--on-failure closed` all three give the agent's deny
+/// output. With the default open mode a panic or watchdog exit leaves empty
+/// stdout and exit 0, and no verdict is a deliberate allow.
 fn run_enforce(agent: &str, capture: CaptureLevel, on_failure: OnFailureArg) -> ! {
-    std::panic::set_hook(Box::new(|_| std::process::exit(0)));
+    std::panic::set_hook(Box::new(move |_| exit_without_adapter(on_failure)));
     emit::test_seam("before_adapter");
-    emit::arm_watchdog(Duration::from_millis(800)); // > decision deadline, < agent UX budget
-    let adapter = match adapters::for_agent(agent) {
-        Some(a) => a,
-        None => std::process::exit(0),
+    let Some(adapter) = adapters::for_agent(agent) else {
+        exit_without_adapter(on_failure);
     };
+
+    let exit: &'static emit::Exit = Box::leak(Box::new(emit::Exit::new()));
+    let failure: &'static Failure = Box::leak(Box::new(Failure::choose(&*adapter, on_failure)));
+    std::panic::set_hook(Box::new(move |_| exit.finish(failure.on_crash())));
+    // > decision deadline, < agent UX budget
+    emit::arm_watchdog(Duration::from_millis(800), move || {
+        exit.finish(failure.on_crash())
+    });
 
     let mut buf = Vec::new();
     let _ = std::io::stdin()
@@ -341,43 +395,26 @@ fn run_enforce(agent: &str, capture: CaptureLevel, on_failure: OnFailureArg) -> 
             // Only block when the daemon explicitly says Deny AND is in Enforce mode.
             // A Deny down-shifted to Observe (spec §4) must not block the tool call.
             (Decision::Deny { rule_id, reason }, EnforcementMode::Enforce) => {
-                emit_deny(&*adapter, &rule_id, &reason);
+                exit.finish(&adapter.deny_output(&rule_id, &reason))
             }
             // Allow, or a Deny down-shifted to Observe → do not block.
-            _ => emit_allow(&*adapter),
+            _ => emit_allow(&*adapter, exit),
         },
-        None => match on_failure {
-            OnFailureArg::Open => emit_allow(&*adapter),
-            OnFailureArg::Closed => {
-                emit_deny(
-                    &*adapter,
-                    "fail_closed",
-                    "decision unavailable; on_failure=closed",
-                );
-            }
+        None => match failure {
+            Failure::Open => emit_allow(&*adapter, exit),
+            Failure::Closed(deny) => exit.finish(deny),
         },
     }
 }
 
 /// Emit the adapter's explicit allow output (if any) and exit 0. Used on every
-/// DELIBERATE-allow branch so the only empty-stdout exit is a panic/watchdog
-/// failure — which Cursor's failClosed converts to a block in closed mode.
-fn emit_allow(adapter: &dyn adapters::HookAdapter) -> ! {
-    if let Some(s) = adapter.allow_output() {
-        println!("{s}");
-    }
-    std::process::exit(0);
-}
-
-/// Print the adapter's deny output (if any) and exit with its code.
-fn emit_deny(adapter: &dyn adapters::HookAdapter, rule_id: &str, reason: &str) -> ! {
-    let out = adapter.deny_output(rule_id, reason);
-    if let Some(s) = out.stdout {
-        // println! appends a trailing newline; the agent reads the deny response as a line.
-        println!("{s}");
-    }
-    emit::test_seam("stall_after_write");
-    std::process::exit(out.exit_code);
+/// DELIBERATE-allow branch so that, in open mode, the only empty-stdout exit
+/// from an agent that needs an explicit allow is a panic or watchdog failure.
+fn emit_allow(adapter: &dyn adapters::HookAdapter, exit: &emit::Exit) -> ! {
+    exit.finish(&HookOutput {
+        stdout: adapter.allow_output(),
+        exit_code: 0,
+    })
 }
 
 fn main() {

@@ -1,4 +1,4 @@
-use super::{permission_deny, DenyOutput, HookAdapter};
+use super::{permission_deny, HookAdapter, HookOutput};
 use crate::redact::capture;
 use lodeline_core::event::AiTool;
 use lodeline_core::hook_proto::*;
@@ -94,7 +94,7 @@ impl HookAdapter for Cursor {
 
     /// Cursor blocks via a stdout `{"permission":"deny", …}` on exit 0 — not the
     /// default Claude PreToolUse JSON.
-    fn deny_output(&self, rule_id: &str, reason: &str) -> DenyOutput {
+    fn deny_output(&self, rule_id: &str, reason: &str) -> HookOutput {
         permission_deny(rule_id, reason)
     }
 

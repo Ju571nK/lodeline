@@ -52,6 +52,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- `lodeline-hook --enforce --on-failure closed` now covers a panic and a watchdog exit.
+  Both left empty stdout and exit 0, which most agents read as allow, so an operator
+  who chose closed mode got allow on those paths. Each now gives the agent's deny
+  output, the same as when no verdict is available. The hook writes one response at
+  most, so a late failure path cannot add a second one. The default open mode does
+  not change: a panic or a watchdog exit stays silent with exit 0. A signal or an
+  abort still ends the process with nothing written.
+
 - Policy and rule-pack applies now run one at a time. Before, an older version sent
   at the same moment as a newer one could pass the version check and land last, so
   the file on disk and the recorded version moved backward. An apply now reads the

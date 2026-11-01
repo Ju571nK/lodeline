@@ -199,6 +199,8 @@ Example for Claude Code (`.claude/settings.json`):
 lodeline-hook claude-code --enforce --on-failure closed
 ```
 
+In closed mode, a panic in the hook and a watchdog exit also give the agent's deny output. In the default open mode, both leave empty stdout and exit 0. A signal or an abort ends the process before the hook can write anything, so the agent's own handling of a failed hook decides that case. For Cursor, `lodeline-hook install --enforce --on-failure closed` sets `failClosed`, which turns that case into a block.
+
 Choose fail-closed only when you are confident the daemon will always be running; an unexpected daemon outage will block all matched tool calls.
 
 #### How bash deny rules are matched
