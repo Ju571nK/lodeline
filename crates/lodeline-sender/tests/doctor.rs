@@ -203,9 +203,38 @@ async fn cert_writable_by_others_warns() {
 }
 
 #[tokio::test]
-async fn events_dir_that_is_missing_fails() {
+async fn events_dir_the_agent_has_not_created_yet_warns() {
     let host = Host::new();
     fs::remove_dir(host.path("events")).unwrap();
+    let checks = host.run().await;
+    let events = line(&checks, "events dir");
+    assert_eq!(events.level, Level::Warn);
+    assert!(events.text.contains("the agent creates it"), "{events:?}");
+    assert!(!checks.iter().any(Check::is_failure), "{checks:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn events_dir_this_user_cannot_read_warns_and_names_the_group() {
+    let host = Host::new();
+    set_mode(&host.path("events"), 0o000);
+    if fs::read_dir(host.path("events")).is_ok() {
+        // Root ignores the mode, so there is nothing to see on a root CI container.
+        return;
+    }
+    let checks = host.run().await;
+    set_mode(&host.path("events"), 0o700);
+    let events = line(&checks, "events dir");
+    assert_eq!(events.level, Level::Warn);
+    assert!(events.text.contains("lodeline group"), "{events:?}");
+    assert!(!checks.iter().any(Check::is_failure), "{checks:?}");
+}
+
+#[tokio::test]
+async fn events_dir_that_is_a_file_fails() {
+    let host = Host::new();
+    fs::remove_dir(host.path("events")).unwrap();
+    fs::write(host.path("events"), "").unwrap();
     assert!(line(&host.run().await, "events dir").is_failure());
 }
 

@@ -6,6 +6,7 @@ use crate::transport::client_cert_expiry;
 use lodeline_core::sender_status::status_path_for;
 use lodeline_diag::{collect, safe, AgentRun, ClientCert, FleetLink, Level, Probe};
 use std::fmt;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
@@ -184,6 +185,19 @@ fn events_dir(path: &Path) -> Check {
     const SUBJECT: &str = "events dir";
     match std::fs::read_dir(path) {
         Ok(_) => Check::new(Level::Ok, SUBJECT, path.display()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Check::new(
+            Level::Warn,
+            SUBJECT,
+            format!("{} does not exist; the agent creates it", path.display()),
+        ),
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => Check::new(
+            Level::Warn,
+            SUBJECT,
+            format!(
+                "{}: permission denied; run as root or as a member of the lodeline group",
+                path.display()
+            ),
+        ),
         Err(e) => Check::new(Level::Error, SUBJECT, format!("{}: {e}", path.display())),
     }
 }
