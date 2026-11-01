@@ -113,8 +113,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   R/449 s events drain: about 5770 in a 30-day R. After a server upgrade the next
   retry comes within 360 s (300 s max backoff plus 20% jitter) and the first 200
   clears the stop. At a batch size of 100, about 7.4% of events refused on the parse
-  path, about 8 in 108, stops ingest. At 1 in 10 refused, throughput falls to about
-  0.07 events/s, and only refused events are quarantined. (#339)
+  path, about 8 in 108, stops ingest. At 1 in 10 refused, throughput falls below
+  0.1 events/s, and only refused events are quarantined. (#339)
 
 - lodeline-proxy no longer scans the spool's `events` table for acknowledged rows
   on each maintenance pass, so appends wait less behind it. The new partial index
@@ -140,8 +140,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   event: the client sent two requests every 5 seconds, because each unnamed answer
   cleared the backoff. It now sends one request per max backoff (300 s with 20%
   jitter), and loses at most one event per period. In a 4500 s paused-clock test,
-  requests fell from 1750 to 11 to 19. Once the client is stopped, good events
-  behind a refused one wait up to the maximum backoff, 300 s plus 20% jitter. (#363)
+  requests fell from about 1750 to between 11 and 19. Once the client is stopped, a
+  good event behind a refused one waits one to two backoff periods, about 449 s on
+  average and about 660 s at most. (#363)
 
 - `lodeline scan` no longer lists a tool as not configured when another scope of
   the same tool was assessed or failed to parse.

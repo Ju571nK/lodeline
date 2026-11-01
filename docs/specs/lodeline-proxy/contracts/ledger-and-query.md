@@ -467,7 +467,7 @@ clean batches get 200s between them. SV-3..SV-5 answers name every bad event of 
 batch, so 1 in 10 refused does not stop them. The parse path names one per answer.
 At the production batch size of 100, about 7.4% of events refused on that path,
 about 8 in 108, stops ingest: 1 in 14 did not stop it and 1 in 13 did. At 1 in 10
-refused, throughput falls to about 0.07 events/s. Nothing is lost: only refused
+refused, throughput falls below 0.1 events/s. Nothing is lost: only refused
 events are quarantined, and the rest are acked unless R expires them first.
 
 ### Test cases (mirrored in the checker)
