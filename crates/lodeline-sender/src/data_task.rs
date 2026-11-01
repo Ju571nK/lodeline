@@ -315,20 +315,19 @@ pub async fn run(ctx: DataTaskCtx) {
             events,
         })
         .await;
-        ctx.stats.write().record(
-            Plane::Events,
-            outcome.link_result(),
-            OffsetDateTime::now_utc(),
-        );
+        if let Err(failure) = outcome.link_result() {
+            ctx.stats
+                .write()
+                .record(Plane::Events, Err(failure), OffsetDateTime::now_utc());
+        }
 
         match outcome {
             BatchOutcome::Accepted(accepted) => {
-                consecutive_failures = 0;
-                tls_reason = None;
                 let new_state = match apply_ack(&manifest, accepted.high_water_event_id) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!(error = ?e, "apply_ack failed");
+                        consecutive_failures += 1;
                         ctx.stats.write().record(
                             Plane::Events,
                             Err(LinkFailure::Protocol),
@@ -341,9 +340,18 @@ pub async fn run(ctx: DataTaskCtx) {
                             },
                         );
                         let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
+                        let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
+                        if !idle_sleep(&ctx.shutdown, delay).await {
+                            break;
+                        }
                         continue;
                     }
                 };
+                consecutive_failures = 0;
+                tls_reason = None;
+                ctx.stats
+                    .write()
+                    .record(Plane::Events, Ok(()), OffsetDateTime::now_utc());
                 for r in &accepted.rejected {
                     tracing::warn!(
                         host_id = %ctx.host_id,

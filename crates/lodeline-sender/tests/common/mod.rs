@@ -21,6 +21,8 @@ pub struct MockState {
     pub next_body: Option<String>, // override body
     /// Per-event rejections appended to the 200 response. Cleared after use.
     pub next_rejected: Vec<EventRejection>,
+    /// Answers 200 with a high water id that is not in the batch.
+    pub foreign_high_water: bool,
     pub policy_etag: String,
     pub policy_response: Option<lodeline_sender::wire::SignedPolicyResponse>,
     pub rule_packs_etag: String,
@@ -36,6 +38,7 @@ impl Default for MockState {
             next_status: 200,
             next_body: None,
             next_rejected: Vec::new(),
+            foreign_high_water: false,
             policy_etag: String::new(),
             policy_response: None,
             rule_packs_etag: String::new(),
@@ -87,6 +90,7 @@ async fn handle_events(
             high_water_event_id: req
                 .events
                 .last()
+                .filter(|_| !s.foreign_high_water)
                 .map(|e| e.event_id)
                 .unwrap_or_else(uuid::Uuid::nil),
         };
