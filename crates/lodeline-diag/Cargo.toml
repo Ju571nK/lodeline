@@ -1,0 +1,23 @@
+[package]
+name = "lodeline-diag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Read-only health snapshot of a Lodeline install, shared by the CLI and the diagnostic UI"
+
+[dependencies]
+lodeline-core = { path = "../lodeline-core", features = ["control-client"] }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
