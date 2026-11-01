@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-10-31 · spool hardening·AWS 2노드 재시험 (기준 커밋 `fc60da5`)
+갱신: 2026-11-01 · spool·ingest 수정 #359 #362 #363 (기준 커밋 `1af08a9`)
 
 ## 현재 상태
 
@@ -20,6 +20,9 @@
 | #342 | quarantine 행을 `quarantined_at`이 Q(= 서버가 내려준 E, `event_retention_seconds`)보다 오래되면 maintenance pass에서 삭제(모든 code, `registry_conflict_original` 포함). E를 받기 전에는 삭제하지 않음. 결정 1 | #302 |
 | #360 | by-index 422도 `MAX_CONSECUTIVE_SINGLE_QUARANTINES`(응답 8개, event 8개가 아님)에 응답 단위로 세고 count를 지우지 않는다. 200만 지운다. 409 by item과 424는 세지도 지우지도 않는다. 한도를 넘으면 stopped 상태로 backoff하고, status에 `central.ingest_stopped: true`와 `spool.state: degraded`를 보고하며, max backoff 주기(기본 300초)마다 event 1개만 quarantine해 뒤의 정상 event가 재개된다. 업그레이드 후 대기는 최대 360초(300초 + jitter 20%) | #339 |
 | #356 | spool `events(acked_at) WHERE state = 1` 부분 인덱스 `idx_acked_at`을 추가하고 ack purge를 `acked_at` 순으로 바꿔 maintenance pass의 전체 scan 제거(기존 DB는 open 시 추가, `SCHEMA_VERSION` 유지). 1M unsent + 1M quarantined 600 byte에서 pass 120 ms → 18 ms(release, macOS). 남은 시간은 `oldest_unsent` | #345 |
+| #387 | `oldest_unsent`가 ack batch마다 `idx_unsent_created`를 정렬하던 것을 `INDEXED BY idx_unsent`로 고쳐 순서대로 한 행만 읽게 함. plan 테스트 추가. 1M unsent(600 byte)에서 중앙값 21.5 ms → 0.002 ms(SQLite 3.45.0 bundled, opt-level 2 test build, 30회) | #359 |
+| #387 | spool status의 `Full`과 admission 거절이 하나의 규칙 `admits(unsent, size, limit)`을 쓰도록 통일. status는 `event_max_bytes` 크기의 event가 들어가지 않으면 `Full`이고, 그보다 작은 event는 `Full` 중에도 들어갈 수 있다. `Ok`이면 허용된 모든 event가 들어간다 | #362 |
+| #387 | stopped 상태에서 이름 없는 409/422 응답이 backoff를 지워 5초에 요청 2개가 나가던 것을 수정. 여러 event batch의 이름 없는 응답은 stopped이면 progress가 아니고, stopped의 느린 quarantine도 progress가 아니다. 이제 stopped는 max backoff(300초, jitter 20%)당 요청 1개이고 손실은 주기당 event 1개 이하. paused clock 테스트: 4500초 구간 요청 1750 → 11–19 | #363 |
 
 - clock-jump guard는 시도 후 리뷰에서 되돌렸다(suspend가 jump로 계산되어 R 이후 재전송 위험). 대신 결정 4로 boot-clock age를 구현했다: 행마다 `(boot_id, boot clock)` stamp를 side table에 두고 같은 boot 안에서는 boot clock, boot가 다르거나 stamp가 없으면 wall clock으로 R·Q를 잰다(macOS는 개발 환경, Windows는 wall clock만). quarantine 정책은 #302 결정 1–4로 정함(https://github.com/Ju571nK/lodeline/issues/302#issuecomment-6537627891): Q = E purge, byte 상한 없음(`quarantined_bytes` 노출), replay·upload 없음, boot-clock 기반 age.
 - 운영자 로컬 harness로 main에서 AWS 2노드 smoke 재실행(§3–§13, D1): 시나리오 27/27, ledger 22, privacy 0, outage replay 6, 재시작 fail-closed, spool 32×200/48×503(delta 32), disable/enable 정상, 감사 seq 0–4 ok.
