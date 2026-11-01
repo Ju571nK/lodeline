@@ -70,7 +70,7 @@ impl BackoffPolicy {
 }
 
 use crate::transport::{
-    cap_server_text, classify_send_error, classify_status, failure_cause, SendOutcome,
+    cap_server_text, classify_body_error, classify_send_error, classify_status, SendOutcome,
 };
 use crate::wire::{Envelope, EventsAccepted, EventsRequest};
 use lodeline_core::sink::jsonl::segment_order;
@@ -134,26 +134,12 @@ pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
     let url = format!("{}/v1/events", ctx.server_base_url.trim_end_matches('/'));
     let resp = match ctx.client.post(&url).json(&req).send().await {
         Ok(r) => r,
-        Err(e) => match classify_send_error::<EventsAccepted>(e) {
-            SendOutcome::TlsFailure(s) => return BatchOutcome::TlsFailure(s),
-            SendOutcome::Network(s) => return BatchOutcome::Network(s),
-            other => {
-                return BatchOutcome::ProtocolViolation {
-                    status: None,
-                    detail: format!("{other:?}"),
-                }
-            }
-        },
+        Err(e) => return classify_send_error(e).into(),
     };
     let status = resp.status().as_u16();
     let body_bytes = match resp.bytes().await {
         Ok(b) => b,
-        Err(e) => {
-            return BatchOutcome::ProtocolViolation {
-                status: None,
-                detail: format!("body read: {}", failure_cause(e)),
-            };
-        }
+        Err(e) => return classify_body_error(e, "body read").into(),
     };
     let body_text = String::from_utf8_lossy(&body_bytes).to_string();
     let parsed: Option<EventsAccepted> = if (200..300).contains(&status) {
@@ -161,16 +147,22 @@ pub async fn send_one_batch(ctx: BatchSendCtx<'_>) -> BatchOutcome {
     } else {
         None
     };
-    match classify_status(status, body_text.clone(), parsed) {
-        SendOutcome::Ok2xx(r) => BatchOutcome::Accepted(r),
-        SendOutcome::PermanentReject { status, body } => {
-            BatchOutcome::PermanentReject { status, body }
-        }
-        SendOutcome::ServerBusy { status, body } => BatchOutcome::ServerBusy { status, body },
-        SendOutcome::TlsFailure(s) => BatchOutcome::TlsFailure(s),
-        SendOutcome::Network(s) => BatchOutcome::Network(s),
-        SendOutcome::ProtocolViolation { status, detail } => {
-            BatchOutcome::ProtocolViolation { status, detail }
+    classify_status(status, body_text, parsed).into()
+}
+
+impl From<SendOutcome<EventsAccepted>> for BatchOutcome {
+    fn from(outcome: SendOutcome<EventsAccepted>) -> Self {
+        match outcome {
+            SendOutcome::Ok2xx(r) => BatchOutcome::Accepted(r),
+            SendOutcome::PermanentReject { status, body } => {
+                BatchOutcome::PermanentReject { status, body }
+            }
+            SendOutcome::ServerBusy { status, body } => BatchOutcome::ServerBusy { status, body },
+            SendOutcome::TlsFailure(s) => BatchOutcome::TlsFailure(s),
+            SendOutcome::Network(s) => BatchOutcome::Network(s),
+            SendOutcome::ProtocolViolation { status, detail } => {
+                BatchOutcome::ProtocolViolation { status, detail }
+            }
         }
     }
 }

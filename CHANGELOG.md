@@ -71,7 +71,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   last success. A connection now has 10 seconds to open and a whole request 120
   seconds. A full 1 MiB batch, the default size, fits that on a link of about 70
   kbit/s. A timed-out request counts as a network failure and the link state shows
-  `failing`.
+  `failing`. So does a timeout or a dropped connection while the sender reads the
+  response body. Before, that counted as a protocol violation and wrote a dead letter
+  on each retry, and on a policy poll that got a 404 it read as an unknown host. A
+  body that arrives and does not parse is still a protocol violation.
 
 - Policy and rule-pack applies now run one at a time. Before, an older version sent
   at the same moment as a newer one could pass the version check and land last, so

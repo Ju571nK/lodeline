@@ -183,6 +183,21 @@ pub fn classify_send_error<R>(err: reqwest::Error) -> SendOutcome<R> {
     }
 }
 
+/// Maps a `reqwest::Error` from reading a response body. A transport error, such as a
+/// timeout or a dropped connection, is the same failure as one during send. Only a
+/// body that arrived and does not parse is a protocol violation. `reqwest` reports
+/// both as a decode error, so the cause tells them apart.
+pub fn classify_body_error<R>(err: reqwest::Error, what: &str) -> SendOutcome<R> {
+    if error_chain(&err).any(|e| e.is::<serde_json::Error>()) {
+        SendOutcome::ProtocolViolation {
+            status: None,
+            detail: format!("{what}: {}", failure_cause(err)),
+        }
+    } else {
+        classify_send_error(err)
+    }
+}
+
 /// The text that is safe to store: the deepest cause, because `reqwest` puts the
 /// request URL and its query in its own message and prints no cause there. A decode
 /// error can quote the server's text, so it is capped.
