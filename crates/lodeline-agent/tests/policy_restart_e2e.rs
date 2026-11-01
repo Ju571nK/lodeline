@@ -920,3 +920,28 @@ fn show_assess_and_doctor_read_the_default_policy_without_the_flag() {
     host.write_default_policy(NOT_A_POLICY);
     assert!(stdout(&["doctor"]).contains("[ERROR] policy parse failed"));
 }
+
+#[test]
+fn a_policy_path_with_no_directory_applies_and_survives_a_restart() {
+    let host = Host::new("version: 1\n");
+    let bare_name = || {
+        let mut agent = host.agent_command();
+        agent
+            .current_dir(host.path("."))
+            .arg("--policy")
+            .arg("policy.yaml");
+        agent
+    };
+    let mut agent = spawn_agent(bare_name());
+    host.wait_until_serving();
+    let reply = host.apply(POLICY, 2);
+    agent.0.kill().unwrap();
+    agent.0.wait().unwrap();
+    drop(agent);
+    assert_accepted(&reply, 2);
+
+    let _agent = spawn_agent(bare_name());
+    host.wait_until_serving();
+
+    assert_eq!(host.status()["last_applied_policy_version"], 2);
+}

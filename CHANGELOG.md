@@ -70,6 +70,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   - `config/policy.example.yaml` no longer overrides a macOS-only target, which would
     stop the boot on Linux and Windows.
 
+- Boot and the next apply now sync the config directory before they finish an apply
+  that stopped after its rename. Before, the applied version could be recorded while
+  the rename was not yet durable, so a power loss could leave the record ahead of the
+  file. If the sync fails, the apply stays pending and the next boot or apply settles
+  it. A signed apply also works when `--policy` is a bare file name; before, it failed
+  every time at the directory sync, after the file had already moved.
+
 - The agent keeps the applied version and expiry of a signed policy or rule-pack
   bundle across a restart. An apply now records its version, the blake3 of its bytes,
   and its `valid_until` in `state.db` before the file moves, and promotes them after
