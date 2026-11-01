@@ -59,6 +59,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   most, so a late failure path cannot add a second one. The default open mode does
   not change: a panic or a watchdog exit stays silent with exit 0. A signal or an
   abort still ends the process with nothing written.
+  With `--enforce --on-failure closed`, an unknown agent name now exits 2 with a reason
+  on stderr, where it exited 0 before. With `--on-failure open` it still exits 0.
 
 - Policy and rule-pack applies now run one at a time. Before, an older version sent
   at the same moment as a newer one could pass the version check and land last, so
