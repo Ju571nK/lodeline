@@ -101,7 +101,7 @@ pub enum AgentRun {
 pub enum FleetLink {
     NotConfigured,
     Configured {
-        /// The `lodeline-server` URL, without userinfo, query, or fragment.
+        /// The `lodeline-server` scheme, host, and port. Nothing else of the URL.
         server_url: String,
         config_path: PathBuf,
         link: LinkState,
@@ -392,30 +392,64 @@ struct SenderServerUrl {
 
 fn parse_fleet(path: &Path, bytes: &[u8]) -> FleetLink {
     let parsed = serde_yaml::from_slice::<SenderServerUrl>(bytes);
-    match parsed.map(|config| redact_url(config.server_base_url.trim())) {
-        Ok(server_url) if !server_url.is_empty() => FleetLink::Configured {
+    match parsed
+        .ok()
+        .and_then(|config| redact_url(config.server_base_url.trim()))
+    {
+        Some(server_url) => FleetLink::Configured {
             server_url,
             config_path: path.to_path_buf(),
             link: LinkState::Unknown,
         },
         // The YAML error can quote the file, so it stays out of `reason`.
-        _ => FleetLink::Unreadable {
+        None => FleetLink::Unreadable {
             config_path: path.to_path_buf(),
             reason: "no usable server_base_url".to_string(),
         },
     }
 }
 
-fn redact_url(raw: &str) -> String {
+/// `scheme://host[:port]` or `host[:port]`. `None` when the authority fails
+/// validation, which is what stops an unencoded `/` in a password: the authority
+/// then ends inside the userinfo, so what is left is not a host and port.
+fn redact_url(raw: &str) -> Option<String> {
     let (scheme, rest) = match raw.split_once("://") {
-        Some((scheme, rest)) => (&raw[..scheme.len() + 3], rest),
-        None => ("", raw),
+        Some((scheme, rest)) if is_scheme(scheme) => (Some(scheme), rest),
+        _ => (None, raw),
     };
-    // The last `@` of the whole value: an unencoded `/` or `?` in a password must
-    // not end the userinfo early and leave the rest of it in the output.
-    let host_on = rest.rsplit_once('@').map_or(rest, |(_, host_on)| host_on);
-    let end = host_on.find(['?', '#']).unwrap_or(host_on.len());
-    format!("{scheme}{}", &host_on[..end])
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if !is_host_port(host_port) {
+        return None;
+    }
+    Some(scheme.map_or(host_port.to_string(), |s| format!("{s}://{host_port}")))
+}
+
+fn is_scheme(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_alphabetic())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
+}
+
+fn is_host_port(text: &str) -> bool {
+    let (host, port) = match text.rsplit_once(':') {
+        // The colon of a bracketed IPv6 literal with no port.
+        Some((_, tail)) if tail.ends_with(']') => (text, None),
+        Some((host, port)) => (host, Some(port)),
+        None => (text, None),
+    };
+    let host_ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(ip) => ip.parse::<std::net::Ipv6Addr>().is_ok(),
+        None => {
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        }
+    };
+    host_ok && port.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -582,16 +616,24 @@ mod tests {
     }
 
     #[test]
-    fn server_url_never_carries_credentials() {
+    fn server_url_keeps_only_scheme_host_and_port() {
         for (raw, expected) in [
             (
-                "https://u:pw@s.example:8443/base?token=t#f",
-                "https://s.example:8443/base",
+                "https://u:pw@srv.example:8443/?t=1",
+                "https://srv.example:8443",
             ),
-            ("https://s.example/?token=t", "https://s.example/"),
+            (
+                "https://u:pw@s.example:8443/base?token=t#f",
+                "https://s.example:8443",
+            ),
+            ("https://s.example/?token=t", "https://s.example"),
             ("https://s.example#frag", "https://s.example"),
-            ("https://u:p/w@s.example", "https://s.example"),
-            ("https://u:p?w@s.example/x", "https://s.example/x"),
+            ("https://s.example/a@b", "https://s.example"),
+            ("https://s.example/tok3n/x", "https://s.example"),
+            ("s.example/?token=abc&r=http://x", "s.example"),
+            ("https://[::1]:8443/x", "https://[::1]:8443"),
+            ("[::1]", "[::1]"),
+            ("srv.example:8443", "srv.example:8443"),
             ("u:pw@s.example:8443", "s.example:8443"),
             ("https://s.example:8443", "https://s.example:8443"),
         ] {
@@ -600,6 +642,27 @@ mod tests {
                 panic!("{raw} should be configured, got {fleet:?}");
             };
             assert_eq!(server_url, expected);
+        }
+    }
+
+    #[test]
+    fn server_url_that_fails_validation_prints_nothing() {
+        for raw in [
+            "https://u:p/w@host/",
+            "https://u:p?w@s.example/x",
+            "https://",
+            "s.example:",
+            "s.example:80a",
+            "https://s ex/",
+            "https://[hunter2]/",
+            "https://[::1",
+            "1http://s.example",
+        ] {
+            let (_dir, fleet) = fleet_with(&format!("server_base_url: \"{raw}\"\n"));
+            let FleetLink::Unreadable { reason, .. } = &fleet else {
+                panic!("{raw} should be unreadable, got {fleet:?}");
+            };
+            assert_eq!(reason, "no usable server_base_url");
         }
     }
 
