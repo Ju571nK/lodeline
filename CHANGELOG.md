@@ -52,6 +52,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- `lodeline-sender` stopped asking for a policy or rule-pack bundle when the server
+  sent it, before the agent answered. If the agent was down, every later poll got a
+  `304` and the document stayed undelivered until the next publish or a sender
+  restart. The sender now asks until the agent settles the document. It retries at
+  the poll interval after an outage or an agent failure. It stops when the agent
+  applies the document or refuses it for good, such as for an old version or a bad
+  signature. It offers a document that the keystore refused every 12 polls, because
+  a host can gain the missing key while the document stays the same.
+  `policy-etag.txt` and `rule-packs-etag.txt` now take effect at startup, so a
+  restart no longer fetches a settled document and the agent no longer records a
+  version regression for it. If you reset the agent's `state.db` and keep the sender
+  state, publish a new document or remove those two files.
+
 - `lodeline-sender` reported every TLS failure as a network failure, so the
   `tls_failure` dead-letter event was never written. It now finds the TLS cause in
   the error chain, and it writes one event per failure streak, whatever the reason text,

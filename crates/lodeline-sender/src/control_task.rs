@@ -1,6 +1,8 @@
 //! Control plane: poll /v1/policy, hand 200 results to the agent IPC.
 
+use crate::agent_ipc::{self, Settlement};
 use crate::heartbeat::{Plane, SharedStats};
+use crate::state;
 use crate::transport::{classify_send_error, failure_cause, SendOutcome};
 use crate::wire::SignedPolicyResponse;
 use lodeline_core::sender_status::LinkFailure;
@@ -9,13 +11,13 @@ use time::OffsetDateTime;
 
 #[derive(Debug)]
 pub enum PollOutcome {
-    /// Server returned a fresh policy. Caller hands this to apply_policy IPC.
+    /// Server returned a fresh policy. The control loop offers it to the agent.
     NewPolicy {
         etag: String,
         response: SignedPolicyResponse,
     },
-    /// Server returned a fresh rule-pack bundle. Caller hands this to
-    /// apply_rule_packs IPC. Same response shape as a policy.
+    /// Server returned a fresh rule-pack bundle. The control loop offers it to
+    /// the agent. Same response shape as a policy.
     NewRulePacks {
         etag: String,
         response: SignedPolicyResponse,
@@ -176,9 +178,17 @@ pub async fn poll_rule_packs(
     }
 }
 
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Polls between offers of a document the agent [refused for now]. At the default
+/// poll interval this is one hour. Each offer costs a full body and a warning event
+/// in the fleet, so a host missing a key must not repeat it on every poll.
+///
+/// [refused for now]: Settlement::RefusedForNow
+const POLLS_BETWEEN_OFFERS_REFUSED_FOR_NOW: u32 = 12;
 
 pub struct ControlLoopCtx {
     pub client: Client,
@@ -188,15 +198,66 @@ pub struct ControlLoopCtx {
     pub shutdown: CancellationToken,
     pub outcomes: mpsc::Sender<PollOutcome>,
     pub stats: SharedStats,
+    pub agent_control: PathBuf,
+    pub policy_etag_path: PathBuf,
+    pub packs_etag_path: PathBuf,
 }
 
-/// Runs `poll_policy` in a loop with the configured interval. Cached
-/// ETag is held in-process (not persisted here — caller persists on
-/// agent ACK).
+/// The `If-None-Match` state of one kind of document. The sender stops asking for a
+/// document only once the agent has settled it.
+struct Offer {
+    etag_path: PathBuf,
+    /// The last document the agent settled. Survives a restart.
+    settled: Option<String>,
+    /// A document refused for now, not offered again until this time. Lost on a
+    /// restart, so a restart offers it once more.
+    refused_until: Option<(String, Instant)>,
+}
+
+impl Offer {
+    fn load(etag_path: &Path) -> Self {
+        Self {
+            etag_path: etag_path.to_owned(),
+            settled: state::load_etag(etag_path).ok().flatten(),
+            refused_until: None,
+        }
+    }
+
+    fn if_none_match(&self) -> Option<&str> {
+        match &self.refused_until {
+            Some((etag, until)) if Instant::now() < *until => Some(etag),
+            _ => self.settled.as_deref(),
+        }
+    }
+
+    fn settle(&mut self, etag: &str, settlement: Settlement, recheck_after: Duration) {
+        if settlement != Settlement::Applied {
+            tracing::warn!(etag, ?settlement, "agent did not apply the document");
+        }
+        match settlement {
+            Settlement::Applied | Settlement::Refused(_) => {
+                if let Err(e) = state::store_etag(&self.etag_path, etag) {
+                    tracing::warn!(error = ?e, "store_etag failed");
+                }
+                self.settled = Some(etag.to_owned());
+                self.refused_until = None;
+            }
+            Settlement::RefusedForNow(_) => {
+                self.refused_until = Some((etag.to_owned(), Instant::now() + recheck_after));
+            }
+            Settlement::Undecided(_) => {}
+        }
+    }
+}
+
+/// Polls with the configured interval and offers each new document to the agent. One
+/// task does both, in order, so a poll cannot overtake the agent's answer to the last
+/// offer.
 pub async fn run(ctx: ControlLoopCtx) {
-    // Separate ETag caches: policy and rule packs are versioned independently.
-    let mut policy_etag: Option<String> = None;
-    let mut packs_etag: Option<String> = None;
+    let recheck_after = ctx.poll_interval * POLLS_BETWEEN_OFFERS_REFUSED_FOR_NOW;
+    // Separate offers: policy and rule packs are versioned independently.
+    let mut policy = Offer::load(&ctx.policy_etag_path);
+    let mut packs = Offer::load(&ctx.packs_etag_path);
     let mut interval = tokio::time::interval(ctx.poll_interval);
     interval.tick().await; // skip immediate fire
     loop {
@@ -208,13 +269,14 @@ pub async fn run(ctx: ControlLoopCtx) {
                     &ctx.client,
                     &ctx.server_base_url,
                     &ctx.host_id,
-                    policy_etag.as_deref(),
+                    policy.if_none_match(),
                 ).await;
                 // Only the policy poll counts: `poll_rule_packs` maps 404 to `Unmodified`,
                 // which would clear a host-unknown answer moments after it arrived.
                 ctx.stats.write().record(Plane::Policy, p.link_result(), OffsetDateTime::now_utc());
-                if let PollOutcome::NewPolicy { etag, .. } = &p {
-                    policy_etag = Some(etag.clone());
+                if let PollOutcome::NewPolicy { etag, response } = &p {
+                    let answer = agent_ipc::apply_policy(&ctx.agent_control, response).await;
+                    policy.settle(etag, answer.into(), recheck_after);
                 }
                 if ctx.outcomes.send(p).await.is_err() {
                     // Receiver dropped — exit loop.
@@ -224,10 +286,11 @@ pub async fn run(ctx: ControlLoopCtx) {
                     &ctx.client,
                     &ctx.server_base_url,
                     &ctx.host_id,
-                    packs_etag.as_deref(),
+                    packs.if_none_match(),
                 ).await;
-                if let PollOutcome::NewRulePacks { etag, .. } = &r {
-                    packs_etag = Some(etag.clone());
+                if let PollOutcome::NewRulePacks { etag, response } = &r {
+                    let answer = agent_ipc::apply_rule_packs(&ctx.agent_control, response).await;
+                    packs.settle(etag, answer.into(), recheck_after);
                 }
                 if ctx.outcomes.send(r).await.is_err() {
                     break;

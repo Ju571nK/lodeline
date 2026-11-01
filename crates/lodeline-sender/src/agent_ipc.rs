@@ -2,6 +2,8 @@
 //! invokes `apply_policy`.
 
 use crate::wire::SignedPolicyResponse;
+pub use lodeline_core::control_proto::ApplyPolicyResult;
+use lodeline_core::event::PolicySignatureInvalidReason;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -20,13 +22,6 @@ pub struct AgentResponse {
     pub error: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum ApplyPolicyResult {
-    Accepted { applied_policy_version: i64 },
-    Rejected { reason: String },
-}
-
 #[derive(Debug, Error)]
 pub enum IpcError {
     #[error("connect {path}: {source}")]
@@ -38,6 +33,43 @@ pub enum IpcError {
     Io(#[from] std::io::Error),
     #[error("response parse: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+/// What the agent's answer settles about one signed document.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Settlement {
+    Applied,
+    /// Only a new document can change this answer.
+    Refused(PolicySignatureInvalidReason),
+    /// The keystore decided this answer, and the keystore can change while the
+    /// document stays the same. An agent that could not load its keystore lands here.
+    RefusedForNow(PolicySignatureInvalidReason),
+    /// The agent gave no decision: it was unreachable, failed, or answered nonsense.
+    Undecided(String),
+}
+
+impl From<Result<AgentResponse, IpcError>> for Settlement {
+    fn from(answer: Result<AgentResponse, IpcError>) -> Self {
+        use PolicySignatureInvalidReason::*;
+        match answer {
+            Ok(AgentResponse {
+                ok: true,
+                apply_policy: Some(ApplyPolicyResult::Accepted { .. }),
+                ..
+            }) => Settlement::Applied,
+            Ok(AgentResponse {
+                apply_policy: Some(ApplyPolicyResult::Rejected { reason }),
+                ..
+            }) => match reason {
+                VersionRegression | SignatureInvalid | Expired | ParseFailed => {
+                    Settlement::Refused(reason)
+                }
+                PubkeyUnknown | PubkeyInactive => Settlement::RefusedForNow(reason),
+            },
+            Ok(other) => Settlement::Undecided(format!("{other:?}")),
+            Err(e) => Settlement::Undecided(e.to_string()),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -142,4 +174,84 @@ pub async fn apply_rule_packs(
     BufReader::new(&mut client).read_line(&mut buf).await?;
     let parsed: AgentResponse = serde_json::from_str(buf.trim())?;
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settle(answer: &str) -> Settlement {
+        let parsed = serde_json::from_str::<AgentResponse>(answer).map_err(IpcError::from);
+        Settlement::from(parsed)
+    }
+
+    fn refusal(reason: &str) -> Settlement {
+        settle(&format!(
+            r#"{{"ok":false,"apply_policy":{{"outcome":"rejected","reason":"{reason}"}}}}"#
+        ))
+    }
+
+    #[test]
+    fn an_accepted_document_is_applied() {
+        assert_eq!(
+            settle(
+                r#"{"ok":true,"apply_policy":{"outcome":"accepted","applied_policy_version":5}}"#
+            ),
+            Settlement::Applied
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_the_document_itself_is_final() {
+        use PolicySignatureInvalidReason::*;
+        for (wire, reason) in [
+            ("version_regression", VersionRegression),
+            ("signature_invalid", SignatureInvalid),
+            ("expired", Expired),
+            ("parse_failed", ParseFailed),
+        ] {
+            assert_eq!(refusal(wire), Settlement::Refused(reason));
+        }
+    }
+
+    #[test]
+    fn a_refusal_by_the_keystore_is_not_final() {
+        use PolicySignatureInvalidReason::*;
+        for (wire, reason) in [
+            ("pubkey_unknown", PubkeyUnknown),
+            ("pubkey_inactive", PubkeyInactive),
+        ] {
+            assert_eq!(refusal(wire), Settlement::RefusedForNow(reason));
+        }
+    }
+
+    #[test]
+    fn no_decision_from_the_agent_is_undecided() {
+        for answer in [
+            r#"{"ok":false,"apply_policy":null,"error":"internal: atomic disk write"}"#,
+            r#"{"ok":false,"error":"unknown variant `apply_rule_packs`"}"#,
+            r#"{"ok":true}"#,
+            r#"{"ok":false,"apply_policy":{"outcome":"accepted","applied_policy_version":5}}"#,
+            "",
+            "not json",
+            r#"{"ok":false,"apply_policy":{"outcome":"rejected","reason":"from_a_newer_agent"}}"#,
+        ] {
+            assert!(
+                matches!(settle(answer), Settlement::Undecided(_)),
+                "{answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreachable_agent_is_undecided() {
+        let unreachable = Err(IpcError::Connect {
+            path: "/run/control.sock".into(),
+            source: std::io::ErrorKind::NotFound.into(),
+        });
+        assert!(matches!(
+            Settlement::from(unreachable),
+            Settlement::Undecided(_)
+        ));
+    }
 }
