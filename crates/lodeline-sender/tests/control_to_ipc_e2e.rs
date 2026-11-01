@@ -24,7 +24,7 @@ fn sample_policy(etag: &str) -> SignedPolicyResponse {
 }
 
 #[tokio::test]
-async fn control_loop_emits_new_policy_then_ipc_handoff_succeeds() {
+async fn control_loop_hands_a_new_policy_to_the_agent_and_stores_its_etag() {
     let (addr, mock_state) = common::spawn_mock().await;
     {
         let mut s = mock_state.lock().await;
@@ -59,6 +59,9 @@ async fn control_loop_emits_new_policy_then_ipc_handoff_succeeds() {
     let cancel_c = cancel.clone();
     let client = reqwest::Client::new();
     let server_base = format!("http://{addr}");
+    let policy_etag_path = dir.path().join("policy-etag.txt");
+    let packs_etag_path = dir.path().join("rule-packs-etag.txt");
+    let etag_path = policy_etag_path.clone();
     let ctl = tokio::spawn(async move {
         lodeline_sender::control_task::run(ControlLoopCtx {
             client,
@@ -68,6 +71,9 @@ async fn control_loop_emits_new_policy_then_ipc_handoff_succeeds() {
             shutdown: cancel_c,
             outcomes: tx,
             stats: lodeline_sender::heartbeat::shared(),
+            agent_control: socket,
+            policy_etag_path,
+            packs_etag_path,
         })
         .await;
     });
@@ -76,14 +82,11 @@ async fn control_loop_emits_new_policy_then_ipc_handoff_succeeds() {
         .await
         .unwrap()
         .unwrap();
-    let response = match outcome {
-        PollOutcome::NewPolicy { response, .. } => response,
-        other => panic!("expected NewPolicy, got {other:?}"),
-    };
-    let agent_resp = lodeline_sender::agent_ipc::apply_policy(&socket, &response)
-        .await
-        .unwrap();
-    assert!(agent_resp.ok);
+    assert!(
+        matches!(outcome, PollOutcome::NewPolicy { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(std::fs::read_to_string(etag_path).unwrap(), "v1");
     cancel.cancel();
     let _ = tokio::join!(ctl, agent);
 }

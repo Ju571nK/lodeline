@@ -102,6 +102,9 @@ async fn loop_fires_once_then_shuts_down() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let cancel = tokio_util::sync::CancellationToken::new();
     let cancel_c = cancel.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let (policy_etag_path, packs_etag_path) = (dir.path().join("p"), dir.path().join("r"));
+    let agent_control = dir.path().join("control.sock");
     let handle = tokio::spawn(async move {
         lodeline_sender::control_task::run(lodeline_sender::control_task::ControlLoopCtx {
             client,
@@ -111,6 +114,9 @@ async fn loop_fires_once_then_shuts_down() {
             shutdown: cancel_c,
             outcomes: tx,
             stats: lodeline_sender::heartbeat::shared(),
+            agent_control,
+            policy_etag_path,
+            packs_etag_path,
         })
         .await;
     });
