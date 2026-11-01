@@ -58,6 +58,12 @@ pub struct WatchTarget {
     pub disabled: bool,
 }
 
+impl WatchTarget {
+    fn runs_on(&self, platform: Platform) -> bool {
+        matches!(self.platform, Platform::Any) || self.platform == platform
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostIdStrategy {
@@ -134,6 +140,16 @@ pub enum Matcher {
     Equals { value: String },
     NotEquals { value: String },
     Regex { pattern: String },
+}
+
+impl Matcher {
+    /// The compiled pattern of a `Regex` matcher. Other kinds hold no pattern.
+    pub fn compile(&self) -> Result<Option<regex::Regex>, regex::Error> {
+        match self {
+            Matcher::Regex { pattern } => regex::Regex::new(pattern).map(Some),
+            _ => Ok(None),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -304,6 +320,20 @@ pub enum PolicyError {
     EmptyTargets,
     #[error("duplicate hook deny rule id: {0}")]
     DuplicateDenyRuleId(String),
+    #[error("hook deny rule {id}: {detail}")]
+    DenyRuleRegex { id: String, detail: String },
+    #[error("rule pack {id}: rule {rule}: {detail}")]
+    RulePackRegex {
+        id: String,
+        rule: String,
+        detail: String,
+    },
+    #[error("target {id}: {detail}")]
+    TargetGlob { id: String, detail: String },
+    #[error("hook_silence.tick_secs must be above 0 when an agent is enabled")]
+    HookSilenceTick,
+    #[error("policy is not UTF-8")]
+    NotUtf8(#[from] std::str::Utf8Error),
 }
 
 /// Parse a YAML document into a `PolicyDocument`. Validates schema version.
@@ -323,6 +353,59 @@ pub fn parse(yaml: &str) -> Result<PolicyDocument, PolicyError> {
         }
     }
     validate_deny_rule_ids(&doc.hook_deny_rules)?;
+    Ok(doc)
+}
+
+/// Parse a document that travels in a signed envelope. Beyond [`parse`], this
+/// refuses text that is not UTF-8, which boot cannot read, a deny rule that does
+/// not compile, which makes boot run with no deny rules at all, a hook-silence
+/// tick of zero, which stops boot, and what boot would skip with only a log line:
+/// a rule-pack regex that does not compile, and a target path that does not
+/// compile as a glob on this OS.
+///
+/// A policy and a bundle share this check. Only a policy has to merge, and that
+/// depends on the host's defaults: see [`merge_on_this_host`].
+pub fn parse_signed(bytes: &[u8]) -> Result<PolicyDocument, PolicyError> {
+    let doc = parse(std::str::from_utf8(bytes)?)?;
+    for rule in &doc.hook_deny_rules {
+        for matcher in rule.match_.matchers() {
+            matcher.compile().map_err(|e| PolicyError::DenyRuleRegex {
+                id: rule.id.clone(),
+                detail: e.to_string(),
+            })?;
+        }
+    }
+    let silence = &doc.hook_silence;
+    if !silence.enabled_agents.is_empty() && silence.tick_secs == 0 {
+        return Err(PolicyError::HookSilenceTick);
+    }
+    for pack in &doc.rule_packs {
+        for rule in &pack.rules {
+            let conditions = rule.when.iter().map(|c| &c.matcher);
+            for matcher in std::iter::once(&rule.matcher).chain(conditions) {
+                matcher.compile().map_err(|e| PolicyError::RulePackRegex {
+                    id: pack.id.clone(),
+                    rule: rule.id.clone(),
+                    detail: e.to_string(),
+                })?;
+            }
+        }
+    }
+    // Another OS reads a target's paths by its own glob rules: `\` ends a Windows
+    // directory path but escapes on Unix. That host's `apply` checks those targets.
+    let current = current_platform();
+    for t in doc
+        .targets
+        .iter()
+        .filter(|t| !t.disabled && t.runs_on(current))
+    {
+        for path in &t.paths {
+            glob::CompiledGlob::new(path).map_err(|e| PolicyError::TargetGlob {
+                id: t.id.clone(),
+                detail: e.to_string(),
+            })?;
+        }
+    }
     Ok(doc)
 }
 
@@ -416,7 +499,7 @@ pub fn merge(
     // 4. Drop disabled.
     by_id.retain(|t| !t.disabled);
     // 5. Filter by current platform (Any always passes).
-    by_id.retain(|t| matches!(t.platform, Platform::Any) || t.platform == current);
+    by_id.retain(|t| t.runs_on(current));
     // 6. Empty after merge is an error.
     if by_id.is_empty() {
         return Err(PolicyError::EmptyTargets);
@@ -517,6 +600,14 @@ pub fn merge(
     })
 }
 
+/// The merge boot runs: `defaults < user < bundle` on this host.
+pub fn merge_on_this_host(
+    user: Option<PolicyDocument>,
+    bundle: Option<PolicyDocument>,
+) -> Result<EffectivePolicy, PolicyError> {
+    merge(defaults()?, user, bundle, current_platform())
+}
+
 /// Built-in defaults for the current OS, parsed from a compile-time-embedded YAML.
 ///
 /// Source data lives in the `lodeline-rules-basic` crate so the OSS baseline
@@ -572,6 +663,104 @@ fn _path_buf_marker(_p: PathBuf) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn doc_with_deny_match(deny_match: &str) -> String {
+        format!("version: 1\nhook_deny_rules:\n  - id: r\n    match: {deny_match}\n")
+    }
+
+    #[test]
+    fn parse_signed_accepts_a_document_boot_can_load() {
+        let doc = parse_signed(
+            doc_with_deny_match("{kind: bash, command: {kind: regex, pattern: 'rm.*'}}").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(doc.hook_deny_rules.len(), 1);
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_version_boot_refuses() {
+        assert!(matches!(
+            parse_signed(b"version: 2\n"),
+            Err(PolicyError::UnsupportedVersion { found: 2 })
+        ));
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_bad_regex_in_every_deny_field() {
+        let bad = "{kind: regex, pattern: '('}";
+        let any = "{kind: exists}";
+        for deny_match in [
+            format!("{{kind: bash, command: {bad}}}"),
+            format!("{{kind: bash_indirection, indirection: {bad}}}"),
+            format!("{{kind: file_edit, path: {bad}}}"),
+            format!("{{kind: mcp_call, server: {bad}, tool: {any}}}"),
+            format!("{{kind: mcp_call, server: {any}, tool: {bad}}}"),
+            format!("{{kind: other, label: {bad}, detail: {any}}}"),
+            format!("{{kind: other, label: {any}, detail: {bad}}}"),
+        ] {
+            let yaml = doc_with_deny_match(&deny_match);
+            assert!(
+                matches!(
+                    parse_signed(yaml.as_bytes()),
+                    Err(PolicyError::DenyRuleRegex { .. })
+                ),
+                "{deny_match}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_signed_refuses_text_boot_cannot_read() {
+        let utf16: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain("version: 1\n".bytes().flat_map(|b| [b, 0]))
+            .collect();
+        assert!(matches!(parse_signed(&utf16), Err(PolicyError::NotUtf8(_))));
+    }
+
+    fn doc_with_pack_regexes(matcher: &str, when: &str) -> String {
+        format!(
+            "version: 1\nrule_packs:\n  - id: acme\n    pack_version: 2\n    tool: gemini\n    scope: {{kind: user_global}}\n    watched_paths: []\n    rules:\n      - id: r\n        on_file: x\n        format: json\n        selector: $.x\n        matcher: {{kind: regex, pattern: '{matcher}'}}\n        emit: {{kind: sandbox_disabled}}\n        when:\n          - selector: $.y\n            matcher: {{kind: regex, pattern: '{when}'}}\n"
+        )
+    }
+
+    fn doc_with_target(platform: &str, disabled: bool, path: &str) -> String {
+        format!(
+            "version: 1\ntargets:\n  - id: t\n    description: d\n    tier: standard\n    platform: {platform}\n    disabled: {disabled}\n    paths: ['{path}']\n"
+        )
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_bad_regex_anywhere_in_a_rule_pack() {
+        for yaml in [
+            doc_with_pack_regexes("(", "ok"),
+            doc_with_pack_regexes("ok", "("),
+        ] {
+            let err = parse_signed(yaml.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("acme"), "{err}");
+        }
+        parse_signed(doc_with_pack_regexes("ok", "ok").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_glob_this_host_would_drop() {
+        let err = parse_signed(doc_with_target("any", false, "/tmp/[").as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("target t"), "{err}");
+    }
+
+    #[test]
+    fn parse_signed_ignores_a_target_this_host_never_compiles() {
+        let other_os = if cfg!(windows) { "linux" } else { "windows" };
+        parse_signed(doc_with_target(other_os, false, "/tmp/[").as_bytes()).unwrap();
+        parse_signed(doc_with_target("any", true, "/tmp/[").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn parse_signed_accepts_path_tokens() {
+        for path in ["~/.x/*.json", "$HOME/.x", "%APPDATA%/x/*.json"] {
+            parse_signed(doc_with_target("any", false, path).as_bytes()).unwrap();
+        }
+    }
 
     fn yaml_minimal() -> &'static str {
         r#"

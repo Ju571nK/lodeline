@@ -57,6 +57,19 @@ pub enum HookActionMatch {
     },
 }
 
+impl HookActionMatch {
+    /// Every field matcher of this rule.
+    pub fn matchers(&self) -> Vec<&Matcher> {
+        match self {
+            Self::Bash { command } => vec![command],
+            Self::BashIndirection { indirection } => vec![indirection],
+            Self::FileEdit { path } => vec![path],
+            Self::McpCall { server, tool } => vec![server, tool],
+            Self::Other { label, detail } => vec![label, detail],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

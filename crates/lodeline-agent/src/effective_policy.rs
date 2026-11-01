@@ -16,7 +16,7 @@
 use crate::ai_guard::rubric::Rubric;
 use crate::hook_deny::DenyEvaluator;
 use lodeline_core::event::AiGuardBucket;
-use lodeline_core::policy::{current_platform, defaults, merge, validate_deny_rule_ids};
+use lodeline_core::policy::{merge_on_this_host, validate_deny_rule_ids};
 use std::path::Path;
 
 /// Build `(Rubric, DenyEvaluator, enforce_bucket)` from disk — cold, no daemon.
@@ -77,7 +77,7 @@ pub fn load_effective_policy(
     };
 
     // ── 3. Merge: defaults < policy.yaml < bundle ─────────────────────────────
-    let effective = merge(defaults()?, user_doc, bundle_doc, current_platform())
+    let effective = merge_on_this_host(user_doc, bundle_doc)
         .map_err(|e| anyhow::anyhow!("policy merge failed: {e}"))?;
 
     // ── 4. Build Rubric from rubric_overrides ─────────────────────────────────
