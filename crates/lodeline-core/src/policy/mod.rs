@@ -58,6 +58,12 @@ pub struct WatchTarget {
     pub disabled: bool,
 }
 
+impl WatchTarget {
+    fn runs_on(&self, platform: Platform) -> bool {
+        matches!(self.platform, Platform::Any) || self.platform == platform
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostIdStrategy {
@@ -316,6 +322,14 @@ pub enum PolicyError {
     DuplicateDenyRuleId(String),
     #[error("hook deny rule {id}: {detail}")]
     DenyRuleRegex { id: String, detail: String },
+    #[error("rule pack {id}: rule {rule}: {detail}")]
+    RulePackRegex {
+        id: String,
+        rule: String,
+        detail: String,
+    },
+    #[error("target {id}: {detail}")]
+    TargetGlob { id: String, detail: String },
     #[error("policy is not UTF-8")]
     NotUtf8(#[from] std::str::Utf8Error),
 }
@@ -341,17 +355,46 @@ pub fn parse(yaml: &str) -> Result<PolicyDocument, PolicyError> {
 }
 
 /// Parse a document that travels in a signed envelope. Beyond [`parse`], this
-/// refuses text that is not UTF-8, which boot cannot read, and a deny rule that
-/// does not compile, which makes boot run with no deny rules at all.
+/// refuses text that is not UTF-8, which boot cannot read, a deny rule that does
+/// not compile, which makes boot run with no deny rules at all, and what boot
+/// would skip with only a log line: a rule-pack regex that does not compile, and
+/// a target path that does not compile as a glob on this OS.
 ///
-/// Whether the document merges depends on the host's defaults: see
-/// [`merge_on_this_host`] and [`merge_on_any_os`].
+/// A policy and a bundle share this check. Only a policy has to merge, and that
+/// depends on the host's defaults: see [`merge_on_this_host`].
 pub fn parse_signed(bytes: &[u8]) -> Result<PolicyDocument, PolicyError> {
     let doc = parse(std::str::from_utf8(bytes)?)?;
     for rule in &doc.hook_deny_rules {
         for matcher in rule.match_.matchers() {
             matcher.compile().map_err(|e| PolicyError::DenyRuleRegex {
                 id: rule.id.clone(),
+                detail: e.to_string(),
+            })?;
+        }
+    }
+    for pack in &doc.rule_packs {
+        for rule in &pack.rules {
+            let conditions = rule.when.iter().map(|c| &c.matcher);
+            for matcher in std::iter::once(&rule.matcher).chain(conditions) {
+                matcher.compile().map_err(|e| PolicyError::RulePackRegex {
+                    id: pack.id.clone(),
+                    rule: rule.id.clone(),
+                    detail: e.to_string(),
+                })?;
+            }
+        }
+    }
+    // Another OS reads a target's paths by its own glob rules: `\` ends a Windows
+    // directory path but escapes on Unix. That host's `apply` checks those targets.
+    let current = current_platform();
+    for t in doc
+        .targets
+        .iter()
+        .filter(|t| !t.disabled && t.runs_on(current))
+    {
+        for path in &t.paths {
+            glob::CompiledGlob::new(path).map_err(|e| PolicyError::TargetGlob {
+                id: t.id.clone(),
                 detail: e.to_string(),
             })?;
         }
@@ -449,7 +492,7 @@ pub fn merge(
     // 4. Drop disabled.
     by_id.retain(|t| !t.disabled);
     // 5. Filter by current platform (Any always passes).
-    by_id.retain(|t| matches!(t.platform, Platform::Any) || t.platform == current);
+    by_id.retain(|t| t.runs_on(current));
     // 6. Empty after merge is an error.
     if by_id.is_empty() {
         return Err(PolicyError::EmptyTargets);
@@ -556,23 +599,6 @@ pub fn merge_on_this_host(
     bundle: Option<PolicyDocument>,
 ) -> Result<EffectivePolicy, PolicyError> {
     merge(defaults()?, user, bundle, current_platform())
-}
-
-/// Accept `doc` if a host on some supported OS can merge it. A signer can run on
-/// a different OS from its hosts, so the defaults of one OS cannot decide this.
-pub fn merge_on_any_os(doc: &PolicyDocument) -> Result<(), PolicyError> {
-    let mut result = Ok(());
-    for (defaults_yaml, platform) in [
-        (lodeline_rules_basic::DEFAULTS_MACOS, Platform::Macos),
-        (lodeline_rules_basic::DEFAULTS_WINDOWS, Platform::Windows),
-        (lodeline_rules_basic::DEFAULTS_LINUX, Platform::Linux),
-    ] {
-        result = merge(parse(defaults_yaml)?, Some(doc.clone()), None, platform).map(drop);
-        if result.is_ok() {
-            break;
-        }
-    }
-    result
 }
 
 /// Built-in defaults for the current OS, parsed from a compile-time-embedded YAML.
@@ -727,42 +753,6 @@ mod tests {
         for path in ["~/.x/*.json", "$HOME/.x", "%APPDATA%/x/*.json"] {
             parse_signed(doc_with_target("any", false, path).as_bytes()).unwrap();
         }
-    }
-
-    fn doc_overriding(id: &str) -> PolicyDocument {
-        parse(&format!(
-            "version: 1\noverrides:\n  - id: {id}\n    disabled: true\n"
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn merge_on_any_os_refuses_an_override_no_os_knows() {
-        assert!(matches!(
-            merge_on_any_os(&doc_overriding("no-such-target")),
-            Err(PolicyError::UnknownOverrideId(_))
-        ));
-    }
-
-    #[test]
-    fn merge_on_any_os_accepts_an_override_only_one_os_knows() {
-        let ids = |yaml| -> HashSet<String> {
-            parse(yaml)
-                .unwrap()
-                .targets
-                .into_iter()
-                .map(|t| t.id)
-                .collect()
-        };
-        let linux = ids(lodeline_rules_basic::DEFAULTS_LINUX);
-        let elsewhere = ids(lodeline_rules_basic::DEFAULTS_MACOS);
-        let elsewhere = &elsewhere | &ids(lodeline_rules_basic::DEFAULTS_WINDOWS);
-        let linux_only = linux
-            .difference(&elsewhere)
-            .next()
-            .expect("a Linux-only id");
-
-        merge_on_any_os(&doc_overriding(linux_only)).unwrap();
     }
 
     fn yaml_minimal() -> &'static str {

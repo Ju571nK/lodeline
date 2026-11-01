@@ -10,7 +10,7 @@
 //!   2. signature valid      → VerifyError::SignatureInvalid
 //!   3. valid_until in future → VerifyError::Expired
 //!   4. policy_version monotonic → VerifyError::VersionRegression
-//!   5. parse as boot would  → VerifyError::ParseFailed
+//!   5. document check (`parse_signed`) → VerifyError::ParseFailed
 
 use crate::event::PolicySignatureInvalidReason;
 use crate::policy::{

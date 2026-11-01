@@ -57,11 +57,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   stopped the next boot or turned hook deny rules off. `apply` now rejects it with
   `parse_failed` before anything is written, so the policy on disk, the version, and
   the running policy stay as they were. This covers an unsupported `version`, text
-  that is not UTF-8, a hook deny rule whose regex does not compile, and a policy
-  that does not merge over the defaults of the host. `lodeline-sign sign` now stops
-  on the same mistakes before it signs, and it writes no bundle. It checks the merge
-  against the defaults of each supported OS and refuses only when all of them fail,
-  so a mistake that affects one OS still reaches `apply` on that OS.
+  that is not UTF-8, a hook deny rule or rule-pack regex that does not compile, a
+  target path that does not compile as a glob, and a policy that does not merge over
+  the defaults of the host. `lodeline-sign sign` now stops on the same mistakes before
+  it signs, and it writes no bundle, with two limits. It does not check the merge,
+  because the file does not say whether it is a policy or a bundle, and only a policy
+  has to merge. It checks the target paths for its own OS and for `platform: any`, so
+  a target for another OS is checked by `apply` on that OS.
   `lodeline-sign verify` reports the same document errors.
 
 - `lodeline-sender` reported every TLS failure as a network failure, so the

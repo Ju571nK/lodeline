@@ -75,6 +75,17 @@ fn sign_leaves_a_merge_to_the_host_because_a_bundle_never_merges_overrides() {
 }
 
 #[test]
+fn sign_accepts_the_example_policy() {
+    let (out, wrote_file) = sign_cli(include_str!("../../../config/policy.example.yaml"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(wrote_file);
+}
+
+#[test]
 fn sign_accepts_a_target_written_for_another_os() {
     let (out, wrote_file) = sign_cli(
         "version: 1\ntargets:\n  - id: tools\n    description: d\n    tier: standard\n    platform: windows\n    recursive: true\n    paths: ['C:\\tools\\']\n",

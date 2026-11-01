@@ -4,8 +4,8 @@ use crate::keygen::SigningKeyFile;
 use anyhow::{Context, Result};
 use ed25519_dalek::Signer;
 use lodeline_core::policy::canonical::to_canonical_bytes;
+use lodeline_core::policy::parse_signed;
 use lodeline_core::policy::signed_envelope::{SignedEnvelope, SignedPolicyResponse};
-use lodeline_core::policy::{merge_on_any_os, parse_signed};
 use std::path::Path;
 use time::OffsetDateTime;
 
@@ -18,12 +18,12 @@ pub struct SignArgs<'a> {
 }
 
 /// Read the YAML, refuse it if no agent could load it, build + sign the envelope,
-/// and return the response.
+/// and return the response. The file does not say whether it is a policy or a
+/// bundle, and only a policy has to merge, so that check stays with `apply`.
 pub fn sign(args: SignArgs<'_>) -> Result<SignedPolicyResponse> {
     let yaml_bytes = std::fs::read(args.yaml_path)
         .with_context(|| format!("read yaml {}", args.yaml_path.display()))?;
     parse_signed(&yaml_bytes)
-        .and_then(|doc| merge_on_any_os(&doc))
         .with_context(|| format!("refuse to sign {}", args.yaml_path.display()))?;
 
     let envelope = SignedEnvelope {
