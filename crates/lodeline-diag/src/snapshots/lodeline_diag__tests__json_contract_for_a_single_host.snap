@@ -1,0 +1,30 @@
+---
+source: crates/lodeline-diag/src/lib.rs
+expression: "serde_json::to_string_pretty(&status).unwrap()"
+---
+{
+  "schema_version": 1,
+  "tool_version": "1.2.3",
+  "components": [
+    {
+      "name": "lodeline",
+      "presence": {
+        "state": "installed",
+        "path": "/usr/bin/lodeline",
+        "version": "1.2.3"
+      }
+    },
+    {
+      "name": "lodeline_sender",
+      "presence": {
+        "state": "missing"
+      }
+    }
+  ],
+  "agent": {
+    "state": "stopped"
+  },
+  "fleet": {
+    "state": "not_configured"
+  }
+}

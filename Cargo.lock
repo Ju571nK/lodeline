@@ -1967,6 +1967,7 @@ dependencies = [
  "insta",
  "libc",
  "lodeline-core",
+ "lodeline-diag",
  "mac_address",
  "notify",
  "os_info",
@@ -2010,8 +2011,23 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "time",
+ "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "lodeline-diag"
+version = "0.12.0"
+dependencies = [
+ "insta",
+ "libc",
+ "lodeline-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -69,7 +69,7 @@ fn current_uid() -> u32 {
 
 /// Default control named-pipe name on Windows.
 pub fn default_control_pipe_name() -> String {
-    r"\\.\pipe\lodeline-control".to_string()
+    lodeline_core::control_proto::DEFAULT_CONTROL_PIPE.to_string()
 }
 
 /// Default hook-decide named-pipe name on Windows (#162) — the enforce IPC the

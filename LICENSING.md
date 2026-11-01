@@ -20,6 +20,7 @@ These modules are public and accept community contributions:
 | `crates/lodeline-core`                             | Event schema, policy types, signing primitives   |
 | `crates/lodeline-agent`                            | Daemon runtime, file watcher, IPC, GC, heartbeat |
 | `crates/lodeline-spool`                            | Generic JSONL spool (producer/consumer/GC)       |
+| `crates/lodeline-diag`                             | Read-only host health snapshot for `status`      |
 | `crates/lodeline-rules-basic`                      | Baseline detection ruleset (macOS + Windows)     |
 | `crates/lodeline-core/src/sink/jsonl.rs`           | JSONL output sink                                |
 | `crates/lodeline-core/src/policy/verify.rs`        | Signed-policy verification chain                 |

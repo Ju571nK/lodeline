@@ -166,6 +166,7 @@ Set the diagnostic log level with `LODELINE_LOG` (e.g. `LODELINE_LOG=debug`).
 ## 5. Verify
 
 ```sh
+lodeline status              # components, agent, fleet link; add --json for the data
 lodeline doctor              # config + permissions (FDA), does not start the daemon
 lodeline show config         # merged effective policy
 lodeline show paths          # fully expanded watch paths

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/lodeline-core", "crates/lodeline-agent", "crates/lodeline-spool", "crates/lodeline-rules-basic", "crates/lodeline-sender", "crates/lodeline-signer", "crates/lodeline-server", "crates/lodeline-mcp", "crates/lodeline-hook", "crates/lodeline-proxy-api", "crates/lodeline-proxy", "crates/lodeline-proxy-e2e"]
+members = ["crates/lodeline-core", "crates/lodeline-agent", "crates/lodeline-diag", "crates/lodeline-spool", "crates/lodeline-rules-basic", "crates/lodeline-sender", "crates/lodeline-signer", "crates/lodeline-server", "crates/lodeline-mcp", "crates/lodeline-hook", "crates/lodeline-proxy-api", "crates/lodeline-proxy", "crates/lodeline-proxy-e2e"]
 resolver = "2"
 
 [workspace.package]

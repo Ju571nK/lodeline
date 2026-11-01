@@ -37,6 +37,16 @@ pub fn resolve_control_socket(
         .join("control.sock")
 }
 
+/// The agent's control named pipe on Windows.
+pub const DEFAULT_CONTROL_PIPE: &str = r"\\.\pipe\lodeline-control";
+
+/// The control socket is trusted only if its peer is root (the system agent) or
+/// the same user as this process (the individual-developer case). Any other
+/// local user owning the socket is treated as a spoofing attempt (#57).
+pub fn peer_trusted(peer_euid: u32, self_uid: u32) -> bool {
+    peer_euid == 0 || peer_euid == self_uid
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -231,6 +241,16 @@ mod tests {
     use super::*;
     use crate::policy::signed_envelope::{SignedEnvelope, SignedPolicyResponse};
     use time::macros::datetime;
+
+    #[test]
+    fn peer_trusted_accepts_root_and_self_rejects_others() {
+        assert!(peer_trusted(0, 501), "root agent is trusted");
+        assert!(peer_trusted(501, 501), "same user is trusted");
+        assert!(
+            !peer_trusted(1001, 501),
+            "a different local user is rejected"
+        );
+    }
 
     fn sample_response() -> SignedPolicyResponse {
         SignedPolicyResponse {

@@ -42,6 +42,8 @@ pub mod show;
 pub mod silence_task;
 pub mod sink_task;
 pub mod state_task;
+#[cfg(feature = "operator-cli")]
+pub mod status_cli;
 pub mod supervisor;
 pub mod test_support;
 pub mod watcher;

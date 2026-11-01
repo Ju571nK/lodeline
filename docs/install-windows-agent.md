@@ -96,6 +96,7 @@ lodeline run
 ```
 
 ```powershell
+lodeline status                 # components, agent, fleet link; add --json for the data
 lodeline show config            # merged effective policy
 lodeline show paths             # expanded watch paths
 lodeline show risk              # AI Guard risk score per detected AI tool
