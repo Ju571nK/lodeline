@@ -21,6 +21,7 @@ pub mod manifest;
 pub mod paths;
 pub mod policy;
 pub mod ratelimit;
+pub mod sender_status;
 pub mod sink;
 pub mod state;
 pub mod stats;
