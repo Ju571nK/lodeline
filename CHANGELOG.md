@@ -62,6 +62,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   With `--enforce --on-failure closed`, an unknown agent name now exits 2 with a reason
   on stderr, where it exited 0 before. With `--on-failure open` it still exits 0.
 
+- A path template with non-ASCII text, such as `$HOME/한국어/설정.json`, now expands
+  to that same text. Before, `expand` pushed each byte of the literal text as a
+  separate character, so the path came out as mojibake and a target with a
+  non-ASCII path never matched a file. `lodeline doctor` reported such a file as
+  "not present". Token parsing is unchanged, and a bad token still returns
+  `Malformed`. (#379)
+
 - Policy and rule-pack applies now run one at a time. Before, an older version sent
   at the same moment as a newer one could pass the version check and land last, so
   the file on disk and the recorded version moved backward. An apply now reads the
