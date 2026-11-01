@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,7 @@ use lodeline_proxy::bootstrap::Bootstrap;
 use lodeline_proxy::config_sync::{ConfigView, MtlsFetcher};
 use lodeline_proxy::ingest_client::{
     run_ingest, EventSource, IngestClient, IngestOutcome, IngestParams, IngestTransport,
+    MAX_CONSECUTIVE_SINGLE_QUARANTINES,
 };
 use lodeline_proxy::status_report::{
     run_status_reporter, CentralHealth, GapQueue, PostFuture, Reporter, ReporterParams,
@@ -792,6 +793,11 @@ struct Tap {
     inner: Arc<MtlsFetcher>,
     log: Mutex<Vec<Post>>,
     drop_replies: AtomicUsize,
+    /// Add a field the server's closed envelope refuses, as a proxy upgraded
+    /// before the server would. The client's own parse has already passed.
+    newer_shape: AtomicBool,
+    /// Limit `newer_shape` to events up to this sequence; 0 means every event.
+    newer_upto: AtomicUsize,
     /// Source whose acknowledged count is noted whenever a reply is dropped.
     watch: Mutex<Option<Fixture>>,
     acked_at_drop: Mutex<Vec<usize>>,
@@ -803,6 +809,8 @@ impl Tap {
             inner,
             log: Mutex::default(),
             drop_replies: AtomicUsize::new(0),
+            newer_shape: AtomicBool::new(false),
+            newer_upto: AtomicUsize::new(0),
             watch: Mutex::default(),
             acked_at_drop: Mutex::default(),
         })
@@ -813,6 +821,16 @@ impl Tap {
     fn count_status(&self, s: u16) -> usize {
         self.posts().iter().filter(|p| p.status == Some(s)).count()
     }
+}
+
+fn with_newer_shape(body: &[u8], upto: usize) -> Vec<u8> {
+    let mut v: Value = serde_json::from_slice(body).unwrap();
+    for e in v["events"].as_array_mut().unwrap() {
+        if upto == 0 || e["sequence"].as_u64().unwrap() as usize <= upto {
+            e["field_of_a_newer_proxy"] = json!(1);
+        }
+    }
+    serde_json::to_vec(&v).unwrap()
 }
 
 impl IngestTransport for Tap {
@@ -828,6 +846,11 @@ impl IngestTransport for Tap {
                     })
                 })
                 .unwrap_or_default();
+            let body = if self.newer_shape.load(Ordering::SeqCst) {
+                with_newer_shape(&body, self.newer_upto.load(Ordering::SeqCst))
+            } else {
+                body
+            };
             let reply = self.inner.post_events(body).await;
             let dropped = reply.is_some() && take_one(&self.drop_replies);
             if dropped {
@@ -960,6 +983,138 @@ impl Proxy {
 }
 
 // ------------------------------------------------------------------- tests
+
+/// #339: the real server parse path refuses every event at index 0. The client
+/// stops after the limit, keeps the rest unsent, and sends them after the upgrade.
+#[tokio::test]
+async fn shape_the_server_cannot_parse_stops_at_the_limit_and_resumes() {
+    let Some(h) = H::new(|_| {}).await else {
+        return;
+    };
+    let cap = MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize;
+    let px = Proxy::new(&h);
+    px.tap.newer_shape.store(true, Ordering::SeqCst);
+    px.fx.push((1..=30).map(ping));
+    // A long period keeps the slow exit out of this test.
+    let params = IngestParams {
+        max_backoff: Duration::from_secs(30),
+        ..fast_params()
+    };
+    let client = IngestClient::new(px.gaps.clone(), px.central.clone(), params);
+    let run = spawn_ingest(&px.tap, &px.fx, client);
+    eventually("the client keeps retrying past the limit", || {
+        px.tap.count_status(422) >= cap + 3
+    })
+    .await;
+
+    assert_eq!(px.fx.quarantined().len(), cap);
+    assert_eq!(px.fx.unsent_count(), 30 - cap);
+    assert_eq!(px.fx.acked_count(), 0);
+    assert!(!h.stored(1));
+    assert!(px
+        .fx
+        .quarantined()
+        .iter()
+        .all(|(_, code)| *code == QuarantineCode::SemanticInvalid));
+    let refusal: Value = serde_json::from_slice(&px.tap.posts()[0].body).unwrap();
+    assert_eq!(refusal["error"]["items"][0]["index"], 0);
+    assert_eq!(px.gaps.pending_batch().len(), cap);
+    assert_eq!(px.central.consecutive_failures(), 0);
+    assert!(px.central.last_ingest_ack_at().is_none());
+    assert!(px.central.ingest_stopped());
+
+    px.tap.newer_shape.store(false, Ordering::SeqCst);
+    eventually("the rest is accepted after the upgrade", || {
+        px.fx.acked_count() == 30 - cap
+    })
+    .await;
+    assert!(!px.central.ingest_stopped());
+    run.stop().await;
+    assert_eq!(px.fx.quarantined().len(), cap);
+    assert_eq!(px.fx.unsent_count(), 0);
+    assert!(!h.stored(cap as u32));
+    assert!(h.stored(cap as u32 + 1));
+    assert!(h.stored(30));
+}
+
+/// #339: twelve events the server refuses for good, then a hundred good ones.
+/// The refused ones leave slowly and every good one is accepted.
+#[tokio::test]
+async fn good_traffic_resumes_behind_a_permanent_refusal() {
+    let Some(h) = H::new(|_| {}).await else {
+        return;
+    };
+    let cap = MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize;
+    let px = Proxy::new(&h);
+    px.tap.newer_shape.store(true, Ordering::SeqCst);
+    px.tap.newer_upto.store(12, Ordering::SeqCst);
+    px.fx.push((1..=12).map(ping));
+    let run = spawn_ingest(&px.tap, &px.fx, px.client());
+    let (rep, _tx) = spawn_reporter(&h.fetcher, &px.gaps, &px.central);
+    let reported_stop = || {
+        h.ctx()
+            .store
+            .entry(PROXY)
+            .and_then(|e| e.status)
+            .and_then(|s| s.central.ingest_stopped)
+    };
+    eventually("the server sees the stop", || reported_stop() == Some(true)).await;
+    let stopped_at = Instant::now();
+    assert!(px.fx.quarantined().len() >= cap);
+    assert_eq!(px.central.consecutive_failures(), 0);
+    px.fx.push((13..=112).map(ping));
+    eventually("every good event is accepted", || {
+        px.fx.acked_count() == 100
+    })
+    .await;
+    // The proxy stops sending the field, so the stored true must go with it.
+    eventually("the server sees the stop end", || reported_stop().is_none()).await;
+    run.stop().await;
+    rep.stop().await;
+    assert!(stopped_at.elapsed() >= fast_params().max_backoff * 2);
+    assert_eq!(px.fx.quarantined().len(), 12);
+    assert_eq!(px.fx.unsent_count(), 0);
+    assert!(!h.stored(12));
+    assert!(h.stored(13));
+    assert!(h.stored(112));
+}
+
+/// #339, SV-4: the server names every bad event of a batch. Eight answers take
+/// three events each, then one event leaves per period, and good traffic resumes.
+#[tokio::test]
+async fn named_refusals_leave_one_event_per_period_when_stopped() {
+    let Some(h) = H::new(|_| {}).await else {
+        return;
+    };
+    let cap = MAX_CONSECUTIVE_SINGLE_QUARANTINES as usize;
+    let px = Proxy::new(&h);
+    h.upload_metadata(&mref(1)).await;
+    px.fx
+        .push((1..=30).map(|n| ev(n, 1, n, Some(&mref(1)), "up2")));
+    let run = spawn_ingest(
+        &px.tap,
+        &px.fx,
+        px.client().with_batch_limits(3, usize::MAX),
+    );
+    eventually("the limit is reached", || px.central.ingest_stopped()).await;
+    let stopped_at = Instant::now();
+    assert_eq!(px.tap.count_status(200), 0);
+    assert!(
+        px.fx.quarantined().len() >= 3 * cap,
+        "each answer named three"
+    );
+    assert!(px.fx.quarantined().len() < 30, "the limit held");
+    px.fx.push((31..=130).map(ping));
+    eventually("every good event is accepted", || {
+        px.fx.acked_count() == 100
+    })
+    .await;
+    run.stop().await;
+    assert!(stopped_at.elapsed() >= fast_params().max_backoff * 4);
+    assert_eq!(px.fx.quarantined().len(), 30);
+    assert_eq!(px.fx.unsent_count(), 0);
+    assert!(!px.central.ingest_stopped());
+}
 
 /// Happy path: events reach the ledger; the source is acknowledged only after
 /// the 200 (checked inside the acknowledgement); a reply lost after the server

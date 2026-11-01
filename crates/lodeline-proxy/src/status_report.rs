@@ -33,7 +33,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lodeline_proxy_api::status::ConfigState;
+use lodeline_proxy_api::status::{ConfigState, SpoolState};
 use lodeline_proxy_api::{ErrorCode, GapReport};
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -72,6 +72,7 @@ pub struct CentralHealth(Arc<Mutex<CentralInner>>);
 struct CentralInner {
     last_ingest_ack_at: Option<String>,
     consecutive_failures: i64,
+    ingest_stopped: bool,
 }
 
 impl CentralHealth {
@@ -95,6 +96,14 @@ impl CentralHealth {
         let mut g = self.lock();
         g.consecutive_failures = 0;
         g.last_ingest_ack_at = Some(rfc3339(at));
+    }
+    /// The server keeps refusing events and ingest passed the quarantine limit
+    /// (`ingest_client::MAX_CONSECUTIVE_SINGLE_QUARANTINES`).
+    pub fn set_ingest_stopped(&self, stopped: bool) {
+        self.lock().ingest_stopped = stopped;
+    }
+    pub fn ingest_stopped(&self) -> bool {
+        self.lock().ingest_stopped
     }
     pub fn consecutive_failures(&self) -> i64 {
         self.lock().consecutive_failures
@@ -876,10 +885,15 @@ impl StatusBuilder {
         // (T-13). It says nothing about health. A builder with no spool attached
         // (unit tests only) reports an empty spool and `capacity_bytes = 1`, the
         // least the schema allows.
+        let ingest_stopped = self.central.ingest_stopped();
         let (spool_section, last_assigned) = match self.spool.as_ref().map(Spool::snapshot) {
             Some(s) => (
                 json!({
-                    "state": s.state,
+                    // Events are not draining, so the list view must not say ok.
+                    "state": match s.state {
+                        SpoolState::Ok if ingest_stopped => SpoolState::Degraded,
+                        state => state,
+                    },
                     "depth_events": s.unsent_events.saturating_add(s.retained_acked_events),
                     "unsent_events": s.unsent_events,
                     "bytes": s.unsent_bytes.saturating_add(s.retained_acked_bytes),
@@ -934,6 +948,12 @@ impl StatusBuilder {
                 None => json!({"upstream_id": u, "state": route_state}),
             })
             .collect();
+        let mut central = json!({"last_ingest_ack_at": self.central.last_ingest_ack_at(),
+            "consecutive_failures": self.central.consecutive_failures()});
+        // Only when true: an older server refuses the whole report for this field.
+        if ingest_stopped {
+            central["ingest_stopped"] = json!(true);
+        }
         let body = json!({
             "schema_version": 1,
             "report_id": uuid::Uuid::new_v4().to_string(),
@@ -944,8 +964,7 @@ impl StatusBuilder {
             "config": config,
             "spool": spool_section,
             "registry": registry_section,
-            "central": {"last_ingest_ack_at": self.central.last_ingest_ack_at(),
-                "consecutive_failures": self.central.consecutive_failures()},
+            "central": central,
             "routes": routes,
             "counters": {"auth_failures": [], "unmatched_cancels": []},
             "gaps": gaps,
@@ -2565,6 +2584,16 @@ mod tests {
         let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
         assert_eq!(s.central.consecutive_failures.get(), 0);
         assert!(s.central.last_ingest_ack_at.is_some());
+        assert_eq!(s.central.ingest_stopped, None, "absent while not stopped");
+        central.set_ingest_stopped(true);
+        let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
+        assert_eq!(s.central.ingest_stopped, Some(true));
+        central.set_ingest_stopped(false);
+        let s = st(b.build(&view(ConfigState::Valid), &[], now).unwrap());
+        assert_eq!(
+            s.central.ingest_stopped, None,
+            "absent again after the stop"
+        );
         // an expired config does not claim its routes are supported
         let mut expired = view(ConfigState::Expired);
         expired.route_upstreams = vec!["up-r1".into()];
@@ -2717,8 +2746,10 @@ mod tests {
     async fn report_carries_real_spool_numbers_and_the_tail_sequence() {
         let d = tempfile::tempdir().unwrap();
         let spool = test_spool(d.path());
+        let central = CentralHealth::new();
         let mut b = StatusBuilder::new("px-1", &uid(5000));
         b.set_spool(spool.clone());
+        b.set_central(central.clone());
         let v = built(&mut b);
         assert_eq!(v["last_assigned_sequence"], 0);
         assert_eq!(v["spool"]["state"], "ok");
@@ -2740,11 +2771,19 @@ mod tests {
         assert_eq!(v["spool"]["quarantined_events"], 0);
         assert_eq!(v["spool"]["quarantined_bytes"], 0);
 
-        // Full: admission is closed and the state says so.
+        // Stopped ingest: the reported state stops saying ok.
+        assert_eq!(v["spool"]["state"], "ok");
+        central.set_ingest_stopped(true);
+        let v = built(&mut b);
+        assert_eq!(v["spool"]["state"], "degraded");
+        assert_eq!(v["central"]["ingest_stopped"], true);
+
+        // Full: admission is closed and the state says so, stopped or not.
         let one = spool.snapshot().unsent_bytes / 2;
         spool.set_capacity_for_test(one * 2 + 5, 5);
         let v = built(&mut b);
         assert_eq!(v["spool"]["state"], "full");
+        central.set_ingest_stopped(false);
         assert_eq!(v["spool"]["capacity_bytes"], one * 2 + 5);
 
         // Acknowledged events leave `unsent` but the sequence never goes back.

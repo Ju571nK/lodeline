@@ -2470,6 +2470,33 @@ fn spool_quarantined_bytes_is_optional_and_round_trips() {
 }
 
 #[test]
+fn central_ingest_stopped_is_optional_and_round_trips() {
+    use lodeline_proxy_api::parse_status;
+    let old = parse_status(&serde_json::to_vec(&status()).unwrap()).unwrap();
+    assert!(old.central.ingest_stopped.is_none());
+    assert!(serde_json::to_value(&old).unwrap()["central"]
+        .get("ingest_stopped")
+        .is_none());
+
+    for stopped in [true, false] {
+        let mut v = status();
+        v["central"]["ingest_stopped"] = json!(stopped);
+        let new = parse_status(&serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_eq!(new.central.ingest_stopped, Some(stopped));
+        assert_eq!(serde_json::to_value(&new).unwrap()["central"], v["central"]);
+    }
+
+    for bad in [json!(1), json!("true"), json!(null)] {
+        let mut b = status();
+        b["central"]["ingest_stopped"] = bad.clone();
+        assert!(
+            parse_status(&serde_json::to_vec(&b).unwrap()).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn registry_counters_are_optional_and_round_trip() {
     use lodeline_proxy_api::parse_status;
     // Old shape (a proxy that predates the counters): accepted, fields absent,

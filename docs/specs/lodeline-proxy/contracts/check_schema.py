@@ -913,7 +913,8 @@ def status(**over):
                   "capacity_bytes": 1073741824, "oldest_unsent_age_seconds": 40,
                   "quarantined_events": 0, "quarantined_bytes": 0},
         "registry": {"pending_entries": 0, "sync_stalled": False},
-        "central": {"last_ingest_ack_at": "2026-10-10T01:59:30Z", "consecutive_failures": 0},
+        "central": {"last_ingest_ack_at": "2026-10-10T01:59:30Z", "consecutive_failures": 0,
+                    "ingest_stopped": False},
         "routes": [{"upstream_id": "fixture", "state": "supported"},
                    {"upstream_id": "tasks-upstream", "state": "unsupported",
                     "reason": "upstream_capability_unsupported"}],
@@ -998,6 +999,11 @@ w_pos.append(("status epoch change report", stat, status(
 spool_ok = status()["spool"]
 w_pos.append(("status spool without quarantined_bytes (older proxy)", stat, status(
     spool={k: v for k, v in spool_ok.items() if k != "quarantined_bytes"})))
+central_ok = status()["central"]
+w_pos.append(("status central ingest stopped", stat, status(
+    central=dict(central_ok, ingest_stopped=True))))
+w_pos.append(("status central without ingest_stopped (not stopped)", stat, status(
+    central={k: v for k, v in central_ok.items() if k != "ingest_stopped"})))
 for label, doc in [
     ("raw name in gap", status(gaps=[dict(GAPS["registry_conflict"], name="json_ok")])),
     ("gap carries fingerprint", status(gaps=[dict(GAPS["registry_conflict"],
@@ -1060,6 +1066,8 @@ for label, doc in [
     ("spool negative", status(spool=dict(spool_ok, bytes=-1))),
     ("spool negative quarantined_bytes", status(spool=dict(spool_ok, quarantined_bytes=-1))),
     ("spool null quarantined_bytes", status(spool=dict(spool_ok, quarantined_bytes=None))),
+    ("central null ingest_stopped", status(central=dict(central_ok, ingest_stopped=None))),
+    ("central non-boolean ingest_stopped", status(central=dict(central_ok, ingest_stopped=1))),
     ("spool zero capacity", status(spool=dict(spool_ok, capacity_bytes=0))),
     ("route state raw", status(routes=[{"upstream_id": "fixture", "state": "canary"}])),
     ("route reason raw", status(routes=[{"upstream_id": "fixture", "state": "degraded",
