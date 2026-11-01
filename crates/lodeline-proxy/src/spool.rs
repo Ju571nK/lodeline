@@ -28,7 +28,8 @@
 //!   and a gap delivered more than E after the quarantine (an outage of at
 //!   least E; R + E for `spool_expired`). Until E is known nothing is deleted.
 //! * Admission stops at `capacity - gap_reserve` of unsent event bytes
-//!   ([`AppendError::Full`]); the reserve is only for gap records.
+//!   ([`AppendError::Full`]); the reserve is only for gap records. The status
+//!   reports `full` by the same rule, see [`admits`].
 //! * Unsent events older than [`SpoolConfig::max_offline_retry_age`] (R) are
 //!   moved unchanged to quarantine and a `spool_expired` gap is recorded for each
 //!   contiguous sequence run (O-1 option A). The gap is handed to the status
@@ -180,7 +181,8 @@ pub enum SpoolError {
 /// Why an append was refused. Nothing was stored in any of these cases.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AppendError {
-    /// Unsent bytes reached `capacity - gap_reserve`. The relay blocks new calls.
+    /// The event does not fit under `capacity - gap_reserve` (see [`admits`]). The
+    /// relay blocks new calls.
     #[error("spool is full")]
     Full,
     #[error("event exceeds event_max_bytes")]
@@ -286,6 +288,16 @@ struct Counters {
     pending_gaps: u64,
 }
 
+/// The admission rule, shared by [`Writer::append_tx`] and [`Spool::snapshot`] so
+/// the two cannot disagree: an event of `size` bytes is admitted iff the unsent
+/// bytes plus `size` stay within `limit` (`capacity - gap_reserve`). Acknowledged
+/// rows never count, because admission purges them first. The status asks it
+/// for an event of `event_max_bytes`, so `Ok` means every allowed event is
+/// admitted and `Full` means the largest one is refused.
+fn admits(unsent_bytes: u64, size: u64, limit: u64) -> bool {
+    unsent_bytes.saturating_add(size) <= limit
+}
+
 struct Shared {
     counters: Mutex<Counters>,
     degraded: AtomicBool,
@@ -293,6 +305,9 @@ struct Shared {
     dead: AtomicBool,
     capacity: AtomicU64,
     reserve: AtomicU64,
+    /// `event_max_bytes`: the largest event admitted, and the size the status
+    /// assumes for the next one.
+    event_max_bytes: AtomicU64,
     /// R in seconds; the applied server config can change it at runtime.
     retry_age_secs: AtomicU64,
     /// Q in seconds; 0 until the applied server config provides E (no purge).
@@ -350,6 +365,13 @@ struct Inner {
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
+impl Shared {
+    fn admission_limit(&self) -> u64 {
+        let cap = self.capacity.load(Ordering::Relaxed);
+        cap.saturating_sub(self.reserve.load(Ordering::Relaxed))
+    }
+}
+
 impl Drop for Inner {
     fn drop(&mut self) {
         let _ = self.tx.send(Cmd::Shutdown);
@@ -379,6 +401,7 @@ impl Spool {
             dead: AtomicBool::new(false),
             capacity: AtomicU64::new(cfg.capacity_bytes),
             reserve: AtomicU64::new(cfg.gap_reserve_bytes),
+            event_max_bytes: AtomicU64::new(cfg.event_max_bytes),
             retry_age_secs: AtomicU64::new(cfg.max_offline_retry_age.as_secs()),
             quarantine_retention_secs: AtomicU64::new(0),
             gap_exhausted: AtomicBool::new(false),
@@ -550,7 +573,11 @@ impl Spool {
             || sh.gap_exhausted.load(Ordering::SeqCst)
         {
             SpoolState::Degraded
-        } else if c.unsent_bytes >= cap.saturating_sub(reserve) {
+        } else if !admits(
+            c.unsent_bytes,
+            sh.event_max_bytes.load(Ordering::Relaxed),
+            sh.admission_limit(),
+        ) {
             SpoolState::Full
         } else {
             SpoolState::Ok
@@ -635,6 +662,16 @@ impl Spool {
     #[cfg(any(test, feature = "test-util"))]
     pub fn inject_storage_failure(&self, on: bool) {
         self.inner.shared.inject_failure.store(on, Ordering::SeqCst);
+    }
+
+    /// Test knob: change `event_max_bytes`, for capacities smaller than the
+    /// default event limit.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_event_max_bytes_for_test(&self, bytes: u64) {
+        self.inner
+            .shared
+            .event_max_bytes
+            .store(bytes, Ordering::SeqCst);
     }
 
     /// Test knob: change the capacity and gap reserve.
@@ -1177,9 +1214,7 @@ impl Writer {
             self.set_degraded(true);
             return Err(AppendError::DiskFull);
         }
-        let cap = self.shared.capacity.load(Ordering::Relaxed);
-        let reserve = self.shared.reserve.load(Ordering::Relaxed);
-        let limit = cap.saturating_sub(reserve);
+        let limit = self.shared.admission_limit();
         let now = (self.cfg.clock)();
         let boot = (self.cfg.boot_clock)();
         let mut res = self.append_tx(&mut event, now, boot.as_ref(), limit);
@@ -1254,10 +1289,10 @@ impl Writer {
         let bytes =
             serde_json::to_vec(&*event).map_err(|_| AppendTx::Refused(AppendError::Storage))?;
         let size = bytes.len() as u64;
-        if size > self.cfg.event_max_bytes {
+        if size > self.shared.event_max_bytes.load(Ordering::Relaxed) {
             return Err(AppendTx::Refused(AppendError::TooLarge));
         }
-        if unsent_bytes.saturating_add(size) > limit {
+        if !admits(unsent_bytes, size, limit) {
             return Err(AppendTx::Refused(AppendError::Full));
         }
         if unsent_bytes
@@ -2151,8 +2186,11 @@ mod tests {
     #[test]
     fn capacity_blocks_and_keeps_gap_reserve() {
         let d = tempfile::tempdir().unwrap();
-        let (s, _) = open(d.path());
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
         let sz = event_size();
+        let mut c = cfg(d.path(), now);
+        c.event_max_bytes = sz;
+        let s = Spool::open(c).unwrap();
         // Room for exactly 2 events plus a 1 KiB reserve.
         s.set_capacity_for_test(2 * sz + 1024, 1024);
         s.append(event(1)).unwrap();
@@ -2169,6 +2207,29 @@ mod tests {
         s2.acknowledged(&[uid(1)]);
         assert_eq!(s.snapshot().state, SpoolState::Ok);
         assert!(s.append(event(3)).is_ok());
+    }
+
+    /// #362: the status and admission share one rule, so the status is `Full`
+    /// exactly when the next event is refused for lack of room.
+    #[test]
+    fn status_is_full_exactly_when_admission_refuses() {
+        let d = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let sz = event_size();
+        let mut c = cfg(d.path(), now);
+        c.event_max_bytes = sz;
+        let s = Spool::open(c).unwrap();
+        // Room for two events and half of a third.
+        s.set_capacity_for_test(2 * sz + sz / 2 + 1024, 1024);
+        for n in 1..=4 {
+            let state = s.snapshot().state;
+            let res = s.append(event(n));
+            assert_eq!(
+                state == SpoolState::Full,
+                res == Err(AppendError::Full),
+                "event {n}: status {state:?}, append {res:?}"
+            );
+        }
     }
 
     #[test]
@@ -2450,6 +2511,7 @@ mod tests {
             dead: AtomicBool::new(false),
             capacity: AtomicU64::new(1 << 30),
             reserve: AtomicU64::new(1 << 20),
+            event_max_bytes: AtomicU64::new(16 * 1024),
             retry_age_secs: AtomicU64::new(3600),
             quarantine_retention_secs: AtomicU64::new(0),
             gap_exhausted: AtomicBool::new(false),

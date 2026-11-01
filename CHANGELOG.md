@@ -125,6 +125,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   thread, so appends waited behind it. The query now walks `idx_unsent` and takes
   about 2 microseconds. (#359)
 
+- lodeline-proxy status said the spool was `ok` while the relay already refused calls.
+  The status reported `full` only when no byte was left, but admission refuses any
+  event larger than the room that remains. Both now use one rule. The status is
+  `full` when an event of `event_max_bytes` (16 KiB by default) no longer fits, so
+  `ok` means every allowed event is admitted. A smaller event can still fit while
+  the status says `full`. (#362)
+
 - `lodeline scan` no longer lists a tool as not configured when another scope of
   the same tool was assessed or failed to parse.
 
