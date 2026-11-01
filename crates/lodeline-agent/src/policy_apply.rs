@@ -58,10 +58,16 @@ pub struct ApplyContext {
     /// rule-pack bundle commits. The reload task (Task 5) subscribes to
     /// re-read `rule-packs.yaml` into the merge.
     pub rule_packs_version_tx: watch::Sender<i64>,
+    /// Held by an apply from reading the applied version until it has published
+    /// the result, so the check still holds at commit and results publish in
+    /// order. Only applies take it, so status reads and reloads never queue
+    /// behind a slow apply, and it is async because it is held across event sends.
+    pub apply_lock: tokio::sync::Mutex<()>,
 }
 
 /// Apply a freshly-received `SignedPolicyResponse`.
 pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> ApplyOutcome {
+    let _applying = ctx.apply_lock.lock().await;
     let now = OffsetDateTime::now_utc();
     let last_applied = {
         let cache = ctx.cache.lock();
@@ -146,6 +152,7 @@ pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> Apply
 /// `atomic_write_rule_packs`: it writes `rule-packs.yaml` and advances the
 /// rule-packs version. It NEVER touches policy.yaml or the policy version.
 pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyResponse) -> ApplyOutcome {
+    let _applying = ctx.apply_lock.lock().await;
     let now = OffsetDateTime::now_utc();
     let last_applied = {
         let cache = ctx.cache.lock();
@@ -345,6 +352,7 @@ mod tests {
                 active_valid_until: active_valid_until.clone(),
                 rule_packs_yaml_path: dir.path().join("rule-packs.yaml"),
                 rule_packs_version_tx,
+                apply_lock: Default::default(),
             },
             sk,
             rx_event,

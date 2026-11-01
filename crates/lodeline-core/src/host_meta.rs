@@ -57,29 +57,37 @@ impl HashCache {
     }
 
     /// Set `last_applied_policy_version` (called from the apply_policy IPC
-    /// path after a verified envelope is durably written). Caller must ensure
-    /// the new value is strictly greater than the current value (the §3.8.2
-    /// monotonic check); this method does not enforce it because the agent's
-    /// verify-chain already does so before commit.
+    /// path after a verified envelope is durably written). The caller's
+    /// verify-chain makes the §3.8.2 monotonic check before commit. This is the
+    /// last guard: a lower value leaves the row alone and returns
+    /// [`StateError::WouldLowerVersion`].
     pub fn host_meta_set_policy_version(&self, version: i64) -> Result<(), StateError> {
-        self.conn.execute(
-            "UPDATE host_meta SET last_applied_policy_version = ?1 WHERE id = 1",
+        let updated = self.conn.execute(
+            "UPDATE host_meta SET last_applied_policy_version = ?1
+             WHERE id = 1 AND last_applied_policy_version <= ?1",
             rusqlite::params![version],
         )?;
-        Ok(())
+        require_advanced(updated, version)
     }
 
     /// Set `last_applied_rule_packs_version` (advanced after a verified
     /// rule-packs bundle is durably written). Mirrors
-    /// `host_meta_set_policy_version`; the monotonic check is enforced by the
-    /// caller's verify-chain, not here.
+    /// `host_meta_set_policy_version`, including its refusal of a lower value.
     pub fn set_last_applied_rule_packs_version(&self, version: i64) -> Result<(), StateError> {
-        self.conn.execute(
-            "UPDATE host_meta SET last_applied_rule_packs_version = ?1 WHERE id = 1",
+        let updated = self.conn.execute(
+            "UPDATE host_meta SET last_applied_rule_packs_version = ?1
+             WHERE id = 1 AND last_applied_rule_packs_version <= ?1",
             rusqlite::params![version],
         )?;
-        Ok(())
+        require_advanced(updated, version)
     }
+}
+
+fn require_advanced(updated: usize, requested: i64) -> Result<(), StateError> {
+    if updated == 0 {
+        return Err(StateError::WouldLowerVersion { requested });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,6 +152,39 @@ mod tests {
             c.host_meta_get().unwrap().last_applied_rule_packs_version,
             7
         );
+    }
+
+    #[test]
+    fn policy_version_refuses_to_move_backward() {
+        let (_dir, c) = fresh_cache();
+        c.host_meta_set_policy_version(5).unwrap();
+
+        let refused = c.host_meta_set_policy_version(4);
+
+        assert!(matches!(
+            refused,
+            Err(StateError::WouldLowerVersion { requested: 4 })
+        ));
+        assert_eq!(c.host_meta_get().unwrap().last_applied_policy_version, 5);
+        c.host_meta_set_policy_version(5).unwrap();
+    }
+
+    #[test]
+    fn rule_packs_version_refuses_to_move_backward() {
+        let (_dir, c) = fresh_cache();
+        c.set_last_applied_rule_packs_version(5).unwrap();
+
+        let refused = c.set_last_applied_rule_packs_version(4);
+
+        assert!(matches!(
+            refused,
+            Err(StateError::WouldLowerVersion { requested: 4 })
+        ));
+        assert_eq!(
+            c.host_meta_get().unwrap().last_applied_rule_packs_version,
+            5
+        );
+        c.set_last_applied_rule_packs_version(5).unwrap();
     }
 
     #[test]

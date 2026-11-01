@@ -16,7 +16,9 @@ pub enum AtomicWriteError {
     Io(#[from] std::io::Error),
     /// state.db update failure after disk write succeeded — caller should
     /// log loudly; the disk file is ahead of state.db, but boot reconciliation
-    /// in `reconcile_on_boot` will recover.
+    /// in `reconcile_on_boot` will recover. A lower version refused by state.db
+    /// also lands here, after the file has moved: `apply` runs one at a time so
+    /// that it cannot.
     #[error("state.db update failed AFTER disk write: {0}")]
     StateAfterDisk(StateError),
 }
@@ -174,6 +176,27 @@ mod tests {
         atomic_write(&target, b"version: 2\n", &cache, 2).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), b"version: 2\n");
+        assert_eq!(
+            cache.host_meta_get().unwrap().last_applied_policy_version,
+            2
+        );
+    }
+
+    #[test]
+    fn a_refused_version_reaches_the_caller_as_an_error() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let target = dir.path().join("policy.yaml");
+        atomic_write(&target, b"version: 2\n", &cache, 2).unwrap();
+
+        let refused = atomic_write(&target, b"version: 1\n", &cache, 1);
+
+        assert!(matches!(
+            refused,
+            Err(AtomicWriteError::StateAfterDisk(
+                StateError::WouldLowerVersion { requested: 1 }
+            ))
+        ));
         assert_eq!(
             cache.host_meta_get().unwrap().last_applied_policy_version,
             2

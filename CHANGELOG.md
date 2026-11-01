@@ -52,6 +52,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- Policy and rule-pack applies now run one at a time. Before, an older version sent
+  at the same moment as a newer one could pass the version check and land last, so
+  the file on disk and the recorded version moved backward. An apply now reads the
+  recorded version, verifies, writes, and publishes the result under one lock, so an
+  older version is refused with `version_regression` and changes nothing. Status
+  requests and policy reloads do not take that lock. The recorded versions also
+  refuse to go down on their own: `host_meta_set_policy_version` and
+  `set_last_applied_rule_packs_version` return `StateError::WouldLowerVersion` and
+  leave the value as it was, and `apply` reports that as an internal error.
+
 - A signed policy or rule-pack bundle that the agent could not load at boot is now
   refused. Before, such a document passed `apply`, advanced the version, and then
   stopped the next boot or turned hook deny rules off. `apply` now rejects it with
