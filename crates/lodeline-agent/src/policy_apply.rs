@@ -229,6 +229,7 @@ async fn settle_earlier_apply(
 }
 
 fn settle_failed(e: AtomicWriteError) -> ApplyOutcome {
+    tracing::error!(error = %e, "could not settle an earlier apply, refusing this one");
     ApplyOutcome::Internal {
         detail: format!("settling an earlier apply: {e}"),
     }
