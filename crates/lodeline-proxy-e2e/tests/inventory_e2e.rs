@@ -731,10 +731,21 @@ async fn start_proxy(h: &H, registry_poll: Duration) -> Running {
         )
         .await
     });
+    let spool = match tokio::time::timeout(WAIT, spool_rx).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) => match task.await {
+            Ok(r) => panic!("the proxy stopped before its spool opened: {r:?}"),
+            Err(e) => panic!("the proxy task failed before its spool opened: {e}"),
+        },
+        Err(_) => {
+            task.abort();
+            panic!("the proxy did not open its spool within {WAIT:?}")
+        }
+    };
     let px = Running {
         listen,
         session: tokio::sync::Mutex::new(None),
-        spool: Some(tokio::time::timeout(WAIT, spool_rx).await.unwrap().unwrap()),
+        spool: Some(spool),
         stop: Some(stop),
         task: Some(task),
     };
