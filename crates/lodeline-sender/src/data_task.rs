@@ -69,7 +69,9 @@ impl BackoffPolicy {
     }
 }
 
-use crate::transport::{classify_send_error, classify_status, failure_cause, SendOutcome};
+use crate::transport::{
+    cap_server_text, classify_send_error, classify_status, failure_cause, SendOutcome,
+};
 use crate::wire::{Envelope, EventsAccepted, EventsRequest};
 use lodeline_core::sink::jsonl::segment_order;
 use reqwest::Client;
@@ -220,7 +222,7 @@ pub fn local_event(host_id: &str, evidence: Evidence) -> Event {
 }
 
 /// Appends one `tls_failure` event per failure streak. A TLS failure repeats at every
-/// retry or poll and this directory has no rotation, so a loop sets `in_streak` here
+/// retry or poll and this directory keeps a file a day with no size limit, so a loop sets `in_streak` here
 /// and clears it on a success. The reason text is ignored: rustls prints the check
 /// time in expired and not-yet-valid errors, so it differs on every retry.
 pub fn dead_letter_tls_failure(dir: &Path, host_id: &str, in_streak: &mut bool, reason: String) {
@@ -353,7 +355,7 @@ pub async fn run(ctx: DataTaskCtx) {
                         &ctx.host_id,
                         Evidence::EventUnprocessableLocal {
                             original_event_id: r.event_id,
-                            server_reason: r.reason.clone(),
+                            server_reason: cap_server_text(&r.reason),
                         },
                     );
                     if let Err(e) = dead_letter::append(&ctx.config.dead_letter_dir, &evt) {
@@ -381,7 +383,10 @@ pub async fn run(ctx: DataTaskCtx) {
                 let evt = local_event(
                     &ctx.host_id,
                     Evidence::ServerProtocolViolation {
-                        detail: format!("batch rejected status={status}: {body}"),
+                        detail: format!(
+                            "batch rejected status={status}: {}",
+                            cap_server_text(&body)
+                        ),
                     },
                 );
                 let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);

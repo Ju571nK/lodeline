@@ -21,6 +21,9 @@ pub enum DeadLetterError {
     Serialize(serde_json::Error),
 }
 
+/// Most dead-letter files kept. There is one file a day.
+pub const MAX_FILES: usize = 30;
+
 /// Append one event line to today's `sender-dead-letter-YYYY-MM-DD.jsonl`
 /// in `dir`. Creates the file if missing; one fsync per line.
 pub fn append(dir: &Path, event: &Event) -> Result<(), DeadLetterError> {
@@ -54,7 +57,29 @@ pub fn append(dir: &Path, event: &Event) -> Result<(), DeadLetterError> {
         path: path.clone(),
         source,
     })?;
+    prune(dir);
     Ok(())
+}
+
+/// Removes the oldest dead-letter files past [`MAX_FILES`]. Names carry the date, so
+/// name order is age order. A failure is ignored: this directory is a debugging aid.
+fn prune(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("sender-dead-letter-") && n.ends_with(".jsonl"))
+        })
+        .collect();
+    files.sort();
+    for old in &files[..files.len().saturating_sub(MAX_FILES)] {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +126,27 @@ mod tests {
         let body = std::fs::read_to_string(entries[0].path()).unwrap();
         assert!(body.ends_with('\n'));
         assert_eq!(body.matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn the_oldest_files_go_when_there_are_too_many() {
+        let dir = tempdir().unwrap();
+        for day in 1..=MAX_FILES + 5 {
+            let name = format!("sender-dead-letter-2020-01-{day:02}.jsonl");
+            std::fs::write(dir.path().join(name), b"{}\n").unwrap();
+        }
+        std::fs::write(dir.path().join("notes.txt"), b"keep").unwrap();
+        append(dir.path(), &sample_event()).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("sender-dead-letter-"))
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), MAX_FILES);
+        assert!(names.last().unwrap() > &"sender-dead-letter-2021".to_owned());
+        assert!(!names.contains(&"sender-dead-letter-2020-01-01.jsonl".to_owned()));
+        assert!(dir.path().join("notes.txt").exists());
     }
 
     #[test]

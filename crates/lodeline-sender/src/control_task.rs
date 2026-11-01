@@ -3,7 +3,7 @@
 use crate::agent_ipc::{self, Settlement};
 use crate::heartbeat::{Plane, SharedStats};
 use crate::state;
-use crate::transport::{classify_send_error, failure_cause, SendOutcome};
+use crate::transport::{cap_server_text, classify_send_error, failure_cause, SendOutcome};
 use crate::wire::SignedPolicyResponse;
 use lodeline_core::sender_status::LinkFailure;
 use reqwest::Client;
@@ -65,7 +65,7 @@ fn protocol_violation(detail: String) -> PollOutcome {
 fn bad_status(status: u16, body: &str) -> PollOutcome {
     PollOutcome::ProtocolViolation {
         status: Some(status),
-        detail: format!("status {status}: {body}"),
+        detail: format!("status {status}: {}", cap_server_text(body)),
     }
 }
 

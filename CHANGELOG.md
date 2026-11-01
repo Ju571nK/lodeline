@@ -52,6 +52,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- `lodeline-sender` now caps the server text it stores in the dead-letter directory
+  at 512 bytes, cut on a character boundary and marked with `…`. Before, a status
+  body, an unparseable reply, a batch rejection, or a per-event rejection reason went
+  in whole, so a misbehaving server could fill the disk of a host. The directory also
+  keeps at most 30 files, one a day, and removes the oldest. A file still has no size
+  limit within its day.
+
 - `lodeline-sender` now gives up on a request to `lodeline-server` that gets no answer.
   The HTTP client had no timeout, so a server that accepted a connection and never
   replied held the request open and the link state stayed `connected` with an aging
