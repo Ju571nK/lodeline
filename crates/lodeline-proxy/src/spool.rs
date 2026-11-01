@@ -887,6 +887,7 @@ CREATE TABLE IF NOT EXISTS rewrite_originals (
   rewritten_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_quarantine_at ON quarantine(quarantined_at);
+CREATE INDEX IF NOT EXISTS idx_unsent ON events(sequence) WHERE state = 0;
 CREATE INDEX IF NOT EXISTS idx_unsent_created ON events(created_at) WHERE state = 0;
 CREATE INDEX IF NOT EXISTS idx_acked_at ON events(acked_at) WHERE state = 1;
 CREATE TABLE IF NOT EXISTS event_boot_stamps (
@@ -3691,5 +3692,43 @@ mod tests {
         assert_eq!(version, "1");
         clk.step_wall(86_401);
         assert_eq!(s.expire_now().unwrap().purged_acked, 1);
+    }
+
+    /// `OLDEST_UNSENT` names `idx_unsent`, so a spool missing it must get it back on
+    /// open, with the base schema's definition, instead of failing the query.
+    #[test]
+    fn a_spool_without_idx_unsent_heals_on_open() {
+        let d = tempfile::tempdir().unwrap();
+        let clk = Clocks::new();
+        let s = clk.open(d.path());
+        s.append(event(1)).unwrap();
+        s.close_blocking_for_test();
+        let path = d.path().join(SPOOL_FILE);
+        let index_sql = || -> Option<String> {
+            Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name = 'idx_unsent'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap()
+        };
+        let original = index_sql().expect("the base schema creates it");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP INDEX idx_unsent")
+            .unwrap();
+        assert_eq!(index_sql(), None);
+        let s = clk.open(d.path());
+        assert_eq!(index_sql(), Some(original));
+        assert_eq!(s.snapshot().unsent_events, 1);
+        s.close_blocking_for_test();
+        let created: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row(OLDEST_UNSENT, [], |r| r.get(0))
+            .unwrap();
+        assert!(created > 0);
     }
 }
