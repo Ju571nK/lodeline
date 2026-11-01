@@ -41,6 +41,29 @@ pub fn arm_watchdog(budget: Duration) {
     });
 }
 
+/// Debug builds only: lets the e2e tests drive a failure path on the real
+/// binary. No input reaches a panic, and release builds compile this out, so
+/// the env var is never read there.
+#[cfg(debug_assertions)]
+pub fn test_seam(point: &str) {
+    if std::env::var("LODELINE_HOOK_TEST_SEAM").as_deref() != Ok(point) {
+        return;
+    }
+    match point {
+        "hold_stdout" => {
+            let _held = std::io::stdout().lock();
+            loop {
+                std::thread::park();
+            }
+        }
+        "stall_after_write" => std::thread::sleep(Duration::from_secs(1)),
+        _ => panic!("test seam: {point}"),
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub fn test_seam(_point: &str) {}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

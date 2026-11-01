@@ -300,6 +300,7 @@ const DECISION_DEADLINE: Duration = Duration::from_millis(250);
 /// No verdict (daemon down / timeout / malformed) → apply on_failure.
 fn run_enforce(agent: &str, capture: CaptureLevel, on_failure: OnFailureArg) -> ! {
     std::panic::set_hook(Box::new(|_| std::process::exit(0)));
+    emit::test_seam("before_adapter");
     emit::arm_watchdog(Duration::from_millis(800)); // > decision deadline, < agent UX budget
     let adapter = match adapters::for_agent(agent) {
         Some(a) => a,
@@ -320,6 +321,9 @@ fn run_enforce(agent: &str, capture: CaptureLevel, on_failure: OnFailureArg) -> 
     if oversized {
         inv.capture_status = CaptureStatus::Oversized;
     }
+
+    emit::test_seam("panic");
+    emit::test_seam("hold_stdout");
 
     let req = HookDecisionRequest {
         protocol_version: HOOK_PROTOCOL_VERSION,
@@ -372,6 +376,7 @@ fn emit_deny(adapter: &dyn adapters::HookAdapter, rule_id: &str, reason: &str) -
         // println! appends a trailing newline; the agent reads the deny response as a line.
         println!("{s}");
     }
+    emit::test_seam("stall_after_write");
     std::process::exit(out.exit_code);
 }
 
