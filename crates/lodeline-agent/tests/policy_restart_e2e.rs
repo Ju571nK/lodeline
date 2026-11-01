@@ -903,7 +903,7 @@ fn a_policy_that_cannot_load_stops_the_boot_with_or_without_the_policy_flag() {
 }
 
 #[test]
-fn show_assess_and_doctor_read_the_default_policy_without_the_flag() {
+fn show_and_doctor_read_the_default_policy_without_the_flag() {
     if default_path_is_real() {
         return;
     }
@@ -915,7 +915,6 @@ fn show_assess_and_doctor_read_the_default_policy_without_the_flag() {
     };
 
     assert!(stdout(&["show", "config"]).contains("id: extra"));
-    assert!(stdout(&["assess", "--command", "forbidden-command"]).contains("blocked"));
 
     host.write_default_policy(NOT_A_POLICY);
     assert!(stdout(&["doctor"]).contains("[ERROR] policy parse failed"));

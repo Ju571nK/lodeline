@@ -209,9 +209,26 @@ pub fn run(args: AssessArgs) -> i32 {
 fn resolve_policy_paths(policy_override: Option<&Path>) -> (PathBuf, PathBuf) {
     let policy = policy_override
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(crate::runtime::default_policy_yaml_path);
+        .unwrap_or_else(default_policy_yaml_path);
     let rule_packs = policy.with_file_name("rule-packs.yaml");
     (policy, rule_packs)
+}
+
+/// Platform-specific system `policy.yaml`. Non-root callers read it too, so an
+/// integration running as a user gets the rules of the root agent on that host.
+fn default_policy_yaml_path() -> PathBuf {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        PathBuf::from("/etc/lodeline/policy.yaml")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PathBuf::from(r"C:\ProgramData\Lodeline\policy.yaml")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        PathBuf::from("/etc/lodeline/policy.yaml")
+    }
 }
 
 /// Human-readable name of the top-level JSON type (for error messages).
@@ -292,6 +309,13 @@ mod tests {
             rule_packs.to_str().unwrap().ends_with("rule-packs.yaml"),
             "rule-packs path should end in rule-packs.yaml: {rule_packs:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_policy_paths_reads_the_system_policy_as_any_user() {
+        let (policy, _) = resolve_policy_paths(None);
+        assert_eq!(policy, Path::new("/etc/lodeline/policy.yaml"));
     }
 
     #[test]
