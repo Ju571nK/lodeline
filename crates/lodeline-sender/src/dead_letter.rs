@@ -60,14 +60,16 @@ pub fn append(dir: &Path, event: &Event) -> Result<(), DeadLetterError> {
     })?;
     // The count only grows when a file is created, so one scan per file is enough.
     if new_file {
-        prune(dir);
+        prune(dir, &path);
     }
     Ok(())
 }
 
-/// Removes the oldest dead-letter files past [`MAX_FILES`]. Names carry the date, so
-/// name order is age order. A failure is ignored: this directory is a debugging aid.
-fn prune(dir: &Path) {
+/// Removes the oldest dead-letter files past [`MAX_FILES`], counting `keep`. Names carry
+/// the date, so name order is age order, unless the clock was set back. Then files
+/// dated in the future sort last, and `keep`, the file just written, is never one that
+/// goes. A failure is ignored: this directory is a debugging aid.
+fn prune(dir: &Path, keep: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -75,14 +77,19 @@ fn prune(dir: &Path) {
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("sender-dead-letter-") && n.ends_with(".jsonl"))
+            p != keep
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("sender-dead-letter-") && n.ends_with(".jsonl"))
         })
         .collect();
     files.sort();
-    for old in &files[..files.len().saturating_sub(MAX_FILES)] {
-        let _ = std::fs::remove_file(old);
+    let mut removed = 0;
+    for old in &files[..files.len().saturating_sub(MAX_FILES - 1)] {
+        removed += usize::from(std::fs::remove_file(old).is_ok());
+    }
+    if removed > 0 {
+        tracing::info!(removed, "pruned old dead-letter files");
     }
 }
 
@@ -164,6 +171,27 @@ mod tests {
         append(dir.path(), &sample_event()).unwrap();
         let count = || std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(count(), MAX_FILES + 1, "today's file already existed");
+    }
+
+    #[test]
+    fn the_file_just_written_survives_when_the_clock_was_set_back() {
+        let dir = tempdir().unwrap();
+        for day in 1..=MAX_FILES {
+            let name = format!("sender-dead-letter-2099-01-{day:02}.jsonl");
+            std::fs::write(dir.path().join(name), b"{}\n").unwrap();
+        }
+        append(dir.path(), &sample_event()).unwrap();
+        let today: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| !p.to_string_lossy().contains("2099"))
+            .collect();
+        assert_eq!(today.len(), 1, "today's file was pruned");
+        assert_eq!(
+            std::fs::read_to_string(&today[0]).unwrap().lines().count(),
+            1
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), MAX_FILES);
     }
 
     #[test]

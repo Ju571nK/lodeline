@@ -63,7 +63,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   body, an unparseable reply, a batch rejection, or a per-event rejection reason went
   in whole, so a misbehaving server could fill the disk of a host. The directory also
   keeps at most 30 files, one a day, and removes the oldest when it starts a new
-  file. A batch reply gets at most 20 per-event rejection entries. The rest are
+  file, and logs how many. It never removes the file it just wrote, even when the
+  clock was set back. A batch reply gets at most 20 per-event rejection entries. The rest are
   counted in one `server_protocol_violation` entry, so a server that rejects
   thousands of events at a time cannot grow the directory. A file still has no size
   limit within its day beyond these bounds.
