@@ -110,11 +110,28 @@ pub fn classify_status<R>(status: u16, body: String, parsed: Option<R>) -> SendO
 /// available) to either a TLS or network failure.
 pub fn classify_send_error<R>(err: reqwest::Error) -> SendOutcome<R> {
     let msg = err.to_string();
-    if msg.contains("tls") || msg.contains("certificate") || msg.contains("handshake") {
+    if is_tls_failure(&err) {
         SendOutcome::TlsFailure(msg)
     } else {
         SendOutcome::Network(msg)
     }
+}
+
+/// `reqwest` prints only "error sending request", so the cause is in the source
+/// chain. `io::Error::source` skips the error it wraps, so `get_ref` must look there.
+fn is_tls_failure(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(err);
+    while let Some(e) = next {
+        if e.is::<rustls::Error>() {
+            return true;
+        }
+        let wrapped = e
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+            .map(|inner| inner as &(dyn std::error::Error + 'static));
+        next = wrapped.or(e.source());
+    }
+    false
 }
 
 /// Returns `Some(latest_mtime)` if any of the cert / key / CA files have
@@ -136,6 +153,25 @@ pub fn newest_pem_mtime(paths: &[&Path]) -> std::io::Result<Option<std::time::Sy
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn a_failed_tls_handshake_is_a_tls_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"HTTP/1.1 400 not tls\r\n\r\n").await.ok();
+        });
+        let err = build_client(None, None, None)
+            .unwrap()
+            .get(format!("https://{addr}/"))
+            .send()
+            .await
+            .unwrap_err();
+        let outcome = classify_send_error::<()>(err);
+        assert!(matches!(outcome, SendOutcome::TlsFailure(_)), "{outcome:?}");
+    }
 
     #[test]
     fn missing_cert_returns_read_error() {
