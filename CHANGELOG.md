@@ -43,6 +43,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   on each maintenance pass, so appends wait less behind it. The new partial index
   is added to existing spools on open, with no schema version change.
 
+- `lodeline scan` no longer lists a tool as not configured when another scope of
+  the same tool was assessed or failed to parse.
+
 ## [0.12.0] - 2026-10-31
 
 ### Changed
