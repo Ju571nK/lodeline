@@ -248,9 +248,9 @@ client_cert_path: "/path/to/client-hostA.crt"
 client_key_path:  "/path/to/client-hostA.key"
 server_ca_path:   "/path/to/ca.crt"
 
-events_dir: "~/.local/state/lodeline/events"     # MUST equal the agent's --events-dir
-offset_path: "~/.local/state/lodeline/sender-offset.json"
-dead_letter_dir: "~/.local/state/lodeline/dead-letter"
+events_dir: "/Users/<you>/.local/state/lodeline/events"     # MUST equal the agent's --events-dir
+offset_path: "/Users/<you>/.local/state/lodeline/sender-offset.json"
+dead_letter_dir: "/Users/<you>/.local/state/lodeline/dead-letter"
 
 # REQUIRED — must equal the agent's host_id (section 6). A mismatch makes the
 # server reject the entire batch with host_id_payload_mismatch.
@@ -261,6 +261,9 @@ host_id: "<agent host_id from section 6>"
 # `lodeline --control-socket`.
 agent_control: "/tmp/lodeline-501/control.sock"
 ```
+
+Replace `<you>` with your user name. The sender does not expand `~` or `$HOME` in
+`sender.yaml`, so every path there must be absolute.
 
 ```sh
 lodeline-sender --config ~/.config/lodeline/sender.yaml start
