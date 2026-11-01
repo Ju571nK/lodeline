@@ -31,12 +31,23 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
 }
 
 /// Values from config files, the environment, and the daemon can hold terminal
-/// escape sequences.
+/// escape sequences, or characters that hide or reorder what the reader sees.
 fn safe(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .map(|c| if is_unsafe(c) { '\u{FFFD}' } else { c })
         .collect()
+}
+
+fn is_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 fn safe_path(path: &Path) -> String {
@@ -174,6 +185,23 @@ mod tests {
             let out = render(&status(agent, fleet));
             assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
             assert!(out.contains("pwned"), "the value stays readable: {out:?}");
+        }
+    }
+
+    #[test]
+    fn invisible_and_reordering_characters_do_not_reach_the_terminal() {
+        let hidden = ('\u{200B}'..='\u{200F}')
+            .chain('\u{2028}'..='\u{202E}')
+            .chain('\u{2060}'..='\u{2069}')
+            .chain(['\u{FEFF}']);
+        for c in hidden {
+            let out = render(&status(
+                AgentRun::Unreachable {
+                    reason: format!("a{c}b"),
+                },
+                FleetLink::NotConfigured,
+            ));
+            assert!(out.contains("a\u{FFFD}b"), "U+{:04X}: {out:?}", c as u32);
         }
     }
 }
