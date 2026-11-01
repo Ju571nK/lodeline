@@ -452,6 +452,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         active_valid_until: active_valid_until.clone(),
         rule_packs_yaml_path: rule_packs_yaml_path.clone(),
         rule_packs_version_tx,
+        apply_lock: Default::default(),
     });
     // The pipeline reads its matcher set from this watch channel; the
     // policy-reload task (spawned below) publishes new sets on `targets_tx`.

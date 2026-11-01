@@ -54,6 +54,7 @@ async fn apply_policy_writes_yaml_advances_version_emits_reloaded_and_no_expiry_
         active_valid_until: active_vu.clone(),
         rule_packs_yaml_path: dir.path().join("rule-packs.yaml"),
         rule_packs_version_tx: rp_vtx,
+        apply_lock: Default::default(),
     };
 
     // Sign + send a v1 envelope.

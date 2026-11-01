@@ -8,6 +8,10 @@ use thiserror::Error;
 pub enum StateError {
     #[error("sqlite: {0}")]
     Sql(#[from] rusqlite::Error),
+    /// A version that only moves forward was asked to move backward. Nothing
+    /// was written.
+    #[error("refused to lower an applied version to {requested}")]
+    WouldLowerVersion { requested: i64 },
 }
 
 pub struct HashCache {
