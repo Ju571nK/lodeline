@@ -39,10 +39,12 @@ pub enum IpcError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Settlement {
     Applied,
-    /// Only a new document can change this answer.
+    /// Only a new document can change this answer: the agent's applied version
+    /// never falls.
     Refused(PolicySignatureInvalidReason),
-    /// The keystore decided this answer, and the keystore can change while the
-    /// document stays the same. An agent that could not load its keystore lands here.
+    /// The same document can pass later, because this answer also depends on the
+    /// host's clock, the host's keystore, or the agent's version. An agent that could
+    /// not load its keystore lands here.
     RefusedForNow(PolicySignatureInvalidReason),
     /// The agent gave no decision: it was unreachable, failed, or answered nonsense.
     Undecided(String),
@@ -61,10 +63,10 @@ impl From<Result<AgentResponse, IpcError>> for Settlement {
                 apply_policy: Some(ApplyPolicyResult::Rejected { reason }),
                 ..
             }) => match reason {
-                VersionRegression | SignatureInvalid | Expired | ParseFailed => {
-                    Settlement::Refused(reason)
+                VersionRegression => Settlement::Refused(reason),
+                PubkeyUnknown | PubkeyInactive | SignatureInvalid | Expired | ParseFailed => {
+                    Settlement::RefusedForNow(reason)
                 }
-                PubkeyUnknown | PubkeyInactive => Settlement::RefusedForNow(reason),
             },
             Ok(other) => Settlement::Undecided(format!("{other:?}")),
             Err(e) => Settlement::Undecided(e.to_string()),

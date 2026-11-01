@@ -57,9 +57,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   `304` and the document stayed undelivered until the next publish or a sender
   restart. The sender now asks until the agent settles the document. It retries at
   the poll interval after an outage or an agent failure. It stops when the agent
-  applies the document or refuses it for good, such as for an old version or a bad
-  signature. It offers a document that the keystore refused every 12 polls, because
-  a host can gain the missing key while the document stays the same.
+  applies the document or refuses it as an old version, which only a new document
+  can change. Every other refusal can lift with the document unchanged, because the
+  host's clock, its keystore, or the agent's version also decides it. The sender
+  offers such a document on every 12th poll with no restart, which is 24 full fetches
+  a day at the default interval. Each refused offer also records a warning event.
   `policy-etag.txt` and `rule-packs-etag.txt` now take effect at startup, so a
   restart no longer fetches a settled document and the agent no longer records a
   version regression for it. If you reset the agent's `state.db` and keep the sender

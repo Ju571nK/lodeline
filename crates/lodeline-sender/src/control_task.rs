@@ -179,16 +179,16 @@ pub async fn poll_rule_packs(
 }
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Polls between offers of a document the agent [refused for now]. At the default
-/// poll interval this is one hour. Each offer costs a full body and a warning event
-/// in the fleet, so a host missing a key must not repeat it on every poll.
+/// One poll in this many offers a document the agent [refused for now] again. Each
+/// offer costs a full body and a warning event in the fleet, so a document that never
+/// passes costs 24 full fetches a day at the default poll interval.
 ///
 /// [refused for now]: Settlement::RefusedForNow
-const POLLS_BETWEEN_OFFERS_REFUSED_FOR_NOW: u32 = 12;
+const POLLS_PER_OFFER_REFUSED_FOR_NOW: u32 = 12;
 
 pub struct ControlLoopCtx {
     pub client: Client,
@@ -209,9 +209,9 @@ struct Offer {
     etag_path: PathBuf,
     /// The last document the agent settled. Survives a restart.
     settled: Option<String>,
-    /// A document refused for now, not offered again until this time. Lost on a
-    /// restart, so a restart offers it once more.
-    refused_until: Option<(String, Instant)>,
+    /// A document refused for now, and the polls left before it is offered again.
+    /// Lost on a restart, so a restart offers it once more.
+    refused: Option<(String, u32)>,
 }
 
 impl Offer {
@@ -219,18 +219,22 @@ impl Offer {
         Self {
             etag_path: etag_path.to_owned(),
             settled: state::load_etag(etag_path).ok().flatten(),
-            refused_until: None,
+            refused: None,
         }
     }
 
-    fn if_none_match(&self) -> Option<&str> {
-        match &self.refused_until {
-            Some((etag, until)) if Instant::now() < *until => Some(etag),
+    /// The validator for the next poll. Call once per poll: it counts them.
+    fn if_none_match(&mut self) -> Option<&str> {
+        match &mut self.refused {
+            Some((etag, polls_left)) if *polls_left > 0 => {
+                *polls_left -= 1;
+                Some(etag)
+            }
             _ => self.settled.as_deref(),
         }
     }
 
-    fn settle(&mut self, etag: &str, settlement: Settlement, recheck_after: Duration) {
+    fn settle(&mut self, etag: &str, settlement: Settlement) {
         if settlement != Settlement::Applied {
             tracing::warn!(etag, ?settlement, "agent did not apply the document");
         }
@@ -240,10 +244,10 @@ impl Offer {
                     tracing::warn!(error = ?e, "store_etag failed");
                 }
                 self.settled = Some(etag.to_owned());
-                self.refused_until = None;
+                self.refused = None;
             }
             Settlement::RefusedForNow(_) => {
-                self.refused_until = Some((etag.to_owned(), Instant::now() + recheck_after));
+                self.refused = Some((etag.to_owned(), POLLS_PER_OFFER_REFUSED_FOR_NOW - 1));
             }
             Settlement::Undecided(_) => {}
         }
@@ -254,7 +258,6 @@ impl Offer {
 /// task does both, in order, so a poll cannot overtake the agent's answer to the last
 /// offer.
 pub async fn run(ctx: ControlLoopCtx) {
-    let recheck_after = ctx.poll_interval * POLLS_BETWEEN_OFFERS_REFUSED_FOR_NOW;
     // Separate offers: policy and rule packs are versioned independently.
     let mut policy = Offer::load(&ctx.policy_etag_path);
     let mut packs = Offer::load(&ctx.packs_etag_path);
@@ -276,7 +279,7 @@ pub async fn run(ctx: ControlLoopCtx) {
                 ctx.stats.write().record(Plane::Policy, p.link_result(), OffsetDateTime::now_utc());
                 if let PollOutcome::NewPolicy { etag, response } = &p {
                     let answer = agent_ipc::apply_policy(&ctx.agent_control, response).await;
-                    policy.settle(etag, answer.into(), recheck_after);
+                    policy.settle(etag, answer.into());
                 }
                 if ctx.outcomes.send(p).await.is_err() {
                     // Receiver dropped — exit loop.
@@ -290,12 +293,34 @@ pub async fn run(ctx: ControlLoopCtx) {
                 ).await;
                 if let PollOutcome::NewRulePacks { etag, response } = &r {
                     let answer = agent_ipc::apply_rule_packs(&ctx.agent_control, response).await;
-                    packs.settle(etag, answer.into(), recheck_after);
+                    packs.settle(etag, answer.into());
                 }
                 if ctx.outcomes.send(r).await.is_err() {
                     break;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodeline_core::event::PolicySignatureInvalidReason::Expired;
+
+    #[test]
+    fn a_document_that_never_passes_costs_24_full_fetches_a_day_at_the_default_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut offer = Offer::load(&dir.path().join("policy-etag.txt"));
+        let default_polls_a_day = 86_400 / 300;
+
+        let mut full_fetches = 0;
+        for _ in 0..default_polls_a_day {
+            if offer.if_none_match() != Some("v5") {
+                full_fetches += 1;
+                offer.settle("v5", Settlement::RefusedForNow(Expired));
+            }
+        }
+        assert_eq!(full_fetches, 24);
     }
 }
