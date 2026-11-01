@@ -2027,6 +2027,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "time",
  "tokio",
 ]
 
@@ -2141,6 +2142,7 @@ dependencies = [
  "clap",
  "http 1.4.0",
  "lodeline-core",
+ "lodeline-diag",
  "parking_lot",
  "reqwest",
  "rustls",
@@ -2158,6 +2160,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]

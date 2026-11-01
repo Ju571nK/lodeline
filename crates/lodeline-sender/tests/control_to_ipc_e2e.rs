@@ -67,6 +67,7 @@ async fn control_loop_emits_new_policy_then_ipc_handoff_succeeds() {
             poll_interval: std::time::Duration::from_millis(20),
             shutdown: cancel_c,
             outcomes: tx,
+            stats: lodeline_sender::heartbeat::shared(),
         })
         .await;
     });

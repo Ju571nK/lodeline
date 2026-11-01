@@ -3,7 +3,9 @@ use clap::Parser;
 use lodeline_core::paths::default_sender_config;
 use lodeline_sender::cli::{Cli, Command};
 use lodeline_sender::config::SenderConfig;
+use lodeline_sender::doctor::{self, Check};
 use lodeline_sender::runtime::{run, RuntimeCtx};
+use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 /// Resolve the sender's host_id. Precedence: LODELINE_HOST_ID env (override) >
@@ -61,12 +63,14 @@ async fn main() -> Result<()> {
             .await?;
         }
         Command::Doctor => {
-            let cfg = SenderConfig::load(&config_path)?;
             println!("Lodeline sender doctor");
-            println!("[OK] config loaded: {}", config_path.display());
-            println!("[OK] server_base_url: {}", cfg.server_base_url);
-            println!("[OK] events_dir: {}", cfg.events_dir.display());
-            println!("[OK] agent_control: {}", cfg.agent_control.display());
+            let checks = doctor::run(&config_path, OffsetDateTime::now_utc()).await;
+            for check in &checks {
+                println!("{check}");
+            }
+            if checks.iter().any(Check::is_failure) {
+                std::process::exit(1);
+            }
         }
         Command::DryRun { url } => {
             println!("dry-run url={url} (not yet wired)");

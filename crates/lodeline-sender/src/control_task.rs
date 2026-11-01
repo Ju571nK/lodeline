@@ -1,8 +1,11 @@
 //! Control plane: poll /v1/policy, hand 200 results to the agent IPC.
 
-use crate::transport::{classify_send_error, SendOutcome};
+use crate::heartbeat::{Plane, SharedStats};
+use crate::transport::{classify_send_error, failure_cause, SendOutcome};
 use crate::wire::SignedPolicyResponse;
+use lodeline_core::sender_status::LinkFailure;
 use reqwest::Client;
+use time::OffsetDateTime;
 
 #[derive(Debug)]
 pub enum PollOutcome {
@@ -25,8 +28,43 @@ pub enum PollOutcome {
     TlsFailure(String),
     /// Network failure.
     Network(String),
-    /// Other / parse failure.
-    ProtocolViolation(String),
+    /// Other / parse failure. `status` is set when the status itself was the problem.
+    ProtocolViolation { status: Option<u16>, detail: String },
+}
+
+impl PollOutcome {
+    pub(crate) fn link_result(&self) -> Result<(), LinkFailure> {
+        match self {
+            PollOutcome::NewPolicy { .. }
+            | PollOutcome::NewRulePacks { .. }
+            | PollOutcome::Unmodified => Ok(()),
+            PollOutcome::HostUnknown => Err(LinkFailure::Response {
+                last_response_code: 404,
+            }),
+            PollOutcome::TlsFailure(_) => Err(LinkFailure::Tls),
+            PollOutcome::Network(_) => Err(LinkFailure::Network),
+            PollOutcome::ProtocolViolation {
+                status: Some(code), ..
+            } => Err(LinkFailure::Response {
+                last_response_code: *code,
+            }),
+            PollOutcome::ProtocolViolation { status: None, .. } => Err(LinkFailure::Protocol),
+        }
+    }
+}
+
+fn protocol_violation(detail: String) -> PollOutcome {
+    PollOutcome::ProtocolViolation {
+        status: None,
+        detail,
+    }
+}
+
+fn bad_status(status: u16, body: &str) -> PollOutcome {
+    PollOutcome::ProtocolViolation {
+        status: Some(status),
+        detail: format!("status {status}: {body}"),
+    }
 }
 
 pub async fn poll_policy(
@@ -49,7 +87,7 @@ pub async fn poll_policy(
         Err(e) => match classify_send_error::<()>(e) {
             SendOutcome::TlsFailure(s) => return PollOutcome::TlsFailure(s),
             SendOutcome::Network(s) => return PollOutcome::Network(s),
-            other => return PollOutcome::ProtocolViolation(format!("{other:?}")),
+            other => return protocol_violation(format!("{other:?}")),
         },
     };
     let status = resp.status().as_u16();
@@ -57,11 +95,19 @@ pub async fn poll_policy(
         return PollOutcome::Unmodified;
     }
     if status == 404 {
-        return PollOutcome::HostUnknown;
+        // The server also answers 404 when it holds no policy, for a host it knows.
+        let body = resp.text().await.unwrap_or_default();
+        let error = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error")?.as_str().map(str::to_owned));
+        return match error.as_deref() {
+            Some("no_policy") => PollOutcome::Unmodified,
+            _ => PollOutcome::HostUnknown,
+        };
     }
     if !(200..300).contains(&status) {
         let body = resp.text().await.unwrap_or_default();
-        return PollOutcome::ProtocolViolation(format!("status {status}: {body}"));
+        return bad_status(status, &body);
     }
     let etag = resp
         .headers()
@@ -71,7 +117,7 @@ pub async fn poll_policy(
         .unwrap_or_default();
     match resp.json::<SignedPolicyResponse>().await {
         Ok(response) => PollOutcome::NewPolicy { etag, response },
-        Err(e) => PollOutcome::ProtocolViolation(format!("policy json: {e}")),
+        Err(e) => protocol_violation(format!("policy json: {}", failure_cause(e))),
     }
 }
 
@@ -103,7 +149,7 @@ pub async fn poll_rule_packs(
         Err(e) => match classify_send_error::<()>(e) {
             SendOutcome::TlsFailure(s) => return PollOutcome::TlsFailure(s),
             SendOutcome::Network(s) => return PollOutcome::Network(s),
-            other => return PollOutcome::ProtocolViolation(format!("{other:?}")),
+            other => return protocol_violation(format!("{other:?}")),
         },
     };
     let status = resp.status().as_u16();
@@ -116,7 +162,7 @@ pub async fn poll_rule_packs(
     }
     if !(200..300).contains(&status) {
         let body = resp.text().await.unwrap_or_default();
-        return PollOutcome::ProtocolViolation(format!("status {status}: {body}"));
+        return bad_status(status, &body);
     }
     let etag = resp
         .headers()
@@ -126,7 +172,7 @@ pub async fn poll_rule_packs(
         .unwrap_or_default();
     match resp.json::<SignedPolicyResponse>().await {
         Ok(response) => PollOutcome::NewRulePacks { etag, response },
-        Err(e) => PollOutcome::ProtocolViolation(format!("rule-packs json: {e}")),
+        Err(e) => protocol_violation(format!("rule-packs json: {}", failure_cause(e))),
     }
 }
 
@@ -141,6 +187,7 @@ pub struct ControlLoopCtx {
     pub poll_interval: Duration,
     pub shutdown: CancellationToken,
     pub outcomes: mpsc::Sender<PollOutcome>,
+    pub stats: SharedStats,
 }
 
 /// Runs `poll_policy` in a loop with the configured interval. Cached
@@ -163,6 +210,9 @@ pub async fn run(ctx: ControlLoopCtx) {
                     &ctx.host_id,
                     policy_etag.as_deref(),
                 ).await;
+                // Only the policy poll counts: `poll_rule_packs` maps 404 to `Unmodified`,
+                // which would clear a host-unknown answer moments after it arrived.
+                ctx.stats.write().record(Plane::Policy, p.link_result(), OffsetDateTime::now_utc());
                 if let PollOutcome::NewPolicy { etag, .. } = &p {
                     policy_etag = Some(etag.clone());
                 }

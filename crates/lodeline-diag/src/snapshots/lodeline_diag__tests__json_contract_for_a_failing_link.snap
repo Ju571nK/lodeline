@@ -1,0 +1,46 @@
+---
+source: crates/lodeline-diag/src/lib.rs
+expression: "serde_json::to_string_pretty(&status).unwrap()"
+---
+{
+  "schema_version": 2,
+  "tool_version": "1.2.3",
+  "components": [
+    {
+      "name": "lodeline",
+      "presence": {
+        "state": "installed",
+        "path": "/usr/bin/lodeline",
+        "version": "1.2.3"
+      }
+    },
+    {
+      "name": "lodeline_sender",
+      "presence": {
+        "state": "missing"
+      }
+    }
+  ],
+  "agent": {
+    "state": "stopped"
+  },
+  "fleet": {
+    "state": "configured",
+    "server_url": "https://s.example:8443",
+    "config_path": "/etc/lodeline/sender.yaml",
+    "link": {
+      "state": "failing",
+      "last_report_at": "2026-11-01T11:59:50Z",
+      "since": "2026-11-01T11:55:00Z",
+      "failure": {
+        "kind": "response",
+        "last_response_code": 503
+      },
+      "last_ok_at": null
+    },
+    "client_cert": {
+      "state": "expired",
+      "expires_at": "2026-11-01T11:59:00Z"
+    }
+  }
+}

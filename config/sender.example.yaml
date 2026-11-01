@@ -17,7 +17,8 @@ events_dir: "/var/log/lodeline"
 
 # The sender's durable read-offset checkpoint (atomic-rename writes). This is
 # sender-owned and writable — it lives in the sender's own state dir so the
-# non-root sender can write it. Defaults to this path if omitted.
+# non-root sender can write it. Defaults to this path if omitted. The sender
+# also writes sender-status.json in this dir, and `lodeline status` reads it.
 offset_path: "/var/lib/lodeline-sender/sender-offset.json"
 
 # Agent control IPC. Used by the sender to forward apply_policy responses

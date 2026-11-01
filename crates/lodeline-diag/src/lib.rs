@@ -3,24 +3,35 @@
 //!
 //! Collecting changes nothing on disk, starts nothing, makes no network call, and
 //! runs none of the binaries it finds. The only IPC is two read-only control
-//! requests to a local daemon. Key and certificate files are never opened.
+//! requests to a local daemon. Key and certificate files are never opened: what is
+//! known about the link and the client certificate comes from the status file a
+//! running sender leaves, which is untrusted input.
 
 use lodeline_core::control_client::exchange;
 use lodeline_core::control_proto::{Request, Response};
-use lodeline_core::paths::default_sender_config;
+use lodeline_core::paths::{default_sender_config, default_sender_offset};
+pub use lodeline_core::sender_status::LinkFailure;
+use lodeline_core::sender_status::{
+    status_path_for, Contact, SenderReport, MAX_REPORT_BYTES, REPORT_SCHEMA_VERSION, STALE_AFTER,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 /// Bump when a change to the JSON would break a consumer. Adding a variant or a
 /// field does not.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_SENDER_CONFIG_BYTES: u64 = 1024 * 1024;
+/// The server issues client certificates for 30 days by default, so a longer window
+/// would warn for most of a certificate's life.
+const CERT_EXPIRING_SOON: time::Duration = time::Duration::days(7);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostStatus {
@@ -107,6 +118,7 @@ pub enum FleetLink {
         server_url: String,
         config_path: PathBuf,
         link: LinkState,
+        client_cert: ClientCert,
     },
     /// A sender config exists but gives no server URL, so this host is neither
     /// known single-host nor known fleet. `reason` never quotes the file.
@@ -116,10 +128,243 @@ pub enum FleetLink {
     },
 }
 
+/// Whether this host reaches `lodeline-server`, as far as its sender's status file
+/// tells. `last_report_at` is when the sender wrote the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum LinkState {
-    Unknown,
+    /// No status file: the sender has not run with this config.
+    NeverReported,
+    /// `reason` never quotes the file.
+    Unreadable { reason: String },
+    /// The sender runs and no request to the server has finished yet.
+    AwaitingContact {
+        #[serde(with = "time::serde::rfc3339")]
+        last_report_at: OffsetDateTime,
+    },
+    Connected {
+        #[serde(with = "time::serde::rfc3339")]
+        last_report_at: OffsetDateTime,
+        #[serde(with = "time::serde::rfc3339")]
+        last_ok_at: OffsetDateTime,
+    },
+    Failing {
+        #[serde(with = "time::serde::rfc3339")]
+        last_report_at: OffsetDateTime,
+        #[serde(with = "time::serde::rfc3339")]
+        since: OffsetDateTime,
+        failure: LinkFailure,
+        #[serde(with = "time::serde::rfc3339::option")]
+        last_ok_at: Option<OffsetDateTime>,
+    },
+    /// The report is older than `stale_after_secs`: the sender stopped or hung.
+    Stale {
+        #[serde(with = "time::serde::rfc3339")]
+        last_report_at: OffsetDateTime,
+        stale_after_secs: u64,
+        #[serde(with = "time::serde::rfc3339::option")]
+        last_ok_at: Option<OffsetDateTime>,
+    },
+}
+
+impl LinkState {
+    fn from_report(report: &SenderReport, now: OffsetDateTime) -> Self {
+        let last_report_at = report.written_at;
+        // The absolute age, so a written_at in the future cannot read as fresh forever.
+        if (now - last_report_at).abs() > STALE_AFTER {
+            let last_ok_at = match report.contact {
+                Contact::NoAnswerYet => None,
+                Contact::Reached { last_ok_at } => Some(last_ok_at),
+                Contact::Failing { last_ok_at, .. } => last_ok_at,
+            };
+            return Self::Stale {
+                last_report_at,
+                stale_after_secs: STALE_AFTER.as_secs(),
+                last_ok_at,
+            };
+        }
+        match report.contact {
+            Contact::NoAnswerYet => Self::AwaitingContact { last_report_at },
+            Contact::Reached { last_ok_at } => Self::Connected {
+                last_report_at,
+                last_ok_at,
+            },
+            Contact::Failing {
+                since,
+                failure,
+                last_ok_at,
+            } => Self::Failing {
+                last_report_at,
+                since,
+                failure,
+                last_ok_at,
+            },
+        }
+    }
+
+    pub fn summary(&self) -> (Level, String) {
+        let last_success = |at: &Option<OffsetDateTime>| {
+            at.map_or("no success yet".to_string(), |t| {
+                format!("last success {}", timestamp(t))
+            })
+        };
+        match self {
+            Self::NeverReported => (
+                Level::Warn,
+                "no status file: lodeline-sender has not run, or predates this report".to_string(),
+            ),
+            Self::Unreadable { reason } => (
+                Level::Warn,
+                format!("cannot read the status file: {}", safe(reason)),
+            ),
+            Self::AwaitingContact { last_report_at } => (
+                Level::Info,
+                format!(
+                    "lodeline-sender is running, no server answer yet (report {})",
+                    timestamp(*last_report_at)
+                ),
+            ),
+            Self::Connected {
+                last_report_at,
+                last_ok_at,
+            } => (
+                Level::Ok,
+                format!(
+                    "connected, last success {} (report {})",
+                    timestamp(*last_ok_at),
+                    timestamp(*last_report_at)
+                ),
+            ),
+            Self::Failing {
+                since,
+                failure,
+                last_ok_at,
+                ..
+            } => {
+                let failure = match failure {
+                    LinkFailure::Network => "network failure".to_string(),
+                    LinkFailure::Tls => "TLS failure".to_string(),
+                    LinkFailure::Response { last_response_code } => {
+                        format!("server answered {last_response_code}")
+                    }
+                    LinkFailure::Protocol => "server answer not usable".to_string(),
+                };
+                (
+                    Level::Error,
+                    format!(
+                        "failing since {}: {failure}, {}",
+                        timestamp(*since),
+                        last_success(last_ok_at)
+                    ),
+                )
+            }
+            Self::Stale {
+                last_report_at,
+                stale_after_secs,
+                last_ok_at,
+            } => (
+                Level::Warn,
+                format!(
+                    "stale: last report {}, older than {stale_after_secs}s, so \
+                     lodeline-sender stopped or hung, {}",
+                    timestamp(*last_report_at),
+                    last_success(last_ok_at)
+                ),
+            ),
+        }
+    }
+}
+
+/// The certificate the running sender loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ClientCert {
+    /// No status file, or the sender has no certificate or could not read its expiry.
+    NotReported,
+    Valid {
+        #[serde(with = "time::serde::rfc3339")]
+        expires_at: OffsetDateTime,
+    },
+    ExpiringSoon {
+        #[serde(with = "time::serde::rfc3339")]
+        expires_at: OffsetDateTime,
+    },
+    Expired {
+        #[serde(with = "time::serde::rfc3339")]
+        expires_at: OffsetDateTime,
+    },
+}
+
+impl ClientCert {
+    pub fn at(expires_at: OffsetDateTime, now: OffsetDateTime) -> Self {
+        if expires_at <= now {
+            Self::Expired { expires_at }
+        } else if expires_at - now <= CERT_EXPIRING_SOON {
+            Self::ExpiringSoon { expires_at }
+        } else {
+            Self::Valid { expires_at }
+        }
+    }
+
+    pub fn summary(&self) -> Option<(Level, String)> {
+        match self {
+            Self::NotReported => None,
+            Self::Valid { expires_at } => {
+                Some((Level::Ok, format!("expires {}", timestamp(*expires_at))))
+            }
+            Self::ExpiringSoon { expires_at } => Some((
+                Level::Warn,
+                format!("expires soon, {}", timestamp(*expires_at)),
+            )),
+            Self::Expired { expires_at } => {
+                Some((Level::Error, format!("expired {}", timestamp(*expires_at))))
+            }
+        }
+    }
+}
+
+/// The `[OK]` / `[WARN]` tag of a line of text output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Ok,
+    Info,
+    Warn,
+    Error,
+}
+
+impl Level {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Ok => "[OK]  ",
+            Self::Info => "[INFO]",
+            Self::Warn => "[WARN]",
+            Self::Error => "[ERROR]",
+        }
+    }
+}
+
+fn timestamp(at: OffsetDateTime) -> String {
+    at.format(&Rfc3339).unwrap_or_else(|_| at.to_string())
+}
+
+/// Values from config files, the environment, and the daemon can hold terminal
+/// escape sequences, or characters that hide or reorder what the reader sees.
+pub fn safe(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if is_unsafe(c) { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+fn is_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 /// Where to look. [`Probe::detect`] fills it from this machine.
@@ -244,7 +489,8 @@ fn effective_uid() -> u32 {
     0
 }
 
-pub async fn collect(probe: &Probe) -> HostStatus {
+/// `now` decides whether the sender's report is stale and its certificate expired.
+pub async fn collect(probe: &Probe, now: OffsetDateTime) -> HostStatus {
     HostStatus {
         schema_version: SCHEMA_VERSION,
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -253,7 +499,7 @@ pub async fn collect(probe: &Probe) -> HostStatus {
             .map(|name| find_component(name, probe))
             .collect(),
         agent: probe_agent(probe).await,
-        fleet: read_fleet(&probe.sender_configs),
+        fleet: read_fleet(&probe.sender_configs, now),
     }
 }
 
@@ -369,9 +615,9 @@ async fn send(endpoint: &Path, _self_uid: u32, req: &Request) -> io::Result<Resp
     exchange(ClientOptions::new().open(endpoint)?, req).await
 }
 
-fn read_fleet(candidates: &[PathBuf]) -> FleetLink {
+fn read_fleet(candidates: &[PathBuf], now: OffsetDateTime) -> FleetLink {
     for path in candidates {
-        match read_capped(path) {
+        match read_capped(path, MAX_SENDER_CONFIG_BYTES) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
                 return FleetLink::Unreadable {
@@ -379,7 +625,7 @@ fn read_fleet(candidates: &[PathBuf]) -> FleetLink {
                     reason: e.to_string(),
                 }
             }
-            Ok(bytes) => return parse_fleet(path, &bytes),
+            Ok(bytes) => return parse_fleet(path, &bytes, now),
         }
     }
     FleetLink::NotConfigured
@@ -387,44 +633,99 @@ fn read_fleet(candidates: &[PathBuf]) -> FleetLink {
 
 /// A FIFO would block forever and a device could be endless, so anything but a
 /// regular file of bounded size is refused before it is read.
-fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+fn read_capped(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
     if !std::fs::metadata(path)?.is_file() {
         return Err(io::Error::other("not a regular file"));
     }
     let mut bytes = Vec::new();
     File::open(path)?
-        .take(MAX_SENDER_CONFIG_BYTES + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_SENDER_CONFIG_BYTES {
-        return Err(io::Error::other("larger than 1 MiB"));
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::other(format!("larger than {max_bytes} bytes")));
     }
     Ok(bytes)
 }
 
-/// Reads only `server_base_url`. `lodeline-sender`'s own config type would link its
+const RELATIVE_OFFSET_PATH: &str =
+    "offset_path is relative, so it depends on the working directory of the sender";
+
+/// Reads only what status needs. `lodeline-sender`'s own config type would link its
 /// TLS stack into this crate.
 #[derive(Deserialize)]
-struct SenderServerUrl {
+struct SenderFields {
     server_base_url: String,
+    offset_path: Option<PathBuf>,
 }
 
-fn parse_fleet(path: &Path, bytes: &[u8]) -> FleetLink {
-    let parsed = serde_yaml::from_slice::<SenderServerUrl>(bytes);
-    match parsed
+fn parse_fleet(path: &Path, bytes: &[u8], now: OffsetDateTime) -> FleetLink {
+    let Some((server_url, offset_path)) = serde_yaml::from_slice::<SenderFields>(bytes)
         .ok()
-        .and_then(|config| redact_url(config.server_base_url.trim()))
-    {
-        Some(server_url) => FleetLink::Configured {
-            server_url,
-            config_path: path.to_path_buf(),
-            link: LinkState::Unknown,
-        },
+        .and_then(|config| {
+            let url = redact_url(config.server_base_url.trim())?;
+            Some((url, config.offset_path))
+        })
+    else {
         // The YAML error can quote the file, so it stays out of `reason`.
-        None => FleetLink::Unreadable {
+        return FleetLink::Unreadable {
             config_path: path.to_path_buf(),
             reason: "no usable server_base_url".to_string(),
-        },
+        };
+    };
+    let (link, client_cert) = match offset_path {
+        // Only a configured path: the default is a POSIX path, which Windows calls relative.
+        Some(path) if path.is_relative() => (
+            LinkState::Unreadable {
+                reason: RELATIVE_OFFSET_PATH.to_string(),
+            },
+            ClientCert::NotReported,
+        ),
+        path => read_report(
+            &status_path_for(&path.unwrap_or_else(default_sender_offset)),
+            now,
+        ),
+    };
+    FleetLink::Configured {
+        server_url,
+        config_path: path.to_path_buf(),
+        link,
+        client_cert,
     }
+}
+
+/// A missing file is the only absence. A file that cannot be read or parsed may hide
+/// a running sender, so it must not read as `NeverReported`.
+fn read_report(path: &Path, now: OffsetDateTime) -> (LinkState, ClientCert) {
+    let unreadable = |why: &dyn std::fmt::Display| {
+        let reason = format!("{}: {why}", path.display());
+        (LinkState::Unreadable { reason }, ClientCert::NotReported)
+    };
+    let is_symlink = std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink());
+    let bytes = match is_symlink {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return (LinkState::NeverReported, ClientCert::NotReported)
+        }
+        Err(e) => return unreadable(&e),
+        Ok(true) => return unreadable(&"not a regular file"),
+        Ok(false) => read_capped(path, MAX_REPORT_BYTES),
+    };
+    let report = match bytes.map(|b| serde_json::from_slice::<SenderReport>(&b)) {
+        Err(e) => return unreadable(&e),
+        Ok(Err(_)) => return unreadable(&"not a sender report"),
+        Ok(Ok(report)) => report,
+    };
+    if report.schema_version != REPORT_SCHEMA_VERSION {
+        return unreadable(&format!(
+            "report schema {} is not {REPORT_SCHEMA_VERSION}",
+            report.schema_version
+        ));
+    }
+    (
+        LinkState::from_report(&report, now),
+        report
+            .client_cert_expires_at
+            .map_or(ClientCert::NotReported, |at| ClientCert::at(at, now)),
+    )
 }
 
 /// `scheme://host[:port]` or `host[:port]`. `None` when the authority fails
@@ -474,6 +775,13 @@ fn is_host_port(text: &str) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+    use time::macros::datetime;
+
+    const NOW: OffsetDateTime = datetime!(2026-11-01 12:00 UTC);
+
+    fn seconds_ago(seconds: i64) -> OffsetDateTime {
+        NOW - time::Duration::seconds(seconds)
+    }
 
     fn probe_in(dir: &Path) -> Probe {
         Probe {
@@ -505,14 +813,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sender.yaml");
         fs::write(&path, yaml).unwrap();
-        let fleet = read_fleet(&[path]);
+        let fleet = read_fleet(&[path], NOW);
         (dir, fleet)
     }
 
     #[tokio::test]
     async fn empty_host_is_single_host_with_stopped_agent_and_no_components() {
         let dir = tempfile::tempdir().unwrap();
-        let status = collect(&probe_in(dir.path())).await;
+        let status = collect(&probe_in(dir.path()), NOW).await;
         assert_eq!(status.schema_version, SCHEMA_VERSION);
         assert_eq!(status.fleet, FleetLink::NotConfigured);
         assert_eq!(status.agent, AgentRun::Stopped);
@@ -526,7 +834,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         let path = install(&bin, ComponentName::LodelineHook);
-        let status = collect(&probe_in(dir.path())).await;
+        let status = collect(&probe_in(dir.path()), NOW).await;
         assert_eq!(
             presence_of(&status, ComponentName::LodelineHook),
             &Presence::Installed {
@@ -549,7 +857,7 @@ mod tests {
             ..probe_in(dir.path())
         };
         install(&bin, ComponentName::LodelineMcp);
-        let status = collect(&probe).await;
+        let status = collect(&probe, NOW).await;
         let version_of = |name| match presence_of(&status, name) {
             Presence::Installed { version, .. } => version.clone(),
             Presence::Missing => panic!("{name:?} should be installed"),
@@ -609,13 +917,24 @@ mod tests {
 
     #[test]
     fn sender_config_makes_the_host_a_fleet_host() {
-        let (dir, fleet) = fleet_with("server_base_url: https://s.example:8443\n");
+        let (dir, _) = fleet_with("");
+        let config = dir.path().join("sender.yaml");
+        let offset = dir.path().join("sender-offset.json");
+        fs::write(
+            &config,
+            format!(
+                "server_base_url: https://s.example:8443\noffset_path: {}\n",
+                offset.display()
+            ),
+        )
+        .unwrap();
         assert_eq!(
-            fleet,
+            read_fleet(std::slice::from_ref(&config), NOW),
             FleetLink::Configured {
                 server_url: "https://s.example:8443".to_string(),
-                config_path: dir.path().join("sender.yaml"),
-                link: LinkState::Unknown,
+                config_path: config,
+                link: LinkState::NeverReported,
+                client_cert: ClientCert::NotReported,
             }
         );
     }
@@ -625,7 +944,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let second = dir.path().join("second.yaml");
         fs::write(&second, "server_base_url: https://second\n").unwrap();
-        let fleet = read_fleet(&[dir.path().join("absent.yaml"), second.clone()]);
+        let fleet = read_fleet(&[dir.path().join("absent.yaml"), second.clone()], NOW);
         assert!(matches!(
             fleet,
             FleetLink::Configured { server_url, config_path, .. }
@@ -711,7 +1030,9 @@ mod tests {
             .unwrap();
         assert!(made.success());
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || tx.send(read_fleet(&[fifo])));
+        std::thread::spawn(move || {
+            let _ = tx.send(read_fleet(&[fifo], NOW));
+        });
         let fleet = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("reading a FIFO must not block");
@@ -730,7 +1051,7 @@ mod tests {
 
         let (_dir, fleet) = fleet_with(&(at_cap + "x"));
         assert!(
-            matches!(&fleet, FleetLink::Unreadable { reason, .. } if reason == "larger than 1 MiB"),
+            matches!(&fleet, FleetLink::Unreadable { reason, .. } if reason == "larger than 1048576 bytes"),
             "{fleet:?}"
         );
     }
@@ -770,7 +1091,56 @@ mod tests {
             FleetLink::Configured {
                 server_url: "https://s.example:8443".to_string(),
                 config_path: PathBuf::from("/etc/lodeline/sender.yaml"),
-                link: LinkState::Unknown,
+                link: LinkState::Connected {
+                    last_report_at: seconds_ago(10),
+                    last_ok_at: seconds_ago(40),
+                },
+                client_cert: ClientCert::ExpiringSoon {
+                    expires_at: NOW + time::Duration::days(3),
+                },
+            },
+        );
+        insta::assert_snapshot!(serde_json::to_string_pretty(&status).unwrap());
+    }
+
+    #[test]
+    fn json_contract_for_a_failing_link() {
+        let status = sample(
+            AgentRun::Stopped,
+            FleetLink::Configured {
+                server_url: "https://s.example:8443".to_string(),
+                config_path: PathBuf::from("/etc/lodeline/sender.yaml"),
+                link: LinkState::Failing {
+                    last_report_at: seconds_ago(10),
+                    since: seconds_ago(300),
+                    failure: LinkFailure::Response {
+                        last_response_code: 503,
+                    },
+                    last_ok_at: None,
+                },
+                client_cert: ClientCert::Expired {
+                    expires_at: seconds_ago(60),
+                },
+            },
+        );
+        insta::assert_snapshot!(serde_json::to_string_pretty(&status).unwrap());
+    }
+
+    #[test]
+    fn json_contract_for_a_stale_link() {
+        let status = sample(
+            AgentRun::Stopped,
+            FleetLink::Configured {
+                server_url: "https://s.example:8443".to_string(),
+                config_path: PathBuf::from("/etc/lodeline/sender.yaml"),
+                link: LinkState::Stale {
+                    last_report_at: seconds_ago(91),
+                    stale_after_secs: 90,
+                    last_ok_at: Some(seconds_ago(120)),
+                },
+                client_cert: ClientCert::Valid {
+                    expires_at: NOW + time::Duration::days(30),
+                },
             },
         );
         insta::assert_snapshot!(serde_json::to_string_pretty(&status).unwrap());
@@ -801,6 +1171,341 @@ mod tests {
         let status = sample(AgentRun::Stopped, FleetLink::NotConfigured);
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(serde_json::from_str::<HostStatus>(&json).unwrap(), status);
+    }
+
+    fn report_at(written_at: OffsetDateTime, contact: Contact) -> SenderReport {
+        SenderReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            written_at,
+            contact,
+            client_cert_expires_at: None,
+        }
+    }
+
+    fn link_of(report: &SenderReport, now: OffsetDateTime) -> LinkState {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sender-status.json");
+        fs::write(&path, serde_json::to_vec(report).unwrap()).unwrap();
+        read_report(&path, now).0
+    }
+
+    fn unreadable_reason((link, cert): (LinkState, ClientCert)) -> String {
+        assert_eq!(cert, ClientCert::NotReported);
+        match link {
+            LinkState::Unreadable { reason } => reason,
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_offset_path_decides_where_the_report_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let report = report_at(
+            seconds_ago(1),
+            Contact::Reached {
+                last_ok_at: seconds_ago(2),
+            },
+        );
+        fs::write(
+            state.join("sender-status.json"),
+            serde_json::to_vec(&report).unwrap(),
+        )
+        .unwrap();
+        let config = dir.path().join("sender.yaml");
+        fs::write(
+            &config,
+            format!(
+                "server_base_url: https://s.example\noffset_path: {}\n",
+                state.join("sender-offset.json").display()
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_fleet(&[config], NOW),
+            FleetLink::Configured {
+                link: LinkState::Connected { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_relative_offset_path_cannot_be_read_from_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("sender.yaml");
+        fs::write(
+            &config,
+            "server_base_url: https://s.example\noffset_path: state/sender-offset.json\n",
+        )
+        .unwrap();
+        let FleetLink::Configured {
+            link, client_cert, ..
+        } = read_fleet(&[config], NOW)
+        else {
+            panic!("not configured");
+        };
+        assert_eq!(
+            link,
+            LinkState::Unreadable {
+                reason: RELATIVE_OFFSET_PATH.to_string()
+            }
+        );
+        assert_eq!(client_cert, ClientCert::NotReported);
+    }
+
+    #[test]
+    fn report_exactly_at_the_limit_is_fresh_and_one_second_more_is_stale() {
+        let limit = STALE_AFTER.as_secs() as i64;
+        let reached = Contact::Reached {
+            last_ok_at: seconds_ago(limit + 100),
+        };
+        assert!(matches!(
+            link_of(&report_at(seconds_ago(limit), reached), NOW),
+            LinkState::Connected { .. }
+        ));
+        assert_eq!(
+            link_of(&report_at(seconds_ago(limit + 1), reached), NOW),
+            LinkState::Stale {
+                last_report_at: seconds_ago(limit + 1),
+                stale_after_secs: STALE_AFTER.as_secs(),
+                last_ok_at: Some(seconds_ago(limit + 100)),
+            }
+        );
+    }
+
+    #[test]
+    fn stale_wins_over_a_failing_or_silent_report() {
+        for contact in [
+            Contact::NoAnswerYet,
+            Contact::Failing {
+                since: seconds_ago(1000),
+                failure: LinkFailure::Network,
+                last_ok_at: None,
+            },
+        ] {
+            assert!(matches!(
+                link_of(&report_at(seconds_ago(1000), contact), NOW),
+                LinkState::Stale {
+                    last_ok_at: None,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn report_dated_far_in_the_future_is_stale_not_fresh() {
+        let future = NOW + time::Duration::days(1);
+        assert!(matches!(
+            link_of(&report_at(future, Contact::NoAnswerYet), NOW),
+            LinkState::Stale { .. }
+        ));
+    }
+
+    #[test]
+    fn fresh_reports_map_to_their_state() {
+        let at = seconds_ago(1);
+        assert_eq!(
+            link_of(&report_at(at, Contact::NoAnswerYet), NOW),
+            LinkState::AwaitingContact { last_report_at: at }
+        );
+        let failure = LinkFailure::Response {
+            last_response_code: 503,
+        };
+        assert_eq!(
+            link_of(
+                &report_at(
+                    at,
+                    Contact::Failing {
+                        since: seconds_ago(50),
+                        failure,
+                        last_ok_at: None
+                    }
+                ),
+                NOW
+            ),
+            LinkState::Failing {
+                last_report_at: at,
+                since: seconds_ago(50),
+                failure,
+                last_ok_at: None
+            }
+        );
+    }
+
+    #[test]
+    fn expired_and_expiring_soon_are_distinct() {
+        let in_days = |d| NOW + time::Duration::days(d);
+        assert!(matches!(
+            ClientCert::at(in_days(8), NOW),
+            ClientCert::Valid { .. }
+        ));
+        assert!(matches!(
+            ClientCert::at(in_days(7), NOW),
+            ClientCert::ExpiringSoon { .. }
+        ));
+        assert!(matches!(
+            ClientCert::at(NOW + time::Duration::seconds(1), NOW),
+            ClientCert::ExpiringSoon { .. }
+        ));
+        assert!(matches!(
+            ClientCert::at(NOW, NOW),
+            ClientCert::Expired { .. }
+        ));
+    }
+
+    #[test]
+    fn report_carries_the_certificate_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sender-status.json");
+        let expires_at = NOW + time::Duration::days(2);
+        let report = SenderReport {
+            client_cert_expires_at: Some(expires_at),
+            ..report_at(seconds_ago(1), Contact::NoAnswerYet)
+        };
+        fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        assert_eq!(
+            read_report(&path, NOW).1,
+            ClientCert::ExpiringSoon { expires_at }
+        );
+    }
+
+    #[test]
+    fn absent_report_is_never_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_report(&dir.path().join("absent.json"), NOW),
+            (LinkState::NeverReported, ClientCert::NotReported)
+        );
+    }
+
+    #[test]
+    fn corrupt_report_is_unreadable_and_does_not_quote_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sender-status.json");
+        for bytes in [
+            b"hunter2".as_slice(),
+            b"",
+            b"\xff\xfe",
+            br#"{"schema_version":1}"#,
+            br#"{"schema_version":1,"written_at":"hunter2","contact":{"state":"no_answer_yet"}}"#,
+            br#"{"schema_version":1,"written_at":"2026-11-01T12:00:00Z","contact":{"state":"hunter2"}}"#,
+        ] {
+            fs::write(&path, bytes).unwrap();
+            let reason = unreadable_reason(read_report(&path, NOW));
+            assert!(reason.ends_with("not a sender report"), "{reason}");
+            assert!(!reason.contains("hunter2"), "{reason}");
+        }
+        fs::write(&path, "[".repeat(10_000)).unwrap();
+        unreadable_reason(read_report(&path, NOW));
+    }
+
+    #[test]
+    fn report_of_another_schema_is_unreadable() {
+        let report = SenderReport {
+            schema_version: REPORT_SCHEMA_VERSION + 1,
+            ..report_at(seconds_ago(1), Contact::NoAnswerYet)
+        };
+        assert!(matches!(
+            link_of(&report, NOW),
+            LinkState::Unreadable { .. }
+        ));
+    }
+
+    #[test]
+    fn report_over_the_cap_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sender-status.json");
+        let json = serde_json::to_string(&report_at(seconds_ago(1), Contact::NoAnswerYet)).unwrap();
+        let padded = |len: usize| json.clone() + &" ".repeat(len - json.len());
+        fs::write(&path, padded(MAX_REPORT_BYTES as usize)).unwrap();
+        assert!(matches!(
+            read_report(&path, NOW).0,
+            LinkState::AwaitingContact { .. }
+        ));
+        fs::write(&path, padded(MAX_REPORT_BYTES as usize + 1)).unwrap();
+        let reason = unreadable_reason(read_report(&path, NOW));
+        assert!(reason.contains("larger than"), "{reason}");
+    }
+
+    #[test]
+    fn a_directory_at_the_report_path_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let reason = unreadable_reason(read_report(dir.path(), NOW));
+        assert!(reason.ends_with("not a regular file"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_at_the_report_path_is_unreadable_and_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("sender-status.json");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(read_report(&fifo, NOW)));
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reading a FIFO must not block");
+        let reason = unreadable_reason(result);
+        assert!(reason.ends_with("not a regular file"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_at_the_report_path_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.json");
+        let report = report_at(seconds_ago(1), Contact::NoAnswerYet);
+        fs::write(&target, serde_json::to_vec(&report).unwrap()).unwrap();
+        let link = dir.path().join("sender-status.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let reason = unreadable_reason(read_report(&link, NOW));
+        assert!(reason.ends_with("not a regular file"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_this_user_may_not_read_is_unreadable_not_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        if effective_uid() == 0 {
+            return; // root ignores the mode, so nothing is under test.
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = read_report(&locked.join("sender-status.json"), NOW);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        unreadable_reason(result);
+    }
+
+    #[test]
+    fn levels_tell_healthy_from_broken() {
+        let level = |link: LinkState| link.summary().0;
+        let at = seconds_ago(1);
+        assert_eq!(level(LinkState::NeverReported), Level::Warn);
+        assert_eq!(
+            level(LinkState::Connected {
+                last_report_at: at,
+                last_ok_at: at
+            }),
+            Level::Ok
+        );
+        assert_eq!(
+            level(LinkState::Failing {
+                last_report_at: at,
+                since: at,
+                failure: LinkFailure::Tls,
+                last_ok_at: None
+            }),
+            Level::Error
+        );
     }
 
     #[cfg(unix)]
@@ -871,7 +1576,7 @@ mod tests {
                 true,
             );
             assert_eq!(
-                collect(&probe).await.agent,
+                collect(&probe, NOW).await.agent,
                 AgentRun::Running {
                     events_emitted_total: 7,
                     signed_policy: Some(SignedPolicy {
@@ -892,7 +1597,7 @@ mod tests {
                 false,
             );
             assert!(matches!(
-                collect(&probe).await.agent,
+                collect(&probe, NOW).await.agent,
                 AgentRun::Running {
                     signed_policy: None,
                     ..
@@ -910,7 +1615,7 @@ mod tests {
                 ..probe_in(dir.path())
             };
             assert!(matches!(
-                collect(&probe).await.agent,
+                collect(&probe, NOW).await.agent,
                 AgentRun::Running { .. }
             ));
         }
@@ -935,7 +1640,7 @@ mod tests {
                 closed.is_ok(),
                 "the socket still accepts 5s after its listener was dropped"
             );
-            assert_eq!(collect(&probe).await.agent, AgentRun::Stopped);
+            assert_eq!(collect(&probe, NOW).await.agent, AgentRun::Stopped);
         }
 
         #[tokio::test]
@@ -943,7 +1648,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let probe = probe_in(dir.path());
             let _listener = UnixListener::bind(&probe.control_endpoints[0]).unwrap();
-            let AgentRun::Unreachable { reason } = collect(&probe).await.agent else {
+            let AgentRun::Unreachable { reason } = collect(&probe, NOW).await.agent else {
                 panic!("a socket with no answer is not a stopped agent");
             };
             assert!(reason.contains("no answer"), "{reason}");
@@ -965,7 +1670,7 @@ mod tests {
                 0,
                 false,
             );
-            let AgentRun::Unreachable { reason } = collect(&probe).await.agent else {
+            let AgentRun::Unreachable { reason } = collect(&probe, NOW).await.agent else {
                 panic!("an untrusted peer must not read as running");
             };
             assert!(reason.contains("refusing to trust"), "{reason}");
@@ -983,7 +1688,7 @@ mod tests {
             let _listener = UnixListener::bind(socket).unwrap();
             fs::set_permissions(socket, fs::Permissions::from_mode(0o000)).unwrap();
             assert!(matches!(
-                collect(&probe).await.agent,
+                collect(&probe, NOW).await.agent,
                 AgentRun::Unreachable { .. }
             ));
         }
@@ -998,7 +1703,7 @@ mod tests {
                 ..probe_in(dir.path())
             };
             assert!(matches!(
-                collect(&probe).await.agent,
+                collect(&probe, NOW).await.agent,
                 AgentRun::Unreachable { .. }
             ));
         }

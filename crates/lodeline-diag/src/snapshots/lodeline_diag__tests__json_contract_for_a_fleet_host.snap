@@ -3,7 +3,7 @@ source: crates/lodeline-diag/src/lib.rs
 expression: "serde_json::to_string_pretty(&status).unwrap()"
 ---
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "tool_version": "1.2.3",
   "components": [
     {
@@ -34,7 +34,13 @@ expression: "serde_json::to_string_pretty(&status).unwrap()"
     "server_url": "https://s.example:8443",
     "config_path": "/etc/lodeline/sender.yaml",
     "link": {
-      "state": "unknown"
+      "state": "connected",
+      "last_report_at": "2026-11-01T11:59:50Z",
+      "last_ok_at": "2026-11-01T11:59:20Z"
+    },
+    "client_cert": {
+      "state": "expiring_soon",
+      "expires_at": "2026-11-04T12:00:00Z"
     }
   }
 }

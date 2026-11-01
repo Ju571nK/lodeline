@@ -11,7 +11,9 @@ description = "Read-only health snapshot of a Lodeline install, shared by the CL
 [dependencies]
 lodeline-core = { path = "../lodeline-core", features = ["control-client"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -19,5 +21,4 @@ libc = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
-serde_json = { workspace = true }
 tempfile = { workspace = true }

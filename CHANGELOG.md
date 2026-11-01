@@ -9,6 +9,25 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Added
 
+- `lodeline status` shows whether a fleet host really reaches `lodeline-server`. A
+  running `lodeline-sender` now writes `sender-status.json` next to its offset file,
+  at start, on a change of state, and every 30 seconds. The file has mode `0640` and
+  holds only timestamps and enums, never a URL, token, or server message. `status`
+  reads the file with no network call and shows never reported, awaiting contact,
+  connected, failing, stale (no report for 90 seconds), or unreadable. It also shows
+  whether the client certificate is valid, expires within 7 days, or has expired.
+  In `lodeline status --json`, `fleet.link` carries these states and
+  `fleet.client_cert` is new. `schema_version` is now 2 because the `unknown` link
+  state is gone. The status file is not authenticated: it is a local diagnostic, and
+  anyone able to write its directory can make it say anything. In the packaged layout
+  that is the `lodeline` user and root.
+
+- `lodeline-sender doctor` now runs real checks: config, certificate and key files
+  and their permissions, certificate expiry, events directory, agent control
+  endpoint, and status file. It exits 1 on a failure. It previously printed four
+  `[OK]` lines without checking anything. It makes no network call and never reads
+  the key.
+
 - `lodeline status` and `lodeline status --json` show whether Lodeline is healthy
   on this host: which components are installed, whether the agent is running, and
   the configured `lodeline-server`. A host with no sender config reads as single
@@ -32,6 +51,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   remove the field from the stored proxy state by hand. (#339)
 
 ### Fixed
+
+- `lodeline-sender` reported every TLS failure as a network failure, so the
+  `tls_failure` dead-letter event was never written. It now finds the TLS cause in
+  the error chain, and it writes one event per failure streak, whatever the reason text,
+  separately for events and policy, because that directory has no rotation.
+  Stored reasons hold the cause only, never the request URL.
+
+- `lodeline-sender` treated the 404 of a server with no policy as an unknown host and
+  wrote a `host_id_conflict` dead-letter event at each poll. It now treats that
+  answer as no change.
 
 - `lodeline-proxy`: a server that refuses every event by index no longer moves the
   whole queue into quarantine. These answers now count toward the existing limit of

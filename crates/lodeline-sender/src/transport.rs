@@ -5,6 +5,7 @@
 use reqwest::{Client, ClientBuilder, Identity};
 use std::path::Path;
 use thiserror::Error;
+use time::OffsetDateTime;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -71,6 +72,19 @@ pub fn build_client(
     builder.build().map_err(TransportError::Build)
 }
 
+/// When the first certificate in the PEM file at `path` expires.
+pub fn client_cert_expiry(path: &Path) -> anyhow::Result<OffsetDateTime> {
+    let pem = std::fs::read(path)?;
+    let der = rustls_pemfile::certs(&mut pem.as_slice())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no certificate in the file"))??;
+    let (_, cert) = x509_parser::parse_x509_certificate(&der)
+        .map_err(|_| anyhow::anyhow!("not a valid X.509 certificate"))?;
+    Ok(OffsetDateTime::from_unix_timestamp(
+        cert.validity().not_after.timestamp(),
+    )?)
+}
+
 /// High-level outcome of an HTTP send. The data_task uses this to decide
 /// retry vs. permanent-pause vs. event emission.
 #[derive(Debug)]
@@ -85,8 +99,9 @@ pub enum SendOutcome<R> {
     TlsFailure(String),
     /// Network failure (DNS, connect, timeout) — retry.
     Network(String),
-    /// Unparseable body or other unexpected protocol issue.
-    ProtocolViolation(String),
+    /// Unparseable body or other unexpected protocol issue. `status` is set when
+    /// the status itself was the problem.
+    ProtocolViolation { status: Option<u16>, detail: String },
 }
 
 /// Classify a `reqwest::Error` (or status) into a `SendOutcome`. Caller
@@ -95,26 +110,54 @@ pub fn classify_status<R>(status: u16, body: String, parsed: Option<R>) -> SendO
     if (200..300).contains(&status) {
         match parsed {
             Some(r) => SendOutcome::Ok2xx(r),
-            None => SendOutcome::ProtocolViolation(format!("2xx without parseable body: {body}")),
+            None => SendOutcome::ProtocolViolation {
+                status: None,
+                detail: format!("2xx without parseable body: {body}"),
+            },
         }
     } else if status == 409 || status == 426 {
         SendOutcome::PermanentReject { status, body }
     } else if (500..600).contains(&status) || status == 503 {
         SendOutcome::ServerBusy { status, body }
     } else {
-        SendOutcome::ProtocolViolation(format!("unexpected status {status}: {body}"))
+        SendOutcome::ProtocolViolation {
+            status: Some(status),
+            detail: format!("unexpected status {status}: {body}"),
+        }
     }
 }
 
 /// Maps a `reqwest::Error` from the *send/connect* phase (no HTTP status
 /// available) to either a TLS or network failure.
 pub fn classify_send_error<R>(err: reqwest::Error) -> SendOutcome<R> {
-    let msg = err.to_string();
-    if msg.contains("tls") || msg.contains("certificate") || msg.contains("handshake") {
-        SendOutcome::TlsFailure(msg)
+    let is_tls = error_chain(&err).any(|e| e.is::<rustls::Error>());
+    let cause = failure_cause(err);
+    if is_tls {
+        SendOutcome::TlsFailure(cause)
     } else {
-        SendOutcome::Network(msg)
+        SendOutcome::Network(cause)
     }
+}
+
+/// The text that is safe to store: the deepest cause, because `reqwest` puts the
+/// request URL and its query in its own message and prints no cause there.
+pub fn failure_cause(err: reqwest::Error) -> String {
+    let err = err.without_url();
+    error_chain(&err)
+        .last()
+        .map_or(String::new(), |e| e.to_string())
+}
+
+/// `io::Error::source` skips the error it wraps, so `get_ref` must look there.
+fn error_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(err), |&e| {
+        e.downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+            .map(|inner| inner as &(dyn std::error::Error + 'static))
+            .or(e.source())
+    })
 }
 
 /// Returns `Some(latest_mtime)` if any of the cert / key / CA files have
@@ -136,6 +179,49 @@ pub fn newest_pem_mtime(paths: &[&Path]) -> std::io::Result<Option<std::time::Sy
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn a_failed_tls_handshake_is_a_tls_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"HTTP/1.1 400 not tls\r\n\r\n").await.ok();
+            // Closing with the hello unread sends a reset, and Windows then drops the answer.
+            tokio::io::copy(&mut stream, &mut tokio::io::sink())
+                .await
+                .ok();
+        });
+        let err = build_client(None, None, None)
+            .unwrap()
+            .get(format!("https://{addr}/"))
+            .send()
+            .await
+            .unwrap_err();
+        let outcome = classify_send_error::<()>(err);
+        assert!(matches!(outcome, SendOutcome::TlsFailure(_)), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_stores_its_cause_and_no_part_of_the_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = build_client(None, None, None)
+            .unwrap()
+            .get(format!("http://u:s3cret@{addr}/base?token=t0ken"))
+            .send()
+            .await
+            .unwrap_err();
+        let SendOutcome::Network(cause) = classify_send_error::<()>(err) else {
+            panic!("not a network failure");
+        };
+        assert_ne!(cause, "error sending request");
+        for leak in ["s3cret", "t0ken", "/base", "127.0.0.1"] {
+            assert!(!cause.contains(leak), "{leak} in {cause}");
+        }
+    }
 
     #[test]
     fn missing_cert_returns_read_error() {
@@ -233,6 +319,9 @@ mod tests {
     #[test]
     fn classify_2xx_without_body_is_protocol_violation() {
         let outcome: SendOutcome<()> = classify_status(200, "".into(), None);
-        assert!(matches!(outcome, SendOutcome::ProtocolViolation(_)));
+        assert!(matches!(
+            outcome,
+            SendOutcome::ProtocolViolation { status: None, .. }
+        ));
     }
 }
