@@ -59,12 +59,27 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the running policy stay as they were. This covers an unsupported `version`, text
   that is not UTF-8, a hook deny rule or rule-pack regex that does not compile, a
   target path that does not compile as a glob, a `hook_silence.tick_secs` of 0 with
-  an agent enabled, and a policy that does not merge over the defaults of the host. `lodeline-sign sign` now stops on the same mistakes before
-  it signs, and it writes no bundle, with two limits. It does not check the merge,
-  because the file does not say whether it is a policy or a bundle, and only a policy
-  has to merge. It checks the target paths for its own OS and for `platform: any`, so
+  an agent enabled, and a policy that does not merge over the defaults of the host.
+  `lodeline-sign sign` now stops on the same mistakes before it signs, and it writes
+  no bundle, with two limits. It does not check the merge, because the file does not
+  say whether it is a policy or a bundle, and only a policy has to merge. It checks the target paths for its own OS and for `platform: any`, so
   a target for another OS is checked by `apply` on that OS.
   `lodeline-sign verify` reports the same document errors.
+
+- `lodeline-sender` stopped asking for a policy or rule-pack bundle when the server
+  sent it, before the agent answered. If the agent was down, every later poll got a
+  `304` and the document stayed undelivered until the next publish or a sender
+  restart. The sender now asks until the agent settles the document. It retries at
+  the poll interval after an outage or an agent failure. It stops when the agent
+  applies the document or refuses it as an old version, which only a new document
+  can change. Every other refusal can lift with the document unchanged, because the
+  host's clock, its keystore, or the agent's version also decides it. The sender
+  offers such a document on every 12th poll with no restart, which is 24 full fetches
+  a day at the default interval. Each refused offer also records a warning event.
+  `policy-etag.txt` and `rule-packs-etag.txt` now take effect at startup, so a
+  restart no longer fetches a settled document and the agent no longer records a
+  version regression for it. If you reset the agent's `state.db` and keep the sender
+  state, publish a new document or remove those two files.
 
 - `lodeline-sender` reported every TLS failure as a network failure, so the
   `tls_failure` dead-letter event was never written. It now finds the TLS cause in

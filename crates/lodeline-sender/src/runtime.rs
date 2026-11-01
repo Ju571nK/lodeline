@@ -1,21 +1,19 @@
 //! Top-level supervisor.
 //!
 //! Spawns four tasks:
-//! - control_task: polls /v1/policy with cached ETag.
-//! - reader: handles each PollOutcome — apply_policy IPC for fresh
-//!   policies (then persists ETag on success), local-event emission for
+//! - control_task: polls /v1/policy with cached ETag, offers each new
+//!   document to the agent, and persists the ETag once the agent settles it.
+//! - reader: handles each PollOutcome — local-event emission for
 //!   HostUnknown / TlsFailure / ProtocolViolation.
 //! - data_task: read JSONL → POST /v1/events → apply_ack → state::store
 //!   → dead-letter rejections → SharedStats updates.
 //! - status: writes SharedStats to the status file for readers on this host.
 
-use crate::agent_ipc::ApplyPolicyResult;
 use crate::config::SenderConfig;
 use crate::control_task::{ControlLoopCtx, PollOutcome};
 use crate::data_task::{self, dead_letter_tls_failure, local_event, DataTaskCtx};
 use crate::dead_letter;
 use crate::heartbeat;
-use crate::state;
 use crate::transport::{build_client, client_cert_expiry};
 use anyhow::Result;
 use lodeline_core::event::Evidence;
@@ -57,9 +55,6 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
                     None
                 }
             });
-    let etag_path = etag_path_for(&ctx.config.offset_path);
-    let packs_etag_path = packs_etag_path_for(&ctx.config.offset_path);
-    let initial_etag = state::load_etag(&etag_path).ok().flatten();
 
     let (poll_tx, mut poll_rx) = mpsc::channel::<PollOutcome>(8);
 
@@ -78,21 +73,18 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
                 shutdown: cancel_c,
                 outcomes: poll_tx,
                 stats: stats_c,
+                policy_etag_path: etag_path_for(&cfg_c.offset_path),
+                packs_etag_path: packs_etag_path_for(&cfg_c.offset_path),
+                agent_control: cfg_c.agent_control.clone(),
             })
             .await;
         }
     });
 
     let reader = tokio::spawn({
-        let agent_socket = ctx.config.agent_control.clone();
         let dead_letter_dir = ctx.config.dead_letter_dir.clone();
         let host_id = ctx.host_id.clone();
-        let etag_path_c = etag_path.clone();
-        let packs_etag_path_c = packs_etag_path.clone();
         let cancel_r = ctx.shutdown.clone();
-        // Seed the in-process etag with whatever boot recovery loaded so the
-        // first successful apply_policy doesn't re-store an unchanged value.
-        let _ = initial_etag;
         async move {
             let mut tls_streak = false;
             loop {
@@ -104,41 +96,11 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
                             tls_streak = false;
                         }
                         match maybe {
-                            Some(PollOutcome::NewPolicy { etag, response }) => {
-                                match crate::agent_ipc::apply_policy(&agent_socket, &response).await {
-                                    Ok(resp) if resp.ok
-                                        && matches!(resp.apply_policy, Some(ApplyPolicyResult::Accepted { .. })) =>
-                                    {
-                                        if let Err(e) = state::store_etag(&etag_path_c, &etag) {
-                                            tracing::warn!(error = ?e, "store_etag failed");
-                                        }
-                                    }
-                                    Ok(resp) => {
-                                        tracing::warn!(?resp, "agent did not accept policy; not caching etag");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(error = ?e, "apply_policy IPC failed");
-                                    }
-                                }
-                            }
-                            Some(PollOutcome::NewRulePacks { etag, response }) => {
-                                match crate::agent_ipc::apply_rule_packs(&agent_socket, &response).await {
-                                    Ok(resp) if resp.ok
-                                        && matches!(resp.apply_policy, Some(ApplyPolicyResult::Accepted { .. })) =>
-                                    {
-                                        if let Err(e) = state::store_etag(&packs_etag_path_c, &etag) {
-                                            tracing::warn!(error = ?e, "store rule-packs etag failed");
-                                        }
-                                    }
-                                    Ok(resp) => {
-                                        tracing::warn!(?resp, "agent did not accept rule packs; not caching etag");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(error = ?e, "apply_rule_packs IPC failed");
-                                    }
-                                }
-                            }
-                            Some(PollOutcome::Unmodified) => {}
+                            Some(
+                                PollOutcome::NewPolicy { .. }
+                                | PollOutcome::NewRulePacks { .. }
+                                | PollOutcome::Unmodified,
+                            ) => {}
                             Some(PollOutcome::HostUnknown) => {
                                 let evt = local_event(&host_id, Evidence::HostIdConflict { observed_status: 404 });
                                 let _ = dead_letter::append(&dead_letter_dir, &evt);

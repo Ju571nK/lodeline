@@ -29,6 +29,12 @@ pub struct MockState {
     /// Rule-packs bundle. `None` → endpoint responds 404 (benign: not
     /// configured). `Some` → 200 with the bundle (or 304 on etag match).
     pub rule_packs_response: Option<lodeline_sender::wire::SignedPolicyResponse>,
+    pub policy_polls: usize,
+    /// Polls answered with a full body rather than a 304.
+    pub policy_bodies: usize,
+    pub rule_pack_polls: usize,
+    /// Polls answered with a full body rather than a 304 or 404.
+    pub rule_pack_bodies: usize,
 }
 
 impl Default for MockState {
@@ -43,6 +49,10 @@ impl Default for MockState {
             policy_response: None,
             rule_packs_etag: String::new(),
             rule_packs_response: None,
+            policy_polls: 0,
+            policy_bodies: 0,
+            rule_pack_polls: 0,
+            rule_pack_bodies: 0,
         }
     }
 }
@@ -115,7 +125,8 @@ async fn handle_policy(
     axum::http::HeaderMap,
     Json<serde_json::Value>,
 ) {
-    let s = state.lock().await;
+    let mut s = state.lock().await;
+    s.policy_polls += 1;
     let mut out_headers = axum::http::HeaderMap::new();
     if let Some(etag) = headers.get("if-none-match") {
         if etag.to_str().unwrap_or("") == s.policy_etag {
@@ -126,6 +137,7 @@ async fn handle_policy(
             );
         }
     }
+    s.policy_bodies += 1;
     out_headers.insert(
         "etag",
         axum::http::HeaderValue::from_str(&s.policy_etag).unwrap(),
@@ -146,10 +158,11 @@ async fn handle_rule_packs(
     axum::http::HeaderMap,
     Json<serde_json::Value>,
 ) {
-    let s = state.lock().await;
+    let mut s = state.lock().await;
+    s.rule_pack_polls += 1;
     let mut out_headers = axum::http::HeaderMap::new();
     // No bundle configured → 404 (benign).
-    let Some(resp) = s.rule_packs_response.as_ref() else {
+    let Some(resp) = s.rule_packs_response.clone() else {
         return (
             axum::http::StatusCode::NOT_FOUND,
             out_headers,
@@ -165,6 +178,7 @@ async fn handle_rule_packs(
             );
         }
     }
+    s.rule_pack_bodies += 1;
     out_headers.insert(
         "etag",
         axum::http::HeaderValue::from_str(&s.rule_packs_etag).unwrap(),
