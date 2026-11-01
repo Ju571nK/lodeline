@@ -94,14 +94,14 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
         // first successful apply_policy doesn't re-store an unchanged value.
         let _ = initial_etag;
         async move {
-            let mut tls_reason: Option<String> = None;
+            let mut tls_streak = false;
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel_r.cancelled() => break,
                     maybe = poll_rx.recv() => {
                         if maybe.as_ref().is_some_and(|p| p.link_result().is_ok()) {
-                            tls_reason = None;
+                            tls_streak = false;
                         }
                         match maybe {
                             Some(PollOutcome::NewPolicy { etag, response }) => {
@@ -144,7 +144,7 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
                                 let _ = dead_letter::append(&dead_letter_dir, &evt);
                             }
                             Some(PollOutcome::TlsFailure(reason)) => {
-                                dead_letter_tls_failure(&dead_letter_dir, &host_id, &mut tls_reason, reason);
+                                dead_letter_tls_failure(&dead_letter_dir, &host_id, &mut tls_streak, reason);
                             }
                             Some(PollOutcome::Network(reason)) => {
                                 tracing::warn!(reason = %reason, "policy poll network failure");

@@ -219,26 +219,16 @@ pub fn local_event(host_id: &str, evidence: Evidence) -> Event {
     }
 }
 
-/// Appends a `tls_failure` event unless `last_reason` is already this reason. A TLS
-/// failure repeats at every retry or poll and this directory has no rotation, so a
-/// loop keeps the reason here and clears it on a success.
-pub fn dead_letter_tls_failure(
-    dir: &Path,
-    host_id: &str,
-    last_reason: &mut Option<String>,
-    reason: String,
-) {
-    if last_reason.as_ref() == Some(&reason) {
+/// Appends one `tls_failure` event per failure streak. A TLS failure repeats at every
+/// retry or poll and this directory has no rotation, so a loop sets `in_streak` here
+/// and clears it on a success. The reason text is ignored: rustls prints the check
+/// time in expired and not-yet-valid errors, so it differs on every retry.
+pub fn dead_letter_tls_failure(dir: &Path, host_id: &str, in_streak: &mut bool, reason: String) {
+    if std::mem::replace(in_streak, true) {
         return;
     }
-    let evt = local_event(
-        host_id,
-        Evidence::TlsFailure {
-            reason: reason.clone(),
-        },
-    );
+    let evt = local_event(host_id, Evidence::TlsFailure { reason });
     let _ = dead_letter::append(dir, &evt);
-    *last_reason = Some(reason);
 }
 
 /// Top-level data plane loop: read JSONL → POST /v1/events → apply_ack
@@ -255,7 +245,7 @@ pub async fn run(ctx: DataTaskCtx) {
         }
     };
     let mut consecutive_failures: u32 = 0;
-    let mut tls_reason: Option<String> = None;
+    let mut tls_streak = false;
 
     loop {
         if ctx.shutdown.is_cancelled() {
@@ -348,7 +338,7 @@ pub async fn run(ctx: DataTaskCtx) {
                     }
                 };
                 consecutive_failures = 0;
-                tls_reason = None;
+                tls_streak = false;
                 ctx.stats
                     .write()
                     .record(Plane::Events, Ok(()), OffsetDateTime::now_utc());
@@ -412,7 +402,7 @@ pub async fn run(ctx: DataTaskCtx) {
                 dead_letter_tls_failure(
                     &ctx.config.dead_letter_dir,
                     &ctx.host_id,
-                    &mut tls_reason,
+                    &mut tls_streak,
                     reason,
                 );
                 let delay = backoff_busy.next_delay(consecutive_failures.saturating_sub(1));
@@ -487,15 +477,31 @@ mod tests {
     use crate::manifest::{ByteRange, ManifestEntry};
 
     #[test]
-    fn a_new_tls_reason_is_written_and_a_repeat_is_not() {
+    fn two_different_reasons_in_one_streak_write_one_event() {
         let dir = tempfile::tempdir().unwrap();
-        let mut last = None;
-        for reason in ["expired", "expired", "unknown issuer", "unknown issuer"] {
-            dead_letter_tls_failure(dir.path(), "h", &mut last, reason.into());
+        let mut in_streak = false;
+        for reason in [
+            "expired at 10:00:01",
+            "expired at 10:00:09",
+            "unknown issuer",
+        ] {
+            dead_letter_tls_failure(dir.path(), "h", &mut in_streak, reason.into());
         }
         let file = std::fs::read_dir(dir.path()).unwrap().next().unwrap();
         let body = std::fs::read_to_string(file.unwrap().path()).unwrap();
-        assert_eq!(body.lines().count(), 2, "{body}");
+        assert_eq!(body.lines().count(), 1, "{body}");
+        in_streak = false;
+        dead_letter_tls_failure(dir.path(), "h", &mut in_streak, "expired again".into());
+        let n: usize = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|f| {
+                std::fs::read_to_string(f.unwrap().path())
+                    .unwrap()
+                    .lines()
+                    .count()
+            })
+            .sum();
+        assert_eq!(n, 2, "a success ends the streak, the next failure writes");
     }
 
     #[test]
