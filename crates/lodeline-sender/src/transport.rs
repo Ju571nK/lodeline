@@ -188,6 +188,10 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             let (mut stream, _) = listener.accept().await.unwrap();
             stream.write_all(b"HTTP/1.1 400 not tls\r\n\r\n").await.ok();
+            // Closing with the hello unread sends a reset, and Windows then drops the answer.
+            tokio::io::copy(&mut stream, &mut tokio::io::sink())
+                .await
+                .ok();
         });
         let err = build_client(None, None, None)
             .unwrap()

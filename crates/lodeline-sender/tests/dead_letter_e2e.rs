@@ -25,7 +25,13 @@ async fn listener_without_tls() -> std::net::SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
-            stream.write_all(b"HTTP/1.1 400 not tls\r\n\r\n").await.ok();
+            tokio::spawn(async move {
+                stream.write_all(b"HTTP/1.1 400 not tls\r\n\r\n").await.ok();
+                // Closing with the hello unread sends a reset, and Windows then drops the answer.
+                tokio::io::copy(&mut stream, &mut tokio::io::sink())
+                    .await
+                    .ok();
+            });
         }
     });
     addr
