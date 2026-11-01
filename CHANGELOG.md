@@ -9,6 +9,15 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Added
 
+- `lodeline status` and `lodeline status --json` show whether Lodeline is healthy
+  on this host: which components are installed, whether the agent is running, and
+  the configured `lodeline-server`. A host with no sender config reads as single
+  host. The command is read-only and needs no daemon, no fleet, and no network.
+  `--sender-config` names the config of a sender started with `--config`. The data
+  comes from the new `lodeline-diag` library, which a later diagnostic UI will use
+  too. The JSON carries `schema_version`. A build with `--no-default-features`
+  leaves the command and the library out.
+
 - lodeline-proxy status reports now carry `central.ingest_stopped: true` while
   ingest is stopped (see Fixed), and the proxy reports `spool.state` as `degraded`
   instead of `ok` during that time. The field is sent only when true, and absent
