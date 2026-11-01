@@ -61,13 +61,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - `lodeline-sender` now caps the server text it stores in the dead-letter directory
   at 512 bytes, cut on a character boundary and marked with `…`. Before, a status
   body, an unparseable reply, a batch rejection, or a per-event rejection reason went
-  in whole, so a misbehaving server could fill the disk of a host. The directory also
-  keeps at most 30 files, one a day, and removes the oldest when it starts a new
-  file, and logs how many. It never removes the file it just wrote, even when the
-  clock was set back. A batch reply gets at most 20 per-event rejection entries. The rest are
-  counted in one `server_protocol_violation` entry, so a server that rejects
-  thousands of events at a time cannot grow the directory. A file still has no size
-  limit within its day beyond these bounds.
+  in whole, so a misbehaving server could fill the disk of a host. The directory
+  holds one file a day. When it starts a new file it keeps 30 at most, removes the
+  oldest, and logs how many. It never removes the file it just wrote, even when the
+  clock was set back. A batch reply gets at most 20 per-event rejection entries. The
+  rest are counted in one `server_protocol_violation` entry, so each batch adds at
+  most 21 entries however many events the server rejects. A file has no size limit
+  within its day beyond these bounds.
 
 - `lodeline-sender` now gives up on a request to `lodeline-server` that gets no answer.
   The HTTP client had no timeout, so a server that accepted a connection and never
@@ -77,7 +77,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   kbit/s. A timed-out request counts as a network failure and the link state shows
   `failing`. So does a timeout or a dropped connection while the sender reads the
   response body. Before, that counted as a protocol violation and wrote a dead letter
-  on each retry, and on a policy poll that got a 404 it read as an unknown host. A
+  on each retry, and on a policy poll that got a 404 it read as an unknown host. The
+  same holds when the status is an error: a 409 whose body is cut off is now retried
+  as a network failure, not treated as a permanent rejection. A
   body that arrives and does not parse is still a protocol violation.
 
 - A path template with non-ASCII text, such as `$HOME/한국어/설정.json`, now expands
