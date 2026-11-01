@@ -10,7 +10,8 @@ use lodeline_core::control_proto::{Request, Response};
 use lodeline_core::paths::default_sender_config;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use std::time::Duration;
 pub const SCHEMA_VERSION: u32 = 1;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_SENDER_CONFIG_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostStatus {
@@ -369,7 +371,7 @@ async fn send(endpoint: &Path, _self_uid: u32, req: &Request) -> io::Result<Resp
 
 fn read_fleet(candidates: &[PathBuf]) -> FleetLink {
     for path in candidates {
-        match std::fs::read(path) {
+        match read_capped(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
                 return FleetLink::Unreadable {
@@ -381,6 +383,22 @@ fn read_fleet(candidates: &[PathBuf]) -> FleetLink {
         }
     }
     FleetLink::NotConfigured
+}
+
+/// A FIFO would block forever and a device could be endless, so anything but a
+/// regular file of bounded size is refused before it is read.
+fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_SENDER_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SENDER_CONFIG_BYTES {
+        return Err(io::Error::other("larger than 1 MiB"));
+    }
+    Ok(bytes)
 }
 
 /// Reads only `server_base_url`. `lodeline-sender`'s own config type would link its
@@ -680,6 +698,41 @@ mod tests {
             };
             assert_eq!(reason, "no usable server_base_url");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_at_the_config_path_is_unreadable_and_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("sender.yaml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(read_fleet(&[fifo])));
+        let fleet = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reading a FIFO must not block");
+        assert!(
+            matches!(&fleet, FleetLink::Unreadable { reason, .. } if reason == "not a regular file"),
+            "{fleet:?}"
+        );
+    }
+
+    #[test]
+    fn sender_config_is_read_up_to_the_size_cap() {
+        let config = "server_base_url: https://s.example\n#";
+        let at_cap = config.to_string() + &"x".repeat(1024 * 1024 - config.len());
+        let (_dir, fleet) = fleet_with(&at_cap);
+        assert!(matches!(fleet, FleetLink::Configured { .. }), "{fleet:?}");
+
+        let (_dir, fleet) = fleet_with(&(at_cap + "x"));
+        assert!(
+            matches!(&fleet, FleetLink::Unreadable { reason, .. } if reason == "larger than 1 MiB"),
+            "{fleet:?}"
+        );
     }
 
     fn sample(agent: AgentRun, fleet: FleetLink) -> HostStatus {
