@@ -80,9 +80,11 @@ pub fn expand(input: &str, vars: &impl VarLookup) -> Result<PathBuf, ExpandError
                 out.push_str(&value);
                 i = end + 1;
             }
-            other => {
-                out.push(other as char);
-                i += 1;
+            _ => {
+                // Tokens are ASCII, so `i` is always on a char boundary here.
+                let c = input[i..].chars().next().expect("i < len");
+                out.push(c);
+                i += c.len_utf8();
             }
         }
     }
