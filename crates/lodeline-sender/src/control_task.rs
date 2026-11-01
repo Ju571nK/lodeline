@@ -75,10 +75,10 @@ fn transport_failure(outcome: SendOutcome<()>) -> PollOutcome {
 }
 
 /// The text of a response body, or the failure that cut the read short.
-async fn body_text(resp: reqwest::Response) -> Result<String, PollOutcome> {
+async fn body_text(resp: reqwest::Response) -> Result<String, Box<PollOutcome>> {
     resp.text()
         .await
-        .map_err(|e| transport_failure(classify_body_error(e, "body read")))
+        .map_err(|e| Box::new(transport_failure(classify_body_error(e, "body read"))))
 }
 
 fn bad_status(status: u16, body: &str) -> PollOutcome {
@@ -115,7 +115,7 @@ pub async fn poll_policy(
         // The server also answers 404 when it holds no policy, for a host it knows.
         let body = match body_text(resp).await {
             Ok(b) => b,
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         };
         let error = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
@@ -128,7 +128,7 @@ pub async fn poll_policy(
     if !(200..300).contains(&status) {
         return match body_text(resp).await {
             Ok(body) => bad_status(status, &body),
-            Err(outcome) => outcome,
+            Err(outcome) => *outcome,
         };
     }
     let etag = resp
@@ -181,7 +181,7 @@ pub async fn poll_rule_packs(
     if !(200..300).contains(&status) {
         return match body_text(resp).await {
             Ok(body) => bad_status(status, &body),
-            Err(outcome) => outcome,
+            Err(outcome) => *outcome,
         };
     }
     let etag = resp
