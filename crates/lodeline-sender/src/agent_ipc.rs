@@ -202,24 +202,22 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_of_the_document_itself_is_final() {
-        use PolicySignatureInvalidReason::*;
-        for (wire, reason) in [
-            ("version_regression", VersionRegression),
-            ("signature_invalid", SignatureInvalid),
-            ("expired", Expired),
-            ("parse_failed", ParseFailed),
-        ] {
-            assert_eq!(refusal(wire), Settlement::Refused(reason));
-        }
+    fn only_a_version_the_agent_already_passed_is_final() {
+        assert_eq!(
+            refusal("version_regression"),
+            Settlement::Refused(PolicySignatureInvalidReason::VersionRegression)
+        );
     }
 
     #[test]
-    fn a_refusal_by_the_keystore_is_not_final() {
+    fn a_refusal_decided_by_the_host_or_the_agent_build_is_not_final() {
         use PolicySignatureInvalidReason::*;
         for (wire, reason) in [
             ("pubkey_unknown", PubkeyUnknown),
             ("pubkey_inactive", PubkeyInactive),
+            ("signature_invalid", SignatureInvalid),
+            ("expired", Expired),
+            ("parse_failed", ParseFailed),
         ] {
             assert_eq!(refusal(wire), Settlement::RefusedForNow(reason));
         }
