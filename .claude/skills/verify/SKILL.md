@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Drive the real Lodeline CLI (lodeline, lodeline-hook, lodeline-sign, lodeline-server) as short-lived processes in an isolated temp HOME and capture evidence. Use to prove a change to scan, doctor, hook install or enforce, or policy signing on the real binaries, not just in tests, or to reproduce a CLI bug.
+description: Drive the real Lodeline CLI (lodeline, lodeline-hook, lodeline-sign, lodeline-server) as short-lived processes in an isolated temp HOME and capture evidence. Use to prove a change to scan, doctor, status, hook install or enforce, or policy signing on the real binaries, not just in tests, or to reproduce a CLI bug.
 ---
 
 # Verify Lodeline
@@ -79,7 +79,7 @@ Stops this run's background processes, removes `scratch/`, keeps `evidence/`, an
 - **User enumeration.** `lodeline doctor` and `lodeline show paths` take users from `/Users` on macOS and `/etc/passwd` on Linux, not from `$HOME`. `doctor` checks that real users' config paths exist and prints those paths, so its evidence holds real home paths. It does not read their contents.
 - **System policy files.** `lodeline scan` reads managed settings at `/Library/Application Support/ClaudeCode` on macOS, `/etc/claude-code` on Linux, and `/etc/codex`, read-only. On a host with those files, extra rows or controls appear. Assert on your fixture's row, not on the whole table.
 - **Full Disk Access.** `doctor` on macOS probes the system TCC database path. The result, and so the exit code, depends on the host.
-- **The daemon.** `lodeline run` watches every enumerated user's real configs. A policy can disable a target by id, but no run has shown that this covers every daemon read. Daemon behavior stays with `cargo test -p lodeline-agent`. Anything that needs a live daemon is out of reach here: `show stats`, `show risk`, `show policy-status`, `show targets`, `reload`, live AI Guard data in `doctor`, and real deny verdicts.
+- **The daemon.** `lodeline run` watches every enumerated user's real configs. A policy can disable a target by id, but no run has shown that this covers every daemon read. Daemon behavior stays with `cargo test -p lodeline-agent`. Anything that needs a live daemon is out of reach here: `show stats`, `show risk`, `show policy-status`, `show targets`, `reload`, live AI Guard data in `doctor`, the `agent: running` row of `status`, and real deny verdicts.
 
 ## Secondary surfaces
 

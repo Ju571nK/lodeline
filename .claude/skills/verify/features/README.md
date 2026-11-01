@@ -40,3 +40,4 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 - [Doctor](./doctor.md) covers the diagnostic report, exit codes, and rubric overrides.
 - [Hook install](./hook-install.md) covers preview, write in a temp HOME, drift detection, uninstall, and opt-in enforce.
 - [Fleet local](./fleet-local.md) covers policy signing and the plain-HTTP server on loopback.
+- [Status](./status.md) covers the host snapshot in text and JSON, the agent row, and the fleet link read from a sender config.
