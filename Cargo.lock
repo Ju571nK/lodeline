@@ -2142,6 +2142,7 @@ dependencies = [
  "clap",
  "http 1.4.0",
  "lodeline-core",
+ "lodeline-diag",
  "parking_lot",
  "reqwest",
  "rustls",

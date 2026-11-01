@@ -19,7 +19,8 @@ pub struct Cli {
 pub enum Command {
     /// Run the sender process (data_task + control_task).
     Start,
-    /// Print health summary (cert status, last ack, lag) and exit.
+    /// Check config, certificates, events dir, agent, and the status file. Makes no
+    /// network call. Exits 1 on a failure.
     Doctor,
     /// Read config + cert, attempt one POST to a configured mock URL,
     /// print outcome, exit. Does NOT advance any offset on disk.

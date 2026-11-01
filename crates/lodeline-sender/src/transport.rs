@@ -195,6 +195,17 @@ mod tests {
     }
 
     #[test]
+    fn client_cert_expiry_reads_not_after() {
+        let dir = tempdir().unwrap();
+        let cert = dir.path().join("client.crt");
+        std::fs::write(&cert, include_str!("../tests/fixtures/client.crt")).unwrap();
+        assert_eq!(
+            client_cert_expiry(&cert).unwrap(),
+            time::macros::datetime!(2036-10-29 08:05:26 UTC)
+        );
+    }
+
+    #[test]
     fn missing_cert_returns_read_error() {
         let dir = tempdir().unwrap();
         let err = build_client(
