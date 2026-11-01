@@ -125,9 +125,10 @@ impl HashCache {
         Ok(())
     }
 
-    /// Record an apply before its file moves, so that a boot can finish it. A
+    /// Record an apply before its file moves, so that it can be finished later. A
     /// version below the recorded one leaves everything alone and returns
-    /// [`StateError::WouldLowerVersion`].
+    /// [`StateError::WouldLowerVersion`]. An earlier record must be settled first:
+    /// replacing it would lose the version that may already be on disk.
     pub fn record_pending(
         &self,
         kind: ArtifactKind,
@@ -138,7 +139,7 @@ impl HashCache {
         self.conn.pragma_update(None, "synchronous", "FULL")?;
         let inserted = self.conn.execute(
             &format!(
-                "INSERT OR REPLACE INTO pending_envelope (kind, version, hash_hex, valid_until)
+                "INSERT INTO pending_envelope (kind, version, hash_hex, valid_until)
                  SELECT ?1, ?2, ?3, ?4 FROM host_meta WHERE id = 1 AND {column} <= ?2"
             ),
             params![

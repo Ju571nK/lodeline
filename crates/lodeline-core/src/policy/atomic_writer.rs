@@ -1,8 +1,8 @@
 //! Crash-safe writer for one signed artifact file and its recorded version.
 //!
 //! Spec §4.4. A file and a state.db row cannot change together, so state.db records
-//! the apply before the file moves. A stop at any step leaves a state that the next
-//! boot resolves from what is on disk, with [`settle_pending`].
+//! the apply before the file moves. A stop or a failure at any step leaves a state
+//! that the next boot or apply resolves from what is on disk, with [`settle_pending`].
 
 use super::deployment::ArtifactKind;
 use crate::host_meta::PendingEnvelope;
@@ -22,7 +22,7 @@ pub enum AtomicWriteError {
     /// and the applied version are unchanged. A lower version lands here.
     #[error("state.db update failed before disk write: {0}")]
     StateBeforeDisk(StateError),
-    /// The file may be ahead of the applied version, and the next boot settles it.
+    /// The file may be ahead of the applied version. The next boot or apply settles it.
     #[error("state.db update failed AFTER disk write: {0}")]
     StateAfterDisk(StateError),
 }
@@ -55,16 +55,16 @@ pub fn atomic_write(
         .map_err(AtomicWriteError::StateAfterDisk)
 }
 
-/// Resolve an apply that stopped partway. Run it at boot, before any new apply.
-/// `target` holding the pending bytes means the rename happened, so the apply is
-/// finished, and its version is returned. Otherwise the rename never happened, or an
-/// older agent has since gone past this version, and the pending record is dropped.
+/// Resolve an apply that stopped or failed partway. Run it at boot and before every
+/// apply. `target` holding the pending bytes means the rename happened, so the apply
+/// is finished, and its record is returned. Otherwise the rename never happened, or
+/// an older agent has since gone past this version, and the pending record is dropped.
 /// Safe to run again after a stop at any point.
 pub fn settle_pending(
     kind: ArtifactKind,
     target: &Path,
     cache: &HashCache,
-) -> Result<Option<i64>, AtomicWriteError> {
+) -> Result<Option<PendingEnvelope>, AtomicWriteError> {
     let Some(pending) = cache
         .pending(kind)
         .map_err(AtomicWriteError::StateAfterDisk)?
@@ -78,7 +78,7 @@ pub fn settle_pending(
     };
     if on_disk.as_deref() == Some(pending.hash_hex.as_str()) {
         match cache.promote_pending(kind) {
-            Ok(()) => return Ok(Some(pending.version)),
+            Ok(()) => return Ok(Some(pending)),
             Err(StateError::WouldLowerVersion { .. }) => {}
             Err(e) => return Err(AtomicWriteError::StateAfterDisk(e)),
         }
@@ -267,7 +267,8 @@ mod tests {
             record_pending(&cache, kind, b"five\n", 5);
             std::fs::write(&target, b"five\n").unwrap();
 
-            assert_eq!(settle_pending(kind, &target, &cache).unwrap(), Some(5));
+            let settled = settle_pending(kind, &target, &cache).unwrap();
+            assert_eq!(settled.map(|pending| pending.version), Some(5));
             assert_eq!(settle_pending(kind, &target, &cache).unwrap(), None);
 
             assert_eq!(applied(&cache, kind), 5);

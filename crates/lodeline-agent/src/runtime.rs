@@ -113,9 +113,13 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         let packs = settle_pending(ArtifactKind::RulePacks, &rule_packs_yaml_path, &c)
             .context("finishing an interrupted rule-pack apply")?;
         let finished: Vec<Evidence> = policy
-            .map(|policy_version| Evidence::PolicyReloaded { policy_version })
+            .map(|pending| Evidence::PolicyReloaded {
+                policy_version: pending.version,
+            })
             .into_iter()
-            .chain(packs.map(|version| Evidence::RulePackBundleApplied { version }))
+            .chain(packs.map(|pending| Evidence::RulePackBundleApplied {
+                version: pending.version,
+            }))
             .collect();
         (finished, c.host_meta_get()?.policy)
     };

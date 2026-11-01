@@ -1,18 +1,19 @@
 //! Server-of-record for the `apply_policy` IPC handler.
 //!
 //! Spec §4.4. The handler is pure orchestration:
-//!   1. Run the A5 verifier, then merge the policy the way boot does.
-//!   2. On Ok: atomic_write(policy.yaml, version, valid_until) → notify watchers → ack.
-//!   3. On Err with reason: emit PolicySignatureInvalid → reject ack.
-//!   4. On Err::Internal: log + 5xx-equivalent (re-tries OK).
+//!   1. Settle an earlier apply that failed partway, the way boot does.
+//!   2. Run the A5 verifier, then merge the policy the way boot does.
+//!   3. On Ok: atomic_write(policy.yaml, version, valid_until) → notify watchers → ack.
+//!   4. On Err with reason: emit PolicySignatureInvalid → reject ack.
+//!   5. On Err::Internal: log + 5xx-equivalent (re-tries OK).
 
 use lodeline_core::event::{
     Event, Evidence, PolicySignatureInvalidReason, Severity, SourceKind, Subject, AGENT_VERSION,
     SCHEMA_VERSION,
 };
 use lodeline_core::policy::{
-    atomic_write, deployment::ArtifactKind, merge_on_this_host, pubkeys::Keystore,
-    signed_envelope::SignedPolicyResponse, verify_envelope, VerifyError,
+    atomic_write, deployment::ArtifactKind, merge_on_this_host, pubkeys::Keystore, settle_pending,
+    signed_envelope::SignedPolicyResponse, verify_envelope, AtomicWriteError, VerifyError,
 };
 use lodeline_core::state::HashCache;
 use parking_lot::{Mutex, RwLock};
@@ -29,7 +30,8 @@ use crate::state_task::CommittableEvent;
 pub enum ApplyOutcome {
     /// Verifier accepted; disk + state.db advanced.
     Accepted { applied_policy_version: i64 },
-    /// Verifier rejected; event emitted; nothing changed on disk or in state.db.
+    /// Verifier rejected; event emitted; this document changed nothing on disk or
+    /// in state.db.
     Rejected {
         reason: PolicySignatureInvalidReason,
     },
@@ -69,6 +71,9 @@ pub struct ApplyContext {
 /// Apply a freshly-received `SignedPolicyResponse`.
 pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> ApplyOutcome {
     let _applying = ctx.apply_lock.lock().await;
+    if let Err(e) = settle_earlier_apply(ctx, ArtifactKind::Policy).await {
+        return settle_failed(e);
+    }
     let now = OffsetDateTime::now_utc();
     let last_applied = {
         let cache = ctx.cache.lock();
@@ -125,19 +130,12 @@ pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> Apply
     };
     match write_result {
         Ok(()) => {
-            // Update the shared cell so the expiry monitor + IPC PolicyStatus
-            // can see the new envelope's valid_until.
-            *ctx.active_valid_until.write() = Some(new_valid_until);
-            // Notify subscribers (heartbeat, expiry monitor) that the
-            // active policy version advanced. Send is best-effort; if no
-            // receiver is alive we still consider apply successful.
-            let _ = ctx.policy_version_tx.send(verified.policy_version);
-            emit_reloaded(ctx, verified.policy_version).await;
+            publish_policy(ctx, verified.policy_version, new_valid_until).await;
             ApplyOutcome::Accepted {
                 applied_policy_version: verified.policy_version,
             }
         }
-        // The sender retries, and the next boot settles a file that moved.
+        // The sender retries, and the next apply or boot settles a file that moved.
         Err(e) => ApplyOutcome::Internal {
             detail: e.to_string(),
         },
@@ -150,6 +148,9 @@ pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> Apply
 /// policy.yaml or the policy version.
 pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyResponse) -> ApplyOutcome {
     let _applying = ctx.apply_lock.lock().await;
+    if let Err(e) = settle_earlier_apply(ctx, ArtifactKind::RulePacks).await {
+        return settle_failed(e);
+    }
     let now = OffsetDateTime::now_utc();
     let last_applied = {
         let cache = ctx.cache.lock();
@@ -195,10 +196,7 @@ pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyRespons
     };
     match write_result {
         Ok(()) => {
-            // Notify the reload task (Task 5) that the rule-packs version
-            // advanced. Best-effort; no live receiver is not an error.
-            let _ = ctx.rule_packs_version_tx.send(verified.policy_version);
-            emit_rule_packs_applied(ctx, verified.policy_version).await;
+            publish_rule_packs(ctx, verified.policy_version).await;
             ApplyOutcome::Accepted {
                 applied_policy_version: verified.policy_version,
             }
@@ -207,6 +205,51 @@ pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyRespons
             detail: e.to_string(),
         },
     }
+}
+
+/// Resolve an earlier apply of `kind` that failed partway, so this one is checked
+/// against what is really on disk. The earlier failure published nothing, so a
+/// finished apply publishes here, and the running agent loads its file.
+async fn settle_earlier_apply(
+    ctx: &ApplyContext,
+    kind: ArtifactKind,
+) -> Result<(), AtomicWriteError> {
+    let target = match kind {
+        ArtifactKind::Policy => &ctx.policy_yaml_path,
+        ArtifactKind::RulePacks => &ctx.rule_packs_yaml_path,
+    };
+    let finished = settle_pending(kind, target, &ctx.cache.lock())?;
+    if let Some(pending) = finished {
+        match kind {
+            ArtifactKind::Policy => publish_policy(ctx, pending.version, pending.valid_until).await,
+            ArtifactKind::RulePacks => publish_rule_packs(ctx, pending.version).await,
+        }
+    }
+    Ok(())
+}
+
+fn settle_failed(e: AtomicWriteError) -> ApplyOutcome {
+    ApplyOutcome::Internal {
+        detail: format!("settling an earlier apply: {e}"),
+    }
+}
+
+async fn publish_policy(ctx: &ApplyContext, version: i64, valid_until: OffsetDateTime) {
+    // Update the shared cell so the expiry monitor + IPC PolicyStatus
+    // can see the new envelope's valid_until.
+    *ctx.active_valid_until.write() = Some(valid_until);
+    // Notify subscribers (heartbeat, expiry monitor) that the
+    // active policy version advanced. Send is best-effort; if no
+    // receiver is alive we still consider apply successful.
+    let _ = ctx.policy_version_tx.send(version);
+    emit_reloaded(ctx, version).await;
+}
+
+async fn publish_rule_packs(ctx: &ApplyContext, version: i64) {
+    // Notify the reload task (Task 5) that the rule-packs version
+    // advanced. Best-effort; no live receiver is not an error.
+    let _ = ctx.rule_packs_version_tx.send(version);
+    emit_rule_packs_applied(ctx, version).await;
 }
 
 async fn emit_invalid(

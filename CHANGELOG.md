@@ -60,6 +60,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   stop between the rename and the record left the version behind the file, and an
   older signed version could then replace the newest. If this repair fails, the agent
   stops at boot instead of serving a stale version.
+  - A running agent makes the same check before every apply. Before, an apply that
+    failed after the rename, at the directory sync or the record write, left the
+    version behind the file while the agent kept running, and an older signed version
+    could then replace the newest. It is now refused with `version_regression`, and
+    the status, the expiry, and the loaded policy follow the finished apply. If the
+    check fails, that apply returns an error and writes nothing. A retry of the
+    document that failed finishes it and gets `version_regression`, because it is
+    already applied.
   - `policy_status` now reports the real `active_envelope_valid_until` and
     `policy_expired_active` after a restart. The expiry monitor checks at boot, so a
     restart on an expired policy reports `policy_expired_active` at once instead of
