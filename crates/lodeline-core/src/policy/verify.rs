@@ -10,11 +10,12 @@
 //!   2. signature valid      → VerifyError::SignatureInvalid
 //!   3. valid_until in future → VerifyError::Expired
 //!   4. policy_version monotonic → VerifyError::VersionRegression
-//!   5. parse                → VerifyError::ParseFailed
+//!   5. parse as boot would  → VerifyError::ParseFailed
 
 use crate::event::PolicySignatureInvalidReason;
 use crate::policy::{
     canonical::{to_canonical_bytes, CanonicalError},
+    parse_signed,
     pubkeys::{Keystore, KeystoreError},
     signed_envelope::SignedPolicyResponse,
     PolicyDocument,
@@ -25,7 +26,7 @@ use time::OffsetDateTime;
 /// Successful verification result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedPolicy {
-    /// The decoded YAML parsed into a `PolicyDocument`.
+    /// The decoded document, accepted by [`parse_signed`].
     pub policy: PolicyDocument,
     /// Echoed for the caller's atomic write step.
     pub policy_version: i64,
@@ -59,7 +60,7 @@ pub enum VerifyError {
         /// Agent's current persisted version.
         last_applied: i64,
     },
-    /// Check 5: bytes did not parse to a `PolicyDocument`.
+    /// Check 5: bytes are not a document that [`parse_signed`] accepts.
     #[error("policy bytes did not parse: {0}")]
     ParseFailed(String),
     /// Internal failure (keystore I/O, canonicalization). NOT a signature
@@ -159,8 +160,8 @@ pub fn verify_envelope(
         .signed_envelope
         .decode_policy_bytes()
         .map_err(|e| VerifyError::ParseFailed(format!("base64: {e}")))?;
-    let policy: PolicyDocument = serde_yaml::from_slice(&policy_bytes)
-        .map_err(|e| VerifyError::ParseFailed(format!("yaml: {e}")))?;
+    let policy =
+        parse_signed(&policy_bytes).map_err(|e| VerifyError::ParseFailed(e.to_string()))?;
 
     Ok(VerifiedPolicy {
         policy,
@@ -413,6 +414,23 @@ mod tests {
 
         let r = verify_envelope(&store, &resp, now, 0);
         assert!(matches!(r, Err(VerifyError::ParseFailed(_))));
+    }
+
+    #[test]
+    fn check5_document_boot_cannot_load_returns_parse_failed() {
+        let now = datetime!(2026-05-15 0:00 UTC);
+        let (store, sk) = fixture(now);
+        for yaml in [
+            "version: 2\n",
+            "version: 1\nhook_deny_rules:\n  - id: r\n    match: {kind: bash, command: {kind: regex, pattern: '('}}\n",
+        ] {
+            let mut env = well_formed_envelope(10, now);
+            env.policy_bytes_b64 = data_encoding::BASE64.encode(yaml.as_bytes());
+            let resp = sign_response(&sk, env, "k1", now);
+
+            let r = verify_envelope(&store, &resp, now, 0);
+            assert!(matches!(r, Err(VerifyError::ParseFailed(_))), "{yaml}");
+        }
     }
 
     #[test]

@@ -52,6 +52,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- A signed policy or rule-pack bundle that the agent could not load at boot is now
+  refused. Before, such a document passed `apply`, advanced the version, and then
+  stopped the next boot or turned hook deny rules off. `apply` now rejects it with
+  `parse_failed` before anything is written, so the policy on disk, the version, and
+  the running policy stay as they were. This covers an unsupported `version`, text
+  that is not UTF-8, a hook deny rule whose regex does not compile, and a policy
+  that does not merge over the defaults of the host. `lodeline-sign sign` now stops
+  on the same mistakes before it signs, and it writes no bundle. It checks the merge
+  against the defaults of each supported OS and refuses only when all of them fail,
+  so a mistake that affects one OS still reaches `apply` on that OS.
+  `lodeline-sign verify` reports the same document errors.
+
 - `lodeline-sender` reported every TLS failure as a network failure, so the
   `tls_failure` dead-letter event was never written. It now finds the TLS cause in
   the error chain, and it writes one event per failure streak, whatever the reason text,

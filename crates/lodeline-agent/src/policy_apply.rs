@@ -1,7 +1,7 @@
 //! Server-of-record for the `apply_policy` IPC handler.
 //!
 //! Spec §4.4. The handler is pure orchestration:
-//!   1. Run the A5 verifier.
+//!   1. Run the A5 verifier, then merge the policy the way boot does.
 //!   2. On Ok: atomic_write(policy.yaml, version) → notify watchers → ack.
 //!   3. On Err with reason: emit PolicySignatureInvalid → reject ack.
 //!   4. On Err::Internal: log + 5xx-equivalent (re-tries OK).
@@ -11,7 +11,7 @@ use lodeline_core::event::{
     SCHEMA_VERSION,
 };
 use lodeline_core::policy::{
-    atomic_write, atomic_write_rule_packs, pubkeys::Keystore,
+    atomic_write, atomic_write_rule_packs, merge_on_this_host, pubkeys::Keystore,
     signed_envelope::SignedPolicyResponse, verify_envelope, AtomicWriteError, VerifyError,
 };
 use lodeline_core::state::HashCache;
@@ -86,6 +86,7 @@ pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> Apply
             return ApplyOutcome::Internal { detail };
         }
         Err(other) => {
+            tracing::warn!(error = %other, "policy rejected at apply");
             let reason = other
                 .reason()
                 .expect("non-Internal verify error has a reason");
@@ -93,6 +94,15 @@ pub async fn apply(ctx: &ApplyContext, response: &SignedPolicyResponse) -> Apply
             return ApplyOutcome::Rejected { reason };
         }
     };
+
+    // Boot stops on a policy that does not merge over this host's defaults. The
+    // bundle layer cannot fail a merge, so the bundle on disk does not matter here.
+    if let Err(e) = merge_on_this_host(Some(verified.policy), None) {
+        tracing::warn!(error = %e, "policy rejected at apply: it does not merge on this host");
+        let reason = PolicySignatureInvalidReason::ParseFailed;
+        emit_invalid(ctx, &reason, response, last_applied).await;
+        return ApplyOutcome::Rejected { reason };
+    }
 
     // Verifier accepted — commit.
     let write_result = {
@@ -156,6 +166,7 @@ pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyRespons
             return ApplyOutcome::Internal { detail };
         }
         Err(other) => {
+            tracing::warn!(error = %other, "rule-pack bundle rejected at apply");
             let reason = other
                 .reason()
                 .expect("non-Internal verify error has a reason");
@@ -163,27 +174,6 @@ pub async fn apply_rule_packs(ctx: &ApplyContext, response: &SignedPolicyRespons
             return ApplyOutcome::Rejected { reason };
         }
     };
-
-    // D5 (#115): validate the bundle's hook_deny_rules BEFORE persisting, so a
-    // bad distributed rule can never be written/watermarked (and thus can never
-    // fail-open on the next restart). Reuses ParseFailed as the "bundle content
-    // failed validation" reason (no new wire-string variant).
-    // `verified.policy` is already the parsed PolicyDocument from verify_envelope
-    // check 5; re-use it directly rather than re-parsing policy_bytes.
-    let deny_validation: Result<(), String> =
-        lodeline_core::policy::validate_deny_rule_ids(&verified.policy.hook_deny_rules)
-            .map_err(|e| e.to_string())
-            .and_then(|()| {
-                crate::hook_deny::DenyEvaluator::new(&verified.policy.hook_deny_rules)
-                    .map(|_| ())
-                    .map_err(|e| format!("hook deny rule regex failed to compile: {e}"))
-            });
-    if let Err(detail) = deny_validation {
-        tracing::warn!(%detail, "bundle hook_deny_rules rejected at apply (#115)");
-        let reason = PolicySignatureInvalidReason::ParseFailed;
-        emit_invalid(ctx, &reason, response, last_applied).await;
-        return ApplyOutcome::Rejected { reason };
-    }
 
     // `verified.policy_bytes` is the bundle YAML (a PolicyDocument with only
     // `rule_packs` meaningfully set). Write it verbatim to rule-packs.yaml; the

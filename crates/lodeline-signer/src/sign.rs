@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::Signer;
 use lodeline_core::policy::canonical::to_canonical_bytes;
 use lodeline_core::policy::signed_envelope::{SignedEnvelope, SignedPolicyResponse};
+use lodeline_core::policy::{merge_on_any_os, parse_signed};
 use std::path::Path;
 use time::OffsetDateTime;
 
@@ -16,10 +17,14 @@ pub struct SignArgs<'a> {
     pub now: OffsetDateTime,
 }
 
-/// Read the YAML, build + sign the envelope, and return the response.
+/// Read the YAML, refuse it if no agent could load it, build + sign the envelope,
+/// and return the response.
 pub fn sign(args: SignArgs<'_>) -> Result<SignedPolicyResponse> {
     let yaml_bytes = std::fs::read(args.yaml_path)
         .with_context(|| format!("read yaml {}", args.yaml_path.display()))?;
+    parse_signed(&yaml_bytes)
+        .and_then(|doc| merge_on_any_os(&doc))
+        .with_context(|| format!("refuse to sign {}", args.yaml_path.display()))?;
 
     let envelope = SignedEnvelope {
         policy_version: args.policy_version,
@@ -114,7 +119,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let key_path = dir.path().join("k.json");
         let key_file = keygen("k", &key_path).unwrap();
-        let yaml_path = write_yaml(dir.path(), "p.yaml", "x: 1\n");
+        let yaml_path = write_yaml(dir.path(), "p.yaml", "version: 1\n");
         let out = dir.path().join("signed.json");
         sign_to_file(
             SignArgs {
@@ -136,7 +141,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let key_path = dir.path().join("k.json");
         let key_file = keygen("k", &key_path).unwrap();
-        let yaml_path = write_yaml(dir.path(), "p.yaml", "x: 1\n");
+        let yaml_path = write_yaml(dir.path(), "p.yaml", "version: 1\n");
         let resp = sign(SignArgs {
             yaml_path: &yaml_path,
             key_file: &key_file,

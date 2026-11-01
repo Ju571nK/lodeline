@@ -95,7 +95,7 @@ pub enum PolicySignatureInvalidReason {
     Expired,
     /// `policy_version <= host_meta.last_applied_policy_version` (replay or rollback).
     VersionRegression,
-    /// Base64 decode succeeded but the YAML did not parse to a `Policy`.
+    /// The signature is good but the agent could not load the document at boot.
     ParseFailed,
 }
 

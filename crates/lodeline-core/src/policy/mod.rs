@@ -136,6 +136,16 @@ pub enum Matcher {
     Regex { pattern: String },
 }
 
+impl Matcher {
+    /// The compiled pattern of a `Regex` matcher. Other kinds hold no pattern.
+    pub fn compile(&self) -> Result<Option<regex::Regex>, regex::Error> {
+        match self {
+            Matcher::Regex { pattern } => regex::Regex::new(pattern).map(Some),
+            _ => Ok(None),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Override {
     pub id: String,
@@ -304,6 +314,10 @@ pub enum PolicyError {
     EmptyTargets,
     #[error("duplicate hook deny rule id: {0}")]
     DuplicateDenyRuleId(String),
+    #[error("hook deny rule {id}: {detail}")]
+    DenyRuleRegex { id: String, detail: String },
+    #[error("policy is not UTF-8")]
+    NotUtf8(#[from] std::str::Utf8Error),
 }
 
 /// Parse a YAML document into a `PolicyDocument`. Validates schema version.
@@ -323,6 +337,25 @@ pub fn parse(yaml: &str) -> Result<PolicyDocument, PolicyError> {
         }
     }
     validate_deny_rule_ids(&doc.hook_deny_rules)?;
+    Ok(doc)
+}
+
+/// Parse a document that travels in a signed envelope. Beyond [`parse`], this
+/// refuses text that is not UTF-8, which boot cannot read, and a deny rule that
+/// does not compile, which makes boot run with no deny rules at all.
+///
+/// Whether the document merges depends on the host's defaults: see
+/// [`merge_on_this_host`] and [`merge_on_any_os`].
+pub fn parse_signed(bytes: &[u8]) -> Result<PolicyDocument, PolicyError> {
+    let doc = parse(std::str::from_utf8(bytes)?)?;
+    for rule in &doc.hook_deny_rules {
+        for matcher in rule.match_.matchers() {
+            matcher.compile().map_err(|e| PolicyError::DenyRuleRegex {
+                id: rule.id.clone(),
+                detail: e.to_string(),
+            })?;
+        }
+    }
     Ok(doc)
 }
 
@@ -517,6 +550,31 @@ pub fn merge(
     })
 }
 
+/// The merge boot runs: `defaults < user < bundle` on this host.
+pub fn merge_on_this_host(
+    user: Option<PolicyDocument>,
+    bundle: Option<PolicyDocument>,
+) -> Result<EffectivePolicy, PolicyError> {
+    merge(defaults()?, user, bundle, current_platform())
+}
+
+/// Accept `doc` if a host on some supported OS can merge it. A signer can run on
+/// a different OS from its hosts, so the defaults of one OS cannot decide this.
+pub fn merge_on_any_os(doc: &PolicyDocument) -> Result<(), PolicyError> {
+    let mut result = Ok(());
+    for (defaults_yaml, platform) in [
+        (lodeline_rules_basic::DEFAULTS_MACOS, Platform::Macos),
+        (lodeline_rules_basic::DEFAULTS_WINDOWS, Platform::Windows),
+        (lodeline_rules_basic::DEFAULTS_LINUX, Platform::Linux),
+    ] {
+        result = merge(parse(defaults_yaml)?, Some(doc.clone()), None, platform).map(drop);
+        if result.is_ok() {
+            break;
+        }
+    }
+    result
+}
+
 /// Built-in defaults for the current OS, parsed from a compile-time-embedded YAML.
 ///
 /// Source data lives in the `lodeline-rules-basic` crate so the OSS baseline
@@ -572,6 +630,96 @@ fn _path_buf_marker(_p: PathBuf) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn doc_with_deny_match(deny_match: &str) -> String {
+        format!("version: 1\nhook_deny_rules:\n  - id: r\n    match: {deny_match}\n")
+    }
+
+    #[test]
+    fn parse_signed_accepts_a_document_boot_can_load() {
+        let doc = parse_signed(
+            doc_with_deny_match("{kind: bash, command: {kind: regex, pattern: 'rm.*'}}").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(doc.hook_deny_rules.len(), 1);
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_version_boot_refuses() {
+        assert!(matches!(
+            parse_signed(b"version: 2\n"),
+            Err(PolicyError::UnsupportedVersion { found: 2 })
+        ));
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_bad_regex_in_every_deny_field() {
+        let bad = "{kind: regex, pattern: '('}";
+        let any = "{kind: exists}";
+        for deny_match in [
+            format!("{{kind: bash, command: {bad}}}"),
+            format!("{{kind: bash_indirection, indirection: {bad}}}"),
+            format!("{{kind: file_edit, path: {bad}}}"),
+            format!("{{kind: mcp_call, server: {bad}, tool: {any}}}"),
+            format!("{{kind: mcp_call, server: {any}, tool: {bad}}}"),
+            format!("{{kind: other, label: {bad}, detail: {any}}}"),
+            format!("{{kind: other, label: {any}, detail: {bad}}}"),
+        ] {
+            let yaml = doc_with_deny_match(&deny_match);
+            assert!(
+                matches!(
+                    parse_signed(yaml.as_bytes()),
+                    Err(PolicyError::DenyRuleRegex { .. })
+                ),
+                "{deny_match}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_signed_refuses_text_boot_cannot_read() {
+        let utf16: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain("version: 1\n".bytes().flat_map(|b| [b, 0]))
+            .collect();
+        assert!(matches!(parse_signed(&utf16), Err(PolicyError::NotUtf8(_))));
+    }
+
+    fn doc_overriding(id: &str) -> PolicyDocument {
+        parse(&format!(
+            "version: 1\noverrides:\n  - id: {id}\n    disabled: true\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_on_any_os_refuses_an_override_no_os_knows() {
+        assert!(matches!(
+            merge_on_any_os(&doc_overriding("no-such-target")),
+            Err(PolicyError::UnknownOverrideId(_))
+        ));
+    }
+
+    #[test]
+    fn merge_on_any_os_accepts_an_override_only_one_os_knows() {
+        let ids = |yaml| -> HashSet<String> {
+            parse(yaml)
+                .unwrap()
+                .targets
+                .into_iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        let linux = ids(lodeline_rules_basic::DEFAULTS_LINUX);
+        let elsewhere = ids(lodeline_rules_basic::DEFAULTS_MACOS);
+        let elsewhere = &elsewhere | &ids(lodeline_rules_basic::DEFAULTS_WINDOWS);
+        let linux_only = linux
+            .difference(&elsewhere)
+            .next()
+            .expect("a Linux-only id");
+
+        merge_on_any_os(&doc_overriding(linux_only)).unwrap();
+    }
 
     fn yaml_minimal() -> &'static str {
         r#"

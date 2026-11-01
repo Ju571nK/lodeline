@@ -2004,6 +2004,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "rand_core 0.6.4",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

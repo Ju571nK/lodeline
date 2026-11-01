@@ -4,7 +4,7 @@ An operator signs a policy with `lodeline-sign`, and `lodeline-server` serves it
 
 ## Sub-features
 
-- `fleet-sign` generates a keypair and signs a policy.
+- `fleet-sign` generates a keypair and signs a policy, and refuses a document no agent could load.
 - `fleet-verify` accepts a signed bundle and rejects a version regression.
 - `fleet-serve` serves `/v1/healthz` and `/v1/policy`, with `304` on a matching ETag.
 - `fleet-read-auth` requires a bearer token on read routes such as `/v1/meta`.
@@ -21,9 +21,10 @@ Preconditions:
 - `drive.sh doctor "$RUN"` exits 0.
 - `lsof -nP -iTCP:18443 -sTCP:LISTEN` prints nothing. If the port is taken, use another port in the steps below. Never kill the holder.
 
-- **Seed.** Run `drive.sh run "$RUN" fleet-seed -- sh -c 'mkdir -p ../fleet/events && printf "version: 2\nhost_id_strategy: hostname\n" > ../fleet/policy.yaml && printf "bind: \"127.0.0.1:18443\"\nevents_out_dir: \"%s/../fleet/events\"\npolicy_bundle_path: \"%s/../fleet/signed-policy.json\"\n" "$PWD" "$PWD" > ../fleet/server.yaml'`. Exit code `0`.
+- **Seed.** Run `drive.sh run "$RUN" fleet-seed -- sh -c 'mkdir -p ../fleet/events && printf "version: 1\nhost_id_strategy: hostname\n" > ../fleet/policy.yaml && printf "bind: \"127.0.0.1:18443\"\nevents_out_dir: \"%s/../fleet/events\"\npolicy_bundle_path: \"%s/../fleet/signed-policy.json\"\n" "$PWD" "$PWD" > ../fleet/server.yaml'`. Exit code `0`.
 - **Keygen.** Run `drive.sh run "$RUN" fleet-keygen -- lodeline-sign keygen --id verify-key --out ../fleet/key.json`. Stdout holds `wrote keypair`.
 - **Sign.** Run `drive.sh run "$RUN" fleet-sign -- lodeline-sign sign --in ../fleet/policy.yaml --key ../fleet/key.json --policy-version 2 --valid-until 2030-01-01T00:00:00Z --out ../fleet/signed-policy.json`. Stdout holds `signed policy_version=2` and an `etag:` line.
+- **Refuse unloadable.** Run `drive.sh run "$RUN" fleet-refuse -- sh -c 'printf "version: 2\n" > ../fleet/bad.yaml; lodeline-sign sign --in ../fleet/bad.yaml --key ../fleet/key.json --policy-version 3 --valid-until 2030-01-01T00:00:00Z --out ../fleet/bad.json'`. Exit code `1`, stderr holds `unsupported policy version 2`, and `../fleet/bad.json` does not exist.
 - **Inspect.** Run `drive.sh run "$RUN" fleet-inspect -- lodeline-sign inspect --in ../fleet/signed-policy.json`. Stdout holds `signing_pubkey_id : verify-key` and `policy_version    : 2`.
 - **Keystore.** Run `drive.sh run "$RUN" fleet-keystore -- sh -c 'pub=$(sed -n "s/.*\"ed25519_pubkey_b64\": *\"\([^\"]*\)\".*/\1/p" ../fleet/key.json); printf "{\"pubkeys\":[{\"id\":\"verify-key\",\"ed25519_pubkey_b64\":\"%s\",\"valid_from\":\"2026-01-01T00:00:00Z\",\"valid_until\":\"2031-01-01T00:00:00Z\"}]}" "$pub" > ../fleet/keystore.pem'`. Exit code `0`.
 - **Verify.** Run `drive.sh run "$RUN" fleet-verify -- lodeline-sign verify --in ../fleet/signed-policy.json --keystore ../fleet/keystore.pem`. Stdout `OK: pubkey_id=verify-key policy_version=2`.

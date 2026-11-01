@@ -14,7 +14,7 @@ use crate::{
 use anyhow::Context;
 use lodeline_core::policy::expand::{expand_per_user, EnvLookup, UserEnumerator};
 use lodeline_core::policy::pubkeys::Keystore;
-use lodeline_core::policy::{current_platform, defaults, merge, Tier};
+use lodeline_core::policy::{merge_on_this_host, Tier};
 use lodeline_core::sink::jsonl::JsonlSink;
 use lodeline_core::state::HashCache;
 use lodeline_core::stats::Stats;
@@ -160,7 +160,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // (e.g. a fast git-pull right after startup) retains the boot packs instead
     // of dropping them. Clone before `merge` consumes `bundle_doc`.
     let bundle_doc_for_ctx = bundle_doc.clone();
-    let mut effective = merge(defaults()?, user_doc, bundle_doc, current_platform())?;
+    let mut effective = merge_on_this_host(user_doc, bundle_doc)?;
     // (host_id resolution moved up above; effective.host_id_strategy is no longer consulted)
 
     // Phase 3b.6.2 — per-repo discovery for Continue / Claude Code / Codex.
