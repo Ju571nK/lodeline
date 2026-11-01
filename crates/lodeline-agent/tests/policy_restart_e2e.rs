@@ -1,19 +1,21 @@
-//! e2e: the agent keeps the applied version and expiry across a restart, wherever
-//! an apply stopped.
+//! e2e: the agent keeps the applied version and expiry across a restart, and across
+//! a later apply in the same process, wherever an apply stopped.
 //!
 //! The agent has no test hook. A SQL trigger stops the write of the recorded version,
-//! and a directory at the temp path stops the file write. The child process test
-//! holds the agent inside that SQL write and sends it SIGKILL. Unix only, because the
-//! requests go over the control socket.
+//! a directory at the temp path stops the file write, and a directory mode stops the
+//! directory sync. The child process tests hold the agent inside that SQL write, or
+//! in the open of a FIFO at the temp path, and send it SIGKILL. Unix only, because
+//! the requests go over the control socket.
 #![cfg(all(unix, feature = "operator-cli"))]
 
 #[path = "common/signed_host.rs"]
 mod signed_host;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use signed_host::{Host, STOP_DEADLINE};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -27,18 +29,21 @@ struct Artifact {
     file: &'static str,
     apply: &'static str,
     column: &'static str,
+    kind: &'static str,
 }
 
 const POLICY: Artifact = Artifact {
     file: "policy.yaml",
     apply: "apply_policy",
     column: "last_applied_policy_version",
+    kind: "policy",
 };
 
 const RULE_PACKS: Artifact = Artifact {
     file: "rule-packs.yaml",
     apply: "apply_rule_packs",
     column: "last_applied_rule_packs_version",
+    kind: "rule_packs",
 };
 
 fn doc(version: i64) -> String {
@@ -73,8 +78,25 @@ impl Host {
             .unwrap()
     }
 
+    fn pending(&self, artifact: Artifact) -> Option<i64> {
+        Connection::open(self.path("state.db"))
+            .unwrap()
+            .query_row(
+                "SELECT version FROM pending_envelope WHERE kind = ?1",
+                [artifact.kind],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
     fn status(&self) -> Value {
         self.control(&json!({"cmd": "policy_status"}))["policy_status"].clone()
+    }
+
+    fn set_directory_mode(&self, mode: u32) {
+        let mode = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(self.path("."), mode).unwrap();
     }
 
     fn stop_the_record_write(&self, artifact: Artifact) {
@@ -103,12 +125,25 @@ impl Host {
     #[track_caller]
     fn assert_older_envelope_is_refused(&self, artifact: Artifact) {
         assert_eq!(self.recorded(artifact), 5, "record after boot");
+        self.assert_apply_finishes_the_newest_and_refuses_an_older_one(artifact);
+    }
 
+    #[track_caller]
+    fn assert_apply_finishes_the_newest_and_refuses_an_older_one(&self, artifact: Artifact) {
         let reply = self.apply(artifact, 3);
 
         assert_refused_as_older(&reply);
         assert_eq!(self.file(artifact), doc(5), "newest stays on disk");
         assert_eq!(self.recorded(artifact), 5);
+    }
+}
+
+#[track_caller]
+fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "never: {what}");
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -206,6 +241,186 @@ fn stop_before_the_rule_pack_rename_leaves_the_host_unchanged_and_a_retry_applie
     stop_before_the_rename_leaves_the_host_unchanged_and_a_retry_applies(RULE_PACKS);
 }
 
+fn failed_record_write_keeps_the_newest_version_without_a_restart(artifact: Artifact) {
+    let host = Host::new("version: 1\n");
+    let rt = host.apply_stopped_after_the_rename(artifact);
+    host.sql("DROP TRIGGER stop_here;");
+
+    host.assert_apply_finishes_the_newest_and_refuses_an_older_one(artifact);
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn failed_policy_record_write_keeps_the_newest_version_without_a_restart() {
+    failed_record_write_keeps_the_newest_version_without_a_restart(POLICY);
+}
+
+#[test]
+fn failed_rule_pack_record_write_keeps_the_newest_version_without_a_restart() {
+    failed_record_write_keeps_the_newest_version_without_a_restart(RULE_PACKS);
+}
+
+fn failed_directory_sync_keeps_the_newest_version_without_a_restart(artifact: Artifact) {
+    let host = Host::new("version: 1\n");
+    let rt = host.boot().expect("boot");
+    assert_accepted(&host.apply(artifact, 2), 2);
+    host.set_directory_mode(0o300);
+    if std::fs::File::open(host.path(".")).is_ok() {
+        eprintln!("skipped: root ignores directory modes");
+        host.set_directory_mode(0o700);
+        rt.shutdown_timeout(STOP_DEADLINE);
+        return;
+    }
+
+    let reply = host.apply(artifact, 5);
+    host.set_directory_mode(0o700);
+
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(host.file(artifact), doc(5), "the rename happened");
+    assert_eq!(host.recorded(artifact), 2, "the record did not move");
+    host.assert_apply_finishes_the_newest_and_refuses_an_older_one(artifact);
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn failed_policy_directory_sync_keeps_the_newest_version_without_a_restart() {
+    failed_directory_sync_keeps_the_newest_version_without_a_restart(POLICY);
+}
+
+#[test]
+fn failed_rule_pack_directory_sync_keeps_the_newest_version_without_a_restart() {
+    failed_directory_sync_keeps_the_newest_version_without_a_restart(RULE_PACKS);
+}
+
+fn failed_repair_refuses_the_apply_and_a_later_apply_recovers(artifact: Artifact) {
+    let host = Host::new("version: 1\n");
+    let rt = host.apply_stopped_after_the_rename(artifact);
+
+    let reply = host.apply(artifact, 6);
+
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(
+        host.file(artifact),
+        doc(5),
+        "the refused apply wrote nothing"
+    );
+    assert_eq!(host.recorded(artifact), 2);
+    host.sql("DROP TRIGGER stop_here;");
+    assert_accepted(&host.apply(artifact, 6), 6);
+    assert_eq!(host.file(artifact), doc(6), "file after recovery");
+    assert_eq!(host.recorded(artifact), 6, "record after recovery");
+    assert_eq!(host.pending(artifact), None);
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn failed_policy_repair_refuses_the_apply_and_a_later_apply_recovers() {
+    failed_repair_refuses_the_apply_and_a_later_apply_recovers(POLICY);
+}
+
+#[test]
+fn failed_rule_pack_repair_refuses_the_apply_and_a_later_apply_recovers() {
+    failed_repair_refuses_the_apply_and_a_later_apply_recovers(RULE_PACKS);
+}
+
+fn retry_of_the_same_document_leaves_it_applied(artifact: Artifact) {
+    let host = Host::new("version: 1\n");
+    let rt = host.apply_stopped_after_the_rename(artifact);
+    host.sql("DROP TRIGGER stop_here;");
+
+    host.apply(artifact, 5);
+
+    assert_eq!(host.file(artifact), doc(5));
+    assert_eq!(host.recorded(artifact), 5);
+    assert_eq!(host.pending(artifact), None);
+    assert_accepted(&host.apply(artifact, 6), 6);
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn retry_of_the_same_policy_leaves_it_applied() {
+    retry_of_the_same_document_leaves_it_applied(POLICY);
+}
+
+#[test]
+fn retry_of_the_same_rule_pack_leaves_it_applied() {
+    retry_of_the_same_document_leaves_it_applied(RULE_PACKS);
+}
+
+fn retry_after_a_failure_before_the_rename_applies_without_a_restart(artifact: Artifact) {
+    let host = Host::new("version: 1\n");
+    let rt = host.boot().expect("boot");
+    assert_accepted(&host.apply(artifact, 2), 2);
+    let temp = host.path(&format!(".{}.{}.tmp", artifact.file, std::process::id()));
+    std::fs::create_dir(&temp).unwrap();
+    assert_eq!(host.apply(artifact, 5)["ok"], false);
+    std::fs::remove_dir(&temp).unwrap();
+
+    assert_accepted(&host.apply(artifact, 5), 5);
+
+    assert_eq!(host.file(artifact), doc(5));
+    assert_eq!(host.recorded(artifact), 5);
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn retry_after_a_policy_failure_before_the_rename_applies_without_a_restart() {
+    retry_after_a_failure_before_the_rename_applies_without_a_restart(POLICY);
+}
+
+#[test]
+fn retry_after_a_rule_pack_failure_before_the_rename_applies_without_a_restart() {
+    retry_after_a_failure_before_the_rename_applies_without_a_restart(RULE_PACKS);
+}
+
+#[test]
+fn status_after_a_repair_without_a_restart_shows_the_true_version_and_expiry() {
+    let host = Host::new("version: 1\n");
+    let rt = host.boot().expect("boot");
+    assert_accepted(&host.apply(POLICY, 2), 2);
+    host.stop_the_record_write(POLICY);
+    let in_two_hours = OffsetDateTime::now_utc() + time::Duration::hours(2);
+    let response = host.signed_until(5, &doc(5), in_two_hours);
+    let reply = host.control(&json!({"cmd": "apply_policy", "response": response}));
+    assert_eq!(reply["ok"], false, "{reply}");
+    host.sql("DROP TRIGGER stop_here;");
+
+    assert_refused_as_older(&host.apply(POLICY, 3));
+
+    let status = host.status();
+    assert_eq!(status["last_applied_policy_version"], 5, "{status}");
+    assert_eq!(
+        status["active_envelope_valid_until"],
+        in_two_hours.format(&Rfc3339).unwrap(),
+        "{status}"
+    );
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn repair_without_a_restart_loads_the_policy_it_finished() {
+    let yaml = "version: 1\ntargets:\n  - id: extra\n    description: extra\n    tier: standard\n    platform: any\n    paths: ['/tmp/lodeline-repair-*.json']\n";
+    let host = Host::new("version: 1\n");
+    let rt = host.boot().expect("boot");
+    assert_accepted(&host.apply(POLICY, 2), 2);
+    host.stop_the_record_write(POLICY);
+    assert_eq!(host.apply_policy(5, yaml)["ok"], false);
+    host.sql("DROP TRIGGER stop_here;");
+
+    assert_refused_as_older(&host.apply(POLICY, 3));
+
+    // A polling host also reloads when the directory changes, so the version watch
+    // itself is pinned by the policy_apply unit tests.
+    wait_until("the finished policy loaded", || host.has_target("extra"));
+    wait_until("the finished policy was reported", || {
+        host.events().iter().any(|event| {
+            event["evidence"]["kind"] == "policy_reloaded"
+                && event["evidence"]["policy_version"] == 5
+        })
+    });
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
 #[test]
 fn first_envelope_v1_applies_over_a_local_policy() {
     let host = Host::new("version: 1\n");
@@ -292,6 +507,13 @@ fn status_after_a_restart_shows_an_expired_policy_and_the_monitor_reports_it() {
 }
 
 impl Host {
+    fn has_target(&self, id: &str) -> bool {
+        let reply = self.control(&json!({"cmd": "targets"}));
+        reply["targets"]["targets"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|target| target["id"] == id))
+    }
+
     fn events(&self) -> Vec<Value> {
         std::fs::read_dir(self.path("events"))
             .unwrap()
@@ -420,6 +642,32 @@ impl Host {
         ));
     }
 
+    /// Sends an apply and leaves it unanswered, for an agent that will not answer.
+    fn send_apply(&self, artifact: Artifact, version: i64) -> UnixStream {
+        let response = self.signed(version, &doc(version));
+        let mut stream = UnixStream::connect(self.path("c.sock")).unwrap();
+        let mut request = json!({"cmd": artifact.apply, "response": response}).to_string();
+        request.push('\n');
+        stream.write_all(request.as_bytes()).unwrap();
+        stream
+    }
+
+    /// The agent blocks in the open of its temp file until the FIFO has a reader,
+    /// which is after it recorded the apply and before the rename.
+    fn hold_the_file_write(&self, artifact: Artifact, agent: &ChildAgent) {
+        let temp = self.path(&format!(".{}.{}.tmp", artifact.file, agent.0.id()));
+        let made = Command::new("mkfifo").arg(temp).status().unwrap();
+        assert!(made.success(), "mkfifo");
+    }
+
+    fn wait_for_the_pending_record(&self, artifact: Artifact, version: i64) {
+        let deadline = Instant::now() + CHILD_DEADLINE;
+        while self.pending(artifact) != Some(version) {
+            assert!(Instant::now() < deadline, "the apply was never recorded");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn wait_for_the_file(&self, artifact: Artifact, version: i64) {
         let deadline = Instant::now() + CHILD_DEADLINE;
         while std::fs::read(self.path(artifact.file)).unwrap() != doc(version).as_bytes() {
@@ -450,11 +698,7 @@ fn sigkill_after_the_rename_and_during_repair_keeps_the_newest_version(artifact:
     host.wait_until_serving();
     assert_accepted(&host.apply(artifact, 2), 2);
     host.hold_the_record_write(artifact);
-    let response = host.signed(5, &doc(5));
-    let mut held_request = UnixStream::connect(host.path("c.sock")).unwrap();
-    let mut request = json!({"cmd": artifact.apply, "response": response}).to_string();
-    request.push('\n');
-    held_request.write_all(request.as_bytes()).unwrap();
+    let _held_request = host.send_apply(artifact, 5);
 
     host.wait_for_the_file(artifact, 5);
     agent.0.kill().unwrap();
@@ -485,4 +729,40 @@ fn sigkill_after_the_policy_rename_and_during_repair_keeps_the_newest_version() 
 #[test]
 fn sigkill_after_the_rule_pack_rename_and_during_repair_keeps_the_newest_version() {
     sigkill_after_the_rename_and_during_repair_keeps_the_newest_version(RULE_PACKS);
+}
+
+fn sigkill_between_the_record_and_the_rename_leaves_the_host_unchanged(artifact: Artifact) {
+    let host = Host::new("version: 1\n");
+    let mut agent = host.spawn_child();
+    host.wait_until_serving();
+    assert_accepted(&host.apply(artifact, 2), 2);
+    host.hold_the_file_write(artifact, &agent);
+    let _held_request = host.send_apply(artifact, 5);
+
+    host.wait_for_the_pending_record(artifact, 5);
+    agent.0.kill().unwrap();
+    agent.0.wait().unwrap();
+
+    assert_eq!(host.file(artifact), doc(2), "the rename did not happen");
+    assert_eq!(host.recorded(artifact), 2, "the record did not move");
+    assert_eq!(host.pending(artifact), Some(5), "the record stayed behind");
+    drop(agent);
+    let _agent = host.spawn_child();
+    host.wait_until_serving();
+
+    assert_eq!(host.pending(artifact), None, "boot dropped the record");
+    assert_eq!(host.file(artifact), doc(2), "file after boot");
+    assert_eq!(host.recorded(artifact), 2, "record after boot");
+    assert_accepted(&host.apply(artifact, 5), 5);
+    assert_eq!(host.file(artifact), doc(5), "file after the retry");
+}
+
+#[test]
+fn sigkill_between_the_policy_record_and_the_rename_leaves_the_host_unchanged() {
+    sigkill_between_the_record_and_the_rename_leaves_the_host_unchanged(POLICY);
+}
+
+#[test]
+fn sigkill_between_the_rule_pack_record_and_the_rename_leaves_the_host_unchanged() {
+    sigkill_between_the_record_and_the_rename_leaves_the_host_unchanged(RULE_PACKS);
 }

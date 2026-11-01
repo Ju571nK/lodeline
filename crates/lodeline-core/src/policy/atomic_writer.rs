@@ -244,6 +244,21 @@ mod tests {
     }
 
     #[test]
+    fn a_write_with_a_pending_record_outstanding_is_refused_and_leaves_the_file() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let target = dir.path().join("policy.yaml");
+        write(Policy, &target, b"two\n", &cache, 2).unwrap();
+        record_pending(&cache, Policy, b"five\n", 5);
+
+        let refused = write(Policy, &target, b"six\n", &cache, 6);
+
+        assert!(matches!(refused, Err(AtomicWriteError::StateBeforeDisk(_))));
+        assert_eq!(std::fs::read(&target).unwrap(), b"two\n");
+        assert_eq!(cache.pending(Policy).unwrap().unwrap().version, 5);
+    }
+
+    #[test]
     fn settling_finishes_an_apply_whose_rename_happened_and_twice_changes_nothing() {
         for kind in [Policy, RulePacks] {
             let dir = tempdir().unwrap();

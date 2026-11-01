@@ -360,6 +360,17 @@ mod tests {
     }
 
     #[test]
+    fn a_second_pending_record_is_refused_and_the_first_stays() {
+        let (_dir, c) = fresh_cache();
+        c.record_pending(Policy, &pending(5)).unwrap();
+
+        let refused = c.record_pending(Policy, &pending(6));
+
+        assert!(matches!(refused, Err(StateError::Sql(_))), "{refused:?}");
+        assert_eq!(c.pending(Policy).unwrap(), Some(pending(5)));
+    }
+
+    #[test]
     fn promote_refuses_to_move_past_a_higher_record_and_keeps_the_pending_row() {
         let (_dir, c) = fresh_cache();
         c.record_pending(Policy, &pending(4)).unwrap();

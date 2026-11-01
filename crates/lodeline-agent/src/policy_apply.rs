@@ -493,6 +493,82 @@ mod tests {
         }
     }
 
+    fn record_pending_for_file(
+        h: &Harness,
+        kind: ArtifactKind,
+        valid_until: OffsetDateTime,
+        target: &std::path::Path,
+    ) {
+        std::fs::write(target, b"five\n").unwrap();
+        let pending = PendingEnvelope {
+            version: 5,
+            hash_hex: blake3::hash(b"five\n").to_hex().to_string(),
+            valid_until,
+        };
+        h.ctx.cache.lock().record_pending(kind, &pending).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_publishes_an_earlier_apply_it_finishes() {
+        let now = OffsetDateTime::now_utc();
+        let mut h = build_harness(now, 2);
+        let valid_until = now + time::Duration::hours(2);
+        record_pending_for_file(
+            &h,
+            ArtifactKind::Policy,
+            valid_until,
+            &h.ctx.policy_yaml_path,
+        );
+        let resp = sign(&h.sk, well_formed_envelope(3, now), now);
+
+        let outcome = apply(&h.ctx, &resp).await;
+
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Rejected {
+                reason: PolicySignatureInvalidReason::VersionRegression
+            }
+        );
+        assert_eq!(std::fs::read(&h.ctx.policy_yaml_path).unwrap(), b"five\n");
+        assert!(h.rx_version.has_changed().unwrap());
+        assert_eq!(*h.rx_version.borrow(), 5);
+        assert_eq!(*h.active_valid_until.read(), Some(valid_until));
+        let finished = h.rx_event.recv().await.unwrap().event.evidence;
+        assert!(matches!(
+            finished,
+            Evidence::PolicyReloaded { policy_version: 5 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_rule_packs_publishes_an_earlier_apply_it_finishes() {
+        let now = OffsetDateTime::now_utc();
+        let mut h = build_harness_with_rule_packs(now, 0, 2);
+        record_pending_for_file(
+            &h,
+            ArtifactKind::RulePacks,
+            now,
+            &h.ctx.rule_packs_yaml_path,
+        );
+        let resp = sign(&h.sk, rule_packs_envelope(3, now), now);
+
+        let outcome = apply_rule_packs(&h.ctx, &resp).await;
+
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Rejected {
+                reason: PolicySignatureInvalidReason::VersionRegression
+            }
+        );
+        assert!(h.rx_rule_packs_version.has_changed().unwrap());
+        assert_eq!(*h.rx_rule_packs_version.borrow(), 5);
+        let finished = h.rx_event.recv().await.unwrap().event.evidence;
+        assert!(matches!(
+            finished,
+            Evidence::RulePackBundleApplied { version: 5 }
+        ));
+    }
+
     #[tokio::test]
     async fn pubkey_unknown_emits_invalid_with_correct_reason() {
         // Currently passes because verify_envelope short-circuits on
