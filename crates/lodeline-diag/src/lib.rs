@@ -917,7 +917,7 @@ mod tests {
 
         #[tokio::test]
         async fn stale_socket_file_is_stopped() {
-            use std::os::unix::net::{UnixListener, UnixStream};
+            use std::os::unix::net::UnixListener;
             let dir = tempfile::tempdir().unwrap();
             let probe = probe_in(dir.path());
             let socket = &probe.control_endpoints[0];
@@ -925,9 +925,16 @@ mod tests {
             assert!(socket.exists());
             // insta forks `cargo metadata`, and until its exec the child holds this
             // listener open, so the socket can accept for a moment after the drop.
-            while UnixStream::connect(socket).is_ok() {
-                tokio::task::yield_now().await;
-            }
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                while tokio::net::UnixStream::connect(socket).await.is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert!(
+                closed.is_ok(),
+                "the socket still accepts 5s after its listener was dropped"
+            );
             assert_eq!(collect(&probe).await.agent, AgentRun::Stopped);
         }
 
