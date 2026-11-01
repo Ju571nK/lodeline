@@ -120,6 +120,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   on each maintenance pass, so appends wait less behind it. The new partial index
   is added to existing spools on open, with no schema version change.
 
+- lodeline-proxy no longer sorts every unsent event to find the oldest one after each
+  acknowledged batch. At 1M unsent events that took about 21 ms on the writer
+  thread, so appends waited behind it. The query now walks `idx_unsent` and takes
+  about 2 microseconds. (#359)
+
 - `lodeline scan` no longer lists a tool as not configured when another scope of
   the same tool was assessed or failed to parse.
 

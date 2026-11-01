@@ -908,6 +908,12 @@ const PURGE_QUARANTINE_BY_WALL: &str = "DELETE FROM quarantine WHERE sequence IN
 const DUE_ACKED: &str = "SELECT sequence, event_id FROM events \
      WHERE state = 1 AND acked_at <= ?1 ORDER BY acked_at LIMIT ?2";
 
+/// Creation time of the oldest unsent event. The planner prefers
+/// `idx_unsent_created` here and sorts every unsent row by `sequence`; naming
+/// `idx_unsent` walks it in order and stops at the first row.
+const OLDEST_UNSENT: &str = "SELECT created_at FROM events INDEXED BY idx_unsent \
+     WHERE state = 0 ORDER BY sequence LIMIT 1";
+
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE seq (id INTEGER PRIMARY KEY CHECK (id = 1), last INTEGER NOT NULL);
@@ -1095,11 +1101,7 @@ impl Writer {
 
     fn oldest_unsent(&self) -> rusqlite::Result<Option<i64>> {
         self.conn
-            .query_row(
-                "SELECT created_at FROM events WHERE state = 0 ORDER BY sequence LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row(OLDEST_UNSENT, [], |r| r.get(0))
             .optional()
     }
 
@@ -2687,6 +2689,19 @@ mod tests {
             assert!(!plan.contains("SCAN"), "{name}: {plan}");
             assert!(!plan.contains("TEMP B-TREE"), "{name}: {plan}");
         }
+    }
+
+    /// `oldest_unsent` runs on the writer thread after every ack batch. Its plan
+    /// must walk `idx_unsent` in order, not sort the unsent rows (#359).
+    #[test]
+    fn oldest_unsent_walks_idx_unsent_without_sorting() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.close_blocking_for_test();
+        let c = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        let plan = query_plan(&c, OLDEST_UNSENT, []);
+        assert!(plan.contains("USING INDEX idx_unsent"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     }
 
     /// A spool written before the index existed gets it on reopen.
