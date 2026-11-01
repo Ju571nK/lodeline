@@ -504,6 +504,56 @@ mod tests {
         assert_eq!(n, 2, "a success ends the streak, the next failure writes");
     }
 
+    #[tokio::test]
+    async fn a_server_that_never_answers_ends_the_request_and_shows_as_a_network_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let client = crate::transport::build_client_with_timeouts(
+            Duration::from_millis(300),
+            Duration::from_millis(300),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let url = format!("http://{addr}");
+        let send = send_one_batch(BatchSendCtx {
+            client: &client,
+            server_base_url: &url,
+            host_id: "h",
+            agent_version: "1",
+            sender_version: "1",
+            events: Vec::new(),
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(5), send)
+            .await
+            .expect("the request was still open after 5 seconds");
+        assert!(matches!(outcome, BatchOutcome::Network(_)), "{outcome:?}");
+        let stats = crate::heartbeat::shared();
+        stats.write().record(
+            Plane::Events,
+            outcome.link_result(),
+            OffsetDateTime::now_utc(),
+        );
+        assert!(
+            matches!(
+                stats.read().contact(),
+                lodeline_core::sender_status::Contact::Failing {
+                    failure: LinkFailure::Network,
+                    ..
+                }
+            ),
+            "{:?}",
+            stats.read().contact()
+        );
+    }
+
     #[test]
     fn segments_are_walked_in_write_order() {
         let dir = tempfile::tempdir().unwrap();

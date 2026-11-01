@@ -52,6 +52,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- `lodeline-sender` now gives up on a request to `lodeline-server` that gets no answer.
+  The HTTP client had no timeout, so a server that accepted a connection and never
+  replied held the request open and the link state stayed `connected` with an aging
+  last success. A connection now has 10 seconds to open and a whole request 120
+  seconds. A full 1 MiB batch, the default size, fits that on a link of about 70
+  kbit/s. A timed-out request counts as a network failure and the link state shows
+  `failing`.
+
 - Policy and rule-pack applies now run one at a time. Before, an older version sent
   at the same moment as a newer one could pass the version check and land last, so
   the file on disk and the recorded version moved backward. An apply now reads the

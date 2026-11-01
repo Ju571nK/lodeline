@@ -4,6 +4,7 @@
 
 use reqwest::{Client, ClientBuilder, Identity};
 use std::path::Path;
+use std::time::Duration;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -24,6 +25,14 @@ pub enum TransportError {
     Build(reqwest::Error),
 }
 
+/// Longest wait for a TCP and TLS connection.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longest time for one request, from the first byte sent to the last byte of the
+/// response. A full event batch is 1 MiB by default, so 120 seconds still fits it on a
+/// link of about 70 kbit/s. It stays under the 300 second default policy poll interval.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Build a reqwest client. mTLS is applied when both `client_cert_pem` and
 /// `client_key_pem` are supplied; a `server_ca_pem` pins the server cert to
 /// that CA (built-in roots disabled). With all three `None`, a plain client is
@@ -34,7 +43,27 @@ pub fn build_client(
     client_key_pem: Option<&Path>,
     server_ca_pem: Option<&Path>,
 ) -> Result<Client, TransportError> {
-    let mut builder = ClientBuilder::new().use_rustls_tls();
+    build_client_with_timeouts(
+        CONNECT_TIMEOUT,
+        REQUEST_TIMEOUT,
+        client_cert_pem,
+        client_key_pem,
+        server_ca_pem,
+    )
+}
+
+/// [`build_client`] with the timeouts given, so a test can use short ones.
+pub fn build_client_with_timeouts(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    client_cert_pem: Option<&Path>,
+    client_key_pem: Option<&Path>,
+    server_ca_pem: Option<&Path>,
+) -> Result<Client, TransportError> {
+    let mut builder = ClientBuilder::new()
+        .use_rustls_tls()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout);
 
     match (client_cert_pem, client_key_pem) {
         (Some(cert_path), Some(key_path)) => {
