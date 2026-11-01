@@ -8,6 +8,56 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_lodeline-sign")
 }
 
+fn sign_cli(yaml: &str) -> (std::process::Output, bool) {
+    let dir = tempdir().unwrap();
+    let key_path = dir.path().join("k.json");
+    let yaml_path = dir.path().join("p.yaml");
+    let signed_path = dir.path().join("signed.json");
+    std::fs::write(&yaml_path, yaml).unwrap();
+    let keygen = Command::new(bin())
+        .args(["keygen", "--id", "k1", "--out"])
+        .arg(&key_path)
+        .output()
+        .unwrap();
+    assert!(keygen.status.success());
+    let out = Command::new(bin())
+        .args(["sign", "--in"])
+        .arg(&yaml_path)
+        .arg("--key")
+        .arg(&key_path)
+        .args(["--policy-version", "2"])
+        .args(["--valid-until", "2027-06-15T00:00:00Z"])
+        .arg("--out")
+        .arg(&signed_path)
+        .output()
+        .unwrap();
+    let wrote_file = signed_path.exists();
+    (out, wrote_file)
+}
+
+#[track_caller]
+fn assert_sign_refuses(yaml: &str, expected_reason: &str) {
+    let (out, wrote_file) = sign_cli(yaml);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "sign accepted {yaml:?}");
+    assert!(!wrote_file, "sign wrote a bundle for {yaml:?}");
+    assert!(stderr.contains(expected_reason), "stderr: {stderr}");
+}
+
+#[test]
+fn sign_refuses_a_document_the_agent_cannot_load() {
+    assert_sign_refuses("version: 2\n", "unsupported policy version 2");
+    assert_sign_refuses("not: a policy\n", "version");
+    assert_sign_refuses(
+        "version: 1\nhook_deny_rules:\n  - id: bad\n    match:\n      kind: bash\n      command:\n        kind: regex\n        pattern: '('\n",
+        "bad",
+    );
+    assert_sign_refuses(
+        "version: 1\noverrides:\n  - id: no-such-target\n    disabled: true\n",
+        "no-such-target",
+    );
+}
+
 #[test]
 fn keygen_sign_verify_inspect_roundtrip_via_cli() {
     let dir = tempdir().unwrap();

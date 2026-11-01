@@ -724,6 +724,94 @@ mod tests {
         }
     }
 
+    fn envelope_of(yaml: &str, version: i64, now: OffsetDateTime) -> SignedEnvelope {
+        SignedEnvelope {
+            policy_version: version,
+            policy_bytes_b64: data_encoding::BASE64.encode(yaml.as_bytes()),
+            valid_until: now + time::Duration::hours(24),
+            issued_at: now,
+        }
+    }
+
+    const BAD_REGEX: &str = "version: 1\nhook_deny_rules:\n  - id: bad\n    match:\n      kind: bash\n      command:\n        kind: regex\n        pattern: '('\n";
+    const UNKNOWN_OVERRIDE: &str =
+        "version: 1\noverrides:\n  - id: no-such-target\n    disabled: true\n";
+
+    async fn assert_parse_failed_event(h: &mut Harness) {
+        let ev = h.rx_event.recv().await.unwrap();
+        match ev.event.evidence {
+            Evidence::PolicySignatureInvalid { reason, .. } => {
+                assert_eq!(reason, PolicySignatureInvalidReason::ParseFailed);
+            }
+            other => panic!("expected PolicySignatureInvalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_a_document_boot_cannot_load_touches_nothing() {
+        for yaml in ["version: 2\n", BAD_REGEX, UNKNOWN_OVERRIDE] {
+            let now = OffsetDateTime::now_utc();
+            let mut h = build_harness(now, 3);
+            std::fs::write(&h.ctx.policy_yaml_path, b"version: 1\n").unwrap();
+            let resp = sign(&h.sk, envelope_of(yaml, 4, now), now);
+
+            let outcome = apply(&h.ctx, &resp).await;
+
+            assert_eq!(
+                outcome,
+                ApplyOutcome::Rejected {
+                    reason: PolicySignatureInvalidReason::ParseFailed
+                },
+                "{yaml}"
+            );
+            assert_eq!(
+                std::fs::read(&h.ctx.policy_yaml_path).unwrap(),
+                b"version: 1\n"
+            );
+            let meta = h.ctx.cache.lock().host_meta_get().unwrap();
+            assert_eq!(meta.last_applied_policy_version, 3);
+            assert_eq!(*h.active_valid_until.read(), None);
+            assert!(!h.rx_version.has_changed().unwrap());
+            assert_parse_failed_event(&mut h).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_rule_packs_refuses_a_bundle_boot_cannot_load_touches_nothing() {
+        let now = OffsetDateTime::now_utc();
+        let mut h = build_harness_with_rule_packs(now, 0, 0);
+        let resp = sign(&h.sk, envelope_of("version: 2\n", 1, now), now);
+
+        let outcome = apply_rule_packs(&h.ctx, &resp).await;
+
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Rejected {
+                reason: PolicySignatureInvalidReason::ParseFailed
+            }
+        );
+        assert!(!h.ctx.rule_packs_yaml_path.exists());
+        let meta = h.ctx.cache.lock().host_meta_get().unwrap();
+        assert_eq!(meta.last_applied_rule_packs_version, 0);
+        assert_parse_failed_event(&mut h).await;
+    }
+
+    #[tokio::test]
+    async fn apply_rule_packs_accepts_fields_that_boot_ignores_in_a_bundle() {
+        let now = OffsetDateTime::now_utc();
+        let h = build_harness_with_rule_packs(now, 0, 0);
+        let resp = sign(&h.sk, envelope_of(UNKNOWN_OVERRIDE, 1, now), now);
+
+        let outcome = apply_rule_packs(&h.ctx, &resp).await;
+
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Accepted {
+                applied_policy_version: 1
+            }
+        );
+    }
+
     #[tokio::test]
     async fn apply_rule_packs_version_regression_rejects_against_rule_packs_watermark() {
         let now = OffsetDateTime::now_utc();
