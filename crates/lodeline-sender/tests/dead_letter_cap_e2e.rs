@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use lodeline_sender::config::SenderConfig;
+use lodeline_sender::data_task::MAX_REJECTION_DEAD_LETTERS;
 use lodeline_sender::runtime::{run, RuntimeCtx};
 use lodeline_sender::transport::MAX_STORED_SERVER_TEXT;
 use lodeline_sender::wire::{EventRejection, EventsAccepted, EventsRequest};
@@ -23,11 +24,27 @@ fn huge() -> String {
 enum Events {
     Status(StatusCode),
     RejectsOne,
+    RejectsMany,
 }
 
 async fn events(State(mode): State<Events>, Json(batch): Json<EventsRequest>) -> Response {
     match mode {
         Events::Status(status) => (status, huge()).into_response(),
+        Events::RejectsMany => {
+            let id = batch.events[0].event_id;
+            Json(EventsAccepted {
+                accepted: Vec::new(),
+                rejected: (0..500)
+                    .map(|n| EventRejection {
+                        event_id: uuid::Uuid::from_u128(1000 + n),
+                        reason: "no".into(),
+                        detail: None,
+                    })
+                    .collect(),
+                high_water_event_id: id,
+            })
+            .into_response()
+        }
         Events::RejectsOne => {
             let id = batch.events[0].event_id;
             Json(EventsAccepted {
@@ -192,4 +209,26 @@ async fn a_per_event_rejection_reason_is_capped() {
     )
     .await;
     assert_capped(&letters);
+}
+
+#[tokio::test]
+async fn a_huge_rejected_list_writes_a_bounded_number_of_dead_letters() {
+    let letters = sender_against(
+        Events::RejectsMany,
+        |l| l.len() > MAX_REJECTION_DEAD_LETTERS || l.iter().any(|x| x.contains("not recorded")),
+        false,
+    )
+    .await;
+    assert_eq!(letters.len(), MAX_REJECTION_DEAD_LETTERS + 1, "{letters:?}");
+    let summary = letters
+        .iter()
+        .filter(|x| x.contains("not recorded"))
+        .count();
+    assert_eq!(summary, 1);
+    assert!(
+        letters
+            .iter()
+            .any(|x| x.contains(&format!("{} more", 500 - MAX_REJECTION_DEAD_LETTERS))),
+        "{letters:?}"
+    );
 }

@@ -182,6 +182,10 @@ use lodeline_core::event::{
 use lodeline_core::sender_status::LinkFailure;
 use tokio_util::sync::CancellationToken;
 
+/// Most per-event rejections of one batch that get a dead letter each. The server
+/// controls the length of `rejected`, so the rest are counted in one summary entry.
+pub const MAX_REJECTION_DEAD_LETTERS: usize = 20;
+
 /// Idle poll interval when no batch is available.
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
@@ -335,10 +339,10 @@ pub async fn run(ctx: DataTaskCtx) {
                 ctx.stats
                     .write()
                     .record(Plane::Events, Ok(()), OffsetDateTime::now_utc());
-                for r in &accepted.rejected {
+                for r in accepted.rejected.iter().take(MAX_REJECTION_DEAD_LETTERS) {
                     tracing::warn!(
                         host_id = %ctx.host_id,
-                        reason = %r.reason,
+                        reason = %cap_server_text(&r.reason),
                         event_id = %r.event_id,
                         "server rejected event; dead-lettering"
                     );
@@ -356,6 +360,24 @@ pub async fn run(ctx: DataTaskCtx) {
                             "dead_letter::append failed"
                         );
                     }
+                }
+                let dropped = accepted
+                    .rejected
+                    .len()
+                    .saturating_sub(MAX_REJECTION_DEAD_LETTERS);
+                if dropped > 0 {
+                    tracing::warn!(
+                        host_id = %ctx.host_id,
+                        dropped,
+                        "server rejected more events than are dead-lettered"
+                    );
+                    let evt = local_event(
+                        &ctx.host_id,
+                        Evidence::ServerProtocolViolation {
+                            detail: format!("{dropped} more per-event rejections not recorded"),
+                        },
+                    );
+                    let _ = dead_letter::append(&ctx.config.dead_letter_dir, &evt);
                 }
                 if let Err(e) = state::store(&ctx.config.offset_path, &new_state) {
                     tracing::warn!(error = ?e, "state::store failed; will retry");

@@ -25,7 +25,7 @@ pub enum DeadLetterError {
 pub const MAX_FILES: usize = 30;
 
 /// Append one event line to today's `sender-dead-letter-YYYY-MM-DD.jsonl`
-/// in `dir`. Creates the file if missing; one fsync per line.
+/// in `dir`. Creates the file if missing, and then prunes old files; one fsync per line.
 pub fn append(dir: &Path, event: &Event) -> Result<(), DeadLetterError> {
     std::fs::create_dir_all(dir).map_err(|source| DeadLetterError::Io {
         path: dir.to_path_buf(),
@@ -41,6 +41,7 @@ pub fn append(dir: &Path, event: &Event) -> Result<(), DeadLetterError> {
     let path = dir.join(basename);
     let mut bytes = serde_json::to_vec(event).map_err(DeadLetterError::Serialize)?;
     bytes.push(b'\n');
+    let new_file = !path.exists();
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -57,7 +58,10 @@ pub fn append(dir: &Path, event: &Event) -> Result<(), DeadLetterError> {
         path: path.clone(),
         source,
     })?;
-    prune(dir);
+    // The count only grows when a file is created, so one scan per file is enough.
+    if new_file {
+        prune(dir);
+    }
     Ok(())
 }
 
@@ -147,6 +151,19 @@ mod tests {
         assert!(names.last().unwrap() > &"sender-dead-letter-2021".to_owned());
         assert!(!names.contains(&"sender-dead-letter-2020-01-01.jsonl".to_owned()));
         assert!(dir.path().join("notes.txt").exists());
+    }
+
+    #[test]
+    fn files_are_scanned_when_a_file_is_created_and_not_on_every_append() {
+        let dir = tempdir().unwrap();
+        append(dir.path(), &sample_event()).unwrap();
+        for day in 1..=MAX_FILES {
+            let name = format!("sender-dead-letter-2020-01-{day:02}.jsonl");
+            std::fs::write(dir.path().join(name), b"{}\n").unwrap();
+        }
+        append(dir.path(), &sample_event()).unwrap();
+        let count = || std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(count(), MAX_FILES + 1, "today's file already existed");
     }
 
     #[test]

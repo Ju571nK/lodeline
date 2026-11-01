@@ -62,8 +62,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   at 512 bytes, cut on a character boundary and marked with `…`. Before, a status
   body, an unparseable reply, a batch rejection, or a per-event rejection reason went
   in whole, so a misbehaving server could fill the disk of a host. The directory also
-  keeps at most 30 files, one a day, and removes the oldest. A file still has no size
-  limit within its day.
+  keeps at most 30 files, one a day, and removes the oldest when it starts a new
+  file. A batch reply gets at most 20 per-event rejection entries. The rest are
+  counted in one `server_protocol_violation` entry, so a server that rejects
+  thousands of events at a time cannot grow the directory. A file still has no size
+  limit within its day beyond these bounds.
 
 - `lodeline-sender` now gives up on a request to `lodeline-server` that gets no answer.
   The HTTP client had no timeout, so a server that accepted a connection and never
