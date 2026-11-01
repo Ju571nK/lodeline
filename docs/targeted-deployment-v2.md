@@ -99,6 +99,8 @@ path, and imports both trusted legacy watermarks. `open_existing` never creates
 a missing store or resets malformed state. Before integration, legacy writers
 must be stopped under the same migration lock while those watermarks are copied;
 the new store does **not** yet block existing `policy.yaml` writers by itself.
+Copy them after boot has run `settle_pending`, or an interrupted legacy apply can
+leave them behind the file on disk.
 
 Commit holds an immediate transaction while checking identity/replay, both
 artifacts, and the caller's semantic preparation. It rechecks key/manifest

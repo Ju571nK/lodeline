@@ -32,8 +32,8 @@ pub struct ExpiryTaskCtx {
 
 pub async fn run(ctx: ExpiryTaskCtx) {
     let mut last_emitted_for_version: Option<i64> = None;
+    // The first tick fires at once, so a restart on an expired policy reports it.
     let mut interval = tokio::time::interval(ctx.tick);
-    interval.tick().await; // skip the immediate fire
     loop {
         tokio::select! {
             biased;

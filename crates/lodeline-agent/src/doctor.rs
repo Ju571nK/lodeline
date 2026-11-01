@@ -257,7 +257,7 @@ pub fn run(policy_override: Option<PathBuf>, state_db_override: Option<PathBuf>)
                         .clone()
                         .unwrap_or_else(|| "<not yet generated>".into());
                     println!("[OK]   host_id: {host_id_display} (UUIDv4, persisted in state.db)");
-                    let rp_ver = meta.last_applied_rule_packs_version;
+                    let rp_ver = meta.rule_packs.version();
                     println!("[INFO] rule-pack bundle version: {rp_ver}");
                 }
                 Err(e) => {

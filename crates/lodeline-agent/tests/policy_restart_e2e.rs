@@ -261,7 +261,7 @@ fn status_after_a_restart_shows_the_real_expiry_of_a_valid_policy() {
 fn status_after_a_restart_shows_an_expired_policy_and_the_monitor_reports_it() {
     let host = Host::new("version: 1\n");
     let rt = host.boot().expect("boot");
-    let valid_until = OffsetDateTime::now_utc() + time::Duration::seconds(2);
+    let valid_until = OffsetDateTime::now_utc() + time::Duration::seconds(3);
     let response = host.signed_until(2, &doc(2), valid_until);
     let reply = host.control(&json!({"cmd": "apply_policy", "response": response}));
     assert_accepted(&reply, 2);
@@ -428,8 +428,9 @@ impl Host {
         }
     }
 
-    /// True once the child holds the write lock across several reads, which outlasts
-    /// the short writes of its startup. An agent with nothing to repair serves instead.
+    /// Returns once the child holds the write lock across several probes, which
+    /// outlasts the short writes of its startup, or after a bounded wait when the child
+    /// has nothing to repair.
     fn wait_for_the_held_write(&self) {
         let probe = Connection::open(self.path("state.db")).unwrap();
         probe.busy_timeout(Duration::ZERO).unwrap();

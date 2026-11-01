@@ -12,9 +12,13 @@ use crate::{
     watcher,
 };
 use anyhow::Context;
+use lodeline_core::event::{
+    Event, Evidence, Severity, SourceKind, Subject, AGENT_VERSION, SCHEMA_VERSION,
+};
+use lodeline_core::policy::deployment::ArtifactKind;
 use lodeline_core::policy::expand::{expand_per_user, EnvLookup, UserEnumerator};
 use lodeline_core::policy::pubkeys::Keystore;
-use lodeline_core::policy::{merge_on_this_host, Tier};
+use lodeline_core::policy::{merge_on_this_host, settle_pending, Tier};
 use lodeline_core::sink::jsonl::JsonlSink;
 use lodeline_core::state::HashCache;
 use lodeline_core::stats::Stats;
@@ -90,46 +94,39 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     let policy_expired_active = Arc::new(parking_lot::RwLock::new(false));
     let jsonl_above_soft_floor = Arc::new(parking_lot::RwLock::new(false));
     let current_segment_filename = Arc::new(parking_lot::RwLock::new(String::new()));
-    let active_valid_until: Arc<parking_lot::RwLock<Option<OffsetDateTime>>> =
-        Arc::new(parking_lot::RwLock::new(None));
-    let (policy_version_tx, _policy_version_rx_init) = watch::channel::<i64>(0);
 
-    // Phase 2: boot reconciliation — disk may be ahead of state.db after a
-    // crash between atomic-rename and state.db version-bump. If so, advance
-    // state.db and remember the version so we can emit a synthetic
-    // PolicyReloaded event once `tx_sink` is bound below.
+    // Finish or drop any apply that a stop interrupted, before the control socket
+    // serves. A failure here stops the boot, because an apply checked against a
+    // stale record could replace a newer policy.
     let policy_path_for_apply = cfg
         .policy_path
         .clone()
         .unwrap_or_else(default_policy_yaml_path);
-    let pending_reconcile: Option<i64> = {
+    // Task 5 — distributed rule-pack bundle destination, beside policy.yaml. Also
+    // the BOOT merge's 3rd layer (defaults < policy < bundle). MUST stay identical
+    // to `ApplyContext.rule_packs_yaml_path` so apply writes where boot/reload read.
+    let rule_packs_yaml_path = policy_path_for_apply.with_file_name("rule-packs.yaml");
+    let (finished_applies, applied_policy) = {
         let c = cache.lock();
-        match reconcile_policy_on_boot(&c, &policy_path_for_apply) {
-            Ok(Some(v)) => {
-                tracing::info!(
-                    version = v,
-                    "policy reconciliation: state.db advanced to match disk"
-                );
-                Some(v)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(error = ?e, "policy reconciliation failed; skipping");
-                None
-            }
-        }
+        let policy = settle_pending(ArtifactKind::Policy, &policy_path_for_apply, &c)
+            .context("finishing an interrupted policy apply")?;
+        let packs = settle_pending(ArtifactKind::RulePacks, &rule_packs_yaml_path, &c)
+            .context("finishing an interrupted rule-pack apply")?;
+        let finished: Vec<Evidence> = policy
+            .map(|policy_version| Evidence::PolicyReloaded { policy_version })
+            .into_iter()
+            .chain(packs.map(|version| Evidence::RulePackBundleApplied { version }))
+            .collect();
+        (finished, c.host_meta_get()?.policy)
     };
+    let active_valid_until = Arc::new(parking_lot::RwLock::new(applied_policy.valid_until()));
+    let (policy_version_tx, _policy_version_rx_init) = watch::channel(applied_policy.version());
 
     // 1. Load + merge policy.
     let user_doc = match cfg.policy_path.as_ref() {
         Some(p) if p.exists() => Some(lodeline_core::policy::parse(&std::fs::read_to_string(p)?)?),
         _ => None,
     };
-    // Task 5 — distributed rule-pack bundle destination, beside policy.yaml.
-    // Defined here (not at the later ApplyContext) so the BOOT merge can read
-    // it as the 3rd layer (defaults < policy < bundle). MUST stay identical to
-    // `ApplyContext.rule_packs_yaml_path` so apply writes where boot/reload read.
-    let rule_packs_yaml_path = policy_path_for_apply.with_file_name("rule-packs.yaml");
     // #134 review — ensure the config dir exists so the dedicated rule-packs
     // watcher can arm itself on first boot (it watches the parent dir; a missing
     // dir keeps the watcher permanently dead until restart).  Best-effort: on
@@ -398,13 +395,10 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         }
     }
 
-    // Phase 2: emit the deferred PolicyReloaded event from boot reconciliation
-    // (held above until tx_sink existed). Best-effort: if the channel is full,
-    // the heartbeat's `last_applied_policy_version` will still surface it.
-    if let Some(version) = pending_reconcile {
-        use lodeline_core::event::{
-            Event, Evidence, Severity, SourceKind, Subject, AGENT_VERSION, SCHEMA_VERSION,
-        };
+    // Phase 2: emit the events of the applies finished above (held until tx_sink
+    // existed). Best-effort: if the channel is full, the heartbeat's
+    // `last_applied_policy_version` still surfaces a policy.
+    for evidence in finished_applies {
         let event = Event {
             schema_version: SCHEMA_VERSION,
             event_id: uuid::Uuid::now_v7(),
@@ -414,9 +408,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             severity: Severity::Info,
             source: SourceKind::Agent,
             subject: Subject::Self_,
-            evidence: Evidence::PolicyReloaded {
-                policy_version: version,
-            },
+            evidence,
             target_id: None,
         };
         let committable = CommittableEvent {
@@ -426,7 +418,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             target_id: String::new(),
         };
         if tx_sink.try_send(committable).is_err() {
-            tracing::warn!("event channel full; deferred PolicyReloaded dropped");
+            tracing::warn!("event channel full; event of a finished apply dropped");
         }
     }
 
@@ -1486,26 +1478,6 @@ mod nonroot_path_tests {
             resolve_events_dir_unix(false, None, None),
             PathBuf::from("/var/log/lodeline")
         );
-    }
-}
-
-/// Boot reconciliation: if the YAML on disk has been advanced past
-/// `state.db.last_applied_policy_version` (crash between rename and version-bump),
-/// advance state.db and return the new version so the caller can emit
-/// `PolicyReloaded` once `tx_sink` is bound.
-fn reconcile_policy_on_boot(cache: &HashCache, policy_path: &Path) -> anyhow::Result<Option<i64>> {
-    if !policy_path.exists() {
-        return Ok(None);
-    }
-    let yaml = std::fs::read_to_string(policy_path)?;
-    let doc: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
-    let on_disk = doc.get("version").and_then(|v| v.as_i64()).unwrap_or(0);
-    let in_db = cache.host_meta_get()?.last_applied_policy_version;
-    if on_disk > in_db {
-        cache.host_meta_set_policy_version(on_disk)?;
-        Ok(Some(on_disk))
-    } else {
-        Ok(None)
     }
 }
 

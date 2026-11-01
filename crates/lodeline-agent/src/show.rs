@@ -188,16 +188,14 @@ fn write_policy_status(w: &mut impl Write, p: &PolicyStatusPayload) -> io::Resul
         "last applied policy version : {}",
         p.last_applied_policy_version
     )?;
-    let valid_until = p
-        .active_envelope_valid_until
-        .as_deref()
-        .unwrap_or("(no envelope applied)");
+    let (valid_until, expired) = match p.active_envelope_valid_until.as_deref() {
+        Some(t) if p.policy_expired_active => (t, "yes"),
+        Some(t) => (t, "no"),
+        None if p.last_applied_policy_version == 0 => ("(no envelope applied)", "no"),
+        None => ("(unknown until the next apply)", "unknown"),
+    };
     writeln!(w, "active envelope valid until : {valid_until}")?;
-    writeln!(
-        w,
-        "policy expired              : {}",
-        if p.policy_expired_active { "yes" } else { "no" }
-    )?;
+    writeln!(w, "policy expired              : {expired}")?;
     Ok(())
 }
 
@@ -742,17 +740,30 @@ mod tests {
 
     #[cfg(feature = "operator-cli")]
     #[test]
-    fn write_policy_status_handles_no_envelope_and_expired() {
-        let p = crate::control::PolicyStatusPayload {
-            last_applied_policy_version: 0,
-            active_envelope_valid_until: None,
-            policy_expired_active: true,
-        };
-        let mut buf = Vec::new();
-        write_policy_status(&mut buf, &p).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("active envelope valid until : (no envelope applied)"));
-        assert!(out.contains("policy expired              : yes"));
+    fn write_policy_status_tells_no_envelope_expired_and_unknown_apart() {
+        let time = "2026-06-12T00:00:00Z";
+        for (version, valid_until, expired, shown_until, shown_expired) in [
+            (0, None, false, "(no envelope applied)", "no"),
+            (3, Some(time), true, time, "yes"),
+            (7, None, false, "(unknown until the next apply)", "unknown"),
+        ] {
+            let p = crate::control::PolicyStatusPayload {
+                last_applied_policy_version: version,
+                active_envelope_valid_until: valid_until.map(str::to_owned),
+                policy_expired_active: expired,
+            };
+            let mut buf = Vec::new();
+            write_policy_status(&mut buf, &p).unwrap();
+            let out = String::from_utf8(buf).unwrap();
+            assert!(
+                out.contains(&format!("active envelope valid until : {shown_until}")),
+                "{out}"
+            );
+            assert!(
+                out.contains(&format!("policy expired              : {shown_expired}")),
+                "{out}"
+            );
+        }
     }
 
     #[cfg(feature = "operator-cli")]

@@ -239,8 +239,10 @@ Copy `signed-policy.json` to the server's `policy_bundle_path` (section 5). The
 **public** half goes into each agent's keystore — see
 [install-macos-agent.md § keystore](install-macos-agent.md). Keep `signing-key.json` offline.
 
-> `--policy-version` must be **greater than** the `version:` already applied by
-> agents, or boot reconciliation rejects it as a regression. Start at `2`.
+> `--policy-version` must be **greater than** the version the agents last applied,
+> or they refuse it with `version_regression`. An agent that has only a local
+> `policy.yaml` accepts version `1`. An agent from v0.12.0 or earlier does not: it
+> records its local file as version 1, so start at `2` if any of those remain.
 
 ---
 
