@@ -15,6 +15,7 @@ use crate::ai_guard::command_scan::{
 };
 use crate::ai_guard::rubric;
 use lodeline_core::event::{AiGuardReason, LauncherShape};
+use lodeline_core::redact::redact_url;
 use serde_json::Value;
 
 /// Walk `settings.mcpServers` (object keyed by server name) and push reasons.
@@ -37,7 +38,7 @@ pub(crate) fn emit_one_server(name: &str, def: &Value, out: &mut Vec<AiGuardReas
             if scheme_is_remote(u) {
                 out.push(AiGuardReason::McpServerRemote {
                     server_name: name.to_string(),
-                    url: u.to_string(),
+                    url: url_for_evidence(u),
                 });
             }
         }
@@ -115,6 +116,12 @@ pub(crate) fn emit_one_server(name: &str, def: &Value, out: &mut Vec<AiGuardReas
             }
         }
     }
+}
+
+/// #403 — `url` as it may be reported: `scheme://host[:port]`. Userinfo, the
+/// query and path segments can all carry tokens, so none of them is kept.
+pub(crate) fn url_for_evidence(url: &str) -> String {
+    redact_url(url.trim()).unwrap_or_else(|| "<unparseable-url>".into())
 }
 
 /// True iff the URL scheme (lowercased) is http/https. Lowercasing defeats
@@ -584,7 +591,7 @@ mod tests {
         emit_one_server("ws", &def, &mut out);
         assert!(out.iter().any(|r| matches!(
             r,
-            AiGuardReason::McpServerRemote { url, .. } if url == "wss://evil.example/mcp"
+            AiGuardReason::McpServerRemote { url, .. } if url == "wss://evil.example"
         )));
     }
 

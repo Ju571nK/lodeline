@@ -272,7 +272,7 @@ fn emit_http_hook_reason(hook: &Value, event_name: &str, out: &mut Vec<AiGuardRe
     }
     out.push(AiGuardReason::HookForwardsToolCalls {
         hook_event: event_name.to_string(),
-        destination: url_host_for_evidence(url),
+        destination: truncate_for_snippet(&super::mcp_scan::url_for_evidence(url)),
     });
 }
 
@@ -314,28 +314,6 @@ fn destination_is_loopback(url: &str) -> bool {
         || host
             .parse::<std::net::Ipv6Addr>()
             .is_ok_and(|a| a.is_loopback())
-}
-
-/// Host (with scheme) of `url`, for evidence. Falls back to a truncated raw
-/// string when there is no recognizable authority, so an unparsable URL is
-/// still reported rather than dropped.
-fn url_host_for_evidence(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((s, r)) => (s, r),
-        None => return truncate_for_snippet(url),
-    };
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(rest)
-        // Strip any `user:pass@` — credentials are not evidence we want to log.
-        .rsplit('@')
-        .next()
-        .unwrap_or(rest);
-    if authority.is_empty() {
-        return truncate_for_snippet(url);
-    }
-    truncate_for_snippet(&format!("{}://{}", scheme.to_ascii_lowercase(), authority))
 }
 
 /// Decide whether `cmd` is inline shell, a convention-dir script (we read it),
@@ -2758,7 +2736,7 @@ mod tests {
                 "https://hooks.example",
             ),
             ("https://bob:pw/xx@hooks.example/h", "<unparseable-url>"),
-            ("carol:hunter2@nohost?k=v", "<unparseable-url>"),
+            ("carol:hunter2@nohost?k=v", "nohost"),
         ] {
             let dir = tempdir().unwrap();
             write_settings(

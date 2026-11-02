@@ -187,7 +187,13 @@ fn interpolate_reason(reason: &AiGuardReason, matched: &MatchedValue) -> AiGuard
     let interpolated = serialized
         .replace("<selector-key>", &key_escaped)
         .replace("<selector-value>", &value_escaped);
-    serde_json::from_str(&interpolated).unwrap_or_else(|_| reason.clone())
+    let mut out: AiGuardReason =
+        serde_json::from_str(&interpolated).unwrap_or_else(|_| reason.clone());
+    // #403 — the matched URL is host config, so it is redacted like the parser's.
+    if let AiGuardReason::McpServerRemote { url, .. } = &mut out {
+        *url = crate::ai_guard::parser::mcp_scan::url_for_evidence(url);
+    }
+    out
 }
 
 #[cfg(test)]
