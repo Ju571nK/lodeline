@@ -7,6 +7,25 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Code `PowerShell` and `Monitor` calls now reach `lodeline-hook` rules. A
+  `Bash` command rule now also matches a `Monitor` call that has a `command`, and a
+  new `powershell` action that carries the raw `PowerShell` command text. A
+  `Monitor` WebSocket watch (`ws`) stays `Other`. A rule matches the raw text with its
+  own regex, case-sensitive unless it starts with `(?i)`, so `rm\s+-rf` does not match
+  `Remove-Item -Recurse`, `ri`, or an upper-case spelling. To cover PowerShell, write
+  the PowerShell forms and add `(?i)`. The shell normalizer and the `bash_indirection`
+  rules do not run on PowerShell text, because the normalizer reads PowerShell's
+  backtick escape as command substitution. A rule written as `Other` with label
+  `PowerShell` or `Monitor` no longer matches command calls. Move it to a `Bash` rule.
+  Blocking through `lodeline-hook` stays opt-in. A new `lodeline-hook` that talks to an
+  older agent sends an action the agent cannot decode, so the hook takes its
+  `--on-failure` mode. The default `open` allows the call. With `--on-failure closed`,
+  every PowerShell call is blocked until the agent is upgraded, so upgrade the agent
+  before the hook on fail-closed installs. An older hook with a newer agent works as
+  before. (#199)
+
 ### Fixed
 
 - `lodeline reload`, `lodeline show stats|policy-status|targets|risk`, and the live

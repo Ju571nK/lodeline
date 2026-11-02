@@ -191,6 +191,13 @@ fn rule_matches(
                 .any(|seg| f.holds(Some(seg.as_str())))
                 .then(|| via_suffix("normalized command"))
         }
+        // Raw text only: shell_norm parses POSIX shells, not PowerShell.
+        (
+            CompiledMatch::Bash(f),
+            HookAction::PowerShell {
+                command_preview, ..
+            },
+        ) => hit(f.holds(command_preview.as_deref())),
         (CompiledMatch::BashIndirection(f), HookAction::Bash { .. }) => {
             let n = normalized?;
             n.indirections
@@ -350,6 +357,44 @@ mod tests {
         // A fully-resolvable command is not caught by the indirection rule.
         assert!(ev.evaluate(&bash(Some("rm -rf /"))).is_none());
         assert!(ev.evaluate(&bash(Some("git status"))).is_none());
+    }
+
+    fn powershell(preview: &str) -> HookAction {
+        HookAction::PowerShell {
+            command_hash: "ab".repeat(32),
+            command_preview: Some(preview.into()),
+        }
+    }
+
+    #[test]
+    fn bash_rule_matches_powershell_raw_text_only() {
+        let ev = DenyEvaluator::new(&[
+            DenyRule {
+                id: "no-rm".into(),
+                match_: HookActionMatch::Bash {
+                    command: Matcher::Regex {
+                        pattern: r"^(rm|Remove-Item) -Recurse".into(),
+                    },
+                },
+            },
+            DenyRule {
+                id: "no-opaque".into(),
+                match_: HookActionMatch::BashIndirection {
+                    indirection: Matcher::Exists,
+                },
+            },
+        ])
+        .unwrap();
+        let (id, reason) = ev
+            .evaluate(&powershell("Remove-Item -Recurse C:\\build"))
+            .unwrap();
+        assert_eq!(id, "no-rm");
+        assert_eq!(reason, "matched deny rule no-rm");
+        // A backtick is PowerShell's escape character; read as POSIX it is a
+        // command substitution, which the indirection rule would deny.
+        let tab = "Write-Host \"a`tb\"";
+        assert!(ev.evaluate(&bash(Some(tab))).is_some());
+        assert!(ev.evaluate(&powershell(tab)).is_none());
     }
 
     #[test]

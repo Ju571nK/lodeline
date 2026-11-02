@@ -185,7 +185,7 @@ Example for Claude Code (`.claude/settings.json`):
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell|Monitor",
         "hooks": [
           {
             "type": "command",
@@ -207,6 +207,10 @@ lodeline-hook claude-code --enforce --on-failure closed
 The hook has an 800 ms budget. In closed mode, a hook that cannot finish in that time, for example because stdin is slow, denies the tool call. In closed mode, a panic in the hook and a watchdog exit also give the agent's deny output. In the default open mode, both leave empty stdout and exit 0. A signal or an abort ends the process before the hook can write anything, so the agent's own handling of a failed hook decides that case. For Cursor, `lodeline-hook install --enforce --on-failure closed` sets `failClosed`, which turns that case into a block.
 
 Choose fail-closed only when you are confident the daemon will always be running; an unexpected daemon outage will block all matched tool calls.
+
+On a fail-closed install, upgrade the agent before the hook. A newer `lodeline-hook` sends a `powershell` action that an older agent cannot decode, and `--on-failure closed` then blocks every PowerShell call until the agent is upgraded. An older hook with a newer agent works as before.
+
+The matcher lists the tools whose calls reach the hook. `lodeline-hook` sends `Bash` and `Monitor` calls that have a `command` to `bash` rules, and `PowerShell` calls to the same rules as a separate `powershell` action. A `Monitor` WebSocket watch (`ws`) has no command and stays `other`. If your matcher names only `Bash`, Claude Code never sends the other two tools to the hook.
 
 #### How bash deny rules are matched
 
@@ -252,7 +256,23 @@ Some constructs cannot be resolved without running them — `$(...)`, backticks,
 
 `unparsable` deserves its own rule if you care about coverage. It fires when quoting never closes, or when the command is past the parser's size or segment bound — cases where a text rule's silence means "not checked", not "safe".
 
-**Limits worth knowing.** Normalization models POSIX sh/bash quoting and expansion, not the whole language: arithmetic expansion, brace expansion, globbing, aliases, and shell functions are not interpreted, and Windows/PowerShell quoting is not covered. Those leave a rule exactly where a plain text match already stood — gaps to close, not regressions. As always, a command whose text the hook never sees (no preview) fails open.
+**Limits worth knowing.** Normalization models POSIX sh/bash quoting and expansion, not the whole language: arithmetic expansion, brace expansion, globbing, aliases, and shell functions are not interpreted. Those leave a rule exactly where a plain text match already stood — gaps to close, not regressions. As always, a command whose text the hook never sees (no preview) fails open.
+
+#### PowerShell and Monitor commands
+
+A `bash` rule also tests Claude Code `PowerShell` calls and `Monitor` calls that have a `command`. For these, the rule's regex runs on the raw command text only. Neither the normalization above nor the `bash_indirection` rules run on PowerShell text, because the normalizer reads PowerShell's backtick escape as command substitution and would deny ordinary commands.
+
+A regex is case-sensitive unless it starts with `(?i)`, and a rule written for POSIX does not match PowerShell spellings. `rm\s+-rf` misses `Remove-Item -Recurse`, the alias `ri`, and an upper-case `RM -RF`. To cover PowerShell, write its forms and add `(?i)`:
+
+```yaml
+hook_deny_rules:
+  - id: no-recursive-delete
+    match:
+      kind: bash
+      command: { kind: regex, pattern: "(?i)(\\brm\\s+-rf\\b|\\bRemove-Item\\b.*-Recurse|\\bri\\s+.*-r)" }
+```
+
+A rule written as `other` with label `PowerShell` or `Monitor` no longer matches command calls. Move it to a `bash` rule.
 
 The four ways rules manifest at runtime:
 

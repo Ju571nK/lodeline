@@ -45,6 +45,15 @@ pub enum HookAction {
         command_hash: String,
         command_preview: Option<String>,
     },
+    /// A PowerShell command line. Kept apart from `Bash` because the POSIX
+    /// normalizer would misread PowerShell syntax (a backtick is its escape
+    /// character, not command substitution), so command rules see only the
+    /// raw text.
+    #[serde(rename = "powershell")]
+    PowerShell {
+        command_hash: String,
+        command_preview: Option<String>,
+    },
     FileEdit {
         path_hash: String,
         path_preview: Option<String>,
@@ -322,5 +331,16 @@ mod tests {
             HookAction::Bash { command_hash, .. } => assert_eq!(command_hash.len(), 64),
             _ => panic!("expected bash"),
         }
+    }
+
+    #[test]
+    fn powershell_action_wire_tag() {
+        let a = HookAction::PowerShell {
+            command_hash: "ab".repeat(32),
+            command_preview: Some("Get-ChildItem".into()),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        assert!(s.contains("\"kind\":\"powershell\""), "{s}");
+        assert_eq!(serde_json::from_str::<HookAction>(&s).unwrap(), a);
     }
 }

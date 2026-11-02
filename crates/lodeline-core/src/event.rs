@@ -386,7 +386,7 @@ pub struct HookInvocationEvidence {
     pub peer_uid: u32,
     pub agent_session_id: Option<String>,
     pub tool_use_id: Option<String>,
-    /// Normalized action kind: "bash" | "file_edit" | "mcp_call" | "other".
+    /// Normalized action kind: "bash" | "powershell" | "file_edit" | "mcp_call" | "other".
     pub action_kind: String,
     /// Tool name when `action_kind == "other"`, else `None`. Carries the
     /// original tool name (e.g. "WebFetch") for non-Bash/Edit/MCP tools.
@@ -408,7 +408,7 @@ pub struct HookDecisionEvidence {
     pub peer_uid: u32,
     pub agent_session_id: Option<String>,
     pub tool_use_id: Option<String>,
-    /// Normalized action kind: "bash" | "file_edit" | "mcp_call" | "other".
+    /// Normalized action kind: "bash" | "powershell" | "file_edit" | "mcp_call" | "other".
     pub action_kind: String,
     pub action_hash: String,
     pub action_preview: Option<String>,
