@@ -161,23 +161,68 @@ mod tests {
         }
     }
 
+    fn patch_preview(p: serde_json::Value) -> String {
+        match Codex.normalize(&p, CaptureLevel::Raw).unwrap().action {
+            HookAction::FileEdit { path_preview, .. } => path_preview.unwrap(),
+            other => panic!("expected FileEdit, got {other:?}"),
+        }
+    }
+
     // Shape captured from codex-cli 0.164.0 `codex exec`: the patch text rides
     // in `tool_input.command`, the same field the shell tool uses.
     #[test]
     fn apply_patch_is_file_edit_on_header_paths() {
         let p = serde_json::json!({
             "tool_name":"apply_patch","tool_input":{"command":
-                "*** Begin Patch\n*** Update File: /repo/a.txt\n@@\n-rm -rf /\n+hello\n\
-                 *** Move to: /repo/c.txt\n*** Add File: /repo/b.txt\n+*** Delete File: /etc/x\n\
+                "*** Begin Patch\n*** Update File: /repo/a.txt\n*** Move to: /repo/c.txt\n\
+                 @@\n-rm -rf /\n+hello\n*** Add File: /repo/b.txt\n+*** Delete File: /etc/x\n\
                  *** Delete File: /repo/old.txt\n*** End Patch"}
         });
-        match Codex.normalize(&p, CaptureLevel::Raw).unwrap().action {
-            HookAction::FileEdit { path_preview, .. } => assert_eq!(
-                path_preview.unwrap(),
-                "/repo/a.txt\n/repo/c.txt\n/repo/b.txt\n/repo/old.txt"
-            ),
-            other => panic!("expected FileEdit, got {other:?}"),
-        }
+        assert_eq!(
+            patch_preview(p),
+            "/repo/a.txt\n/repo/c.txt\n/repo/b.txt\n/repo/old.txt"
+        );
+    }
+
+    // codex rust-v0.166.0 streaming_parser.rs: headers match the trimmed line,
+    // except inside an Update hunk, where only trailing space is trimmed and a
+    // line with a leading space is a context line.
+    #[test]
+    fn apply_patch_headers_follow_codex_whitespace_rules() {
+        let p = serde_json::json!({
+            "tool_name":"apply_patch","tool_input":{"command":
+                "*** Begin Patch\n \t*** Add File: /etc/x\n+hi\n*** Update File: /repo/a.txt  \n\
+                 *** Move to: /repo/c.txt \n@@\n-old\n *** Update File: /etc/context-only\n+new\n\
+                 *** Delete File: /repo/old.txt\t\n*** End Patch\n"}
+        });
+        assert_eq!(
+            patch_preview(p),
+            "/etc/x\n/repo/a.txt\n/repo/c.txt\n/repo/old.txt"
+        );
+    }
+
+    #[test]
+    fn apply_patch_reads_codex_heredoc_wrapper() {
+        let p = serde_json::json!({
+            "tool_name":"apply_patch","tool_input":{"command":
+                "<<'EOF'\n*** Begin Patch\n*** Add File: /etc/x\n+hi\n*** End Patch\nEOF\n"}
+        });
+        assert_eq!(patch_preview(p), "/etc/x");
+    }
+
+    // Paths on Windows are not `/`-rooted, so the expected strings are Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn apply_patch_resolves_relative_paths_against_cwd() {
+        let p = serde_json::json!({
+            "cwd":"/repo/sub","tool_name":"apply_patch","tool_input":{"command":
+                "*** Begin Patch\n*** Add File: .env\n+X=1\n*** Update File: ../lib/x.rs\n\
+                 *** Move to: ./y/../z.rs\n@@\n-a\n+b\n*** Delete File: /abs/old\n*** End Patch"}
+        });
+        assert_eq!(
+            patch_preview(p),
+            "/repo/sub/.env\n/repo/lib/x.rs\n/repo/sub/z.rs\n/abs/old"
+        );
     }
 
     #[test]
