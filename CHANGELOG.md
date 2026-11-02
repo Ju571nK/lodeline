@@ -135,6 +135,24 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the same event and matcher but different commands in user and managed files count as
   one. (#413)
 
+- The Codex scanner now follows `default_permissions = "<name>"` to the matching
+  `[permissions.<name>]` profile and along its `extends` chain, in user and project
+  config. A profile that grants filesystem write on `:root`, `/`, `~`, or a drive root
+  now reports `sandbox_disabled`, and a trailing `/**` on those paths counts the same.
+  Extra writable paths and network-only openness are not scored. No new reason kind is
+  added, so older servers accept the events. The score of a host with a wide-open
+  profile rises on upgrade. (#414)
+
+- Codex MCP server and app auto-approval now follow each tool's effective approval
+  mode, which is the tool's own setting or else the default of its server or app. The
+  scanner honors `enabled_tools` and `disabled_tools`. A server whose default is
+  `approve` but whose tools all prompt is no longer reported as `trusted_mcp_server`,
+  unless tools that the config does not name keep the `approve` default. The scanner now
+  reads `[apps.<id>]` and `[apps._default]`, and reports `[apps._default]` set to
+  `approve` as its own finding. It skips apps with `enabled = false` and tools turned off
+  by `default_tools_enabled = false`. No new reason kind is added. The score of a host
+  falls when the tools of its servers all prompt. (#414)
+
 ### Fixed
 
 - A Claude Code host whose managed settings set `permissions.deny` rules no longer gets
