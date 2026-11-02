@@ -292,6 +292,7 @@ fn assess_user_layers(
     let permissions = effective.as_ref().and_then(|v| v.get("permissions"));
     emit_sandbox_reasons(&layers, permissions, &mut out);
     let get = |key| effective.as_ref().and_then(|v| v.get(key));
+    // The daemon has no cwd, so a trust decision on any project stands in for the active one.
     let trust_decided = get("projects")
         .and_then(Value::as_table)
         .is_some_and(|projects| {
@@ -401,7 +402,7 @@ fn emit_workspace_write_reasons(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .any(writes_everywhere)
+        .any(writable_root_everywhere)
     {
         out.push(AiGuardReason::SandboxDisabled);
     }
@@ -472,6 +473,19 @@ fn writes_everywhere(p: &str) -> bool {
     let drive_root =
         trimmed.len() == 2 && trimmed.as_bytes()[0].is_ascii_alphabetic() && trimmed.ends_with(':');
     (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
+}
+
+/// A `writable_roots` entry naming the whole disk or the home dir. Codex
+/// reads each as a plain path with only `~` and `~/` expanded, so `/**`,
+/// `~/**` and `:root` are ordinary relative or literal paths there
+/// (`AbsolutePathBuf`, rust-v0.166.0).
+fn writable_root_everywhere(p: &str) -> bool {
+    let trimmed = p.trim_end_matches(['/', '\\']);
+    let drive_root = trimmed.len() == 2
+        && trimmed.len() < p.len()
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && trimmed.ends_with(':');
+    (trimmed.is_empty() && !p.is_empty()) || trimmed == "~" || drive_root
 }
 
 /// #200 — `approval_policy` decides whether a human is asked before a tool
@@ -946,16 +960,17 @@ fn network_host(raw: &str) -> Option<String> {
     if ["://", "/", "?", "#"].iter().any(|s| host.contains(s)) {
         return None;
     }
+    let is_port = |port: &str| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
     let host = match host.strip_prefix('[') {
-        Some(bracketed) => bracketed.split_once(']')?.0,
-        None => match host.split_once(':') {
-            Some((name, port))
-                if !name.is_empty()
-                    && !port.is_empty()
-                    && port.bytes().all(|b| b.is_ascii_digit()) =>
-            {
-                name
+        Some(bracketed) => {
+            let (inside, rest) = bracketed.split_once(']')?;
+            if !rest.is_empty() && !rest.strip_prefix(':').is_some_and(is_port) {
+                return None;
             }
+            inside
+        }
+        None => match host.split_once(':') {
+            Some((name, port)) if !name.is_empty() && is_port(port) => name,
             _ => host,
         },
     };
@@ -1003,7 +1018,7 @@ pub(crate) fn emit_hook_reasons(
                 }
                 match handler.get("type").and_then(Value::as_str) {
                     Some("command") => {
-                        if let Some(cmd) = hook_command(handler) {
+                        if let Some(cmd) = hook_command(handler, cfg!(windows)) {
                             claude_code::classify_command(cmd, event_name, out);
                         }
                     }
@@ -1019,8 +1034,8 @@ pub(crate) fn emit_hook_reasons(
 /// #200 — the command Codex runs for a `command` handler. On Windows,
 /// `commandWindows` (alias `command_windows`) replaces `command`
 /// (`hooks/src/engine/discovery.rs`, rust-v0.166.0).
-fn hook_command(handler: &Value) -> Option<&str> {
-    let windows = cfg!(windows)
+fn hook_command(handler: &Value, windows: bool) -> Option<&str> {
+    let windows = windows
         .then(|| {
             handler
                 .get("commandWindows")
@@ -1076,7 +1091,7 @@ pub(crate) fn collect_external_script_paths_from_config(
                 if !matches!(handler.get("type").and_then(Value::as_str), Some("command")) {
                     continue;
                 }
-                let Some(cmd) = hook_command(handler) else {
+                let Some(cmd) = hook_command(handler, cfg!(windows)) else {
                     continue;
                 };
                 if let Some(candidate) = claude_code::external_path_from_command(cmd, hooks_dir) {
@@ -3171,6 +3186,32 @@ mcp_elicitations = "on-request"
         );
     }
 
+    /// A later rule for the same host wins either way; `forbidden` is an
+    /// alias of `deny`, and Codex rejects a wildcard or malformed host.
+    #[test]
+    fn network_rules_follow_codex_order_and_host_validation() {
+        let rule = |host: &str, decision: &str| {
+            format!("network_rule(host=\"{host}\", protocol=\"https\", decision=\"{decision}\")\n")
+        };
+        let cases = [
+            (
+                rule("a.example", "deny") + &rule("a.example", "allow"),
+                vec!["a.example"],
+            ),
+            (rule("a.example", "forbidden"), vec![]),
+            (rule("*.example.com", "allow"), vec![]),
+            (rule("[::1]junk", "allow"), vec![]),
+            (rule("[::1]:", "allow"), vec![]),
+            (rule("[::1]:8080", "allow"), vec!["<redacted>"]),
+        ];
+        for (text, hosts) in cases {
+            let dir = tempdir().unwrap();
+            write_rules(dir.path(), "net.rules", &text);
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(approvals(&reasons), hosts, "{text}");
+        }
+    }
+
     #[test]
     fn project_network_rule_is_reported() {
         let (dir, p) = project_with("");
@@ -3212,6 +3253,12 @@ mcp_elicitations = "on-request"
             ("default_permissions = \":workspace\"\n", false),
             ("", false),
             ("[projects.\"/src/app\"]\ntrust_level = \"trusted\"\n", true),
+            // Codex counts `untrusted` as a trust decision too
+            // (`default_builtin_permission_profile_name`, rust-v0.166.0).
+            (
+                "[projects.\"/src/app\"]\ntrust_level = \"untrusted\"\n",
+                true,
+            ),
         ];
         for (mode, scored) in cases {
             let dir = tempdir().unwrap();
@@ -3243,6 +3290,12 @@ mcp_elicitations = "on-request"
             ("[\"/\"]", true),
             ("[\"/opt/cache\", \"~\"]", true),
             ("[\"/opt/cache\", \"~/work\"]", false),
+            ("[\"~/\"]", true),
+            ("[\"C:\\\\\"]", true),
+            // Codex expands only `~` and `~/`, and has no special paths here.
+            ("[\":root\"]", false),
+            ("[\"~/**\"]", false),
+            ("[\"/**\"]", false),
         ] {
             let dir = tempdir().unwrap();
             write_config(
@@ -3286,6 +3339,29 @@ mcp_elicitations = "on-request"
                 "{key}: {reasons:?}"
             );
         }
+    }
+
+    #[test]
+    fn hook_command_picks_the_windows_command_on_windows_only() {
+        let handler = |key: &str| -> Value {
+            toml::from_str(&format!("command = \"unix\"\n{key} = \"win\"\n")).unwrap()
+        };
+        for key in ["commandWindows", "command_windows"] {
+            assert_eq!(hook_command(&handler(key), true), Some("win"), "{key}");
+            assert_eq!(hook_command(&handler(key), false), Some("unix"), "{key}");
+        }
+        let unix_only: Value = toml::from_str("command = \"unix\"\n").unwrap();
+        assert_eq!(hook_command(&unix_only, true), Some("unix"));
+    }
+
+    #[test]
+    fn workspace_network_access_false_is_not_scored() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = false\n",
+        );
+        assert!(!workspace_network(&CodexParser.assess(dir.path()).unwrap()));
     }
 
     #[test]
