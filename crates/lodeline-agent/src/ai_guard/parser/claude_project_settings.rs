@@ -55,6 +55,8 @@ const RISKY_ENV: &[(&str, &str)] = &[
 const EVIDENCE_CAP: usize = 120;
 /// Plugin names kept in one finding, so a hostile file cannot bloat the event.
 const MAX_PLUGINS: usize = 20;
+/// Recorded in place of a repository-supplied name that fails [`safe_name`].
+const REDACTED: &str = "<redacted>";
 
 pub(crate) fn emit_project_settings_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
     if let Some(plugins) = settings.get("enabledPlugins").and_then(Value::as_object) {
@@ -63,7 +65,7 @@ pub(crate) fn emit_project_settings_reasons(settings: &Value, out: &mut Vec<AiGu
             .iter()
             .filter(|(_, on)| on.as_bool() == Some(true))
             .take(MAX_PLUGINS)
-            .map(|(plugin, _)| cap(plugin))
+            .map(|(plugin, _)| safe_name(plugin))
             .collect();
         if !enabled.is_empty() {
             out.push(AiGuardReason::ProjectSettingsPluginEnabled { plugins: enabled });
@@ -82,7 +84,13 @@ pub(crate) fn emit_project_settings_reasons(settings: &Value, out: &mut Vec<AiGu
     }
     if let Some(env) = settings.get("env").and_then(Value::as_object) {
         for (variable, value) in env {
-            if let Some(reason) = env_reason(variable, value.as_str().unwrap_or("")) {
+            // Claude Code coerces a number or bool `env` value to its string form.
+            let value = match value {
+                Value::String(s) => s.clone(),
+                Value::Number(_) | Value::Bool(_) => value.to_string(),
+                _ => continue,
+            };
+            if let Some(reason) = env_reason(variable, &value) {
                 out.push(reason);
             }
         }
@@ -105,7 +113,7 @@ pub(crate) fn emit_project_settings_reasons(settings: &Value, out: &mut Vec<AiGu
         };
         for (name, def) in markets {
             out.push(AiGuardReason::ProjectSettingsMarketplace {
-                name: cap(name),
+                name: safe_name(name),
                 source: marketplace_source(def),
             });
         }
@@ -153,15 +161,16 @@ fn marketplace_source(def: &Value) -> String {
         "github" => source
             .and_then(|s| s.get("repo"))
             .and_then(Value::as_str)
-            .map(str::to_string),
+            .map(|repo| safe_name(repo.split(['?', '#']).next().unwrap_or_default())),
         _ => source
             .and_then(|s| s.get("url"))
             .and_then(Value::as_str)
             .and_then(host_for_evidence),
     };
+    let kind = safe_name(kind);
     cap(&match detail {
         Some(d) => format!("{kind}:{d}"),
-        None => kind.to_string(),
+        None => kind,
     })
 }
 
@@ -189,6 +198,20 @@ fn is_loopback_host(host: &str) -> bool {
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|a| a.is_loopback())
+}
+
+/// A repository-supplied name, kept only when it is made of plugin, marketplace
+/// and repo name characters, so free text or a credential never reaches the event.
+fn safe_name(name: &str) -> String {
+    let safe = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '/' | '-'));
+    if safe {
+        cap(name)
+    } else {
+        REDACTED.to_string()
+    }
 }
 
 fn cap(s: &str) -> String {
@@ -275,6 +298,20 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn non_string_env_values_are_read_as_their_string_form() {
+        let out = reasons(json!({"env": {"NODE_TLS_REJECT_UNAUTHORIZED": 0}}));
+        assert_eq!(
+            out,
+            vec![AiGuardReason::ProjectSettingsEnvOverride {
+                variable: "NODE_TLS_REJECT_UNAUTHORIZED".into(),
+                effect: WEAKEN_TLS.into(),
+                destination: None,
+            }]
+        );
+        assert!(reasons(json!({"env": {"NODE_TLS_REJECT_UNAUTHORIZED": 1}})).is_empty());
     }
 
     #[test]
