@@ -73,7 +73,10 @@ impl AiGuardParser for ClaudeCodeParser {
     }
 
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        external_script_paths(&self.locate(home_dir).0)
+        user_external_script_paths(
+            &self.locate(home_dir).0,
+            &super::policy_controls::claude_policy_dir(),
+        )
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
@@ -102,6 +105,17 @@ fn assess_user(
     let components = super::claude_components::component_hooks(claude);
     let claude_json = super::claude_json::read(claude_json);
     let claude_json_servers = claude_json.servers();
+    // An unreadable managed file counts as absent here; the controls channel
+    // reports its error.
+    let managed = super::policy_controls::claude_managed_settings(policy_dir).ok();
+    // Managed hooks, rules or classifier lists apply to every session, so
+    // they are scored even when the user has configured nothing. Other
+    // managed keys, such as `sandbox`, are not evidence the tool is in use.
+    let managed_configures = managed.as_ref().is_some_and(|m| {
+        ["hooks", "permissions", "autoMode"]
+            .iter()
+            .any(|k| m.get(k).is_some())
+    });
 
     // Missing primary file with no overlay → operator hasn't enabled tool.
     // #191 — a real unattended task (a `scheduled-tasks/<name>/SKILL.md`) is
@@ -116,13 +130,11 @@ fn assess_user(
             && !claude.join("loop.md").is_file()
             && components.is_empty()
             && claude_json_servers.is_empty()
+            && !managed_configures
     {
         return Ok(Vec::new());
     }
 
-    // An unreadable managed file counts as absent here; the controls channel
-    // reports its error.
-    let managed = super::policy_controls::claude_managed_settings(policy_dir).ok();
     // `disableAutoMode` takes effect from any file, managed ones included.
     let auto_disabled = [&managed, &base, &local]
         .into_iter()
@@ -146,7 +158,14 @@ fn assess_user(
     let mut out = Vec::new();
     emit_hook_reasons(&merged, &mut out)?;
     super::claude_components::emit_component_hook_reasons(&components, &mut out);
-    emit_permission_reasons(&merged, &mut out);
+    // Managed deny rules apply to every session, so the deny list is the
+    // combined one.
+    if deny_list_empty(&merge_overlay(merged.clone(), managed.clone())) {
+        out.push(AiGuardReason::PermissionsDenyEmpty);
+    }
+    if let Some(perms) = merged.get("permissions") {
+        emit_broad_allow_reasons(perms, &mut out);
+    }
     // #199 — managed hooks run in every session and managed allow rules merge
     // with the user's, so they score like the user's own.
     if let Some(managed) = &managed {
@@ -160,13 +179,7 @@ fn assess_user(
     // #191 signal 1 — the start mode's auto-approval posture.
     if emit_start_mode_reason(start, &mut out) {
         // #199 — the classifier's own safety rules, when auto mode is in use.
-        // It combines the user and managed `autoMode` lists.
-        emit_auto_mode_reasons(&base_settings, &mut out);
-        if let Some(managed) = &managed {
-            let mut found = Vec::new();
-            emit_auto_mode_reasons(managed, &mut found);
-            push_managed(found, &mut out);
-        }
+        emit_auto_mode_reasons(&base_settings, managed.as_ref(), &mut out);
     }
     // #191 signal 2 — unattended recurring Claude Code scheduled tasks.
     emit_scheduled_task_reasons(claude, &mut out);
@@ -210,6 +223,18 @@ fn external_script_paths(claude_dir: &Path) -> Vec<PathBuf> {
         &super::claude_components::component_hooks(claude_dir),
         &hooks_dir,
     ));
+    paths
+}
+
+/// [`external_script_paths`] plus the scripts managed hooks run.
+fn user_external_script_paths(claude_dir: &Path, policy_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = external_script_paths(claude_dir);
+    if let Ok(managed) = super::policy_controls::claude_managed_settings(policy_dir) {
+        paths.extend(collect_external_script_paths_from_settings(
+            &managed,
+            &claude_dir.join("hooks"),
+        ));
+    }
     paths
 }
 
@@ -592,33 +617,31 @@ fn truncate_for_snippet(s: &str) -> String {
 }
 
 pub(crate) fn emit_permission_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
-    let perms = match settings.get("permissions") {
-        Some(p) => p,
-        None => {
-            // No `permissions` section at all. Only flag this as a finding if
-            // the operator is actively using hooks (NON-empty hooks object) —
-            // an empty `{}` settings file means "tool not really configured"
-            // rather than "configured insecurely".
-            let has_active_hooks = settings
-                .get("hooks")
-                .and_then(Value::as_object)
-                .map(|m| !m.is_empty())
-                .unwrap_or(false);
-            if has_active_hooks {
-                out.push(AiGuardReason::PermissionsDenyEmpty);
-            }
-            return;
-        }
-    };
-    let deny_empty = match perms.get("deny") {
-        None => true,
-        Some(Value::Array(a)) => a.is_empty(),
-        Some(_) => false,
-    };
-    if deny_empty {
+    if deny_list_empty(settings) {
         out.push(AiGuardReason::PermissionsDenyEmpty);
     }
-    emit_broad_allow_reasons(perms, out);
+    if let Some(perms) = settings.get("permissions") {
+        emit_broad_allow_reasons(perms, out);
+    }
+}
+
+/// Whether `settings` configures the tool without any deny rule.
+fn deny_list_empty(settings: &Value) -> bool {
+    match settings.get("permissions") {
+        // No `permissions` section at all. Only flag this as a finding if
+        // the operator is actively using hooks (NON-empty hooks object) —
+        // an empty `{}` settings file means "tool not really configured"
+        // rather than "configured insecurely".
+        None => settings
+            .get("hooks")
+            .and_then(Value::as_object)
+            .is_some_and(|m| !m.is_empty()),
+        Some(perms) => match perms.get("deny") {
+            None => true,
+            Some(Value::Array(a)) => a.is_empty(),
+            Some(_) => false,
+        },
+    }
 }
 
 fn emit_broad_allow_reasons(perms: &Value, out: &mut Vec<AiGuardReason>) {
@@ -670,7 +693,9 @@ fn label_managed(reason: &mut AiGuardReason) {
 }
 
 /// Add reasons found in the managed files. `NoSandbox` describes the host as
-/// a whole, so it is added at most once, as for component hooks.
+/// a whole, so it is added at most once, as for component hooks. A hook or
+/// allow rule the user also has runs once, so the user's reason is replaced
+/// by the labelled one rather than scored twice.
 fn push_managed(found: Vec<AiGuardReason>, out: &mut Vec<AiGuardReason>) {
     for mut reason in found {
         if matches!(reason, AiGuardReason::NoSandbox { .. }) {
@@ -680,10 +705,15 @@ fn push_managed(found: Vec<AiGuardReason>, out: &mut Vec<AiGuardReason>) {
             {
                 continue;
             }
-        } else {
-            label_managed(&mut reason);
+            out.push(reason);
+            continue;
         }
-        out.push(reason);
+        let user_copy = out.iter().position(|r| *r == reason);
+        label_managed(&mut reason);
+        match user_copy {
+            Some(i) => out[i] = reason,
+            None => out.push(reason),
+        }
     }
 }
 
@@ -794,24 +824,40 @@ const AUTO_MODE_DEFAULTS_MARKER: &str = "$defaults";
 /// v2.1.207 the classifier reads `autoMode` from user settings, managed
 /// settings, and `--settings` only — never a `settings.local.json` overlay or
 /// a repo-local file.
-fn emit_auto_mode_reasons(base_settings: &Value, out: &mut Vec<AiGuardReason>) {
-    let Some(auto_mode) = base_settings.get("autoMode") else {
-        return;
-    };
+///
+/// The classifier concatenates each list across those scopes, so one
+/// `$defaults` in any of them keeps the built-in rules (checked on 2.1.316
+/// with `claude auto-mode config`).
+fn emit_auto_mode_reasons(
+    base_settings: &Value,
+    managed: Option<&Value>,
+    out: &mut Vec<AiGuardReason>,
+) {
     for list in AUTO_MODE_DENY_LISTS {
-        let Some(entries) = auto_mode.get(list).and_then(Value::as_array) else {
+        let pointer = format!("/autoMode/{list}");
+        let user_entries = base_settings.pointer(&pointer).and_then(Value::as_array);
+        let managed_entries = managed
+            .and_then(|m| m.pointer(&pointer))
+            .and_then(Value::as_array);
+        if user_entries.is_none() && managed_entries.is_none() {
             continue;
-        };
+        }
         // An explicitly empty list is the strongest form of the same thing:
         // the defaults are gone and nothing replaced them.
-        let keeps_defaults = entries
-            .iter()
+        let keeps_defaults = user_entries
+            .into_iter()
+            .chain(managed_entries)
+            .flatten()
             .filter_map(Value::as_str)
             .any(|e| e.trim() == AUTO_MODE_DEFAULTS_MARKER);
         if !keeps_defaults {
-            out.push(AiGuardReason::AutoModeDefaultsDropped {
+            let mut reason = AiGuardReason::AutoModeDefaultsDropped {
                 list: (*list).to_string(),
-            });
+            };
+            if managed_entries.is_some() {
+                label_managed(&mut reason);
+            }
+            out.push(reason);
         }
     }
 }
@@ -2512,6 +2558,131 @@ mod tests {
             .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))
             .count();
         assert_eq!(sandboxes, 1, "{reasons:?}");
+    }
+
+    /// Assess `user` settings (none when `None`) under the managed file
+    /// `managed`.
+    fn assess_with_managed(user: Option<&str>, managed: &str) -> Vec<AiGuardReason> {
+        let home = tempdir().unwrap();
+        if let Some(user) = user {
+            write_settings(home.path(), user);
+        }
+        let policy = tempdir().unwrap();
+        write_file(policy.path(), "managed-settings.json", managed);
+        assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap()
+    }
+
+    /// Managed hooks, rules and modes apply even when the user has no
+    /// config, but other managed keys do not show the tool is in use.
+    #[test]
+    fn managed_posture_is_scored_without_user_config() {
+        let reasons = assess_with_managed(
+            None,
+            r#"{"permissions": {"defaultMode": "bypassPermissions"}}"#,
+        );
+        assert!(
+            reasons.contains(&AiGuardReason::AutoApprovalEnabled {
+                mode: "bypassPermissions (managed file)".into()
+            }),
+            "{reasons:?}"
+        );
+        let reasons = assess_with_managed(None, r#"{"sandbox": {"enabled": true}}"#);
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    /// Managed deny rules apply to every session, so the user needs none.
+    #[test]
+    fn managed_deny_rules_fill_the_deny_list() {
+        let reasons = assess_with_managed(
+            Some(r#"{"permissions": {"allow": ["Read"]}}"#),
+            r#"{"permissions": {"deny": ["Read(./.env)"]}}"#,
+        );
+        assert!(
+            !reasons.contains(&AiGuardReason::PermissionsDenyEmpty),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn managed_hook_scripts_are_watched() {
+        let home = tempdir().unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{"hooks": {"PreToolUse": [{"hooks": [{"command": "/opt/org/guard.sh"}]}]}}"#,
+        );
+        let paths = user_external_script_paths(&home.path().join(".claude"), policy.path());
+        assert!(
+            paths.contains(&PathBuf::from("/opt/org/guard.sh")),
+            "{paths:?}"
+        );
+    }
+
+    /// Claude Code runs an identical hook once and merges allow lists, so the
+    /// same hook or rule in both files scores once, as the managed one.
+    #[test]
+    fn hook_and_rule_in_user_and_managed_files_score_once() {
+        let both = r#"{
+            "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "true"}]}]},
+            "permissions": {"allow": ["Bash(*)"], "deny": ["Read(./.env)"]}
+        }"#;
+        let reasons = assess_with_managed(Some(both), both);
+        let matchers: Vec<_> = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
+            .collect();
+        assert_eq!(
+            matchers,
+            [&AiGuardReason::BroadMatcher {
+                hook_event: "PreToolUse (managed file)".into(),
+                matcher: "*".into(),
+            }]
+        );
+        let rules: Vec<_> = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. }))
+            .collect();
+        assert_eq!(
+            rules,
+            [&AiGuardReason::PermissionsAllowBroad {
+                rule: "Bash(*) (managed file)".into()
+            }]
+        );
+    }
+
+    /// The classifier concatenates each `autoMode` list across user and
+    /// managed settings, so `$defaults` in either keeps the built-in rules.
+    #[test]
+    fn auto_mode_defaults_marker_in_either_file_keeps_the_defaults() {
+        let list = |entry: &str| {
+            format!(
+                r#"{{"permissions": {{"defaultMode": "auto"}}, "autoMode": {{"soft_deny": ["{entry}"]}}}}"#
+            )
+        };
+        let dropped = |reasons: &[AiGuardReason]| -> Vec<AiGuardReason> {
+            reasons
+                .iter()
+                .filter(|r| matches!(r, AiGuardReason::AutoModeDefaultsDropped { .. }))
+                .cloned()
+                .collect()
+        };
+        for (user, managed) in [("$defaults", "Org rule"), ("Own rule", "$defaults")] {
+            let reasons = assess_with_managed(Some(&list(user)), &list(managed));
+            assert_eq!(dropped(&reasons), [], "{user} + {managed}");
+        }
+        let reasons = assess_with_managed(Some(&list("Own rule")), &list("Org rule"));
+        assert_eq!(
+            dropped(&reasons),
+            [AiGuardReason::AutoModeDefaultsDropped {
+                list: "soft_deny (managed file)".into()
+            }]
+        );
     }
 
     /// A committed project `defaultMode` applies to everyone who opens the
