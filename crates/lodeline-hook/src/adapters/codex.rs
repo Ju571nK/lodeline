@@ -136,15 +136,23 @@ mod tests {
         }
     }
 
+    // Shape captured from codex-cli 0.164.0 `codex exec`: the patch text rides
+    // in `tool_input.command`, the same field the shell tool uses.
     #[test]
-    fn apply_patch_is_file_edit() {
+    fn apply_patch_is_file_edit_on_header_paths() {
         let p = serde_json::json!({
-            "tool_name":"apply_patch","tool_input":{"file_path":"/repo/src/lib.rs"}
+            "tool_name":"apply_patch","tool_input":{"command":
+                "*** Begin Patch\n*** Update File: /repo/a.txt\n@@\n-rm -rf /\n+hello\n\
+                 *** Move to: /repo/c.txt\n*** Add File: /repo/b.txt\n+*** Delete File: /etc/x\n\
+                 *** Delete File: /repo/old.txt\n*** End Patch"}
         });
-        assert!(matches!(
-            Codex.normalize(&p, CaptureLevel::Redacted).unwrap().action,
-            HookAction::FileEdit { .. }
-        ));
+        match Codex.normalize(&p, CaptureLevel::Raw).unwrap().action {
+            HookAction::FileEdit { path_preview, .. } => assert_eq!(
+                path_preview.unwrap(),
+                "/repo/a.txt\n/repo/c.txt\n/repo/b.txt\n/repo/old.txt"
+            ),
+            other => panic!("expected FileEdit, got {other:?}"),
+        }
     }
 
     #[test]
