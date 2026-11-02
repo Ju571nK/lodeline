@@ -19,7 +19,7 @@ pub(crate) struct ClaudeJsonMcp {
     #[serde(default)]
     mcp_servers: Value,
     #[serde(default)]
-    projects: BTreeMap<String, ProjectMcp>,
+    projects: BTreeMap<String, LenientProject>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -29,6 +29,18 @@ struct ProjectMcp {
     mcp_servers: Value,
     #[serde(default)]
     disabled_mcp_servers: Value,
+}
+
+/// A project entry that is not the expected shape (e.g. `null`) loads as empty
+/// instead of failing the whole file.
+#[derive(Debug)]
+struct LenientProject(ProjectMcp);
+
+impl<'de> Deserialize<'de> for LenientProject {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        Ok(Self(serde_json::from_value(v).unwrap_or_default()))
+    }
 }
 
 /// Read `<home>/.claude.json`. A missing, oversized, unreadable or malformed
@@ -62,8 +74,10 @@ impl ClaudeJsonMcp {
     /// exist and do not list the server in their `disabledMcpServers`.
     pub(crate) fn servers(&self) -> Vec<(&str, &Value)> {
         let mut out: Vec<(&str, &Value)> = entries(&self.mcp_servers).collect();
-        for (project, p) in &self.projects {
-            if !Path::new(project).is_dir() {
+        for (project, LenientProject(p)) in &self.projects {
+            // Skip only a clean not-found: an unmounted volume or a hung mount
+            // errors instead, and its servers stay in scope.
+            if Path::new(project).try_exists().is_ok_and(|exists| !exists) {
                 continue;
             }
             let disabled = p.disabled_mcp_servers.as_array();
@@ -174,6 +188,39 @@ mod tests {
             ["a-remote", "b-local"],
             "{reasons:?}"
         );
+    }
+
+    #[test]
+    fn project_missing_on_disk_is_skipped() {
+        let home = tempdir().unwrap();
+        let gone = home.path().join("gone");
+        write_claude_json(
+            home.path(),
+            &serde_json::json!({"projects": {
+                gone.to_str().unwrap(): {"mcpServers": {"stale": {"command": "node"}}}
+            }})
+            .to_string(),
+        );
+        assert!(mcp_reasons(home.path()).is_empty());
+    }
+
+    #[test]
+    fn malformed_project_entry_does_not_drop_other_servers() {
+        let home = tempdir().unwrap();
+        let a = tempdir().unwrap();
+        write_claude_json(
+            home.path(),
+            &serde_json::json!({
+                "mcpServers": {"u": {"url": "https://u.example/mcp"}},
+                "projects": {
+                    "/x": null,
+                    "/y": "text",
+                    a.path().to_str().unwrap(): {"mcpServers": {"l": {"command": "node"}}}
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(server_names(&mcp_reasons(home.path())), ["l", "u"]);
     }
 
     #[test]
