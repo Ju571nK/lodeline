@@ -51,7 +51,7 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         AutoApprovalEnabled { mode }
             if mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE =>
         {
-            "No defaultMode is set, so Claude Code 2.1.283+ starts in auto mode (Lodeline can't read the installed version and assumes a current one) — set \"disableAutoMode\": \"disable\" or an explicit defaultMode to opt out."
+            "No defaultMode is set, so interactive Claude Code 2.1.283+ sessions start in auto mode (`claude -p` does not, and an unsupported model or org policy can still start in default mode). Lodeline can't read the installed version and assumes 2.1.283+ — set \"disableAutoMode\": \"disable\" or an explicit defaultMode to opt out."
         }
         AutoApprovalEnabled { .. } => {
             "Auto-approval is on — turn it off so tool calls require confirmation."

@@ -86,15 +86,17 @@ fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>,
         return Ok(Vec::new());
     }
 
+    // An unreadable managed file counts as absent here; the controls channel
+    // reports its error.
+    let managed = super::policy_controls::claude_managed_settings(policy_dir).ok();
     // `disableAutoMode` takes effect from any file, managed ones included.
-    let auto_disabled = [&base, &local]
+    let auto_disabled = [&managed, &base, &local]
         .into_iter()
         .flatten()
-        .any(settings_disable_auto_mode)
-        || super::policy_controls::claude_controls(policy_dir)
-            .is_ok_and(|c| super::policy_controls::disables_auto_mode(&c));
+        .any(settings_disable_auto_mode);
     let start = start_mode(
         &[
+            (ModeScope::Managed, managed.as_ref()),
             (ModeScope::Local, local.as_ref()),
             (ModeScope::User, base.as_ref()),
         ],
@@ -607,6 +609,7 @@ pub(crate) const BUILT_IN_AUTO_MODE: &str = "auto (built-in default)";
 /// and `bypassPermissions` set in project or local files.
 #[derive(Clone, Copy)]
 enum ModeScope {
+    Managed,
     User,
     Project,
     Local,
@@ -614,7 +617,8 @@ enum ModeScope {
 
 impl ModeScope {
     fn takes_effect(self, mode: &str) -> bool {
-        matches!(self, ModeScope::User) || !matches!(mode, "auto" | "bypassPermissions")
+        matches!(self, ModeScope::Managed | ModeScope::User)
+            || !matches!(mode, "auto" | "bypassPermissions")
     }
 }
 
@@ -629,24 +633,29 @@ enum StartMode {
     BuiltInAuto,
 }
 
-/// Resolve a scope's start mode. `layers` runs highest precedence first; a
-/// `defaultMode` its file cannot set is skipped. `None` means the session
-/// prompts as usual (`default`), including an `auto` that `disableAutoMode`
-/// turned off.
+/// Resolve a scope's start mode. `layers` runs highest precedence first, and
+/// the first `defaultMode` found decides. One its file cannot set does not
+/// fall through to a lower file: a skipped `auto` leaves the built-in default
+/// and a skipped `bypassPermissions` starts in `default`. `None` means the
+/// session prompts as usual (`default`), including an `auto` that
+/// `disableAutoMode` turned off.
 fn start_mode(
     layers: &[(ModeScope, Option<&Value>)],
     built_in_auto: bool,
     auto_disabled: bool,
 ) -> Option<StartMode> {
-    let explicit = layers.iter().find_map(|&(scope, file)| {
+    let first = layers.iter().find_map(|&(scope, file)| {
         let mode = file?.get("permissions")?.get("defaultMode")?.as_str()?;
-        scope.takes_effect(mode).then_some(mode)
+        Some((scope, mode))
     });
-    match explicit {
-        Some("auto") if auto_disabled => None,
-        Some(mode) => Some(StartMode::Explicit(mode.to_string())),
-        None if built_in_auto && !auto_disabled => Some(StartMode::BuiltInAuto),
-        None => None,
+    match first {
+        Some((_, "auto")) if auto_disabled => None,
+        Some((scope, mode)) if scope.takes_effect(mode) => {
+            Some(StartMode::Explicit(mode.to_string()))
+        }
+        Some((_, "bypassPermissions")) => None,
+        _ if built_in_auto && !auto_disabled => Some(StartMode::BuiltInAuto),
+        _ => None,
     }
 }
 
@@ -808,8 +817,9 @@ pub(crate) fn emit_scheduled_task_reasons(claude_dir: &Path, out: &mut Vec<AiGua
 }
 
 /// Claude Code permission rules are `Tool:matcher` (colon-delimited), so
-/// breadth lives in the matcher position: bare `*`, `*:*`, or any rule whose
-/// matcher is a wildcard (`:*` / `:.*`). This heuristic is intentionally
+/// breadth lives in the matcher position: `*:*`, or any rule whose matcher is
+/// a wildcard (`:*` / `:.*`). Unanchored tool-name globs (`*`, `mcp__*`)
+/// are skipped by Claude Code and are not broad. This heuristic is intentionally
 /// distinct from Gemini's `emit_tools_allowed` (issue #30): Gemini uses a
 /// `tool(restriction)` paren format, not colon format, so a shared predicate
 /// would not fit. Over-flagging is acceptable — Lodeline measures, doesn't block.
@@ -2194,33 +2204,62 @@ mod tests {
         assert!(auto_findings(&reasons).is_empty(), "{reasons:?}");
     }
 
-    /// `auto` and `bypassPermissions` do not take effect from a local file,
-    /// so `~/.claude/settings.local.json` cannot set them; `acceptEdits` can.
+    /// `auto` and `bypassPermissions` do not take effect from a local file, and
+    /// the user file's `defaultMode` does not fill in for them: a skipped
+    /// `auto` leaves the built-in default and a skipped `bypassPermissions`
+    /// starts in `default`. `acceptEdits` takes effect from a local file.
     #[test]
     fn local_file_cannot_set_auto_or_bypass() {
-        for local in ["auto", "bypassPermissions"] {
+        for (local, want) in [
+            ("auto", vec![format!("mode:{BUILT_IN_AUTO_MODE}")]),
+            ("bypassPermissions", vec![]),
+            ("acceptEdits", vec!["mode:acceptEdits".to_string()]),
+        ] {
             let dir = tempdir().unwrap();
-            write_settings(dir.path(), r#"{"permissions": {"defaultMode": "default"}}"#);
+            write_settings(
+                dir.path(),
+                r#"{"permissions": {"defaultMode": "bypassPermissions"}}"#,
+            );
             write_file(
                 dir.path(),
                 ".claude/settings.local.json",
                 &format!(r#"{{"permissions": {{"defaultMode": "{local}"}}}}"#),
             );
-            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
-            assert!(auto_findings(&reasons).is_empty(), "{local} -> {reasons:?}");
+            let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+            assert_eq!(auto_findings(&reasons), want, "{local}");
         }
-        let dir = tempdir().unwrap();
-        write_settings(dir.path(), r#"{"permissions": {"defaultMode": "default"}}"#);
-        write_file(
-            dir.path(),
-            ".claude/settings.local.json",
-            r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
-        );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
-        assert_eq!(
-            auto_findings(&reasons),
-            vec!["mode:acceptEdits".to_string()]
-        );
+    }
+
+    /// Managed settings outrank every user file, so a managed `defaultMode`
+    /// decides the start mode, and a managed `default` or `plan` leaves no
+    /// built-in `auto`.
+    #[test]
+    fn managed_default_mode_decides_the_start_mode() {
+        for (managed, user, want) in [
+            ("default", "{}", vec![]),
+            ("plan", "{}", vec![]),
+            (
+                "acceptEdits",
+                r#"{"permissions": {"defaultMode": "bypassPermissions"}}"#,
+                vec!["mode:acceptEdits".to_string()],
+            ),
+            (
+                "auto",
+                r#"{"permissions": {"defaultMode": "default"}}"#,
+                vec!["mode:auto".to_string()],
+            ),
+        ] {
+            let dir = tempdir().unwrap();
+            write_settings(dir.path(), user);
+            let policy = tempdir().unwrap();
+            write_file(
+                policy.path(),
+                "managed-settings.d/10-mode.json",
+                &format!(r#"{{"permissions": {{"defaultMode": "{managed}"}}}}"#),
+            );
+            let reasons = assess_user(dir.path(), policy.path()).unwrap();
+            assert_eq!(auto_findings(&reasons), want, "{managed} over {user}");
+        }
     }
 
     /// A committed project `defaultMode` applies to everyone who opens the
