@@ -387,10 +387,15 @@ fn hook_condition(hook: &Value) -> Option<&str> {
         .strip_suffix(')')?
         .split_once('(')?;
     let tool = tool.trim();
+    // The tool must look like a tool name: it reaches evidence, so free text
+    // (`Bearer abc (x)`) must not. `**/*` matches every path, so `/` is a wildcard here.
     let narrows = !tool.is_empty()
+        && tool
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
         && !arg
             .chars()
-            .all(|c| c == '*' || c == ':' || c.is_whitespace());
+            .all(|c| matches!(c, '*' | ':' | '/') || c.is_whitespace());
     narrows.then_some(tool)
 }
 
@@ -3637,6 +3642,8 @@ mod tests {
             "Bash(* *)",
             "garbage(",
             "(git *)",
+            "Read(**/*)",
+            "Bearer abc123 (x)",
         ] {
             let handlers = serde_json::json!([{"command": "true", "if": rule}]).to_string();
             assert!(broad(&handlers), "{rule:?} must not narrow the matcher");
@@ -3675,13 +3682,20 @@ mod tests {
         write_file(
             repo.path(),
             ".claude/settings.json",
-            r#"{"disableAllHooks": true, "statusLine": {"command": "x"}}"#,
+            r#"{"disableAllHooks": true, "statusLine": {"command": "x"}, "apiKeyHelper": "y"}"#,
         );
         let reasons = assess_project(repo.path(), policy.path()).unwrap();
         assert!(
             !reasons
                 .iter()
                 .any(|r| matches!(r, AiGuardReason::ProjectSettingsUiCommand { .. })),
+            "{reasons:?}"
+        );
+        // apiKeyHelper is not a hook, so disableAllHooks leaves it running.
+        assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectSettingsHelperCommand { .. })),
             "{reasons:?}"
         );
     }
