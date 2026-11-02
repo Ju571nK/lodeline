@@ -56,6 +56,26 @@ mod tests {
         assert!(!g.is_match(Path::new("/Users/alice/.claude.jsonx")));
     }
 
+    // 한글 written precomposed (NFC) and decomposed (NFD). APFS keeps
+    // whichever form a file was created with and FSEvents reports it (#388).
+    const HAN_NFC: &str = "\u{D55C}\u{AE00}";
+    const HAN_NFD: &str = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}";
+
+    #[test]
+    fn nfc_pattern_matches_nfd_path() {
+        let g = CompiledGlob::new(&format!("/Users/a/{HAN_NFC}/config.json")).unwrap();
+        assert!(g.is_match(Path::new(&format!("/Users/a/{HAN_NFD}/config.json"))));
+        assert!(g.is_match(Path::new(&format!("/Users/a/{HAN_NFC}/config.json"))));
+    }
+
+    #[test]
+    fn nfd_pattern_matches_nfc_path() {
+        let g = CompiledGlob::new(&format!("/Users/a/{HAN_NFD}-*.json")).unwrap();
+        assert!(g.is_match(Path::new(&format!("/Users/a/{HAN_NFC}-x.json"))));
+        assert!(g.is_match(Path::new(&format!("/Users/a/{HAN_NFD}-x.json"))));
+        assert!(!g.is_match(Path::new("/Users/a/other-x.json")));
+    }
+
     #[test]
     fn pattern_round_trips_the_input_string() {
         let g = CompiledGlob::new("/Users/*/.claude/policy-*.json").unwrap();
