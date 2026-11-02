@@ -302,13 +302,7 @@ fn assess_user_layers(
     }
     // #200 — standing command approvals, which live outside config.toml.
     // System rules are managed and always load.
-    emit_rules_reasons(
-        &[
-            (system, RuleEvidence::ProgramOnly),
-            (user, RuleEvidence::FullPrefix),
-        ],
-        &mut out,
-    );
+    emit_rules_reasons(&[system, user], &mut out);
     Ok(out)
 }
 
@@ -404,12 +398,13 @@ const MAX_STANDING_APPROVAL_REASONS: usize = 32;
 /// shallow: it extracts the quoted strings from the `pattern=[...]` list of
 /// any rule that allows, and ignores rule forms it does not recognize rather
 /// than guessing at their meaning. Patterns are deduped across `layers`.
-fn emit_rules_reasons(layers: &[(&CodexLayer, RuleEvidence)], out: &mut Vec<AiGuardReason>) {
+///
+/// Only the program name of a prefix leaves the host, whatever the layer:
+/// later argv words are free text that can hold a token or URL.
+fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
     let mut patterns: Vec<String> = layers
         .iter()
-        .flat_map(|(layer, evidence)| {
-            allow_patterns_in_rules_dir(&layer.dir.join("rules"), *evidence)
-        })
+        .flat_map(|layer| allow_patterns_in_rules_dir(&layer.dir.join("rules")))
         .collect();
     patterns.sort();
     patterns.dedup();
@@ -426,27 +421,10 @@ fn emit_rules_reasons(layers: &[(&CodexLayer, RuleEvidence)], out: &mut Vec<AiGu
     }
 }
 
-/// #200 — how much of an allowed prefix a finding may carry. The user wrote
-/// `~/.codex/rules` themselves; a repo's or the system's rules are someone
-/// else's free text, which can hold a token or URL, so only the program name
-/// leaves the host.
-#[derive(Clone, Copy)]
-enum RuleEvidence {
-    FullPrefix,
-    ProgramOnly,
-}
-
-impl RuleEvidence {
-    fn render(self, words: &[String]) -> String {
-        match self {
-            RuleEvidence::FullPrefix => words.join(" "),
-            RuleEvidence::ProgramOnly => program_basename(&words[0]),
-        }
-    }
-}
-
 /// Basename of the first token, so a path's directories (usernames) never
-/// leave the host. An alternative list `{a|b}` fails the charset and is redacted,
+/// leave the host. POSIX and Windows separators both count. A home directory
+/// itself (`/home/alice`, `C:\Users\alice`) names a user, not a program, and
+/// is redacted. An alternative list `{a|b}` fails the charset and is redacted,
 /// and so does a name shaped like a token (a known token prefix, or 20+
 /// characters mixing letters and digits).
 fn program_basename(word: &str) -> String {
@@ -463,12 +441,18 @@ fn program_basename(word: &str) -> String {
         "xoxp-",
         "AKIA",
     ];
-    let name = word.rsplit('/').next().unwrap_or("");
+    let mut parts = word.rsplit(['/', '\\']);
+    let name = parts.next().unwrap_or("");
+    // Skip empty parts: `a//b`, or a raw string's doubled `\\`.
+    let home_dir = parts
+        .find(|p| !p.is_empty())
+        .is_some_and(|p| p.eq_ignore_ascii_case("home") || p.eq_ignore_ascii_case("Users"));
     let token_like = TOKEN_PREFIXES.iter().any(|p| name.starts_with(p))
         || (name.len() >= 20
             && name.chars().any(|c| c.is_ascii_digit())
             && name.chars().any(|c| c.is_ascii_alphabetic()));
     let safe = !name.is_empty()
+        && !home_dir
         && !token_like
         && name.len() <= 32
         && name
@@ -482,7 +466,7 @@ fn program_basename(word: &str) -> String {
 }
 
 /// Allowed prefixes in one `rules/` dir, at most `MAX_RULES_FILES` files.
-fn allow_patterns_in_rules_dir(rules_dir: &Path, evidence: RuleEvidence) -> Vec<String> {
+fn allow_patterns_in_rules_dir(rules_dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(rules_dir) else {
         return Vec::new();
     };
@@ -511,7 +495,7 @@ fn allow_patterns_in_rules_dir(rules_dir: &Path, evidence: RuleEvidence) -> Vec<
         patterns.extend(
             allow_patterns_in_rules_text(&text)
                 .iter()
-                .map(|words| evidence.render(words)),
+                .map(|words| program_basename(&words[0])),
         );
     }
     patterns
@@ -522,72 +506,89 @@ fn allow_patterns_in_rules_dir(rules_dir: &Path, evidence: RuleEvidence) -> Vec<
 /// reads as an approval.
 fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut quote: Option<char> = None;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some(q) => {
-                out.push(c);
-                if c == '\\' {
-                    // Escaped character inside a string: copy it verbatim so a
-                    // `\"` does not look like the closing quote.
-                    if let Some(n) = chars.next() {
-                        out.push(n);
-                    }
-                } else if c == q {
-                    quote = None;
-                }
-            }
-            None => match c {
-                '"' | '\'' => {
-                    quote = Some(c);
-                    out.push(c);
-                }
-                '#' => {
-                    for n in chars.by_ref() {
-                        if n == '\n' {
-                            out.push('\n');
-                            break;
-                        }
-                    }
-                }
-                '/' if chars.peek() == Some(&'/') => {
-                    for n in chars.by_ref() {
-                        if n == '\n' {
-                            out.push('\n');
-                            break;
-                        }
-                    }
-                }
-                _ => out.push(c),
-            },
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let comment = c == '#' || rest.starts_with("//");
+        let len = if comment {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if c == '"' || c == '\'' {
+            string_len(rest).unwrap_or(rest.len())
+        } else {
+            c.len_utf8()
+        };
+        if !comment {
+            out.push_str(&rest[..len]);
         }
+        rest = &rest[len..];
     }
     out
 }
 
+/// Delimiter of the string literal starting `s`, if one does.
+fn string_delim(s: &str) -> Option<&'static str> {
+    ["\"\"\"", "'''", "\"", "'"]
+        .into_iter()
+        .find(|d| s.starts_with(d))
+}
+
+/// Byte length of the string literal starting `s`, quotes included, or None
+/// if it never closes. Honors `\` escapes and `"""`/`'''` triple quotes.
+/// A raw `r"..."` skips the same way: its `\"` does not close it either.
+fn string_len(s: &str) -> Option<usize> {
+    let delim = string_delim(s)?;
+    let mut chars = s.char_indices().skip(delim.len());
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            chars.next();
+        } else if s[i..].starts_with(delim) {
+            return Some(i + delim.len());
+        }
+    }
+    None
+}
+
+/// `s`'s chars outside string literals. A literal yields only its opening
+/// quote; an unterminated one runs to the end.
+fn code_chars(s: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        let at = i;
+        let c = s[at..].chars().next()?;
+        i += match string_len(&s[at..]) {
+            Some(len) => len,
+            None if c == '"' || c == '\'' => s.len() - at,
+            None => c.len_utf8(),
+        };
+        Some((at, c))
+    })
+}
+
 /// One `prefix_rule( ... )` invocation's argument text. Scans the whole file
 /// rather than a line at a time: the documented form spans several lines.
+/// Only a call at the top level counts: not one inside a string literal, not
+/// a method call `x.prefix_rule(`, and not a longer name `my_prefix_rule(`.
 fn rule_invocations(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("prefix_rule") {
-        let after = &rest[i + "prefix_rule".len()..];
-        // Only a whole identifier counts: `my_prefix_rule(` is someone else's function.
-        let glued = text_before(text, rest, i).is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if glued {
-            rest = after;
+    let mut prev: Option<char> = None;
+    let mut resume = 0usize;
+    for (i, c) in code_chars(text) {
+        let before = prev.replace(c);
+        if i < resume {
             continue;
         }
-        let trimmed = after.trim_start();
-        let Some(body) = trimmed.strip_prefix('(') else {
-            rest = after;
+        if !text[i..].starts_with("prefix_rule")
+            || before.is_some_and(|b| b.is_alphanumeric() || b == '_' || b == '.')
+        {
+            continue;
+        }
+        let after = &text[i + "prefix_rule".len()..];
+        let Some(body) = after.trim_start().strip_prefix('(') else {
             continue;
         };
         match balanced_end(body, '(', ')') {
             Some(end) => {
                 out.push(&body[..end]);
-                rest = &body[end..];
+                resume = text.len() - body.len() + end;
             }
             // Unterminated invocation: nothing further to read.
             None => break,
@@ -596,37 +597,17 @@ fn rule_invocations(text: &str) -> Vec<&str> {
     out
 }
 
-/// The char just before byte `i` of `rest`, where `rest` is a suffix of `text`.
-fn text_before(text: &str, rest: &str, i: usize) -> Option<char> {
-    text[..text.len() - rest.len() + i].chars().next_back()
-}
-
 /// Byte offset of the `close` that balances an already-consumed `open`.
 /// Quote-aware, so a bracket inside a string does not shift the depth.
 fn balanced_end(s: &str, open: char, close: char) -> Option<usize> {
     let mut depth = 1usize;
-    let mut quote: Option<char> = None;
-    let mut chars = s.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    chars.next();
-                } else if c == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if c == '"' || c == '\'' {
-                    quote = Some(c);
-                } else if c == open {
-                    depth += 1;
-                } else if c == close {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
+    for (i, c) in code_chars(s) {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
             }
         }
     }
@@ -639,32 +620,20 @@ fn balanced_end(s: &str, open: char, close: char) -> Option<usize> {
 fn top_level_arg<'a>(args: &'a str, name: &str) -> Option<&'a str> {
     let bytes = args.as_bytes();
     let mut depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut chars = args.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    chars.next();
-                } else if c == q {
-                    quote = None;
+    for (i, c) in code_chars(args) {
+        match c {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && args[i..].starts_with(name) => {
+                // Must be a whole word followed by `=`.
+                let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+                let after = &args[i + name.len()..];
+                let after_trimmed = after.trim_start();
+                if before_ok && after_trimmed.starts_with('=') {
+                    return Some(after_trimmed[1..].trim_start());
                 }
             }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '[' | '(' | '{' => depth += 1,
-                ']' | ')' | '}' => depth = depth.saturating_sub(1),
-                _ if depth == 0 && args[i..].starts_with(name) => {
-                    // Must be a whole word followed by `=`.
-                    let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-                    let after = &args[i + name.len()..];
-                    let after_trimmed = after.trim_start();
-                    if before_ok && after_trimmed.starts_with('=') {
-                        return Some(after_trimmed[1..].trim_start());
-                    }
-                }
-                _ => {}
-            },
+            _ => {}
         }
     }
     None
@@ -711,28 +680,16 @@ fn pattern_prefix(list_text: &str) -> Option<Vec<String>> {
 fn split_top_level(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
-    let mut quote: Option<char> = None;
     let mut start = 0usize;
-    let mut chars = s.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    chars.next();
-                } else if c == q {
-                    quote = None;
-                }
+    for (i, c) in code_chars(s) {
+        match c {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
             }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '[' | '(' | '{' => depth += 1,
-                ']' | ')' | '}' => depth = depth.saturating_sub(1),
-                ',' if depth == 0 => {
-                    out.push(&s[start..i]);
-                    start = i + c.len_utf8();
-                }
-                _ => {}
-            },
+            _ => {}
         }
     }
     let tail = &s[start..];
@@ -742,17 +699,36 @@ fn split_top_level(s: &str) -> Vec<&str> {
     out
 }
 
-/// The contents of a single quoted string, or None if `s` is not exactly one.
+/// The contents of a single string literal, raw or not, or None if `s` is not
+/// exactly one. Escapes stay as written.
 fn quoted_string(s: &str) -> Option<String> {
     let s = s.trim();
-    let quote = s.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-    let body = &s[quote.len_utf8()..];
-    let end = body.find(quote)?;
+    let raw = s.starts_with(['r', 'R']);
+    let s = s.strip_prefix(['r', 'R']).unwrap_or(s);
+    let delim = string_delim(s)?;
+    let len = string_len(s)?;
     // Anything after the closing quote means this was not a lone string.
-    if !body[end + quote.len_utf8()..].trim().is_empty() {
+    if !s[len..].trim().is_empty() {
         return None;
     }
-    Some(body[..end].to_string())
+    let body = &s[delim.len()..len - delim.len()];
+    if raw {
+        return Some(body.to_string());
+    }
+    // Other escapes (`\x2f`, `A`) become U+FFFD, which the basename
+    // charset redacts, so an encoded path cannot dodge the home-dir check.
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        out.push(match c {
+            '\\' => match chars.next() {
+                Some(e @ ('\\' | '"' | '\'')) => e,
+                _ => char::REPLACEMENT_CHARACTER,
+            },
+            c => c,
+        });
+    }
+    Some(out)
 }
 
 /// Approved command prefixes in one rules file. A rule allows when its
@@ -980,7 +956,7 @@ impl AiGuardParser for CodexProjectParser {
                 });
             }
         }
-        emit_rules_reasons(&[(&layer, RuleEvidence::ProgramOnly)], &mut out);
+        emit_rules_reasons(&[&layer], &mut out);
         // #146 — AGENTS.md is Codex's first-class instruction file.
         super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
         Ok(out)
@@ -1749,12 +1725,8 @@ mcp_elicitations = "on-request"
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
         // The list is one argv sequence, not three independent approvals:
-        // this rule approves the command `codex mcp login`.
-        assert_eq!(
-            approvals(&reasons),
-            vec!["codex mcp login"],
-            "got {reasons:?}"
-        );
+        // this rule approves `codex mcp login`, reported by its program.
+        assert_eq!(approvals(&reasons), vec!["codex"], "got {reasons:?}");
     }
 
     fn approvals(reasons: &[AiGuardReason]) -> Vec<&str> {
@@ -1778,11 +1750,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(pattern=[\"gh\", \"pr\", [\"view\", \"list\"]], decision=\"allow\")\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(
-            approvals(&reasons),
-            vec!["gh pr {view|list}"],
-            "got {reasons:?}"
-        );
+        assert_eq!(approvals(&reasons), vec!["gh"], "got {reasons:?}");
     }
 
     /// The keyword appearing in a comment or inside a quoted string is not a
@@ -1813,7 +1781,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(\n    pattern = [\"cargo\", \"test\"],\n    decision = \"allow\",\n)\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(approvals(&reasons), vec!["cargo test"], "got {reasons:?}");
+        assert_eq!(approvals(&reasons), vec!["cargo"], "got {reasons:?}");
     }
 
     /// A bracket or comment character inside a string must not shift the
@@ -1827,11 +1795,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(pattern=[\"sh\", \"-c\", \"echo ]# not a comment\"], decision=\"allow\")\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(
-            approvals(&reasons),
-            vec!["sh -c echo ]# not a comment"],
-            "got {reasons:?}"
-        );
+        assert_eq!(approvals(&reasons), vec!["sh"], "got {reasons:?}");
     }
 
     /// A deny rule is a control, not a risk.
@@ -2254,7 +2218,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(pattern=[\"git\", \"push\"])\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(approvals(&reasons), vec!["git push"], "{reasons:?}");
+        assert_eq!(approvals(&reasons), vec!["git"], "{reasons:?}");
 
         write_rules(
             dir.path(),
@@ -2396,6 +2360,12 @@ mcp_elicitations = "on-request"
                 "prefix_rule(pattern=[\"sk-live-123@evil.com/path\"])\n",
                 "prefix_rule(pattern=[\"/Users/alice/secretbin\"])\n",
                 "prefix_rule(pattern=[\"abcdefghijklmnopqrstuvwxyz0123456789\"])\n",
+                "prefix_rule(pattern=[\"/home/alice\"])\n",
+                "prefix_rule(pattern=[\"/Users/alice/\"])\n",
+                "prefix_rule(pattern=[\"C:\\\\Users\\\\alice\"])\n",
+                "prefix_rule(pattern=['C:\\Users\\alice'])\n",
+                "prefix_rule(pattern=[\"\\x2fhome\\x2falice\"])\n",
+                "prefix_rule(pattern=[\"\\x67it\"])\n",
             ),
         );
         let reasons = p.assess(dir.path()).unwrap();
@@ -2409,9 +2379,29 @@ mcp_elicitations = "on-request"
     }
 
     #[test]
+    fn windows_paths_reduce_to_the_program_name() {
+        let (dir, p) = project_with("");
+        write_rules(
+            &p.repo_root,
+            "win.rules",
+            concat!(
+                "prefix_rule(pattern=[\"C:\\\\Tools\\\\bin\\\\git.exe\", \"push\"])\n",
+                "prefix_rule(pattern=[r'D:\\x\\y.exe'])\n",
+            ),
+        );
+        let reasons = p.assess(dir.path()).unwrap();
+        assert_eq!(approvals(&reasons), vec!["git.exe", "y.exe"], "{reasons:?}");
+    }
+
+    #[test]
     fn prefix_rule_inside_a_longer_identifier_is_not_a_rule() {
         assert_eq!(
-            rule_invocations("my_prefix_rule(pattern=[\"zzz\"])\nxprefix_rule(1)\n"),
+            rule_invocations(concat!(
+                "my_prefix_rule(pattern=[\"zzz\"])\nxprefix_rule(1)\n",
+                "x.prefix_rule(pattern=[\"m\"])\n",
+                "note(\"prefix_rule(pattern=[\\\"s\\\"])\")\n",
+                "note('prefix_rule(3)')\n",
+            )),
             Vec::<&str>::new()
         );
         assert_eq!(
@@ -2420,18 +2410,57 @@ mcp_elicitations = "on-request"
         );
     }
 
+    /// Each string form Starlark allows must close where Starlark closes it.
+    /// Misreading one either drops the rule or hides every rule after it.
     #[test]
-    fn user_rule_keeps_the_full_prefix() {
-        let dir = tempdir().unwrap();
+    fn every_string_form_keeps_the_allow_rule() {
+        let rule = "prefix_rule(pattern=[\"git\"], decision=\"allow\")";
+        for (text, want) in [
+            (format!("note(\"prefix_rule(1)\")\n{rule}"), "git"),
+            (format!("\"x\"{rule}"), "git"),
+            (
+                r#"prefix_rule(pattern=["sh","-c","echo \"x\""], decision="allow")"#.into(),
+                "sh",
+            ),
+            (
+                r#"prefix_rule(pattern=[r"git"], decision=r'allow')"#.into(),
+                "git",
+            ),
+            (r#"prefix_rule(pattern=[R'git', r"\""])"#.into(), "git"),
+            (format!("\"\"\"a\"b\"\"\"\n{rule}"), "git"),
+            (format!("'''a'b # c'''\n{rule}"), "git"),
+            (r#"prefix_rule(pattern=["""g"it""", "x"])"#.into(), "g\"it"),
+        ] {
+            let got = allow_patterns_in_rules_text(&text);
+            assert_eq!(got.len(), 1, "{text} -> {got:?}");
+            assert_eq!(got[0][0], want, "{text}");
+        }
+    }
+
+    #[test]
+    fn unterminated_string_runs_to_end_of_input() {
+        assert!(
+            allow_patterns_in_rules_text("\"\"\"open\nprefix_rule(pattern=[\"git\"])").is_empty()
+        );
+        assert!(allow_patterns_in_rules_text("prefix_rule(pattern=[\"a\\\"])").is_empty());
+    }
+
+    #[test]
+    fn user_and_system_rules_report_only_the_program() {
+        let (_root, system, home) = system_and_home();
+        std::fs::create_dir_all(system.join("rules")).unwrap();
+        std::fs::write(
+            system.join("rules").join("fleet.rules"),
+            "prefix_rule(pattern=[\"/opt/bin/deploy\", \"--token\", \"ghp_x\"])\n",
+        )
+        .unwrap();
         write_rules(
-            dir.path(),
+            &home,
             "u.rules",
-            "prefix_rule(pattern=[\"curl\", \"-H\", \"X-Trace: 1\"], decision=\"allow\")\n",
+            "prefix_rule(pattern=[\"/Users/alice/bin/curl\", \"-H\", \"Authorization: Bearer t\"])\n",
         );
-        assert_eq!(
-            approvals(&CodexParser.assess(dir.path()).unwrap()),
-            vec!["curl -H X-Trace: 1"]
-        );
+        let reasons = assess_user_layers(&system, &home).unwrap();
+        assert_eq!(approvals(&reasons), vec!["curl", "deploy"], "{reasons:?}");
     }
 
     #[test]
