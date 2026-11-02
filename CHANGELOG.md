@@ -116,7 +116,29 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   longer reported, because Codex does not start them. The scores of hosts with these
   settings change on upgrade. (#200)
 
+- The Claude Code scanner now scores the content of managed settings files, not only
+  their restriction controls. It reads `managed-settings.json` and then
+  `managed-settings.d/*.json` in name order, and applies the checks it runs on user
+  settings: hooks with a broad matcher, hooks that forward to an http URL, hooks that run
+  a destructive or unscanned script, broad `permissions.allow` rules, `autoMode` lists
+  that drop `$defaults`, and the managed `defaultMode`. Evidence ends in
+  `(managed file)`, and weights match user scope. Managed hooks always run, so a host
+  with managed settings can now score higher than before. A host with managed settings
+  and no `~/.claude/settings.json` is now scored. A managed file that sets permissions
+  but no mode reports Claude Code's built-in `auto` start mode. A managed file with only
+  unrelated keys, such as `sandbox`, still reports nothing. `autoMode` lists combine
+  across user and managed settings, and one `$defaults` in either file keeps the
+  defaults. A hook or allow rule that appears in both user and managed files is scored
+  once, and the agent watches the scripts that managed hooks run. No new reason kind is
+  added, so older servers accept the events. The scanner does not read the macOS managed
+  preferences domain, the Windows registry, or server-managed settings. Two hooks with
+  the same event and matcher but different commands in user and managed files count as
+  one. (#413)
+
 ### Fixed
+
+- A Claude Code host whose managed settings set `permissions.deny` rules no longer gets
+  a "deny list empty" finding. Managed deny rules now count toward the deny list. (#413)
 
 - `lodeline scan` now honors `CLAUDE_CONFIG_DIR`. When you set it, Claude Code reads
   its user settings, `.claude.json` MCP servers, hooks, `CLAUDE.md`, skills, and agents
