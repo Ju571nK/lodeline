@@ -174,6 +174,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   hint for the built-in auto mode also names HIPAA configurations as starting in default
   mode. (#199)
 
+- `lodeline-mcp` in fleet mode no longer writes the full `LODELINE_SERVER_BASE_URL` to
+  its log or to the MCP client. It logged the value as written at startup. When it could
+  not reach the server, it also returned an error to the MCP client that held the base
+  URL and the request URL. A base URL with a user name, password, path, or query string
+  appeared in both places. Both now show only `scheme://host[:port]`, or `<redacted>` when
+  the URL does not parse. The read token was never logged or returned. Logs and MCP
+  client transcripts from earlier versions still hold the base URL as written. (#412)
+
 ## [0.12.1] - 2026-11-02
 
 ### Added
