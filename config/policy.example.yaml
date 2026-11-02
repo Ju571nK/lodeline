@@ -3,10 +3,11 @@
 version: 1
 host_id_strategy: machine_id
 
-# Optional: disable a built-in default or change its tier.
-overrides:
-  - id: shadow-ai-binaries-macos
-    tier: standard
+# Optional: disable a built-in default or change its tier. Built-in ids differ per
+# OS, and an id this OS does not have stops the agent at boot.
+# overrides:
+#   - id: shadow-ai-binaries-macos
+#     tier: standard
 
 # Optional: add custom watchlist entries.
 targets:

@@ -15,7 +15,7 @@ pub mod pubkeys;
 pub mod signed_envelope;
 pub mod verify;
 
-pub use atomic_writer::{atomic_write, settle_pending, AtomicWriteError};
+pub use atomic_writer::{atomic_write, create_dir_durably, settle_pending, AtomicWriteError};
 pub use canonical::{to_canonical_bytes, CanonicalError};
 pub use pubkeys::{Keystore, KeystoreEntry, KeystoreError};
 pub use signed_envelope::{SignedEnvelope, SignedPolicyResponse};
@@ -1371,6 +1371,19 @@ host_id_strategy: hostname
                 .contains_key("external_script_unscanned"),
             "example should demonstrate rubric_overrides"
         );
+    }
+
+    #[test]
+    fn shipped_policy_example_loads_on_every_platform() {
+        let example = include_str!("../../../../config/policy.example.yaml");
+        for (default_yaml, platform) in [
+            (lodeline_rules_basic::DEFAULTS_MACOS, Platform::Macos),
+            (lodeline_rules_basic::DEFAULTS_LINUX, Platform::Linux),
+            (lodeline_rules_basic::DEFAULTS_WINDOWS, Platform::Windows),
+        ] {
+            let defaults = parse(default_yaml).unwrap();
+            merge(defaults, Some(parse(example).unwrap()), None, platform).unwrap();
+        }
     }
 
     #[test]

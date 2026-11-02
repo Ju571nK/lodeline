@@ -2167,9 +2167,10 @@ mod tests {
             tokio::time::sleep(c.next_delay(&st)).await;
         }
         let late: Vec<_> = sends.iter().filter(|at| **at >= settled).collect();
+        // `jitter` floors at 800 permille in integer arithmetic, so a gap of
+        // exactly `period * 4 / 5` is legal. `mul_f32(0.8)` rounds up past it.
         assert!(
-            late.windows(2)
-                .all(|w| *w[1] - *w[0] >= period.mul_f32(0.8)),
+            late.windows(2).all(|w| *w[1] - *w[0] >= period * 4 / 5),
             "{} requests after the backoff should have settled",
             late.len()
         );

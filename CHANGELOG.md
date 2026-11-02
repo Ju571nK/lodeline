@@ -52,6 +52,69 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- A signed policy or rule-pack bundle now applies on a packaged or root agent with no
+  `--policy`. The agent wrote these files to `/etc/lodeline`, which `lodeline.service`
+  keeps read-only, so every apply failed with `Read-only file system (os error 30)` and
+  the host stayed on its old policy. Applies now land in
+  `/var/lib/lodeline/applied/policy.yaml` and `rule-packs.yaml`. Each applied file
+  replaces the content of its namesake in `/etc/lodeline`, as an apply over that file
+  did before, and the two files resolve separately. `/etc/lodeline` is no longer
+  written, so a hand edit there has no effect while the applied file exists. To go
+  back to the local file, delete the applied one and run `lodeline reload`. A host that
+  an older agent applied into keeps loading that file, with its version intact, until
+  the next apply lands in the new path. Nothing in `/etc` is moved or deleted.
+  `lodeline show paths` and `lodeline doctor` now print the file in force. `--policy`,
+  non-root agents, and Windows do not change. `lodeline assess` reads the applied
+  files first. `/var/lib/lodeline` is `0750 root:lodeline`, so a user outside the
+  `lodeline` group gets one warning on stderr and a verdict from `/etc/lodeline`, which
+  can miss signed rules. Add such a user to the group. Any other error checking an
+  applied file also gives one warning and a verdict from `/etc/lodeline`. After the
+  applied file is deleted, `lodeline status` keeps reporting the signed version and its
+  expiry while the local file runs, and only a higher version lands.
+
+- A reload on a host with no policy file now loads the built-in defaults and any
+  rule-pack bundle, as a boot does. It used to keep the previous state, so a bundle
+  applied to such a host had no effect until a restart. A policy file that was loaded
+  and has since gone missing still keeps the previous state, with a warning, until the
+  file returns or the agent restarts. That includes deleting an applied policy with no
+  file in `/etc/lodeline`.
+
+- A policy path that cannot be checked, such as one under a regular file, now stops the
+  boot, for non-root agents too. It used to count as no policy file, so the agent ran
+  on the built-in defaults.
+
+- A signed apply into a new directory now survives a power loss. The agent synced the
+  file into that directory but not the directory into its parent, so the file could
+  vanish while the version stayed recorded. The first boot syncs the directory it
+  creates in the same way.
+
+- `lodeline run` without `--policy` now loads the policy at its default path at
+  boot. Before, boot read a policy file only
+  with `--policy`, while a signed apply and a reload used the default path. A restart
+  dropped the deny rules and targets of an applied policy while `lodeline status`
+  still showed its version, and redelivering that version did not restore them. The
+  default path is `/etc/lodeline/policy.yaml` as root, and
+  `$XDG_CONFIG_HOME/lodeline/policy.yaml` or `~/.config/lodeline/policy.yaml`
+  otherwise.
+  - A policy you placed at that path by hand now loads at boot too, as the install
+    guides describe. A file that cannot be read or parsed, or that overrides a
+    built-in id this OS does not have, stops the boot, as it does with `--policy`.
+    Check any file at that path before you upgrade. `lodeline doctor` reports one
+    that fails to parse.
+  - `lodeline show config`, `show paths`, and `doctor` read the same file when
+    `--policy` is absent.
+  - `config/policy.example.yaml` no longer overrides a macOS-only target, which would
+    stop the boot on Linux and Windows. If you copied the old example to
+    `policy.yaml` on either, remove its `shadow-ai-binaries-macos` override before
+    you upgrade.
+
+- Boot and the next apply now sync the config directory before they finish an apply
+  that stopped after its rename. Before, the applied version could be recorded while
+  the rename was not yet durable, so a power loss could leave the record ahead of the
+  file. If the sync fails, the apply stays pending and the next boot or apply settles
+  it. A signed apply also works when `--policy` is a bare file name; before, it failed
+  every time at the directory sync, after the file had already moved.
+
 - The agent keeps the applied version and expiry of a signed policy or rule-pack
   bundle across a restart. An apply now records its version, the blake3 of its bytes,
   and its `valid_until` in `state.db` before the file moves, and promotes them after

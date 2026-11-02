@@ -77,6 +77,11 @@ pub fn settle_pending(
         Err(e) => return Err(e.into()),
     };
     if on_disk.as_deref() == Some(pending.hash_hex.as_str()) {
+        // An apply can stop before its own directory sync, and the record must not
+        // outlive a rename that a power loss could undo.
+        if let Some(dir) = target.parent() {
+            sync_dir(dir)?;
+        }
         match cache.promote_pending(kind) {
             Ok(()) => return Ok(Some(pending)),
             Err(StateError::WouldLowerVersion { .. }) => {}
@@ -97,7 +102,7 @@ fn write_file_durably(target: &Path, bytes: &[u8]) -> Result<(), AtomicWriteErro
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    std::fs::create_dir_all(&parent)?;
+    create_dir_durably(&parent)?;
 
     let pid = std::process::id();
     let tmp = parent.join(format!(
@@ -123,14 +128,48 @@ fn write_file_durably(target: &Path, bytes: &[u8]) -> Result<(), AtomicWriteErro
     // 2. Rename atomically.
     std::fs::rename(&tmp, target)?;
 
-    // 3. fsync parent directory (POSIX only — no-op on Windows where
-    //    rename's durability semantics differ).
-    #[cfg(unix)]
-    {
-        let dir = std::fs::OpenOptions::new().read(true).open(&parent)?;
-        dir.sync_all()?;
-    }
+    // 3. fsync parent directory.
+    sync_dir(&parent)?;
 
+    Ok(())
+}
+
+/// `create_dir_all` that fsyncs the directory above each one it creates, so a new
+/// directory survives a power loss along with what lands in it. An existing `dir`
+/// syncs nothing, because its parent may be read-only. A directory whose entry could
+/// not be synced is removed, so the next call retries the sync.
+pub fn create_dir_durably(dir: &Path) -> std::io::Result<()> {
+    let Some(above) = dir.parent() else {
+        return Ok(());
+    };
+    if dir.is_dir() {
+        return Ok(());
+    }
+    create_dir_durably(above)?;
+    match std::fs::create_dir(dir) {
+        Ok(()) => sync_dir(above).inspect_err(|_| {
+            let _ = std::fs::remove_dir(dir);
+        }),
+        Err(_) if dir.is_dir() => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// fsync a directory, so a rename inside it survives a power loss. A file with no
+/// directory in its path has an empty parent, which is the current directory.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// No-op on Windows, where rename's durability semantics differ.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -335,6 +374,101 @@ mod tests {
 
         assert!(matches!(settled, Err(AtomicWriteError::Io(_))));
         assert!(cache.pending(Policy).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settling_keeps_the_pending_record_until_the_directory_can_be_synced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let artifacts = dir.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        let target = artifacts.join("policy.yaml");
+        record_pending(&cache, Policy, b"five\n", 5);
+        std::fs::write(&target, b"five\n").unwrap();
+        let set_mode = |mode| {
+            let mode = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&artifacts, mode).unwrap();
+        };
+        set_mode(0o300);
+        if std::fs::File::open(&artifacts).is_ok() {
+            eprintln!("skipped: root ignores directory modes");
+            set_mode(0o700);
+            return;
+        }
+
+        let settled = settle_pending(Policy, &target, &cache);
+        set_mode(0o700);
+
+        assert!(matches!(settled, Err(AtomicWriteError::Io(_))));
+        assert_eq!(applied(&cache, Policy), 0);
+        assert!(cache.pending(Policy).unwrap().is_some());
+        let settled = settle_pending(Policy, &target, &cache).unwrap();
+        assert_eq!(settled.map(|pending| pending.version), Some(5));
+        assert_eq!(applied(&cache, Policy), 5);
+    }
+
+    #[cfg(unix)]
+    fn set_mode(dir: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// `base/sealed` with `inside` in it and a mode that allows entering and writing
+    /// but not opening, so a sync of it fails. Returns `None` for root, which ignores
+    /// directory modes.
+    #[cfg(unix)]
+    fn unsyncable_dir(base: &Path, inside: &[&str]) -> Option<PathBuf> {
+        let sealed = base.join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        for name in inside {
+            std::fs::create_dir(sealed.join(name)).unwrap();
+        }
+        set_mode(&sealed, 0o300);
+        if std::fs::File::open(&sealed).is_ok() {
+            eprintln!("skipped: root ignores directory modes");
+            return None;
+        }
+        Some(sealed)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_directory_is_synced_into_its_parent_before_the_file_lands() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let Some(sealed) = unsyncable_dir(dir.path(), &[]) else {
+            return;
+        };
+        let target = sealed.join("applied/policy.yaml");
+
+        for _ in 0..2 {
+            let refused = write(Policy, &target, b"five\n", &cache, 5);
+
+            assert!(matches!(refused, Err(AtomicWriteError::Io(_))));
+            assert!(!sealed.join("applied").exists(), "a retry syncs it again");
+            assert_eq!(settle_pending(Policy, &target, &cache).unwrap(), None);
+        }
+        assert_eq!(applied(&cache, Policy), 0);
+        set_mode(&sealed, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_directory_needs_no_sync_of_its_parent() {
+        let dir = tempdir().unwrap();
+        let cache = fresh_cache(&dir);
+        let Some(sealed) = unsyncable_dir(dir.path(), &["applied"]) else {
+            return;
+        };
+        let target = sealed.join("applied/policy.yaml");
+
+        write(Policy, &target, b"five\n", &cache, 5).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"five\n");
+        assert_eq!(applied(&cache, Policy), 5);
+        set_mode(&sealed, 0o700);
     }
 
     #[test]

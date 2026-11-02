@@ -50,3 +50,7 @@ For the verdict to mean anything, this host must have a Lodeline policy with
 `policy.yaml`). With no rules loaded, `assess` still scores intrinsic risk
 (destructive commands, suspicious MCP launchers) but `deny_match` will be empty.
 See [../../docs/install-personal.md](../../docs/install-personal.md).
+
+On a host with a root agent, `assess` reads rules applied from a fleet server from
+`/var/lib/lodeline/applied/`. Add the user that runs `assess` to the `lodeline` group,
+or it warns on stderr and uses `/etc/lodeline` only.

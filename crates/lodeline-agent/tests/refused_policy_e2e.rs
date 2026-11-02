@@ -39,15 +39,6 @@ fn doc_with_target(glob: &str) -> String {
 }
 
 impl Host {
-    fn denies(&self, command: &str) -> bool {
-        let reply = self.control(&json!({
-            "cmd": "assess",
-            "input": {"kind": "command", "command": command, "args": []},
-        }));
-        assert_eq!(reply["ok"], true, "assess failed: {reply}");
-        !reply["assess_verdict"]["deny_match"].is_null()
-    }
-
     fn tool_config(&self) -> String {
         let path = self.path("tool.json");
         std::fs::write(&path, r#"{"mode": "off"}"#).unwrap();

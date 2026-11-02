@@ -11,11 +11,11 @@
 #[path = "common/signed_host.rs"]
 mod signed_host;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde_json::{json, Value};
-use signed_host::{Host, STOP_DEADLINE};
+use signed_host::{policy, Artifact, Host, POLICY, RULE_PACKS, STOP_DEADLINE};
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -23,28 +23,6 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 const CHILD_DEADLINE: Duration = Duration::from_secs(60);
-
-#[derive(Clone, Copy)]
-struct Artifact {
-    file: &'static str,
-    apply: &'static str,
-    column: &'static str,
-    kind: &'static str,
-}
-
-const POLICY: Artifact = Artifact {
-    file: "policy.yaml",
-    apply: "apply_policy",
-    column: "last_applied_policy_version",
-    kind: "policy",
-};
-
-const RULE_PACKS: Artifact = Artifact {
-    file: "rule-packs.yaml",
-    apply: "apply_rule_packs",
-    column: "last_applied_rule_packs_version",
-    kind: "rule_packs",
-};
 
 fn doc(version: i64) -> String {
     format!("version: 1\n# envelope {version}\n")
@@ -60,36 +38,6 @@ impl Host {
         String::from_utf8(self.read(artifact.file)).unwrap()
     }
 
-    fn sql(&self, statements: &str) {
-        Connection::open(self.path("state.db"))
-            .unwrap()
-            .execute_batch(statements)
-            .unwrap();
-    }
-
-    fn recorded(&self, artifact: Artifact) -> i64 {
-        Connection::open(self.path("state.db"))
-            .unwrap()
-            .query_row(
-                &format!("SELECT {} FROM host_meta", artifact.column),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-    }
-
-    fn pending(&self, artifact: Artifact) -> Option<i64> {
-        Connection::open(self.path("state.db"))
-            .unwrap()
-            .query_row(
-                "SELECT version FROM pending_envelope WHERE kind = ?1",
-                [artifact.kind],
-                |row| row.get(0),
-            )
-            .optional()
-            .unwrap()
-    }
-
     fn status(&self) -> Value {
         self.control(&json!({"cmd": "policy_status"}))["policy_status"].clone()
     }
@@ -97,14 +45,6 @@ impl Host {
     fn set_directory_mode(&self, mode: u32) {
         let mode = std::fs::Permissions::from_mode(mode);
         std::fs::set_permissions(self.path("."), mode).unwrap();
-    }
-
-    fn stop_the_record_write(&self, artifact: Artifact) {
-        self.sql(&format!(
-            "CREATE TRIGGER stop_here BEFORE UPDATE OF {} ON host_meta
-             BEGIN SELECT RAISE(ABORT, 'stopped'); END;",
-            artifact.column
-        ));
     }
 
     /// Leaves `doc(5)` on disk and the record at 2, the state of a process that
@@ -587,6 +527,47 @@ fn upgraded_host_that_recorded_one_for_a_local_policy_accepts_envelope_v1() {
     rt.shutdown_timeout(STOP_DEADLINE);
 }
 
+#[test]
+fn lodeline_reload_keeps_the_deny_rule_when_the_policy_file_is_gone() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new(&policy("local-rule"));
+    let log = host.path("agent.log");
+    let mut agent = host.agent_command();
+    agent
+        .arg("--policy")
+        .arg(host.path("policy.yaml"))
+        .arg("run")
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap());
+    let _agent = ChildAgent(agent.spawn().unwrap());
+    host.wait_until_serving();
+    assert!(host.denies("local-rule"));
+
+    // `lodeline reload` reaches the agent only through the default socket path.
+    std::fs::create_dir_all(host.path("run/lodeline")).unwrap();
+    symlink(host.path("c.sock"), host.path("run/lodeline/control.sock")).unwrap();
+
+    std::fs::remove_file(host.path("policy.yaml")).unwrap();
+    let reload = Command::new(env!("CARGO_BIN_EXE_lodeline"))
+        .arg("reload")
+        .env("XDG_RUNTIME_DIR", host.path("run"))
+        .output()
+        .unwrap();
+    assert!(reload.status.success(), "{reload:?}");
+
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    while !std::fs::read_to_string(&log)
+        .unwrap()
+        .contains("policy file is missing")
+    {
+        assert!(Instant::now() < deadline, "the agent never warned");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(host.denies("local-rule"));
+}
+
 struct ChildAgent(Child);
 
 impl Drop for ChildAgent {
@@ -596,12 +577,22 @@ impl Drop for ChildAgent {
     }
 }
 
+fn spawn_agent(mut agent: Command) -> ChildAgent {
+    let child = agent
+        .arg("run")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    ChildAgent(child)
+}
+
 impl Host {
-    fn spawn_child(&self) -> ChildAgent {
-        let child = Command::new(env!("CARGO_BIN_EXE_lodeline"))
-            .arg("run")
-            .arg("--policy")
-            .arg(self.path("policy.yaml"))
+    fn agent_command(&self) -> Command {
+        let mut agent = Command::new(env!("CARGO_BIN_EXE_lodeline"));
+        agent
+            .env("HOME", self.path("."))
+            .env("XDG_CONFIG_HOME", self.path("config"))
             .arg("--state-db")
             .arg(self.path("state.db"))
             .arg("--events-dir")
@@ -610,12 +601,14 @@ impl Host {
             .arg(self.path("c.sock"))
             .arg("--keystore")
             .arg(self.path("keystore.json"))
-            .arg("--poll")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        ChildAgent(child)
+            .arg("--poll");
+        agent
+    }
+
+    fn spawn_child(&self) -> ChildAgent {
+        let mut agent = self.agent_command();
+        agent.arg("--policy").arg(self.path("policy.yaml"));
+        spawn_agent(agent)
     }
 
     fn wait_until_serving(&self) {
@@ -765,4 +758,163 @@ fn sigkill_between_the_policy_record_and_the_rename_leaves_the_host_unchanged() 
 #[test]
 fn sigkill_between_the_rule_pack_record_and_the_rename_leaves_the_host_unchanged() {
     sigkill_between_the_record_and_the_rename_leaves_the_host_unchanged(RULE_PACKS);
+}
+
+const DENY_RULE_AND_TARGET: &str = "version: 1
+hook_deny_rules:
+  - id: blocked
+    match:
+      kind: bash
+      command:
+        kind: regex
+        pattern: 'forbidden-command'
+targets:
+  - id: extra
+    description: extra
+    tier: standard
+    platform: any
+    paths: ['/tmp/lodeline-default-path-*.json']
+";
+
+const NOT_A_POLICY: &str = ": this is not : valid : yaml :::\n";
+
+/// Under root the default policy path is the real `/etc/lodeline`.
+fn default_path_is_real() -> bool {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    if root {
+        eprintln!("skipped: the default policy path of root is outside the test");
+    }
+    root
+}
+
+#[track_caller]
+fn assert_stops_at_boot(mut agent: ChildAgent, what: &str) {
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    loop {
+        if let Some(status) = agent.0.try_wait().unwrap() {
+            assert!(!status.success(), "{what}: {status}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what}: the agent kept running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+impl Host {
+    fn default_policy_file(&self) -> std::path::PathBuf {
+        self.path("config/lodeline/policy.yaml")
+    }
+
+    fn write_default_policy(&self, yaml: &str) {
+        std::fs::create_dir_all(self.path("config/lodeline")).unwrap();
+        std::fs::write(self.default_policy_file(), yaml).unwrap();
+    }
+}
+
+#[test]
+fn restart_without_the_policy_flag_keeps_the_applied_policy_in_force() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new("version: 1\n");
+    let mut agent = spawn_agent(host.agent_command());
+    host.wait_until_serving();
+    assert!(!host.denies("forbidden-command"), "before the apply");
+    assert_accepted(&host.apply_policy(5, DENY_RULE_AND_TARGET), 5);
+    wait_until("the applied policy loaded", || {
+        host.denies("forbidden-command")
+    });
+    agent.0.kill().unwrap();
+    agent.0.wait().unwrap();
+    drop(agent);
+
+    let _agent = spawn_agent(host.agent_command());
+    host.wait_until_serving();
+
+    assert_eq!(host.status()["last_applied_policy_version"], 5);
+    assert!(host.denies("forbidden-command"), "deny rule after restart");
+    assert!(host.has_target("extra"), "target after restart");
+}
+
+#[test]
+fn boot_without_the_policy_flag_loads_a_hand_written_policy() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new("version: 1\n");
+    host.write_default_policy(DENY_RULE_AND_TARGET);
+
+    let _agent = spawn_agent(host.agent_command());
+    host.wait_until_serving();
+
+    assert!(host.denies("forbidden-command"), "deny rule");
+    assert!(host.has_target("extra"), "target");
+    assert_eq!(host.status()["last_applied_policy_version"], 0);
+}
+
+#[test]
+fn a_policy_that_cannot_load_stops_the_boot_with_or_without_the_policy_flag() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new(NOT_A_POLICY);
+    host.write_default_policy(NOT_A_POLICY);
+    assert_stops_at_boot(host.spawn_child(), "malformed with the flag");
+    assert_stops_at_boot(
+        spawn_agent(host.agent_command()),
+        "malformed without the flag",
+    );
+
+    let unreadable = std::fs::Permissions::from_mode(0o000);
+    std::fs::set_permissions(host.path("policy.yaml"), unreadable.clone()).unwrap();
+    std::fs::set_permissions(host.default_policy_file(), unreadable).unwrap();
+    assert_stops_at_boot(host.spawn_child(), "unreadable with the flag");
+    assert_stops_at_boot(
+        spawn_agent(host.agent_command()),
+        "unreadable without the flag",
+    );
+}
+
+#[test]
+fn show_and_doctor_read_the_default_policy_without_the_flag() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new("version: 1\n");
+    host.write_default_policy(DENY_RULE_AND_TARGET);
+    let stdout = |args: &[&str]| {
+        let run = host.agent_command().args(args).output().unwrap();
+        String::from_utf8(run.stdout).unwrap()
+    };
+
+    assert!(stdout(&["show", "config"]).contains("id: extra"));
+
+    host.write_default_policy(NOT_A_POLICY);
+    assert!(stdout(&["doctor"]).contains("[ERROR] policy parse failed"));
+}
+
+#[test]
+fn a_policy_path_with_no_directory_applies_and_survives_a_restart() {
+    let host = Host::new("version: 1\n");
+    let bare_name = || {
+        let mut agent = host.agent_command();
+        agent
+            .current_dir(host.path("."))
+            .arg("--policy")
+            .arg("policy.yaml");
+        agent
+    };
+    let mut agent = spawn_agent(bare_name());
+    host.wait_until_serving();
+    let reply = host.apply(POLICY, 2);
+    agent.0.kill().unwrap();
+    agent.0.wait().unwrap();
+    drop(agent);
+    assert_accepted(&reply, 2);
+
+    let _agent = spawn_agent(bare_name());
+    host.wait_until_serving();
+
+    assert_eq!(host.status()["last_applied_policy_version"], 2);
 }

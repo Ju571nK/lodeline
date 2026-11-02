@@ -244,6 +244,17 @@ Copy `signed-policy.json` to the server's `policy_bundle_path` (section 5). The
 > `policy.yaml` accepts version `1`. An agent from v0.12.0 or earlier does not: it
 > records its local file as version 1, so start at `2` if any of those remain.
 
+On a packaged or root agent, the applied policy lands in
+`/var/lib/lodeline/applied/policy.yaml`, and a bundle in `rule-packs.yaml` beside it.
+Each replaces the content of its namesake in `/etc/lodeline`, which an apply does not
+write, so a hand edit there has no effect while the applied file exists. `lodeline show
+paths` prints the file in force. To go back to the local file, delete the applied one
+and run `sudo lodeline reload`. The next signed version replaces it again.
+After that, `lodeline status` still reports the signed version and its expiry while the
+local file runs, and only a higher version lands. If `/etc/lodeline` has no
+`policy.yaml`, deleting the applied one keeps the previous policy with a warning in the
+log until a restart, which loads the defaults.
+
 ---
 
 ## 5. Configure `server.yaml`

@@ -3,10 +3,11 @@
 #![allow(dead_code)]
 
 use ed25519_dalek::{Signer, SigningKey};
-use lodeline_agent::runtime::{self, RuntimeConfig};
+use lodeline_agent::runtime::{self, PolicyPaths, RuntimeConfig, SignedFile};
 use lodeline_core::policy::canonical::to_canonical_bytes;
 use lodeline_core::policy::pubkeys::{Keystore, KeystoreEntry};
 use lodeline_core::policy::signed_envelope::{SignedEnvelope, SignedPolicyResponse};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -18,6 +19,39 @@ use tokio::runtime::Runtime;
 
 const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 pub const STOP_DEADLINE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+pub struct Artifact {
+    pub file: &'static str,
+    pub apply: &'static str,
+    pub column: &'static str,
+    pub kind: &'static str,
+}
+
+pub const POLICY: Artifact = Artifact {
+    file: "policy.yaml",
+    apply: "apply_policy",
+    column: "last_applied_policy_version",
+    kind: "policy",
+};
+
+pub const RULE_PACKS: Artifact = Artifact {
+    file: "rule-packs.yaml",
+    apply: "apply_rule_packs",
+    column: "last_applied_rule_packs_version",
+    kind: "rule_packs",
+};
+
+/// A policy whose deny rule and target name `marker`.
+pub fn policy(marker: &str) -> String {
+    format!(
+        "version: 1\n\
+         targets:\n  - id: {marker}\n    description: x\n    tier: standard\n    platform: any\n    \
+         paths:\n      - '/tmp/{marker}'\n    recursive: false\n    follow_symlinks: false\n\
+         hook_deny_rules:\n  - id: {marker}\n    match:\n      kind: bash\n      command:\n        \
+         kind: equals\n        value: {marker}\n"
+    )
+}
 
 pub struct Host {
     td: TempDir,
@@ -55,13 +89,30 @@ impl Host {
     }
 
     pub fn boot(&self) -> Result<Runtime, String> {
+        self.boot_with(PolicyPaths::at(self.path("policy.yaml")))
+    }
+
+    /// Boots with applies going under `applied/`, and the top of the temp dir as the
+    /// local files: the layout of a root agent with no `--policy`.
+    pub fn boot_layered(&self) -> Result<Runtime, String> {
+        let file = |name: &str| SignedFile {
+            applied: self.path("applied").join(name),
+            local: Some(self.path(name)),
+        };
+        self.boot_with(PolicyPaths {
+            policy: file("policy.yaml"),
+            rule_packs: file("rule-packs.yaml"),
+        })
+    }
+
+    pub fn boot_with(&self, policy_paths: PolicyPaths) -> Result<Runtime, String> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
             .build()
             .unwrap();
         let agent = rt.spawn(runtime::run(RuntimeConfig {
-            policy_path: Some(self.path("policy.yaml")),
+            policy_paths,
             state_db_path: self.path("state.db"),
             events_dir: self.path("events"),
             control_socket: self.path("c.sock"),
@@ -137,6 +188,51 @@ impl Host {
 
     pub fn apply_rule_packs(&self, version: i64, yaml: &str) -> Value {
         self.control(&json!({"cmd": "apply_rule_packs", "response": self.signed(version, yaml)}))
+    }
+
+    pub fn denies(&self, command: &str) -> bool {
+        let input = json!({"kind": "command", "command": command, "args": []});
+        let reply = self.control(&json!({"cmd": "assess", "input": input}));
+        assert_eq!(reply["ok"], true, "{reply}");
+        !reply["assess_verdict"]["deny_match"].is_null()
+    }
+
+    pub fn sql(&self, statements: &str) {
+        Connection::open(self.path("state.db"))
+            .unwrap()
+            .execute_batch(statements)
+            .unwrap();
+    }
+
+    pub fn recorded(&self, artifact: Artifact) -> i64 {
+        Connection::open(self.path("state.db"))
+            .unwrap()
+            .query_row(
+                &format!("SELECT {} FROM host_meta", artifact.column),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    pub fn pending(&self, artifact: Artifact) -> Option<i64> {
+        Connection::open(self.path("state.db"))
+            .unwrap()
+            .query_row(
+                "SELECT version FROM pending_envelope WHERE kind = ?1",
+                [artifact.kind],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    pub fn stop_the_record_write(&self, artifact: Artifact) {
+        self.sql(&format!(
+            "CREATE TRIGGER stop_here BEFORE UPDATE OF {} ON host_meta
+             BEGIN SELECT RAISE(ABORT, 'stopped'); END;",
+            artifact.column
+        ));
     }
 
     pub fn watermark(&self) -> i64 {
