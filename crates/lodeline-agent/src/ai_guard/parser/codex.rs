@@ -377,7 +377,7 @@ pub(crate) fn emit_approval_policy_reasons(val: &Value, out: &mut Vec<AiGuardRea
 /// into unbounded work by dropping a large file there.
 const MAX_RULES_FILES: usize = 64;
 const MAX_RULES_FILE_BYTES: u64 = 1024 * 1024;
-const MAX_STANDING_APPROVAL_REASONS: usize = 32;
+pub(super) const MAX_STANDING_APPROVAL_REASONS: usize = 32;
 
 /// #200 — `<layer>/rules/*.rules` (system, `~/.codex`, a repo's `.codex/`)
 /// holds command-approval rules in a small DSL, verified on a live install

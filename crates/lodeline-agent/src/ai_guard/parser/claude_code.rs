@@ -3,6 +3,7 @@
 //! + mcp servers, and maps findings to `AiGuardReason`.
 
 use crate::ai_guard::command_scan::launcher_basename;
+use crate::ai_guard::parser::codex::MAX_STANDING_APPROVAL_REASONS;
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rubric;
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
@@ -293,6 +294,7 @@ pub(crate) fn emit_hook_reasons(
     out.push(AiGuardReason::NoSandbox {
         executor: "host_shell".into(),
     });
+    let mut approvals: Vec<String> = Vec::new();
     for (event_name, entries) in hooks {
         let Some(arr) = entries.as_array() else {
             continue;
@@ -319,14 +321,18 @@ pub(crate) fn emit_hook_reasons(
             };
             for h in inner {
                 // #199 — a `PermissionRequest` hook answers the permission
-                // prompt in the user's place, for every call it matches.
+                // prompt in the user's place, for every call it matches. The
+                // evidence names the tool, never the `if` argument, which can
+                // hold a token or URL.
                 if event_name == "PermissionRequest" {
                     let target = hook_condition(h)
                         .or(matcher.filter(|m| !m.is_empty()))
                         .unwrap_or("*");
-                    out.push(AiGuardReason::StandingCommandApproval {
-                        pattern: truncate_for_snippet(&format!("PermissionRequest hook: {target}")),
-                    });
+                    let pattern =
+                        truncate_for_snippet(&format!("PermissionRequest hook: {target}"));
+                    if !approvals.contains(&pattern) {
+                        approvals.push(pattern);
+                    }
                 }
                 // #199 — a hook is no longer necessarily a shell command.
                 // `http` POSTs the tool call to a URL, and `prompt` / `agent` /
@@ -356,16 +362,36 @@ pub(crate) fn emit_hook_reasons(
             }
         }
     }
+    let total = approvals.len();
+    for pattern in approvals.into_iter().take(MAX_STANDING_APPROVAL_REASONS) {
+        out.push(AiGuardReason::StandingCommandApproval { pattern });
+    }
+    if total > MAX_STANDING_APPROVAL_REASONS {
+        tracing::warn!(
+            total,
+            cap = MAX_STANDING_APPROVAL_REASONS,
+            "claude hooks: capping PermissionRequest StandingCommandApproval reasons"
+        );
+    }
     Ok(())
 }
 
-/// A handler's `if` permission rule, when it narrows the calls the handler
-/// runs for. A rule that admits every call of a tool, such as `Bash(*)`, does
-/// not.
+/// The tool a handler's `if` permission rule narrows it to. Only `Tool(arg)`
+/// with an argument that is not all wildcards narrows: a bare tool name, `*`,
+/// `Bash(*)`, `Edit(**)` or an unparsable rule admits every call.
 fn hook_condition(hook: &Value) -> Option<&str> {
-    hook.get("if")
-        .and_then(Value::as_str)
-        .filter(|rule| !rule.trim().is_empty() && !is_broad_allow(rule))
+    let (tool, arg) = hook
+        .get("if")?
+        .as_str()?
+        .trim()
+        .strip_suffix(')')?
+        .split_once('(')?;
+    let tool = tool.trim();
+    let narrows = !tool.is_empty()
+        && !arg
+            .chars()
+            .all(|c| c == '*' || c == ':' || c.is_whitespace());
+    narrows.then_some(tool)
 }
 
 /// The effective `disableAllHooks` among `files`, highest precedence first:
@@ -1228,7 +1254,7 @@ fn assess_project(repo_root: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReas
     emit_permission_reasons(&merged, &mut out);
     emit_start_mode_reason(start, &mut out);
     emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
-    super::claude_project_settings::emit_project_settings_reasons(&merged, &mut out);
+    super::claude_project_settings::emit_project_settings_reasons(&merged, hooks_off, &mut out);
     // #145 — auto-enable posture: emit ONLY when a server-enable key is
     // present AND the project actually ships `.mcp.json` servers for it
     // to launch (key-only with no payload -> no emit).
@@ -3562,11 +3588,7 @@ mod tests {
                     {"matcher": "*", "hooks": [{"command": "/opt/approve.sh", "if": "Bash(git *)"}]}
                 ]}}"#
             ),
-            [
-                "PermissionRequest hook: Bash",
-                "PermissionRequest hook: *",
-                "PermissionRequest hook: Bash(git *)"
-            ]
+            ["PermissionRequest hook: Bash", "PermissionRequest hook: *"]
         );
         assert!(approvals(
             r#"{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "/opt/approve.sh"}]}]}}"#
@@ -3603,7 +3625,83 @@ mod tests {
         assert!(broad(
             r#"[{"command": "true", "if": "Bash(git *)"}, {"command": "true"}]"#
         ));
-        assert!(broad(r#"[{"command": "true", "if": "Bash(*)"}]"#));
-        assert!(broad(r#"[{"command": "true", "if": ""}]"#));
+        assert!(!broad(r#"[{"command": "true", "if": "Edit(src/**)"}]"#));
+        for rule in [
+            "",
+            "Bash",
+            "Read",
+            "*",
+            "Bash(*)",
+            "Edit(**)",
+            "Bash(**)",
+            "Bash(* *)",
+            "garbage(",
+            "(git *)",
+        ] {
+            let handlers = serde_json::json!([{"command": "true", "if": rule}]).to_string();
+            assert!(broad(&handlers), "{rule:?} must not narrow the matcher");
+        }
+    }
+
+    /// The `if` argument can carry a credential, so only the tool name leaves
+    /// the host.
+    #[test]
+    fn permission_request_evidence_omits_the_if_argument() {
+        assert_eq!(
+            approvals(
+                r#"{"hooks": {"PermissionRequest": [{"matcher": "*", "hooks": [
+                    {"command": "/opt/approve.sh", "if": "Bash(curl -H 'Authorization: Bearer abc123' *)"}
+                ]}]}}"#
+            ),
+            ["PermissionRequest hook: Bash"]
+        );
+    }
+
+    #[test]
+    fn permission_request_reasons_are_capped_per_file() {
+        let groups: Vec<Value> = (0..MAX_STANDING_APPROVAL_REASONS + 8)
+            .map(|i| serde_json::json!({"matcher": format!("Tool{i}"), "hooks": [{"command": "/opt/approve.sh"}]}))
+            .collect();
+        let settings = serde_json::json!({"hooks": {"PermissionRequest": groups}}).to_string();
+        assert_eq!(approvals(&settings).len(), MAX_STANDING_APPROVAL_REASONS);
+    }
+
+    /// `disableAllHooks` also turns off the status line and file suggestion
+    /// commands.
+    #[test]
+    fn disable_all_hooks_turns_off_project_ui_commands() {
+        let repo = tempdir().unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"disableAllHooks": true, "statusLine": {"command": "x"}}"#,
+        );
+        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        assert!(
+            !reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectSettingsUiCommand { .. })),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn disable_all_hooks_turns_off_user_component_hooks() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), r#"{"disableAllHooks": true}"#);
+        write_file(
+            home.path(),
+            ".claude/agents/deployer.md",
+            "---\nname: deployer\nhooks:\n  Stop:\n    - hooks:\n        - command: rm -rf ~/y\n---\n",
+        );
+        let policy = tempdir().unwrap();
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap();
+        assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
     }
 }
