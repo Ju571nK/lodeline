@@ -52,6 +52,27 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- A signed policy or rule-pack bundle now applies on a packaged or root agent with no
+  `--policy`. The agent wrote these files to `/etc/lodeline`, which `lodeline.service`
+  keeps read-only, so every apply failed with `Read-only file system (os error 30)` and
+  the host stayed on its old policy. Applies now land in
+  `/var/lib/lodeline/applied/policy.yaml` and `rule-packs.yaml`. Each applied file
+  replaces the content of its namesake in `/etc/lodeline`, as an apply over that file
+  did before, and the two files resolve separately. `/etc/lodeline` is no longer
+  written, so a hand edit there has no effect while the applied file exists. To go
+  back to the local file, delete the applied one and run `lodeline reload`. A host that
+  an older agent applied into keeps loading that file, with its version intact, until
+  the next apply lands in the new path. Nothing in `/etc` is moved or deleted.
+  `lodeline show paths` and `lodeline doctor` now print the file in force. `--policy`,
+  non-root agents, and Windows do not change. `lodeline assess` reads the applied
+  files first. `/var/lib/lodeline` is `0750 root:lodeline`, so a user outside the
+  `lodeline` group gets one warning on stderr and a verdict from `/etc/lodeline`, which
+  can miss signed rules. Add such a user to the group.
+
+- A reload on a host with no policy file now loads the built-in defaults and any
+  rule-pack bundle, as a boot does. It used to keep the previous state, so a bundle
+  applied to such a host had no effect until a restart.
+
 - `lodeline run` without `--policy` now loads the policy at its default path at
   boot. Before, boot read a policy file only
   with `--policy`, while a signed apply and a reload used the default path. A restart

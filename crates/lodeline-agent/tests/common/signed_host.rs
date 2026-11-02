@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use ed25519_dalek::{Signer, SigningKey};
-use lodeline_agent::runtime::{self, RuntimeConfig};
+use lodeline_agent::runtime::{self, PolicyPaths, RuntimeConfig, SignedFile};
 use lodeline_core::policy::canonical::to_canonical_bytes;
 use lodeline_core::policy::pubkeys::{Keystore, KeystoreEntry};
 use lodeline_core::policy::signed_envelope::{SignedEnvelope, SignedPolicyResponse};
@@ -55,13 +55,30 @@ impl Host {
     }
 
     pub fn boot(&self) -> Result<Runtime, String> {
+        self.boot_with(PolicyPaths::at(self.path("policy.yaml")))
+    }
+
+    /// Boots with applies going under `applied/`, and the top of the temp dir as the
+    /// local files: the layout of a root agent with no `--policy`.
+    pub fn boot_layered(&self) -> Result<Runtime, String> {
+        let file = |name: &str| SignedFile {
+            applied: self.path("applied").join(name),
+            local: Some(self.path(name)),
+        };
+        self.boot_with(PolicyPaths {
+            policy: file("policy.yaml"),
+            rule_packs: file("rule-packs.yaml"),
+        })
+    }
+
+    fn boot_with(&self, policy_paths: PolicyPaths) -> Result<Runtime, String> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
             .build()
             .unwrap();
         let agent = rt.spawn(runtime::run(RuntimeConfig {
-            policy_path: Some(self.path("policy.yaml")),
+            policy_paths,
             state_db_path: self.path("state.db"),
             events_dir: self.path("events"),
             control_socket: self.path("c.sock"),

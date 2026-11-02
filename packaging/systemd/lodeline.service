@@ -11,6 +11,8 @@
 # Default paths the agent uses on Linux (override with --policy / --state-db /
 # --events-dir on ExecStart if you want something else):
 #   policy : /etc/lodeline/policy.yaml          (optional; built-in defaults apply if absent)
+#   applied: /var/lib/lodeline/applied/         (signed policy.yaml and rule-packs.yaml; each
+#                                                replaces its /etc/lodeline file once present)
 #   state  : /var/lib/lodeline/state.db
 #   events : /var/log/lodeline/events-*.jsonl   (point your SIEM agent here)
 #   IPC    : /var/run/lodeline/control.sock

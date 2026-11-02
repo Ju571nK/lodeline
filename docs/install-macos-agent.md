@@ -98,11 +98,18 @@ this matters on macOS because the system locations aren't user-writable:
 
 | Item | Default as root | Default as non-root user |
 |---|---|---|
-| policy | `/etc/lodeline/policy.yaml` | `$XDG_CONFIG_HOME/lodeline/policy.yaml` → else `~/.config/lodeline/policy.yaml` (auto) |
+| policy | `/etc/lodeline/policy.yaml` (see below) | `$XDG_CONFIG_HOME/lodeline/policy.yaml` → else `~/.config/lodeline/policy.yaml` (auto) |
 | state.db | `/var/lib/lodeline/state.db` | pass `--state-db ~/.local/state/lodeline/state.db` |
 | events dir | `/var/log/lodeline` | pass `--events-dir ~/.local/state/lodeline/events` |
 | control socket | `/var/run/lodeline/control.sock` | `$XDG_RUNTIME_DIR/lodeline/control.sock` → else `/tmp/lodeline-<uid>/control.sock` (auto) |
 | keystore | `/etc/lodeline/policy-signing-pubkeys.pem` | `$XDG_CONFIG_HOME/lodeline/...` → else `~/.config/lodeline/...` (auto) |
+
+As root, a signed policy or rule-pack bundle lands in `/var/lib/lodeline/applied/`,
+not `/etc/lodeline`. Each file there replaces the content of its namesake in
+`/etc/lodeline`, so a hand edit of that file has no effect while the applied one
+exists. `lodeline show paths` prints the file in force. To go back to the local file,
+delete the applied one and run `sudo lodeline reload`. As a non-root user, or with
+`--policy`, an apply writes the policy file itself.
 
 The **control socket** and **keystore** now fall back to user-writable
 locations automatically when you're not root, so the control plane and policy

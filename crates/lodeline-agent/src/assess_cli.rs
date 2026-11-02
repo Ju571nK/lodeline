@@ -19,6 +19,7 @@
 
 use crate::ai_guard::assess::{assess, AssessCtx};
 use crate::effective_policy::load_effective_policy;
+use crate::runtime::SignedFile;
 use lodeline_core::assess::{AssessInput, AssessVerdict, Decision};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -173,7 +174,16 @@ pub fn run(args: AssessArgs) -> i32 {
     };
 
     // ── Step 3: load policy (fail-loud, exit 1 on error) ─────────────────────
-    let (policy_path, rule_packs_path) = resolve_policy_paths(args.policy_override.as_deref());
+    let (policy_path, rule_packs_path, denied) =
+        resolve_policy_paths(args.policy_override.as_deref());
+    if let Some(applied) = denied {
+        eprintln!(
+            "lodeline assess: permission denied reading {}, so this verdict uses {} and may \
+             miss signed rules. Add this user to the `lodeline` group.",
+            applied.display(),
+            policy_path.display()
+        );
+    }
     let (rubric, deny, enforce_bucket) = match load_effective_policy(&policy_path, &rule_packs_path)
     {
         Ok(triple) => triple,
@@ -203,31 +213,31 @@ pub fn run(args: AssessArgs) -> i32 {
     exit_code(verdict.decision, args.fail_on_warn)
 }
 
-/// Return canonical `(policy.yaml, rule-packs.yaml)` paths, respecting an
-/// optional `--policy` override from the global CLI. `rule-packs.yaml` lives
-/// beside `policy.yaml` (same directory, different file name).
-fn resolve_policy_paths(policy_override: Option<&Path>) -> (PathBuf, PathBuf) {
-    let policy = policy_override
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(default_policy_yaml_path);
-    let rule_packs = policy.with_file_name("rule-packs.yaml");
-    (policy, rule_packs)
+/// Return the `(policy.yaml, rule-packs.yaml)` files to load, respecting an optional
+/// `--policy` override from the global CLI. Without one these are the system agent's
+/// files, so an integration running as a user gets the rules of the root agent on that
+/// host. The third value is the applied file this caller may not read, if any.
+fn resolve_policy_paths(policy_override: Option<&Path>) -> (PathBuf, PathBuf, Option<PathBuf>) {
+    let paths = policy_override
+        .map(|p| crate::runtime::PolicyPaths::at(p.to_path_buf()))
+        .unwrap_or_else(crate::runtime::system_policy_paths);
+    let (policy, policy_denied) = readable_file(&paths.policy, paths.policy.applied.try_exists());
+    let (rule_packs, packs_denied) =
+        readable_file(&paths.rule_packs, paths.rule_packs.applied.try_exists());
+    let denied = (policy_denied || packs_denied).then_some(paths.policy.applied.clone());
+    (policy, rule_packs, denied)
 }
 
-/// Platform-specific system `policy.yaml`. Non-root callers read it too, so an
-/// integration running as a user gets the rules of the root agent on that host.
-fn default_policy_yaml_path() -> PathBuf {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        PathBuf::from("/etc/lodeline/policy.yaml")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        PathBuf::from(r"C:\ProgramData\Lodeline\policy.yaml")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        PathBuf::from("/etc/lodeline/policy.yaml")
+/// The file to load given what the OS said about `file.applied`. A caller outside the
+/// `lodeline` group cannot look inside the state directory, whether or not an applied
+/// file is there, so denied falls back to the local file and reports `true`.
+fn readable_file(file: &SignedFile, applied_exists: std::io::Result<bool>) -> (PathBuf, bool) {
+    match (&file.local, applied_exists) {
+        (Some(local), Ok(false)) => (local.clone(), false),
+        (Some(local), Err(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            (local.clone(), true)
+        }
+        _ => (file.applied.clone(), false),
     }
 }
 
@@ -299,7 +309,7 @@ mod tests {
 
     #[test]
     fn resolve_policy_paths_uses_default_when_no_override() {
-        let (policy, rule_packs) = resolve_policy_paths(None);
+        let (policy, rule_packs, _) = resolve_policy_paths(None);
         // Must be something ending in policy.yaml and rule-packs.yaml
         assert!(
             policy.to_str().unwrap().ends_with("policy.yaml"),
@@ -312,19 +322,92 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn resolve_policy_paths_reads_the_system_policy_as_any_user() {
-        let (policy, _) = resolve_policy_paths(None);
-        assert_eq!(policy, Path::new("/etc/lodeline/policy.yaml"));
-    }
-
-    #[test]
     fn resolve_policy_paths_respects_override() {
         let tmp = tempfile::tempdir().unwrap();
         let custom = tmp.path().join("custom-policy.yaml");
-        let (policy, rule_packs) = resolve_policy_paths(Some(&custom));
+        let (policy, rule_packs, denied) = resolve_policy_paths(Some(&custom));
         assert_eq!(policy, custom);
         assert_eq!(rule_packs, tmp.path().join("rule-packs.yaml"));
+        assert_eq!(denied, None);
+    }
+
+    fn system_file() -> SignedFile {
+        SignedFile {
+            applied: "/var/lib/lodeline/applied/policy.yaml".into(),
+            local: Some("/etc/lodeline/policy.yaml".into()),
+        }
+    }
+
+    fn denied() -> std::io::Result<bool> {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+
+    #[test]
+    fn a_readable_applied_file_wins() {
+        assert_eq!(
+            readable_file(&system_file(), Ok(true)),
+            (system_file().applied, false)
+        );
+    }
+
+    #[test]
+    fn no_applied_file_reads_the_local_file_without_a_warning() {
+        assert_eq!(
+            readable_file(&system_file(), Ok(false)),
+            (PathBuf::from("/etc/lodeline/policy.yaml"), false)
+        );
+    }
+
+    #[test]
+    fn a_caller_outside_the_group_reads_the_local_file_and_is_warned() {
+        assert_eq!(
+            readable_file(&system_file(), denied()),
+            (PathBuf::from("/etc/lodeline/policy.yaml"), true)
+        );
+    }
+
+    #[test]
+    fn another_error_stays_on_the_applied_file_so_the_load_fails_loudly() {
+        let broken = Err(std::io::ErrorKind::InvalidData.into());
+        assert_eq!(
+            readable_file(&system_file(), broken),
+            (system_file().applied, false)
+        );
+    }
+
+    #[test]
+    fn override_has_no_fallback_to_take_when_denied() {
+        let file = SignedFile {
+            applied: "/srv/p/policy.yaml".into(),
+            local: None,
+        };
+        assert_eq!(
+            readable_file(&file, denied()),
+            (file.applied.clone(), false)
+        );
+    }
+
+    /// The real errno behind [`readable_file`]'s denied arm. Root reads through the
+    /// mode bits, so this runs only for a non-root user.
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_without_search_permission_reports_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        if crate::control::is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let exists = state.join("applied/policy.yaml").try_exists();
+
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            readable_file(&system_file(), exists),
+            (PathBuf::from("/etc/lodeline/policy.yaml"), true)
+        );
     }
 
     // ── fail_on_warn plumbs through assess logic ──────────────────────────────

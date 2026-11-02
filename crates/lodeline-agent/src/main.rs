@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         cli::Command::Run => {
             let cfg = runtime::RuntimeConfig {
-                policy_path: cli.policy.clone(),
+                policy_paths: runtime::policy_paths(cli.policy.clone()),
                 state_db_path: cli.state_db.clone().unwrap_or_else(default_state_db_path),
                 events_dir: cli.events_dir.clone().unwrap_or_else(default_events_dir),
                 control_socket: cli

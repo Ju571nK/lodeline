@@ -197,16 +197,14 @@ pub(crate) fn read_bundle_state(path: &std::path::Path) -> BundleState {
 /// lifetime (so the OS watcher stays alive); `watched_roots` is the desired-root
 /// diff base, including missing roots retained for retry.
 pub struct ReloadCtx {
-    pub policy_yaml_path: PathBuf,
+    /// The files to load, the same [`crate::runtime::PolicyPaths`] that sets where
+    /// an apply writes.
+    pub paths: crate::runtime::PolicyPaths,
     pub policy_version_rx: watch::Receiver<i64>,
     /// Task 5 — bumped by `apply_rule_packs` whenever it commits a new
     /// `rule-packs.yaml`. A change here re-runs `reload()` so the bundle's
     /// rule packs are re-merged into the live parser set.
     pub rule_packs_version_rx: watch::Receiver<i64>,
-    /// Task 5 — on-disk path of the distributed rule-pack bundle, beside
-    /// `policy.yaml`. IDENTICAL to `ApplyContext.rule_packs_yaml_path` so the
-    /// apply path writes exactly where boot/reload read.
-    pub rule_packs_yaml_path: PathBuf,
     pub targets_tx: watch::Sender<Arc<Vec<CompiledTarget>>>,
     pub watcher: WatcherHandle,
     pub watched_roots: Vec<(PathBuf, bool)>,
@@ -270,18 +268,20 @@ pub async fn run(mut ctx: ReloadCtx) {
 pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     let version = *ctx.policy_version_rx.borrow();
 
-    let yaml = match std::fs::read_to_string(&ctx.policy_yaml_path) {
-        Ok(s) => s,
+    let policy_in_force = ctx.paths.policy.in_force();
+    // Like boot, no policy file means defaults: a rule-pack bundle still loads over them.
+    let doc = match std::fs::read_to_string(policy_in_force) {
+        Ok(yaml) => match lodeline_core::policy::parse(&yaml) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::error!(error = %e, "policy reload: re-parse failed; keeping previous targets");
+                return;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            tracing::error!(path = %ctx.policy_yaml_path.display(), error = %e,
+            tracing::error!(path = %policy_in_force.display(), error = %e,
                 "policy reload: re-read failed; keeping previous targets");
-            return;
-        }
-    };
-    let doc = match lodeline_core::policy::parse(&yaml) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!(error = %e, "policy reload: re-parse failed; keeping previous targets");
             return;
         }
     };
@@ -298,7 +298,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     // Empty(0바이트/공백, cp 트렁케이트 창) → retain last good (#135, enforcement race 방지).
     // Absent(파일 NotFound) → clear cache (deliberate rm honored).
     let bundle: Option<lodeline_core::policy::PolicyDocument> =
-        match read_bundle_state(&ctx.rule_packs_yaml_path) {
+        match read_bundle_state(ctx.paths.rule_packs.in_force()) {
             BundleState::Present(d) => {
                 let doc = *d;
                 ctx.last_good_bundle = Some(doc.clone());
@@ -312,7 +312,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         };
     let mut effective = match lodeline_core::policy::merge(
         defaults,
-        Some(doc),
+        doc,
         bundle,
         lodeline_core::policy::current_platform(),
     ) {
@@ -692,10 +692,9 @@ mod tests {
 
         (
             ReloadCtx {
-                policy_yaml_path,
+                paths: crate::runtime::PolicyPaths::at(policy_yaml_path),
                 policy_version_rx,
                 rule_packs_version_rx,
-                rule_packs_yaml_path: dir.join("rule-packs.yaml"),
                 targets_tx,
                 watcher,
                 watched_roots: roots,
@@ -758,10 +757,9 @@ mod tests {
 
         (
             ReloadCtx {
-                policy_yaml_path,
+                paths: crate::runtime::PolicyPaths::at(policy_yaml_path),
                 policy_version_rx,
                 rule_packs_version_rx,
-                rule_packs_yaml_path: dir.join("rule-packs.yaml"),
                 targets_tx,
                 watcher,
                 watched_roots: roots,
@@ -798,7 +796,7 @@ mod tests {
         // create B's file so the warmup hashes it.
         std::fs::write(dir.path().join("dirB").join("b.json"), b"hello").unwrap();
         std::fs::write(
-            &ctx.policy_yaml_path,
+            &ctx.paths.policy.applied,
             policy_yaml("target-b", &path_b, "critical"),
         )
         .unwrap();
@@ -843,7 +841,11 @@ mod tests {
             build_ctx(dir.path(), &policy_yaml("target-a", &path_a, "standard"));
         let roots_before = ctx.watched_roots.clone();
 
-        std::fs::write(&ctx.policy_yaml_path, b": this is not : valid : yaml :::\n").unwrap();
+        std::fs::write(
+            &ctx.paths.policy.applied,
+            b": this is not : valid : yaml :::\n",
+        )
+        .unwrap();
         reload(&mut ctx, &plat); // must not panic
 
         assert!(
@@ -885,7 +887,7 @@ mod tests {
             "version: 1\nhost_id_strategy: machine_id\ncontinue_workspaces:\n  - '{}'\ntargets: []\n",
             workspace.display()
         );
-        std::fs::write(&ctx.policy_yaml_path, &updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
         reload(&mut ctx, &plat);
         {
             let guard = parsers.read();
@@ -944,7 +946,7 @@ mod tests {
         }
 
         let updated = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
-        std::fs::write(&ctx.policy_yaml_path, updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, updated).unwrap();
         reload(&mut ctx, &plat);
 
         {
@@ -1002,7 +1004,7 @@ mod tests {
             "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
             workspace.display()
         );
-        std::fs::write(&ctx.policy_yaml_path, &updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
         reload(&mut ctx, &plat);
         let has = parsers.read().iter().any(|p| {
             p.tool() == lodeline_core::event::AiTool::ClaudeCode
@@ -1041,7 +1043,7 @@ mod tests {
             "version: 1\nhost_id_strategy: machine_id\ncodex_workspaces:\n  - '{}'\ntargets: []\n",
             workspace.display()
         );
-        std::fs::write(&ctx.policy_yaml_path, &updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
         reload(&mut ctx, &plat);
         let has = parsers.read().iter().any(|p| {
             p.tool() == lodeline_core::event::AiTool::Codex
@@ -1079,7 +1081,7 @@ mod tests {
             "version: 1\nhost_id_strategy: machine_id\ngemini_workspaces:\n  - '{}'\ntargets: []\n",
             workspace.display()
         );
-        std::fs::write(&ctx.policy_yaml_path, &updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
         reload(&mut ctx, &plat);
         let has = parsers.read().iter().any(|p| {
             p.tool() == lodeline_core::event::AiTool::Gemini
@@ -1115,7 +1117,7 @@ mod tests {
             "version: 1\nhost_id_strategy: machine_id\ncursor_workspaces:\n  - '{}'\ntargets: []\n",
             workspace.display()
         );
-        std::fs::write(&ctx.policy_yaml_path, &updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
         reload(&mut ctx, &plat);
         let has = parsers.read().iter().any(|p| {
             p.tool() == lodeline_core::event::AiTool::Cursor
@@ -1151,7 +1153,7 @@ mod tests {
             "version: 1\nhost_id_strategy: machine_id\nantigravity_workspaces:\n  - '{}'\ntargets: []\n",
             workspace.display()
         );
-        std::fs::write(&ctx.policy_yaml_path, &updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
         reload(&mut ctx, &plat);
         let has = parsers.read().iter().any(|p| {
             p.tool() == lodeline_core::event::AiTool::Antigravity
@@ -1189,7 +1191,7 @@ mod tests {
 
         // Add a custom user rule pack.
         let updated = "version: 1\nhost_id_strategy: machine_id\ntargets:\n  - id: t1\n    description: x\n    tier: standard\n    platform: any\n    paths: [\"/tmp/x\"]\nrule_packs:\n  - id: my-extra\n    pack_version: 1\n    tool: gemini\n    scope:\n      kind: user_global\n    watched_paths: []\n    rules: []\n";
-        std::fs::write(&ctx.policy_yaml_path, updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, updated).unwrap();
         reload(&mut ctx, &plat);
 
         let has_extra = parsers.read().iter().any(|p| {
@@ -1218,7 +1220,7 @@ mod tests {
 
         // Drop the user pack — no defaults remain after 3b.8 retirement.
         let updated = "version: 1\nhost_id_strategy: machine_id\ntargets:\n  - id: t1\n    description: x\n    tier: standard\n    platform: any\n    paths: [\"/tmp/x\"]\n";
-        std::fs::write(&ctx.policy_yaml_path, updated).unwrap();
+        std::fs::write(&ctx.paths.policy.applied, updated).unwrap();
         reload(&mut ctx, &plat);
 
         let still_present = parsers.read().iter().any(|p| {
@@ -1390,7 +1392,7 @@ mod tests {
 
         // Bundle (rule-packs.yaml) carries one UserGlobal pack.
         let bundle = "version: 1\nrule_packs:\n  - id: bundle-pack\n    pack_version: 1\n    tool: gemini\n    scope:\n      kind: user_global\n    watched_paths: []\n    rules: []\n";
-        std::fs::write(&ctx.rule_packs_yaml_path, bundle).unwrap();
+        std::fs::write(&ctx.paths.rule_packs.applied, bundle).unwrap();
 
         reload(&mut ctx, &plat);
 
@@ -1418,7 +1420,7 @@ mod tests {
 
         // 1. Valid bundle → pack goes live, cache seeded.
         let bundle = "version: 1\nrule_packs:\n  - id: retained-pack\n    pack_version: 1\n    tool: gemini\n    scope:\n      kind: user_global\n    watched_paths: []\n    rules: []\n";
-        std::fs::write(&ctx.rule_packs_yaml_path, bundle).unwrap();
+        std::fs::write(&ctx.paths.rule_packs.applied, bundle).unwrap();
         reload(&mut ctx, &plat);
 
         let is_live = |parsers: &Arc<
@@ -1438,7 +1440,7 @@ mod tests {
         );
 
         // 2. Corrupt the bundle on disk and reload.
-        std::fs::write(&ctx.rule_packs_yaml_path, "}{not yaml").unwrap();
+        std::fs::write(&ctx.paths.rule_packs.applied, "}{not yaml").unwrap();
         reload(&mut ctx, &plat);
 
         // 3. The pack MUST still be live (retained from last-good), and the
@@ -1543,7 +1545,7 @@ mod tests {
 
         // Bundle authors the SAME id `shared` with watched_paths ["from-bundle"].
         let bundle = "version: 1\nrule_packs:\n  - id: shared\n    pack_version: 1\n    tool: gemini\n    scope:\n      kind: user_global\n    watched_paths: [\"from-bundle\"]\n    rules: []\n";
-        std::fs::write(&ctx.rule_packs_yaml_path, bundle).unwrap();
+        std::fs::write(&ctx.paths.rule_packs.applied, bundle).unwrap();
 
         reload(&mut ctx, &plat);
 

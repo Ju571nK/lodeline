@@ -113,6 +113,14 @@ sudo systemctl enable --now lodeline-server
 journalctl -u lodeline-server -f
 ```
 
+A signed policy or rule-pack bundle does not write `/etc/lodeline`, which the agent's
+unit keeps read-only. It lands in `/var/lib/lodeline/applied/`, and each file there
+replaces the content of its namesake in `/etc/lodeline`, so a hand edit of that file has
+no effect while the applied one exists. `lodeline show paths` prints the file in force.
+To go back to the local file, delete the applied one and run `sudo lodeline reload`. A
+host that an older agent applied into keeps loading that file from `/etc/lodeline` until
+the next apply.
+
 `lodeline-signer` is a one-shot operator CLI — no service to start:
 
 ```sh

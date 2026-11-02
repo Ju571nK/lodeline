@@ -31,7 +31,7 @@ use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 
 pub struct RuntimeConfig {
-    pub policy_path: Option<PathBuf>,
+    pub policy_paths: PolicyPaths,
     pub state_db_path: PathBuf,
     pub events_dir: PathBuf,
     pub control_socket: PathBuf,
@@ -98,20 +98,23 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // Finish or drop any apply that a stop interrupted, before the control socket
     // serves. A failure here stops the boot, because an apply checked against a
     // stale record could replace a newer policy.
-    let policy_path_for_apply = cfg
-        .policy_path
-        .clone()
-        .unwrap_or_else(default_policy_yaml_path);
-    // Task 5 — distributed rule-pack bundle destination, beside policy.yaml. Also
-    // the BOOT merge's 3rd layer (defaults < policy < bundle). MUST stay identical
-    // to `ApplyContext.rule_packs_yaml_path` so apply writes where boot/reload read.
-    let rule_packs_yaml_path = policy_path_for_apply.with_file_name("rule-packs.yaml");
+    let policy_path_for_apply = cfg.policy_paths.policy.applied.clone();
+    // Task 5 — distributed rule-pack bundle destination. The file in force of
+    // `cfg.policy_paths.rule_packs` is the BOOT merge's 3rd layer (defaults <
+    // policy < bundle), and apply, settle and reload all use `cfg.policy_paths`.
+    let rule_packs_yaml_path = cfg.policy_paths.rule_packs.applied.clone();
     let (finished_applies, applied_policy) = {
         let c = cache.lock();
-        let policy = settle_pending(ArtifactKind::Policy, &policy_path_for_apply, &c)
+        // An older agent's unfinished apply targets the local file, so settle what
+        // is in force rather than the apply target.
+        let policy = settle_pending(ArtifactKind::Policy, cfg.policy_paths.policy.in_force(), &c)
             .context("finishing an interrupted policy apply")?;
-        let packs = settle_pending(ArtifactKind::RulePacks, &rule_packs_yaml_path, &c)
-            .context("finishing an interrupted rule-pack apply")?;
+        let packs = settle_pending(
+            ArtifactKind::RulePacks,
+            cfg.policy_paths.rule_packs.in_force(),
+            &c,
+        )
+        .context("finishing an interrupted rule-pack apply")?;
         let finished: Vec<Evidence> = policy
             .map(|pending| Evidence::PolicyReloaded {
                 policy_version: pending.version,
@@ -126,18 +129,19 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     let active_valid_until = Arc::new(parking_lot::RwLock::new(applied_policy.valid_until()));
     let (policy_version_tx, _policy_version_rx_init) = watch::channel(applied_policy.version());
 
-    // 1. Load + merge policy, from the file a signed apply writes.
-    let user_doc = if policy_path_for_apply.exists() {
-        let yaml = std::fs::read_to_string(&policy_path_for_apply)?;
+    // 1. Load + merge policy, from the file in force.
+    let policy_in_force = cfg.policy_paths.policy.in_force();
+    let user_doc = if policy_in_force.try_exists()? {
+        let yaml = std::fs::read_to_string(policy_in_force)?;
         Some(lodeline_core::policy::parse(&yaml)?)
     } else {
         None
     };
-    // #134 review — ensure the config dir exists so the dedicated rule-packs
+    // #134 review — ensure the apply dir exists so the dedicated rule-packs
     // watcher can arm itself on first boot (it watches the parent dir; a missing
     // dir keeps the watcher permanently dead until restart).  Best-effort: on
-    // error we log a warning and continue — the dir may be unwritable (e.g.
-    // /etc/lodeline without root) for packaged installs where it already exists.
+    // error we log a warning and continue — the dir may be unwritable, and the
+    // watcher re-arms if it appears later.
     if let Some(dir) = policy_path_for_apply.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             tracing::warn!(
@@ -148,12 +152,13 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         }
     }
     // Fail-open: missing/corrupt rule-packs.yaml → None (no bundle packs).
-    let bundle_doc = std::fs::read_to_string(&rule_packs_yaml_path)
+    let rule_packs_in_force = cfg.policy_paths.rule_packs.in_force();
+    let bundle_doc = std::fs::read_to_string(rule_packs_in_force)
         .ok()
         .and_then(|s| match lodeline_core::policy::parse(&s) {
             Ok(d) => Some(d),
             Err(e) => {
-                tracing::warn!(error = ?e, path = %rule_packs_yaml_path.display(),
+                tracing::warn!(error = ?e, path = %rule_packs_in_force.display(),
                     "rule-packs.yaml parse failed at boot; ignoring bundle layer");
                 None
             }
@@ -430,9 +435,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
 
     // Phase 2: build ApplyContext (used by control IPC's apply_policy handler)
     // and ControlContext (used by control IPC dispatch).
-    // Rule-pack bundle destination sits beside policy.yaml (`rule_packs_yaml_path`
-    // defined above, shared with the boot merge). Task 5 wires the receiver of
-    // `rule_packs_version_tx` into the reload task below so an `apply_rule_packs`
+    // `rule_packs_yaml_path` is defined above from `cfg.policy_paths`. Task 5 wires
+    // the receiver of `rule_packs_version_tx` into the reload task below so an `apply_rule_packs`
     // bump re-runs the 3-layer merge live.
     let (rule_packs_version_tx, rule_packs_version_rx) = watch::channel(0i64);
     // #134 — clone before apply_ctx moves rule_packs_version_tx; dedicated FS
@@ -580,17 +584,13 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // Live policy reload: on a successful `apply_policy`, re-derive watch
     // targets/roots from the new policy.yaml and apply them to the running
     // pipeline + watcher (no restart). Owns the watcher handle + targets sender.
-    // #134 — clone rule_packs_yaml_path before policy_reload moves it;
-    // the dedicated FS watcher task needs the same path.
-    let rule_packs_yaml_path_for_fs = rule_packs_yaml_path.clone();
     sup.track(
         "policy_reload",
         tokio::spawn(crate::policy_reload_task::run(
             crate::policy_reload_task::ReloadCtx {
-                policy_yaml_path: policy_path_for_apply.clone(),
+                paths: cfg.policy_paths.clone(),
                 policy_version_rx: policy_version_tx.subscribe(),
                 rule_packs_version_rx,
-                rule_packs_yaml_path,
                 targets_tx,
                 watcher: watcher_handle,
                 watched_roots: watch_roots,
@@ -613,15 +613,20 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // Passes the SAME poll_interval as the main watcher so a `--poll` host
     // (NFS/virtiofs/9p) drives rule-packs hot-reload via polling too, instead
     // of the native FS events the operator declared unreliable.
-    sup.track(
-        "rule_packs_watch",
-        tokio::spawn(crate::rule_packs_watch::run(
-            rule_packs_yaml_path_for_fs,
-            rule_packs_version_tx_fs,
-            poll_interval,
-            sup.shutdown.clone(),
-        )),
-    );
+    // One watcher per file a bundle can load from: a change to either can change
+    // which file is in force, and a reload re-reads whichever that is.
+    let rule_packs = cfg.policy_paths.rule_packs.clone();
+    for path in std::iter::once(rule_packs.applied).chain(rule_packs.local) {
+        sup.track(
+            "rule_packs_watch",
+            tokio::spawn(crate::rule_packs_watch::run(
+                path,
+                rule_packs_version_tx_fs.clone(),
+                poll_interval,
+                sup.shutdown.clone(),
+            )),
+        );
+    }
 
     sup.track(
         "state_store",
@@ -1244,20 +1249,91 @@ mod keystore_path_tests {
     }
 }
 
-/// Default `policy.yaml` location when not overridden via `RuntimeConfig.policy_path`.
-/// Root → system `/etc/lodeline`; non-root → `$XDG_CONFIG_HOME/lodeline` (else
-/// `$HOME/.config/lodeline`) so a non-root personal agent reads policy.yaml — and
-/// the sibling `rule-packs.yaml` it derives (see `rule_packs_yaml_path`) — from
-/// its own config dir, matching `docs/install-personal.md` (#159). Mirrors
-/// `resolve_keystore_path_unix`.
-pub fn default_policy_yaml_path() -> PathBuf {
+/// One file the agent loads that a signed apply can replace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedFile {
+    /// Where a signed apply writes. Once it exists it replaces `local`.
+    pub applied: PathBuf,
+    /// The operator's file, which an apply never overwrites. `None` when an apply
+    /// writes the operator's file itself.
+    pub local: Option<PathBuf>,
+}
+
+impl SignedFile {
+    /// The file to load: `local` only when `applied` is known to be absent. Any
+    /// other failure stays on `applied`, so that the read reports it and a fault
+    /// cannot quietly bring back the local file.
+    pub fn in_force(&self) -> &Path {
+        match (&self.local, self.applied.try_exists()) {
+            (Some(local), Ok(false)) => local,
+            _ => &self.applied,
+        }
+    }
+}
+
+/// The two files one agent loads. Each resolves on its own, so a signed bundle can
+/// sit over a local `policy.yaml` and the other way round.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyPaths {
+    pub policy: SignedFile,
+    pub rule_packs: SignedFile,
+}
+
+impl PolicyPaths {
+    /// `policy_file` and the `rule-packs.yaml` beside it, with no local layer.
+    pub fn at(policy_file: PathBuf) -> Self {
+        let rule_packs = policy_file.with_file_name("rule-packs.yaml");
+        Self {
+            policy: SignedFile {
+                applied: policy_file,
+                local: None,
+            },
+            rule_packs: SignedFile {
+                applied: rule_packs,
+                local: None,
+            },
+        }
+    }
+}
+
+/// The files of this process: `--policy` if given, else the default for its user.
+pub fn policy_paths(policy_override: Option<PathBuf>) -> PolicyPaths {
+    policy_override.map_or_else(default_policy_paths, PolicyPaths::at)
+}
+
+/// The files of the system agent. On Unix an apply writes under the state directory,
+/// the one place the packaged unit lets the agent write, and `/etc/lodeline` stays
+/// the operator's. Any user's `lodeline assess` reads these too.
+pub fn system_policy_paths() -> PolicyPaths {
     #[cfg(target_os = "windows")]
     {
-        PathBuf::from(r"C:\ProgramData\Lodeline\policy.yaml")
+        PolicyPaths::at(PathBuf::from(r"C:\ProgramData\Lodeline\policy.yaml"))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        resolve_policy_yaml_path_unix(
+        let file = |name: &str| SignedFile {
+            applied: Path::new(ROOT_STATE_DIR).join("applied").join(name),
+            local: Some(Path::new("/etc/lodeline").join(name)),
+        };
+        PolicyPaths {
+            policy: file("policy.yaml"),
+            rule_packs: file("rule-packs.yaml"),
+        }
+    }
+}
+
+/// Default files when `--policy` is not given. Root → the system files; non-root →
+/// `$XDG_CONFIG_HOME/lodeline` (else `$HOME/.config/lodeline`) so a non-root personal
+/// agent reads and applies in its own config dir, matching
+/// `docs/install-personal.md` (#159). Mirrors `resolve_keystore_path_unix`.
+fn default_policy_paths() -> PolicyPaths {
+    #[cfg(target_os = "windows")]
+    {
+        system_policy_paths()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        resolve_policy_paths_unix(
             crate::control::is_root(),
             std::env::var("XDG_CONFIG_HOME")
                 .ok()
@@ -1267,36 +1343,44 @@ pub fn default_policy_yaml_path() -> PathBuf {
     }
 }
 
-/// The policy file a one-shot command reads: `--policy`, else the default file if
-/// there is one.
+/// The policy file a one-shot command reads: `--policy`, else the default file in
+/// force if there is one.
 pub fn policy_path_for_command(policy_override: Option<PathBuf>) -> Option<PathBuf> {
-    policy_override.or_else(|| Some(default_policy_yaml_path()).filter(|p| p.exists()))
+    policy_override.or_else(|| {
+        Some(default_policy_paths().policy.in_force().to_path_buf()).filter(|p| p.exists())
+    })
 }
 
-/// Pure resolver for the Unix `policy.yaml` default. Root → `/etc/lodeline`;
+/// Pure resolver for the Unix default files. Root → [`system_policy_paths`];
 /// non-root → `$XDG_CONFIG_HOME/lodeline` (else `$HOME/.config/lodeline`); last-resort
 /// `/etc/lodeline`.
 #[cfg(not(target_os = "windows"))]
-fn resolve_policy_yaml_path_unix(
+fn resolve_policy_paths_unix(
     is_root: bool,
     xdg_config: Option<String>,
     home: Option<String>,
-) -> PathBuf {
+) -> PolicyPaths {
     const FILE: &str = "policy.yaml";
     if is_root {
-        return PathBuf::from("/etc/lodeline").join(FILE);
+        return system_policy_paths();
     }
     if let Some(dir) = xdg_config {
-        return PathBuf::from(dir).join("lodeline").join(FILE);
+        return PolicyPaths::at(PathBuf::from(dir).join("lodeline").join(FILE));
     }
     if let Some(home) = home {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("lodeline")
-            .join(FILE);
+        return PolicyPaths::at(
+            PathBuf::from(home)
+                .join(".config")
+                .join("lodeline")
+                .join(FILE),
+        );
     }
-    PathBuf::from("/etc/lodeline").join(FILE)
+    PolicyPaths::at(PathBuf::from("/etc/lodeline").join(FILE))
 }
+
+/// The packaged agent's state directory, from `StateDirectory=lodeline`.
+#[cfg(not(target_os = "windows"))]
+const ROOT_STATE_DIR: &str = "/var/lib/lodeline";
 
 /// Default `state.db` path when not overridden via `--state-db`. Root →
 /// `/var/lib/lodeline/state.db` (systemd deploy); non-root → `$XDG_STATE_HOME/lodeline`
@@ -1333,7 +1417,7 @@ fn resolve_state_db_path_unix(
 ) -> PathBuf {
     const FILE: &str = "state.db";
     if is_root {
-        return PathBuf::from("/var/lib/lodeline").join(FILE);
+        return PathBuf::from(ROOT_STATE_DIR).join(FILE);
     }
     if let Some(dir) = xdg_state {
         return PathBuf::from(dir).join("lodeline").join(FILE);
@@ -1341,7 +1425,7 @@ fn resolve_state_db_path_unix(
     if let Some(home) = home {
         return PathBuf::from(home).join(".local/state/lodeline").join(FILE);
     }
-    PathBuf::from("/var/lib/lodeline").join(FILE)
+    PathBuf::from(ROOT_STATE_DIR).join(FILE)
 }
 
 /// Default events directory when not overridden via `--events-dir`. Root →
@@ -1394,7 +1478,8 @@ fn resolve_events_dir_unix(
 #[cfg(all(test, not(target_os = "windows")))]
 mod nonroot_path_tests {
     use super::{
-        resolve_events_dir_unix, resolve_policy_yaml_path_unix, resolve_state_db_path_unix,
+        resolve_events_dir_unix, resolve_policy_paths_unix, resolve_state_db_path_unix,
+        PolicyPaths, SignedFile,
     };
     use std::path::PathBuf;
 
@@ -1419,8 +1504,17 @@ mod nonroot_path_tests {
         let xs = Some("/home/u/.local/state".to_string());
         let h = Some("/home/u".to_string());
         assert_eq!(
-            resolve_policy_yaml_path_unix(true, x, h.clone()),
-            PathBuf::from("/etc/lodeline/policy.yaml")
+            resolve_policy_paths_unix(true, x, h.clone()),
+            PolicyPaths {
+                policy: SignedFile {
+                    applied: "/var/lib/lodeline/applied/policy.yaml".into(),
+                    local: Some("/etc/lodeline/policy.yaml".into()),
+                },
+                rule_packs: SignedFile {
+                    applied: "/var/lib/lodeline/applied/rule-packs.yaml".into(),
+                    local: Some("/etc/lodeline/rule-packs.yaml".into()),
+                },
+            }
         );
         assert_eq!(
             resolve_state_db_path_unix(true, xs.clone(), h.clone()),
@@ -1435,12 +1529,12 @@ mod nonroot_path_tests {
     #[test]
     fn nonroot_prefers_xdg() {
         assert_eq!(
-            resolve_policy_yaml_path_unix(
+            resolve_policy_paths_unix(
                 false,
                 Some("/home/u/.config".into()),
                 Some("/home/u".into())
             ),
-            PathBuf::from("/home/u/.config/lodeline/policy.yaml")
+            PolicyPaths::at("/home/u/.config/lodeline/policy.yaml".into())
         );
         assert_eq!(
             resolve_state_db_path_unix(
@@ -1463,8 +1557,8 @@ mod nonroot_path_tests {
     #[test]
     fn nonroot_without_xdg_uses_home() {
         assert_eq!(
-            resolve_policy_yaml_path_unix(false, None, Some("/home/u".into())),
-            PathBuf::from("/home/u/.config/lodeline/policy.yaml")
+            resolve_policy_paths_unix(false, None, Some("/home/u".into())),
+            PolicyPaths::at("/home/u/.config/lodeline/policy.yaml".into())
         );
         assert_eq!(
             resolve_state_db_path_unix(false, None, Some("/home/u".into())),
@@ -1479,8 +1573,8 @@ mod nonroot_path_tests {
     #[test]
     fn nonroot_without_xdg_or_home_falls_back_to_system() {
         assert_eq!(
-            resolve_policy_yaml_path_unix(false, None, None),
-            PathBuf::from("/etc/lodeline/policy.yaml")
+            resolve_policy_paths_unix(false, None, None),
+            PolicyPaths::at("/etc/lodeline/policy.yaml".into())
         );
         assert_eq!(
             resolve_state_db_path_unix(false, None, None),
@@ -1490,6 +1584,63 @@ mod nonroot_path_tests {
             resolve_events_dir_unix(false, None, None),
             PathBuf::from("/var/log/lodeline")
         );
+    }
+
+    #[test]
+    fn policy_override_keeps_writing_and_reading_that_path() {
+        assert_eq!(
+            super::policy_paths(Some("/srv/p/mine.yaml".into())),
+            PolicyPaths {
+                policy: SignedFile {
+                    applied: "/srv/p/mine.yaml".into(),
+                    local: None,
+                },
+                rule_packs: SignedFile {
+                    applied: "/srv/p/rule-packs.yaml".into(),
+                    local: None,
+                },
+            }
+        );
+    }
+
+    fn layered(dir: &std::path::Path) -> SignedFile {
+        SignedFile {
+            applied: dir.join("applied/policy.yaml"),
+            local: Some(dir.join("policy.yaml")),
+        }
+    }
+
+    #[test]
+    fn in_force_is_the_local_file_until_an_applied_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = layered(dir.path());
+        assert_eq!(file.in_force(), file.local.as_deref().unwrap());
+
+        std::fs::create_dir(dir.path().join("applied")).unwrap();
+        std::fs::write(&file.applied, "x").unwrap();
+        assert_eq!(file.in_force(), file.applied);
+
+        std::fs::remove_file(&file.applied).unwrap();
+        assert_eq!(file.in_force(), file.local.as_deref().unwrap());
+    }
+
+    #[test]
+    fn in_force_without_a_local_file_is_the_applied_path_even_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = SignedFile {
+            applied: dir.path().join("policy.yaml"),
+            local: None,
+        };
+        assert_eq!(file.in_force(), file.applied);
+    }
+
+    #[test]
+    fn in_force_does_not_fall_back_when_the_applied_file_cannot_be_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = layered(dir.path());
+        // A regular file in the path gives an error other than not-found, as root too.
+        std::fs::write(dir.path().join("applied"), "not a directory").unwrap();
+        assert_eq!(file.in_force(), file.applied);
     }
 }
 
