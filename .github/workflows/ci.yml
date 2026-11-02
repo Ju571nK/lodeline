@@ -6,22 +6,26 @@ on:
     paths:
       # Order matters: a later pattern overrides an earlier one. Docs and markdown
       # are skipped, but the proxy contract JSON that
-      # crates/lodeline-proxy-api/tests/contract.rs include_str!s must still run CI.
+      # crates/lodeline-proxy-api/tests/contract.rs include_str!s must still run CI,
+      # and so must the signed-policy skill, whose SKILL.md holds the sync commit.
       - '**'
       - '!**.md'
       - '!docs/**'
       - '!apps/**'
       - 'docs/specs/lodeline-proxy/contracts/**'
+      - '.claude/skills/signed-policy/**'
   pull_request:
     paths:
       # Order matters: a later pattern overrides an earlier one. Docs and markdown
       # are skipped, but the proxy contract JSON that
-      # crates/lodeline-proxy-api/tests/contract.rs include_str!s must still run CI.
+      # crates/lodeline-proxy-api/tests/contract.rs include_str!s must still run CI,
+      # and so must the signed-policy skill, whose SKILL.md holds the sync commit.
       - '**'
       - '!**.md'
       - '!docs/**'
       - '!apps/**'
       - 'docs/specs/lodeline-proxy/contracts/**'
+      - '.claude/skills/signed-policy/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
@@ -79,6 +83,32 @@ jobs:
           python-version: '3.12'
       - run: pip install -r docs/specs/lodeline-proxy/contracts/requirements-check.txt
       - run: python docs/specs/lodeline-proxy/contracts/check_schema.py
+
+  # The TLA+ model of the signed policy apply path, its drift check against the
+  # covered Rust functions, and its mutants. No path filter: an edit to any
+  # covered file can drift the model. The drift check reads the sync commit.
+  signed-policy-model:
+    name: signed-policy model check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: TLC pin
+        id: tlc
+        run: |
+          grep -E '^TLC_(VERSION|SHA256) = ' .claude/skills/signed-policy/check.py | tr -d '" ' | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg-cache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/xdg-cache/lodeline-formal
+          key: tlc-${{ steps.tlc.outputs.tlc_version }}-${{ steps.tlc.outputs.tlc_sha256 }}
+      - name: model check
+        run: python3 .claude/skills/signed-policy/check.py
 
   # Keeps `rust-version` in Cargo.toml honest (#240). rust-toolchain.toml pins
   # `stable`, so the MSRV toolchain is selected explicitly with `cargo +<ver>`.
