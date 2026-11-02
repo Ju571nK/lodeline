@@ -6,6 +6,7 @@
 |-------------|------------------------------------|--------------------------------------|
 | Binary      | /usr/local/bin/lodeline            | %PROGRAMFILES%\Lodeline\lodeline.exe |
 | Policy      | /etc/lodeline/policy.yaml          | %ProgramData%\Lodeline\policy.yaml   |
+| Applied     | /var/lib/lodeline/applied/         | the Policy file itself               |
 | Events      | /var/log/lodeline/                 | %ProgramData%\Lodeline\events\       |
 | State       | /var/lib/lodeline/state.db         | %ProgramData%\Lodeline\state.db      |
 | Service id  | com.lodeline.agent (launchd label) | Lodeline (Windows Service name)      |

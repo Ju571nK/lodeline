@@ -52,5 +52,6 @@ For the verdict to mean anything, this host must have a Lodeline policy with
 See [../../docs/install-personal.md](../../docs/install-personal.md).
 
 On a host with a root agent, `assess` reads rules applied from a fleet server from
-`/var/lib/lodeline/applied/`. Add the user that runs `assess` to the `lodeline` group,
-or it warns on stderr and uses `/etc/lodeline` only.
+`/var/lib/lodeline/applied/`. On the packaged Linux install the state directory
+`/var/lib/lodeline` is `0750 root:lodeline`. Add the user that runs `assess` to the
+`lodeline` group, or it warns on stderr and uses `/etc/lodeline` only.
