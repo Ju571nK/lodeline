@@ -200,6 +200,9 @@ pub struct ReloadCtx {
     /// The files to load, the same [`crate::runtime::PolicyPaths`] that sets where
     /// an apply writes.
     pub paths: crate::runtime::PolicyPaths,
+    /// Whether the last successful load read a policy file. If so, a missing file
+    /// is a gap to wait out, not a host that has no policy.
+    pub policy_file_loaded: bool,
     pub policy_version_rx: watch::Receiver<i64>,
     /// Task 5 — bumped by `apply_rule_packs` whenever it commits a new
     /// `rule-packs.yaml`. A change here re-runs `reload()` so the bundle's
@@ -262,14 +265,16 @@ pub async fn run(mut ctx: ReloadCtx) {
 }
 
 /// Re-derive targets/roots from `policy.yaml` on disk and apply them to the
-/// live pipeline + watcher. On any parse/merge failure, log and keep the
-/// previous state untouched (`apply_policy` refuses what boot could not load, but
-/// a hand-edited file shouldn't kill the agent).
+/// live pipeline + watcher. On any parse/merge failure, or when a policy file that
+/// was loaded has gone missing, log and keep the previous state untouched
+/// (`apply_policy` refuses what boot could not load, but a hand-edited file shouldn't
+/// kill the agent).
 pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     let version = *ctx.policy_version_rx.borrow();
 
     let policy_in_force = ctx.paths.policy.in_force();
-    // Like boot, no policy file means defaults: a rule-pack bundle still loads over them.
+    // Like boot, a host with no policy file runs on defaults, and a rule-pack bundle
+    // still loads over them.
     let doc = match std::fs::read_to_string(policy_in_force) {
         Ok(yaml) => match lodeline_core::policy::parse(&yaml) {
             Ok(d) => Some(d),
@@ -278,7 +283,12 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
                 return;
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !ctx.policy_file_loaded => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(path = %policy_in_force.display(),
+                "policy reload: policy file is missing; keeping previous targets until it returns or the agent restarts");
+            return;
+        }
         Err(e) => {
             tracing::error!(path = %policy_in_force.display(), error = %e,
                 "policy reload: re-read failed; keeping previous targets");
@@ -310,6 +320,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
                 None
             }
         };
+    let loaded_a_file = doc.is_some();
     let mut effective = match lodeline_core::policy::merge(
         defaults,
         doc,
@@ -322,6 +333,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             return;
         }
     };
+    ctx.policy_file_loaded = loaded_a_file;
 
     // #115 / #134 — rebuild the shared deny evaluator from the freshly-merged
     // policy. Keep-previous on deny-id validation failure OR regex compile
@@ -693,6 +705,7 @@ mod tests {
         (
             ReloadCtx {
                 paths: crate::runtime::PolicyPaths::at(policy_yaml_path),
+                policy_file_loaded: true,
                 policy_version_rx,
                 rule_packs_version_rx,
                 targets_tx,
@@ -758,6 +771,7 @@ mod tests {
         (
             ReloadCtx {
                 paths: crate::runtime::PolicyPaths::at(policy_yaml_path),
+                policy_file_loaded: true,
                 policy_version_rx,
                 rule_packs_version_rx,
                 targets_tx,
@@ -853,6 +867,53 @@ mod tests {
             "targets unchanged"
         );
         assert_eq!(ctx.watched_roots, roots_before, "watch roots unchanged");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_policy_file_that_was_loaded_and_goes_missing_keeps_the_previous_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("dirA")).unwrap();
+        let path_a = format!("{}/dirA/a.json", dir.path().display());
+        let yaml = policy_yaml("target-a", &path_a, "standard");
+        let (mut ctx, plat, targets_rx) = build_ctx(dir.path(), &yaml);
+        let has_target_a = || targets_rx.borrow().iter().any(|c| c.id == "target-a");
+
+        std::fs::remove_file(&ctx.paths.policy.applied).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(has_target_a(), "the gap keeps the loaded policy");
+
+        ctx.policy_file_loaded = false;
+        reload(&mut ctx, &plat);
+        assert!(
+            !has_target_a(),
+            "no file before and none now means defaults"
+        );
+        assert!(!ctx.policy_file_loaded);
+
+        std::fs::write(&ctx.paths.policy.applied, &yaml).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(has_target_a());
+        assert!(ctx.policy_file_loaded, "the next gap is kept out too");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_missing_applied_file_with_a_local_file_loads_the_local_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("dirA")).unwrap();
+        let path_a = format!("{}/dirA/a.json", dir.path().display());
+        let (mut ctx, plat, targets_rx) = build_ctx(
+            dir.path(),
+            &policy_yaml("applied-rule", &path_a, "standard"),
+        );
+        let local = dir.path().join("local-policy.yaml");
+        std::fs::write(&local, policy_yaml("local-rule", &path_a, "standard")).unwrap();
+        ctx.paths.policy.local = Some(local);
+
+        std::fs::remove_file(&ctx.paths.policy.applied).unwrap();
+        reload(&mut ctx, &plat);
+
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "local-rule"));
+        assert!(ctx.policy_file_loaded);
     }
 
     // Phase 3b.6.1 — per-repo Continue parser hot-reload reconciliation.

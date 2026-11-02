@@ -7,28 +7,20 @@
 #[path = "common/signed_host.rs"]
 mod signed_host;
 
+use lodeline_agent::runtime::{PolicyPaths, SignedFile};
 use lodeline_core::policy::deployment::ArtifactKind;
 use lodeline_core::state::HashCache;
 use lodeline_core::PendingEnvelope;
-use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
-use signed_host::{Host, STOP_DEADLINE};
+use signed_host::{policy, Artifact, Host, POLICY, RULE_PACKS, STOP_DEADLINE};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
+use tokio::runtime::Runtime;
 
 /// Two poll cycles of the agent's 5 s watcher, plus room for a loaded machine.
 const RELOAD_DEADLINE: Duration = Duration::from_secs(30);
-
-/// A policy whose deny rule and target name `marker`.
-fn policy(marker: &str) -> String {
-    format!(
-        "version: 1\n\
-         targets:\n  - id: {marker}\n    description: x\n    tier: standard\n    platform: any\n    \
-         paths:\n      - '/tmp/{marker}'\n    recursive: false\n    follow_symlinks: false\n\
-         hook_deny_rules:\n  - id: {marker}\n    match:\n      kind: bash\n      command:\n        \
-         kind: equals\n        value: {marker}\n"
-    )
-}
 
 fn wait_for(host: &Host, what: &str, deadline: Duration, done: impl Fn(&Host) -> bool) {
     let until = Instant::now() + deadline;
@@ -44,12 +36,13 @@ fn assert_accepted(reply: &Value, version: i64) {
 }
 
 impl Host {
-    fn denies(&self, command: &str) -> bool {
-        let reply = self.control(&json!({
-            "cmd": "assess",
-            "input": {"kind": "command", "command": command, "args": []}
-        }));
-        !reply["assess_verdict"]["deny_match"].is_null()
+    fn apply(&self, artifact: Artifact, version: i64, yaml: &str) -> Value {
+        let response = self.signed(version, yaml);
+        self.control(&json!({"cmd": artifact.apply, "response": response}))
+    }
+
+    fn applied_file(&self, artifact: Artifact) -> String {
+        self.text(&format!("applied/{}", artifact.file))
     }
 
     fn reload(&self) {
@@ -58,18 +51,6 @@ impl Host {
 
     fn text(&self, name: &str) -> String {
         String::from_utf8(self.read(name)).unwrap()
-    }
-
-    fn pending_policy(&self) -> Option<i64> {
-        Connection::open(self.path("state.db"))
-            .unwrap()
-            .query_row(
-                "SELECT version FROM pending_envelope WHERE kind = 'policy'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .unwrap()
     }
 
     fn record_pending(&self, kind: ArtifactKind, version: i64, bytes: &[u8]) {
@@ -154,7 +135,7 @@ fn a_rename_an_older_agent_finished_is_settled_against_the_local_file() {
 
     let rt = host.boot_layered().expect("upgrade boot");
 
-    assert_eq!(host.pending_policy(), None);
+    assert_eq!(host.pending(POLICY), None);
     assert_eq!(host.watermark(), 5, "the apply had finished");
     assert!(host.denies("renamed-rule"));
     assert_accepted(&host.apply_policy(6, &policy("newer-rule")), 6);
@@ -170,7 +151,7 @@ fn an_older_agent_apply_that_never_renamed_is_dropped_and_a_retry_applies() {
 
     let rt = host.boot_layered().expect("upgrade boot");
 
-    assert_eq!(host.pending_policy(), None);
+    assert_eq!(host.pending(POLICY), None);
     assert_eq!(host.watermark(), 2, "the apply did not happen");
     assert!(host.denies("older-rule"));
     assert_accepted(&host.apply_policy(5, &policy("never-written")), 5);
@@ -284,16 +265,161 @@ fn a_rule_pack_change_reloads_the_file_in_force() {
     rt.shutdown_timeout(STOP_DEADLINE);
 }
 
-#[test]
-fn a_bundle_goes_live_on_a_host_with_no_policy_file() {
+fn a_bundle_goes_live_with_no_restart_on_a_host_with_no_policy_file(
+    boot: fn(&Host) -> Result<Runtime, String>,
+) {
     let host = Host::new("version: 1\n");
     std::fs::remove_file(host.path("policy.yaml")).unwrap();
-    let rt = host.boot_layered().expect("boot");
+    let rt = boot(&host).expect("boot");
 
     assert_accepted(&host.apply_rule_packs(1, &policy("signed-pack")), 1);
 
     wait_for(&host, "signed pack live", RELOAD_DEADLINE, |h| {
         h.denies("signed-pack")
     });
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn a_bundle_goes_live_on_a_layered_host_with_no_policy_file() {
+    a_bundle_goes_live_with_no_restart_on_a_host_with_no_policy_file(Host::boot_layered);
+}
+
+#[test]
+fn a_bundle_goes_live_with_a_policy_path_that_has_no_file() {
+    a_bundle_goes_live_with_no_restart_on_a_host_with_no_policy_file(Host::boot);
+}
+
+#[test]
+fn deleting_the_applied_policy_with_no_local_file_keeps_it_until_a_restart() {
+    let host = Host::new("version: 1\n");
+    std::fs::remove_file(host.path("policy.yaml")).unwrap();
+    let rt = host.boot_layered().expect("boot");
+    assert_accepted(&host.apply_policy(1, &policy("signed-rule")), 1);
+    wait_for(&host, "signed rule live", RELOAD_DEADLINE, |h| {
+        h.denies("signed-rule")
+    });
+
+    std::fs::remove_file(host.path("applied/policy.yaml")).unwrap();
+    host.reload();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(host.denies("signed-rule"), "kept until a restart");
+
+    rt.shutdown_timeout(STOP_DEADLINE);
+    let rt = host.boot_layered().expect("restart");
+    assert!(!host.denies("signed-rule"));
+    assert_eq!(host.watermark(), 1, "the signed version stays on record");
+    let older = host.apply_policy(1, &policy("same-version"));
+    assert_eq!(older["apply_policy"]["reason"], "version_regression");
+    assert_accepted(&host.apply_policy(2, &policy("higher-rule")), 2);
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+fn a_first_apply_stopped_after_its_rename_finishes_at_boot(artifact: Artifact) {
+    let host = Host::new(&policy("local-rule"));
+    let rt = host.boot_layered().expect("boot");
+    host.stop_the_record_write(artifact);
+
+    let reply = host.apply(artifact, 5, &policy("renamed-rule"));
+
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(host.pending(artifact), Some(5));
+    assert_eq!(host.recorded(artifact), 0);
+    rt.shutdown_timeout(STOP_DEADLINE);
+    host.sql("DROP TRIGGER stop_here");
+
+    let rt = host.boot_layered().expect("restart");
+
+    assert_eq!(host.pending(artifact), None);
+    assert_eq!(host.recorded(artifact), 5, "the apply had finished");
+    assert!(host.denies("renamed-rule"));
+    assert_eq!(host.applied_file(artifact), policy("renamed-rule"));
+    assert_eq!(host.text("policy.yaml"), policy("local-rule"));
+    let older = host.apply(artifact, 5, &policy("same-version"));
+    assert_eq!(older["apply_policy"]["reason"], "version_regression");
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn a_first_policy_apply_stopped_after_its_rename_finishes_at_boot() {
+    a_first_apply_stopped_after_its_rename_finishes_at_boot(POLICY);
+}
+
+#[test]
+fn a_first_bundle_apply_stopped_after_its_rename_finishes_at_boot() {
+    a_first_apply_stopped_after_its_rename_finishes_at_boot(RULE_PACKS);
+}
+
+fn a_first_apply_stopped_before_its_rename_is_dropped_and_a_retry_applies(artifact: Artifact) {
+    let host = Host::new(&policy("local-rule"));
+    let rt = host.boot_layered().expect("boot");
+    let temp = format!("applied/.{}.{}.tmp", artifact.file, std::process::id());
+    std::fs::create_dir(host.path(&temp)).unwrap();
+
+    let reply = host.apply(artifact, 5, &policy("unwritten-rule"));
+
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(host.pending(artifact), Some(5));
+    rt.shutdown_timeout(STOP_DEADLINE);
+    std::fs::remove_dir(host.path(&temp)).unwrap();
+
+    let rt = host.boot_layered().expect("restart");
+
+    assert_eq!(host.pending(artifact), None);
+    assert_eq!(host.recorded(artifact), 0, "the apply did not happen");
+    assert!(host.denies("local-rule"));
+    assert!(!host.denies("unwritten-rule"));
+    assert_accepted(&host.apply(artifact, 5, &policy("unwritten-rule")), 5);
+    assert_eq!(host.applied_file(artifact), policy("unwritten-rule"));
+    assert_eq!(host.text("policy.yaml"), policy("local-rule"));
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
+#[test]
+fn a_first_policy_apply_stopped_before_its_rename_is_dropped_and_a_retry_applies() {
+    a_first_apply_stopped_before_its_rename_is_dropped_and_a_retry_applies(POLICY);
+}
+
+#[test]
+fn a_first_bundle_apply_stopped_before_its_rename_is_dropped_and_a_retry_applies() {
+    a_first_apply_stopped_before_its_rename_is_dropped_and_a_retry_applies(RULE_PACKS);
+}
+
+fn set_mode(dir: &Path, mode: u32) {
+    let mode = std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(dir, mode).unwrap();
+}
+
+#[test]
+fn boot_leaves_no_apply_directory_it_could_not_sync() {
+    let host = Host::new(&policy("local-rule"));
+    let sealed = host.path("sealed");
+    std::fs::create_dir(&sealed).unwrap();
+    set_mode(&sealed, 0o300);
+    if std::fs::File::open(&sealed).is_ok() {
+        eprintln!("skipped: root ignores directory modes");
+        return;
+    }
+    let file = |name: &str| SignedFile {
+        applied: sealed.join("applied").join(name),
+        local: Some(host.path(name)),
+    };
+
+    let rt = host
+        .boot_with(PolicyPaths {
+            policy: file("policy.yaml"),
+            rule_packs: file("rule-packs.yaml"),
+        })
+        .expect("boot");
+
+    assert!(!sealed.join("applied").exists());
+    assert!(host.denies("local-rule"));
+    assert_eq!(host.apply_policy(1, &policy("signed-rule"))["ok"], false);
+    set_mode(&sealed, 0o700);
+    assert_accepted(&host.apply_policy(1, &policy("signed-rule")), 1);
+    assert_eq!(
+        host.text("sealed/applied/policy.yaml"),
+        policy("signed-rule")
+    );
     rt.shutdown_timeout(STOP_DEADLINE);
 }

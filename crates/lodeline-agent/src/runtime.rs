@@ -18,7 +18,7 @@ use lodeline_core::event::{
 use lodeline_core::policy::deployment::ArtifactKind;
 use lodeline_core::policy::expand::{expand_per_user, EnvLookup, UserEnumerator};
 use lodeline_core::policy::pubkeys::Keystore;
-use lodeline_core::policy::{merge_on_this_host, settle_pending, Tier};
+use lodeline_core::policy::{create_dir_durably, merge_on_this_host, settle_pending, Tier};
 use lodeline_core::sink::jsonl::JsonlSink;
 use lodeline_core::state::HashCache;
 use lodeline_core::stats::Stats;
@@ -137,13 +137,14 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     } else {
         None
     };
+    let policy_file_loaded = user_doc.is_some();
     // #134 review — ensure the apply dir exists so the dedicated rule-packs
     // watcher can arm itself on first boot (it watches the parent dir; a missing
     // dir keeps the watcher permanently dead until restart).  Best-effort: on
     // error we log a warning and continue — the dir may be unwritable, and the
     // watcher re-arms if it appears later.
     if let Some(dir) = policy_path_for_apply.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
+        if let Err(e) = create_dir_durably(dir) {
             tracing::warn!(
                 error = ?e,
                 path = %dir.display(),
@@ -589,6 +590,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         tokio::spawn(crate::policy_reload_task::run(
             crate::policy_reload_task::ReloadCtx {
                 paths: cfg.policy_paths.clone(),
+                policy_file_loaded,
                 policy_version_rx: policy_version_tx.subscribe(),
                 rule_packs_version_rx,
                 targets_tx,
