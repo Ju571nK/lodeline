@@ -45,7 +45,7 @@ $ echo $?
 
 - Pass the **whole** command line in `--command` (not split), so Lodeline sees exactly
   what the shell will run and its deny-rule check matches what it would enforce.
-- On a host with a root agent, run this as a user in the `lodeline` group. Otherwise
+- On a packaged Linux host, run this as a user in the `lodeline` group. Otherwise
   `assess` warns on stderr and cannot see rules applied from a fleet server.
 - This skill uses the `lodeline assess` CLI, which needs no extra setup. For richer,
   live-policy checks (and to assess MCP server definitions too) you can instead
