@@ -7,6 +7,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-02
+
 ### Fixed
 
 - A policy reload that keeps the previous state now runs again on each 5-second root
