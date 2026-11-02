@@ -291,6 +291,24 @@ fn assess_user_layers(
     let mut out = Vec::new();
     let permissions = effective.as_ref().and_then(|v| v.get("permissions"));
     emit_sandbox_reasons(&layers, permissions, &mut out);
+    let get = |key| effective.as_ref().and_then(|v| v.get(key));
+    // The daemon has no cwd, so a trust decision on any project stands in for the active one.
+    let trust_decided = get("projects")
+        .and_then(Value::as_table)
+        .is_some_and(|projects| {
+            projects.values().any(|p| {
+                matches!(
+                    p.get("trust_level").and_then(Value::as_str),
+                    Some("trusted" | "untrusted")
+                )
+            })
+        });
+    emit_workspace_write_reasons(
+        &layers,
+        get("sandbox_workspace_write"),
+        trust_decided,
+        &mut out,
+    );
     if let Some(val) = &effective {
         // #200 — whether a human is asked before a tool runs.
         emit_approval_policy_reasons(val, &mut out);
@@ -324,16 +342,68 @@ fn emit_sandbox_reasons(
     permissions: Option<&Value>,
     out: &mut Vec<AiGuardReason>,
 ) {
-    let disabled = layers.iter().rev().find_map(|layer| {
+    let disabled = match sandbox_setting(layers) {
+        Some(SandboxSetting::Profile(profile)) => profile_writes_everywhere(profile, permissions),
+        Some(SandboxSetting::Mode(mode)) => mode == "danger-full-access",
+        None => false,
+    };
+    if disabled {
+        out.push(AiGuardReason::SandboxDisabled);
+    }
+}
+
+enum SandboxSetting<'a> {
+    Profile(&'a str),
+    Mode(&'a str),
+}
+
+/// The key that picks the sandbox: the highest layer setting either key
+/// decides, and inside it `default_permissions` wins over `sandbox_mode`.
+fn sandbox_setting(layers: &[CodexLayer]) -> Option<SandboxSetting<'_>> {
+    layers.iter().rev().find_map(|layer| {
         let config = layer.config.as_ref()?;
         let key = |k| config.get(k).and_then(Value::as_str);
-        match (key("default_permissions"), key("sandbox_mode")) {
-            (Some(profile), _) => Some(profile_writes_everywhere(profile, permissions)),
-            (None, Some(mode)) => Some(mode == "danger-full-access"),
-            (None, None) => None,
-        }
-    });
-    if disabled == Some(true) {
+        key("default_permissions")
+            .map(SandboxSetting::Profile)
+            .or_else(|| key("sandbox_mode").map(SandboxSetting::Mode))
+    })
+}
+
+/// #200 — `[sandbox_workspace_write]` applies only in `workspace-write` mode.
+/// With no sandbox key in any layer, Codex picks that mode in a folder with a
+/// trust decision and `read-only` elsewhere (`derive_permission_profile`,
+/// rust-v0.166.0); a `default_permissions` profile ignores the table.
+/// `network_access = true` opens the network the mode otherwise blocks, so it
+/// scores as `NoSandbox`, below a disabled sandbox. A writable root on the
+/// whole disk or the home dir writes everywhere, as `:danger-full-access`
+/// does. Not modeled: Windows with its native sandbox off falls back to
+/// `read-only` (`effective_sandbox_mode`).
+fn emit_workspace_write_reasons(
+    mode_layers: &[CodexLayer],
+    settings: Option<&Value>,
+    trust_decided: bool,
+    out: &mut Vec<AiGuardReason>,
+) {
+    let in_force = match sandbox_setting(mode_layers) {
+        Some(SandboxSetting::Mode(mode)) => mode == "workspace-write",
+        Some(SandboxSetting::Profile(_)) => false,
+        None => trust_decided,
+    };
+    let Some(settings) = settings.filter(|_| in_force) else {
+        return;
+    };
+    if settings.get("network_access").and_then(Value::as_bool) == Some(true) {
+        out.push(AiGuardReason::NoSandbox {
+            executor: "workspace_write_network".to_string(),
+        });
+    }
+    let roots = settings.get("writable_roots").and_then(Value::as_array);
+    if roots
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(writable_root_everywhere)
+    {
         out.push(AiGuardReason::SandboxDisabled);
     }
 }
@@ -344,7 +414,7 @@ fn emit_sandbox_reasons(
 /// rust-v0.164.0). `:read-only` and `:workspace`, the only built-in parents
 /// Codex accepts, write nowhere outside the workspace roots and temp dirs.
 /// Extra writable paths and `network.enabled = true` are not scored: no
-/// reason kind fits them, as with `sandbox_workspace_write`.
+/// reason kind fits them.
 fn profile_writes_everywhere(name: &str, permissions: Option<&Value>) -> bool {
     if name == ":danger-full-access" {
         return true;
@@ -379,29 +449,43 @@ fn profile_writes_everywhere(name: &str, permissions: Option<&Value>) -> bool {
 /// (`compile_read_write_glob_path`, rust-v0.166.0); a special path such as
 /// `:root` only matches exactly (`parse_special_path`).
 fn grants_write_everywhere(path: &str, access: &Value) -> bool {
-    let everywhere = |p: &str| {
-        let p = p.strip_suffix("/**").unwrap_or(p);
-        let trimmed = p.trim_end_matches(['/', '\\']);
-        let drive_root = trimmed.len() == 2
-            && trimmed.as_bytes()[0].is_ascii_alphabetic()
-            && trimmed.ends_with(':');
-        (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
-    };
     match access {
-        Value::String(access) => access == "write" && everywhere(path),
+        Value::String(access) => access == "write" && writes_everywhere(path),
         Value::Table(scoped) => scoped.iter().any(|(sub, access)| {
             access.as_str() == Some("write")
                 && if sub == "." {
                     // Codex compiles a scoped entry's own key as an exact path.
-                    !path.ends_with("/**") && everywhere(path)
+                    !path.ends_with("/**") && writes_everywhere(path)
                 } else {
                     matches!(path, ":workspace_roots" | ":project_roots")
                         && sub.starts_with('~')
-                        && everywhere(sub)
+                        && writes_everywhere(sub)
                 }
         }),
         _ => false,
     }
+}
+
+/// A path naming the whole disk or the home dir.
+fn writes_everywhere(p: &str) -> bool {
+    let p = p.strip_suffix("/**").unwrap_or(p);
+    let trimmed = p.trim_end_matches(['/', '\\']);
+    let drive_root =
+        trimmed.len() == 2 && trimmed.as_bytes()[0].is_ascii_alphabetic() && trimmed.ends_with(':');
+    (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
+}
+
+/// A `writable_roots` entry naming the whole disk or the home dir. Codex
+/// reads each as a plain path with only `~` and `~/` expanded, so `/**`,
+/// `~/**` and `:root` are ordinary relative or literal paths there
+/// (`AbsolutePathBuf`, rust-v0.166.0).
+fn writable_root_everywhere(p: &str) -> bool {
+    let trimmed = p.trim_end_matches(['/', '\\']);
+    let drive_root = trimmed.len() == 2
+        && trimmed.len() < p.len()
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && trimmed.ends_with(':');
+    (trimmed.is_empty() && !p.is_empty()) || trimmed == "~" || drive_root
 }
 
 /// #200 — `approval_policy` decides whether a human is asked before a tool
@@ -473,11 +557,23 @@ pub(super) const MAX_STANDING_APPROVAL_REASONS: usize = 32;
 ///
 /// Only the program name of a prefix leaves the host, whatever the layer:
 /// later argv words are free text that can hold a token or URL.
+///
+/// A host that a `network_rule` allows is a standing approval too: Codex adds
+/// it to the network proxy's allowlist (`network_proxy_spec.rs`,
+/// rust-v0.166.0). It is reported as the bare host under the same cap.
 fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
-    let mut patterns: Vec<String> = layers
+    let texts: Vec<String> = layers
         .iter()
-        .flat_map(|layer| allow_patterns_in_rules_dir(&layer.dir.join("rules")))
+        .flat_map(|layer| rules_texts(&layer.dir.join("rules")))
         .collect();
+    let prefixes = texts
+        .iter()
+        .flat_map(|text| allow_patterns_in_rules_text(text))
+        .map(|words| program_basename(&words[0]));
+    let hosts = allowed_network_hosts(&texts)
+        .into_iter()
+        .map(|host| program_basename(&host));
+    let mut patterns: Vec<String> = prefixes.chain(hosts).collect();
     patterns.sort();
     patterns.dedup();
     let total = patterns.len();
@@ -537,8 +633,8 @@ fn program_basename(word: &str) -> String {
     }
 }
 
-/// Allowed prefixes in one `rules/` dir, at most `MAX_RULES_FILES` files.
-fn allow_patterns_in_rules_dir(rules_dir: &Path) -> Vec<String> {
+/// The `.rules` files in one `rules/` dir, at most `MAX_RULES_FILES`.
+fn rules_texts(rules_dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(rules_dir) else {
         return Vec::new();
     };
@@ -551,7 +647,7 @@ fn allow_patterns_in_rules_dir(rules_dir: &Path) -> Vec<String> {
     files.sort();
     files.truncate(MAX_RULES_FILES);
 
-    let mut patterns: Vec<String> = Vec::new();
+    let mut texts = Vec::new();
     for file in files {
         match std::fs::metadata(&file) {
             Ok(m) if m.len() > MAX_RULES_FILE_BYTES => {
@@ -561,16 +657,11 @@ fn allow_patterns_in_rules_dir(rules_dir: &Path) -> Vec<String> {
             Ok(_) => {}
             Err(_) => continue,
         }
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        patterns.extend(
-            allow_patterns_in_rules_text(&text)
-                .iter()
-                .map(|words| program_basename(&words[0])),
-        );
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            texts.push(text);
+        }
     }
-    patterns
+    texts
 }
 
 /// Strip `#` and `//` comments that are outside string literals. Without this,
@@ -635,11 +726,11 @@ fn code_chars(s: &str) -> impl Iterator<Item = (usize, char)> + '_ {
     })
 }
 
-/// One `prefix_rule( ... )` invocation's argument text. Scans the whole file
+/// One `<name>( ... )` invocation's argument text. Scans the whole file
 /// rather than a line at a time: the documented form spans several lines.
 /// Only a call at the top level counts: not one inside a string literal, not
 /// a method call `x.prefix_rule(`, and not a longer name `my_prefix_rule(`.
-fn rule_invocations(text: &str) -> Vec<&str> {
+fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut prev: Option<char> = None;
     let mut resume = 0usize;
@@ -648,12 +739,12 @@ fn rule_invocations(text: &str) -> Vec<&str> {
         if i < resume {
             continue;
         }
-        if !text[i..].starts_with("prefix_rule")
+        if !text[i..].starts_with(name)
             || before.is_some_and(|b| b.is_alphanumeric() || b == '_' || b == '.')
         {
             continue;
         }
-        let after = &text[i + "prefix_rule".len()..];
+        let after = &text[i + name.len()..];
         let Some(body) = after.trim_start().strip_prefix('(') else {
             continue;
         };
@@ -810,7 +901,7 @@ fn quoted_string(s: &str) -> Option<String> {
 fn allow_patterns_in_rules_text(text: &str) -> Vec<Vec<String>> {
     let stripped = strip_comments(text);
     let mut out = Vec::new();
-    for args in rule_invocations(&stripped) {
+    for args in rule_invocations(&stripped, "prefix_rule") {
         let decides_allow = match top_level_arg(args, "decision") {
             None => true,
             Some(v) => {
@@ -827,6 +918,65 @@ fn allow_patterns_in_rules_text(text: &str) -> Vec<Vec<String>> {
         }
     }
     out
+}
+
+/// Hosts the `network_rule` calls in `texts`, low layer to high, leave
+/// allowed. The `decision` is required; a later `deny` (or `forbidden`) for
+/// the same host undoes an `allow` and the reverse, and `prompt` changes
+/// neither (`compiled_network_domains`, rust-v0.166.0).
+fn allowed_network_hosts(texts: &[String]) -> Vec<String> {
+    let mut allowed: Vec<String> = Vec::new();
+    for text in texts {
+        let stripped = strip_comments(text);
+        for args in rule_invocations(&stripped, "network_rule") {
+            let host = string_arg(args, "host", 0).and_then(|h| network_host(&h));
+            let (Some(host), Some(decision)) = (host, string_arg(args, "decision", 2)) else {
+                continue;
+            };
+            match decision.as_str() {
+                "allow" if !allowed.contains(&host) => allowed.push(host),
+                "deny" | "forbidden" => allowed.retain(|h| *h != host),
+                _ => {}
+            }
+        }
+    }
+    allowed
+}
+
+/// String argument `name`, passed by keyword or at `position`.
+fn string_arg(args: &str, name: &str, position: usize) -> Option<String> {
+    let text = match top_level_arg(args, name) {
+        Some(value) => *split_top_level(value).first()?,
+        None => *split_top_level(args).get(position)?,
+    };
+    quoted_string(text)
+}
+
+/// A `network_rule` host as Codex normalizes it, port and trailing dot
+/// dropped and lowercased, or None where Codex rejects the rule
+/// (`normalize_network_rule_host`, rust-v0.166.0).
+fn network_host(raw: &str) -> Option<String> {
+    let host = raw.trim();
+    if ["://", "/", "?", "#"].iter().any(|s| host.contains(s)) {
+        return None;
+    }
+    let is_port = |port: &str| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => {
+            let (inside, rest) = bracketed.split_once(']')?;
+            if !rest.is_empty() && !rest.strip_prefix(':').is_some_and(is_port) {
+                return None;
+            }
+            inside
+        }
+        None => match host.split_once(':') {
+            Some((name, port)) if !name.is_empty() && is_port(port) => name,
+            _ => host,
+        },
+    };
+    let host = host.trim_end_matches('.').trim().to_ascii_lowercase();
+    let valid = !host.is_empty() && !host.contains('*') && !host.contains(char::is_whitespace);
+    valid.then_some(host)
 }
 
 /// Verified schema: hooks live under the top-level `[hooks]` table, keyed by
@@ -866,18 +1016,56 @@ pub(crate) fn emit_hook_reasons(
                     );
                     continue;
                 }
-                // Only process `type = "command"` entries; skip "prompt" / "agent".
-                let handler_type = handler.get("type").and_then(Value::as_str);
-                if !matches!(handler_type, Some("command")) {
-                    continue;
+                match handler.get("type").and_then(Value::as_str) {
+                    Some("command") => {
+                        if let Some(cmd) = hook_command(handler, cfg!(windows)) {
+                            claude_code::classify_command(cmd, event_name, out);
+                        }
+                    }
+                    Some("mcp_tool") => emit_mcp_tool_hook_reason(handler, event_name, out),
+                    // Codex skips `prompt` and `agent` handlers.
+                    _ => {}
                 }
-                let Some(cmd) = handler.get("command").and_then(Value::as_str) else {
-                    continue;
-                };
-                claude_code::classify_command(cmd, event_name, out);
             }
         }
     }
+}
+
+/// #200 — the command Codex runs for a `command` handler. On Windows,
+/// `commandWindows` (alias `command_windows`) replaces `command`
+/// (`hooks/src/engine/discovery.rs`, rust-v0.166.0).
+fn hook_command(handler: &Value, windows: bool) -> Option<&str> {
+    let windows = windows
+        .then(|| {
+            handler
+                .get("commandWindows")
+                .or_else(|| handler.get("command_windows"))
+        })
+        .flatten();
+    windows.or_else(|| handler.get("command"))?.as_str()
+}
+
+/// #200 — an `mcp_tool` handler hands the event payload to a configured MCP
+/// server, a separate trust domain that may be remote, as for Claude Code.
+/// Codex skips one on `SessionEnd` or with an empty server or tool
+/// (`discovery.rs`, rust-v0.166.0).
+fn emit_mcp_tool_hook_reason(handler: &Value, event_name: &str, out: &mut Vec<AiGuardReason>) {
+    let field = |key| {
+        handler
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+    };
+    if event_name == "SessionEnd" || field("tool").is_none() {
+        return;
+    }
+    let Some(server) = field("server") else {
+        return;
+    };
+    out.push(AiGuardReason::HookForwardsToolCalls {
+        hook_event: event_name.to_string(),
+        destination: format!("mcp:{}", super::claude_project_settings::safe_name(server)),
+    });
 }
 
 /// Phase 3b.3 — collect external script paths from a codex config.toml.
@@ -903,7 +1091,7 @@ pub(crate) fn collect_external_script_paths_from_config(
                 if !matches!(handler.get("type").and_then(Value::as_str), Some("command")) {
                     continue;
                 }
-                let Some(cmd) = handler.get("command").and_then(Value::as_str) else {
+                let Some(cmd) = hook_command(handler, cfg!(windows)) else {
                     continue;
                 };
                 if let Some(candidate) = claude_code::external_path_from_command(cmd, hooks_dir) {
@@ -1083,9 +1271,12 @@ impl AiGuardParser for CodexProjectParser {
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        let layer = CodexLayer::read(&self.repo_root.join(".codex"))?;
-        let user = CodexLayer::read_lenient(&home_dir.join(".codex"));
-        let layers = std::slice::from_ref(&layer);
+        let both = [
+            CodexLayer::read_lenient(&home_dir.join(".codex")),
+            CodexLayer::read(&self.repo_root.join(".codex"))?,
+        ];
+        let [user, layer] = &both;
+        let layers = std::slice::from_ref(layer);
         let mut out = Vec::new();
         // #200 — scored whatever `[projects."<path>"].trust_level` says: Codex
         // re-asks for folder trust on every launch in an undecided or untrusted
@@ -1100,6 +1291,12 @@ impl AiGuardParser for CodexProjectParser {
             }
         }
         emit_sandbox_reasons(layers, Some(&permissions), &mut out);
+        // The user layer can still pick the mode the project's table needs.
+        let workspace_write = layer
+            .config
+            .as_ref()
+            .and_then(|c| c.get("sandbox_workspace_write"));
+        emit_workspace_write_reasons(&both, workspace_write, true, &mut out);
         if let Some(val) = &layer.config {
             emit_approval_policy_reasons(val, &mut out);
         }
@@ -1122,7 +1319,7 @@ impl AiGuardParser for CodexProjectParser {
                 });
             }
         }
-        emit_rules_reasons(&[&layer], &mut out);
+        emit_rules_reasons(&[layer], &mut out);
         // #146 — AGENTS.md is Codex's first-class instruction file.
         super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
         Ok(out)
@@ -2562,16 +2759,22 @@ mcp_elicitations = "on-request"
     #[test]
     fn prefix_rule_inside_a_longer_identifier_is_not_a_rule() {
         assert_eq!(
-            rule_invocations(concat!(
-                "my_prefix_rule(pattern=[\"zzz\"])\nxprefix_rule(1)\n",
-                "x.prefix_rule(pattern=[\"m\"])\n",
-                "note(\"prefix_rule(pattern=[\\\"s\\\"])\")\n",
-                "note('prefix_rule(3)')\n",
-            )),
+            rule_invocations(
+                concat!(
+                    "my_prefix_rule(pattern=[\"zzz\"])\nxprefix_rule(1)\n",
+                    "x.prefix_rule(pattern=[\"m\"])\n",
+                    "note(\"prefix_rule(pattern=[\\\"s\\\"])\")\n",
+                    "note('prefix_rule(3)')\n",
+                ),
+                "prefix_rule"
+            ),
             Vec::<&str>::new()
         );
         assert_eq!(
-            rule_invocations("a=1; prefix_rule(pattern=[\"git\"])\n(prefix_rule(2))"),
+            rule_invocations(
+                "a=1; prefix_rule(pattern=[\"git\"])\n(prefix_rule(2))",
+                "prefix_rule"
+            ),
             vec!["pattern=[\"git\"]", "2"]
         );
     }
@@ -2958,6 +3161,244 @@ mcp_elicitations = "on-request"
                 server_name: "apps.mail".to_string(),
                 tools: vec!["send".to_string()],
             }]
+        );
+    }
+
+    // ─── #200: network rules, workspace network, hook handlers ────────────
+
+    #[test]
+    fn allow_network_rule_reports_the_host_only() {
+        let dir = tempdir().unwrap();
+        write_rules(
+            dir.path(),
+            "net.rules",
+            "network_rule(host=\"API.Example.com:443\", protocol=\"https\", decision=\"allow\", justification=\"/home/alice\")\n\
+             network_rule(\"pypi.org\", \"https\", \"allow\")\n\
+             network_rule(host=\"blocked.example\", protocol=\"https\", decision=\"prompt\")\n\
+             network_rule(host=\"later.example\", protocol=\"https\", decision=\"allow\")\n\
+             network_rule(host=\"later.example\", protocol=\"http\", decision=\"deny\")\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert_eq!(
+            approvals(&reasons),
+            vec!["api.example.com", "pypi.org"],
+            "{reasons:?}"
+        );
+    }
+
+    /// A later rule for the same host wins either way; `forbidden` is an
+    /// alias of `deny`, and Codex rejects a wildcard or malformed host.
+    #[test]
+    fn network_rules_follow_codex_order_and_host_validation() {
+        let rule = |host: &str, decision: &str| {
+            format!("network_rule(host=\"{host}\", protocol=\"https\", decision=\"{decision}\")\n")
+        };
+        let cases = [
+            (
+                rule("a.example", "deny") + &rule("a.example", "allow"),
+                vec!["a.example"],
+            ),
+            (rule("a.example", "forbidden"), vec![]),
+            (rule("*.example.com", "allow"), vec![]),
+            (rule("[::1]junk", "allow"), vec![]),
+            (rule("[::1]:", "allow"), vec![]),
+            (rule("[::1]:8080", "allow"), vec!["<redacted>"]),
+        ];
+        for (text, hosts) in cases {
+            let dir = tempdir().unwrap();
+            write_rules(dir.path(), "net.rules", &text);
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(approvals(&reasons), hosts, "{text}");
+        }
+    }
+
+    #[test]
+    fn project_network_rule_is_reported() {
+        let (dir, p) = project_with("");
+        let rules = p.repo_root.join(".codex").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("a.rules"),
+            "network_rule(host=\"pypi.org\", protocol=\"https\", decision=\"allow\")\n",
+        )
+        .unwrap();
+        let reasons = p.assess(dir.path()).unwrap();
+        assert_eq!(approvals(&reasons), vec!["pypi.org"], "{reasons:?}");
+    }
+
+    fn workspace_network(reasons: &[AiGuardReason]) -> bool {
+        reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::NoSandbox { executor } if executor == "workspace_write_network"))
+    }
+
+    #[test]
+    fn workspace_write_network_access_is_scored() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = true\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(workspace_network(&reasons), "{reasons:?}");
+        assert!(!sandbox_disabled(&reasons), "{reasons:?}");
+    }
+
+    /// With no sandbox key set, Codex runs workspace-write in any folder with
+    /// a trust decision, and read-only elsewhere.
+    #[test]
+    fn workspace_network_access_follows_the_effective_mode() {
+        let cases = [
+            ("sandbox_mode = \"read-only\"\n", false),
+            ("default_permissions = \":workspace\"\n", false),
+            ("", false),
+            ("[projects.\"/src/app\"]\ntrust_level = \"trusted\"\n", true),
+            // Codex counts `untrusted` as a trust decision too
+            // (`default_builtin_permission_profile_name`, rust-v0.166.0).
+            (
+                "[projects.\"/src/app\"]\ntrust_level = \"untrusted\"\n",
+                true,
+            ),
+        ];
+        for (mode, scored) in cases {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!("{mode}[sandbox_workspace_write]\nnetwork_access = true\n"),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(
+                workspace_network(&reasons),
+                scored,
+                "{mode:?} -> {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_workspace_network_access_is_scored() {
+        let (dir, p) = project_with("[sandbox_workspace_write]\nnetwork_access = true\n");
+        assert!(workspace_network(&p.assess(dir.path()).unwrap()));
+
+        write_config(dir.path(), "sandbox_mode = \"read-only\"\n");
+        assert!(!workspace_network(&p.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn writable_root_on_the_whole_disk_or_home_disables_the_sandbox() {
+        for (roots, disabled) in [
+            ("[\"/\"]", true),
+            ("[\"/opt/cache\", \"~\"]", true),
+            ("[\"/opt/cache\", \"~/work\"]", false),
+            ("[\"~/\"]", true),
+            ("[\"C:\\\\\"]", true),
+            // Codex expands only `~` and `~/`, and has no special paths here.
+            ("[\":root\"]", false),
+            ("[\"~/**\"]", false),
+            ("[\"/**\"]", false),
+        ] {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!(
+                    "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = {roots}\n"
+                ),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(
+                sandbox_disabled(&reasons),
+                disabled,
+                "{roots} -> {reasons:?}"
+            );
+        }
+    }
+
+    /// Codex runs `commandWindows` (or `command_windows`) instead of
+    /// `command` on Windows, and ignores it elsewhere.
+    #[test]
+    fn windows_hook_command_is_scanned_on_windows_only() {
+        for key in ["commandWindows", "command_windows"] {
+            let dir = tempdir().unwrap();
+            let codex = dir.path().join(".codex");
+            std::fs::create_dir_all(&codex).unwrap();
+            std::fs::write(
+                codex.join("hooks.json"),
+                format!(
+                    r#"{{"hooks":{{"PreToolUse":[{{"hooks":[{{"type":"command","command":"echo ok","{key}":"rm -rf /"}}]}}]}}}}"#
+                ),
+            )
+            .unwrap();
+            write_config(
+                dir.path(),
+                &trusted(&codex.join("hooks.json"), "pre_tool_use", 0, 0),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(
+                has_destructive_inline(&reasons),
+                cfg!(windows),
+                "{key}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_command_picks_the_windows_command_on_windows_only() {
+        let handler = |key: &str| -> Value {
+            toml::from_str(&format!("command = \"unix\"\n{key} = \"win\"\n")).unwrap()
+        };
+        for key in ["commandWindows", "command_windows"] {
+            assert_eq!(hook_command(&handler(key), true), Some("win"), "{key}");
+            assert_eq!(hook_command(&handler(key), false), Some("unix"), "{key}");
+        }
+        let unix_only: Value = toml::from_str("command = \"unix\"\n").unwrap();
+        assert_eq!(hook_command(&unix_only, true), Some("unix"));
+    }
+
+    #[test]
+    fn workspace_network_access_false_is_not_scored() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = false\n",
+        );
+        assert!(!workspace_network(&CodexParser.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn mcp_tool_hook_is_reported_as_forwarding() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join(".codex").join("config.toml");
+        write_config(
+            dir.path(),
+            &(r#"
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.hooks]]
+type = "mcp_tool"
+server = "auditor"
+tool = "review"
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "mcp_tool"
+server = "ignored"
+tool = "review"
+"#
+            .to_string()
+                + &trusted(&config, "pre_tool_use", 0, 0)
+                + &trusted(&config, "session_end", 0, 0)),
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        let forwards: Vec<_> = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::HookForwardsToolCalls { .. }))
+            .collect();
+        assert_eq!(
+            forwards,
+            vec![&AiGuardReason::HookForwardsToolCalls {
+                hook_event: "PreToolUse".to_string(),
+                destination: "mcp:auditor".to_string(),
+            }],
+            "{reasons:?}"
         );
     }
 }
