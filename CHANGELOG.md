@@ -46,6 +46,23 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   those servers. It scores an identical definition once. It does not yet read
   `CLAUDE_CONFIG_DIR`, `managed-mcp.json`, or plugin MCP servers. (#199)
 
+- The Codex scanner now scores `approval_policy` and `default_permissions` in a
+  repository's `.codex/config.toml`, and the rule files in the repository's
+  `.codex/rules/`. The user scan also reads the system `/etc/codex/rules` folder, which
+  Codex always loads. The agent watches both new rules folders. Project settings count at
+  full weight whatever the project's trust level, because Codex asks for folder trust
+  again on each start and the prompt does not list the project's settings. A new reason
+  kind, `mcp_tools_auto_approved` (1.0), reports an MCP server with a tool set to
+  `approval_mode = "approve"`, and its evidence holds the server name and the tool names.
+  A server with `default_tools_approval_mode = "approve"` reports the existing
+  `trusted_mcp_server`. Evidence from repository and system rules records only the
+  program name, which is the basename when it uses safe characters, is at most 32
+  characters, and is not shaped like a token. Otherwise it records `<redacted>`. Evidence
+  from `~/.codex/rules` is unchanged. Upgrade `lodeline-server` before the agents. An
+  older server rejects the one event that carries `mcp_tools_auto_approved`, not the
+  batch. The scanner does not yet read Codex profile layers, `apps.*.tools` approval
+  modes, or custom `[permissions.x]` profiles. (#200)
+
 ### Changed
 
 - A host with a Claude Code settings file and no effective `defaultMode` now reports
@@ -84,6 +101,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   every PowerShell call is blocked until the agent is upgraded, so upgrade the agent
   before the hook on fail-closed installs. An older hook with a newer agent works as
   before. (#199)
+- The Codex scanner now follows current Codex, checked against `rust-v0.166.0`. A
+  `prefix_rule` with no `decision` counts as an allow, as Codex treats it.
+  `default_permissions = ":danger-full-access"` now reports `sandbox_disabled`. The
+  highest config layer that sets `default_permissions` or `sandbox_mode` decides, and
+  within one layer `default_permissions` wins. MCP servers with `enabled = false` are no
+  longer reported, because Codex does not start them. The scores of hosts with these
+  settings change on upgrade. (#200)
 
 ### Fixed
 
