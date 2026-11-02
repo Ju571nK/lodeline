@@ -1126,6 +1126,8 @@ pub(crate) fn emit_mcp_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
 /// name connects once in Claude Code, so it must be scored once; settings
 /// definitions take precedence (a `.mcp.json` server whose name already
 /// appears in settings is skipped).
+// shortcut: a deployed managed-mcp.json stops these servers loading, but they are
+// still scored (over-report); pass the managed set in if that shows up as noise.
 pub(crate) fn emit_project_mcp_reasons(
     settings: &Value,
     mcp_json: Option<&Value>,
