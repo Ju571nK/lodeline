@@ -81,6 +81,11 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         AiGuardReason::HookForwardsToolCalls { .. } => "hook_forwards_tool_calls",
         AiGuardReason::UnattendedLoopPrompt { .. } => "unattended_loop_prompt",
         AiGuardReason::StandingCommandApproval { .. } => "standing_command_approval",
+        AiGuardReason::ProjectSettingsPluginEnabled { .. } => "project_settings_plugin_enabled",
+        AiGuardReason::ProjectSettingsHelperCommand { .. } => "project_settings_helper_command",
+        AiGuardReason::ProjectSettingsEnvOverride { .. } => "project_settings_env_override",
+        AiGuardReason::ProjectSettingsUiCommand { .. } => "project_settings_ui_command",
+        AiGuardReason::ProjectSettingsMarketplace { .. } => "project_settings_marketplace",
     }
 }
 
@@ -114,6 +119,11 @@ pub const DANGEROUS_TOGGLE_KINDS: &[&str] = &[
     "hook_forwards_tool_calls",
     "unattended_loop_prompt",
     "standing_command_approval",
+    // #199 — a repository change that runs code or reroutes traffic before
+    // anyone accepts the trust dialog.
+    "project_settings_plugin_enabled",
+    "project_settings_helper_command",
+    "project_settings_env_override",
 ];
 
 /// The set of dangerous-toggle kind keys present in a reason set.
@@ -194,6 +204,15 @@ impl Rubric {
         w.insert("unattended_loop_prompt", 2.5);
         // #200 — a persistent, unprompted approval for a command prefix.
         w.insert("standing_command_approval", 2.0);
+        // #199 — repository settings keys, ranked by consent. A plugin enable
+        // applies in every session before trust; helpers and `env` apply
+        // before trust only in `claude -p`, like a project hook (`no_sandbox`
+        // 2.0); interface commands and marketplaces wait for the dialog.
+        w.insert("project_settings_plugin_enabled", 2.5);
+        w.insert("project_settings_helper_command", 2.0);
+        w.insert("project_settings_env_override", 2.0);
+        w.insert("project_settings_ui_command", 1.0);
+        w.insert("project_settings_marketplace", 1.0);
         Rubric {
             weights: w,
             overridden: HashSet::new(),
@@ -565,7 +584,7 @@ mod tests {
             r.weights.get("mcp_read_only_hint_contradiction"),
             Some(&2.0)
         );
-        assert_eq!(r.weights.len(), 33);
+        assert_eq!(r.weights.len(), 38);
     }
 
     #[test]

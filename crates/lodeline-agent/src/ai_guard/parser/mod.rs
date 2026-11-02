@@ -5,6 +5,7 @@ pub mod antigravity;
 pub mod claude_code;
 pub(crate) mod claude_components;
 pub mod claude_desktop;
+pub(crate) mod claude_project_settings;
 pub mod codex;
 pub mod codex_tool_cache;
 pub mod continue_dev;

@@ -95,6 +95,21 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         StandingCommandApproval { .. } => {
             "A standing rule auto-approves a command prefix without prompting — narrow the prefix or remove the rule."
         }
+        ProjectSettingsPluginEnabled { .. } => {
+            "The repository's Claude Code settings enable a plugin, which loads before the trust dialog — review the plugin, or set it to false in .claude/settings.local.json."
+        }
+        ProjectSettingsHelperCommand { .. } => {
+            "The repository's Claude Code settings define a helper command that `claude -p` runs in an untrusted folder — review it, and keep credential helpers in user or managed settings."
+        }
+        ProjectSettingsEnvOverride { .. } => {
+            "The repository's Claude Code env block reroutes traffic, loads code, or weakens TLS — review the variable, and set such variables in your own environment instead."
+        }
+        ProjectSettingsUiCommand { .. } => {
+            "The repository's Claude Code settings run a status line or file-suggestion command once the folder is trusted — review the command before trusting it."
+        }
+        ProjectSettingsMarketplace { .. } => {
+            "The repository's Claude Code settings register a plugin marketplace once the folder is trusted — confirm you trust the source first."
+        }
     }
 }
 
