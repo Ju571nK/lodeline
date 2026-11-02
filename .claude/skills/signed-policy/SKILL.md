@@ -105,7 +105,7 @@ Sync commit: `1042af0961c67860f7b9a0c2f1b89ad7466a4471`
 | `target, local` | `crates/lodeline-agent/src/runtime.rs` | `default_policy_paths` |
 | `target, local` | `crates/lodeline-agent/src/runtime.rs` | `resolve_policy_paths_unix` |
 | `InForce` | `crates/lodeline-agent/src/runtime.rs` | `policy_path_for_command` |
-| `Boot` | `crates/lodeline-agent/src/runtime.rs` | `let policy_path_for_apply = cfg..let policy_file_loaded` |
+| `Boot` | `crates/lodeline-agent/src/runtime.rs` | `let policy_path_for_apply = cfg..let bundle_doc_for_ctx` |
 | `Settle, Rename` | `crates/lodeline-agent/src/runtime.rs` | `let apply_ctx = Arc::new..apply_lock: Default::default()` |
 | `ReloadCheck, ReloadRead, loaded, retry` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..applied_policy: None,` |
 | `ReloadCheck, ReloadRetry, ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
