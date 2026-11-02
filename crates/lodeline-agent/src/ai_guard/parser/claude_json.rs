@@ -43,13 +43,12 @@ impl<'de> Deserialize<'de> for LenientProject {
     }
 }
 
-/// Read `<home>/.claude.json`. A missing, oversized, unreadable or malformed
+/// Read Claude Code's `.claude.json` at `path`. A missing, oversized, unreadable or malformed
 /// file yields no servers: it must not blind the settings checks, and the
 /// error text is not logged because it can quote file content.
-pub(crate) fn read(home_dir: &Path) -> ClaudeJsonMcp {
-    let path = home_dir.join(".claude.json");
+pub(crate) fn read(path: &Path) -> ClaudeJsonMcp {
     let mut bytes = Vec::new();
-    let read = std::fs::File::open(&path)
+    let read = std::fs::File::open(path)
         .and_then(|f| f.take(MAX_CLAUDE_JSON_BYTES + 1).read_to_end(&mut bytes));
     match read {
         Ok(_) if bytes.len() as u64 > MAX_CLAUDE_JSON_BYTES => {
@@ -128,7 +127,7 @@ mod tests {
     }
 
     fn mcp_reasons(home: &Path) -> Vec<AiGuardReason> {
-        ClaudeCodeParser
+        ClaudeCodeParser::default()
             .assess(home)
             .unwrap()
             .into_iter()
@@ -167,6 +166,41 @@ mod tests {
         );
         let reasons = mcp_reasons(home.path());
         assert_eq!(server_names(&reasons), ["local", "remote"], "{reasons:?}");
+    }
+
+    /// `CLAUDE_CONFIG_DIR` moves `~/.claude` to the folder and `~/.claude.json`
+    /// into it, so the default locations are no longer read.
+    #[test]
+    fn config_dir_replaces_the_default_locations() {
+        let home = tempdir().unwrap();
+        let config = tempdir().unwrap();
+        write_claude_json(
+            config.path(),
+            r#"{"mcpServers":{"moved":{"command":"npx"}}}"#,
+        );
+        std::fs::write(
+            config.path().join("settings.json"),
+            r#"{"permissions":{"allow":["Bash:*"]}}"#,
+        )
+        .unwrap();
+        write_claude_json(
+            home.path(),
+            r#"{"mcpServers":{"default":{"command":"npx"}}}"#,
+        );
+        let parser = ClaudeCodeParser::with_config_dir(Some(config.path().to_path_buf()));
+
+        let reasons = parser.assess(home.path()).unwrap();
+
+        assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. })),
+            "{reasons:?}"
+        );
+        assert_eq!(server_names(&reasons), ["moved"], "{reasons:?}");
+        let watched = parser.watched_paths(home.path());
+        assert!(watched.contains(&config.path().join(".claude.json")));
+        assert!(!watched.contains(&home.path().join(".claude.json")));
     }
 
     #[test]
@@ -293,7 +327,7 @@ mod tests {
         )
         .unwrap();
         write_claude_json(home.path(), "{ not json");
-        let reasons = ClaudeCodeParser.assess(home.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
         assert!(
             reasons
                 .iter()
@@ -322,7 +356,7 @@ mod tests {
             })
             .to_string(),
         );
-        let reasons = ClaudeCodeParser.assess(home.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
         assert_eq!(server_names(&reasons), ["l", "u"]);
         let emitted = serde_json::to_string(&reasons).unwrap();
         assert!(!emitted.contains("SECRET"), "{emitted}");
