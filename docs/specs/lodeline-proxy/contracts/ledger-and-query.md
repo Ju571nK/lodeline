@@ -466,6 +466,10 @@ refuses the start, as it did before the count was in it. The operator recovers b
 fixing or upgrading the server: the next 200 clears the count and the stop.
 Deleting `gap_queue.json` clears them too, but it also discards the gaps the
 server has not acknowledged, so it is not the way to recover.
+A `lodeline-proxy` from before the count was kept in `gap_queue.json` rejects the
+unknown field `single_quarantines` and refuses to start. The field is absent unless
+a run is in progress. To downgrade during one, wait for a 200 first, or remove
+`single_quarantines` from `gap_queue.json` while the proxy is stopped.
 
 One case falls outside "backs off" and "at most 288 events per day": a 409 by
 item is quarantined at once, stopped or not, and has no limit.
