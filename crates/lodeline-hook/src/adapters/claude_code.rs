@@ -23,10 +23,18 @@ impl HookAdapter for ClaudeCode {
             .get("tool_input")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let action = if tool == "Bash" {
-            let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let c = capture(cmd, level);
+        let command = input.get("command").and_then(|v| v.as_str());
+        // Monitor runs `command` through the same shell as Bash (and Claude Code
+        // applies Bash hooks and rules to it); a `ws` watch has no command.
+        let action = if tool == "Bash" || (tool == "Monitor" && command.is_some()) {
+            let c = capture(command.unwrap_or(""), level);
             HookAction::Bash {
+                command_hash: c.hash,
+                command_preview: c.preview,
+            }
+        } else if tool == "PowerShell" {
+            let c = capture(command.unwrap_or(""), level);
+            HookAction::PowerShell {
                 command_hash: c.hash,
                 command_preview: c.preview,
             }
@@ -120,6 +128,79 @@ mod tests {
                 assert_eq!(tool, "create_issue");
             }
             _ => panic!(),
+        }
+    }
+
+    /// Claude Code 2.1.316 PreToolUse payloads, captured live on macOS
+    /// (transcript_path dropped). PowerShell needs pwsh, which was absent, so
+    /// its payload follows the hooks doc: the same fields as Bash.
+    fn monitor_command_payload() -> serde_json::Value {
+        serde_json::json!({
+            "session_id":"s1","cwd":"/repo","prompt_id":"p1",
+            "permission_mode":"default","effort":{"level":"medium"},
+            "hook_event_name":"PreToolUse","tool_name":"Monitor",
+            "tool_input":{"description":"tail","timeout_ms":300000,"command":"tail -f /dev/null"},
+            "tool_use_id":"t1"
+        })
+    }
+
+    #[test]
+    fn monitor_command_normalizes_to_bash() {
+        let inv = ClaudeCode
+            .normalize(&monitor_command_payload(), CaptureLevel::Redacted)
+            .unwrap();
+        match inv.action {
+            HookAction::Bash {
+                command_preview, ..
+            } => assert_eq!(command_preview.unwrap(), "tail -f /dev/null"),
+            other => panic!("expected Bash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn monitor_websocket_stays_other() {
+        let p = serde_json::json!({
+            "permission_mode":"acceptEdits","hook_event_name":"PreToolUse",
+            "tool_name":"Monitor",
+            "tool_input":{"description":"ws","timeout_ms":60000,"ws":{"url":"wss://echo.websocket.org"}}
+        });
+        match ClaudeCode
+            .normalize(&p, CaptureLevel::Redacted)
+            .unwrap()
+            .action
+        {
+            HookAction::Other {
+                label,
+                detail_preview,
+                ..
+            } => {
+                assert_eq!(label, "Monitor");
+                assert!(detail_preview.unwrap().contains("wss://echo.websocket.org"));
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn powershell_normalizes_to_powershell_command() {
+        let p = serde_json::json!({
+            "session_id":"s1","permission_mode":"default","hook_event_name":"PreToolUse",
+            "tool_name":"PowerShell",
+            "tool_input":{"command":"Remove-Item -Recurse -Force C:\\build","description":"clean","timeout":120000,"run_in_background":false}
+        });
+        let inv = ClaudeCode.normalize(&p, CaptureLevel::Redacted).unwrap();
+        match inv.action {
+            HookAction::PowerShell {
+                command_hash,
+                command_preview,
+            } => {
+                assert_eq!(command_hash.len(), 64);
+                assert_eq!(
+                    command_preview.unwrap(),
+                    "Remove-Item -Recurse -Force C:\\build"
+                );
+            }
+            other => panic!("expected PowerShell, got {other:?}"),
         }
     }
 

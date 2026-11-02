@@ -20,24 +20,25 @@ pub fn run(
     policy_override: Option<PathBuf>,
     events_dir_override: Option<PathBuf>,
     state_db_path: PathBuf,
+    control_socket: &Path,
 ) -> anyhow::Result<i32> {
     // `stats` talks to the running daemon over the control socket; it doesn't
     // touch the policy file, so handle it before the merge below.
     if let ShowWhat::Stats = what {
-        return show_stats();
+        return show_stats(control_socket);
     }
     if let ShowWhat::HostId = what {
         return show_host_id(&state_db_path);
     }
     #[cfg(feature = "operator-cli")]
     if let ShowWhat::PolicyStatus = what {
-        return show_policy_status();
+        return show_policy_status(control_socket);
     }
     #[cfg(not(feature = "operator-cli"))]
     let _ = events_dir_override;
     #[cfg(feature = "operator-cli")]
     if let ShowWhat::Targets = what {
-        return show_targets();
+        return show_targets(control_socket);
     }
     #[cfg(feature = "operator-cli")]
     if let ShowWhat::Events {
@@ -51,7 +52,7 @@ pub fn run(
     }
     #[cfg(feature = "operator-cli")]
     if let ShowWhat::Risk { tool, pretty } = what {
-        return show_risk(tool, pretty);
+        return show_risk(control_socket, tool, pretty);
     }
 
     let paths = crate::runtime::policy_paths(policy_override.clone());
@@ -132,8 +133,8 @@ fn show_host_id(state_db_path: &Path) -> anyhow::Result<i32> {
 /// Connect to the running daemon's control socket, ask for `{"cmd":"stats"}`,
 /// and print the snapshot. Returns exit code 1 (without erroring) if the
 /// daemon can't be reached — the common case being "it isn't running".
-fn show_stats() -> anyhow::Result<i32> {
-    match crate::control_client::query(&crate::control::Request::Stats) {
+fn show_stats(control_socket: &Path) -> anyhow::Result<i32> {
+    match crate::control_client::query(control_socket, &crate::control::Request::Stats) {
         Ok(resp) => match resp.stats {
             Some(snap) => {
                 write_stats(&mut io::stdout().lock(), &snap)?;
@@ -174,8 +175,8 @@ fn write_stats(w: &mut impl Write, s: &StatsSnapshot) -> io::Result<()> {
 }
 
 #[cfg(feature = "operator-cli")]
-fn show_policy_status() -> anyhow::Result<i32> {
-    match crate::control_client::query(&crate::control::Request::PolicyStatus) {
+fn show_policy_status(control_socket: &Path) -> anyhow::Result<i32> {
+    match crate::control_client::query(control_socket, &crate::control::Request::PolicyStatus) {
         Ok(resp) => match resp.policy_status {
             Some(p) => {
                 write_policy_status(&mut io::stdout().lock(), &p)?;
@@ -215,8 +216,8 @@ fn write_policy_status(w: &mut impl Write, p: &PolicyStatusPayload) -> io::Resul
 }
 
 #[cfg(feature = "operator-cli")]
-fn show_targets() -> anyhow::Result<i32> {
-    match crate::control_client::query(&crate::control::Request::Targets) {
+fn show_targets(control_socket: &Path) -> anyhow::Result<i32> {
+    match crate::control_client::query(control_socket, &crate::control::Request::Targets) {
         Ok(resp) => match resp.targets {
             Some(t) => {
                 write_targets(&mut io::stdout().lock(), &t)?;
@@ -610,7 +611,7 @@ fn parse_tool(s: &str) -> Option<lodeline_core::event::AiTool> {
 }
 
 #[cfg(feature = "operator-cli")]
-fn show_risk(tool: Option<String>, pretty: bool) -> anyhow::Result<i32> {
+fn show_risk(control_socket: &Path, tool: Option<String>, pretty: bool) -> anyhow::Result<i32> {
     let parsed = match tool.as_deref() {
         None => None,
         Some(s) => match parse_tool(s) {
@@ -626,7 +627,10 @@ fn show_risk(tool: Option<String>, pretty: bool) -> anyhow::Result<i32> {
             }
         },
     };
-    match crate::control_client::query(&crate::control::Request::Risk { tool: parsed }) {
+    match crate::control_client::query(
+        control_socket,
+        &crate::control::Request::Risk { tool: parsed },
+    ) {
         Ok(resp) => match resp.risk {
             Some(p) => {
                 if pretty {

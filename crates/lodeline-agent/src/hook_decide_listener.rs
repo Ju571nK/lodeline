@@ -285,6 +285,10 @@ fn decision_event(
             command_hash,
             command_preview,
         } => ("bash", command_hash.clone(), command_preview.clone()),
+        HookAction::PowerShell {
+            command_hash,
+            command_preview,
+        } => ("powershell", command_hash.clone(), command_preview.clone()),
         HookAction::FileEdit {
             path_hash,
             path_preview,
