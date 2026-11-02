@@ -916,6 +916,129 @@ mod tests {
         assert!(ctx.policy_file_loaded);
     }
 
+    fn has_pack(
+        parsers: &parking_lot::RwLock<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>,
+        id: &str,
+    ) -> bool {
+        parsers.read().iter().any(|p| {
+            p.as_any()
+                .downcast_ref::<crate::ai_guard::rule_pack::parser::RulePackParser>()
+                .is_some_and(|rpp| rpp.pack.id == id)
+        })
+    }
+
+    fn bundle_yaml(pack_id: &str) -> String {
+        format!(
+            "version: 1\nrule_packs:\n  - id: {pack_id}\n    pack_version: 1\n    tool: gemini\n    scope:\n      kind: user_global\n    watched_paths: []\n    rules: []\n"
+        )
+    }
+
+    /// The real task, with a version channel the test holds, on paused time.
+    struct Running {
+        version: watch::Sender<i64>,
+        parsers: Arc<parking_lot::RwLock<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>>,
+        shutdown: CancellationToken,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Running {
+        fn start(mut ctx: ReloadCtx) -> Self {
+            let (version, policy_version_rx) = watch::channel(1i64);
+            ctx.policy_version_rx = policy_version_rx;
+            Self {
+                version,
+                parsers: ctx.parsers.clone(),
+                shutdown: ctx.shutdown.clone(),
+                task: tokio::spawn(run(ctx)),
+            }
+        }
+
+        async fn settle(&self) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        async fn tick(&self) {
+            tokio::time::sleep(crate::watcher::ROOT_RECHECK_INTERVAL * 2).await;
+        }
+
+        async fn stop(self) {
+            self.shutdown.cancel();
+            self.task.await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_read_of_the_policy_is_retried_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (ctx, _plat, targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+        let applied = ctx.paths.policy.applied.clone();
+        let running = Running::start(ctx);
+
+        std::fs::write(&applied, b"}{not yaml").unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-a"));
+
+        std::fs::write(&applied, policy_yaml("target-b", &path, "standard")).unwrap();
+        running.tick().await;
+
+        assert!(
+            targets_rx.borrow().iter().any(|c| c.id == "target-b"),
+            "the retry loaded the fixed file with no new version"
+        );
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_policy_file_that_returns_is_loaded_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (ctx, _plat, targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+        let applied = ctx.paths.policy.applied.clone();
+        let running = Running::start(ctx);
+
+        std::fs::remove_file(&applied).unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-a"));
+
+        std::fs::write(&applied, policy_yaml("target-b", &path, "standard")).unwrap();
+        running.tick().await;
+
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-b"));
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_kept_bundle_catches_up_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, _trx, _parsers, _state) = build_ctx_with_parsers(dir.path(), yaml);
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(has_pack(&ctx.parsers, "old-pack"));
+        let running = Running::start(ctx);
+
+        std::fs::write(&bundle, "}{not yaml").unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        assert!(
+            has_pack(&running.parsers, "old-pack"),
+            "the last good bundle stays"
+        );
+
+        std::fs::write(&bundle, bundle_yaml("new-pack")).unwrap();
+        running.tick().await;
+
+        assert!(has_pack(&running.parsers, "new-pack"));
+        assert!(!has_pack(&running.parsers, "old-pack"));
+        running.stop().await;
+    }
+
     // Phase 3b.6.1 — per-repo Continue parser hot-reload reconciliation.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
