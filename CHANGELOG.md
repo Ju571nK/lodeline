@@ -69,9 +69,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   so a user outside the `lodeline` group gets one warning on stderr and a verdict from
   `/etc/lodeline`, which can miss signed rules. Add such a user to the group. Any other
   error checking an applied file also gives one warning and a verdict from
-  `/etc/lodeline`. After the applied
-  file is deleted, `lodeline status` keeps reporting the signed version and its expiry
-  while the local file runs, and only a higher version lands.
+  `/etc/lodeline`. After the applied file is deleted, `lodeline status` keeps reporting
+  the signed version and its expiry while the local file runs, and only a higher
+  version lands.
 
 - A reload on a host with no policy file now loads the built-in defaults and any
   rule-pack bundle, as a boot does. It used to keep the previous state, so a bundle

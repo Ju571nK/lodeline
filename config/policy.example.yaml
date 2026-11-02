@@ -1,6 +1,7 @@
 # Example user-override policy. Drop into /etc/lodeline/policy.yaml or
-# %ProgramData%\Lodeline\policy.yaml. On a root Unix agent, a signed policy applied to
-# /var/lib/lodeline/applied/policy.yaml replaces this file's content while it exists.
+# %ProgramData%\Lodeline\policy.yaml. On a root Unix agent with no --policy, a signed
+# policy applied to /var/lib/lodeline/applied/policy.yaml replaces this file's content
+# while it exists.
 version: 1
 host_id_strategy: machine_id
 
