@@ -315,6 +315,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - `lodeline scan` no longer lists a tool as not configured when another scope of
   the same tool was assessed or failed to parse.
 
+- With the SELinux module from `packaging/selinux/lodeline.te` loaded in Enforcing
+  mode, `lodeline-server` could not listen on its default port 8443. It failed with
+  `Permission denied (os error 13)` and systemd restarted it in a loop. The audit log
+  showed a denied `name_bind` on `http_port_t`, the label 8443 carries, because the
+  policy allowed only unreserved ports. `lodeline_server_t` can now bind `http_port_t`
+  ports as well. Only hosts that built and loaded the module (it needs
+  `selinux-policy-devel`) were affected, in every release since the module was added.
+  Without the module the daemons run unconfined and nothing changes. Upgrade. If you
+  loaded the module by hand from `packaging/selinux/README.md`, rebuild and reload it,
+  then restart `lodeline-server`. On Amazon Linux 2023 (aarch64, Enforcing), the
+  server then listens on 8443 and all three daemons run confined with no lodeline
+  denials. (#397)
+
 ## [0.12.0] - 2026-10-31
 
 ### Changed

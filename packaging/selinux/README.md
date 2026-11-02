@@ -45,8 +45,13 @@ sudo ausearch -m avc -ts recent | grep lodeline   # → nothing
 
 Remove: `sudo semodule -r lodeline`.
 
-Verified enforcing-clean on Rocky Linux 9.7 (aarch64) with all three daemons
-running (0 AVC denials, even with `dontaudit` disabled).
+Verified on Amazon Linux 2023 (aarch64) in Enforcing mode: all three daemons run
+confined, `lodeline-server` listens on its default port 8443, and `ausearch -m avc`
+shows no lodeline denials.
+
+`lodeline_server_t` can bind unreserved ports and `http_port_t` ports such as 8443.
+A port that carries any other label, as `semanage port -l` shows, is denied. Relabel
+it with `sudo semanage port -m -t http_port_t -p tcp <port>`.
 
 > The `.deb` path is unaffected — Debian/Ubuntu use AppArmor, not SELinux. An
 > AppArmor profile would be a sibling follow-up.
