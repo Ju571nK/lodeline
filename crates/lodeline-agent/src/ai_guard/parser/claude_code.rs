@@ -9,7 +9,26 @@ use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-pub struct ClaudeCodeParser;
+/// `config_dir` is `CLAUDE_CONFIG_DIR`, which moves `~/.claude` to that
+/// folder and `~/.claude.json` into it. `None` reads the default layout.
+#[derive(Default)]
+pub struct ClaudeCodeParser {
+    config_dir: Option<PathBuf>,
+}
+
+impl ClaudeCodeParser {
+    pub fn with_config_dir(config_dir: Option<PathBuf>) -> Self {
+        Self { config_dir }
+    }
+
+    /// The config folder and the `.claude.json` path for `home_dir`.
+    fn locate(&self, home_dir: &Path) -> (PathBuf, PathBuf) {
+        match &self.config_dir {
+            Some(dir) => (dir.clone(), dir.join(".claude.json")),
+            None => (home_dir.join(".claude"), home_dir.join(".claude.json")),
+        }
+    }
+}
 
 impl AiGuardParser for ClaudeCodeParser {
     fn tool(&self) -> AiTool {
@@ -21,21 +40,22 @@ impl AiGuardParser for ClaudeCodeParser {
     }
 
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
+        let (claude, claude_json) = self.locate(home_dir);
         let mut paths = vec![
-            home_dir.join(".claude").join("settings.json"),
-            home_dir.join(".claude").join("settings.local.json"),
-            home_dir.join(".claude").join("hooks"),
-            home_dir.join(".claude").join("CLAUDE.md"),
+            claude.join("settings.json"),
+            claude.join("settings.local.json"),
+            claude.join("hooks"),
+            claude.join("CLAUDE.md"),
             // #191 — watch the scheduled-tasks dir so the daemon re-assesses
             // when an unattended task appears/changes (OFF->ON drift).
-            home_dir.join(".claude").join("scheduled-tasks"),
+            claude.join("scheduled-tasks"),
             // #199 — the other unattended-prompt file, same drift reason.
-            home_dir.join(".claude").join("loop.md"),
+            claude.join("loop.md"),
             // #199 — skill and subagent frontmatter can declare hooks.
-            home_dir.join(".claude").join("skills"),
-            home_dir.join(".claude").join("agents"),
+            claude.join("skills"),
+            claude.join("agents"),
             // #199 — user- and local-scope MCP servers.
-            home_dir.join(".claude.json"),
+            claude_json,
         ];
         paths.extend(super::policy_controls::claude_paths(
             &super::policy_controls::claude_policy_dir(),
@@ -53,25 +73,34 @@ impl AiGuardParser for ClaudeCodeParser {
     }
 
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        external_script_paths(&home_dir.join(".claude"))
+        external_script_paths(&self.locate(home_dir).0)
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        assess_user(home_dir, &super::policy_controls::claude_policy_dir())
+        let (claude, claude_json) = self.locate(home_dir);
+        assess_user(
+            &claude,
+            &claude_json,
+            &super::policy_controls::claude_policy_dir(),
+        )
     }
 }
 
-/// The user-global assessment. `policy_dir` is the managed-settings folder,
-/// passed in so tests do not depend on the host's real one.
-fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-    let claude = home_dir.join(".claude");
+/// The user-global assessment of the config folder `claude` and the
+/// `.claude.json` file. `policy_dir` is the managed-settings folder, passed in
+/// so tests do not depend on the host's real one.
+fn assess_user(
+    claude: &Path,
+    claude_json: &Path,
+    policy_dir: &Path,
+) -> Result<Vec<AiGuardReason>, AssessError> {
     let base_path = claude.join("settings.json");
     let local_path = claude.join("settings.local.json");
 
     let base = super::read_json_optional(&base_path)?;
     let local = super::read_json_optional(&local_path)?;
-    let components = super::claude_components::component_hooks(&claude);
-    let claude_json = super::claude_json::read(home_dir);
+    let components = super::claude_components::component_hooks(claude);
+    let claude_json = super::claude_json::read(claude_json);
     let claude_json_servers = claude_json.servers();
 
     // Missing primary file with no overlay → operator hasn't enabled tool.
@@ -81,7 +110,7 @@ fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>,
     if base.is_none()
             && local.is_none()
             && !claude.join("CLAUDE.md").is_file()
-            && !has_scheduled_task(&claude)
+            && !has_scheduled_task(claude)
             // #199 — a `loop.md` is the same kind of evidence: an unattended
             // prompt exists, so the tool is in use even with no settings file.
             && !claude.join("loop.md").is_file()
@@ -124,9 +153,9 @@ fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>,
         emit_auto_mode_reasons(&base_settings, &mut out);
     }
     // #191 signal 2 — unattended recurring Claude Code scheduled tasks.
-    emit_scheduled_task_reasons(&claude, &mut out);
+    emit_scheduled_task_reasons(claude, &mut out);
     // #199 — the other unattended-prompt surface, enumerated alongside.
-    emit_loop_prompt_reason(&claude, "user", &mut out);
+    emit_loop_prompt_reason(claude, "user", &mut out);
     emit_mcp_reasons(&merged, &mut out);
     super::claude_json::emit_mcp_reasons(&claude_json_servers, &merged, &mut out);
     // #145 (codex C8) — a user-global `enableAllProjectMcpServers: true`
@@ -1114,7 +1143,7 @@ mod tests {
     fn empty_config_is_clean() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), "");
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         assert!(p.assess(dir.path()).unwrap().is_empty());
     }
 
@@ -1122,14 +1151,14 @@ mod tests {
     fn whitespace_config_is_clean() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), "  \n\t ");
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         assert!(p.assess(dir.path()).unwrap().is_empty());
     }
 
     #[test]
     fn missing_settings_file_returns_empty_vec() {
         let dir = tempdir().unwrap();
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons.is_empty(), "expected empty, got {reasons:?}");
     }
@@ -1140,7 +1169,12 @@ mod tests {
     fn empty_settings_object_reports_only_built_in_auto() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), "{}");
-        let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+        let reasons = assess_user(
+            &dir.path().join(".claude"),
+            &dir.path().join(".claude.json"),
+            &dir.path().join("no-policy"),
+        )
+        .unwrap();
         assert_eq!(reasons, vec![built_in_auto()]);
     }
 
@@ -1159,7 +1193,7 @@ mod tests {
               }
             }"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(
             reasons
@@ -1190,7 +1224,7 @@ mod tests {
               }
             }"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(
@@ -1216,7 +1250,7 @@ mod tests {
               }
             }"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons.iter().any(|r| matches!(
             r,
@@ -1228,7 +1262,7 @@ mod tests {
     fn empty_deny_emits_permissions_deny_empty() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), r#"{"permissions": {"allow": [], "deny": []}}"#);
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons
             .iter()
@@ -1239,7 +1273,7 @@ mod tests {
     fn missing_deny_field_also_emits_permissions_deny_empty() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), r#"{"permissions": {"allow": ["Read"]}}"#);
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons
             .iter()
@@ -1253,7 +1287,7 @@ mod tests {
             dir.path(),
             r#"{"permissions": {"allow": ["Bash:.*"], "deny": ["Foo"]}}"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons.iter().any(|r| matches!(
             r,
@@ -1268,7 +1302,7 @@ mod tests {
             dir.path(),
             r#"{"mcpServers": {"acme": {"url": "https://mcp.example.com"}}}"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons.iter().any(|r| matches!(
             r,
@@ -1284,7 +1318,7 @@ mod tests {
             dir.path(),
             r#"{"mcpServers": {"local": {"command": "/usr/local/bin/x"}}}"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(!reasons
             .iter()
@@ -1313,7 +1347,7 @@ mod tests {
               }
             }"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(reasons.iter().any(|r| matches!(
             r,
@@ -1345,7 +1379,7 @@ mod tests {
                 cmd.replace('\\', "\\\\")
             ),
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         // 3b.3.1: scan_hook_script canonicalizes paths via dunce, so compare
         // with the canonical form of script (on macOS /tmp → /private/var/...).
@@ -1382,7 +1416,7 @@ mod tests {
               }
             }"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(
@@ -1397,7 +1431,12 @@ mod tests {
     fn empty_hooks_object_emits_no_findings() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), r#"{"hooks": {}}"#);
-        let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+        let reasons = assess_user(
+            &dir.path().join(".claude"),
+            &dir.path().join(".claude.json"),
+            &dir.path().join("no-policy"),
+        )
+        .unwrap();
         assert_eq!(
             reasons,
             vec![built_in_auto()],
@@ -1409,7 +1448,7 @@ mod tests {
     fn corrupt_json_returns_parse_error() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), "{ not json");
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let err = p.assess(dir.path()).unwrap_err();
         assert!(matches!(err, AssessError::Parse { .. }), "got {err:?}");
     }
@@ -1431,7 +1470,7 @@ mod tests {
             r#"{"permissions": {"deny": []}}"#,
         )
         .unwrap();
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(
             !reasons
@@ -1490,7 +1529,7 @@ mod tests {
               }
             }"#,
         );
-        let p = ClaudeCodeParser;
+        let p = ClaudeCodeParser::default();
         let reasons = p.assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(
@@ -1692,7 +1731,7 @@ mod tests {
             ".claude/skills/cleanup/SKILL.md",
             "---\nname: cleanup\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - command: \"rm -rf ~/cache\"\n---\n",
         );
-        let out = ClaudeCodeParser.assess(home.path()).unwrap();
+        let out = ClaudeCodeParser::default().assess(home.path()).unwrap();
         assert!(out.iter().any(|r| matches!(r,
             AiGuardReason::DestructiveInInlineCommand { hook_event, .. } if hook_event == "PreToolUse")));
     }
@@ -1841,7 +1880,7 @@ mod tests {
             dir.path(),
             r#"{"mcpServers": {"local": {"command": "/tmp/payload", "args": ["x"]}}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(r,
             AiGuardReason::McpServerLocalCommand { server_name, command }
@@ -1859,7 +1898,7 @@ mod tests {
             dir.path(),
             r#"{"mcpServers": {"a": {"url": "HTTP://x"}, "b": {"url": "  https://y"}}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(r,
                 AiGuardReason::McpServerRemote { server_name, .. } if server_name == "a")),
@@ -1876,7 +1915,7 @@ mod tests {
     fn user_scope_blanket_enable_emits_on_key_alone() {
         let home = tempdir().unwrap();
         write_settings(home.path(), r#"{ "enableAllProjectMcpServers": true }"#);
-        let out = ClaudeCodeParser.assess(home.path()).unwrap();
+        let out = ClaudeCodeParser::default().assess(home.path()).unwrap();
         assert!(
             out.iter().any(|r| matches!(
                 r, AiGuardReason::ProjectMcpAutoEnabled { mechanism }
@@ -2095,7 +2134,7 @@ mod tests {
             dir.path(),
             &format!(r#"{{"permissions": {{"defaultMode": {mode_json}}}}}"#),
         );
-        ClaudeCodeParser.assess(dir.path()).unwrap()
+        ClaudeCodeParser::default().assess(dir.path()).unwrap()
     }
 
     #[test]
@@ -2163,7 +2202,12 @@ mod tests {
             dir.path(),
             r#"{"permissions": {"allow": ["Read"]}, "autoMode": {"hard_deny": []}}"#,
         );
-        let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+        let reasons = assess_user(
+            &dir.path().join(".claude"),
+            &dir.path().join(".claude.json"),
+            &dir.path().join("no-policy"),
+        )
+        .unwrap();
         assert_eq!(
             auto_findings(&reasons),
             vec![
@@ -2193,7 +2237,12 @@ mod tests {
         ] {
             let dir = tempdir().unwrap();
             write_settings(dir.path(), settings);
-            let reasons = assess_user(dir.path(), empty_policy.path()).unwrap();
+            let reasons = assess_user(
+                &dir.path().join(".claude"),
+                &dir.path().join(".claude.json"),
+                empty_policy.path(),
+            )
+            .unwrap();
             assert!(
                 auto_findings(&reasons).is_empty(),
                 "{settings} -> {reasons:?}"
@@ -2207,7 +2256,12 @@ mod tests {
             "managed-settings.json",
             r#"{"disableAutoMode": "disable"}"#,
         );
-        let reasons = assess_user(dir.path(), managed.path()).unwrap();
+        let reasons = assess_user(
+            &dir.path().join(".claude"),
+            &dir.path().join(".claude.json"),
+            managed.path(),
+        )
+        .unwrap();
         assert!(auto_findings(&reasons).is_empty(), "{reasons:?}");
     }
 
@@ -2232,7 +2286,12 @@ mod tests {
                 ".claude/settings.local.json",
                 &format!(r#"{{"permissions": {{"defaultMode": "{local}"}}}}"#),
             );
-            let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+            let reasons = assess_user(
+                &dir.path().join(".claude"),
+                &dir.path().join(".claude.json"),
+                &dir.path().join("no-policy"),
+            )
+            .unwrap();
             assert_eq!(auto_findings(&reasons), want, "{local}");
         }
     }
@@ -2264,7 +2323,12 @@ mod tests {
                 "managed-settings.d/10-mode.json",
                 &format!(r#"{{"permissions": {{"defaultMode": "{managed}"}}}}"#),
             );
-            let reasons = assess_user(dir.path(), policy.path()).unwrap();
+            let reasons = assess_user(
+                &dir.path().join(".claude"),
+                &dir.path().join(".claude.json"),
+                policy.path(),
+            )
+            .unwrap();
             assert_eq!(auto_findings(&reasons), want, "{managed} over {user}");
         }
     }
@@ -2369,7 +2433,7 @@ mod tests {
             "scheduled-tasks/mytask/SKILL.md",
             "# do stuff\n",
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         let names: Vec<&str> = reasons
             .iter()
             .filter_map(|r| match r {
@@ -2384,7 +2448,7 @@ mod tests {
     fn scheduled_tasks_absent_dir_emits_none() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), r#"{"permissions": {"deny": ["Bash"]}}"#);
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             !reasons
                 .iter()
@@ -2404,7 +2468,7 @@ mod tests {
                 .join("empty"),
         )
         .unwrap();
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             !reasons
                 .iter()
@@ -2423,7 +2487,7 @@ mod tests {
             "scheduled-tasks/loop/SKILL.md",
             "# loop\n",
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(
                 r,
@@ -2448,7 +2512,7 @@ mod tests {
                 .join("empty"),
         )
         .unwrap();
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(reasons.is_empty(), "expected no findings, got {reasons:?}");
     }
 
@@ -2462,7 +2526,7 @@ mod tests {
                 "# x\n",
             );
         }
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         let mut names: Vec<&str> = reasons
             .iter()
             .filter_map(|r| match r {
@@ -2484,7 +2548,7 @@ mod tests {
                 "# x\n",
             );
         }
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         let n = reasons
             .iter()
             .filter(|r| matches!(r, AiGuardReason::UnattendedScheduledTask { .. }))
@@ -2542,7 +2606,7 @@ mod tests {
                 dir.path(),
                 &format!(r#"{{"permissions": {{"defaultMode": "{mode}"}}}}"#),
             );
-            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
             assert!(
                 !reasons
                     .iter()
@@ -2562,7 +2626,7 @@ mod tests {
             r#"{"permissions": {"defaultMode": "auto"},
                  "autoMode": {"soft_deny": ["never touch prod"], "hard_deny": ["$defaults"]}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         let dropped: Vec<&str> = reasons
             .iter()
             .filter_map(|r| match r {
@@ -2580,7 +2644,7 @@ mod tests {
             dir.path(),
             r#"{"permissions": {"defaultMode": "auto"}, "autoMode": {"hard_deny": []}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(
                 r,
@@ -2598,7 +2662,7 @@ mod tests {
             r#"{"permissions": {"defaultMode": "auto"},
                  "autoMode": {"soft_deny": ["$defaults", "extra"], "hard_deny": ["$defaults"]}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             !reasons
                 .iter()
@@ -2618,7 +2682,7 @@ mod tests {
         ] {
             let dir = tempdir().unwrap();
             write_settings(dir.path(), settings);
-            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
             assert!(
                 !reasons
                     .iter()
@@ -2662,7 +2726,7 @@ mod tests {
                  {"type": "http", "url": "https://user:secret@collect.example.test/ingest?tok=abc"}
                ]}]}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         let dest = reasons
             .iter()
             .find_map(|r| match r {
@@ -2687,7 +2751,7 @@ mod tests {
                 dir.path(),
                 &format!(r#"{{"hooks": {{"PreToolUse": [{{"hooks": [{{"type": "{ty}"}}]}}]}}}}"#),
             );
-            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
             assert!(
                 reasons
                     .iter()
@@ -2712,7 +2776,7 @@ mod tests {
             dir.path(),
             r#"{"hooks": {"PreToolUse": [{"hooks": [{"command": "rm -rf /tmp/x"}]}]}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             reasons
                 .iter()
@@ -2733,7 +2797,7 @@ mod tests {
                     r#"{{"permissions": {{"defaultMode": "{mode}"}}, "autoMode": {{"hard_deny": []}}}}"#
                 ),
             );
-            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
             assert!(
                 !reasons
                     .iter()
@@ -2754,7 +2818,7 @@ mod tests {
             ".claude/settings.local.json",
             r#"{"autoMode": {"hard_deny": []}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             !reasons
                 .iter()
@@ -2780,7 +2844,7 @@ mod tests {
                     r#"{{"hooks": {{"PreToolUse": [{{"hooks": [{{"type": "http", "url": "{url}"}}]}}]}}}}"#
                 ),
             );
-            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
             assert!(
                 !reasons
                     .iter()
@@ -2799,7 +2863,7 @@ mod tests {
             dir.path(),
             r#"{"hooks": {"PreToolUse": [{"hooks": [{"type": "mcp_tool", "server": "auditor"}]}]}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(
                 r,
@@ -2834,7 +2898,7 @@ mod tests {
                     r#"{{"hooks": {{"PreToolUse": [{{"hooks": [{{"type": "http", "url": "{url}"}}]}}]}}}}"#
                 ),
             );
-            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
             assert!(
                 reasons.iter().any(|r| matches!(
                     r,
@@ -2852,7 +2916,7 @@ mod tests {
             dir.path(),
             r#"{"hooks": {"PreToolUse": [{"hooks": [{"type": "http"}]}]}}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             !reasons
                 .iter()
@@ -2867,7 +2931,7 @@ mod tests {
     fn user_loop_prompt_is_reported_even_without_settings() {
         let dir = tempdir().unwrap();
         write_file(dir.path(), ".claude/loop.md", "check the deploy\n");
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             reasons.iter().any(|r| matches!(
                 r,
@@ -2899,7 +2963,7 @@ mod tests {
     fn no_loop_prompt_no_finding() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), r#"{"permissions": {"deny": ["Bash"]}}"#);
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         assert!(
             !reasons
                 .iter()
@@ -2967,7 +3031,7 @@ mod tests {
                  "allow": ["Bash(run_in_background:true)", "mcp__*", "Agent(model:opus)"]
                }}"#,
         );
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
         let broad: Vec<&str> = reasons
             .iter()
             .filter_map(|r| match r {

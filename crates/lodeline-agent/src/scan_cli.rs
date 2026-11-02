@@ -10,6 +10,7 @@
 use crate::ai_guard::parser::AiGuardParser;
 use crate::ai_guard::{rubric, tool_cli_label, user_global_parsers};
 use lodeline_core::event::{AiGuardBucket, AiGuardReason, AiGuardScope, AiTool};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -44,6 +45,10 @@ struct Report {
 
 /// CLI entry. Resolves home + cwd, builds the report, prints it, returns 0.
 pub fn run(args: ScanArgs) -> i32 {
+    let claude_dir = claude_config_dir(
+        args.home_override.as_deref(),
+        std::env::var_os("CLAUDE_CONFIG_DIR"),
+    );
     let home = match args.home_override.or_else(default_home) {
         Some(h) => h,
         None => {
@@ -54,13 +59,16 @@ pub fn run(args: ScanArgs) -> i32 {
     let cwd = args.cwd_override.or_else(|| std::env::current_dir().ok());
 
     if args.json {
-        let v = report_json(&build_report(&home, cwd.as_deref()));
+        let v = report_json(&build_report(&home, claude_dir, cwd.as_deref()));
         println!(
             "{}",
             serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into())
         );
     } else {
-        print!("{}", render_human(&build_report(&home, cwd.as_deref())));
+        print!(
+            "{}",
+            render_human(&build_report(&home, claude_dir, cwd.as_deref()))
+        );
     }
     0
 }
@@ -68,12 +76,12 @@ pub fn run(args: ScanArgs) -> i32 {
 /// Test seam — assemble the JSON report for a given home + optional project dir
 /// without going through `current_dir()` or printing. Used by integration tests.
 pub fn report_json_for(home: &Path, cwd: Option<&Path>) -> serde_json::Value {
-    report_json(&build_report(home, cwd))
+    report_json(&build_report(home, None, cwd))
 }
 
 /// Test seam — the human-rendered report as a string.
 pub fn render_human_for(home: &Path, cwd: Option<&Path>) -> String {
-    render_human(&build_report(home, cwd))
+    render_human(&build_report(home, None, cwd))
 }
 
 fn default_home() -> Option<PathBuf> {
@@ -83,8 +91,17 @@ fn default_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn build_report(home: &Path, cwd: Option<&Path>) -> Report {
-    let mut parsers = user_global_parsers();
+/// `CLAUDE_CONFIG_DIR` belongs to the user running the scan, so it applies
+/// only when the home came from `$HOME`, not from an override.
+fn claude_config_dir(home_override: Option<&Path>, env: Option<OsString>) -> Option<PathBuf> {
+    match home_override {
+        Some(_) => None,
+        None => env.filter(|v| !v.is_empty()).map(PathBuf::from),
+    }
+}
+
+fn build_report(home: &Path, claude_config_dir: Option<PathBuf>, cwd: Option<&Path>) -> Report {
+    let mut parsers = user_global_parsers(claude_config_dir);
     if let Some(dir) = cwd {
         parsers.extend(project_parsers_for_dir(dir));
     }
@@ -427,6 +444,21 @@ fn report_json(report: &Report) -> serde_json::Value {
             "error": m,
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod claude_config_dir_tests {
+    use super::claude_config_dir;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn applies_only_to_the_invoking_users_home() {
+        let set = || Some("/cfg".into());
+        assert_eq!(claude_config_dir(None, set()), Some(PathBuf::from("/cfg")));
+        assert_eq!(claude_config_dir(Some(Path::new("/home/bob")), set()), None);
+        assert_eq!(claude_config_dir(None, Some("".into())), None);
+        assert_eq!(claude_config_dir(None, None), None);
+    }
 }
 
 #[cfg(test)]

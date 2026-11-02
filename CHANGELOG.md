@@ -44,7 +44,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   disabled for their project, and local servers of a project whose directory no longer
   exists. If the directory check fails, for example on an unmounted volume, it keeps
   those servers. It scores an identical definition once. It does not yet read
-  `CLAUDE_CONFIG_DIR`, `managed-mcp.json`, or plugin MCP servers. (#199)
+  `managed-mcp.json` or plugin MCP servers. For `CLAUDE_CONFIG_DIR`, see the Fixed
+  section. (#199)
 
 - The Codex scanner now scores `approval_policy` and `default_permissions` in a
   repository's `.codex/config.toml`, and the rule files in the repository's
@@ -116,6 +117,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   settings change on upgrade. (#200)
 
 ### Fixed
+
+- `lodeline scan` now honors `CLAUDE_CONFIG_DIR`. When you set it, Claude Code reads
+  its user settings, `.claude.json` MCP servers, hooks, `CLAUDE.md`, skills, and agents
+  from that directory instead of `~/.claude` and `~/.claude.json`, and the scan now
+  reads the same files from the same place. The scan showed such a user as "not
+  configured" for Claude Code. An empty value falls back to the home directory, and a
+  relative value resolves against the current directory, as in Claude Code. Managed
+  settings paths do not change. `lodeline scan --home` ignores the variable, because
+  it belongs to the user who runs the command. The agent service does not honor it,
+  because a service cannot see a user's shell environment. A host whose user sets
+  `CLAUDE_CONFIG_DIR` can still show "not configured" for Claude Code in fleet scores.
+  (#411)
 
 - `lodeline-hook` now treats a Codex `apply_patch` call as a file edit. Codex sends the
   patch text in `tool_input.command`, so the hook reported every patch as a Bash
