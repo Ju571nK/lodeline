@@ -2593,6 +2593,15 @@ mod tests {
         );
         let reasons = assess_with_managed(None, r#"{"sandbox": {"enabled": true}}"#);
         assert!(reasons.is_empty(), "{reasons:?}");
+        // A managed file that sets permissions but no mode leaves Claude on its
+        // built-in `auto` start mode, so that is the posture to report.
+        let reasons = assess_with_managed(None, r#"{"permissions": {"deny": ["Read(./.env)"]}}"#);
+        assert_eq!(
+            reasons,
+            vec![AiGuardReason::AutoApprovalEnabled {
+                mode: "auto (built-in default)".into()
+            }]
+        );
     }
 
     /// Managed deny rules apply to every session, so the user needs none.
