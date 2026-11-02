@@ -25,22 +25,26 @@ Envelopes == [v : 1..MaxVersion, until : 1..MaxClock, auth : {"good", "bad"}]
 \* has its own bytes, so `pending = file` stands for the blake3 comparison.
 NoFile == [v |-> 0, until |-> 0, auth |-> "none"]
 
-\* The operator's unsigned file in /etc/lodeline.
+\* The operator's unsigned file: in /etc/lodeline, or at the apply target on a host
+\* with no local file.
 OperatorFile == [v |-> 0, until |-> 0, auth |-> "local"]
 
 \* What an older agent, which applied into /etc/lodeline, left there.
 OlderEnvelope(v) == [v |-> v, until |-> MaxClock, auth |-> "good"]
 
 \* The hosts an agent can start on. `--policy`, a non-root agent, and Windows have
-\* no local file and start as `fresh` does.
+\* no local file. The operator's file on those hosts is the apply target, and an
+\* apply replaces it. Their older-agent states need no row, because a run from the
+\* first two rows reaches each one with one stop.
 Starts == {
-    [local |-> NoFile, applied |-> NoFile, pending |-> NoFile],
-    [local |-> OperatorFile, applied |-> NoFile, pending |-> NoFile],
-    [local |-> OlderEnvelope(2), applied |-> OlderEnvelope(2), pending |-> NoFile],
+    [target |-> NoFile, local |-> NoFile, applied |-> NoFile, pending |-> NoFile],
+    [target |-> OperatorFile, local |-> NoFile, applied |-> NoFile, pending |-> NoFile],
+    [target |-> NoFile, local |-> OperatorFile, applied |-> NoFile, pending |-> NoFile],
+    [target |-> NoFile, local |-> OlderEnvelope(2), applied |-> OlderEnvelope(2), pending |-> NoFile],
     \* An older agent stopped after its rename.
-    [local |-> OlderEnvelope(2), applied |-> OlderEnvelope(1), pending |-> OlderEnvelope(2)],
+    [target |-> NoFile, local |-> OlderEnvelope(2), applied |-> OlderEnvelope(1), pending |-> OlderEnvelope(2)],
     \* An older agent stopped before its rename.
-    [local |-> OlderEnvelope(1), applied |-> OlderEnvelope(1), pending |-> OlderEnvelope(2)]
+    [target |-> NoFile, local |-> OlderEnvelope(1), applied |-> OlderEnvelope(1), pending |-> OlderEnvelope(2)]
 }
 
 VARIABLES
@@ -77,13 +81,13 @@ WorkerSymmetry == Permutations(Workers)
 
 Init ==
     /\ \E s \in Starts :
+        /\ target = s.target
+        /\ savedTarget = Saved(s.target)
         /\ local = s.local
         /\ applied = s.applied
         /\ savedApplied = Saved(s.applied)
         /\ pending = s.pending
         /\ savedPending = Saved(s.pending)
-    /\ target = NoFile
-    /\ savedTarget = NoFile
     /\ clock = 0
     /\ up = FALSE
     /\ pc = [w \in Workers |-> "idle"]
@@ -405,7 +409,9 @@ Quiet == up /\ AllIdle /\ pending = NoFile
 \* The operator's file records nothing.
 Recorded(file) == IF file.auth = "local" THEN NoFile ELSE file
 
-OnlySignedAccepted == target = NoFile \/ target.auth = "good"
+\* The operator's file at the apply target comes only from `Starts`. No apply writes
+\* it, and a power cut restores it only while the rename that replaced it is unsaved.
+OnlySignedAccepted == target \in {NoFile, OperatorFile} \/ target.auth = "good"
 
 NoExpiredApplied ==
     [][\A w \in Workers : (pc[w] = "verify" /\ pc'[w] = "record") => clock < msg'[w].until]_vars

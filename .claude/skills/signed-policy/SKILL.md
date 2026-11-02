@@ -59,9 +59,9 @@ Each config checks only the properties that list it in the last column. A proper
 
 | Config | Kind | Connections | Failed steps | Power cuts | Hand edits | Distinct states |
 |---|---|---|---|---|---|---|
-| `policy` | policy | 2 | yes | yes | no | 994,084 |
-| `rule_packs` | bundle | 2 | yes | yes | no | 852,580 |
-| `local_edits` | policy | 2 | yes | no | yes | 2,732,004 |
+| `policy` | policy | 2 | yes | yes | no | 1,079,748 |
+| `rule_packs` | bundle | 2 | yes | yes | no | 928,932 |
+| `local_edits` | policy | 2 | yes | no | yes | 2,734,756 |
 
 - `policy` checks every property except `LoadedPolicyKept`. `rule_packs` checks the same less `ExpiryMatchesDisk`, which covers `policy` only.
 - A failed step is an error from `record_pending`, the rename, the directory fsync, or `promote_pending`.
@@ -93,6 +93,8 @@ Sync commit: `9dfff8c9878db3650401ab1e7ebce9d97dea6276`
 | `Matches` | `crates/lodeline-core/src/host_meta.rs` | `pending` |
 | `Promote, PromoteFails, SettleRow` | `crates/lodeline-core/src/host_meta.rs` | `promote_pending` |
 | `SettleRow` | `crates/lodeline-core/src/host_meta.rs` | `clear_pending` |
+| `Record, RecordFails, Promote, PromoteFails` | `crates/lodeline-core/src/host_meta.rs` | `require_advanced` |
+| `Record, RecordFails, WriteBackDb, PowerCut` | `crates/lodeline-core/src/state.rs` | `open` |
 | `Verify, Boot` | `crates/lodeline-core/src/host_meta.rs` | `host_meta_get` |
 | `InForce, ReloadCheck` | `crates/lodeline-agent/src/runtime.rs` | `in_force` |
 | `target, local` | `crates/lodeline-agent/src/runtime.rs` | `at` |
@@ -103,11 +105,11 @@ Sync commit: `9dfff8c9878db3650401ab1e7ebce9d97dea6276`
 | `InForce` | `crates/lodeline-agent/src/runtime.rs` | `policy_path_for_command` |
 | `Boot` | `crates/lodeline-agent/src/runtime.rs` | `let policy_path_for_apply = cfg..let policy_file_loaded` |
 | `Settle, Rename` | `crates/lodeline-agent/src/runtime.rs` | `let apply_ctx = Arc::new..apply_lock: Default::default()` |
-| `ReloadRead, loaded` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..policy_file_loaded,` |
+| `ReloadCheck, ReloadRead, loaded` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..rule_packs_version_rx,` |
 | `ReloadCheck, ReloadRead` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
 | `ReloadCheck` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
 | `ReloadRead` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
-| `ReloadCheck` | `crates/lodeline-agent/src/control.rs` | `Request::ReloadPolicy => {..send_modify` |
+| `ReloadCheck` | `crates/lodeline-agent/src/control.rs` | `Request::ReloadPolicy => {..policy_version_tx.send_modify(` |
 | `Workers` | `crates/lodeline-agent/src/control.rs` | `serve_until` |
 
 The check cannot read Rust. A `PASS` covers the model, and `DRIFT` is the only link from the model to the code. `Boot` stands for the block above and for its order in `runtime::run`, which no row can see: settle, load the file, then start the control socket. If you change that order, update `Boot` by hand.

@@ -45,15 +45,17 @@ APPLY_SETTLE_MSG = "IF Finished(target) THEN pending ELSE NoFile"
 NO_SETTLE = "    /\\ UNCHANGED <<applied, pending, savedTarget>>\n"
 
 # (name, code it stands for, config, property it must break, steps its trace must
-# take in order, edits). The steps tie the kill to the reason: a violation reached
-# any other way prints OFF-TARGET. An edit is (old, new).
+# take in order, edits, then any text its last state must show). The steps and the
+# text tie the kill to the reason: a violation reached any other way prints
+# OFF-TARGET. Every trace has `Boot`, so a break of the boot step needs the text.
+# An edit is (old, new).
 MUTANTS = [
     ("no signature check", "verify_envelope check 2", "policy", "OnlySignedAccepted",
      ["Verify", "Rename"], [(GOOD, "")]),
     ("no expiry check", "verify_envelope check 3", "policy", "NoExpiredApplied",
      ["Tick", "Verify"], [(EXPIRY, "")]),
     ("no version check", "verify_envelope check 4", "policy", "VersionCheckHolds",
-     ["Boot", "Verify"], [(VERSION, "")]),
+     ["Verify"], [(VERSION, "")]),
     ("no apply lock", "apply apply_lock", "policy", "VersionCheckHolds",
      ["Verify", "Verify", "Rename"], [(APPLY_LOCK, "    /\\ applyLock' = w\n")]),
     ("no settle in apply", "settle_earlier_apply", "policy", "VersionCheckHolds",
@@ -64,6 +66,8 @@ MUTANTS = [
      [("![w] = \"rename\"]", "![w] = \"promote\"]"),
       ("![w] = PublishStart]", "![w] = \"rename\"]"),
       ("![w] = \"promote\"]\n    /\\ UNCHANGED <<target, local,", "![w] = PublishStart]\n    /\\ UNCHANGED <<target, local,")]),
+    ("rename keeps the operator's file", "write_file_durably rename", "policy", "WatermarkNeverAhead",
+     ["Rename", "Promote"], [("    /\\ target' = msg[w]\n", "    /\\ target' = IF target = OperatorFile THEN target ELSE msg[w]\n")]),
     ("no directory fsync in the write", "write_file_durably sync_dir", "policy", "WatermarkNeverAhead",
      ["Rename", "Promote", "WriteBackDb", "PowerCut"],
      [("    /\\ savedTarget' = Saved(target)\n", "    /\\ savedTarget' = savedTarget\n")]),
@@ -76,9 +80,10 @@ MUTANTS = [
     ("no version guard at all", "check 4, record_pending and promote_pending guards", "policy", "WatermarkMonotonic",
      ["Verify", "Record", "Promote"], [(VERSION, ""), (RECORD_GUARD, ""), (PROMOTE_GUARD, "")]),
     ("no settle at boot", "runtime::run settle_pending", "policy", "BootSettles",
-     ["Boot"], [(BOOT_SETTLE, "    /\\ ~up\n" + NO_SETTLE)]),
+     ["Boot"], [(BOOT_SETTLE, "    /\\ ~up\n" + NO_SETTLE)], "/\\ pending = [v |-> 2"),
     ("boot settles the apply target", "runtime::run in_force", "policy", "BootSettles",
-     ["Boot"], [(BOOT_SETTLE, "    /\\ ~up\n    /\\ SettleRow(target)\n")]),
+     ["Boot"], [(BOOT_SETTLE, "    /\\ ~up\n    /\\ SettleRow(target)\n")],
+     "/\\ applied = [v |-> 1", "/\\ local = [v |-> 2"),
     ("record at synchronous=NORMAL", "record_pending", "policy", "BootSettles",
      ["Record", "Rename", "PowerCut", "Boot"],
      [("    /\\ savedPending' = Saved(msg[w])\n    /\\ savedApplied' = Saved(applied)\n",
@@ -90,13 +95,18 @@ MUTANTS = [
        "reading' = IF local # NoFile THEN \"local\" ELSE \"applied\"")]),
     ("reload not notified", "publish_policy policy_version_tx.send", "policy", "LiveMatchesDisk",
      ["Notify"], [("    /\\ notified' = TRUE\n    /\\ Finish(w)\n", "    /\\ notified' = notified\n    /\\ Finish(w)\n")]),
+    ("settled apply not notified", "settle_earlier_apply publish_policy send", "policy", "LiveMatchesDisk",
+     ["Rename", "Settle", "NotifySettled", "Reject"],
+     [("    /\\ notified' = TRUE\n    /\\ pc' = [pc EXCEPT ![w] = \"verify\"]\n",
+       "    /\\ notified' = notified\n    /\\ pc' = [pc EXCEPT ![w] = \"verify\"]\n")]),
     ("change consumed after the read", "policy_reload_task::run changed()", "policy", "LiveMatchesDisk",
      ["ReloadCheck", "Rename", "Notify", "ReloadRead"],
      [("    /\\ notified' \\in {FALSE, notified}\n", "    /\\ notified' = notified\n"),
       ("    /\\ reading' = \"no\"\n    /\\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, activeUntil>>\n",
        "    /\\ reading' = \"no\"\n    /\\ notified' = FALSE\n    /\\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, activeUntil>>\n")]),
     ("no expiry seeded at boot", "runtime::run active_valid_until", "policy", "ExpiryMatchesDisk",
-     ["Boot"], [("IF Kind = \"policy\" THEN applied'.until ELSE NoFile.until", "NoFile.until")]),
+     ["Boot"], [("IF Kind = \"policy\" THEN applied'.until ELSE NoFile.until", "NoFile.until")],
+     "/\\ activeUntil = 0", "/\\ applied = [v |-> 1, until |-> 3"),
     ("settled apply not published", "settle_earlier_apply publish_policy", "policy", "ExpiryMatchesDisk",
      ["Rename", "Settle"], [(APPLY_SETTLE_PC, '"verify"'), (APPLY_SETTLE_MSG, "NoFile")]),
     ("no missing-file rule", "reload policy_file_loaded", "local_edits", "LoadedPolicyKept",
@@ -150,7 +160,7 @@ def java_binary():
     fail(JAVA_HELP)
 
 
-def run_tlc(java, jar, spec_text, config_text, workers="auto"):
+def run_tlc(java, jar, spec_text, config_text, workers="auto", difftrace=True):
     """Run TLC in a temp directory, so no state or trace file lands in the repo."""
     with tempfile.TemporaryDirectory(prefix="lodeline-formal-") as work:
         work = Path(work)
@@ -159,7 +169,7 @@ def run_tlc(java, jar, spec_text, config_text, workers="auto"):
         started = time.monotonic()
         proc = subprocess.run(
             [java, "-XX:+UseParallelGC", "-cp", str(jar), "tlc2.TLC", "-workers", workers,
-             "-deadlock", "-difftrace", "-metadir", str(work / "states"),
+             "-deadlock", *(["-difftrace"] if difftrace else []), "-metadir", str(work / "states"),
              "-config", "run.cfg", f"{MODULE}.tla"],
             cwd=work, capture_output=True, text=True,
         )
@@ -202,29 +212,40 @@ def only_property(config_text, prop):
 def check_mutants(java, jar):
     spec = (SPEC_DIR / f"{MODULE}.tla").read_text()
     ok = True
-    for name, code, config, prop, path, edits in MUTANTS:
+    for name, code, config, prop, path, edits, *last_state in MUTANTS:
         text = only_property((SPEC_DIR / f"{config}.cfg").read_text(), prop)
         # One worker keeps the shortest trace, and so the OFF-TARGET check, repeatable.
-        output, seconds = run_tlc(java, jar, mutate(spec, edits), text, workers="1")
+        output, seconds = run_tlc(java, jar, mutate(spec, edits), text, workers="1", difftrace=False)
         caught = f"Invariant {prop} is violated." in output or f"Action property {prop} is violated." in output
-        steps = re.findall(r"^State \d+: <(\w+)", output, re.M)
+        steps = re.findall(r"^State \d+: <(?!Initial predicate)(\w+)", output, re.M)
         remaining = iter(steps)
-        on_target = all(step in remaining for step in path)
+        final = output.rpartition("\nState ")[2]
+        on_target = all(step in remaining for step in path) and all(text in final for text in last_state)
         verdict = "KILLED" if caught and on_target else "OFF-TARGET" if caught else "SURVIVED"
         print(f"{verdict} {name} ({code}): {prop}, {seconds:.1f}s", flush=True)
         if verdict == "OFF-TARGET":
-            print(f"  wanted {path}, trace took {steps}", flush=True)
+            print(f"  wanted {path + last_state}, trace took {steps}", flush=True)
         ok = ok and verdict == "KILLED"
     return ok
 
 
 def coverage():
-    """Read the sync commit and the coverage table from SKILL.md."""
+    """Read the sync commit and the coverage table from SKILL.md. Any other table
+    line stops the run, because a row left out here is a function nobody tracks."""
     text = (SKILL / "SKILL.md").read_text()
     sync = re.search(r"^Sync commit: `([0-9a-f]{40})`", text, re.M)
     if not sync:
         fail("SKILL.md has no `Sync commit:` line")
-    rows = re.findall(r"^\| `([^`]+)` \| `([^`]+)` \| `([^`]+)` \|$", text, re.M)
+    section = text[sync.end():].split("\n## ")[0]
+    table = [line for line in section.splitlines() if "|" in line]
+    if table[:2] != ["| Model element | File | Function |", "|---|---|---|"]:
+        fail("SKILL.md has no coverage table under the `Sync commit:` line")
+    rows = []
+    for line in table[2:]:
+        row = re.fullmatch(r"\| `([^`]+)` \| `([^`]+)` \| `([^`]+)` \|", line)
+        if not row:
+            fail(f"SKILL.md has a coverage row that cannot be parsed: {line!r}")
+        rows.append(row.groups())
     if not rows:
         fail("SKILL.md has no coverage rows")
     return sync.group(1), rows
