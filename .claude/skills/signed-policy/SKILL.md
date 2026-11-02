@@ -142,9 +142,9 @@ A property that cannot fail proves nothing. Find out why the break no longer rea
 
 `SURVIVED` means that TLC did not report the property violated. Read the edit in `MUTANTS` and the action it changes. Find the other step or guard that now blocks the harm, and correct the edit or the model.
 
-`OFF-TARGET` means that the property failed without the expected actions in order. The next line, `wanted [...], trace took [...]`, lists the expected actions and the actions of the trace that TLC found on one thread. Compare the two lists.
+`OFF-TARGET` means that the property failed without the expected actions in order, or without the expected text in the last state. The next line, `wanted [...], trace took [...]`, lists the expected actions and text, then the actions of the trace that TLC found on one thread. Compare the two lists.
 
-1. If the trace shows the harm the mutant stands for by a shorter way, correct the expected steps in `MUTANTS`.
+1. If the trace shows the harm the mutant stands for by a shorter way, correct the expected steps or text in `MUTANTS`.
 2. If it shows some other failure, tune the edit until the mutant fails for its own reason. A mutant that fails for the wrong reason says nothing about the code it stands for.
 
 A property written as `[][...]_vars` skips any step that changes no variable. If the failure you want to catch leaves a value unchanged, write the property as an invariant.

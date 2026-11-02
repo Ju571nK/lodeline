@@ -34,8 +34,8 @@ OlderEnvelope(v) == [v |-> v, until |-> MaxClock, auth |-> "good"]
 
 \* The hosts an agent can start on. `--policy`, a non-root agent, and Windows have
 \* no local file. The operator's file on those hosts is the apply target, and an
-\* apply replaces it. Their older-agent states need no row, because a run from the
-\* first two rows reaches each one with one stop.
+\* apply replaces it. Their older-agent states get no row, because a stop during an
+\* apply from the first two rows gives the same states.
 Starts == {
     [target |-> NoFile, local |-> NoFile, applied |-> NoFile, pending |-> NoFile],
     [target |-> OperatorFile, local |-> NoFile, applied |-> NoFile, pending |-> NoFile],
