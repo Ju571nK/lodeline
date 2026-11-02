@@ -2232,4 +2232,87 @@ mod tests {
         step(&mut c, &t, &mut s).await;
         assert_eq!(s.gaps_seen_at_quarantine, vec![1]);
     }
+
+    type Snaps = Arc<Mutex<Vec<crate::state_dir::GapQueueState>>>;
+
+    /// A queue restored from `from`, as at a start, that records every flush.
+    fn durable_queue(from: crate::state_dir::GapQueueState) -> (GapQueue, Snaps) {
+        let snaps: Snaps = Arc::default();
+        let s2 = snaps.clone();
+        let g = GapQueue::restore(from).with_persister(Box::new(move |st| {
+            s2.lock().unwrap().push(st.clone());
+            true
+        }));
+        (g, snaps)
+    }
+
+    fn saved(snaps: &Snaps) -> crate::state_dir::GapQueueState {
+        snaps.lock().unwrap().last().cloned().unwrap()
+    }
+
+    fn restarted(from: crate::state_dir::GapQueueState) -> (IngestClient, Snaps, CentralHealth) {
+        let (g, snaps) = durable_queue(from);
+        let central = CentralHealth::new();
+        let c =
+            IngestClient::new(g, central.clone(), params()).with_batch_limits(1, MAX_BATCH_BYTES);
+        (c, snaps, central)
+    }
+
+    /// #361: the count survives a restart, so a crash loop cannot quarantine
+    /// past the limit, and a restart at the limit is stopped at once.
+    #[tokio::test]
+    async fn quarantine_count_survives_a_restart() {
+        let t = Fake::new(vec![err(422, "semantic_invalid", json!([]))]);
+        let mut s = Mem::with(1..=20);
+        let (mut c, snaps, _) = restarted(Default::default());
+        for _ in 0..CAP - 1 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(s.quarantined.len(), CAP - 1);
+
+        let (mut c, snaps, central) = restarted(saved(&snaps));
+        for _ in 0..5 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(
+            s.quarantined.len(),
+            CAP,
+            "one more answer reaches the limit"
+        );
+        assert!(central.ingest_stopped());
+
+        let (mut c, _, central) = restarted(saved(&snaps));
+        t.set(vec![None]);
+        step(&mut c, &t, &mut s).await;
+        assert!(
+            central.ingest_stopped(),
+            "a restart at the limit is stopped at once"
+        );
+        t.set(vec![err(422, "semantic_invalid", json!([]))]);
+        step(&mut c, &t, &mut s).await;
+        assert_eq!(s.quarantined.len(), CAP, "and keeps the slow period");
+    }
+
+    /// #361: a 200 clears the durable count, so a restart after it has the full
+    /// limit again.
+    #[tokio::test]
+    async fn a_success_clears_the_durable_quarantine_count() {
+        let t = Fake::new(vec![err(422, "semantic_invalid", json!([]))]);
+        let mut s = Mem::with(1..=40);
+        let (mut c, snaps, _) = restarted(Default::default());
+        for _ in 0..CAP + 2 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(s.quarantined.len(), CAP);
+        t.set(vec![ok(&(1..=40).collect::<Vec<_>>(), &[])]);
+        step(&mut c, &t, &mut s).await;
+
+        let (mut c, _, central) = restarted(saved(&snaps));
+        assert!(!central.ingest_stopped());
+        t.set(vec![err(422, "semantic_invalid", json!([]))]);
+        for _ in 0..CAP + 2 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(s.quarantined.len(), 2 * CAP, "the full limit again");
+    }
 }
