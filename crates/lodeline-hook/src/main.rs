@@ -678,6 +678,9 @@ fn cmd_install(
     } else {
         eprintln!("lodeline-hook: already installed for {agent} (no change)");
     }
+    if agent == "codex" {
+        eprintln!("lodeline-hook: {}", install::CODEX_TRUST_NOTE);
+    }
 }
 
 fn cmd_uninstall(agent: &str, write: bool) {

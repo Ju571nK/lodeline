@@ -118,3 +118,52 @@ fn codex_missing_socket_fails_open() {
         "fail-open (on_failure=open) → allow, no output"
     );
 }
+
+/// One-shot stub that allows the call and hands back the request line it read.
+fn spawn_capture_stub(socket: std::path::PathBuf) -> std::sync::mpsc::Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let listener = UnixListener::bind(&socket).unwrap();
+        if let Ok((mut s, _)) = listener.accept() {
+            let mut line = String::new();
+            BufReader::new(s.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            writeln!(
+                s,
+                r#"{{"protocol_version":2,"request_id":"00000000-0000-0000-0000-000000000000","verdict":{{"decision":{{"kind":"allow"}},"enforcement_mode":"enforce"}}}}"#
+            )
+            .unwrap();
+            tx.send(line).unwrap();
+        }
+    });
+    rx
+}
+
+/// The decide request carries every apply_patch target, header whitespace
+/// read the way Codex reads it, relative paths resolved against `cwd`.
+#[test]
+fn codex_apply_patch_sends_every_resolved_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("hook-decide.sock");
+    let rx = spawn_capture_stub(socket.clone());
+    wait_for_socket(&socket);
+    let patch = "*** Begin Patch\n *** Add File: .env\n+X=1\n*** Update File: /etc/hosts  \n\
+                 @@\n-a\n *** Delete File: /etc/context-only\n+b\n*** End Patch\n";
+    let stdin = serde_json::json!({
+        "cwd": "/repo",
+        "tool_name": "apply_patch",
+        "tool_input": {"command": patch},
+    })
+    .to_string();
+    let (stdout, code) = run_codex_enforce(&socket, &stdin);
+    assert_eq!((code, stdout.trim()), (0, ""));
+    let req: serde_json::Value =
+        serde_json::from_str(&rx.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+    let action = &req["invocation"]["action"];
+    assert_eq!(action["kind"], "file_edit");
+    assert_eq!(
+        action["paths"],
+        serde_json::json!(["/repo/.env", "/etc/hosts"])
+    );
+}

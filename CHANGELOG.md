@@ -65,6 +65,12 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Changed
 
+- `lodeline-hook install --agent codex` now prints a trust step. Codex runs a user-level
+  hook only after you trust it, and skips an untrusted hook with no warning. After you
+  install, open `/hooks` in Codex and trust the Lodeline hook. Reinstalling changes the
+  hook command, so trust it again. The old step of enabling hooks in `config.toml` is
+  gone, because `hooks` is on by default in Codex. Blocking stays opt-in. (#200)
+
 - A host with a Claude Code settings file and no effective `defaultMode` now reports
   an `auto_approval_enabled` finding with mode `auto (built-in default)`, and its score
   rises. Claude Code 2.1.283 and later starts interactive sessions in `auto` when no
@@ -110,6 +116,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   settings change on upgrade. (#200)
 
 ### Fixed
+
+- `lodeline-hook` now treats a Codex `apply_patch` call as a file edit. Codex sends the
+  patch text in `tool_input.command`, so the hook reported every patch as a Bash
+  command. Command deny rules matched against the patch text, and file-edit rules never
+  saw the edit. The hook now reads the target paths from the patch headers (`*** Add File:`,
+  `*** Update File:`, `*** Delete File:`, and `*** Move to:`) and never reads the patch
+  body. It checks every target path, and a file-edit rule denies the call if any path
+  matches. A relative path resolves against the call's working directory. Upgrade the
+  agent before the hook. A newer hook with an older agent works, but the older agent
+  checks only a 256-byte preview of the joined paths, so in practice it checks only the
+  first path of a multi-file patch. Hash-only mode sends no paths and still fails open.
+  (#200)
 
 - `lodeline reload`, `lodeline show stats|policy-status|targets|risk`, and the live
   AI Guard section of `lodeline doctor` now use `--control-socket` when you give it.

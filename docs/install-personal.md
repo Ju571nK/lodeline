@@ -212,6 +212,12 @@ On a fail-closed install, upgrade the agent before the hook. A newer `lodeline-h
 
 The matcher lists the tools whose calls reach the hook. `lodeline-hook` sends `Bash` and `Monitor` calls that have a `command` to `bash` rules, and `PowerShell` calls to the same rules as a separate `powershell` action. A `Monitor` WebSocket watch (`ws`) has no command and stays `other`. If your matcher names only `Bash`, Claude Code never sends the other two tools to the hook.
 
+#### Codex
+
+`lodeline-hook install --agent codex` registers the hook in Codex's user-level `hooks.json`. Codex runs a user-level hook only after you trust it, and it skips an untrusted hook with no warning, so the hook sees no calls until you open `/hooks` in Codex and trust it. Rerunning the install changes the hook command, so trust it again. `hooks` is on by default in Codex, so `config.toml` needs no change.
+
+The hook treats an `apply_patch` call as a file edit. It reads the target paths from the patch headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`, and `*** Move to:`), resolves a relative path against the call's working directory, and denies the call if a file-edit rule matches any path. It never reads the patch body. Upgrade the agent before the hook: an older agent checks only a 256-byte preview of the joined paths, so it checks only the first path of a multi-file patch.
+
 #### How bash deny rules are matched
 
 A `bash` deny rule is tested against the raw command *and* against the command as the shell would actually run it. Writing the obvious rule is enough:

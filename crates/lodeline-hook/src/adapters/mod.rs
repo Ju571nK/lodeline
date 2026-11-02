@@ -1,10 +1,27 @@
 use lodeline_core::event::AiTool;
-use lodeline_core::hook_proto::{CaptureLevel, CaptureStatus, HookInvocation};
+use lodeline_core::hook_proto::{CaptureLevel, CaptureStatus, HookAction, HookInvocation};
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;
 pub mod grok;
+
+/// A file edit on `paths`. The preview joins them one per line and is capped;
+/// deny rules read `paths` in full. `HashOnly` sends no path text, so file-edit
+/// rules fail open there, as every rule does without a preview.
+pub(crate) fn file_edit(paths: Vec<String>, level: CaptureLevel) -> HookAction {
+    let c = crate::redact::capture(&paths.join("\n"), level);
+    HookAction::FileEdit {
+        path_hash: c.hash,
+        path_preview: c.preview,
+        edit_hash: None,
+        paths: if level == CaptureLevel::HashOnly {
+            Vec::new()
+        } else {
+            paths
+        },
+    }
+}
 
 /// What ends a run for a given agent: the response line to print, if any, and
 /// the process exit code. Every deny today is JSON on stdout with exit 0; the
