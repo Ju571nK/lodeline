@@ -375,20 +375,25 @@ fn profile_writes_everywhere(name: &str, permissions: Option<&Value>) -> bool {
 /// A `[permissions.<name>.filesystem]` entry that grants `write` on the whole
 /// disk or the home dir. A scoped entry's `.` is the path itself, and a
 /// `~` subpath under `:workspace_roots` is read as a home path, not a subtree.
+/// A trailing `/**` on a key or subpath means the subtree, so it is dropped
+/// (`compile_read_write_glob_path`, rust-v0.166.0); a special path such as
+/// `:root` only matches exactly (`parse_special_path`).
 fn grants_write_everywhere(path: &str, access: &Value) -> bool {
     let everywhere = |p: &str| {
+        let p = p.strip_suffix("/**").unwrap_or(p);
         let trimmed = p.trim_end_matches(['/', '\\']);
         let drive_root = trimmed.len() == 2
             && trimmed.as_bytes()[0].is_ascii_alphabetic()
             && trimmed.ends_with(':');
-        (trimmed.is_empty() && !p.is_empty()) || trimmed == ":root" || trimmed == "~" || drive_root
+        (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
     };
     match access {
         Value::String(access) => access == "write" && everywhere(path),
         Value::Table(scoped) => scoped.iter().any(|(sub, access)| {
             access.as_str() == Some("write")
                 && if sub == "." {
-                    everywhere(path)
+                    // Codex compiles a scoped entry's own key as an exact path.
+                    !path.ends_with("/**") && everywhere(path)
                 } else {
                     matches!(path, ":workspace_roots" | ":project_roots")
                         && sub.starts_with('~')
@@ -929,27 +934,40 @@ pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
             continue;
         };
         super::mcp_scan::emit_one_server(name, &json_def, out);
-        emit_mcp_approval_reasons(name.to_string(), def, None, out);
+        emit_mcp_approval_reasons(name.to_string(), def, None, false, out);
     }
 }
 
 /// #200 — `[apps.<id>]` connector tools take the same approval modes. A
 /// tool's mode, else the app's default, else `[apps._default]`'s decides
-/// (`app_tool_policy_from_apps_config`, rust-v0.164.0). Per-link defaults
-/// and requirements overrides are not read.
+/// (`app_tool_policy_from_apps_config`, rust-v0.166.0). `[apps._default]`
+/// also covers every app not listed, so its `approve` is reported on its own.
+/// A listed app's `enabled` defaults to true whatever `_default.enabled` says
+/// (`app_is_enabled`). Per-link defaults and requirements overrides are not
+/// read.
 fn emit_app_approval_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
     let Some(apps) = val.get("apps").and_then(Value::as_table) else {
         return;
     };
+    let enabled = |app: &Value| app.get("enabled").and_then(Value::as_bool) != Some(false);
     let fallback = apps
         .get("_default")
         .and_then(|d| d.get("default_tools_approval_mode"));
+    if apps.get("_default").is_some_and(enabled)
+        && fallback.and_then(Value::as_str) == Some("approve")
+    {
+        out.push(AiGuardReason::TrustedMcpServer {
+            server_name: "apps._default".to_string(),
+        });
+    }
     for (id, app) in apps.iter().filter(|(id, _)| *id != "_default") {
-        if app.get("enabled").and_then(Value::as_bool) == Some(false) {
+        if !enabled(app) {
             continue;
         }
         let name = format!("apps.{}", super::claude_project_settings::safe_name(id));
-        emit_mcp_approval_reasons(name, app, fallback, out);
+        let tools_off_by_default =
+            app.get("default_tools_enabled").and_then(Value::as_bool) == Some(false);
+        emit_mcp_approval_reasons(name, app, fallback, tools_off_by_default, out);
     }
 }
 
@@ -958,11 +976,14 @@ fn emit_app_approval_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
 /// tool call (`custom_mcp_tool_approval_mode`, rust-v0.164.0). Of
 /// `auto | prompt | writes | approve` only `approve` skips the prompt.
 /// The config does not list a server's tools, so an `approve` default covers
-/// every tool not overridden unless `enabled_tools` closes the set.
+/// every tool not overridden unless `enabled_tools` closes the set, or an
+/// app's `default_tools_enabled = false` closes it to the tools set
+/// `enabled = true` (`tools_off_by_default`; MCP servers have no such key).
 fn emit_mcp_approval_reasons(
     server_name: String,
     def: &Value,
     fallback_default: Option<&Value>,
+    tools_off_by_default: bool,
     out: &mut Vec<AiGuardReason>,
 ) {
     let default_approves = def
@@ -993,7 +1014,18 @@ fn emit_mcp_approval_reasons(
         Some(mode) => mode == "approve",
         None => default_approves,
     };
-    let enabled = names("enabled_tools").map(|e| e.into_iter().filter(exposed).collect::<Vec<_>>());
+    let enabled = names("enabled_tools")
+        .or_else(|| {
+            tools_off_by_default.then(|| {
+                tools
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, t)| t.get("enabled").and_then(Value::as_bool) == Some(true))
+                    .map(|(name, _)| name.as_str())
+                    .collect()
+            })
+        })
+        .map(|e| e.into_iter().filter(exposed).collect::<Vec<_>>());
     let candidates = enabled.clone().unwrap_or_else(|| {
         tools
             .into_iter()
@@ -2685,6 +2717,10 @@ mcp_elicitations = "on-request"
             r#""C:\\" = "write""#,
             r#""/" = { "." = "write" }"#,
             r#"":workspace_roots" = { "~" = "write" }"#,
+            r#"":root/**" = "write""#,
+            r#""~/**" = "write""#,
+            r#""~/" = "write""#,
+            r#"":workspace_roots" = { "~/**" = "write" }"#,
         ] {
             let dir = tempdir().unwrap();
             write_config(
@@ -2695,6 +2731,27 @@ mcp_elicitations = "on-request"
             );
             assert!(
                 sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_special_path_or_scoped_glob_key_keeps_the_sandbox() {
+        for entry in [
+            r#"":root/" = "write""#,
+            r#"":root/**" = { "." = "write" }"#,
+            r#""/**" = "write""#,
+        ] {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!(
+                    "default_permissions = \"open\"\n[permissions.open.filesystem]\n{entry}\n"
+                ),
+            );
+            assert!(
+                !sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()),
                 "{entry}"
             );
         }
@@ -2858,8 +2915,48 @@ mcp_elicitations = "on-request"
         let reasons = CodexParser.assess(dir.path()).unwrap();
         assert_eq!(
             mcp_approvals(&reasons),
+            vec![
+                &AiGuardReason::TrustedMcpServer {
+                    server_name: "apps._default".to_string()
+                },
+                &AiGuardReason::TrustedMcpServer {
+                    server_name: "apps.drive".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn app_default_approval_alone_covers_unlisted_apps() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[apps._default]\ndefault_tools_approval_mode = \"approve\"\n",
+        );
+        assert_eq!(
+            mcp_approvals(&CodexParser.assess(dir.path()).unwrap()),
             vec![&AiGuardReason::TrustedMcpServer {
-                server_name: "apps.drive".to_string()
+                server_name: "apps._default".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn disabled_apps_and_tools_are_not_trusted() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[apps._default]\nenabled = false\ndefault_tools_approval_mode = \"approve\"\n\
+             [apps.drive]\ndefault_tools_enabled = false\n\
+             [apps.mail]\ndefault_tools_enabled = false\n\
+             [apps.mail.tools.send]\nenabled = true\n\
+             [apps.mail.tools.read]\nenabled = true\napproval_mode = \"prompt\"\n",
+        );
+        assert_eq!(
+            mcp_approvals(&CodexParser.assess(dir.path()).unwrap()),
+            vec![&AiGuardReason::McpToolsAutoApproved {
+                server_name: "apps.mail".to_string(),
+                tools: vec!["send".to_string()],
             }]
         );
     }
