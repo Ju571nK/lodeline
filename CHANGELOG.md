@@ -135,6 +135,24 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the same event and matcher but different commands in user and managed files count as
   one. (#413)
 
+- The Claude Code scanner now honors `disableAllHooks`. When it is `true` in effect, the
+  scanner stops scoring the hooks Claude Code turns off. These are the hooks in settings
+  files and in skill and agent frontmatter. In project settings they also include the
+  `statusLine`, `subagentStatusLine`, and `fileSuggestion` commands. The scanner reads
+  the setting in Claude Code's precedence order: managed, then local, project, and user.
+  Only a managed `disableAllHooks: true` turns off managed hooks, so managed hooks are
+  still scored otherwise. A host that turns hooks off now scores lower. The scanner does
+  not yet let a user-level `disableAllHooks: true` stop project hooks from being scored.
+  No new reason kind is added. (#415)
+
+- The scanner now scores each Claude Code `PermissionRequest` hook as a standing
+  approval, the way it scores an auto-approval mode. A `PermissionRequest` hook can answer
+  Claude Code's permission prompts, so a host with one can approve tool calls that a
+  person would otherwise confirm. A hook that only logs still scores, because the scanner
+  cannot tell it from an approving hook by reading the settings file. Evidence names only
+  the tool or matcher and never the hook's condition text. The scanner reports at most a
+  fixed number of these hooks per file. No new reason kind is added, so older servers
+  accept the events. (#415)
 - The Codex scanner now follows `default_permissions = "<name>"` to the matching
   `[permissions.<name>]` profile and along its `extends` chain, in user and project
   config. A profile that grants filesystem write on `:root`, `/`, `~`, or a drive root
@@ -157,6 +175,12 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 - A Claude Code host whose managed settings set `permissions.deny` rules no longer gets
   a "deny list empty" finding. Managed deny rules now count toward the deny list. (#413)
+
+- A Claude Code hook with a broad matcher, such as `*`, is no longer reported as a broad
+  matcher when every handler has an `if` condition of the form `Tool(arg)` with a
+  specific argument, for example `Bash(git *)`. The condition limits the handler to
+  those calls. Conditions that do not narrow, such as `Bash`, `*`, and `Edit(**)`, still
+  leave the hook reported. (#415)
 
 - `lodeline scan` now honors `CLAUDE_CONFIG_DIR`. When you set it, Claude Code reads
   its user settings, `.claude.json` MCP servers, hooks, `CLAUDE.md`, skills, and agents
