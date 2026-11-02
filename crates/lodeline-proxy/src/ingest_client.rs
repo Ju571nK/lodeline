@@ -30,7 +30,10 @@
 //! [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] is the limit: past it the client is
 //! stopped. These answers back off and quarantine one event per `max_backoff`, so
 //! a stuck head leaves slowly and good events behind it resume. The stop shows as
-//! `central.ingest_stopped`, and only a 200 clears it and the count.
+//! `central.ingest_stopped`, and only a 200 clears it and the count. The count
+//! is kept in the [`GapQueue`], so a restart keeps it, and a restart at the
+//! limit starts stopped, with a full `max_backoff` before the next slow
+//! quarantine (#361).
 //!
 //! An event is never rewritten and never given a new id: the bytes sent for an
 //! event are those it serialized to from the source, on every retry.
@@ -408,7 +411,7 @@ pub struct IngestClient {
     /// Current event cap; halved by a 413, doubled back by successes.
     cap: usize,
     failures: u32,
-    /// See [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`].
+    /// See [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`]. Mirrored durably in `gaps`.
     single_quarantines: u32,
     /// Some while stopped: when the next event may be quarantined. See
     /// [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`].
@@ -427,6 +430,9 @@ impl IngestClient {
         // An open outage left in the (reloaded) queue is closed when the server
         // next answers.
         let open = gaps.open_outage();
+        let single_quarantines = gaps.single_quarantines();
+        let slow_quarantine_at = (single_quarantines >= MAX_CONSECUTIVE_SINGLE_QUARANTINES)
+            .then(|| Instant::now() + params.max_backoff);
         IngestClient {
             gaps,
             central,
@@ -437,8 +443,8 @@ impl IngestClient {
             max_bytes: MAX_BATCH_BYTES,
             cap: MAX_BATCH_EVENTS,
             failures: 0,
-            single_quarantines: 0,
-            slow_quarantine_at: None,
+            single_quarantines,
+            slow_quarantine_at,
             stop_hook: None,
             holds: HashMap::new(),
             outage: Outage {
@@ -714,7 +720,10 @@ impl IngestClient {
         now: Instant,
     ) -> bool {
         if self.single_quarantines < MAX_CONSECUTIVE_SINGLE_QUARANTINES {
+            // Counted durably before the events move: a crash in between
+            // overcounts, never undercounts.
             self.single_quarantines += 1;
+            self.gaps.set_single_quarantines(self.single_quarantines);
             self.quarantine(source, ids, code).await;
             return true;
         }
@@ -765,6 +774,7 @@ impl IngestClient {
                     .record_ingest_ack(time::OffsetDateTime::now_utc());
                 self.cap = (self.cap * 2).clamp(1, self.max_events);
                 self.single_quarantines = 0;
+                self.gaps.set_single_quarantines(0);
                 self.slow_quarantine_at = None;
             }
             IngestOutcome::Quarantine { items } => {

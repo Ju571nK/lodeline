@@ -180,6 +180,8 @@ struct Inner {
     persist_failed: bool,
     /// The `central_outage` gap opened and not yet closed (persisted).
     open_outage: Option<OpenOutage>,
+    /// The ingest client's quarantine count (persisted).
+    single_quarantines: u32,
 }
 
 impl Inner {
@@ -260,6 +262,7 @@ impl Inner {
             quarantined: of(GapState::Quarantined),
             overflow_count: self.overflow,
             open_outage: self.open_outage.clone(),
+            single_quarantines: self.single_quarantines,
         }
     }
 
@@ -293,6 +296,7 @@ impl GapQueue {
         let mut inner = Inner {
             overflow: state.overflow_count.max(0),
             open_outage: state.open_outage,
+            single_quarantines: state.single_quarantines,
             ..Inner::default()
         };
         for gap in state.quarantined {
@@ -379,6 +383,21 @@ impl GapQueue {
         let mut g = self.lock();
         g.open_outage = o;
         g.flush();
+    }
+
+    /// The ingest client's quarantine count (persisted, so found again after a
+    /// restart).
+    pub fn single_quarantines(&self) -> u32 {
+        self.lock().single_quarantines
+    }
+
+    /// Store the quarantine count, durably. No write when it is unchanged.
+    pub fn set_single_quarantines(&self, n: u32) {
+        let mut g = self.lock();
+        if g.single_quarantines != n {
+            g.single_quarantines = n;
+            g.flush();
+        }
     }
 
     /// Set `ended_at` on the queued `central_outage` gap `id` and make it
