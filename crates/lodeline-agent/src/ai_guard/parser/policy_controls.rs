@@ -149,7 +149,9 @@ fn observation(product: &str, source: &Path, key: &str, value: Value) -> AiGuard
     }
 }
 
-pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessError> {
+/// The managed settings files under `dir`, `managed-settings.json` first and
+/// then the drop-ins in name order, so a later layer wins.
+fn claude_layers(dir: &Path) -> Result<Vec<(PathBuf, Value)>, AssessError> {
     let mut paths = vec![dir.join("managed-settings.json")];
     let drop_dir = dir.join("managed-settings.d");
     match std::fs::read_dir(&drop_dir) {
@@ -201,14 +203,31 @@ pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessE
         }
         layers.push((path, value));
     }
+    Ok(layers)
+}
+
+fn merge_layers(layers: &[(PathBuf, Value)]) -> Value {
+    layers
+        .iter()
+        .fold(Value::Object(Default::default()), |merged, (_, value)| {
+            super::claude_code::merge_overlay(merged, Some(value.clone()))
+        })
+}
+
+/// The managed settings from the file source, merged the way Claude Code
+/// merges them.
+pub(super) fn claude_managed_settings(dir: &Path) -> Result<Value, AssessError> {
+    Ok(merge_layers(&claude_layers(dir)?))
+}
+
+pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessError> {
+    let layers = claude_layers(dir)?;
     // Scalar restrictions only: last explicitly supplied value wins within
     // the local file source. A replaced parent of the wrong type invalidates it.
-    let mut merged = Value::Object(Default::default());
-    for (_, value) in &layers {
-        merged = super::claude_code::merge_overlay(merged, Some(value.clone()));
-    }
+    let merged = merge_layers(&layers);
     let mut out = Vec::new();
     for (key, expected) in [
+        ("disableAutoMode", Value::from("disable")),
         ("permissions.disableAutoMode", Value::from("disable")),
         (
             "permissions.disableBypassPermissionsMode",
@@ -296,6 +315,27 @@ mod tests {
             .iter()
             .all(|c| c.source_path == path && c.id.contains(".configured.")));
         assert!(!serde_json::to_string(&controls).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn claude_disable_auto_mode_is_reported_top_level_or_under_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed-settings.json");
+        for text in [
+            r#"{"disableAutoMode":"disable"}"#,
+            r#"{"permissions":{"disableAutoMode":"disable"}}"#,
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let controls = claude_controls(dir.path()).unwrap();
+            assert!(
+                controls
+                    .iter()
+                    .any(|c| c.setting.ends_with("disableAutoMode")),
+                "{text}"
+            );
+        }
+        std::fs::write(&path, r#"{"disableAutoMode":"enable"}"#).unwrap();
+        assert!(claude_controls(dir.path()).unwrap().is_empty());
     }
 
     #[test]

@@ -9,6 +9,26 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Changed
 
+- A host with a Claude Code settings file and no effective `defaultMode` now reports
+  an `auto_approval_enabled` finding with mode `auto (built-in default)`, and its score
+  rises. Claude Code 2.1.283 and later starts interactive sessions in `auto` when no
+  `defaultMode` is set, so the scanner scores the auto classifier and runs the
+  `autoMode` defaults check. The scanner cannot read the installed Claude Code version,
+  so it assumes 2.1.283 or later. `claude -p` sessions, unsupported models, HIPAA
+  configurations, and organization policy can still start in default mode, and the
+  finding's hint says so. The scanner now resolves the start mode in Claude Code's order.
+  Managed settings come first (`managed-settings.json`, then its drop-ins in alphabetical
+  order), then the user file. `disableAutoMode: "disable"` turns auto off, including an
+  explicit `auto`. It is accepted at the top level or under `permissions`, in user, local,
+  or managed settings. `auto` or `bypassPermissions` in a local or project file does not
+  take effect in Claude Code, so the scanner no longer scores it. A local `auto` reports
+  the built-in default, and a local `bypassPermissions` starts in default mode. A project
+  `acceptEdits` is now scored. Allow rules that Claude Code skips (`*`, `**`, `B*`,
+  `mcp__*`) no longer count as `permissions_allow_broad`. `Bash(*)` and
+  `mcp__<server>__*` still do. Rule ids are unchanged. The agent does not emit a drift
+  event on upgrade, because it holds the drift baseline in memory. The scanner does not
+  yet read server-managed settings, the macOS managed-settings plist, or the Windows
+  registry. (#199)
 - Claude Code `PowerShell` and `Monitor` calls now reach `lodeline-hook` rules. A
   `Bash` command rule now also matches a `Monitor` call that has a `command`, and a
   new `powershell` action that carries the raw `PowerShell` command text. A
