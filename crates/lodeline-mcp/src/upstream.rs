@@ -72,10 +72,9 @@ impl Upstream {
         if !query.is_empty() {
             req = req.query(query);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|err| UpstreamError::Connection(self.base_url.clone(), err.to_string()))?;
+        let resp = req.send().await.map_err(|err| {
+            UpstreamError::Connection(display_url(&self.base_url), err.without_url().to_string())
+        })?;
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         match status {
@@ -92,6 +91,11 @@ impl Upstream {
             ))),
         }
     }
+}
+
+/// `scheme://host[:port]` of a server URL, safe to log or return to a client.
+pub fn display_url(url: &str) -> String {
+    lodeline_core::redact::redact_url(url).unwrap_or_else(|| "<redacted>".into())
 }
 
 fn build_mtls_client(cert: &Path, key: &Path, ca: &Path) -> Result<Client, UpstreamError> {
@@ -260,10 +264,13 @@ mod tests {
     #[tokio::test]
     async fn connection_refused_maps_to_connection() {
         // Nothing listening on this port.
-        let up = Upstream::for_test("http://127.0.0.1:1".to_string());
-        assert!(matches!(
-            up.get("/v1/healthz", &[]).await,
-            Err(UpstreamError::Connection(_, _))
-        ));
+        let up = Upstream::for_test("http://bob:hunter2@127.0.0.1:1/secret?k=v".to_string());
+        let err = up.get("/v1/healthz", &[]).await.unwrap_err();
+        assert!(matches!(err, UpstreamError::Connection(_, _)));
+        let msg = McpError::from(err).message.to_string();
+        assert!(msg.contains("http://127.0.0.1:1"), "{msg}");
+        for leaked in ["bob", "hunter2", "secret", "k=v", "healthz"] {
+            assert!(!msg.contains(leaked), "{msg}");
+        }
     }
 }
