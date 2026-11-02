@@ -17,7 +17,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   unusable; retaining last good bundle` replaces two earlier messages, and an empty
   bundle now warns once. The cold-load error for a corrupt bundle names the reason. A
   deny-rule validation or compile failure keeps the previous evaluator and does not
-  retry.
+  retry. While a bundle stays unusable, a retry applies a changed or removed policy
+  file and compares nothing else, so other changes wait for a wake. A retry can load a
+  valid file that the operator is still saving, without `lodeline reload`, but only
+  after a failed reload.
 
 ### Added
 
