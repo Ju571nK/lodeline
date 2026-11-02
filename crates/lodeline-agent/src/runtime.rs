@@ -604,6 +604,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 rubric: rubric_handle.clone(),
                 shared_evaluator: shared_evaluator.clone(),
                 last_good_bundle: bundle_doc_for_ctx,
+                unfinished: Vec::new(),
             },
         )),
     );

@@ -63,6 +63,7 @@ VARIABLES
     cacheLock,    \* ApplyContext.cache, held across atomic_write
     notified,     \* policy_version_tx has an unseen change
     reading,      \* the file the running reload chose and has not read yet
+    retry,        \* ReloadCtx.unfinished holds a reason, so a root tick reloads
     live,         \* the envelope the last load read
     loaded,       \* ReloadCtx.policy_file_loaded
     activeUntil,  \* active_valid_until
@@ -70,7 +71,7 @@ VARIABLES
 
 durable == <<target, savedTarget, local, applied, savedApplied, pending, savedPending>>
 world == <<clock, up, crashes>>
-loader == <<notified, reading, live, loaded>>
+loader == <<notified, reading, retry, live, loaded>>
 vars == <<durable, world, pc, msg, applyLock, cacheLock, loader, activeUntil>>
 
 \* The saved copies matter only with power cuts. Keeping them constant otherwise
@@ -96,6 +97,7 @@ Init ==
     /\ cacheLock = NoWorker
     /\ notified = FALSE
     /\ reading = "no"
+    /\ retry = FALSE
     /\ live = NoFile
     /\ loaded = FALSE
     /\ activeUntil = NoFile.until
@@ -259,7 +261,7 @@ Notify(w) ==
     /\ pc[w] = "notify"
     /\ notified' = TRUE
     /\ Finish(w)
-    /\ UNCHANGED <<durable, world, cacheLock, reading, live, loaded, activeUntil>>
+    /\ UNCHANGED <<durable, world, cacheLock, reading, retry, live, loaded, activeUntil>>
 
 \* The same send for a settled apply. This apply then goes on to its own check.
 NotifySettled(w) ==
@@ -268,22 +270,37 @@ NotifySettled(w) ==
     /\ notified' = TRUE
     /\ pc' = [pc EXCEPT ![w] = "verify"]
     /\ msg' = [msg EXCEPT ![w] = NoFile]
-    /\ UNCHANGED <<durable, world, applyLock, cacheLock, reading, live, loaded, activeUntil>>
+    /\ UNCHANGED <<durable, world, applyLock, cacheLock, reading, retry, live, loaded, activeUntil>>
 
-\* policy_reload_task::run wakes and reload calls in_force. A wake on this kind's
-\* channel consumes the change. The other kind's channel, the rule-packs file
-\* watcher, and Request::ReloadPolicy wake it too, at any time, and leave any
-\* change on this channel unseen.
+\* SignedFile::in_force, as reload calls it.
+ReloadChoice == IF target # NoFile THEN "applied" ELSE "local"
+
+\* policy_reload_task::run wakes, clears ctx.unfinished, and reload calls in_force.
+\* A wake on this kind's channel consumes the change. The other kind's channel, the
+\* rule-packs file watcher, and Request::ReloadPolicy wake it too, at any time, and
+\* leave any change on this channel unseen.
 ReloadCheck ==
     /\ up
     /\ reading = "no"
-    /\ reading' = IF target # NoFile THEN "applied" ELSE "local"
+    /\ reading' = ReloadChoice
     /\ notified' \in {FALSE, notified}
+    /\ retry' = FALSE
     /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, live, loaded, activeUntil>>
 
+\* A root tick finds ctx.unfinished not empty, and reload takes it and calls in_force.
+\* A tick consumes no change.
+ReloadRetry ==
+    /\ up
+    /\ retry
+    /\ reading = "no"
+    /\ reading' = ReloadChoice
+    /\ retry' = FALSE
+    /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, live, loaded, activeUntil>>
+
 \* reload reads the chosen file. Rename makes that read atomic. A policy file that
-\* was loaded and has gone missing keeps the previous state. A bundle that has gone
-\* missing is a deliberate removal, which read_bundle_state reports as Absent.
+\* was loaded and has gone missing keeps the previous state and waits for a retry. A
+\* bundle that has gone missing is a deliberate removal, which read_bundle_state
+\* reports as Absent.
 ReloadRead ==
     /\ up
     /\ reading # "no"
@@ -291,8 +308,20 @@ ReloadRead ==
            keep == Kind = "policy" /\ file = NoFile /\ loaded
        IN  /\ live' = IF keep THEN live ELSE file
            /\ loaded' = IF keep THEN loaded ELSE (Kind = "policy" /\ file # NoFile)
+           /\ retry' = keep
     /\ reading' = "no"
     /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, activeUntil>>
+
+\* reload finds the file unusable: a read or parse error, a defaults() or merge error
+\* after it, or a bundle that read_bundle_state reports as Corrupt or Empty. It keeps
+\* what is live and notes the reason in ctx.unfinished.
+ReloadReadFails ==
+    /\ Faults
+    /\ up
+    /\ reading # "no"
+    /\ reading' = "no"
+    /\ retry' = TRUE
+    /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, live, loaded, activeUntil>>
 
 Tick ==
     /\ clock < MaxClock
@@ -309,6 +338,7 @@ LoseMemory ==
     /\ cacheLock' = NoWorker
     /\ notified' = FALSE
     /\ reading' = "no"
+    /\ retry' = FALSE
     /\ live' = NoFile
     /\ loaded' = FALSE
     /\ activeUntil' = NoFile.until
@@ -356,7 +386,7 @@ Boot ==
     /\ live' = InForce
     /\ loaded' = (Kind = "policy" /\ InForce # NoFile)
     /\ up' = TRUE
-    /\ UNCHANGED <<target, local, savedApplied, savedPending, clock, crashes, pc, msg, applyLock, cacheLock, notified, reading>>
+    /\ UNCHANGED <<target, local, savedApplied, savedPending, clock, crashes, pc, msg, applyLock, cacheLock, notified, reading, retry>>
 
 \* The documented way back to the local file. This writer skips verify_envelope.
 DeleteApplied ==
@@ -388,7 +418,9 @@ Next ==
         \/ Notify(w)
         \/ NotifySettled(w)
     \/ ReloadCheck
+    \/ ReloadRetry
     \/ ReloadRead
+    \/ ReloadReadFails
     \/ Tick
     \/ Crash
     \/ PowerCut
@@ -431,8 +463,9 @@ WatermarkMonotonic ==
 BootSettles == [][(~up /\ up') => (pending' = NoFile /\ applied' = Recorded(InForce'))]_vars
 
 \* Spelled out, not `InForce`, so that a change to the read order cannot pass here.
+\* While a retry is pending the live policy may lag, and only then.
 LiveMatchesDisk ==
-    (Quiet /\ ~notified /\ reading = "no") => live = IF target # NoFile THEN target ELSE local
+    (Quiet /\ ~notified /\ reading = "no" /\ ~retry) => live = IF target # NoFile THEN target ELSE local
 
 ExpiryMatchesDisk == (Kind = "policy" /\ Quiet) => activeUntil = InForce.until
 

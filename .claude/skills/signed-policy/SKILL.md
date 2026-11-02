@@ -59,9 +59,9 @@ Each config checks only the properties that list it in the last column. A proper
 
 | Config | Kind | Connections | Failed steps | Power cuts | Hand edits | Distinct states |
 |---|---|---|---|---|---|---|
-| `policy` | policy | 2 | yes | yes | no | 1,079,748 |
-| `rule_packs` | bundle | 2 | yes | yes | no | 928,932 |
-| `local_edits` | policy | 2 | yes | no | yes | 2,734,756 |
+| `policy` | policy | 2 | yes | yes | no | 1,670,436 |
+| `rule_packs` | bundle | 2 | yes | yes | no | 1,438,404 |
+| `local_edits` | policy | 2 | yes | no | yes | 3,637,988 |
 
 - `policy` checks every property except `LoadedPolicyKept`. `rule_packs` checks the same less `ExpiryMatchesDisk`, which covers `policy` only.
 - A failed step is an error from `record_pending`, the rename, the directory fsync, or `promote_pending`.
@@ -108,9 +108,9 @@ Sync commit: `9dfff8c9878db3650401ab1e7ebce9d97dea6276`
 | `Boot` | `crates/lodeline-agent/src/runtime.rs` | `let policy_path_for_apply = cfg..let policy_file_loaded` |
 | `Settle, Rename` | `crates/lodeline-agent/src/runtime.rs` | `let apply_ctx = Arc::new..apply_lock: Default::default()` |
 | `ReloadCheck, ReloadRead, loaded` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..rule_packs_version_rx,` |
-| `ReloadCheck, ReloadRead` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
-| `ReloadCheck` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
-| `ReloadRead` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
+| `ReloadCheck, ReloadRetry, ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
+| `ReloadCheck, ReloadRetry` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
+| `ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
 | `ReloadCheck` | `crates/lodeline-agent/src/control.rs` | `Request::ReloadPolicy => {..policy_version_tx.send_modify(` |
 | `Workers` | `crates/lodeline-agent/src/control.rs` | `serve_until` |
 
