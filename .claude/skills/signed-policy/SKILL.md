@@ -75,7 +75,7 @@ Read the coverage table. If your change touches a listed function or block, `che
 
 `check.py` reads the lines under the `Sync commit:` line up to the next heading. Any line there with a pipe character must be a row of the table, and the table needs the three columns Model element, File, and Function. A line that is not a row stops the run with ``check.py: SKILL.md has a coverage row that cannot be parsed: '<line>'``, because a row left out would leave a function untracked. A missing or wrong header stops it with ``check.py: SKILL.md has no coverage table under the `Sync commit:` line``.
 
-Sync commit: `255f0f7b5aa79961ab424dc710047336eaf1208e`
+Sync commit: `1042af0961c67860f7b9a0c2f1b89ad7466a4471`
 
 | Model element | File | Function |
 |---|---|---|
@@ -107,7 +107,7 @@ Sync commit: `255f0f7b5aa79961ab424dc710047336eaf1208e`
 | `InForce` | `crates/lodeline-agent/src/runtime.rs` | `policy_path_for_command` |
 | `Boot` | `crates/lodeline-agent/src/runtime.rs` | `let policy_path_for_apply = cfg..let policy_file_loaded` |
 | `Settle, Rename` | `crates/lodeline-agent/src/runtime.rs` | `let apply_ctx = Arc::new..apply_lock: Default::default()` |
-| `ReloadCheck, ReloadRead, loaded` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..rule_packs_version_rx,` |
+| `ReloadCheck, ReloadRead, loaded, retry` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..applied_policy: None,` |
 | `ReloadCheck, ReloadRetry, ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
 | `ReloadCheck, ReloadRetry` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
 | `ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
