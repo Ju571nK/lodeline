@@ -119,9 +119,13 @@ pub(crate) fn emit_one_server(name: &str, def: &Value, out: &mut Vec<AiGuardReas
 }
 
 /// #403 — `url` as it may be reported: `scheme://host[:port]`. Userinfo, the
-/// query and path segments can all carry tokens, so none of them is kept.
+/// query and path segments can all carry tokens, so none of them is kept. A
+/// scheme-less value with no `.` or `:` is a bare token, not a host, so it is
+/// not echoed either.
 pub(crate) fn url_for_evidence(url: &str) -> String {
-    redact_url(url.trim()).unwrap_or_else(|| "<unparseable-url>".into())
+    redact_url(url.trim())
+        .filter(|u| u.contains("://") || u.contains(['.', ':']))
+        .unwrap_or_else(|| "<unparseable-url>".into())
 }
 
 /// True iff the URL scheme (lowercased) is http/https. Lowercasing defeats

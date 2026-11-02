@@ -298,7 +298,8 @@ fn destination_is_loopback(url: &str) -> bool {
     let Some((_, rest)) = url.split_once("://") else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // `\` ends the authority as in `redact_url`, so `evil\@127.0.0.1` is not loopback.
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or(rest);
     let host = authority.rsplit('@').next().unwrap_or(authority);
     // Strip a port, and the brackets around an IPv6 literal.
     let host = match host.strip_prefix('[') {
@@ -2736,7 +2737,13 @@ mod tests {
                 "https://hooks.example",
             ),
             ("https://bob:pw/xx@hooks.example/h", "<unparseable-url>"),
-            ("carol:hunter2@nohost?k=v", "nohost"),
+            ("carol:hunter2@nohost?k=v", "<unparseable-url>"),
+            ("abcd1234", "<unparseable-url>"),
+            ("carol:hunter2@hooks.example?k=v", "hooks.example"),
+            (
+                r"https://evil.example\\@127.0.0.1/h",
+                "https://evil.example",
+            ),
         ] {
             let dir = tempdir().unwrap();
             write_settings(
