@@ -153,11 +153,19 @@ fn assess_user(
     // read the `settings.local.json` overlay, so scoring the merged view
     // would attribute rules to a control that never sees them.
     let base_settings = base.clone().unwrap_or(Value::Object(Default::default()));
+    // #199 — a `disableAllHooks: true` outside the managed files turns off
+    // every hook but the managed ones.
+    // shortcut: a project file can set it back to `false` for its own
+    // folder, which this host-wide scope cannot see; a per-repo scope would
+    // have to re-score the user's hooks to cover that.
+    let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
 
     let mut out = Vec::new();
-    emit_hook_reasons(&merged, &mut out)?;
-    super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    if !hooks_off {
+        emit_hook_reasons(&merged, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    }
     // Managed deny rules apply to every session, so the deny list is the
     // combined one.
     if deny_list_empty(&merge_overlay(merged.clone(), managed.clone())) {
@@ -170,7 +178,10 @@ fn assess_user(
     // with the user's, so they score like the user's own.
     if let Some(managed) = &managed {
         let mut found = Vec::new();
-        emit_hook_reasons(managed, &mut found)?;
+        // Only a managed `disableAllHooks` reaches managed hooks.
+        if !hooks_disabled(&[Some(managed)]) {
+            emit_hook_reasons(managed, &mut found)?;
+        }
         if let Some(perms) = managed.get("permissions") {
             emit_broad_allow_reasons(perms, &mut found);
         }
@@ -287,9 +298,15 @@ pub(crate) fn emit_hook_reasons(
             continue;
         };
         for entry in arr {
-            // matcher
-            if let Some(matcher) = entry.get("matcher").and_then(Value::as_str) {
-                if matcher.is_empty() || matcher == "*" || matcher == ".*" {
+            let inner = entry.get("hooks").and_then(Value::as_array);
+            let matcher = entry.get("matcher").and_then(Value::as_str);
+            // matcher. #199 — a handler runs only for calls its `if` rule
+            // matches, so the group is broad unless every handler narrows it.
+            if let Some(matcher) = matcher {
+                let narrowed = inner.is_some_and(|hs| {
+                    !hs.is_empty() && hs.iter().all(|h| hook_condition(h).is_some())
+                });
+                if (matcher.is_empty() || matcher == "*" || matcher == ".*") && !narrowed {
                     out.push(AiGuardReason::BroadMatcher {
                         hook_event: event_name.clone(),
                         matcher: matcher.to_string(),
@@ -297,10 +314,20 @@ pub(crate) fn emit_hook_reasons(
                 }
             }
             // commands
-            let Some(inner) = entry.get("hooks").and_then(Value::as_array) else {
+            let Some(inner) = inner else {
                 continue;
             };
             for h in inner {
+                // #199 — a `PermissionRequest` hook answers the permission
+                // prompt in the user's place, for every call it matches.
+                if event_name == "PermissionRequest" {
+                    let target = hook_condition(h)
+                        .or(matcher.filter(|m| !m.is_empty()))
+                        .unwrap_or("*");
+                    out.push(AiGuardReason::StandingCommandApproval {
+                        pattern: truncate_for_snippet(&format!("PermissionRequest hook: {target}")),
+                    });
+                }
                 // #199 — a hook is no longer necessarily a shell command.
                 // `http` POSTs the tool call to a URL, and `prompt` / `agent` /
                 // `mcp_tool` run inside the agent. Only `command` carries a
@@ -330,6 +357,25 @@ pub(crate) fn emit_hook_reasons(
         }
     }
     Ok(())
+}
+
+/// A handler's `if` permission rule, when it narrows the calls the handler
+/// runs for. A rule that admits every call of a tool, such as `Bash(*)`, does
+/// not.
+fn hook_condition(hook: &Value) -> Option<&str> {
+    hook.get("if")
+        .and_then(Value::as_str)
+        .filter(|rule| !rule.trim().is_empty() && !is_broad_allow(rule))
+}
+
+/// The effective `disableAllHooks` among `files`, highest precedence first:
+/// the first file that sets it decides.
+fn hooks_disabled(files: &[Option<&Value>]) -> bool {
+    files
+        .iter()
+        .flatten()
+        .find_map(|f| f.get("disableAllHooks").and_then(Value::as_bool))
+        .unwrap_or(false)
 }
 
 /// #199 — an `http` hook forwards the whole tool-call payload to a URL. On
@@ -685,6 +731,7 @@ fn label_managed(reason: &mut AiGuardReason) {
         | AiGuardReason::DestructiveInHookScript { hook_event, .. }
         | AiGuardReason::ExternalScriptUnscanned { hook_event, .. } => hook_event,
         AiGuardReason::PermissionsAllowBroad { rule } => rule,
+        AiGuardReason::StandingCommandApproval { pattern } => pattern,
         AiGuardReason::AutoModeDefaultsDropped { list } => list,
         AiGuardReason::AutoApprovalEnabled { mode } => mode,
         _ => return,
@@ -1146,14 +1193,18 @@ fn assess_project(repo_root: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReas
     {
         return Ok(Vec::new());
     }
+    // An unreadable managed file counts as absent.
+    let managed = super::policy_controls::claude_managed_settings(policy_dir).ok();
     // Managed `defaultMode` outranks project and local files, and the user
-    // scope already reports it. An unreadable managed file counts as absent.
-    let managed_sets_mode = super::policy_controls::claude_managed_settings(policy_dir)
-        .ok()
-        .is_some_and(|m| {
-            m.pointer("/permissions/defaultMode")
-                .is_some_and(Value::is_string)
-        });
+    // scope already reports it.
+    let managed_sets_mode = managed.as_ref().is_some_and(|m| {
+        m.pointer("/permissions/defaultMode")
+            .is_some_and(Value::is_string)
+    });
+    // shortcut: the user's own file is not read here, so a user-level
+    // `disableAllHooks: true` the project leaves unset still scores the
+    // project's hooks; reading it needs the user config folder in this scope.
+    let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
     // No built-in fallback here: the user scope already reports it, and a
     // project file cannot set `auto` or `bypassPermissions`.
     let start = if managed_sets_mode {
@@ -1170,8 +1221,10 @@ fn assess_project(repo_root: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReas
     };
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
     let mut out = Vec::new();
-    emit_hook_reasons(&merged, &mut out)?;
-    super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    if !hooks_off {
+        emit_hook_reasons(&merged, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    }
     emit_permission_reasons(&merged, &mut out);
     emit_start_mode_reason(start, &mut out);
     emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
