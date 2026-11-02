@@ -1,4 +1,4 @@
-policy_module(lodeline, 0.1.0)
+policy_module(lodeline, 0.1.1)
 
 ## Lodeline SELinux policy (#69). Confines the three de-rooted lodeline daemons (#10)
 ## into dedicated domains instead of unconfined_service_t. Authored from the

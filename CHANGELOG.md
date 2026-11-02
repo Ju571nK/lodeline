@@ -9,21 +9,6 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [0.12.1] - 2026-11-02
 
-### Fixed
-
-- A policy reload that keeps the previous state now runs again on each 5-second root
-  tick until it finishes, and a new wake clears the record of earlier failures. A
-  policy file or rule-pack bundle that is fixed by hand or returns loads within about
-  5 seconds, with no `lodeline reload`. The log has one line per wake and one per new
-  reason, so a retry with the same reason logs nothing. The warning `rule-packs.yaml
-  unusable; retaining last good bundle` replaces two earlier messages, and an empty
-  bundle now warns once. The cold-load error for a corrupt bundle names the reason. A
-  deny-rule validation or compile failure keeps the previous evaluator and does not
-  retry. While a bundle stays unusable, a retry applies a changed or removed policy
-  file and compares nothing else, so other changes wait for a wake. A retry can load a
-  valid file that the operator is still saving, without `lodeline reload`, but only
-  after a failed reload.
-
 ### Added
 
 - `lodeline status` shows whether a fleet host really reaches `lodeline-server`. A
@@ -68,6 +53,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   remove the field from the stored proxy state by hand. (#339)
 
 ### Fixed
+
+- A policy reload that keeps the previous state now runs again on each 5-second root
+  tick until it finishes, and a new wake clears the record of earlier failures. A
+  policy file or rule-pack bundle that is fixed by hand or returns loads within about
+  5 seconds, with no `lodeline reload`. The log has one line per wake and one per new
+  reason, so a retry with the same reason logs nothing. The warning `rule-packs.yaml
+  unusable; retaining last good bundle` replaces two earlier messages, and an empty
+  bundle now warns once. The cold-load error for a corrupt bundle names the reason. A
+  deny-rule validation or compile failure keeps the previous evaluator and does not
+  retry. While a bundle stays unusable, a retry applies a changed or removed policy
+  file and compares nothing else, so other changes wait for a wake. A retry can load a
+  valid file that the operator is still saving, without `lodeline reload`, but only
+  after a failed reload.
 
 - A signed policy or rule-pack bundle now applies on a packaged or root agent with no
   `--policy`. The agent wrote these files to `/etc/lodeline`, which `lodeline.service`
