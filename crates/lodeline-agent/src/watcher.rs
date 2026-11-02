@@ -231,7 +231,7 @@ fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
                 };
                 for entry in entries.flatten() {
                     if entry.file_type().is_ok_and(|kind| kind.is_dir())
-                        && glob.is_match(Path::new(&entry.file_name()))
+                        && glob.is_match(&crate::normalizer::match_form(entry.file_name().into()))
                     {
                         matches.push(entry.path());
                     }
@@ -583,6 +583,16 @@ mod tests {
             vec![expected]
         );
         assert!(resolve_directory_pattern(&td.path().join("Missing*/*.app/Contents")).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nfc_directory_pattern_finds_an_nfd_stored_directory() {
+        let td = TempDir::new().unwrap();
+        let stored = td.path().join("\u{1112}\u{1161}\u{11AB}-app/Contents");
+        fs::create_dir_all(&stored).unwrap();
+        let pattern = td.path().join("\u{D55C}*/Contents");
+        assert_eq!(resolve_directory_pattern(&pattern), vec![stored]);
     }
 
     #[cfg(windows)]

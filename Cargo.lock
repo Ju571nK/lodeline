@@ -1963,6 +1963,7 @@ dependencies = [
  "data-encoding",
  "dunce",
  "ed25519-dalek",
+ "icu_normalizer",
  "if-addrs",
  "insta",
  "libc",

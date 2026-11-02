@@ -305,6 +305,21 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   `[ERROR] cannot read policy` and counts it. The agent service already failed on such
   errors, and a `rule-packs.yaml` read error already behaved this way. (#416)
 
+- On macOS, the agent no longer misses a watched file whose name has non-ASCII
+  characters, such as Korean. APFS keeps a name in the Unicode form it was created with
+  (NFC or NFD), and FSEvents reports those bytes, while policy paths are usually NFC. A
+  file created in NFD under an NFC policy path did not match, or matched without its
+  earlier hash. The agent now converts event paths and policy paths to NFC in one place,
+  before matching and before the hash cache, so the match, the earlier hash, and the
+  reported path agree. Reported paths for such files are now NFC. ASCII paths are
+  unchanged, and Linux and Windows still match paths byte for byte, because those file
+  systems treat NFC and NFD as different names. After you upgrade, a file that a wildcard
+  pattern matches and whose stored name is NFD can report once as "created" without an
+  earlier hash, because its saved state used the NFD name. Files that the policy names
+  exactly are hashed again at start. On macOS volumes that are not APFS or HFS+, such as
+  SMB, NFS, or exFAT, opening the NFC form of an NFD name can fail, so the hash for such
+  a file can fail. (#419)
+
 ## [0.12.1] - 2026-11-02
 
 ### Added
