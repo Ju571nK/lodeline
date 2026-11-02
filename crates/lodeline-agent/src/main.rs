@@ -11,16 +11,17 @@ use lodeline_agent::{cli, doctor, runtime, show};
 
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
+    let control_socket = cli
+        .control_socket
+        .clone()
+        .unwrap_or_else(default_control_socket);
     match cli.command {
         cli::Command::Run => {
             let cfg = runtime::RuntimeConfig {
                 policy_paths: runtime::policy_paths(cli.policy.clone()),
                 state_db_path: cli.state_db.clone().unwrap_or_else(default_state_db_path),
                 events_dir: cli.events_dir.clone().unwrap_or_else(default_events_dir),
-                control_socket: cli
-                    .control_socket
-                    .clone()
-                    .unwrap_or_else(default_control_socket),
+                control_socket,
                 control_pipe_name: default_control_pipe_name(),
                 poll_watcher: cli.poll,
                 keystore_path: cli.keystore.clone(),
@@ -41,7 +42,7 @@ fn main() -> anyhow::Result<()> {
             let code = if verify_self {
                 doctor::verify_self(manifest)
             } else {
-                doctor::run(cli.policy, cli.state_db)
+                doctor::run(cli.policy, cli.state_db, &control_socket)
             };
             std::process::exit(code);
         }
@@ -51,6 +52,7 @@ fn main() -> anyhow::Result<()> {
                 cli.policy.clone(),
                 cli.events_dir.clone(),
                 cli.state_db.clone().unwrap_or_else(default_state_db_path),
+                &control_socket,
             )?;
             std::process::exit(code);
         }
@@ -78,7 +80,7 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "operator-cli")]
         cli::Command::Reload => {
-            let code = reload();
+            let code = reload(&control_socket);
             std::process::exit(code);
         }
         #[cfg(feature = "operator-cli")]
@@ -106,8 +108,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "operator-cli")]
-fn reload() -> i32 {
-    match control_client::query(&lodeline_agent::control::Request::ReloadPolicy) {
+fn reload(control_socket: &std::path::Path) -> i32 {
+    match control_client::query(
+        control_socket,
+        &lodeline_agent::control::Request::ReloadPolicy,
+    ) {
         Ok(resp) if resp.ok => {
             println!("reload requested — check `journalctl -u lodeline` for the result");
             0
