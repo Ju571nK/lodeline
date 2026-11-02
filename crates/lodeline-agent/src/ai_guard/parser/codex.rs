@@ -289,7 +289,8 @@ fn assess_user_layers(
     }
 
     let mut out = Vec::new();
-    emit_sandbox_reasons(&layers, &mut out);
+    let permissions = effective.as_ref().and_then(|v| v.get("permissions"));
+    emit_sandbox_reasons(&layers, permissions, &mut out);
     if let Some(val) = &effective {
         // #200 — whether a human is asked before a tool runs.
         emit_approval_policy_reasons(val, &mut out);
@@ -313,22 +314,88 @@ fn assess_user_layers(
 /// "read-only" nor "workspace-write" emits `SandboxDisabled`.
 ///
 /// #200 — the top-level `default_permissions` profile does the same job:
-/// `":danger-full-access"` disables the sandbox, while `:read-only`,
-/// `:workspace` and named profiles do not. Codex takes the highest layer that
+/// `":danger-full-access"` disables the sandbox, as does a named profile that
+/// writes everywhere; `:read-only` and `:workspace` do not. Codex takes the highest layer that
 /// sets either key, and inside that layer `default_permissions` wins
 /// (`resolve_permission_config_syntax`, rust-v0.166.0). `layers` is low to high.
-fn emit_sandbox_reasons(layers: &[CodexLayer], out: &mut Vec<AiGuardReason>) {
+/// `permissions` is the merged `[permissions]` table that names resolve in.
+fn emit_sandbox_reasons(
+    layers: &[CodexLayer],
+    permissions: Option<&Value>,
+    out: &mut Vec<AiGuardReason>,
+) {
     let disabled = layers.iter().rev().find_map(|layer| {
         let config = layer.config.as_ref()?;
         let key = |k| config.get(k).and_then(Value::as_str);
         match (key("default_permissions"), key("sandbox_mode")) {
-            (Some(profile), _) => Some(profile == ":danger-full-access"),
+            (Some(profile), _) => Some(profile_writes_everywhere(profile, permissions)),
             (None, Some(mode)) => Some(mode == "danger-full-access"),
             (None, None) => None,
         }
     });
     if disabled == Some(true) {
         out.push(AiGuardReason::SandboxDisabled);
+    }
+}
+
+/// #200 — whether permission profile `name` lets the sandbox write anywhere,
+/// as `:danger-full-access` does. A named profile is resolved through its
+/// `extends` chain, child keys over parent keys (`resolve_profile`,
+/// rust-v0.164.0). `:read-only` and `:workspace`, the only built-in parents
+/// Codex accepts, write nowhere outside the workspace roots and temp dirs.
+/// Extra writable paths and `network.enabled = true` are not scored: no
+/// reason kind fits them, as with `sandbox_workspace_write`.
+fn profile_writes_everywhere(name: &str, permissions: Option<&Value>) -> bool {
+    if name == ":danger-full-access" {
+        return true;
+    }
+    let mut chain = Vec::new();
+    let mut next = Some(name);
+    // Codex refuses to start on a cycle; the bound only stops the walk.
+    while let Some(profile) = next.and_then(|n| permissions?.get(n)) {
+        if chain.len() == 16 {
+            break;
+        }
+        chain.push(profile);
+        next = profile.get("extends").and_then(Value::as_str);
+    }
+    let mut filesystem = Value::Table(toml::Table::new());
+    for profile in chain.iter().rev() {
+        if let Some(entries) = profile.get("filesystem") {
+            merge_layer(&mut filesystem, entries);
+        }
+    }
+    filesystem
+        .as_table()
+        .into_iter()
+        .flatten()
+        .any(|(path, access)| grants_write_everywhere(path, access))
+}
+
+/// A `[permissions.<name>.filesystem]` entry that grants `write` on the whole
+/// disk or the home dir. A scoped entry's `.` is the path itself, and a
+/// `~` subpath under `:workspace_roots` is read as a home path, not a subtree.
+fn grants_write_everywhere(path: &str, access: &Value) -> bool {
+    let everywhere = |p: &str| {
+        let trimmed = p.trim_end_matches(['/', '\\']);
+        let drive_root = trimmed.len() == 2
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.ends_with(':');
+        (trimmed.is_empty() && !p.is_empty()) || trimmed == ":root" || trimmed == "~" || drive_root
+    };
+    match access {
+        Value::String(access) => access == "write" && everywhere(path),
+        Value::Table(scoped) => scoped.iter().any(|(sub, access)| {
+            access.as_str() == Some("write")
+                && if sub == "." {
+                    everywhere(path)
+                } else {
+                    matches!(path, ":workspace_roots" | ":project_roots")
+                        && sub.starts_with('~')
+                        && everywhere(sub)
+                }
+        }),
+        _ => false,
     }
 }
 
@@ -847,6 +914,7 @@ pub(crate) fn collect_external_script_paths_from_config(
 /// `url` (StreamableHttp). A `url` starting with `http://` or `https://`
 /// means the server is remote.
 pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
+    emit_app_approval_reasons(val, out);
     let Some(servers) = val.get("mcp_servers").and_then(Value::as_table) else {
         return;
     };
@@ -861,36 +929,95 @@ pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
             continue;
         };
         super::mcp_scan::emit_one_server(name, &json_def, out);
-        emit_mcp_approval_reasons(name, def, out);
+        emit_mcp_approval_reasons(name.to_string(), def, None, out);
+    }
+}
+
+/// #200 — `[apps.<id>]` connector tools take the same approval modes. A
+/// tool's mode, else the app's default, else `[apps._default]`'s decides
+/// (`app_tool_policy_from_apps_config`, rust-v0.164.0). Per-link defaults
+/// and requirements overrides are not read.
+fn emit_app_approval_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
+    let Some(apps) = val.get("apps").and_then(Value::as_table) else {
+        return;
+    };
+    let fallback = apps
+        .get("_default")
+        .and_then(|d| d.get("default_tools_approval_mode"));
+    for (id, app) in apps.iter().filter(|(id, _)| *id != "_default") {
+        if app.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let name = format!("apps.{}", super::claude_project_settings::safe_name(id));
+        emit_mcp_approval_reasons(name, app, fallback, out);
     }
 }
 
 /// #200 — a tool's `approval_mode`, else the server's
 /// `default_tools_approval_mode`, decides whether Codex asks before an MCP
-/// tool call. Of `auto | prompt | writes | approve` only `approve` skips the
-/// prompt (`requires_mcp_tool_approval_for_mode`, rust-v0.166.0).
-fn emit_mcp_approval_reasons(name: &str, def: &Value, out: &mut Vec<AiGuardReason>) {
-    let approves = |v: Option<&Value>| v.and_then(Value::as_str) == Some("approve");
-    if approves(def.get("default_tools_approval_mode")) {
-        out.push(AiGuardReason::TrustedMcpServer {
-            server_name: name.to_string(),
-        });
+/// tool call (`custom_mcp_tool_approval_mode`, rust-v0.164.0). Of
+/// `auto | prompt | writes | approve` only `approve` skips the prompt.
+/// The config does not list a server's tools, so an `approve` default covers
+/// every tool not overridden unless `enabled_tools` closes the set.
+fn emit_mcp_approval_reasons(
+    server_name: String,
+    def: &Value,
+    fallback_default: Option<&Value>,
+    out: &mut Vec<AiGuardReason>,
+) {
+    let default_approves = def
+        .get("default_tools_approval_mode")
+        .or(fallback_default)
+        .and_then(Value::as_str)
+        == Some("approve");
+    let tools = def.get("tools").and_then(Value::as_table);
+    let names = |key| {
+        def.get(key)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+    };
+    let disabled = names("disabled_tools").unwrap_or_default();
+    let exposed = |tool: &&str| {
+        !disabled.contains(tool)
+            && tools
+                .and_then(|t| t.get(*tool))
+                .and_then(|t| t.get("enabled"))
+                .and_then(Value::as_bool)
+                != Some(false)
+    };
+    let approves = |tool: &&str| match tools
+        .and_then(|t| t.get(*tool))
+        .and_then(|t| t.get("approval_mode"))
+        .and_then(Value::as_str)
+    {
+        Some(mode) => mode == "approve",
+        None => default_approves,
+    };
+    let enabled = names("enabled_tools").map(|e| e.into_iter().filter(exposed).collect::<Vec<_>>());
+    let candidates = enabled.clone().unwrap_or_else(|| {
+        tools
+            .into_iter()
+            .flat_map(|t| t.keys().map(String::as_str))
+            .filter(exposed)
+            .collect()
+    });
+    let approved: Vec<&str> = candidates.into_iter().filter(approves).collect();
+    let all_tools = match &enabled {
+        Some(enabled) => !enabled.is_empty() && approved.len() == enabled.len(),
+        None => default_approves,
+    };
+    if all_tools {
+        out.push(AiGuardReason::TrustedMcpServer { server_name });
         return;
     }
-    let mut tools: Vec<String> = def
-        .get("tools")
-        .and_then(Value::as_table)
+    let mut tools: Vec<String> = approved
         .into_iter()
-        .flatten()
-        .filter(|(_, tool)| approves(tool.get("approval_mode")))
-        .map(|(tool, _)| super::claude_project_settings::safe_name(tool))
+        .map(super::claude_project_settings::safe_name)
         .collect();
     tools.sort();
+    tools.dedup();
     if !tools.is_empty() {
-        out.push(AiGuardReason::McpToolsAutoApproved {
-            server_name: name.to_string(),
-            tools,
-        });
+        out.push(AiGuardReason::McpToolsAutoApproved { server_name, tools });
     }
 }
 
@@ -932,8 +1059,15 @@ impl AiGuardParser for CodexProjectParser {
         // re-asks for folder trust on every launch in an undecided or untrusted
         // folder without listing these settings, so they are one keypress from
         // active (the same reasoning as project MCP servers, #154). The project
-        // is the highest layer, so what it sets wins.
-        emit_sandbox_reasons(layers, &mut out);
+        // is the highest layer, so what it sets wins. Its profile name
+        // resolves in the user's `[permissions]` merged under the project's.
+        let mut permissions = Value::Table(toml::Table::new());
+        for config in [&user.config, &layer.config].into_iter().flatten() {
+            if let Some(table) = config.get("permissions") {
+                merge_layer(&mut permissions, table);
+            }
+        }
+        emit_sandbox_reasons(layers, Some(&permissions), &mut out);
         if let Some(val) = &layer.config {
             emit_approval_policy_reasons(val, &mut out);
         }
