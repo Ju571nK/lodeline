@@ -106,7 +106,24 @@ pub(super) fn claude_paths(dir: &Path) -> Vec<PathBuf> {
     vec![
         dir.join("managed-settings.json"),
         dir.join("managed-settings.d"),
+        dir.join("managed-mcp.json"),
     ]
+}
+
+/// #199 — `managed-mcp.json` under `dir`. A missing, unreadable, oversized or
+/// malformed file reads as not deployed, so the user's servers stay scored.
+/// The error is not logged because it can quote file content.
+pub(super) fn claude_managed_mcp(dir: &Path) -> Option<Value> {
+    let path = dir.join("managed-mcp.json");
+    let parsed = read_policy(&path).map(|text| text.map(|t| serde_json::from_str::<Value>(&t)));
+    match parsed {
+        Ok(None) => None,
+        Ok(Some(Ok(value))) if value.is_object() => Some(value),
+        _ => {
+            tracing::warn!(path = %path.display(), "claude code: unreadable managed-mcp.json; treated as not deployed");
+            None
+        }
+    }
 }
 
 fn read_policy(path: &Path) -> Result<Option<String>, AssessError> {

@@ -43,9 +43,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   A malformed project entry is skipped and the rest load. The scanner skips servers
   disabled for their project, and local servers of a project whose directory no longer
   exists. If the directory check fails, for example on an unmounted volume, it keeps
-  those servers. It scores an identical definition once. It does not yet read
-  `managed-mcp.json` or plugin MCP servers. For `CLAUDE_CONFIG_DIR`, see the Fixed
-  section. (#199)
+  those servers. It scores an identical definition once. It does not yet read plugin
+  MCP servers. For `managed-mcp.json`, see the Changed section. For `CLAUDE_CONFIG_DIR`,
+  see the Fixed section. (#199)
 
 - The Codex scanner now scores `approval_policy` and `default_permissions` in a
   repository's `.codex/config.toml`, and the rule files in the repository's
@@ -171,6 +171,24 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   by `default_tools_enabled = false`. No new reason kind is added. The score of a host
   falls when the tools of its servers all prompt. (#414)
 
+- The Claude Code scanner now reads MCP servers from the managed settings folder. It
+  reads `managed-mcp.json` and the managed `managedMcpServers` setting, and scores each
+  server with the same checks it runs on user MCP servers. Evidence ends in
+  `(managed file)`, and a remote URL shows only `scheme://host[:port]`. The agent
+  watches `managed-mcp.json` for changes. No new reason kind is added, so older servers
+  accept the events. (#418)
+
+- The Claude Code scanner now follows how Claude Code treats `managed-mcp.json`. While
+  that file is deployed, Claude Code loads only the managed servers and stops loading
+  the user's own, so the scanner no longer scores the servers in `~/.claude.json`. A
+  managed server with the same name as a user server replaces it. A `managed-mcp.json`
+  that cannot be parsed counts as not deployed, so the scanner still scores user
+  servers. The score of a host can rise because of its managed servers, or fall because
+  its user servers are no longer loaded. The scanner can still over-report in three
+  cases. It scores project `.mcp.json` servers while `managed-mcp.json` is deployed,
+  though Claude Code does not load them. It scores `managedMcpServers` entries that
+  Claude Code would reject. It does not apply `deniedMcpServers` to managed servers.
+  (#418)
 - The Codex scanner now scores `network_rule(host=..., decision="allow")` in Codex rules
   files as a standing approval, the same way it scores `prefix_rule`. The evidence is the
   host only. A later `deny` for the same host cancels the approval, and a later `allow`
