@@ -446,10 +446,30 @@ impl RuleEvidence {
 }
 
 /// Basename of the first token, so a path's directories (usernames) never
-/// leave the host. An alternative list `{a|b}` fails the charset and is redacted.
+/// leave the host. An alternative list `{a|b}` fails the charset and is redacted,
+/// and so does a name shaped like a token (a known token prefix, or 20+
+/// characters mixing letters and digits).
 fn program_basename(word: &str) -> String {
+    const TOKEN_PREFIXES: &[&str] = &[
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "sk-",
+        "xoxb-",
+        "xoxp-",
+        "AKIA",
+    ];
     let name = word.rsplit('/').next().unwrap_or("");
+    let token_like = TOKEN_PREFIXES.iter().any(|p| name.starts_with(p))
+        || (name.len() >= 20
+            && name.chars().any(|c| c.is_ascii_digit())
+            && name.chars().any(|c| c.is_ascii_alphabetic()));
     let safe = !name.is_empty()
+        && !token_like
         && name.len() <= 32
         && name
             .chars()
@@ -2380,17 +2400,9 @@ mcp_elicitations = "on-request"
         );
         let reasons = p.assess(dir.path()).unwrap();
         let got = approvals(&reasons);
-        assert_eq!(
-            got,
-            vec![
-                "<redacted>",
-                "ghp_ABCDEFGHIJKLMNOP1234",
-                "path",
-                "secretbin"
-            ]
-        );
+        assert_eq!(got, vec!["<redacted>", "path", "secretbin"]);
         for pattern in got {
-            for bad in ["@", "/", "alice", "sk-live"] {
+            for bad in ["@", "/", "alice", "sk-live", "ghp_"] {
                 assert!(!pattern.contains(bad), "{pattern:?}");
             }
         }
