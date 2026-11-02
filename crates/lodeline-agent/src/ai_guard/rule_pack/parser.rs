@@ -8,7 +8,7 @@ use crate::ai_guard::rule_pack::matcher::{
 use crate::ai_guard::rule_pack::selector::{eval_json, eval_toml, MatchedValue};
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
 use lodeline_core::policy::{RuleFormat, RulePack, RulePackScope};
-use lodeline_core::redact::has_url_scheme;
+use lodeline_core::redact::{has_url_scheme, redact_url};
 use std::path::{Path, PathBuf};
 
 pub struct RulePackParser {
@@ -188,11 +188,7 @@ fn interpolate_reason(
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or_else(|_| matched.key.clone());
     // #403 — a URL is redacted before it is interpolated, whatever field it lands in.
-    let value = if is_url_value(selector, &matched.value) {
-        url_for_evidence(&matched.value)
-    } else {
-        matched.value.clone()
-    };
+    let value = evidence_value(selector, matched);
     let value_escaped = serde_json::to_string(&value)
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or(value);
@@ -208,14 +204,88 @@ fn interpolate_reason(
     out
 }
 
-/// A matched value is a URL when its selector names a `…url` key (`url`,
-/// `httpUrl`, `serverURL`) or the value itself starts with `scheme://`.
-fn is_url_value(selector: &str, value: &str) -> bool {
-    selector
-        .rsplit('.')
-        .next()
-        .is_some_and(|key| key.to_ascii_lowercase().ends_with("url"))
-        || has_url_scheme(value)
+const URL_KEY_WORDS: [&str; 5] = ["url", "uri", "endpoint", "address", "host"];
+
+/// The matched value as it may be reported. A URL-keyed value, or one that
+/// starts with `scheme://`, is cut to `scheme://host[:port]`; a bare
+/// single-label host (`localhost`) counts as a host. Any other value is kept
+/// whole except for a credential-shaped `user:password@`, so a `command` like
+/// `ssh user@host:path` stays intact as evidence.
+fn evidence_value(selector: &str, matched: &MatchedValue) -> String {
+    let last = selector.rsplit('.').next().unwrap_or_default();
+    let last = last.split('[').next().unwrap_or_default();
+    if [matched.key.as_str(), last].into_iter().any(names_url) || has_url_scheme(&matched.value) {
+        redact_url(matched.value.trim()).unwrap_or_else(|| "<unparseable-url>".into())
+    } else {
+        strip_userinfo(&matched.value)
+    }
+}
+
+/// A key names a URL when its last word is `url`, `uri`, `endpoint`, `address`
+/// or `host` (singular or plural): the whole key, or after `_` or a camelCase
+/// boundary (`base_url`, `httpUrl`). A hyphen is not a boundary, so a server
+/// named `my-host` as a map key is a name, not a URL.
+fn names_url(key: &str) -> bool {
+    let forms = [
+        key,
+        key.strip_suffix("es").unwrap_or(key),
+        key.strip_suffix('s').unwrap_or(key),
+    ];
+    forms.iter().any(|k| {
+        URL_KEY_WORDS.iter().any(|word| {
+            let Some((head, tail)) = k
+                .len()
+                .checked_sub(word.len())
+                .and_then(|n| k.split_at_checked(n))
+            else {
+                return false;
+            };
+            tail.eq_ignore_ascii_case(word)
+                && (head.is_empty()
+                    || head.ends_with('_')
+                    || (tail.starts_with(|c: char| c.is_ascii_uppercase())
+                        && head.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())))
+        })
+    })
+}
+
+/// Replace each `user:password@` run with `<redacted>@`, keeping the rest. The
+/// password may hold a `/`; a bare `user@host` has no `:` and stays as is.
+/// shortcut: a password with an unencoded `?` or `#` ends the search early and
+/// is kept, upgrade if a real config shows one.
+fn strip_userinfo(value: &str) -> String {
+    value
+        .split_inclusive(char::is_whitespace)
+        .map(strip_token_userinfo)
+        .collect()
+}
+
+fn strip_token_userinfo(token: &str) -> String {
+    let end = token.find(['?', '#']).unwrap_or(token.len());
+    // An image digest (`img:1.2@sha256:…`) is not userinfo.
+    let is_digest = |i: usize| {
+        ["sha256:", "sha512:"]
+            .iter()
+            .any(|d| token[i + 1..].starts_with(d))
+    };
+    let Some(at) = token[..end]
+        .rmatch_indices('@')
+        .map(|(i, _)| i)
+        .find(|&i| !is_digest(i))
+    else {
+        return token.into();
+    };
+    let head = &token[..at];
+    let start = match head.find("://") {
+        Some(i) => i + 3,
+        None if head.starts_with("//") => 2,
+        None => 0,
+    };
+    if head[start..].contains(':') {
+        format!("{}<redacted>{}", &token[..start], &token[at..])
+    } else {
+        token.into()
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +427,107 @@ mod tests {
             got.sort();
             let want: Vec<_> = want.iter().map(|w| format!("run {w}")).collect();
             assert_eq!(got, want, "{selector}");
+        }
+    }
+
+    /// A scheme-less URL is detected from the matched key (`uri`, `endpoint`,
+    /// `address`, `host`, an array of them); every other value is interpolated
+    /// as written, minus a `user:password@` run.
+    #[test]
+    fn interpolation_redacts_urls_by_key() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("cfg.json");
+        std::fs::write(
+            &file,
+            r#"{"s": {"uri": "a.example/p?k=T", "Endpoint": "b.example/p?k=T",
+                       "address": "c.example/p?k=T", "host": "d.example/p?k=T",
+                       "note": "u:pw@e.example", "mail": "me@f.example",
+                       "path": "g/h@i:j", "cmd": "node a/b.js"},
+                "urls": ["k.example/p?k=T"]}"#,
+        )
+        .unwrap();
+        for (selector, want) in [
+            ("$.s.uri", vec!["a.example"]),
+            (
+                "$.s.*",
+                vec![
+                    "a.example",
+                    "b.example",
+                    "c.example",
+                    "d.example",
+                    "<redacted>@e.example",
+                    "me@f.example",
+                    "g/h@i:j",
+                    "node a/b.js",
+                ],
+            ),
+            ("$.urls[*]", vec!["k.example"]),
+        ] {
+            let pack = pack_with_one_rule(
+                file.to_str().unwrap(),
+                selector,
+                Matcher::Exists,
+                AiGuardReason::McpServerLocalCommand {
+                    server_name: "<selector-key>".into(),
+                    command: "run <selector-value>".into(),
+                },
+            );
+            let out = RulePackParser::new(pack)
+                .unwrap()
+                .assess(Path::new("/unused"))
+                .unwrap();
+            let mut got: Vec<_> = out
+                .iter()
+                .map(|r| match r {
+                    AiGuardReason::McpServerLocalCommand { command, .. } => command.clone(),
+                    other => panic!("got {other:?}"),
+                })
+                .collect();
+            got.sort();
+            let mut want: Vec<_> = want.iter().map(|w| format!("run {w}")).collect();
+            want.sort();
+            assert_eq!(got, want, "{selector}");
+        }
+    }
+
+    /// A credential is cut out of a non-URL value and nothing else; a URL-keyed
+    /// value keeps only `scheme://host[:port]`, a bare host included.
+    #[test]
+    fn evidence_value_removes_only_the_credential() {
+        for (key, value, want) in [
+            ("command", "ssh user@host:path", "ssh user@host:path"),
+            (
+                "command",
+                "git@github.com:o/r.git",
+                "git@github.com:o/r.git",
+            ),
+            ("command", "a@b.com:x", "a@b.com:x"),
+            (
+                "command",
+                "curl https://u:p@h/x?t=1",
+                "curl https://<redacted>@h/x?t=1",
+            ),
+            ("command", "u:pa/ss@h.example", "<redacted>@h.example"),
+            ("command", "//u:pw@host", "//<redacted>@host"),
+            (
+                "command",
+                "docker run ghcr.io/o/img:1.2@sha256:abc",
+                "docker run ghcr.io/o/img:1.2@sha256:abc",
+            ),
+            (
+                "command",
+                "pull u:pw@reg.example/img@sha256:abc",
+                "pull <redacted>@reg.example/img@sha256:abc",
+            ),
+            ("my-host", "node a/b.js", "node a/b.js"),
+            ("host", "localhost", "localhost"),
+            ("baseUrl", "https://u:p@h:8443/p?q", "https://h:8443"),
+        ] {
+            let matched = MatchedValue {
+                key: key.into(),
+                value: value.into(),
+            };
+            assert_eq!(evidence_value("$.s.*", &matched), want, "{key}: {value}");
         }
     }
 

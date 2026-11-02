@@ -130,6 +130,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   Rule matching still runs on the full configured value, so a rule that matches a
   scheme such as `http://` behaves as before. The reported reasons change text on
   upgrade, so expect one fresh assessment for each affected host. (#403)
+- Four AI Guard fixes for Claude Code configuration and rule-pack messages. When
+  managed settings set `permissions.defaultMode`, a project `defaultMode` such as
+  `acceptEdits` is no longer scored, because the managed value decides the start mode.
+  A `~/.claude.json` whose `projects` key is `null` is no longer dropped, so its
+  user-scope servers load. A rule-pack message that interpolates a configured value now
+  reports a value under a key ending in `url`, `uri`, `endpoint`, `address`, or `host`,
+  or one that starts with `scheme://`, as `scheme://host[:port]`, and keeps a bare host
+  such as `localhost`. Any other value keeps its text except a `user:password@` part,
+  which becomes `<redacted>@`. A plain `user@host` and an image digest (`@sha256:`) stay
+  as they are. A password that contains an unencoded `?` or `#` is not detected. The
+  hint for the built-in auto mode also names HIPAA configurations as starting in default
+  mode. (#199)
 
 ## [0.12.1] - 2026-11-02
 
