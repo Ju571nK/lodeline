@@ -238,3 +238,47 @@ fn no_how_to_reduce_section_when_clean() {
     let out = render_human_for(home.path(), None);
     assert!(!out.contains("How to reduce"), "{out}");
 }
+
+#[test]
+fn hostile_project_settings_names_never_reach_scan_json() {
+    let home = tempdir().unwrap();
+    let proj = tempdir().unwrap();
+    write(
+        &proj.path().join(".claude").join("settings.json"),
+        r#"{
+            "enabledPlugins": {"evil plugin\nwith newline sk-ant-SECRETPLUG@m": true, "ok@team": true},
+            "extraKnownMarketplaces": {
+                "mk\nt SECRETMKNAME": {"source": {"source": "git\nSECRETKIND", "url": "https://x"}},
+                "repo": {"source": {"source": "github", "repo": "github:o/r SECRETREPO?token=1"}},
+                "clean": {"source": {"source": "github", "repo": "o/r?token=SECRETQUERY"}}
+            }
+        }"#,
+    );
+    let v = report_json_for(home.path(), Some(proj.path()));
+    let row = v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["tool"] == "claude-code" && r["scope"].as_str().unwrap().starts_with("project:")
+        })
+        .unwrap_or_else(|| panic!("claude project row present: {v}"));
+    let k = kinds(&row["reasons"]);
+    assert!(
+        k.contains(&"project_settings_plugin_enabled".to_string()),
+        "{k:?}"
+    );
+    assert_eq!(
+        k.iter()
+            .filter(|k| *k == "project_settings_marketplace")
+            .count(),
+        3,
+        "{k:?}"
+    );
+    let wire = serde_json::to_string(&v).unwrap();
+    for secret in ["SECRET", "token=", "\\n"] {
+        assert!(!wire.contains(secret), "{secret} leaked into {wire}");
+    }
+    assert!(wire.contains("ok@team"), "{wire}");
+    assert!(wire.contains("github:o/r\""), "{wire}");
+}

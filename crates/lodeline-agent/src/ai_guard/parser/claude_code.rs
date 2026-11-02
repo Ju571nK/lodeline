@@ -1006,6 +1006,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         emit_permission_reasons(&merged, &mut out);
         emit_start_mode_reason(start, &mut out);
         emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
+        super::claude_project_settings::emit_project_settings_reasons(&merged, &mut out);
         // #145 — auto-enable posture: emit ONLY when a server-enable key is
         // present AND the project actually ships `.mcp.json` servers for it
         // to launch (key-only with no payload -> no emit).

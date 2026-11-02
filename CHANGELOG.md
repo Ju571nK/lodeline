@@ -9,6 +9,28 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Added
 
+- The scanner now scores the keys in a repository's `.claude/settings.json` and
+  `settings.local.json` that run commands or redirect traffic, and reports five new
+  reason kinds. `project_settings_plugin_enabled` (2.5) is `enabledPlugins` set to
+  `true`, which Claude Code applies at session start before the trust prompt and under
+  `-p`. `project_settings_helper_command` (2.0) is `apiKeyHelper`, `awsAuthRefresh`,
+  `awsCredentialExport`, `gcpAuthRefresh`, or `otelHeadersHelper`, which `claude -p` and
+  the SDK use in a folder you never trusted. `project_settings_env_override` (2.0) is an
+  `env` variable that redirects traffic, loads code, or weakens TLS. `project_settings_ui_command`
+  (1.0) is `statusLine`, `subagentStatusLine`, or `fileSuggestion`, which run only in
+  interactive sessions after trust. `project_settings_marketplace` (1.0) is
+  `extraKnownMarketplaces` or `additionalMarketplaces`, honored after trust. Loopback
+  redirects are skipped, and user-scope settings are not scored. Number and boolean `env`
+  values count as strings. The first three kinds are drift toggles, so a key that appears
+  after the agent starts raises a drift alert, and a key already present at start does not.
+  Evidence holds only key names, variable names, plugin and marketplace names, and hosts.
+  It never holds a command or an `env` value. A name with other characters, and a GitHub
+  repository with userinfo, is recorded as `<redacted>`. Blocking stays opt-in. Upgrade
+  `lodeline-server` before the agents. An older server rejects the Claude Code
+  project-scope risk reading from a newer agent, only that one event and not the batch,
+  so the fleet view keeps that host's last reading until the server is upgraded. Other
+  events, drift alerts included, still arrive. (#199)
+
 - The scanner now reads Claude Code MCP servers from `~/.claude.json`. That file holds
   the user-scope servers (top-level `mcpServers`) and the local-scope servers
   (`projects.<path>.mcpServers`), which is where `claude mcp add` writes. Each server

@@ -353,6 +353,49 @@ pub enum AiGuardReason {
     StandingCommandApproval {
         pattern: String,
     },
+    /// #199 — a repository's Claude Code settings enable a plugin. Claude Code
+    /// applies a project `enabledPlugins` at session start, before the
+    /// workspace trust dialog and in `claude -p`, and a plugin can ship hooks
+    /// and MCP servers. `plugins` lists the `name@marketplace` keys; one
+    /// finding per file, since committing team plugins is the documented use.
+    /// POSTURE only.
+    ProjectSettingsPluginEnabled {
+        plugins: Vec<String>,
+    },
+    /// #199 — a repository's Claude Code settings hold a helper command
+    /// (`apiKeyHelper` and its siblings). `claude -p` and the SDK run it in a
+    /// folder that was never trusted. `key` names the setting; the command is
+    /// not recorded, because a helper can embed a credential. POSTURE only.
+    ProjectSettingsHelperCommand {
+        key: String,
+    },
+    /// #199 — a repository's Claude Code `env` block sets a variable that
+    /// reroutes traffic, loads code into subprocesses, or weakens TLS checks.
+    /// It applies at startup in `claude -p`; interactive sessions wait for the
+    /// trust dialog. `effect` is `redirect` | `exec_code` | `weaken_tls`, and
+    /// `destination` the target host of a `redirect`. The value itself is not
+    /// recorded. POSTURE only.
+    ProjectSettingsEnvOverride {
+        variable: String,
+        effect: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<String>,
+    },
+    /// #199 — a repository's Claude Code settings run an interface command
+    /// (`statusLine`, `subagentStatusLine`, `fileSuggestion`). It runs only in
+    /// an interactive session, after the workspace trust dialog. `key` names
+    /// the setting; the command is not recorded. POSTURE only.
+    ProjectSettingsUiCommand {
+        key: String,
+    },
+    /// #199 — a repository's Claude Code settings register a plugin
+    /// marketplace. Claude Code honors it only after the workspace trust
+    /// dialog, in `claude -p` too. `source` is the source type with its GitHub
+    /// repo or URL host, never a full URL. POSTURE only.
+    ProjectSettingsMarketplace {
+        name: String,
+        source: String,
+    },
 }
 
 /// #146 — category of instruction-file directive. Stable wire strings

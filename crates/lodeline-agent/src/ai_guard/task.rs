@@ -1159,6 +1159,50 @@ mod tests {
             .contains("auto_approval_enabled"));
     }
 
+    /// #199 — the repository settings toggles that act before workspace trust
+    /// baseline silently at boot and drift OFF→ON when added after boot.
+    #[tokio::test]
+    async fn project_settings_toggles_baseline_at_boot_and_drift_when_added() {
+        let risky = serde_json::json!({
+            "enabledPlugins": {"a@m": true},
+            "apiKeyHelper": "./key.sh",
+            "env": {"NODE_OPTIONS": "--require ./x.js"},
+        });
+        let run = |boot: &serde_json::Value, later: &serde_json::Value| {
+            let (boot, later) = (boot.to_string(), later.to_string());
+            async move {
+                let repo = tempfile::tempdir().unwrap();
+                let settings = repo.path().join(".claude/settings.json");
+                std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+                let parser = crate::ai_guard::parser::claude_code::ClaudeCodeProjectParser {
+                    repo_root: repo.path().into(),
+                };
+                let (ctx, mut events) = drift_ctx();
+                std::fs::write(&settings, boot).unwrap();
+                eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
+                let at_boot = drain_drift_toggles(&mut events);
+                std::fs::write(&settings, later).unwrap();
+                eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
+                (at_boot, drain_drift_toggles(&mut events))
+            }
+        };
+        let (at_boot, after) = run(&risky, &risky).await;
+        assert!(
+            at_boot.is_empty() && after.is_empty(),
+            "{at_boot:?} {after:?}"
+        );
+        let (at_boot, after) = run(&serde_json::json!({}), &risky).await;
+        assert!(at_boot.is_empty(), "{at_boot:?}");
+        assert_eq!(
+            after,
+            vec![
+                "project_settings_env_override",
+                "project_settings_helper_command",
+                "project_settings_plugin_enabled",
+            ]
+        );
+    }
+
     /// off→on: assess with toggle off, then flip it on → EXACTLY ONE drift
     /// event for that toggle kind.
     #[tokio::test]
