@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
 
     match Mode::from_env()? {
         Mode::Fleet(cfg) => {
-            tracing::info!(mode = "fleet", base_url = %lodeline_core::redact::redact_url(&cfg.base_url).unwrap_or_else(|| "<redacted>".into()), mtls = cfg.mtls.is_some(), "starting lodeline-mcp");
+            tracing::info!(mode = "fleet", base_url = %upstream::display_url(&cfg.base_url), mtls = cfg.mtls.is_some(), "starting lodeline-mcp");
             let up = Arc::new(Upstream::new(&cfg)?);
             LodelineFleet::new(up)
                 .serve(stdio())
