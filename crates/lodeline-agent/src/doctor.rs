@@ -140,7 +140,13 @@ pub(crate) fn verify_self_impl(
     }
 }
 
-pub fn run(policy_override: Option<PathBuf>, state_db_override: Option<PathBuf>) -> i32 {
+pub fn run(
+    policy_override: Option<PathBuf>,
+    state_db_override: Option<PathBuf>,
+    control_socket: &Path,
+) -> i32 {
+    #[cfg(not(any(target_os = "linux", feature = "operator-cli")))]
+    let _ = control_socket;
     let plat = ActivePlatform::new();
     let mut warn_count = 0;
     let mut error_count = 0;
@@ -306,11 +312,7 @@ pub fn run(policy_override: Option<PathBuf>, state_db_override: Option<PathBuf>)
                 // personal install therefore no longer warns about a root-owned
                 // socket at a path it never binds (#178).
                 let euid = unsafe { libc::geteuid() };
-                check_control_socket_perms(
-                    &crate::control::default_control_socket(),
-                    std::path::Path::new("/etc/group"),
-                    euid,
-                )
+                check_control_socket_perms(control_socket, std::path::Path::new("/etc/group"), euid)
             },
             check_systemd_unit(
                 std::path::Path::new("/run/systemd/system"),
@@ -342,7 +344,10 @@ pub fn run(policy_override: Option<PathBuf>, state_db_override: Option<PathBuf>)
     {
         println!();
         println!("──────────────  AI Guard  ──────────────");
-        match crate::control_client::query(&crate::control::Request::DoctorAiGuardReport) {
+        match crate::control_client::query(
+            control_socket,
+            &crate::control::Request::DoctorAiGuardReport,
+        ) {
             Ok(resp) => match resp.doctor_ai_guard {
                 Some(rep) => {
                     print_ai_guard_live(&rep);
