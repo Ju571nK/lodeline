@@ -5,11 +5,30 @@ use lodeline_core::hook_proto::*;
 
 /// Codex CLI `PreToolUse` hook. Codex deliberately reuses the Claude Code hook
 /// shape (`tool_name` / `tool_input` / `tool_use_id`, plus `turn_id` and a
-/// Codex-only `permission_mode`), so this mirrors the Claude adapter but keys
-/// shell detection on the `tool_input.command` field (Codex's shell tool is
-/// `shell`/`local_shell`, not literally `Bash`) and treats `apply_patch` /
-/// `file_path` inputs as file edits.
+/// Codex-only `permission_mode`), so this mirrors the Claude adapter. Measured
+/// on codex-cli 0.164.0: the shell tool arrives as `Bash` and edits as
+/// `apply_patch`, and both carry their text in `tool_input.command`.
 pub struct Codex;
+
+/// Target paths from the `*** <Op> File:` / `*** Move to:` header lines of an
+/// apply_patch body, one per line. Body lines start with `+`, `-`, ` ` or `@@`,
+/// so patch content can never be read as a header.
+fn patch_paths(patch: &str) -> String {
+    patch
+        .lines()
+        .filter_map(|l| {
+            [
+                "*** Update File: ",
+                "*** Add File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .iter()
+            .find_map(|h| l.strip_prefix(h))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 impl HookAdapter for Codex {
     fn agent(&self) -> AiTool {
@@ -42,6 +61,14 @@ impl HookAdapter for Codex {
                 args_hash: c.hash,
                 args_preview: c.preview,
             }
+        } else if tool == "apply_patch" {
+            let patch = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let c = capture(&patch_paths(patch), level);
+            HookAction::FileEdit {
+                path_hash: c.hash,
+                path_preview: c.preview,
+                edit_hash: None,
+            }
         } else if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
             // Shell tool — keyed on the command field, not the exact tool_name.
             let c = capture(cmd, level);
@@ -49,9 +76,7 @@ impl HookAdapter for Codex {
                 command_hash: c.hash,
                 command_preview: c.preview,
             }
-        } else if matches!(tool, "Edit" | "Write" | "apply_patch")
-            || input.get("file_path").is_some()
-        {
+        } else if matches!(tool, "Edit" | "Write") || input.get("file_path").is_some() {
             let path = input
                 .get("file_path")
                 .and_then(|v| v.as_str())

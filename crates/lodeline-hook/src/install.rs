@@ -5,8 +5,8 @@
 //   - Claude Code / Codex: nested `hooks.PreToolUse[]` with
 //     `{matcher, hooks:[{type:"command", command}]}`.
 //       Claude Code: ~/.claude/settings.json
-//       Codex:       ~/.codex/hooks.json   (also needs hooks enabled in
-//                    ~/.codex/config.toml — surfaced as a note)
+//       Codex:       ~/.codex/hooks.json   (runs only once the user trusts
+//                    it in Codex — surfaced as CODEX_TRUST_NOTE)
 //   - Cursor: ~/.cursor/hooks.json with `version:1` + per-event arrays
 //     (`beforeShellExecution`, `beforeMCPExecution`) of `{command}`.
 //
@@ -248,6 +248,13 @@ fn merge_cursor_enforce(root: &mut Value, exe: &str, cmd: &str, on_failure: &str
 // Public API (dispatched by agent format)
 // ---------------------------------------------------------------------------
 
+/// Measured on codex-cli 0.164.0: an untrusted `~/.codex/hooks.json` entry is
+/// skipped silently, and `hooks` is a stable, default-on feature. Codex source
+/// keys trust to a hash of the entry, so a changed command needs trusting again.
+pub const CODEX_TRUST_NOTE: &str = "note: Codex skips this hook, without a warning, until you \
+    trust it. Run `codex`, open /hooks, and trust the lodeline-hook entry. Do this again after \
+    any install that changes the hook command.";
+
 /// Shared body for `render_block` / `render_block_enforce`: builds the
 /// human-pasteable settings fragment + undo hint for a prebuilt command string.
 /// `cursor_entry` is the pre-built Cursor entry object (observe or enforce with
@@ -271,9 +278,9 @@ fn render_block_inner(cmd: &str, agent: &str, cursor_entry: &Value) -> String {
     };
     let pretty = serde_json::to_string_pretty(&fragment).unwrap_or_default();
     let note = if agent == "codex" {
-        "// note: Codex also requires hooks enabled in ~/.codex/config.toml.\n"
+        format!("// {CODEX_TRUST_NOTE}\n")
     } else {
-        ""
+        String::new()
     };
     format!(
         "// Merge this into {path}:\n\
@@ -600,12 +607,13 @@ mod tests {
 
     // --- Codex (nested, ~/.codex/hooks.json) ---
     #[test]
-    fn codex_uses_nested_and_notes_config_toml() {
+    fn codex_uses_nested_and_notes_hook_trust() {
         let s = render_block("/abs/lodeline-hook", "codex", "redacted");
         assert!(s.contains("/abs/lodeline-hook codex --capture redacted"));
         // Path-separator-agnostic: PathBuf renders `\` on Windows.
         assert!(s.contains("codex") && s.contains("hooks.json"));
-        assert!(s.contains("config.toml"));
+        assert!(s.contains("/hooks") && s.contains("trust"));
+        assert!(!s.contains("config.toml"));
         let mut v = json!({});
         assert!(merge_into(
             &mut v,
