@@ -506,48 +506,61 @@ fn allow_patterns_in_rules_dir(rules_dir: &Path) -> Vec<String> {
 /// reads as an approval.
 fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut quote: Option<char> = None;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some(q) => {
-                out.push(c);
-                if c == '\\' {
-                    // Escaped character inside a string: copy it verbatim so a
-                    // `\"` does not look like the closing quote.
-                    if let Some(n) = chars.next() {
-                        out.push(n);
-                    }
-                } else if c == q {
-                    quote = None;
-                }
-            }
-            None => match c {
-                '"' | '\'' => {
-                    quote = Some(c);
-                    out.push(c);
-                }
-                '#' => {
-                    for n in chars.by_ref() {
-                        if n == '\n' {
-                            out.push('\n');
-                            break;
-                        }
-                    }
-                }
-                '/' if chars.peek() == Some(&'/') => {
-                    for n in chars.by_ref() {
-                        if n == '\n' {
-                            out.push('\n');
-                            break;
-                        }
-                    }
-                }
-                _ => out.push(c),
-            },
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let comment = c == '#' || rest.starts_with("//");
+        let len = if comment {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if c == '"' || c == '\'' {
+            string_len(rest).unwrap_or(rest.len())
+        } else {
+            c.len_utf8()
+        };
+        if !comment {
+            out.push_str(&rest[..len]);
         }
+        rest = &rest[len..];
     }
     out
+}
+
+/// Delimiter of the string literal starting `s`, if one does.
+fn string_delim(s: &str) -> Option<&'static str> {
+    ["\"\"\"", "'''", "\"", "'"]
+        .into_iter()
+        .find(|d| s.starts_with(d))
+}
+
+/// Byte length of the string literal starting `s`, quotes included, or None
+/// if it never closes. Honors `\` escapes and `"""`/`'''` triple quotes.
+/// A raw `r"..."` skips the same way: its `\"` does not close it either.
+fn string_len(s: &str) -> Option<usize> {
+    let delim = string_delim(s)?;
+    let mut chars = s.char_indices().skip(delim.len());
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            chars.next();
+        } else if s[i..].starts_with(delim) {
+            return Some(i + delim.len());
+        }
+    }
+    None
+}
+
+/// `s`'s chars outside string literals. A literal yields only its opening
+/// quote; an unterminated one runs to the end.
+fn code_chars(s: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        let at = i;
+        let c = s[at..].chars().next()?;
+        i += match string_len(&s[at..]) {
+            Some(len) => len,
+            None if c == '"' || c == '\'' => s.len() - at,
+            None => c.len_utf8(),
+        };
+        Some((at, c))
+    })
 }
 
 /// One `prefix_rule( ... )` invocation's argument text. Scans the whole file
@@ -556,25 +569,11 @@ fn strip_comments(text: &str) -> String {
 /// a method call `x.prefix_rule(`, and not a longer name `my_prefix_rule(`.
 fn rule_invocations(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut quote: Option<char> = None;
     let mut prev: Option<char> = None;
     let mut resume = 0usize;
-    let mut chars = text.char_indices();
-    while let Some((i, c)) = chars.next() {
+    for (i, c) in code_chars(text) {
         let before = prev.replace(c);
         if i < resume {
-            continue;
-        }
-        if let Some(q) = quote {
-            if c == '\\' {
-                chars.next();
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        if c == '"' || c == '\'' {
-            quote = Some(c);
             continue;
         }
         if !text[i..].starts_with("prefix_rule")
@@ -602,28 +601,13 @@ fn rule_invocations(text: &str) -> Vec<&str> {
 /// Quote-aware, so a bracket inside a string does not shift the depth.
 fn balanced_end(s: &str, open: char, close: char) -> Option<usize> {
     let mut depth = 1usize;
-    let mut quote: Option<char> = None;
-    let mut chars = s.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    chars.next();
-                } else if c == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if c == '"' || c == '\'' {
-                    quote = Some(c);
-                } else if c == open {
-                    depth += 1;
-                } else if c == close {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
+    for (i, c) in code_chars(s) {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
             }
         }
     }
@@ -636,32 +620,20 @@ fn balanced_end(s: &str, open: char, close: char) -> Option<usize> {
 fn top_level_arg<'a>(args: &'a str, name: &str) -> Option<&'a str> {
     let bytes = args.as_bytes();
     let mut depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut chars = args.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    chars.next();
-                } else if c == q {
-                    quote = None;
+    for (i, c) in code_chars(args) {
+        match c {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && args[i..].starts_with(name) => {
+                // Must be a whole word followed by `=`.
+                let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+                let after = &args[i + name.len()..];
+                let after_trimmed = after.trim_start();
+                if before_ok && after_trimmed.starts_with('=') {
+                    return Some(after_trimmed[1..].trim_start());
                 }
             }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '[' | '(' | '{' => depth += 1,
-                ']' | ')' | '}' => depth = depth.saturating_sub(1),
-                _ if depth == 0 && args[i..].starts_with(name) => {
-                    // Must be a whole word followed by `=`.
-                    let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-                    let after = &args[i + name.len()..];
-                    let after_trimmed = after.trim_start();
-                    if before_ok && after_trimmed.starts_with('=') {
-                        return Some(after_trimmed[1..].trim_start());
-                    }
-                }
-                _ => {}
-            },
+            _ => {}
         }
     }
     None
@@ -708,28 +680,16 @@ fn pattern_prefix(list_text: &str) -> Option<Vec<String>> {
 fn split_top_level(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
-    let mut quote: Option<char> = None;
     let mut start = 0usize;
-    let mut chars = s.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    chars.next();
-                } else if c == q {
-                    quote = None;
-                }
+    for (i, c) in code_chars(s) {
+        match c {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
             }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '[' | '(' | '{' => depth += 1,
-                ']' | ')' | '}' => depth = depth.saturating_sub(1),
-                ',' if depth == 0 => {
-                    out.push(&s[start..i]);
-                    start = i + c.len_utf8();
-                }
-                _ => {}
-            },
+            _ => {}
         }
     }
     let tail = &s[start..];
@@ -739,17 +699,18 @@ fn split_top_level(s: &str) -> Vec<&str> {
     out
 }
 
-/// The contents of a single quoted string, or None if `s` is not exactly one.
+/// The contents of a single string literal, raw or not, or None if `s` is not
+/// exactly one. Escapes stay as written.
 fn quoted_string(s: &str) -> Option<String> {
     let s = s.trim();
-    let quote = s.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-    let body = &s[quote.len_utf8()..];
-    let end = body.find(quote)?;
+    let s = s.strip_prefix(['r', 'R']).unwrap_or(s);
+    let delim = string_delim(s)?;
+    let len = string_len(s)?;
     // Anything after the closing quote means this was not a lone string.
-    if !body[end + quote.len_utf8()..].trim().is_empty() {
+    if !s[len..].trim().is_empty() {
         return None;
     }
-    Some(body[..end].to_string())
+    Some(s[delim.len()..len - delim.len()].to_string())
 }
 
 /// Approved command prefixes in one rules file. A rule allows when its
@@ -2427,6 +2388,41 @@ mcp_elicitations = "on-request"
             rule_invocations("a=1; prefix_rule(pattern=[\"git\"])\n(prefix_rule(2))"),
             vec!["pattern=[\"git\"]", "2"]
         );
+    }
+
+    /// Each string form Starlark allows must close where Starlark closes it.
+    /// Misreading one either drops the rule or hides every rule after it.
+    #[test]
+    fn every_string_form_keeps_the_allow_rule() {
+        let rule = "prefix_rule(pattern=[\"git\"], decision=\"allow\")";
+        for (text, want) in [
+            (format!("note(\"prefix_rule(1)\")\n{rule}"), "git"),
+            (format!("\"x\"{rule}"), "git"),
+            (
+                r#"prefix_rule(pattern=["sh","-c","echo \"x\""], decision="allow")"#.into(),
+                "sh",
+            ),
+            (
+                r#"prefix_rule(pattern=[r"git"], decision=r'allow')"#.into(),
+                "git",
+            ),
+            (r#"prefix_rule(pattern=[R'git', r"\""])"#.into(), "git"),
+            (format!("\"\"\"a\"b\"\"\"\n{rule}"), "git"),
+            (format!("'''a'b # c'''\n{rule}"), "git"),
+            (r#"prefix_rule(pattern=["""g"it""", "x"])"#.into(), "g\"it"),
+        ] {
+            let got = allow_patterns_in_rules_text(&text);
+            assert_eq!(got.len(), 1, "{text} -> {got:?}");
+            assert_eq!(got[0][0], want, "{text}");
+        }
+    }
+
+    #[test]
+    fn unterminated_string_runs_to_end_of_input() {
+        assert!(
+            allow_patterns_in_rules_text("\"\"\"open\nprefix_rule(pattern=[\"git\"])").is_empty()
+        );
+        assert!(allow_patterns_in_rules_text("prefix_rule(pattern=[\"a\\\"])").is_empty());
     }
 
     #[test]
