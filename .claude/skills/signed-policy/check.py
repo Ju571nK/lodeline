@@ -21,7 +21,7 @@ SKILL = Path(__file__).resolve().parent
 ROOT = SKILL.parents[2]
 SPEC_DIR = SKILL / "spec"
 MODULE = "SignedPolicy"
-CONFIGS = ["concurrent", "gap", "serial"]
+CONFIGS = ["policy", "rule_packs", "local_edits"]
 
 TLC_VERSION = "1.7.4"
 TLC_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
@@ -34,33 +34,73 @@ Or set JAVA_HOME."""
 
 GOOD = '    /\\ e.auth = "good"\n'
 EXPIRY = "    /\\ clock < e.until\n"
-VERSION = "    /\\ e.v > watermark\n"
-WRITE_EFFECT = "/\\ disk' = msg[w]"
-BUMP_EFFECT = "/\\ watermark' = msg[w].v"
-WRITE_FRAME = "UNCHANGED <<watermark, clock, up, msg, at, notified, live, crashes>>"
-BUMP_FRAME = "UNCHANGED <<disk, clock, up, msg, at, notified, live, crashes>>"
+VERSION = "    /\\ e.v > applied.v\n"
+RECORD_GUARD = "    /\\ applied.v <= msg[w].v\n"
+PROMOTE_GUARD = "    /\\ applied.v <= pending.v\n"
+APPLY_LOCK = "    /\\ applyLock = NoWorker\n    /\\ applyLock' = w\n"
+BOOT_SETTLE = "    /\\ ~up\n    /\\ SettleRow(InForce)\n"
+APPLY_SETTLE = "    /\\ SettleRow(target)\n"
+APPLY_SETTLE_PC = 'IF Finished(target) THEN PublishSettledStart ELSE "verify"'
+APPLY_SETTLE_MSG = "IF Finished(target) THEN pending ELSE NoFile"
+NO_SETTLE = "    /\\ UNCHANGED <<applied, pending, savedTarget>>\n"
 
-# (name, code it stands for, config, property it must break, edits).
-# An edit is (old, new), or (a, b, "swap") to exchange two strings.
+# (name, code it stands for, config, property it must break, steps its trace must
+# take in order, edits). The steps tie the kill to the reason: a violation reached
+# any other way prints OFF-TARGET. An edit is (old, new).
 MUTANTS = [
-    ("no signature check", "verify_envelope check 2", "serial", "OnlySignedAccepted", [(GOOD, "")]),
-    ("no expiry check", "verify_envelope check 3", "serial", "NoExpiredApplied", [(EXPIRY, "")]),
-    ("no version check", "verify_envelope check 4", "serial", "NoRollback", [(VERSION, "")]),
-    ("no version check", "verify_envelope check 4", "serial", "WatermarkMonotonic", [(VERSION, "")]),
-    (
-        "watermark before rename",
-        "atomic_write step order",
-        "gap",
-        "WatermarkNeverAhead",
-        [(WRITE_EFFECT, BUMP_EFFECT, "swap"), (WRITE_FRAME, BUMP_FRAME, "swap")],
-    ),
-    (
-        "reload not notified",
-        "apply policy_version_tx.send",
-        "serial",
-        "LiveMatchesDisk",
-        [("/\\ notified' = TRUE\n", "/\\ notified' = FALSE\n")],
-    ),
+    ("no signature check", "verify_envelope check 2", "policy", "OnlySignedAccepted",
+     ["Verify", "Rename"], [(GOOD, "")]),
+    ("no expiry check", "verify_envelope check 3", "policy", "NoExpiredApplied",
+     ["Tick", "Verify"], [(EXPIRY, "")]),
+    ("no version check", "verify_envelope check 4", "policy", "VersionCheckHolds",
+     ["Boot", "Verify"], [(VERSION, "")]),
+    ("no apply lock", "apply apply_lock", "policy", "VersionCheckHolds",
+     ["Verify", "Verify", "Rename"], [(APPLY_LOCK, "    /\\ applyLock' = w\n")]),
+    ("no settle in apply", "settle_earlier_apply", "policy", "VersionCheckHolds",
+     ["Rename", "Settle", "Verify"],
+     [(APPLY_SETTLE, NO_SETTLE), (APPLY_SETTLE_PC, '"verify"'), (APPLY_SETTLE_MSG, "NoFile")]),
+    ("promote before rename", "atomic_write step order", "policy", "WatermarkNeverAhead",
+     ["Record", "Promote"],
+     [("![w] = \"rename\"]", "![w] = \"promote\"]"),
+      ("![w] = PublishStart]", "![w] = \"rename\"]"),
+      ("![w] = \"promote\"]\n    /\\ UNCHANGED <<target, local,", "![w] = PublishStart]\n    /\\ UNCHANGED <<target, local,")]),
+    ("no directory fsync in the write", "write_file_durably sync_dir", "policy", "WatermarkNeverAhead",
+     ["Rename", "Promote", "WriteBackDb", "PowerCut"],
+     [("    /\\ savedTarget' = Saved(target)\n", "    /\\ savedTarget' = savedTarget\n")]),
+    ("no directory sync in a settle", "settle_pending sync_dir", "policy", "WatermarkNeverAhead",
+     ["Rename", "WriteBackDb", "PowerCut"],
+     [("    /\\ savedTarget' = IF Matches(target) THEN Saved(target) ELSE savedTarget\n",
+       "    /\\ savedTarget' = savedTarget\n")]),
+    ("no version guard before the rename", "verify_envelope check 4, record_pending guard", "policy", "NoRollback",
+     ["Verify", "Record", "Rename"], [(VERSION, ""), (RECORD_GUARD, "")]),
+    ("no version guard at all", "check 4, record_pending and promote_pending guards", "policy", "WatermarkMonotonic",
+     ["Verify", "Record", "Promote"], [(VERSION, ""), (RECORD_GUARD, ""), (PROMOTE_GUARD, "")]),
+    ("no settle at boot", "runtime::run settle_pending", "policy", "BootSettles",
+     ["Boot"], [(BOOT_SETTLE, "    /\\ ~up\n" + NO_SETTLE)]),
+    ("boot settles the apply target", "runtime::run in_force", "policy", "BootSettles",
+     ["Boot"], [(BOOT_SETTLE, "    /\\ ~up\n    /\\ SettleRow(target)\n")]),
+    ("record at synchronous=NORMAL", "record_pending", "policy", "BootSettles",
+     ["Record", "Rename", "PowerCut", "Boot"],
+     [("    /\\ savedPending' = Saved(msg[w])\n    /\\ savedApplied' = Saved(applied)\n",
+       "    /\\ savedPending' = savedPending\n    /\\ savedApplied' = savedApplied\n")]),
+    ("local file read first", "SignedFile::in_force", "policy", "LiveMatchesDisk",
+     ["Rename", "Boot"],
+     [("InForce == IF target # NoFile THEN target ELSE local", "InForce == IF local # NoFile THEN local ELSE target"),
+      ("reading' = IF target # NoFile THEN \"applied\" ELSE \"local\"",
+       "reading' = IF local # NoFile THEN \"local\" ELSE \"applied\"")]),
+    ("reload not notified", "publish_policy policy_version_tx.send", "policy", "LiveMatchesDisk",
+     ["Notify"], [("    /\\ notified' = TRUE\n    /\\ Finish(w)\n", "    /\\ notified' = notified\n    /\\ Finish(w)\n")]),
+    ("change consumed after the read", "policy_reload_task::run changed()", "policy", "LiveMatchesDisk",
+     ["ReloadCheck", "Rename", "Notify", "ReloadRead"],
+     [("    /\\ notified' \\in {FALSE, notified}\n", "    /\\ notified' = notified\n"),
+      ("    /\\ reading' = \"no\"\n    /\\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, activeUntil>>\n",
+       "    /\\ reading' = \"no\"\n    /\\ notified' = FALSE\n    /\\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, activeUntil>>\n")]),
+    ("no expiry seeded at boot", "runtime::run active_valid_until", "policy", "ExpiryMatchesDisk",
+     ["Boot"], [("IF Kind = \"policy\" THEN applied'.until ELSE NoFile.until", "NoFile.until")]),
+    ("settled apply not published", "settle_earlier_apply publish_policy", "policy", "ExpiryMatchesDisk",
+     ["Rename", "Settle"], [(APPLY_SETTLE_PC, '"verify"'), (APPLY_SETTLE_MSG, "NoFile")]),
+    ("no missing-file rule", "reload policy_file_loaded", "local_edits", "LoadedPolicyKept",
+     ["ReloadRead"], [("keep == Kind = \"policy\" /\\ file = NoFile /\\ loaded", "keep == FALSE")]),
 ]
 
 
@@ -110,7 +150,7 @@ def java_binary():
     fail(JAVA_HELP)
 
 
-def run_tlc(java, jar, spec_text, config_text):
+def run_tlc(java, jar, spec_text, config_text, workers="auto"):
     """Run TLC in a temp directory, so no state or trace file lands in the repo."""
     with tempfile.TemporaryDirectory(prefix="lodeline-formal-") as work:
         work = Path(work)
@@ -118,7 +158,7 @@ def run_tlc(java, jar, spec_text, config_text):
         (work / "run.cfg").write_text(config_text)
         started = time.monotonic()
         proc = subprocess.run(
-            [java, "-XX:+UseParallelGC", "-cp", str(jar), "tlc2.TLC", "-workers", "auto",
+            [java, "-XX:+UseParallelGC", "-cp", str(jar), "tlc2.TLC", "-workers", workers,
              "-deadlock", "-difftrace", "-metadir", str(work / "states"),
              "-config", "run.cfg", f"{MODULE}.tla"],
             cwd=work, capture_output=True, text=True,
@@ -144,40 +184,37 @@ def check_configs(java, jar):
     return ok
 
 
-def replace_once(text, old, new):
-    if text.count(old) != 1:
-        fail(f"mutant edit must match once, found {text.count(old)}: {old!r}")
-    return text.replace(old, new)
-
-
 def mutate(spec, edits):
-    for edit in edits:
-        old, new, *swap = edit
-        if swap:
-            spec = replace_once(spec, old, "@@HOLD@@")
-            spec = replace_once(spec, new, old)
-            spec = spec.replace("@@HOLD@@", new)
-        else:
-            spec = replace_once(spec, old, new)
+    for old, new in edits:
+        if spec.count(old) != 1:
+            fail(f"mutant edit must match once, found {spec.count(old)}: {old!r}")
+        spec = spec.replace(old, new)
     return spec
 
 
 def only_property(config_text, prop):
     """Keep the constants. Check one property, so the failure names that property."""
-    constants = config_text.split("INVARIANTS")[0]
-    keyword = "PROPERTIES" if prop in ("NoRollback", "WatermarkMonotonic") else "INVARIANTS"
+    constants, _, rest = config_text.partition("INVARIANTS")
+    keyword = "PROPERTIES" if prop in rest.split("PROPERTIES")[1] else "INVARIANTS"
     return f"{constants}{keyword}\n    {prop}\n"
 
 
 def check_mutants(java, jar):
     spec = (SPEC_DIR / f"{MODULE}.tla").read_text()
     ok = True
-    for name, code, config, prop, edits in MUTANTS:
+    for name, code, config, prop, path, edits in MUTANTS:
         text = only_property((SPEC_DIR / f"{config}.cfg").read_text(), prop)
-        output, seconds = run_tlc(java, jar, mutate(spec, edits), text)
+        # One worker keeps the shortest trace, and so the OFF-TARGET check, repeatable.
+        output, seconds = run_tlc(java, jar, mutate(spec, edits), text, workers="1")
         caught = f"Invariant {prop} is violated." in output or f"Action property {prop} is violated." in output
-        print(f"{'KILLED' if caught else 'SURVIVED'} {name} ({code}): {prop}, {seconds:.1f}s", flush=True)
-        ok = ok and caught
+        steps = re.findall(r"^State \d+: <(\w+)", output, re.M)
+        remaining = iter(steps)
+        on_target = all(step in remaining for step in path)
+        verdict = "KILLED" if caught and on_target else "OFF-TARGET" if caught else "SURVIVED"
+        print(f"{verdict} {name} ({code}): {prop}, {seconds:.1f}s", flush=True)
+        if verdict == "OFF-TARGET":
+            print(f"  wanted {path}, trace took {steps}", flush=True)
+        ok = ok and verdict == "KILLED"
     return ok
 
 
@@ -191,6 +228,20 @@ def coverage():
     if not rows:
         fail("SKILL.md has no coverage rows")
     return sync.group(1), rows
+
+
+def covered_text(source, name):
+    """`first..last` names the lines from one to the other, for a block of a function
+    too large to track. Anything else names a whole function."""
+    first, dots, last = name.partition("..")
+    if not dots:
+        return function_text(source, name)
+    lines = source.splitlines()
+    start = next((i for i, line in enumerate(lines) if first in line), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start, len(lines)) if last in lines[i]), None)
+    return None if end is None else "\n".join(lines[start:end + 1])
 
 
 def function_text(source, name):
@@ -216,8 +267,8 @@ def check_drift():
         if old.returncode != 0:
             fail(f"cannot read {path} at {sync}: {old.stderr.strip()}")
         current = ROOT / path
-        now = function_text(current.read_text(), function) if current.exists() else None
-        before = function_text(old.stdout, function)
+        now = covered_text(current.read_text(), function) if current.exists() else None
+        before = covered_text(old.stdout, function)
         if before is None:
             fail(f"{function} is not in {path} at {sync}")
         if now != before:
