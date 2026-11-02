@@ -549,7 +549,7 @@ mod tests {
         .unwrap();
         let (_fc_tx, fc_rx) = broadcast::channel(8);
         let (mut ctx, mut events) = ctx_with(
-            crate::ai_guard::parser::claude_code::ClaudeCodeParser,
+            crate::ai_guard::parser::claude_code::ClaudeCodeParser::default(),
             fc_rx,
             Duration::from_secs(3600),
         );

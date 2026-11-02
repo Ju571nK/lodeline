@@ -70,15 +70,21 @@ pub fn default_rubric_handle() -> RubricHandle {
 /// #148 — `CodexToolCacheParser` is Codex-tool but scope
 /// `Application{app:"codex-mcp-tools"}`, so it renders as its own scan row
 /// distinct from `CodexParser`'s user-global row (scan groups by (tool,scope)).
-pub fn user_global_parsers() -> Vec<std::sync::Arc<dyn parser::AiGuardParser>> {
-    user_global_parsers_with_baseline(None)
+///
+/// `claude_config_dir` is the scanned user's `CLAUDE_CONFIG_DIR`, or `None`
+/// for the default `~/.claude` layout.
+pub fn user_global_parsers(
+    claude_config_dir: Option<std::path::PathBuf>,
+) -> Vec<std::sync::Arc<dyn parser::AiGuardParser>> {
+    user_global_parsers_with_baseline(None, claude_config_dir)
 }
 
 pub(crate) fn user_global_parsers_with_baseline(
     baseline: Option<std::path::PathBuf>,
+    claude_config_dir: Option<std::path::PathBuf>,
 ) -> Vec<std::sync::Arc<dyn parser::AiGuardParser>> {
     vec![
-        std::sync::Arc::new(ClaudeCodeParser),
+        std::sync::Arc::new(ClaudeCodeParser::with_config_dir(claude_config_dir)),
         std::sync::Arc::new(CodexParser),
         std::sync::Arc::new(match baseline {
             Some(path) => CodexToolCacheParser::with_baseline(path),
