@@ -3,6 +3,7 @@
 //! + mcp servers, and maps findings to `AiGuardReason`.
 
 use crate::ai_guard::command_scan::launcher_basename;
+use crate::ai_guard::parser::codex::MAX_STANDING_APPROVAL_REASONS;
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rubric;
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
@@ -153,11 +154,19 @@ fn assess_user(
     // read the `settings.local.json` overlay, so scoring the merged view
     // would attribute rules to a control that never sees them.
     let base_settings = base.clone().unwrap_or(Value::Object(Default::default()));
+    // #199 — a `disableAllHooks: true` outside the managed files turns off
+    // every hook but the managed ones.
+    // shortcut: a project file can set it back to `false` for its own
+    // folder, which this host-wide scope cannot see; a per-repo scope would
+    // have to re-score the user's hooks to cover that.
+    let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
 
     let mut out = Vec::new();
-    emit_hook_reasons(&merged, &mut out)?;
-    super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    if !hooks_off {
+        emit_hook_reasons(&merged, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    }
     // Managed deny rules apply to every session, so the deny list is the
     // combined one.
     if deny_list_empty(&merge_overlay(merged.clone(), managed.clone())) {
@@ -170,7 +179,10 @@ fn assess_user(
     // with the user's, so they score like the user's own.
     if let Some(managed) = &managed {
         let mut found = Vec::new();
-        emit_hook_reasons(managed, &mut found)?;
+        // Only a managed `disableAllHooks` reaches managed hooks.
+        if !hooks_disabled(&[Some(managed)]) {
+            emit_hook_reasons(managed, &mut found)?;
+        }
         if let Some(perms) = managed.get("permissions") {
             emit_broad_allow_reasons(perms, &mut found);
         }
@@ -282,14 +294,21 @@ pub(crate) fn emit_hook_reasons(
     out.push(AiGuardReason::NoSandbox {
         executor: "host_shell".into(),
     });
+    let mut approvals: Vec<String> = Vec::new();
     for (event_name, entries) in hooks {
         let Some(arr) = entries.as_array() else {
             continue;
         };
         for entry in arr {
-            // matcher
-            if let Some(matcher) = entry.get("matcher").and_then(Value::as_str) {
-                if matcher.is_empty() || matcher == "*" || matcher == ".*" {
+            let inner = entry.get("hooks").and_then(Value::as_array);
+            let matcher = entry.get("matcher").and_then(Value::as_str);
+            // matcher. #199 — a handler runs only for calls its `if` rule
+            // matches, so the group is broad unless every handler narrows it.
+            if let Some(matcher) = matcher {
+                let narrowed = inner.is_some_and(|hs| {
+                    !hs.is_empty() && hs.iter().all(|h| hook_condition(h).is_some())
+                });
+                if (matcher.is_empty() || matcher == "*" || matcher == ".*") && !narrowed {
                     out.push(AiGuardReason::BroadMatcher {
                         hook_event: event_name.clone(),
                         matcher: matcher.to_string(),
@@ -297,10 +316,24 @@ pub(crate) fn emit_hook_reasons(
                 }
             }
             // commands
-            let Some(inner) = entry.get("hooks").and_then(Value::as_array) else {
+            let Some(inner) = inner else {
                 continue;
             };
             for h in inner {
+                // #199 — a `PermissionRequest` hook answers the permission
+                // prompt in the user's place, for every call it matches. The
+                // evidence names the tool, never the `if` argument, which can
+                // hold a token or URL.
+                if event_name == "PermissionRequest" {
+                    let target = hook_condition(h)
+                        .or(matcher.filter(|m| !m.is_empty()))
+                        .unwrap_or("*");
+                    let pattern =
+                        truncate_for_snippet(&format!("PermissionRequest hook: {target}"));
+                    if !approvals.contains(&pattern) {
+                        approvals.push(pattern);
+                    }
+                }
                 // #199 — a hook is no longer necessarily a shell command.
                 // `http` POSTs the tool call to a URL, and `prompt` / `agent` /
                 // `mcp_tool` run inside the agent. Only `command` carries a
@@ -329,7 +362,51 @@ pub(crate) fn emit_hook_reasons(
             }
         }
     }
+    let total = approvals.len();
+    for pattern in approvals.into_iter().take(MAX_STANDING_APPROVAL_REASONS) {
+        out.push(AiGuardReason::StandingCommandApproval { pattern });
+    }
+    if total > MAX_STANDING_APPROVAL_REASONS {
+        tracing::warn!(
+            total,
+            cap = MAX_STANDING_APPROVAL_REASONS,
+            "claude hooks: capping PermissionRequest StandingCommandApproval reasons"
+        );
+    }
     Ok(())
+}
+
+/// The tool a handler's `if` permission rule narrows it to. Only `Tool(arg)`
+/// with an argument that is not all wildcards narrows: a bare tool name, `*`,
+/// `Bash(*)`, `Edit(**)` or an unparsable rule admits every call.
+fn hook_condition(hook: &Value) -> Option<&str> {
+    let (tool, arg) = hook
+        .get("if")?
+        .as_str()?
+        .trim()
+        .strip_suffix(')')?
+        .split_once('(')?;
+    let tool = tool.trim();
+    // The tool must look like a tool name: it reaches evidence, so free text
+    // (`Bearer abc (x)`) must not. `**/*` matches every path, so `/` is a wildcard here.
+    let narrows = !tool.is_empty()
+        && tool
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        && !arg
+            .chars()
+            .all(|c| matches!(c, '*' | ':' | '/') || c.is_whitespace());
+    narrows.then_some(tool)
+}
+
+/// The effective `disableAllHooks` among `files`, highest precedence first:
+/// the first file that sets it decides.
+fn hooks_disabled(files: &[Option<&Value>]) -> bool {
+    files
+        .iter()
+        .flatten()
+        .find_map(|f| f.get("disableAllHooks").and_then(Value::as_bool))
+        .unwrap_or(false)
 }
 
 /// #199 — an `http` hook forwards the whole tool-call payload to a URL. On
@@ -685,6 +762,7 @@ fn label_managed(reason: &mut AiGuardReason) {
         | AiGuardReason::DestructiveInHookScript { hook_event, .. }
         | AiGuardReason::ExternalScriptUnscanned { hook_event, .. } => hook_event,
         AiGuardReason::PermissionsAllowBroad { rule } => rule,
+        AiGuardReason::StandingCommandApproval { pattern } => pattern,
         AiGuardReason::AutoModeDefaultsDropped { list } => list,
         AiGuardReason::AutoApprovalEnabled { mode } => mode,
         _ => return,
@@ -1146,14 +1224,18 @@ fn assess_project(repo_root: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReas
     {
         return Ok(Vec::new());
     }
+    // An unreadable managed file counts as absent.
+    let managed = super::policy_controls::claude_managed_settings(policy_dir).ok();
     // Managed `defaultMode` outranks project and local files, and the user
-    // scope already reports it. An unreadable managed file counts as absent.
-    let managed_sets_mode = super::policy_controls::claude_managed_settings(policy_dir)
-        .ok()
-        .is_some_and(|m| {
-            m.pointer("/permissions/defaultMode")
-                .is_some_and(Value::is_string)
-        });
+    // scope already reports it.
+    let managed_sets_mode = managed.as_ref().is_some_and(|m| {
+        m.pointer("/permissions/defaultMode")
+            .is_some_and(Value::is_string)
+    });
+    // shortcut: the user's own file is not read here, so a user-level
+    // `disableAllHooks: true` the project leaves unset still scores the
+    // project's hooks; reading it needs the user config folder in this scope.
+    let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
     // No built-in fallback here: the user scope already reports it, and a
     // project file cannot set `auto` or `bypassPermissions`.
     let start = if managed_sets_mode {
@@ -1170,12 +1252,14 @@ fn assess_project(repo_root: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReas
     };
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
     let mut out = Vec::new();
-    emit_hook_reasons(&merged, &mut out)?;
-    super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    if !hooks_off {
+        emit_hook_reasons(&merged, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    }
     emit_permission_reasons(&merged, &mut out);
     emit_start_mode_reason(start, &mut out);
     emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
-    super::claude_project_settings::emit_project_settings_reasons(&merged, &mut out);
+    super::claude_project_settings::emit_project_settings_reasons(&merged, hooks_off, &mut out);
     // #145 — auto-enable posture: emit ONLY when a server-enable key is
     // present AND the project actually ships `.mcp.json` servers for it
     // to launch (key-only with no payload -> no emit).
@@ -3401,5 +3485,237 @@ mod tests {
             })
             .collect();
         assert!(broad.is_empty(), "got {reasons:?}");
+    }
+
+    /// The hook event of every reason a hook produced. `NoSandbox` from hooks
+    /// is listed as `sandbox`.
+    fn hook_events(reasons: &[AiGuardReason]) -> Vec<String> {
+        reasons
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::NoSandbox { .. } => Some("sandbox".to_string()),
+                AiGuardReason::BroadMatcher { hook_event, .. }
+                | AiGuardReason::DestructiveInInlineCommand { hook_event, .. } => {
+                    Some(hook_event.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    const USER_HOOK: &str =
+        r#""hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "rm -rf ~/x"}]}]}"#;
+    const MANAGED_HOOK: &str =
+        r#""hooks": {"Stop": [{"hooks": [{"command": "rm -rf /tmp/org"}]}]}"#;
+
+    /// `disableAllHooks` is read after precedence. Set outside the managed
+    /// files it turns off only the user's hooks; set in a managed file it
+    /// turns off every hook.
+    #[test]
+    fn disable_all_hooks_turns_off_the_hooks_it_reaches() {
+        let reasons = assess_with_managed(
+            Some(&format!(r#"{{"disableAllHooks": true, {USER_HOOK}}}"#)),
+            &format!("{{{MANAGED_HOOK}}}"),
+        );
+        assert_eq!(
+            hook_events(&reasons),
+            ["sandbox", "Stop (managed file)"],
+            "{reasons:?}"
+        );
+
+        let reasons = assess_with_managed(
+            Some(&format!("{{{USER_HOOK}}}")),
+            &format!(r#"{{"disableAllHooks": true, {MANAGED_HOOK}}}"#),
+        );
+        assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
+
+        let reasons = assess_with_managed(
+            Some(&format!(r#"{{"disableAllHooks": true, {USER_HOOK}}}"#)),
+            r#"{"disableAllHooks": false}"#,
+        );
+        assert_eq!(
+            hook_events(&reasons),
+            ["sandbox", "PreToolUse", "PreToolUse"],
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn disable_all_hooks_in_project_files_follows_precedence() {
+        let repo = tempdir().unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            &format!(r#"{{"disableAllHooks": true, {USER_HOOK}}}"#),
+        );
+        write_file(
+            repo.path(),
+            ".claude/agents/deployer.md",
+            "---\nname: deployer\nhooks:\n  Stop:\n    - hooks:\n        - command: rm -rf ~/y\n---\n",
+        );
+        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
+
+        write_file(
+            repo.path(),
+            ".claude/settings.local.json",
+            r#"{"disableAllHooks": false}"#,
+        );
+        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        assert_eq!(
+            hook_events(&reasons),
+            ["sandbox", "PreToolUse", "PreToolUse", "Stop"],
+            "{reasons:?}"
+        );
+    }
+
+    fn approvals(settings: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        emit_hook_reasons(&serde_json::from_str(settings).unwrap(), &mut out).unwrap();
+        out.into_iter()
+            .filter_map(|r| match r {
+                AiGuardReason::StandingCommandApproval { pattern } => Some(pattern),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `PermissionRequest` hook answers permission prompts for the calls it
+    /// matches, so it is scored as a standing approval of them.
+    #[test]
+    fn permission_request_hook_is_a_standing_approval() {
+        assert_eq!(
+            approvals(
+                r#"{"hooks": {"PermissionRequest": [
+                    {"matcher": "Bash", "hooks": [{"command": "/opt/approve.sh"}]},
+                    {"hooks": [{"type": "http", "url": "http://127.0.0.1:9/ok"}]},
+                    {"matcher": "*", "hooks": [{"command": "/opt/approve.sh", "if": "Bash(git *)"}]}
+                ]}}"#
+            ),
+            ["PermissionRequest hook: Bash", "PermissionRequest hook: *"]
+        );
+        assert!(approvals(
+            r#"{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "/opt/approve.sh"}]}]}}"#
+        )
+        .is_empty());
+
+        let reasons = assess_with_managed(
+            None,
+            r#"{"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [{"command": "/opt/approve.sh"}]}]}}"#,
+        );
+        assert!(
+            reasons.contains(&AiGuardReason::StandingCommandApproval {
+                pattern: "PermissionRequest hook: Bash (managed file)".into()
+            }),
+            "{reasons:?}"
+        );
+    }
+
+    /// An `if` condition on every handler narrows a `*` matcher, unless the
+    /// condition itself matches every call of a tool.
+    #[test]
+    fn if_condition_narrows_a_broad_matcher() {
+        let broad = |handlers: &str| {
+            let settings = serde_json::from_str(&format!(
+                r#"{{"hooks": {{"PreToolUse": [{{"matcher": "*", "hooks": {handlers}}}]}}}}"#
+            ))
+            .unwrap();
+            let mut out = Vec::new();
+            emit_hook_reasons(&settings, &mut out).unwrap();
+            out.iter()
+                .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
+        };
+        assert!(!broad(r#"[{"command": "true", "if": "Bash(git *)"}]"#));
+        assert!(broad(
+            r#"[{"command": "true", "if": "Bash(git *)"}, {"command": "true"}]"#
+        ));
+        assert!(!broad(r#"[{"command": "true", "if": "Edit(src/**)"}]"#));
+        for rule in [
+            "",
+            "Bash",
+            "Read",
+            "*",
+            "Bash(*)",
+            "Edit(**)",
+            "Bash(**)",
+            "Bash(* *)",
+            "garbage(",
+            "(git *)",
+            "Read(**/*)",
+            "Bearer abc123 (x)",
+        ] {
+            let handlers = serde_json::json!([{"command": "true", "if": rule}]).to_string();
+            assert!(broad(&handlers), "{rule:?} must not narrow the matcher");
+        }
+    }
+
+    /// The `if` argument can carry a credential, so only the tool name leaves
+    /// the host.
+    #[test]
+    fn permission_request_evidence_omits_the_if_argument() {
+        assert_eq!(
+            approvals(
+                r#"{"hooks": {"PermissionRequest": [{"matcher": "*", "hooks": [
+                    {"command": "/opt/approve.sh", "if": "Bash(curl -H 'Authorization: Bearer abc123' *)"}
+                ]}]}}"#
+            ),
+            ["PermissionRequest hook: Bash"]
+        );
+    }
+
+    #[test]
+    fn permission_request_reasons_are_capped_per_file() {
+        let groups: Vec<Value> = (0..MAX_STANDING_APPROVAL_REASONS + 8)
+            .map(|i| serde_json::json!({"matcher": format!("Tool{i}"), "hooks": [{"command": "/opt/approve.sh"}]}))
+            .collect();
+        let settings = serde_json::json!({"hooks": {"PermissionRequest": groups}}).to_string();
+        assert_eq!(approvals(&settings).len(), MAX_STANDING_APPROVAL_REASONS);
+    }
+
+    /// `disableAllHooks` also turns off the status line and file suggestion
+    /// commands.
+    #[test]
+    fn disable_all_hooks_turns_off_project_ui_commands() {
+        let repo = tempdir().unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"disableAllHooks": true, "statusLine": {"command": "x"}, "apiKeyHelper": "y"}"#,
+        );
+        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        assert!(
+            !reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectSettingsUiCommand { .. })),
+            "{reasons:?}"
+        );
+        // apiKeyHelper is not a hook, so disableAllHooks leaves it running.
+        assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectSettingsHelperCommand { .. })),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn disable_all_hooks_turns_off_user_component_hooks() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), r#"{"disableAllHooks": true}"#);
+        write_file(
+            home.path(),
+            ".claude/agents/deployer.md",
+            "---\nname: deployer\nhooks:\n  Stop:\n    - hooks:\n        - command: rm -rf ~/y\n---\n",
+        );
+        let policy = tempdir().unwrap();
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap();
+        assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
     }
 }

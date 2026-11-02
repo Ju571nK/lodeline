@@ -58,7 +58,13 @@ const MAX_PLUGINS: usize = 20;
 /// Recorded in place of a repository-supplied name that fails [`safe_name`].
 pub(crate) const REDACTED: &str = "<redacted>";
 
-pub(crate) fn emit_project_settings_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
+/// `hooks_off` is the effective `disableAllHooks`, which also turns off the
+/// [`UI_COMMAND_KEYS`] commands (settings-reference.md, `disableAllHooks`).
+pub(crate) fn emit_project_settings_reasons(
+    settings: &Value,
+    hooks_off: bool,
+    out: &mut Vec<AiGuardReason>,
+) {
     if let Some(plugins) = settings.get("enabledPlugins").and_then(Value::as_object) {
         // `false` only switches a plugin off.
         let enabled: Vec<String> = plugins
@@ -96,11 +102,12 @@ pub(crate) fn emit_project_settings_reasons(settings: &Value, out: &mut Vec<AiGu
         }
     }
     for key in UI_COMMAND_KEYS {
-        if settings
-            .get(*key)
-            .and_then(|v| v.get("command"))
-            .and_then(Value::as_str)
-            .is_some_and(|c| !c.trim().is_empty())
+        if !hooks_off
+            && settings
+                .get(*key)
+                .and_then(|v| v.get("command"))
+                .and_then(Value::as_str)
+                .is_some_and(|c| !c.trim().is_empty())
         {
             out.push(AiGuardReason::ProjectSettingsUiCommand {
                 key: key.to_string(),
@@ -234,7 +241,7 @@ mod tests {
 
     fn reasons(settings: Value) -> Vec<AiGuardReason> {
         let mut out = Vec::new();
-        emit_project_settings_reasons(&settings, &mut out);
+        emit_project_settings_reasons(&settings, false, &mut out);
         out
     }
 
