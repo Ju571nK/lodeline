@@ -443,7 +443,7 @@ fn program_basename(word: &str) -> String {
     ];
     let mut parts = word.rsplit(['/', '\\']);
     let name = parts.next().unwrap_or("");
-    // Skip empty parts: an unescaped rules string keeps `\\` doubled.
+    // Skip empty parts: `a//b`, or a raw string's doubled `\\`.
     let home_dir = parts
         .find(|p| !p.is_empty())
         .is_some_and(|p| p.eq_ignore_ascii_case("home") || p.eq_ignore_ascii_case("Users"));
@@ -703,6 +703,7 @@ fn split_top_level(s: &str) -> Vec<&str> {
 /// exactly one. Escapes stay as written.
 fn quoted_string(s: &str) -> Option<String> {
     let s = s.trim();
+    let raw = s.starts_with(['r', 'R']);
     let s = s.strip_prefix(['r', 'R']).unwrap_or(s);
     let delim = string_delim(s)?;
     let len = string_len(s)?;
@@ -710,7 +711,24 @@ fn quoted_string(s: &str) -> Option<String> {
     if !s[len..].trim().is_empty() {
         return None;
     }
-    Some(s[delim.len()..len - delim.len()].to_string())
+    let body = &s[delim.len()..len - delim.len()];
+    if raw {
+        return Some(body.to_string());
+    }
+    // Other escapes (`\x2f`, `A`) become U+FFFD, which the basename
+    // charset redacts, so an encoded path cannot dodge the home-dir check.
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        out.push(match c {
+            '\\' => match chars.next() {
+                Some(e @ ('\\' | '"' | '\'')) => e,
+                _ => char::REPLACEMENT_CHARACTER,
+            },
+            c => c,
+        });
+    }
+    Some(out)
 }
 
 /// Approved command prefixes in one rules file. A rule allows when its
@@ -2346,6 +2364,8 @@ mcp_elicitations = "on-request"
                 "prefix_rule(pattern=[\"/Users/alice/\"])\n",
                 "prefix_rule(pattern=[\"C:\\\\Users\\\\alice\"])\n",
                 "prefix_rule(pattern=['C:\\Users\\alice'])\n",
+                "prefix_rule(pattern=[\"\\x2fhome\\x2falice\"])\n",
+                "prefix_rule(pattern=[\"\\x67it\"])\n",
             ),
         );
         let reasons = p.assess(dir.path()).unwrap();
@@ -2366,7 +2386,7 @@ mcp_elicitations = "on-request"
             "win.rules",
             concat!(
                 "prefix_rule(pattern=[\"C:\\\\Tools\\\\bin\\\\git.exe\", \"push\"])\n",
-                "prefix_rule(pattern=['D:\\x\\y.exe'])\n",
+                "prefix_rule(pattern=[r'D:\\x\\y.exe'])\n",
             ),
         );
         let reasons = p.assess(dir.path()).unwrap();
