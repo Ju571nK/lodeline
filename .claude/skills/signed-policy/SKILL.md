@@ -13,11 +13,11 @@ description: Formally verify Lodeline's signed policy apply path with a TLA+ mod
 python3 .claude/skills/signed-policy/check.py
 ```
 
-The command exits 0 only if all three parts pass. Each part runs even when an earlier one fails. The run takes 35 to 45 seconds on a 12-core Mac, and the last line is `OK in <seconds>` or `FAILED in <seconds>`.
+The command exits 0 only if all three parts pass. Each part runs even when an earlier one fails. The run takes 60 to 70 seconds on a 12-core Mac, and the last line is `OK in <seconds>` or `FAILED in <seconds>`.
 
 1. It compares each function and block in the coverage table with its text at the sync commit. It prints `DRIFT <file> <function> changed since the sync commit. Model element: <elements>` for each difference, or `Drift check clean.`
 2. It runs TLC on `spec/policy.cfg`, `spec/rule_packs.cfg`, and `spec/local_edits.cfg`. It prints `PASS <config>: <n> distinct states in <s>s`, or `FAIL <config>` followed by TLC's output.
-3. It breaks the model 21 ways. Each break is a text edit to the model, and TLC checks it against one property on one thread. It prints `<verdict> <break> (<code it stands for>): <property>, <s>s`, with one of three verdicts.
+3. It breaks the model 24 ways. Each break is a text edit to the model, and TLC checks it against one property on one thread. It prints `<verdict> <break> (<code it stands for>): <property>, <s>s`, with one of three verdicts.
    - `KILLED` means that TLC reported the property violated, the trace took the expected actions in order, and for some breaks the last state of the trace shows the expected text.
    - `OFF-TARGET` means that TLC reported the property violated, but the trace missed the expected actions or the expected text. The next line shows `wanted [...], trace took [...]`, where `wanted` lists the expected actions and then the expected text.
    - `SURVIVED` means that TLC did not report the property violated.
@@ -51,7 +51,7 @@ Below, the applied file is `SignedFile.applied`, the local file is `SignedFile.l
 | `NoRollback` | The version of the file in force falls only on a step that leaves the agent down with a pending row present. It is about the file, and is not a claim about acceptance, which is `VersionCheckHolds`. | A host that took a newer policy runs an older one. | No version check and no `record_pending` guard together. Either one alone does not break it. | `policy`, `rule_packs` |
 | `WatermarkMonotonic` | The applied version falls only on a step that leaves the agent down, with the pending row equal to the file in force and that file at or above the old applied version. | Envelopes older than the last applied one become acceptable again. | No guard on the version at any step, which removes check 4 and the `record_pending` and `promote_pending` guards. | `policy`, `rule_packs`, `local_edits` |
 | `BootSettles` | On the boot step no row is left pending, and the applied record equals the envelope behind the file in force, or is empty when that file is the operator's. | An apply checked against a stale record replaces a newer policy. | No settle at boot. Boot settles the apply target. `record_pending` at `synchronous=NORMAL`, where a power cut keeps the rename and loses the row. | `policy`, `rule_packs` |
-| `LiveMatchesDisk` | With the agent up, no apply in flight, no row pending, no change unseen, and no reload between its check and its read, the live policy is the applied file if it exists, else the local file. | The agent acknowledges a policy and keeps enforcing the old one. | The local file read first. No reload notification. No notification after a settled apply. The change consumed after the read. | `policy`, `rule_packs` |
+| `LiveMatchesDisk` | With the agent up, no apply in flight, no row pending, no change unseen, no hand edit that no reload has looked at, no reload between its check and its read, and no reload that kept the live policy behind a retry, the live policy is the applied file if it exists, else the local file. | The agent acknowledges a policy and keeps enforcing the old one. | The local file read first. No reload notification. No notification after a settled apply. The change consumed after the read. No retry after a failed reload. A bad bundle holds back the policy. A retry for the bundle skips a changed file. | `policy`, `rule_packs`, `local_edits` |
 | `ExpiryMatchesDisk` | For `policy` only. With the agent up, no apply in flight, and no row pending, `active_valid_until` is the expiry of the file in force. An unseen change or a running reload does not exempt it. | The host reports an expiry for a policy it does not run. | No expiry seeded at boot. A settled apply not published. | `policy` |
 | `LoadedPolicyKept` | For `policy` only. While the agent stays up, a policy file that was loaded never becomes no file loaded. | A save that unlinks before it writes drops every deny rule. | No missing-file rule in `reload`. | `local_edits` |
 
@@ -59,15 +59,15 @@ Each config checks only the properties that list it in the last column. A proper
 
 | Config | Kind | Connections | Failed steps | Power cuts | Hand edits | Distinct states |
 |---|---|---|---|---|---|---|
-| `policy` | policy | 2 | yes | yes | no | 1,079,748 |
-| `rule_packs` | bundle | 2 | yes | yes | no | 928,932 |
-| `local_edits` | policy | 2 | yes | no | yes | 2,734,756 |
+| `policy` | policy | 2 | yes | yes | no | 2,075,700 |
+| `rule_packs` | bundle | 2 | yes | yes | no | 1,438,404 |
+| `local_edits` | policy | 2 | yes | no | yes | 7,121,540 |
 
 - `policy` checks every property except `LoadedPolicyKept`. `rule_packs` checks the same less `ExpiryMatchesDisk`, which covers `policy` only.
-- A failed step is an error from `record_pending`, the rename, the directory fsync, or `promote_pending`.
+- A failed step is an error from `record_pending`, the rename, the directory fsync, or `promote_pending`, or a reload that fails and keeps what is live (`ReloadReadFails`).
 - Every config allows a process crash whenever the agent is up, and starts from all six hosts in `Starts`. Crashes and power cuts share a cap of three stops.
 - `local_edits` has no power cuts. A stop there is a crash, which keeps every write the agent made, so that config says nothing about what a power cut loses. It adds the hand edits `DeleteApplied` and `EditLocal`.
-- `WatermarkNeverAhead`, `LiveMatchesDisk`, `ExpiryMatchesDisk`, `NoRollback`, and `BootSettles` are left out of `local_edits` because each fails when added there, and the first failing step is a hand edit, `EditLocal` for four of them and `DeleteApplied` for `LiveMatchesDisk`. The documented way back to the local file keeps the signed version and its expiry while the local file runs.
+- `WatermarkNeverAhead`, `ExpiryMatchesDisk`, `NoRollback`, and `BootSettles` are left out of `local_edits` because each fails when added there, and the first failing step is the hand edit `EditLocal`. The documented way back to the local file keeps the signed version and its expiry while the local file runs.
 
 ## Decide if your change touches verified code
 
@@ -108,9 +108,9 @@ Sync commit: `9dfff8c9878db3650401ab1e7ebce9d97dea6276`
 | `Boot` | `crates/lodeline-agent/src/runtime.rs` | `let policy_path_for_apply = cfg..let policy_file_loaded` |
 | `Settle, Rename` | `crates/lodeline-agent/src/runtime.rs` | `let apply_ctx = Arc::new..apply_lock: Default::default()` |
 | `ReloadCheck, ReloadRead, loaded` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..rule_packs_version_rx,` |
-| `ReloadCheck, ReloadRead` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
-| `ReloadCheck` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
-| `ReloadRead` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
+| `ReloadCheck, ReloadRetry, ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
+| `ReloadCheck, ReloadRetry` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
+| `ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
 | `ReloadCheck` | `crates/lodeline-agent/src/control.rs` | `Request::ReloadPolicy => {..policy_version_tx.send_modify(` |
 | `Workers` | `crates/lodeline-agent/src/control.rs` | `serve_until` |
 
@@ -153,7 +153,7 @@ A property written as `[][...]_vars` skips any step that changes no variable. If
 
 The bounds are `MaxVersion = 4`, `MaxClock = 3` (`valid_until` is 1 to 3, and the clock runs 0 to 3), `MaxCrashes = 3` (crashes and power cuts share it), and two connections in every config.
 
-Every break runs on `policy`, except `no missing-file rule`, which runs on `local_edits`. No break runs on `rule_packs`. The checks under `apply_lock` make the `record_pending` and `promote_pending` guards unreachable, so removing either guard alone passes every property of `policy` and `rule_packs`. The breaks that need those guards removed remove several at once.
+Every break runs on `policy`, except `no missing-file rule` and `a retry for the bundle skips a changed file`, which run on `local_edits`. No break runs on `rule_packs`. The checks under `apply_lock` make the `record_pending` and `promote_pending` guards unreachable, so removing either guard alone passes every property of `policy` and `rule_packs`. The breaks that need those guards removed remove several at once.
 
 The model assumes these facts:
 
@@ -162,16 +162,17 @@ The model assumes these facts:
 - The state directory is not lost. `create_dir_durably` keeps a new directory, and the model treats the directory as there.
 - The wall clock only moves forward. A tick after verification does not count against `NoExpiredApplied`.
 - A host starts in one of the six `Starts`: nothing, the operator's unsigned file at the apply target and nothing else (the `--policy`, non-root, and Windows host), the operator's file in the local path, an older agent's file, or an older agent stopped just after or just before its rename. An older agent's rename has reached the disk, and its record has an expiry.
+- A retry is no, behind, or bundle. Behind is a reload that kept the live file. Bundle is a load of the policy over a bundle that `read_bundle_state` reports as Corrupt or Empty, and only the policy kind models it. A retry for the bundle that finds the policy text it applied has nothing to apply, and a retry compares nothing else.
 - `policy.yaml` and `rule-packs.yaml` do not affect each other. They share `apply_lock` and a `state.db` connection, and the model checks each alone.
 - Two envelopes never hold the same bytes, so `pending = file` stands for the blake3 comparison in `settle_pending`.
-- Every envelope that passes `Verify` loads at `ReloadRead` and at `Boot`, the operator's file also loads, and a reload's read succeeds.
+- Every envelope that passes `Verify` loads at `ReloadRead` and at `Boot`, the operator's file also loads.
 - The only writers other than an apply are the hand edits in `local_edits`: deleting the applied file, and adding or removing the local one. Nobody else writes these files or `state.db`.
 
 The model leaves out these parts:
 
 - The other hand edits, and power cuts in `local_edits`.
 - `lodeline-sender`, `lodeline-server`, and `lodeline-sign`.
-- Document content: check 5 of `verify_envelope`, `merge`, deny-rule compilation, and the corrupt and empty states of `read_bundle_state`.
+- Document content: check 5 of `verify_envelope`, `merge`, and deny-rule compilation. A failure of `merge` counts as `ReloadReadFails`. A deny-rule failure keeps the previous evaluator, finishes the reload, and does not retry.
 - `policy_expiry_task`, and the wake-ups of `rule_packs_watch`, which `ReloadCheck` only stands for as a reload at any time.
 - Commands that only read the files: `assess`, `show`, `doctor`, and `status`.
 - `host_meta_get` reading version 1 with no expiry as no envelope, and a recorded version with no expiry.

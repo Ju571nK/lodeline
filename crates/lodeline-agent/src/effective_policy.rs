@@ -69,9 +69,9 @@ pub fn load_effective_policy(
     let bundle_doc = match read_bundle_state(rule_packs_path) {
         BundleState::Present(d) => Some(*d),
         BundleState::Absent | BundleState::Empty => None,
-        BundleState::Corrupt => {
+        BundleState::Corrupt(reason) => {
             return Err(anyhow::anyhow!(
-                "rule-packs.yaml is corrupt (read/parse failed); cold load cannot continue"
+                "rule-packs.yaml is corrupt ({reason}); cold load cannot continue"
             ))
         }
     };

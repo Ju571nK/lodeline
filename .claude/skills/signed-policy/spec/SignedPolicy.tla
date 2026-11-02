@@ -63,6 +63,8 @@ VARIABLES
     cacheLock,    \* ApplyContext.cache, held across atomic_write
     notified,     \* policy_version_tx has an unseen change
     reading,      \* the file the running reload chose and has not read yet
+    retry,        \* why ReloadCtx.unfinished holds a reason, so a root tick reloads
+    edited,       \* a hand edit that no reload has looked at
     live,         \* the envelope the last load read
     loaded,       \* ReloadCtx.policy_file_loaded
     activeUntil,  \* active_valid_until
@@ -70,7 +72,7 @@ VARIABLES
 
 durable == <<target, savedTarget, local, applied, savedApplied, pending, savedPending>>
 world == <<clock, up, crashes>>
-loader == <<notified, reading, live, loaded>>
+loader == <<notified, reading, retry, edited, live, loaded>>
 vars == <<durable, world, pc, msg, applyLock, cacheLock, loader, activeUntil>>
 
 \* The saved copies matter only with power cuts. Keeping them constant otherwise
@@ -96,6 +98,8 @@ Init ==
     /\ cacheLock = NoWorker
     /\ notified = FALSE
     /\ reading = "no"
+    /\ retry = "no"
+    /\ edited = FALSE
     /\ live = NoFile
     /\ loaded = FALSE
     /\ activeUntil = NoFile.until
@@ -259,7 +263,7 @@ Notify(w) ==
     /\ pc[w] = "notify"
     /\ notified' = TRUE
     /\ Finish(w)
-    /\ UNCHANGED <<durable, world, cacheLock, reading, live, loaded, activeUntil>>
+    /\ UNCHANGED <<durable, world, cacheLock, reading, retry, edited, live, loaded, activeUntil>>
 
 \* The same send for a settled apply. This apply then goes on to its own check.
 NotifySettled(w) ==
@@ -268,31 +272,65 @@ NotifySettled(w) ==
     /\ notified' = TRUE
     /\ pc' = [pc EXCEPT ![w] = "verify"]
     /\ msg' = [msg EXCEPT ![w] = NoFile]
-    /\ UNCHANGED <<durable, world, applyLock, cacheLock, reading, live, loaded, activeUntil>>
+    /\ UNCHANGED <<durable, world, applyLock, cacheLock, reading, retry, edited, live, loaded, activeUntil>>
 
-\* policy_reload_task::run wakes and reload calls in_force. A wake on this kind's
-\* channel consumes the change. The other kind's channel, the rule-packs file
-\* watcher, and Request::ReloadPolicy wake it too, at any time, and leave any
-\* change on this channel unseen.
+\* SignedFile::in_force, as reload calls it.
+ReloadChoice == IF target # NoFile THEN "applied" ELSE "local"
+
+\* policy_reload_task::run wakes, clears ctx.unfinished, and reload calls in_force.
+\* A wake on this kind's channel consumes the change. The other kind's channel, the
+\* rule-packs file watcher, and Request::ReloadPolicy wake it too, at any time, and
+\* leave any change on this channel unseen.
 ReloadCheck ==
     /\ up
     /\ reading = "no"
-    /\ reading' = IF target # NoFile THEN "applied" ELSE "local"
+    /\ reading' = ReloadChoice
     /\ notified' \in {FALSE, notified}
+    /\ retry' = "no"
+    /\ edited' = FALSE
     /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, live, loaded, activeUntil>>
 
+\* A root tick finds ctx.unfinished not empty, and reload takes it and calls in_force.
+\* A tick consumes no change.
+ReloadRetry ==
+    /\ up
+    /\ retry # "no"
+    /\ reading = "no"
+    /\ reading' = ReloadChoice
+    /\ retry' = "no"
+    /\ edited' = FALSE
+    /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, live, loaded, activeUntil>>
+
+\* A policy loads over a bundle that read_bundle_state reports as Corrupt or Empty,
+\* and the reload retries for the bundle alone. A retry that finds the same bundle
+\* and the text it applied has nothing to change here, and returns before applying.
+AfterLoad == IF Faults /\ Kind = "policy" THEN {"no", "bundle"} ELSE {"no"}
+
 \* reload reads the chosen file. Rename makes that read atomic. A policy file that
-\* was loaded and has gone missing keeps the previous state. A bundle that has gone
-\* missing is a deliberate removal, which read_bundle_state reports as Absent.
+\* was loaded and has gone missing keeps the previous state and waits for a retry. A
+\* bundle that has gone missing is a deliberate removal, which read_bundle_state
+\* reports as Absent.
 ReloadRead ==
     /\ up
     /\ reading # "no"
     /\ LET file == IF reading = "applied" THEN target ELSE local
            keep == Kind = "policy" /\ file = NoFile /\ loaded
-       IN  /\ live' = IF keep THEN live ELSE file
+       IN  /\ retry' \in IF keep THEN {"behind"} ELSE AfterLoad
+           /\ live' = IF keep THEN live ELSE file
            /\ loaded' = IF keep THEN loaded ELSE (Kind = "policy" /\ file # NoFile)
     /\ reading' = "no"
-    /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, activeUntil>>
+    /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, edited, activeUntil>>
+
+\* reload cannot load this file: a read or parse error, a defaults() or merge error
+\* after it, or, for the bundle, Corrupt or Empty. It keeps what is live and notes the
+\* reason in ctx.unfinished.
+ReloadReadFails ==
+    /\ Faults
+    /\ up
+    /\ reading # "no"
+    /\ reading' = "no"
+    /\ retry' = "behind"
+    /\ UNCHANGED <<durable, world, pc, msg, applyLock, cacheLock, notified, edited, live, loaded, activeUntil>>
 
 Tick ==
     /\ clock < MaxClock
@@ -309,6 +347,8 @@ LoseMemory ==
     /\ cacheLock' = NoWorker
     /\ notified' = FALSE
     /\ reading' = "no"
+    /\ retry' = "no"
+    /\ edited' = FALSE
     /\ live' = NoFile
     /\ loaded' = FALSE
     /\ activeUntil' = NoFile.until
@@ -356,20 +396,22 @@ Boot ==
     /\ live' = InForce
     /\ loaded' = (Kind = "policy" /\ InForce # NoFile)
     /\ up' = TRUE
-    /\ UNCHANGED <<target, local, savedApplied, savedPending, clock, crashes, pc, msg, applyLock, cacheLock, notified, reading>>
+    /\ UNCHANGED <<target, local, savedApplied, savedPending, clock, crashes, pc, msg, applyLock, cacheLock, notified, reading, retry, edited>>
 
 \* The documented way back to the local file. This writer skips verify_envelope.
 DeleteApplied ==
     /\ LocalEdits
     /\ target # NoFile
     /\ target' = NoFile
-    /\ UNCHANGED <<savedTarget, local, applied, savedApplied, pending, savedPending, world, pc, msg, applyLock, cacheLock, loader, activeUntil>>
+    /\ edited' = up
+    /\ UNCHANGED <<savedTarget, local, applied, savedApplied, pending, savedPending, world, pc, msg, applyLock, cacheLock, notified, reading, retry, live, loaded, activeUntil>>
 
 \* A save that unlinks before it writes, or an operator adding or removing the file.
 EditLocal ==
     /\ LocalEdits
     /\ local' = IF local = NoFile THEN OperatorFile ELSE NoFile
-    /\ UNCHANGED <<target, savedTarget, applied, savedApplied, pending, savedPending, world, pc, msg, applyLock, cacheLock, loader, activeUntil>>
+    /\ edited' = up
+    /\ UNCHANGED <<target, savedTarget, applied, savedApplied, pending, savedPending, world, pc, msg, applyLock, cacheLock, notified, reading, retry, live, loaded, activeUntil>>
 
 Next ==
     \/ \E w \in Workers :
@@ -388,7 +430,9 @@ Next ==
         \/ Notify(w)
         \/ NotifySettled(w)
     \/ ReloadCheck
+    \/ ReloadRetry
     \/ ReloadRead
+    \/ ReloadReadFails
     \/ Tick
     \/ Crash
     \/ PowerCut
@@ -431,8 +475,10 @@ WatermarkMonotonic ==
 BootSettles == [][(~up /\ up') => (pending' = NoFile /\ applied' = Recorded(InForce'))]_vars
 
 \* Spelled out, not `InForce`, so that a change to the read order cannot pass here.
+\* The live file may lag only behind a reload that kept it, or a change or edit no
+\* reload has looked at. A retry for the bundle alone follows a load of this file.
 LiveMatchesDisk ==
-    (Quiet /\ ~notified /\ reading = "no") => live = IF target # NoFile THEN target ELSE local
+    (Quiet /\ ~notified /\ ~edited /\ reading = "no" /\ retry # "behind") => live = IF target # NoFile THEN target ELSE local
 
 ExpiryMatchesDisk == (Kind = "policy" /\ Quiet) => activeUntil = InForce.until
 

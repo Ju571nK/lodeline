@@ -70,3 +70,47 @@ async fn reload_policy_picks_up_on_disk_edits() {
 
     agent.join.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_that_failed_catches_up_when_the_file_is_fixed_without_a_new_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path_a = dir.path().join("a.json");
+    let path_b = dir.path().join("b.json");
+
+    let policy_a = policy_for_paths(&[path_a.to_str().unwrap()], "standard");
+    let agent = TestAgentBuilder::new().policy(&policy_a).start().await;
+
+    std::fs::write(&agent.policy_file, b"}{not yaml").unwrap();
+    assert_eq!(
+        agent.control(&json!({"cmd": "reload_policy"})).await["ok"],
+        true
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let during = agent.control(&json!({"cmd": "targets"})).await;
+    assert!(
+        first_glob_of_test_target(&during)
+            .as_deref()
+            .is_some_and(|g| g.ends_with("a.json")),
+        "a failed reload keeps the previous targets: {during}"
+    );
+
+    let policy_b = policy_for_paths(&[path_b.to_str().unwrap()], "standard");
+    std::fs::write(&agent.policy_file, &policy_b).unwrap();
+
+    let deadline = std::time::Instant::now() + fs_event_timeout();
+    let mut after_glob = None;
+    while std::time::Instant::now() < deadline {
+        let after = agent.control(&json!({"cmd": "targets"})).await;
+        after_glob = first_glob_of_test_target(&after);
+        if after_glob.as_deref().is_some_and(|g| g.ends_with("b.json")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        after_glob.as_deref().is_some_and(|g| g.ends_with("b.json")),
+        "the live policy never caught up with no new version (got {after_glob:?})"
+    );
+
+    agent.join.abort();
+}

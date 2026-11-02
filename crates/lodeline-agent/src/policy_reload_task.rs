@@ -152,7 +152,7 @@ fn reconcile_rule_packs(
 /// States for the rule-pack bundle file.
 /// - `Absent` = file genuinely missing (NotFound) → deliberate `rm`, clear the layer.
 /// - `Present` = parsed OK.
-/// - `Corrupt` = file exists but read/parse failed → retain the last-good bundle.
+/// - `Corrupt` = file exists but read/parse failed, and why → retain the last-good bundle.
 /// - `Empty` = file is zero-byte / whitespace-only → retain the last-good bundle.
 ///   A non-atomic `cp` truncates the destination to zero bytes before writing, so a
 ///   transient empty read is ambiguous with a half-finished write; retaining (#135)
@@ -163,7 +163,7 @@ fn reconcile_rule_packs(
 pub(crate) enum BundleState {
     Absent,
     Present(Box<lodeline_core::policy::PolicyDocument>),
-    Corrupt,
+    Corrupt(String),
     Empty,
 }
 
@@ -171,10 +171,8 @@ pub(crate) fn read_bundle_state(path: &std::path::Path) -> BundleState {
     let s = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return BundleState::Absent,
-        Err(e) => {
-            tracing::warn!(error = ?e, path = %path.display(), "rule-packs.yaml read failed");
-            return BundleState::Corrupt; // 읽기 실패도 보수적으로 corrupt(이전 유지)
-        }
+        // 읽기 실패도 보수적으로 corrupt(이전 유지)
+        Err(e) => return BundleState::Corrupt(format!("read failed: {e}")),
     };
     // A zero-byte / whitespace-only file is a transient truncate window (non-atomic
     // cp), NOT a deliberate removal. Treat it as `Empty` → retain last-good (#135),
@@ -185,11 +183,7 @@ pub(crate) fn read_bundle_state(path: &std::path::Path) -> BundleState {
     }
     match lodeline_core::policy::parse(&s) {
         Ok(d) => BundleState::Present(Box::new(d)),
-        Err(e) => {
-            tracing::warn!(error = ?e, path = %path.display(),
-                "rule-packs.yaml parse failed; retaining last good bundle");
-            BundleState::Corrupt
-        }
+        Err(e) => BundleState::Corrupt(format!("parse failed: {e}")),
     }
 }
 
@@ -235,6 +229,20 @@ pub struct ReloadCtx {
     /// #134 — 마지막으로 성공 파스된 번들 doc. corrupt 시 이를 재사용해
     /// transient 파스 실패가 번들 룰팩을 drop하지 않게 한다.
     pub last_good_bundle: Option<lodeline_core::policy::PolicyDocument>,
+    /// Why the last reload kept something from before, empty once one finished. `run`
+    /// retries on each root tick until it empties.
+    pub unfinished: Vec<String>,
+    /// The policy text the last finished reload applied, `None` for no file. A retry
+    /// compares what it read with this to see if it has anything to apply.
+    pub applied_policy: Option<String>,
+}
+
+/// Notes why this reload did not finish. Returns whether `last`, the reasons of the
+/// reload before it, lacks that reason, so that a retry every root tick logs a cause
+/// once.
+fn note_unfinished(unfinished: &mut Vec<String>, last: &[String], reason: &str) -> bool {
+    unfinished.push(reason.to_string());
+    !last.iter().any(|r| r == reason)
 }
 
 pub async fn run(mut ctx: ReloadCtx) {
@@ -250,6 +258,7 @@ pub async fn run(mut ctx: ReloadCtx) {
                     // Sender (apply_ctx) dropped — agent is shutting down.
                     break;
                 }
+                ctx.unfinished.clear();
                 reload(&mut ctx, &plat);
             }
             changed = ctx.rule_packs_version_rx.changed() => {
@@ -257,9 +266,15 @@ pub async fn run(mut ctx: ReloadCtx) {
                     // Sender (apply_ctx) dropped — agent is shutting down.
                     break;
                 }
+                ctx.unfinished.clear();
                 reload(&mut ctx, &plat);
             }
-            _ = root_tick.tick() => ctx.watcher.reconcile(),
+            _ = root_tick.tick() => {
+                ctx.watcher.reconcile();
+                if !ctx.unfinished.is_empty() {
+                    reload(&mut ctx, &plat);
+                }
+            }
         }
     }
 }
@@ -268,37 +283,47 @@ pub async fn run(mut ctx: ReloadCtx) {
 /// live pipeline + watcher. On any parse/merge failure, or when a policy file that
 /// was loaded has gone missing, log and keep the previous state untouched
 /// (`apply_policy` refuses what boot could not load, but a hand-edited file shouldn't
-/// kill the agent).
+/// kill the agent). `ctx.unfinished` then says why, and `run` tries again.
 pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     let version = *ctx.policy_version_rx.borrow();
+    let last = std::mem::take(&mut ctx.unfinished);
 
     let policy_in_force = ctx.paths.policy.in_force();
     // Like boot, a host with no policy file runs on defaults, and a rule-pack bundle
     // still loads over them.
-    let doc = match std::fs::read_to_string(policy_in_force) {
+    let read = match std::fs::read_to_string(policy_in_force) {
         Ok(yaml) => match lodeline_core::policy::parse(&yaml) {
-            Ok(d) => Some(d),
+            Ok(d) => Some((d, yaml)),
             Err(e) => {
-                tracing::error!(error = %e, "policy reload: re-parse failed; keeping previous targets");
+                if note_unfinished(&mut ctx.unfinished, &last, &e.to_string()) {
+                    tracing::error!(error = %e, "policy reload: re-parse failed; keeping previous targets");
+                }
                 return;
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !ctx.policy_file_loaded => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(path = %policy_in_force.display(),
-                "policy reload: policy file is missing; keeping previous targets until it returns or the agent restarts");
+            if note_unfinished(&mut ctx.unfinished, &last, "policy file is missing") {
+                tracing::warn!(path = %policy_in_force.display(),
+                    "policy reload: policy file is missing; keeping previous targets until it returns or the agent restarts");
+            }
             return;
         }
         Err(e) => {
-            tracing::error!(path = %policy_in_force.display(), error = %e,
-                "policy reload: re-read failed; keeping previous targets");
+            if note_unfinished(&mut ctx.unfinished, &last, &e.to_string()) {
+                tracing::error!(path = %policy_in_force.display(), error = %e,
+                    "policy reload: re-read failed; keeping previous targets");
+            }
             return;
         }
     };
+    let (doc, policy_text) = read.unzip();
     let defaults = match lodeline_core::policy::defaults() {
         Ok(d) => d,
         Err(e) => {
-            tracing::error!(error = %e, "policy reload: defaults() failed; keeping previous targets");
+            if note_unfinished(&mut ctx.unfinished, &last, &e.to_string()) {
+                tracing::error!(error = %e, "policy reload: defaults() failed; keeping previous targets");
+            }
             return;
         }
     };
@@ -307,19 +332,37 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     // Corrupt(파일 존재+파스 실패) → retain last good (transient git-pull state protected).
     // Empty(0바이트/공백, cp 트렁케이트 창) → retain last good (#135, enforcement race 방지).
     // Absent(파일 NotFound) → clear cache (deliberate rm honored).
-    let bundle: Option<lodeline_core::policy::PolicyDocument> =
-        match read_bundle_state(ctx.paths.rule_packs.in_force()) {
-            BundleState::Present(d) => {
-                let doc = *d;
-                ctx.last_good_bundle = Some(doc.clone());
-                Some(doc)
-            }
-            BundleState::Corrupt | BundleState::Empty => ctx.last_good_bundle.clone(), // 이전 정상 유지
-            BundleState::Absent => {
-                ctx.last_good_bundle = None; // 의도적 제거 → 캐시 비움
-                None
-            }
-        };
+    let bundle_path = ctx.paths.rule_packs.in_force();
+    let bundle_state = read_bundle_state(bundle_path);
+    let kept_bundle = match &bundle_state {
+        BundleState::Corrupt(reason) => Some(reason.clone()),
+        BundleState::Empty => Some("file is empty".to_string()),
+        BundleState::Present(_) | BundleState::Absent => None,
+    };
+    if let Some(reason) = kept_bundle {
+        // The reload before this one applied this policy with the last good bundle,
+        // and applying again re-seeds the warmup hashes every root tick.
+        if last == [reason.as_str()] && ctx.applied_policy == policy_text {
+            ctx.unfinished = last;
+            return;
+        }
+        if note_unfinished(&mut ctx.unfinished, &last, &reason) {
+            tracing::warn!(path = %bundle_path.display(), %reason,
+                "rule-packs.yaml unusable; retaining last good bundle");
+        }
+    }
+    let bundle: Option<lodeline_core::policy::PolicyDocument> = match bundle_state {
+        BundleState::Present(d) => {
+            let doc = *d;
+            ctx.last_good_bundle = Some(doc.clone());
+            Some(doc)
+        }
+        BundleState::Corrupt(_) | BundleState::Empty => ctx.last_good_bundle.clone(), // 이전 정상 유지
+        BundleState::Absent => {
+            ctx.last_good_bundle = None; // 의도적 제거 → 캐시 비움
+            None
+        }
+    };
     let loaded_a_file = doc.is_some();
     let mut effective = match lodeline_core::policy::merge(
         defaults,
@@ -329,11 +372,14 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     ) {
         Ok(e) => e,
         Err(e) => {
-            tracing::error!(error = %e, "policy reload: merge failed; keeping previous targets");
+            if note_unfinished(&mut ctx.unfinished, &last, &e.to_string()) {
+                tracing::error!(error = %e, "policy reload: merge failed; keeping previous targets");
+            }
             return;
         }
     };
     ctx.policy_file_loaded = loaded_a_file;
+    ctx.applied_policy = policy_text;
 
     // #115 / #134 — rebuild the shared deny evaluator from the freshly-merged
     // policy. Keep-previous on deny-id validation failure OR regex compile
@@ -723,6 +769,8 @@ mod tests {
                     crate::hook_deny::DenyEvaluator::new(&[]).unwrap(),
                 ))),
                 last_good_bundle: None,
+                unfinished: Vec::new(),
+                applied_policy: None,
             },
             plat,
             targets_rx,
@@ -787,6 +835,8 @@ mod tests {
                     crate::hook_deny::DenyEvaluator::new(&[]).unwrap(),
                 ))),
                 last_good_bundle: None,
+                unfinished: Vec::new(),
+                applied_policy: None,
             },
             plat,
             targets_rx,
@@ -914,6 +964,280 @@ mod tests {
 
         assert!(targets_rx.borrow().iter().any(|c| c.id == "local-rule"));
         assert!(ctx.policy_file_loaded);
+    }
+
+    fn has_pack(
+        parsers: &parking_lot::RwLock<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>,
+        id: &str,
+    ) -> bool {
+        parsers.read().iter().any(|p| {
+            p.as_any()
+                .downcast_ref::<crate::ai_guard::rule_pack::parser::RulePackParser>()
+                .is_some_and(|rpp| rpp.pack.id == id)
+        })
+    }
+
+    fn bundle_yaml(pack_id: &str) -> String {
+        format!(
+            "version: 1\nrule_packs:\n  - id: {pack_id}\n    pack_version: 1\n    tool: gemini\n    scope:\n      kind: user_global\n    watched_paths: []\n    rules: []\n"
+        )
+    }
+
+    /// The real task, with a version channel the test holds, on paused time.
+    struct Running {
+        version: watch::Sender<i64>,
+        parsers: Arc<parking_lot::RwLock<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>>,
+        shutdown: CancellationToken,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Running {
+        fn start(mut ctx: ReloadCtx) -> Self {
+            let (version, policy_version_rx) = watch::channel(1i64);
+            ctx.policy_version_rx = policy_version_rx;
+            Self {
+                version,
+                parsers: ctx.parsers.clone(),
+                shutdown: ctx.shutdown.clone(),
+                task: tokio::spawn(run(ctx)),
+            }
+        }
+
+        async fn settle(&self) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        async fn tick(&self) {
+            tokio::time::sleep(crate::watcher::ROOT_RECHECK_INTERVAL * 2).await;
+        }
+
+        async fn stop(self) {
+            self.shutdown.cancel();
+            self.task.await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_read_of_the_policy_is_retried_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (ctx, _plat, targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+        let applied = ctx.paths.policy.applied.clone();
+        let running = Running::start(ctx);
+
+        std::fs::write(&applied, b"}{not yaml").unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-a"));
+
+        std::fs::write(&applied, policy_yaml("target-b", &path, "standard")).unwrap();
+        running.tick().await;
+
+        assert!(
+            targets_rx.borrow().iter().any(|c| c.id == "target-b"),
+            "the retry loaded the fixed file with no new version"
+        );
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_policy_file_that_returns_is_loaded_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (ctx, _plat, targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+        let applied = ctx.paths.policy.applied.clone();
+        let running = Running::start(ctx);
+
+        std::fs::remove_file(&applied).unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-a"));
+
+        std::fs::write(&applied, policy_yaml("target-b", &path, "standard")).unwrap();
+        running.tick().await;
+
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-b"));
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_kept_bundle_catches_up_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, _trx, _parsers, _state) = build_ctx_with_parsers(dir.path(), yaml);
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(has_pack(&ctx.parsers, "old-pack"));
+        let running = Running::start(ctx);
+
+        std::fs::write(&bundle, "}{not yaml").unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        assert!(
+            has_pack(&running.parsers, "old-pack"),
+            "the last good bundle stays"
+        );
+
+        std::fs::write(&bundle, bundle_yaml("new-pack")).unwrap();
+        running.tick().await;
+
+        assert!(has_pack(&running.parsers, "new-pack"));
+        assert!(!has_pack(&running.parsers, "old-pack"));
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_version_applies_while_a_kept_bundle_waits_for_its_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (mut ctx, plat, targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+        let applied = ctx.paths.policy.applied.clone();
+        let running = Running::start(ctx);
+
+        std::fs::write(&bundle, "}{not yaml").unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+
+        std::fs::write(&applied, policy_yaml("target-b", &path, "standard")).unwrap();
+        running.version.send(3).unwrap();
+        running.settle().await;
+
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-b"));
+        assert!(has_pack(&running.parsers, "old-pack"));
+        running.stop().await;
+    }
+
+    /// Everything `f` logs on this thread. The subscriber is process-wide because
+    /// tracing caches a callsite's interest when any thread first reaches it, so a
+    /// thread-local subscriber loses a callsite another test reached first.
+    fn logs_of(f: impl FnOnce()) -> String {
+        thread_local!(static LINES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) });
+        struct Lines;
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                // A thread that is exiting may log after its buffer is gone.
+                let _ = LINES.try_with(|lines| lines.borrow_mut().extend_from_slice(bytes));
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        static SUBSCRIBER: std::sync::Once = std::sync::Once::new();
+        SUBSCRIBER.call_once(|| tracing_subscriber::fmt().with_writer(|| Lines).init());
+        // A callsite first reached during the install cached no subscriber.
+        tracing::callsite::rebuild_interest_cache();
+        LINES.take();
+        f();
+        String::from_utf8(LINES.take()).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retry_that_fails_the_same_way_logs_nothing_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (mut ctx, plat, _targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+
+        std::fs::write(&ctx.paths.policy.applied, b"}{not yaml").unwrap();
+        let logs = logs_of(|| {
+            reload(&mut ctx, &plat);
+            reload(&mut ctx, &plat);
+            reload(&mut ctx, &plat);
+        });
+        assert_eq!(logs.matches("re-parse failed").count(), 1, "{logs}");
+        assert_eq!(ctx.unfinished.len(), 1);
+
+        std::fs::remove_file(&ctx.paths.policy.applied).unwrap();
+        let logs = logs_of(|| {
+            reload(&mut ctx, &plat);
+            reload(&mut ctx, &plat);
+        });
+        assert_eq!(logs.matches("policy file is missing").count(), 1, "{logs}");
+
+        std::fs::write(
+            &ctx.paths.policy.applied,
+            policy_yaml("target-a", &path, "standard"),
+        )
+        .unwrap();
+        reload(&mut ctx, &plat);
+        assert!(
+            ctx.unfinished.is_empty(),
+            "a finished reload ends the retry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retry_that_finds_the_same_bad_bundle_applies_nothing_and_logs_nothing_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let watched = dir.path().join("a.json");
+        let yaml = policy_yaml("target-a", &watched.display().to_string(), "critical");
+        let (mut ctx, plat, mut targets_rx) = build_ctx(dir.path(), &yaml);
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+
+        for bad in ["}{not yaml", ""] {
+            std::fs::write(&bundle, bad).unwrap();
+            std::fs::write(&watched, format!("seen with {bad:?}")).unwrap();
+            let logs = logs_of(|| reload(&mut ctx, &plat));
+            assert_eq!(logs.matches("retaining last good").count(), 1, "{logs}");
+            assert!(has_pack(&ctx.parsers, "old-pack"));
+            let key = normalizer::canonicalize_glob_prefix(&watched);
+            let seeded = ctx.cache.lock().get(&key).unwrap();
+            assert!(seeded.is_some());
+
+            std::fs::write(&watched, "changed after the warmup").unwrap();
+            targets_rx.mark_unchanged();
+            let logs = logs_of(|| reload(&mut ctx, &plat));
+            assert!(!logs.contains("retaining last good"), "{logs}");
+            assert!(!targets_rx.has_changed().unwrap());
+            assert_eq!(ctx.cache.lock().get(&key).unwrap(), seeded, "no warmup");
+            assert!(!ctx.unfinished.is_empty(), "the retry goes on");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_policy_applies_on_the_root_tick_over_the_same_bad_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (mut ctx, plat, mut targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+        let local = dir.path().join("local-policy.yaml");
+        std::fs::write(&local, policy_yaml("local-rule", &path, "standard")).unwrap();
+        ctx.paths.policy.local = Some(local);
+        let applied = ctx.paths.policy.applied.clone();
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+        let running = Running::start(ctx);
+
+        std::fs::write(&bundle, "}{not yaml").unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        running.tick().await;
+
+        std::fs::write(&applied, policy_yaml("target-b", &path, "standard")).unwrap();
+        running.tick().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-b"));
+        assert!(has_pack(&running.parsers, "old-pack"));
+
+        targets_rx.mark_unchanged();
+        running.tick().await;
+        assert!(!targets_rx.has_changed().unwrap(), "nothing new to apply");
+
+        std::fs::remove_file(&applied).unwrap();
+        running.tick().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "local-rule"));
+        assert!(has_pack(&running.parsers, "old-pack"));
+        running.stop().await;
     }
 
     // Phase 3b.6.1 — per-repo Continue parser hot-reload reconciliation.
@@ -1530,7 +1854,7 @@ mod tests {
         .unwrap();
         assert!(matches!(read_bundle_state(&p), BundleState::Present(_)));
         std::fs::write(&p, "}{not yaml").unwrap();
-        assert!(matches!(read_bundle_state(&p), BundleState::Corrupt));
+        assert!(matches!(read_bundle_state(&p), BundleState::Corrupt(_)));
         // #135 — zero-byte / whitespace-only → Empty (transient truncate), NOT Absent.
         std::fs::write(&p, "").unwrap();
         assert!(matches!(read_bundle_state(&p), BundleState::Empty));
@@ -1586,7 +1910,7 @@ mod tests {
         assert!(cache.is_some());
         std::fs::write(&p, "}{bad").unwrap();
         let retained = match read_bundle_state(&p) {
-            BundleState::Corrupt => cache.clone(),
+            BundleState::Corrupt(_) => cache.clone(),
             _ => None,
         };
         assert!(retained.is_some(), "corrupt must retain last good");

@@ -252,8 +252,9 @@ paths` prints the file in force. To go back to the local file, delete the applie
 and run `sudo lodeline reload`. The next signed version replaces it again.
 After that, `lodeline status` still reports the signed version and its expiry while the
 local file runs, and only a higher version lands. If `/etc/lodeline` has no
-`policy.yaml`, deleting the applied one keeps the previous policy with a warning in the
-log until a restart, which loads the defaults.
+`policy.yaml`, deleting the applied one keeps the previous policy with one warning in the
+log. A `policy.yaml` that returns loads within about 5 seconds, even if it is still being
+saved, and a restart loads the defaults.
 
 ---
 
