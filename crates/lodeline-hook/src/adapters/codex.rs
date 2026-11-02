@@ -2,6 +2,7 @@ use super::HookAdapter;
 use crate::redact::capture;
 use lodeline_core::event::AiTool;
 use lodeline_core::hook_proto::*;
+use std::path::{Component, Path, PathBuf};
 
 /// Codex CLI `PreToolUse` hook. Codex deliberately reuses the Claude Code hook
 /// shape (`tool_name` / `tool_input` / `tool_use_id`, plus `turn_id` and a
@@ -10,24 +11,75 @@ use lodeline_core::hook_proto::*;
 /// `apply_patch`, and both carry their text in `tool_input.command`.
 pub struct Codex;
 
-/// Target paths from the `*** <Op> File:` / `*** Move to:` header lines of an
-/// apply_patch body, one per line. Body lines start with `+`, `-`, ` ` or `@@`,
-/// so patch content can never be read as a header.
-fn patch_paths(patch: &str) -> String {
-    patch
-        .lines()
-        .filter_map(|l| {
-            [
-                "*** Update File: ",
-                "*** Add File: ",
-                "*** Delete File: ",
-                "*** Move to: ",
-            ]
-            .iter()
-            .find_map(|h| l.strip_prefix(h))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Target paths of an apply_patch body, read the way codex rust-v0.166.0
+/// (parser.rs, streaming_parser.rs) reads them: headers match the trimmed line,
+/// but inside an Update hunk only trailing space is trimmed, so ` *** Add File:`
+/// there is a context line. `*** Move to:` counts only right after its Update
+/// header. Body lines start with `+`, `-`, ` ` or `@@` and are never headers.
+fn patch_paths(patch: &str) -> Vec<&str> {
+    let lines: Vec<&str> = patch.trim().lines().collect();
+    // Codex's lenient mode also takes the patch wrapped in a heredoc.
+    let lines = match lines.as_slice() {
+        [first, inner @ .., last]
+            if matches!(*first, "<<EOF" | "<<'EOF'" | "<<\"EOF\"")
+                && last.ends_with("EOF")
+                && inner.len() >= 2 =>
+        {
+            inner
+        }
+        all => all,
+    };
+    let mut paths = Vec::new();
+    let (mut in_update, mut after_update_header) = (false, false);
+    for line in lines
+        .iter()
+        .skip_while(|l| l.trim() != "*** Begin Patch")
+        .skip(1)
+    {
+        let l = if in_update {
+            line.trim_end()
+        } else {
+            line.trim()
+        };
+        if l == "*** End Patch" {
+            break;
+        }
+        let move_to = after_update_header.then(|| l.strip_prefix("*** Move to: "));
+        after_update_header = false;
+        if let Some(path) = move_to.flatten() {
+            paths.push(path);
+        } else if let Some(path) = l.strip_prefix("*** Update File: ") {
+            (in_update, after_update_header) = (true, true);
+            paths.push(path);
+        } else if let Some(path) = l
+            .strip_prefix("*** Add File: ")
+            .or_else(|| l.strip_prefix("*** Delete File: "))
+        {
+            in_update = false;
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// `path` joined onto `cwd` when relative, with `.` and `..` folded lexically
+/// (no filesystem access), so rules on absolute paths see what Codex writes.
+fn resolve(cwd: Option<&str>, path: &str) -> String {
+    let joined = match cwd {
+        Some(cwd) => Path::new(cwd).join(path),
+        None => return path.to_string(),
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 impl HookAdapter for Codex {
@@ -63,12 +115,11 @@ impl HookAdapter for Codex {
             }
         } else if tool == "apply_patch" {
             let patch = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let c = capture(&patch_paths(patch), level);
-            HookAction::FileEdit {
-                path_hash: c.hash,
-                path_preview: c.preview,
-                edit_hash: None,
-            }
+            let cwd = p.get("cwd").and_then(|v| v.as_str());
+            let paths = patch_paths(patch)
+                .into_iter()
+                .map(|path| resolve(cwd, path));
+            super::file_edit(paths.collect(), level)
         } else if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
             // Shell tool — keyed on the command field, not the exact tool_name.
             let c = capture(cmd, level);
@@ -81,12 +132,7 @@ impl HookAdapter for Codex {
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(tool);
-            let c = capture(path, level);
-            HookAction::FileEdit {
-                path_hash: c.hash,
-                path_preview: c.preview,
-                edit_hash: None,
-            }
+            super::file_edit(vec![path.to_string()], level)
         } else {
             let detail = serde_json::to_string(&input).unwrap_or_default();
             let c = capture(&detail, level);

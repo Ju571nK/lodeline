@@ -205,8 +205,16 @@ fn rule_matches(
                 .find(|ind| f.holds(Some(ind.as_str())))
                 .map(|ind| via_suffix(ind.as_str()))
         }
-        (CompiledMatch::FileEdit(f), HookAction::FileEdit { path_preview, .. }) => {
-            hit(f.holds(path_preview.as_deref()))
+        (
+            CompiledMatch::FileEdit(f),
+            HookAction::FileEdit {
+                path_preview,
+                paths,
+                ..
+            },
+        ) if paths.is_empty() => hit(f.holds(path_preview.as_deref())),
+        (CompiledMatch::FileEdit(f), HookAction::FileEdit { paths, .. }) => {
+            hit(paths.iter().any(|p| f.holds(Some(p.as_str()))))
         }
         // server/tool/label are non-optional in HookAction; wrap in Some to satisfy holds().
         (

@@ -58,6 +58,11 @@ pub enum HookAction {
         path_hash: String,
         path_preview: Option<String>,
         edit_hash: Option<String>,
+        /// Every target path in full, for deny rules: the preview is capped
+        /// and may join several paths. Empty under `HashOnly` and from a hook
+        /// that predates the field; rules then fall back to the preview.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
     },
     McpCall {
         server: String,
@@ -171,6 +176,26 @@ pub enum DriftKind {
 mod tests {
     use super::*;
     use crate::event::AiTool;
+
+    /// An agent older than `paths` decodes a new hook's file edit (serde skips
+    /// the unknown field), and an empty list keeps the old bytes exactly.
+    #[test]
+    fn file_edit_paths_are_wire_compatible() {
+        let old = r#"{"kind":"file_edit","path_hash":"h","path_preview":"/a","edit_hash":null}"#;
+        let edit = |paths: Vec<String>| HookAction::FileEdit {
+            path_hash: "h".into(),
+            path_preview: Some("/a".into()),
+            edit_hash: None,
+            paths,
+        };
+        assert_eq!(serde_json::to_string(&edit(vec![])).unwrap(), old);
+        assert_eq!(
+            serde_json::from_str::<HookAction>(old).unwrap(),
+            edit(vec![])
+        );
+        let new = serde_json::to_string(&edit(vec!["/a".into(), "/b".into()])).unwrap();
+        assert!(new.ends_with(r#""paths":["/a","/b"]}"#), "{new}");
+    }
 
     #[test]
     fn decision_request_round_trips() {
