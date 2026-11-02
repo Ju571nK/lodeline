@@ -9,21 +9,6 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [0.12.1] - 2026-11-02
 
-### Fixed
-
-- A policy reload that keeps the previous state now runs again on each 5-second root
-  tick until it finishes, and a new wake clears the record of earlier failures. A
-  policy file or rule-pack bundle that is fixed by hand or returns loads within about
-  5 seconds, with no `lodeline reload`. The log has one line per wake and one per new
-  reason, so a retry with the same reason logs nothing. The warning `rule-packs.yaml
-  unusable; retaining last good bundle` replaces two earlier messages, and an empty
-  bundle now warns once. The cold-load error for a corrupt bundle names the reason. A
-  deny-rule validation or compile failure keeps the previous evaluator and does not
-  retry. While a bundle stays unusable, a retry applies a changed or removed policy
-  file and compares nothing else, so other changes wait for a wake. A retry can load a
-  valid file that the operator is still saving, without `lodeline reload`, but only
-  after a failed reload.
-
 ### Added
 
 - `lodeline status` shows whether a fleet host really reaches `lodeline-server`. A
@@ -68,6 +53,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   remove the field from the stored proxy state by hand. (#339)
 
 ### Fixed
+
+- A policy reload that keeps the previous state now runs again on each 5-second root
+  tick until it finishes, and a new wake clears the record of earlier failures. A
+  policy file or rule-pack bundle that is fixed by hand or returns loads within about
+  5 seconds, with no `lodeline reload`. The log has one line per wake and one per new
+  reason, so a retry with the same reason logs nothing. The warning `rule-packs.yaml
+  unusable; retaining last good bundle` replaces two earlier messages, and an empty
+  bundle now warns once. The cold-load error for a corrupt bundle names the reason. A
+  deny-rule validation or compile failure keeps the previous evaluator and does not
+  retry. While a bundle stays unusable, a retry applies a changed or removed policy
+  file and compares nothing else, so other changes wait for a wake. A retry can load a
+  valid file that the operator is still saving, without `lodeline reload`, but only
+  after a failed reload.
 
 - A signed policy or rule-pack bundle now applies on a packaged or root agent with no
   `--policy`. The agent wrote these files to `/etc/lodeline`, which `lodeline.service`
@@ -314,6 +312,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 - `lodeline scan` no longer lists a tool as not configured when another scope of
   the same tool was assessed or failed to parse.
+
+- With the SELinux module from `packaging/selinux/lodeline.te` loaded in Enforcing
+  mode, `lodeline-server` could not listen on its default port 8443. It failed with
+  `Permission denied (os error 13)` and systemd restarted it in a loop. The audit log
+  showed a denied `name_bind` on `http_port_t`, the label 8443 carries, because the
+  policy allowed only unreserved ports. `lodeline_server_t` can now bind `http_port_t`
+  ports as well. Only hosts that built and loaded the module (it needs
+  `selinux-policy-devel`) were affected, in every release since the module was added.
+  Without the module the daemons run unconfined and nothing changes. Upgrade. If you
+  loaded the module by hand from `packaging/selinux/README.md`, rebuild and reload it,
+  then restart `lodeline-server`. On Amazon Linux 2023 (aarch64, Enforcing), the
+  server then listens on 8443 and all three daemons run confined with no lodeline
+  denials. (#397)
 
 ## [0.12.0] - 2026-10-31
 

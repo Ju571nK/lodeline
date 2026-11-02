@@ -1,4 +1,4 @@
-policy_module(lodeline, 0.1.0)
+policy_module(lodeline, 0.1.1)
 
 ## Lodeline SELinux policy (#69). Confines the three de-rooted lodeline daemons (#10)
 ## into dedicated domains instead of unconfined_service_t. Authored from the
@@ -162,5 +162,7 @@ manage_files_pattern(lodeline_server_t, lodeline_server_var_log_t, lodeline_serv
 allow lodeline_server_t self:tcp_socket { create bind listen accept getattr getopt setopt shutdown read write };
 corenet_tcp_bind_generic_node(lodeline_server_t)
 corenet_tcp_bind_all_unreserved_ports(lodeline_server_t)
+# The documented default port 8443 is labeled http_port_t, not unreserved.
+corenet_tcp_bind_http_port(lodeline_server_t)
 sysnet_dns_name_resolve(lodeline_server_t)
 auth_use_nsswitch(lodeline_server_t)
