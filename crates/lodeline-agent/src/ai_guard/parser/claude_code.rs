@@ -2339,6 +2339,26 @@ mod tests {
         assert_eq!(auto_findings(&reasons), ["mode:acceptEdits"]);
     }
 
+    /// `disableAutoMode` is not a start mode, so a managed file that sets only it
+    /// leaves a committed `acceptEdits` scored.
+    #[test]
+    fn managed_disable_auto_mode_without_default_mode_still_scores_accept_edits() {
+        let repo = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
+        );
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-settings.d/10-mode.json",
+            r#"{"permissions": {"disableAutoMode": "disable"}}"#,
+        );
+        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        assert_eq!(auto_findings(&reasons), ["mode:acceptEdits"]);
+    }
+
     // ---- #191 signal 2: unattended scheduled tasks ----
 
     #[test]
