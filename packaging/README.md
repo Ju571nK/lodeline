@@ -108,8 +108,9 @@ no effect while the applied one exists. `lodeline show paths` prints the file in
 To go back to the local file, delete the applied one and run `sudo lodeline reload`.
 After that, `lodeline status` still reports the signed version and its expiry while the
 local file runs, and only a higher version lands. If `/etc/lodeline` has no
-`policy.yaml`, deleting the applied one keeps the previous policy with a warning in the
-log until a restart, which loads the defaults. A root agent with `--state-db` elsewhere
+`policy.yaml`, deleting the applied one keeps the previous policy with one warning in the
+log. A `policy.yaml` that returns loads within about 5 seconds, and a restart loads the
+defaults. A root agent with `--state-db` elsewhere
 and no `--policy` still applies into `/var/lib/lodeline/applied/`, away from that state
 database. A host that an older agent applied into keeps loading that file from
 `/etc/lodeline` until the next apply.

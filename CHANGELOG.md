@@ -7,6 +7,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Fixed
+
+- A policy reload that keeps the previous state now runs again on each 5-second root
+  tick until it finishes, and a new wake clears the record of earlier failures. A
+  policy file or rule-pack bundle that is fixed by hand or returns loads within about
+  5 seconds, with no `lodeline reload`. The log has one line per wake and one per new
+  reason, so a retry with the same reason logs nothing. The warning `rule-packs.yaml
+  unusable; retaining last good bundle` replaces two earlier messages, and an empty
+  bundle now warns once. The cold-load error for a corrupt bundle names the reason. A
+  deny-rule validation or compile failure keeps the previous evaluator and does not
+  retry.
+
 ### Added
 
 - `lodeline status` shows whether a fleet host really reaches `lodeline-server`. A
