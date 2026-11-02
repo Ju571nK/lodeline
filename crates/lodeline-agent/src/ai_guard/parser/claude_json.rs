@@ -19,7 +19,7 @@ pub(crate) struct ClaudeJsonMcp {
     #[serde(default)]
     mcp_servers: Value,
     #[serde(default)]
-    projects: BTreeMap<String, LenientProject>,
+    projects: Option<BTreeMap<String, LenientProject>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,7 +74,7 @@ impl ClaudeJsonMcp {
     /// exist and do not list the server in their `disabledMcpServers`.
     pub(crate) fn servers(&self) -> Vec<(&str, &Value)> {
         let mut out: Vec<(&str, &Value)> = entries(&self.mcp_servers).collect();
-        for (project, LenientProject(p)) in &self.projects {
+        for (project, LenientProject(p)) in self.projects.iter().flatten() {
             // Skip only a clean not-found: an unmounted volume or a hung mount
             // errors instead, and its servers stay in scope.
             if Path::new(project).try_exists().is_ok_and(|exists| !exists) {
@@ -221,6 +221,31 @@ mod tests {
             .to_string(),
         );
         assert_eq!(server_names(&mcp_reasons(home.path())), ["l", "u"]);
+    }
+
+    #[test]
+    fn null_projects_keeps_user_scope_servers() {
+        let home = tempdir().unwrap();
+        write_claude_json(
+            home.path(),
+            r#"{"mcpServers":{"u":{"url":"https://u.example/mcp"}},"projects":null}"#,
+        );
+        assert_eq!(server_names(&mcp_reasons(home.path())), ["u"]);
+    }
+
+    /// `try_exists` errors on a path with an embedded NUL on every platform,
+    /// which stands in for an unmounted volume: the servers stay in scope.
+    #[test]
+    fn project_whose_existence_check_errors_keeps_its_servers() {
+        let home = tempdir().unwrap();
+        write_claude_json(
+            home.path(),
+            &serde_json::json!({"projects": {
+                "/unmounted\u{0}volume": {"mcpServers": {"kept": {"command": "node"}}}
+            }})
+            .to_string(),
+        );
+        assert_eq!(server_names(&mcp_reasons(home.path())), ["kept"]);
     }
 
     #[test]
