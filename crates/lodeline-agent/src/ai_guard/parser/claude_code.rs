@@ -2717,6 +2717,108 @@ mod tests {
         );
     }
 
+    /// Names of the MCP servers `reasons` score, sorted.
+    fn mcp_server_names(reasons: &[AiGuardReason]) -> Vec<&str> {
+        let mut names: Vec<&str> = reasons
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::McpServerRemote { server_name, .. }
+                | AiGuardReason::McpServerLocalCommand { server_name, .. } => {
+                    Some(server_name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// #199 — servers in `managed-mcp.json` and in the managed
+    /// `managedMcpServers` key load in every session, so they are scored with
+    /// no user config, labelled as managed.
+    #[test]
+    fn managed_mcp_servers_are_scored_and_labelled() {
+        let home = tempdir().unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-mcp.json",
+            r#"{"mcpServers": {"org-local": {"type": "stdio", "command": "/usr/local/bin/company-mcp"}}}"#,
+        );
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{"managedMcpServers": {"search": {"type": "http", "url": "https://search.example.com/mcp"}}}"#,
+        );
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            mcp_server_names(&reasons),
+            ["org-local (managed file)", "search (managed file)"],
+            "{reasons:?}"
+        );
+        assert!(reasons.contains(&AiGuardReason::McpServerLocalCommand {
+            server_name: "org-local (managed file)".into(),
+            command: "/usr/local/bin/company-mcp".into(),
+        }));
+    }
+
+    /// A deployed `managed-mcp.json` takes exclusive control, so the user's
+    /// own servers do not load. Without it, a provided server replaces the
+    /// user's server of the same name and the rest still load.
+    #[test]
+    fn managed_mcp_servers_replace_the_user_servers_they_override() {
+        let home = tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"mcpServers": {"search": {"command": "npx"}, "mine": {"command": "npx"}}}"#,
+        )
+        .unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{"managedMcpServers": {"search": {"type": "http", "url": "https://search.example.com/mcp"}}}"#,
+        );
+        let assess = || {
+            assess_user(
+                &home.path().join(".claude"),
+                &home.path().join(".claude.json"),
+                policy.path(),
+            )
+            .unwrap()
+        };
+        let reasons = assess();
+        assert_eq!(
+            mcp_server_names(&reasons),
+            ["mine", "search (managed file)"],
+            "{reasons:?}"
+        );
+
+        write_file(
+            policy.path(),
+            "managed-mcp.json",
+            r#"{"mcpServers": {"org": {"type": "http", "url": "https://org.example.com/mcp"}}}"#,
+        );
+        let reasons = assess();
+        assert_eq!(
+            mcp_server_names(&reasons),
+            ["org (managed file)", "search (managed file)"],
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn managed_mcp_json_is_watched() {
+        let dir = Path::new("/policy");
+        assert!(super::super::policy_controls::claude_paths(dir)
+            .contains(&dir.join("managed-mcp.json")));
+    }
+
     /// Claude Code runs an identical hook once and merges allow lists, so the
     /// same hook or rule in both files scores once, as the managed one.
     #[test]
