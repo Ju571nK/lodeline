@@ -99,7 +99,22 @@ Then for any of the three daemons, drop a config in place and start it. Agent fi
 sudo cp /etc/lodeline/policy.yaml.example /etc/lodeline/policy.yaml   # optional — defaults apply if absent
 sudo systemctl enable --now lodeline
 journalctl -u lodeline -f
+```
 
+A signed policy or rule-pack bundle does not write `/etc/lodeline`, which the agent's
+unit keeps read-only. It lands in `/var/lib/lodeline/applied/`, and each file there
+replaces the content of its namesake in `/etc/lodeline`, so a hand edit of that file has
+no effect while the applied one exists. `lodeline show paths` prints the file in force.
+To go back to the local file, delete the applied one and run `sudo lodeline reload`.
+After that, `lodeline status` still reports the signed version and its expiry while the
+local file runs, and only a higher version lands. If `/etc/lodeline` has no
+`policy.yaml`, deleting the applied one keeps the previous policy with a warning in the
+log until a restart, which loads the defaults. A root agent with `--state-db` elsewhere
+and no `--policy` still applies into `/var/lib/lodeline/applied/`, away from that state
+database. A host that an older agent applied into keeps loading that file from
+`/etc/lodeline` until the next apply.
+
+```sh
 # sender
 sudo cp /etc/lodeline/sender.yaml.example /etc/lodeline/sender.yaml
 sudo $EDITOR /etc/lodeline/sender.yaml
@@ -112,14 +127,6 @@ sudo $EDITOR /etc/lodeline/server.yaml
 sudo systemctl enable --now lodeline-server
 journalctl -u lodeline-server -f
 ```
-
-A signed policy or rule-pack bundle does not write `/etc/lodeline`, which the agent's
-unit keeps read-only. It lands in `/var/lib/lodeline/applied/`, and each file there
-replaces the content of its namesake in `/etc/lodeline`, so a hand edit of that file has
-no effect while the applied one exists. `lodeline show paths` prints the file in force.
-To go back to the local file, delete the applied one and run `sudo lodeline reload`. A
-host that an older agent applied into keeps loading that file from `/etc/lodeline` until
-the next apply.
 
 `lodeline-signer` is a one-shot operator CLI — no service to start:
 

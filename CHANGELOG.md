@@ -67,11 +67,26 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   non-root agents, and Windows do not change. `lodeline assess` reads the applied
   files first. `/var/lib/lodeline` is `0750 root:lodeline`, so a user outside the
   `lodeline` group gets one warning on stderr and a verdict from `/etc/lodeline`, which
-  can miss signed rules. Add such a user to the group.
+  can miss signed rules. Add such a user to the group. Any other error checking an
+  applied file also gives one warning and a verdict from `/etc/lodeline`. After the
+  applied file is deleted, `lodeline status` keeps reporting the signed version and its
+  expiry while the local file runs, and only a higher version lands.
 
 - A reload on a host with no policy file now loads the built-in defaults and any
   rule-pack bundle, as a boot does. It used to keep the previous state, so a bundle
-  applied to such a host had no effect until a restart.
+  applied to such a host had no effect until a restart. A policy file that was loaded
+  and has since gone missing still keeps the previous state, with a warning, until the
+  file returns or the agent restarts. That includes deleting an applied policy with no
+  file in `/etc/lodeline`.
+
+- A policy path that cannot be checked, such as one under a regular file, now stops the
+  boot, for non-root agents too. It used to count as no policy file, so the agent ran
+  on the built-in defaults.
+
+- A signed apply into a new directory now survives a power loss. The agent synced the
+  file into that directory but not the directory into its parent, so the file could
+  vanish while the version stayed recorded. The first boot syncs the directory it
+  creates in the same way.
 
 - `lodeline run` without `--policy` now loads the policy at its default path at
   boot. Before, boot read a policy file only

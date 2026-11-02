@@ -108,8 +108,14 @@ As root, a signed policy or rule-pack bundle lands in `/var/lib/lodeline/applied
 not `/etc/lodeline`. Each file there replaces the content of its namesake in
 `/etc/lodeline`, so a hand edit of that file has no effect while the applied one
 exists. `lodeline show paths` prints the file in force. To go back to the local file,
-delete the applied one and run `sudo lodeline reload`. As a non-root user, or with
-`--policy`, an apply writes the policy file itself.
+delete the applied one and run `sudo lodeline reload`.
+After that, `lodeline status` still reports the signed version and its expiry while the
+local file runs, and only a higher version lands. If `/etc/lodeline` has no
+`policy.yaml`, deleting the applied one keeps the previous policy with a warning in the
+log until a restart, which loads the defaults. A root agent with `--state-db` elsewhere
+and no `--policy` still applies into `/var/lib/lodeline/applied/`, away from that state
+database.
+As a non-root user, or with `--policy`, an apply writes the policy file itself.
 
 The **control socket** and **keystore** now fall back to user-writable
 locations automatically when you're not root, so the control plane and policy

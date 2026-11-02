@@ -250,6 +250,10 @@ Each replaces the content of its namesake in `/etc/lodeline`, which an apply doe
 write, so a hand edit there has no effect while the applied file exists. `lodeline show
 paths` prints the file in force. To go back to the local file, delete the applied one
 and run `sudo lodeline reload`. The next signed version replaces it again.
+After that, `lodeline status` still reports the signed version and its expiry while the
+local file runs, and only a higher version lands. If `/etc/lodeline` has no
+`policy.yaml`, deleting the applied one keeps the previous policy with a warning in the
+log until a restart, which loads the defaults.
 
 ---
 

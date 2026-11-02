@@ -150,7 +150,7 @@ cp ~/lodeline-rules/rule-packs.yaml /etc/lodeline/.rule-packs.yaml.tmp && \
 On a root agent, a signed bundle from a fleet server lands in
 `/var/lib/lodeline/applied/rule-packs.yaml` and replaces this file's content while it
 exists. `lodeline show paths` prints the file in force. Delete the applied file to go
-back to this one.
+back to this one. The signed version stays on record, so only a higher version lands.
 
 ---
 
