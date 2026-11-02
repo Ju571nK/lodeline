@@ -52,6 +52,28 @@ fn run_assess(extra_args: &[&str], stdin_data: Option<&[u8]>) -> std::process::O
     child.wait_with_output().expect("failed to wait")
 }
 
+#[test]
+fn assess_applies_the_deny_rule_of_the_policy_it_is_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = dir.path().join("policy.yaml");
+    std::fs::write(
+        &policy,
+        "version: 1\nhook_deny_rules:\n  - id: given-rule\n    match:\n      kind: bash\n      \
+         command:\n        kind: equals\n        value: blocked\n",
+    )
+    .unwrap();
+
+    let output = run_assess(
+        &["--policy", policy.to_str().unwrap(), "--command", "blocked"],
+        None,
+    );
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["deny_match"]["rule_id"], "given-rule");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1 — safe command → exit 0, decision=allow
 // ─────────────────────────────────────────────────────────────────────────────

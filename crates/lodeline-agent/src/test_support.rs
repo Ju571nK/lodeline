@@ -71,7 +71,7 @@ impl TestAgentBuilder {
             p
         });
         let cfg = RuntimeConfig {
-            policy_path: Some(policy_file.clone()),
+            policy_paths: crate::runtime::PolicyPaths::at(policy_file.clone()),
             state_db_path: state_db.clone(),
             events_dir: events_dir.clone(),
             control_socket: control_socket.clone(),

@@ -11,11 +11,11 @@
 #[path = "common/signed_host.rs"]
 mod signed_host;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde_json::{json, Value};
-use signed_host::{Host, STOP_DEADLINE};
+use signed_host::{policy, Artifact, Host, POLICY, RULE_PACKS, STOP_DEADLINE};
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -23,28 +23,6 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 const CHILD_DEADLINE: Duration = Duration::from_secs(60);
-
-#[derive(Clone, Copy)]
-struct Artifact {
-    file: &'static str,
-    apply: &'static str,
-    column: &'static str,
-    kind: &'static str,
-}
-
-const POLICY: Artifact = Artifact {
-    file: "policy.yaml",
-    apply: "apply_policy",
-    column: "last_applied_policy_version",
-    kind: "policy",
-};
-
-const RULE_PACKS: Artifact = Artifact {
-    file: "rule-packs.yaml",
-    apply: "apply_rule_packs",
-    column: "last_applied_rule_packs_version",
-    kind: "rule_packs",
-};
 
 fn doc(version: i64) -> String {
     format!("version: 1\n# envelope {version}\n")
@@ -60,36 +38,6 @@ impl Host {
         String::from_utf8(self.read(artifact.file)).unwrap()
     }
 
-    fn sql(&self, statements: &str) {
-        Connection::open(self.path("state.db"))
-            .unwrap()
-            .execute_batch(statements)
-            .unwrap();
-    }
-
-    fn recorded(&self, artifact: Artifact) -> i64 {
-        Connection::open(self.path("state.db"))
-            .unwrap()
-            .query_row(
-                &format!("SELECT {} FROM host_meta", artifact.column),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-    }
-
-    fn pending(&self, artifact: Artifact) -> Option<i64> {
-        Connection::open(self.path("state.db"))
-            .unwrap()
-            .query_row(
-                "SELECT version FROM pending_envelope WHERE kind = ?1",
-                [artifact.kind],
-                |row| row.get(0),
-            )
-            .optional()
-            .unwrap()
-    }
-
     fn status(&self) -> Value {
         self.control(&json!({"cmd": "policy_status"}))["policy_status"].clone()
     }
@@ -97,14 +45,6 @@ impl Host {
     fn set_directory_mode(&self, mode: u32) {
         let mode = std::fs::Permissions::from_mode(mode);
         std::fs::set_permissions(self.path("."), mode).unwrap();
-    }
-
-    fn stop_the_record_write(&self, artifact: Artifact) {
-        self.sql(&format!(
-            "CREATE TRIGGER stop_here BEFORE UPDATE OF {} ON host_meta
-             BEGIN SELECT RAISE(ABORT, 'stopped'); END;",
-            artifact.column
-        ));
     }
 
     /// Leaves `doc(5)` on disk and the record at 2, the state of a process that
@@ -587,6 +527,47 @@ fn upgraded_host_that_recorded_one_for_a_local_policy_accepts_envelope_v1() {
     rt.shutdown_timeout(STOP_DEADLINE);
 }
 
+#[test]
+fn lodeline_reload_keeps_the_deny_rule_when_the_policy_file_is_gone() {
+    if default_path_is_real() {
+        return;
+    }
+    let host = Host::new(&policy("local-rule"));
+    let log = host.path("agent.log");
+    let mut agent = host.agent_command();
+    agent
+        .arg("--policy")
+        .arg(host.path("policy.yaml"))
+        .arg("run")
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap());
+    let _agent = ChildAgent(agent.spawn().unwrap());
+    host.wait_until_serving();
+    assert!(host.denies("local-rule"));
+
+    // `lodeline reload` reaches the agent only through the default socket path.
+    std::fs::create_dir_all(host.path("run/lodeline")).unwrap();
+    symlink(host.path("c.sock"), host.path("run/lodeline/control.sock")).unwrap();
+
+    std::fs::remove_file(host.path("policy.yaml")).unwrap();
+    let reload = Command::new(env!("CARGO_BIN_EXE_lodeline"))
+        .arg("reload")
+        .env("XDG_RUNTIME_DIR", host.path("run"))
+        .output()
+        .unwrap();
+    assert!(reload.status.success(), "{reload:?}");
+
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    while !std::fs::read_to_string(&log)
+        .unwrap()
+        .contains("policy file is missing")
+    {
+        assert!(Instant::now() < deadline, "the agent never warned");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(host.denies("local-rule"));
+}
+
 struct ChildAgent(Child);
 
 impl Drop for ChildAgent {
@@ -828,13 +809,6 @@ impl Host {
     fn write_default_policy(&self, yaml: &str) {
         std::fs::create_dir_all(self.path("config/lodeline")).unwrap();
         std::fs::write(self.default_policy_file(), yaml).unwrap();
-    }
-
-    fn denies(&self, command: &str) -> bool {
-        let input = json!({"kind": "command", "command": command, "args": []});
-        let reply = self.control(&json!({"cmd": "assess", "input": input}));
-        assert_eq!(reply["ok"], true, "{reply}");
-        !reply["assess_verdict"]["deny_match"].is_null()
     }
 }
 

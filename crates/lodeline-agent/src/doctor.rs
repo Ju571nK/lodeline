@@ -148,7 +148,12 @@ pub fn run(policy_override: Option<PathBuf>, state_db_override: Option<PathBuf>)
     println!("Lodeline doctor {}", env!("CARGO_PKG_VERSION"));
     println!("─────────────────────────────────────────────");
 
-    let user_doc = match crate::runtime::policy_path_for_command(policy_override) {
+    let policy_path = crate::runtime::policy_path_for_command(policy_override);
+    match &policy_path {
+        Some(p) => println!("[INFO] policy in force: {}", p.display()),
+        None => println!("[INFO] policy in force: none (built-in defaults)"),
+    }
+    let user_doc = match policy_path {
         Some(p) => match std::fs::read_to_string(&p) {
             Ok(yaml) => match lodeline_core::policy::parse(&yaml) {
                 Ok(d) => Some(d),

@@ -21,6 +21,37 @@ fn it_show_paths_prints_targets() {
     assert!(stdout.contains("# "));
 }
 
+#[test]
+fn show_paths_and_doctor_name_the_policy_file_in_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let policy = tmp.path().join("policy.yaml");
+    std::fs::write(&policy, "version: 1\n").unwrap();
+    let bin = env!("CARGO_BIN_EXE_lodeline");
+
+    let show = Command::new(bin)
+        .args(["show", "paths", "--policy"])
+        .arg(&policy)
+        .output()
+        .unwrap();
+    let show = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        show.contains(&format!("# policy in force: {}", policy.display())),
+        "{show}"
+    );
+    assert!(show.contains("# rule packs in force: none ("), "{show}");
+
+    let doctor = Command::new(bin)
+        .args(["doctor", "--policy"])
+        .arg(&policy)
+        .output()
+        .unwrap();
+    let doctor = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        doctor.contains(&format!("[INFO] policy in force: {}", policy.display())),
+        "{doctor}"
+    );
+}
+
 // #161: a missing state.db (fresh install, before the first `lodeline run`) is
 // reported as INFO and does NOT emit the degradation WARN — so a clean machine
 // isn't told it has a problem just because the daemon hasn't created the DB yet.

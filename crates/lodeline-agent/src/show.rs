@@ -8,6 +8,7 @@ use crate::control::RiskPayload;
 #[cfg(feature = "operator-cli")]
 use crate::control::TargetsPayload;
 use crate::platform::ActivePlatform;
+use crate::runtime::SignedFile;
 use lodeline_core::policy::expand::{expand_per_user, EnvLookup};
 use lodeline_core::policy::{current_platform, defaults, merge};
 use lodeline_core::stats::StatsSnapshot;
@@ -53,6 +54,7 @@ pub fn run(
         return show_risk(tool, pretty);
     }
 
+    let paths = crate::runtime::policy_paths(policy_override.clone());
     let user_doc = match crate::runtime::policy_path_for_command(policy_override) {
         Some(p) => Some(lodeline_core::policy::parse(&std::fs::read_to_string(p)?)?),
         None => None,
@@ -64,6 +66,8 @@ pub fn run(
             println!("{}", serde_yaml::to_string(&effective.targets)?);
         }
         ShowWhat::Paths => {
+            println!("{}", in_force_line("policy", &paths.policy));
+            println!("{}", in_force_line("rule packs", &paths.rule_packs));
             let plat = ActivePlatform::new();
             let users = lodeline_core::policy::expand::UserEnumerator::list(&plat);
             let env = EnvLookup;
@@ -91,6 +95,17 @@ pub fn run(
         ShowWhat::Risk { .. } => unreachable!("handled above"),
     }
     Ok(0)
+}
+
+/// One `show paths` header line: the file the agent loads for `what`, or that it has
+/// none, in which case an operator should see where one would go.
+fn in_force_line(what: &str, file: &SignedFile) -> String {
+    let path = file.in_force();
+    if path.exists() {
+        format!("# {what} in force: {}", path.display())
+    } else {
+        format!("# {what} in force: none ({} absent)", path.display())
+    }
 }
 
 /// Print this host's persisted host_id (read-only — the agent assigns it on its

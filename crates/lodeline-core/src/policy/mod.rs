@@ -15,7 +15,7 @@ pub mod pubkeys;
 pub mod signed_envelope;
 pub mod verify;
 
-pub use atomic_writer::{atomic_write, settle_pending, AtomicWriteError};
+pub use atomic_writer::{atomic_write, create_dir_durably, settle_pending, AtomicWriteError};
 pub use canonical::{to_canonical_bytes, CanonicalError};
 pub use pubkeys::{Keystore, KeystoreEntry, KeystoreError};
 pub use signed_envelope::{SignedEnvelope, SignedPolicyResponse};
