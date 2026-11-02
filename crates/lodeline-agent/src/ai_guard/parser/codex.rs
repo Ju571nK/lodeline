@@ -67,6 +67,7 @@ impl AiGuardParser for CodexParser {
             codex_dir.join("rules"),
             system_dir.join("config.toml"),
             system_dir.join(HOOKS_JSON),
+            system_dir.join("rules"),
             super::policy_controls::codex_requirements_path(),
         ]
     }
@@ -288,8 +289,8 @@ fn assess_user_layers(
     }
 
     let mut out = Vec::new();
+    emit_sandbox_reasons(&layers, &mut out);
     if let Some(val) = &effective {
-        emit_sandbox_reasons(val, &mut out);
         // #200 — whether a human is asked before a tool runs.
         emit_approval_policy_reasons(val, &mut out);
     }
@@ -300,7 +301,14 @@ fn assess_user_layers(
         emit_mcp_reasons(val, &mut out);
     }
     // #200 — standing command approvals, which live outside config.toml.
-    emit_rules_reasons(&codex_dir, &mut out);
+    // System rules are managed and always load.
+    emit_rules_reasons(
+        &[
+            (system, RuleEvidence::ProgramOnly),
+            (user, RuleEvidence::FullPrefix),
+        ],
+        &mut out,
+    );
     Ok(out)
 }
 
@@ -309,9 +317,23 @@ fn assess_user_layers(
 /// sandboxing. `"read-only"` is the default (safest). `"workspace-write"` is
 /// a mid-point that allows writes within the workspace directory. Neither
 /// "read-only" nor "workspace-write" emits `SandboxDisabled`.
-pub(crate) fn emit_sandbox_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
-    let mode = val.get("sandbox_mode").and_then(Value::as_str);
-    if matches!(mode, Some("danger-full-access")) {
+///
+/// #200 — the top-level `default_permissions` profile does the same job:
+/// `":danger-full-access"` disables the sandbox, while `:read-only`,
+/// `:workspace` and named profiles do not. Codex takes the highest layer that
+/// sets either key, and inside that layer `default_permissions` wins
+/// (`resolve_permission_config_syntax`, rust-v0.166.0). `layers` is low to high.
+fn emit_sandbox_reasons(layers: &[CodexLayer], out: &mut Vec<AiGuardReason>) {
+    let disabled = layers.iter().rev().find_map(|layer| {
+        let config = layer.config.as_ref()?;
+        let key = |k| config.get(k).and_then(Value::as_str);
+        match (key("default_permissions"), key("sandbox_mode")) {
+            (Some(profile), _) => Some(profile == ":danger-full-access"),
+            (None, Some(mode)) => Some(mode == "danger-full-access"),
+            (None, None) => None,
+        }
+    });
+    if disabled == Some(true) {
         out.push(AiGuardReason::SandboxDisabled);
     }
 }
@@ -356,15 +378,16 @@ pub(crate) fn emit_approval_policy_reasons(val: &Value, out: &mut Vec<AiGuardRea
     }
 }
 
-/// #200 — bounds on the `~/.codex/rules/` sweep. These files are
+/// #200 — bounds on the `rules/` sweep. These files are
 /// operator-authored, but a scan on the daemon's path must not be steerable
 /// into unbounded work by dropping a large file there.
 const MAX_RULES_FILES: usize = 64;
 const MAX_RULES_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_STANDING_APPROVAL_REASONS: usize = 32;
 
-/// #200 — `~/.codex/rules/*.rules` holds command-approval rules in a small DSL,
-/// verified on a live install (codex-cli 0.137.0):
+/// #200 — `<layer>/rules/*.rules` (system, `~/.codex`, a repo's `.codex/`)
+/// holds command-approval rules in a small DSL, verified on a live install
+/// (codex-cli 0.137.0):
 ///
 /// ```text,ignore
 /// prefix_rule(pattern=["codex", "mcp", "login"], decision="allow")
@@ -375,14 +398,58 @@ const MAX_STANDING_APPROVAL_REASONS: usize = 32;
 /// class of posture as `approval_policy = "never"`, but scoped to a prefix and
 /// invisible in `config.toml`.
 ///
-/// Only `allow` is a finding — a `deny` rule is a control, not a risk. The
-/// parser is deliberately shallow: it extracts the quoted strings from the
-/// `pattern=[...]` list of any rule whose `decision` is `allow`, and ignores
-/// rule forms it does not recognize rather than guessing at their meaning.
-pub(crate) fn emit_rules_reasons(codex_dir: &Path, out: &mut Vec<AiGuardReason>) {
-    let rules_dir = codex_dir.join("rules");
-    let Ok(entries) = std::fs::read_dir(&rules_dir) else {
-        return;
+/// Only `allow` is a finding — a `prompt` or `forbidden` rule is a control,
+/// not a risk. A rule with no `decision` is an allow: Codex defaults it so
+/// (`execpolicy/src/parser.rs`, rust-v0.166.0). The parser is deliberately
+/// shallow: it extracts the quoted strings from the `pattern=[...]` list of
+/// any rule that allows, and ignores rule forms it does not recognize rather
+/// than guessing at their meaning. Patterns are deduped across `layers`.
+fn emit_rules_reasons(layers: &[(&CodexLayer, RuleEvidence)], out: &mut Vec<AiGuardReason>) {
+    let mut patterns: Vec<String> = layers
+        .iter()
+        .flat_map(|(layer, evidence)| {
+            allow_patterns_in_rules_dir(&layer.dir.join("rules"), *evidence)
+        })
+        .collect();
+    patterns.sort();
+    patterns.dedup();
+    let total = patterns.len();
+    for pattern in patterns.into_iter().take(MAX_STANDING_APPROVAL_REASONS) {
+        out.push(AiGuardReason::StandingCommandApproval { pattern });
+    }
+    if total > MAX_STANDING_APPROVAL_REASONS {
+        tracing::warn!(
+            total,
+            cap = MAX_STANDING_APPROVAL_REASONS,
+            "codex rules: capping StandingCommandApproval reasons"
+        );
+    }
+}
+
+/// #200 — how much of an allowed prefix a finding may carry. The user wrote
+/// `~/.codex/rules` themselves; a repo's or the system's rules are someone
+/// else's free text, which can hold a token or URL, so only the program name
+/// leaves the host.
+#[derive(Clone, Copy)]
+enum RuleEvidence {
+    FullPrefix,
+    ProgramOnly,
+}
+
+impl RuleEvidence {
+    fn render(self, words: &[String]) -> String {
+        match self {
+            RuleEvidence::FullPrefix => words.join(" "),
+            // An alternative list `{a|b}` fails the charset and is redacted.
+            RuleEvidence::ProgramOnly => super::claude_project_settings::safe_name(&words[0]),
+        }
+    }
+}
+
+/// Allowed prefixes in one `rules/` dir, at most `MAX_RULES_FILES` files.
+fn allow_patterns_in_rules_dir(rules_dir: &Path, evidence: RuleEvidence) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(rules_dir) else {
+        return Vec::new();
     };
     // Sort for deterministic emission order across platforms.
     let mut files: Vec<PathBuf> = entries
@@ -406,26 +473,18 @@ pub(crate) fn emit_rules_reasons(codex_dir: &Path, out: &mut Vec<AiGuardReason>)
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
-        patterns.extend(allow_patterns_in_rules_text(&text));
-    }
-    patterns.sort();
-    patterns.dedup();
-    let total = patterns.len();
-    for pattern in patterns.into_iter().take(MAX_STANDING_APPROVAL_REASONS) {
-        out.push(AiGuardReason::StandingCommandApproval { pattern });
-    }
-    if total > MAX_STANDING_APPROVAL_REASONS {
-        tracing::warn!(
-            dir = %rules_dir.display(),
-            total,
-            cap = MAX_STANDING_APPROVAL_REASONS,
-            "codex rules: capping StandingCommandApproval reasons"
+        patterns.extend(
+            allow_patterns_in_rules_text(&text)
+                .iter()
+                .map(|words| evidence.render(words)),
         );
     }
+    patterns
 }
 
 /// Strip `#` and `//` comments that are outside string literals. Without this,
-/// `prefix_rule(pattern=["git"])  # decision="allow"` reads as an approval.
+/// `prefix_rule(pattern=["git"], decision="prompt")  # decision="allow"`
+/// reads as an approval.
 fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut quote: Option<char> = None;
@@ -576,7 +635,7 @@ fn is_ident_byte(b: u8) -> bool {
 /// `codex mcp login`, not three separate commands. A nested list is a set of
 /// alternatives at that position, rendered `{a|b}`. Emitting one finding per
 /// quoted string would invent approvals that were never granted.
-fn pattern_prefix(list_text: &str) -> Option<String> {
+fn pattern_prefix(list_text: &str) -> Option<Vec<String>> {
     let inner = list_text.trim().strip_prefix('[')?;
     let end = balanced_end(inner, '[', ']')?;
     let mut words: Vec<String> = Vec::new();
@@ -599,7 +658,7 @@ fn pattern_prefix(list_text: &str) -> Option<String> {
     if words.is_empty() {
         return None;
     }
-    Some(words.join(" "))
+    Some(words)
 }
 
 /// Split on commas that are not inside a nested bracket or a string.
@@ -650,16 +709,20 @@ fn quoted_string(s: &str) -> Option<String> {
     Some(body[..end].to_string())
 }
 
-/// Approved command prefixes in one rules file. Only `decision="allow"` counts:
-/// a deny rule is a control, not a risk. Rule forms this parser does not model
-/// are skipped rather than guessed at.
-fn allow_patterns_in_rules_text(text: &str) -> Vec<String> {
+/// Approved command prefixes in one rules file. A rule allows when its
+/// `decision` is `"allow"` or absent (Codex's default); an explicit `prompt`,
+/// `forbidden` or unparseable decision does not. Rule forms this parser does
+/// not model are skipped rather than guessed at.
+fn allow_patterns_in_rules_text(text: &str) -> Vec<Vec<String>> {
     let stripped = strip_comments(text);
     let mut out = Vec::new();
     for args in rule_invocations(&stripped) {
-        let decides_allow = top_level_arg(args, "decision")
-            .and_then(|v| quoted_string(v.split(',').next().unwrap_or(v)))
-            .is_some_and(|d| d == "allow");
+        let decides_allow = match top_level_arg(args, "decision") {
+            None => true,
+            Some(v) => {
+                quoted_string(v.split(',').next().unwrap_or(v)).is_some_and(|d| d == "allow")
+            }
+        };
         if !decides_allow {
             continue;
         }
@@ -766,12 +829,46 @@ pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
         return;
     };
     for (name, def) in servers {
+        // #200 — Codex does not start a server with `enabled = false`.
+        if def.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
         // toml::Value -> serde_json::Value so the shared helper can read it.
         // Skip (don't abort the loop) a server that fails to convert.
         let Ok(json_def) = serde_json::to_value(def) else {
             continue;
         };
         super::mcp_scan::emit_one_server(name, &json_def, out);
+        emit_mcp_approval_reasons(name, def, out);
+    }
+}
+
+/// #200 — a tool's `approval_mode`, else the server's
+/// `default_tools_approval_mode`, decides whether Codex asks before an MCP
+/// tool call. Of `auto | prompt | writes | approve` only `approve` skips the
+/// prompt (`requires_mcp_tool_approval_for_mode`, rust-v0.166.0).
+fn emit_mcp_approval_reasons(name: &str, def: &Value, out: &mut Vec<AiGuardReason>) {
+    let approves = |v: Option<&Value>| v.and_then(Value::as_str) == Some("approve");
+    if approves(def.get("default_tools_approval_mode")) {
+        out.push(AiGuardReason::TrustedMcpServer {
+            server_name: name.to_string(),
+        });
+        return;
+    }
+    let mut tools: Vec<String> = def
+        .get("tools")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter(|(_, tool)| approves(tool.get("approval_mode")))
+        .map(|(tool, _)| super::claude_project_settings::safe_name(tool))
+        .collect();
+    tools.sort();
+    if !tools.is_empty() {
+        out.push(AiGuardReason::McpToolsAutoApproved {
+            server_name: name.to_string(),
+            tools,
+        });
     }
 }
 
@@ -797,6 +894,7 @@ impl AiGuardParser for CodexProjectParser {
         vec![
             self.repo_root.join(".codex").join("config.toml"),
             self.repo_root.join(".codex").join(HOOKS_JSON),
+            self.repo_root.join(".codex").join("rules"),
             self.repo_root.join("AGENTS.md"),
             // #200 — trusting or disabling a repo hook writes the user config.
             home_dir.join(".codex").join("config.toml"),
@@ -806,9 +904,16 @@ impl AiGuardParser for CodexProjectParser {
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
         let layer = CodexLayer::read(&self.repo_root.join(".codex"))?;
         let user = CodexLayer::read_lenient(&home_dir.join(".codex"));
+        let layers = std::slice::from_ref(&layer);
         let mut out = Vec::new();
+        // #200 — scored whatever `[projects."<path>"].trust_level` says: Codex
+        // re-asks for folder trust on every launch in an undecided or untrusted
+        // folder without listing these settings, so they are one keypress from
+        // active (the same reasoning as project MCP servers, #154). The project
+        // is the highest layer, so what it sets wins.
+        emit_sandbox_reasons(layers, &mut out);
         if let Some(val) = &layer.config {
-            emit_sandbox_reasons(val, &mut out);
+            emit_approval_policy_reasons(val, &mut out);
         }
         layer.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
         if let Some(val) = &layer.config {
@@ -829,6 +934,7 @@ impl AiGuardParser for CodexProjectParser {
                 });
             }
         }
+        emit_rules_reasons(&[(&layer, RuleEvidence::ProgramOnly)], &mut out);
         // #146 — AGENTS.md is Codex's first-class instruction file.
         super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
         Ok(out)
@@ -1638,7 +1744,7 @@ mcp_elicitations = "on-request"
     #[test]
     fn decision_keyword_in_comment_or_prose_is_not_an_approval() {
         for line in [
-            "prefix_rule(pattern=[\"git\"])  # decision=\"allow\"",
+            "prefix_rule(pattern=[\"git\"], decision=\"prompt\")  # decision=\"allow\"",
             "// prefix_rule(pattern=[\"git\"], decision=\"allow\")",
             "prefix_rule(pattern=[\"git\"], justification=\"old decision=allow\", decision=\"prompt\")",
             "prefix_rule(pattern=[\"git\"], note=\"decision\", decision=\"deny\")",
@@ -2077,5 +2183,252 @@ mcp_elicitations = "on-request"
             paths.contains(&PathBuf::from("/opt/guard/stop.sh")),
             "{paths:?}"
         );
+    }
+
+    // ─── #200: config refresh (rust-v0.166.0) ─────────────────────────────
+
+    fn sandbox_disabled(reasons: &[AiGuardReason]) -> bool {
+        reasons.contains(&AiGuardReason::SandboxDisabled)
+    }
+
+    fn project_with(config: &str) -> (tempfile::TempDir, CodexProjectParser) {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::write(repo.join(".codex").join("config.toml"), config).unwrap();
+        (dir, CodexProjectParser { repo_root: repo })
+    }
+
+    #[test]
+    fn rule_without_decision_is_a_standing_approval() {
+        let dir = tempdir().unwrap();
+        write_rules(
+            dir.path(),
+            "a.rules",
+            "prefix_rule(pattern=[\"git\", \"push\"])\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert_eq!(approvals(&reasons), vec!["git push"], "{reasons:?}");
+
+        write_rules(
+            dir.path(),
+            "a.rules",
+            "prefix_rule(pattern=[\"git\", \"push\"], decision=\"prompt\")\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(approvals(&reasons).is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn default_permissions_danger_full_access_disables_sandbox() {
+        let dir = tempdir().unwrap();
+        write_config(dir.path(), r#"default_permissions = ":danger-full-access""#);
+        assert!(sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn highest_layer_setting_either_key_decides_the_sandbox() {
+        let (_root, system, home) = system_and_home();
+        std::fs::write(
+            system.join("config.toml"),
+            "default_permissions = \":danger-full-access\"\n",
+        )
+        .unwrap();
+        let user = home.join(".codex").join("config.toml");
+        std::fs::write(&user, "sandbox_mode = \"read-only\"\n").unwrap();
+        assert!(!sandbox_disabled(
+            &assess_user_layers(&system, &home).unwrap()
+        ));
+
+        std::fs::write(
+            system.join("config.toml"),
+            "sandbox_mode = \"danger-full-access\"\n",
+        )
+        .unwrap();
+        std::fs::write(&user, "default_permissions = \":workspace\"\n").unwrap();
+        assert!(!sandbox_disabled(
+            &assess_user_layers(&system, &home).unwrap()
+        ));
+    }
+
+    #[test]
+    fn default_permissions_beats_sandbox_mode_in_one_layer() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "default_permissions = \":workspace\"\nsandbox_mode = \"danger-full-access\"\n",
+        );
+        assert!(!sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn project_approval_policy_never_is_scored() {
+        let (dir, p) = project_with("approval_policy = \"never\"\n");
+        let reasons = p.assess(dir.path()).unwrap();
+        assert!(
+            reasons.contains(&AiGuardReason::AutoApprovalEnabled {
+                mode: "never".to_string()
+            }),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn project_default_permissions_disables_sandbox() {
+        let (dir, p) = project_with("default_permissions = \":danger-full-access\"\n");
+        assert!(sandbox_disabled(&p.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn project_rules_are_standing_approvals_and_watched() {
+        let (dir, p) = project_with("");
+        write_rules(
+            &p.repo_root,
+            "r.rules",
+            "prefix_rule(pattern=[\"cargo\", \"test\"])\n",
+        );
+        let reasons = p.assess(dir.path()).unwrap();
+        // A repo's prefix is redacted to the program name.
+        assert_eq!(approvals(&reasons), vec!["cargo"], "{reasons:?}");
+        assert!(p
+            .watched_paths(dir.path())
+            .contains(&p.repo_root.join(".codex").join("rules")));
+    }
+
+    #[test]
+    fn system_rules_are_read_by_the_user_parser() {
+        let (_root, system, home) = system_and_home();
+        std::fs::create_dir_all(system.join("rules")).unwrap();
+        std::fs::write(
+            system.join("rules").join("fleet.rules"),
+            "prefix_rule(pattern=[\"npm\", \"ci\"], decision=\"allow\")\n",
+        )
+        .unwrap();
+        write_rules(
+            &home,
+            "u.rules",
+            "prefix_rule(pattern=[\"npm\"], decision=\"allow\")\n",
+        );
+        // The system `npm ci` redacts to `npm`, which dedupes with the user's `npm`.
+        assert_eq!(
+            approvals(&assess_user_layers(&system, &home).unwrap()),
+            vec!["npm"]
+        );
+    }
+
+    #[test]
+    fn project_rule_prefix_never_leaks_arguments() {
+        let (dir, p) = project_with("");
+        write_rules(
+            &p.repo_root,
+            "evil.rules",
+            concat!(
+                "prefix_rule(pattern=[\"curl\", \"-H\", \"Authorization: Bearer sk-live-123\"])\n",
+                "prefix_rule(pattern=[\"https://user:pass@host/path?q=1\", \"x\"])\n",
+                "prefix_rule(pattern=[\"cu\nrl\", \"y\"])\n",
+                "prefix_rule(pattern=[[\"git\", \"gh\"], \"push\"])\n",
+            ),
+        );
+        let reasons = p.assess(dir.path()).unwrap();
+        let got = approvals(&reasons);
+        assert_eq!(got, vec!["<redacted>", "curl"], "{reasons:?}");
+        for pattern in got {
+            for bad in ["Bearer", "pass@", "://", "\n"] {
+                assert!(!pattern.contains(bad), "{pattern:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn user_rule_keeps_the_full_prefix() {
+        let dir = tempdir().unwrap();
+        write_rules(
+            dir.path(),
+            "u.rules",
+            "prefix_rule(pattern=[\"curl\", \"-H\", \"X-Trace: 1\"], decision=\"allow\")\n",
+        );
+        assert_eq!(
+            approvals(&CodexParser.assess(dir.path()).unwrap()),
+            vec!["curl -H X-Trace: 1"]
+        );
+    }
+
+    #[test]
+    fn disabled_mcp_server_is_not_assessed() {
+        let server = "[mcp_servers.x]\nenabled = false\ncommand = \"/tmp/payload\"\ndefault_tools_approval_mode = \"approve\"\n";
+        let dir = tempdir().unwrap();
+        write_config(dir.path(), server);
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(reasons.is_empty(), "{reasons:?}");
+
+        let (dir, p) = project_with(server);
+        let reasons = p.assess(dir.path()).unwrap();
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn approve_all_default_is_a_trusted_server() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[mcp_servers.gh]\nurl = \"https://x.example/mcp\"\ndefault_tools_approval_mode = \"approve\"\n\
+             [mcp_servers.gh.tools.search]\napproval_mode = \"approve\"\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(
+            reasons.contains(&AiGuardReason::TrustedMcpServer {
+                server_name: "gh".to_string()
+            }),
+            "{reasons:?}"
+        );
+        assert!(
+            !reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::McpToolsAutoApproved { .. })),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn per_tool_approve_lists_sorted_tools() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[mcp_servers.gh]\nurl = \"https://x.example/mcp\"\n\
+             [mcp_servers.gh.tools.zeta]\napproval_mode = \"approve\"\n\
+             [mcp_servers.gh.tools.alpha]\napproval_mode = \"approve\"\n\
+             [mcp_servers.gh.tools.mid]\napproval_mode = \"prompt\"\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(
+            reasons.contains(&AiGuardReason::McpToolsAutoApproved {
+                server_name: "gh".to_string(),
+                tools: vec!["alpha".to_string(), "zeta".to_string()],
+            }),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn prompting_mcp_approval_modes_are_silent() {
+        for mode in ["prompt", "auto", "writes"] {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!(
+                    "[mcp_servers.gh]\nurl = \"https://x.example/mcp\"\ndefault_tools_approval_mode = \"{mode}\"\n\
+                     [mcp_servers.gh.tools.t]\napproval_mode = \"{mode}\"\n"
+                ),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert!(
+                !reasons.iter().any(|r| matches!(
+                    r,
+                    AiGuardReason::TrustedMcpServer { .. }
+                        | AiGuardReason::McpToolsAutoApproved { .. }
+                )),
+                "{mode} -> {reasons:?}"
+            );
+        }
     }
 }

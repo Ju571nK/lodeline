@@ -46,7 +46,7 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
             "An MCP server auto-launches a local command — review or remove it, or run it sandboxed."
         }
         TrustedMcpServer { .. } => {
-            "An MCP server is marked trusted (skips per-tool confirmation) — remove the trust flag unless required."
+            "An MCP server skips confirmation for every tool (a trust flag or an approve-all approval mode) — remove that setting unless required."
         }
         AutoApprovalEnabled { mode }
             if mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE =>
@@ -94,6 +94,9 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         }
         StandingCommandApproval { .. } => {
             "A standing rule auto-approves a command prefix without prompting — narrow the prefix or remove the rule."
+        }
+        McpToolsAutoApproved { .. } => {
+            "Named MCP tools run without approval — set their approval_mode back to prompt or auto unless required."
         }
         ProjectSettingsPluginEnabled { .. } => {
             "The repository's Claude Code settings enable a plugin, which loads before the trust dialog — review the plugin, or set it to false in .claude/settings.local.json."

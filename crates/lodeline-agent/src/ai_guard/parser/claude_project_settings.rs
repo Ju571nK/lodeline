@@ -56,7 +56,7 @@ const EVIDENCE_CAP: usize = 120;
 /// Plugin names kept in one finding, so a hostile file cannot bloat the event.
 const MAX_PLUGINS: usize = 20;
 /// Recorded in place of a repository-supplied name that fails [`safe_name`].
-const REDACTED: &str = "<redacted>";
+pub(crate) const REDACTED: &str = "<redacted>";
 
 pub(crate) fn emit_project_settings_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
     if let Some(plugins) = settings.get("enabledPlugins").and_then(Value::as_object) {
@@ -209,7 +209,7 @@ fn is_loopback_host(host: &str) -> bool {
 /// A repository-supplied name, kept only when it is made of plugin, marketplace
 /// and repo name characters, so free text, whitespace or a query never reaches the
 /// event. A token made of those characters still passes.
-fn safe_name(name: &str) -> String {
+pub(crate) fn safe_name(name: &str) -> String {
     let safe = !name.is_empty()
         && name
             .chars()

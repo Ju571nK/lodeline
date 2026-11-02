@@ -219,8 +219,9 @@ pub enum AiGuardReason {
         server_name: String,
         command: String,
     },
-    /// Phase 3b.8 — an MCP server is marked `trust: true`, bypassing
-    /// per-tool confirmation for every tool it exposes (Gemini).
+    /// Phase 3b.8 — an MCP server skips per-tool confirmation for every tool
+    /// it exposes: Gemini `trust: true`, or (#200) Codex
+    /// `default_tools_approval_mode = "approve"`.
     TrustedMcpServer {
         server_name: String,
     },
@@ -352,6 +353,14 @@ pub enum AiGuardReason {
     /// runs unattended. `pattern` is the approved prefix. POSTURE only. Static.
     StandingCommandApproval {
         pattern: String,
+    },
+    /// #200 — a Codex MCP server lets named tools run without approval
+    /// (per-tool `approval_mode = "approve"`). Narrower than
+    /// [`AiGuardReason::TrustedMcpServer`], which covers every tool. `tools`
+    /// holds sorted tool names only. POSTURE only. Static.
+    McpToolsAutoApproved {
+        server_name: String,
+        tools: Vec<String>,
     },
     /// #199 — a repository's Claude Code settings enable a plugin. Claude Code
     /// applies a project `enabledPlugins` at session start, before the
@@ -1479,6 +1488,14 @@ mod tests {
         let j = serde_json::to_value(&t).unwrap();
         assert_eq!(j["kind"], "trusted_mcp_server");
         assert_eq!(j["server_name"], "acme");
+
+        let m = AiGuardReason::McpToolsAutoApproved {
+            server_name: "acme".into(),
+            tools: vec!["search".into()],
+        };
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["kind"], "mcp_tools_auto_approved");
+        assert_eq!(j["tools"][0], "search");
 
         let a = AiGuardReason::AutoApprovalEnabled {
             mode: "auto_edit".into(),
