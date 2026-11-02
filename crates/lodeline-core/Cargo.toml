@@ -17,7 +17,6 @@ time = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
 globset = { workspace = true }
-icu_normalizer = { workspace = true }
 regex = { workspace = true }
 dunce = { workspace = true }
 rusqlite = { workspace = true }

@@ -35,8 +35,28 @@ fn ends_with_sep(s: &OsStr) -> bool {
 /// symlinks to `/private/...`, and `dunce::canonicalize` resolves event paths
 /// to that form. The longest *existing* directory ancestor is canonicalized, so
 /// it works even before the watched leaf exists; if no ancestor exists yet (or
-/// the path isn't absolute) the pattern is returned unchanged.
+/// the path isn't absolute) the pattern is returned unchanged. The result is in
+/// [`match_form`], like the event paths.
 pub fn canonicalize_glob_prefix(pattern: &Path) -> PathBuf {
+    match_form(canonical_prefix(pattern))
+}
+
+/// The one spelling of a path that matching, baseline keys and evidence use
+/// (#388). APFS/HFS+ keep a name in the form it was created with but look names
+/// up normalization-insensitively, so NFC opens the same file; Linux and NTFS
+/// treat NFC and NFD as different names, so there the bytes stay as given.
+pub fn match_form(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(s) = path.to_str().filter(|s| !s.is_ascii()) {
+        let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(s);
+        if let std::borrow::Cow::Owned(nfc) = nfc {
+            return PathBuf::from(nfc);
+        }
+    }
+    path
+}
+
+fn canonical_prefix(pattern: &Path) -> PathBuf {
     let s = pattern.to_string_lossy();
     let glob_at = s.find(['*', '?', '[', ']', '{', '}']);
     let (head, glob_tail): (&str, &str) = match glob_at {
@@ -170,7 +190,8 @@ pub async fn run(
             biased;
             maybe_event = rx_raw.recv() => {
                 let Some(raw) = maybe_event else { break; };
-                let canonical = dunce::canonicalize(&raw.path).unwrap_or(raw.path.clone());
+                let canonical =
+                    match_form(dunce::canonicalize(&raw.path).unwrap_or(raw.path.clone()));
                 // Snapshot the active matcher set for this event (cheap Arc clone).
                 // Live policy reload publishes new sets on `targets_rx`.
                 let targets = targets_rx.borrow().clone();
@@ -276,8 +297,38 @@ fn monotonic_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_glob_prefix;
+    use super::{canonicalize_glob_prefix, match_form};
     use std::path::{Path, PathBuf};
+
+    const HAN_NFC: &str = "/u/\u{D55C}\u{AE00}.json";
+    const HAN_NFD: &str = "/u/\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.json";
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn match_form_is_nfc_on_macos() {
+        assert_eq!(match_form(HAN_NFD.into()), PathBuf::from(HAN_NFC));
+        assert_eq!(match_form(HAN_NFC.into()), PathBuf::from(HAN_NFC));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn match_form_keeps_bytes_off_macos() {
+        assert_eq!(match_form(HAN_NFD.into()), PathBuf::from(HAN_NFD));
+        assert_eq!(match_form(HAN_NFC.into()), PathBuf::from(HAN_NFC));
+    }
+
+    #[test]
+    fn match_form_keeps_ascii_paths() {
+        assert_eq!(match_form("/u/a.json".into()), PathBuf::from("/u/a.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn match_form_keeps_non_utf8_paths() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = PathBuf::from(std::ffi::OsStr::from_bytes(b"/u/\xff\xfe.json"));
+        assert_eq!(match_form(raw.clone()), raw);
+    }
 
     #[test]
     fn passthrough_for_relative_paths() {

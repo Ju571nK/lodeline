@@ -45,6 +45,9 @@ blake3 = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+icu_normalizer = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 same-file = "1"
 
