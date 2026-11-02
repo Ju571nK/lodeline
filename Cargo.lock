@@ -2000,6 +2000,7 @@ dependencies = [
  "ed25519-dalek",
  "globset",
  "hdrhistogram",
+ "icu_normalizer",
  "insta",
  "lodeline-rules-basic",
  "parking_lot",

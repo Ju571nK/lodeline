@@ -1,6 +1,8 @@
 //! Glob compilation wrapping `globset`.
 
 use globset::{Glob, GlobMatcher};
+use icu_normalizer::ComposingNormalizerBorrowed;
+use std::borrow::Cow;
 use std::path::Path;
 use thiserror::Error;
 
@@ -10,20 +12,30 @@ pub enum GlobError {
     Invalid(#[from] globset::Error),
 }
 
+/// A glob that matches regardless of Unicode normalization form: macOS keeps
+/// a name in whichever form it was created (NFC or NFD) and reports it that
+/// way, so pattern and path are both compared in NFC (#388).
 #[derive(Debug)]
 pub struct CompiledGlob(GlobMatcher);
 
+fn nfc(s: &str) -> Cow<'_, str> {
+    ComposingNormalizerBorrowed::new_nfc().normalize(s)
+}
+
 impl CompiledGlob {
     pub fn new(pattern: &str) -> Result<Self, GlobError> {
-        let glob = Glob::new(pattern)?;
+        let glob = Glob::new(&nfc(pattern))?;
         Ok(Self(glob.compile_matcher()))
     }
 
     pub fn is_match(&self, path: &Path) -> bool {
-        self.0.is_match(path)
+        match path.to_str() {
+            Some(s) => self.0.is_match(&*nfc(s)),
+            None => self.0.is_match(path),
+        }
     }
 
-    /// The original pattern string the matcher was compiled from.
+    /// The pattern string the matcher was compiled from, in NFC.
     pub fn pattern(&self) -> &str {
         self.0.glob().glob()
     }
