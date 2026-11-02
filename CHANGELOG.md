@@ -31,6 +31,21 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   so the fleet view keeps that host's last reading until the server is upgraded. Other
   events, drift alerts included, still arrive. (#199)
 
+- The scanner now reads Claude Code MCP servers from `~/.claude.json`. That file holds
+  the user-scope servers (top-level `mcpServers`) and the local-scope servers
+  (`projects.<path>.mcpServers`), which is where `claude mcp add` writes. Each server
+  goes through the same MCP checks as a `.mcp.json` server, so a host can show new
+  `mcp_server_*` and `no_sandbox` findings, and a host that has only `~/.claude.json`
+  now shows a Claude Code row. The scanner reads only the `mcpServers` subtrees and each
+  project's `disabledMcpServers` list. It never reads OAuth, account, or session data,
+  or any server's `env` or `headers`, and it does not report credentials in a remote
+  server URL. A file over 16 MiB, or one that does not parse, is skipped with a warning.
+  A malformed project entry is skipped and the rest load. The scanner skips servers
+  disabled for their project, and local servers of a project whose directory no longer
+  exists. If the directory check fails, for example on an unmounted volume, it keeps
+  those servers. It scores an identical definition once. It does not yet read
+  `CLAUDE_CONFIG_DIR`, `managed-mcp.json`, or plugin MCP servers. (#199)
+
 ### Changed
 
 - A host with a Claude Code settings file and no effective `defaultMode` now reports
@@ -80,6 +95,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the `doctor` socket-permission check follows the flag too. On Windows the flag is
   still ignored and these commands use the default named pipe. `lodeline status`
   already honored the flag. (#392)
+- `lodeline scan` output and posture events no longer carry credentials from a URL.
+  They used to report a remote MCP server's URL as configured, and the destination of a
+  Claude Code `http` hook, including any userinfo, path, query, and fragment. They now
+  report only `scheme://host[:port]`. The path is dropped too, because hosted MCP
+  servers put per-user tokens in path segments. A URL is reported as `<unparseable-url>`
+  when its host is not plain ASCII (an IDN host), its host is longer than 253
+  characters, its port is above 65535, or it is a bare token with no dot or colon. A
+  rule pack that puts a URL value into a message field gets the same redacted form.
+  Rule matching still runs on the full configured value, so a rule that matches a
+  scheme such as `http://` behaves as before. The reported reasons change text on
+  upgrade, so expect one fresh assessment for each affected host. (#403)
 
 ## [0.12.1] - 2026-11-02
 

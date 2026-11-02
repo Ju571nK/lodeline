@@ -220,7 +220,7 @@ mod tests {
         assert!(reasons.iter().any(|r| matches!(
             r,
             AiGuardReason::McpServerRemote { server_name, url }
-                if server_name == "remote-x" && url == "https://mcp.example.com/sse"
+                if server_name == "remote-x" && url == "https://mcp.example.com"
         )));
     }
 
