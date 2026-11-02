@@ -189,6 +189,26 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   though Claude Code does not load them. It scores `managedMcpServers` entries that
   Claude Code would reject. It does not apply `deniedMcpServers` to managed servers.
   (#418)
+- The Codex scanner now scores `network_rule(host=..., decision="allow")` in Codex rules
+  files as a standing approval, the same way it scores `prefix_rule`. The evidence is the
+  host only. A later `deny` for the same host cancels the approval, and a later `allow`
+  adds it back, as Codex does. The scanner skips wildcard hosts, because Codex rejects
+  them. No new reason kind is added. The score of a host with an allowed network rule
+  rises on upgrade. (#417)
+
+- The Codex scanner now scores `network_access = true` under `[sandbox_workspace_write]`
+  when the effective sandbox is `workspace-write`. That is the case when the config sets
+  it, and also the default for a trusted or untrusted project. This scores lower than a
+  disabled sandbox. A `writable_roots` list that includes `/`, `~`, or a drive root is
+  scored as a disabled sandbox. The daemon cannot tell which project is active, so it
+  scores a user-level `network_access = true` when any project is trusted or untrusted.
+  No new reason kind is added. Scores can rise on upgrade. (#417)
+
+- On Windows, the Codex hook check now reads the `command_windows` command (or
+  `commandWindows`) of a hook, because Codex runs that command there. A Codex hook with
+  an `mcp_tool` handler is now reported as forwarding tool calls, as for Claude Code. The
+  scanner still reports an `mcp_tool` hook that points at a local server. No new reason
+  kind is added. (#417)
 
 ### Fixed
 
