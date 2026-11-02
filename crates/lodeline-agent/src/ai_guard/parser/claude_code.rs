@@ -34,6 +34,8 @@ impl AiGuardParser for ClaudeCodeParser {
             // #199 — skill and subagent frontmatter can declare hooks.
             home_dir.join(".claude").join("skills"),
             home_dir.join(".claude").join("agents"),
+            // #199 — user- and local-scope MCP servers.
+            home_dir.join(".claude.json"),
         ];
         paths.extend(super::policy_controls::claude_paths(
             &super::policy_controls::claude_policy_dir(),
@@ -69,6 +71,8 @@ fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>,
     let base = super::read_json_optional(&base_path)?;
     let local = super::read_json_optional(&local_path)?;
     let components = super::claude_components::component_hooks(&claude);
+    let claude_json = super::claude_json::read(home_dir);
+    let claude_json_servers = claude_json.servers();
 
     // Missing primary file with no overlay → operator hasn't enabled tool.
     // #191 — a real unattended task (a `scheduled-tasks/<name>/SKILL.md`) is
@@ -82,6 +86,7 @@ fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>,
             // prompt exists, so the tool is in use even with no settings file.
             && !claude.join("loop.md").is_file()
             && components.is_empty()
+            && claude_json_servers.is_empty()
     {
         return Ok(Vec::new());
     }
@@ -123,6 +128,7 @@ fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>,
     // #199 — the other unattended-prompt surface, enumerated alongside.
     emit_loop_prompt_reason(&claude, "user", &mut out);
     emit_mcp_reasons(&merged, &mut out);
+    super::claude_json::emit_mcp_reasons(&claude_json_servers, &merged, &mut out);
     // #145 (codex C8) — a user-global `enableAllProjectMcpServers: true`
     // blanket-approves project MCP servers across EVERY repo. No single
     // repo context here, so emit on the key alone.
