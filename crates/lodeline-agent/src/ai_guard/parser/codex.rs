@@ -2541,4 +2541,192 @@ mcp_elicitations = "on-request"
             );
         }
     }
+
+    #[test]
+    fn named_profile_writing_everywhere_disables_sandbox() {
+        for entry in [
+            r#"":root" = "write""#,
+            r#""/" = "write""#,
+            r#""~" = "write""#,
+            r#""C:\\" = "write""#,
+            r#""/" = { "." = "write" }"#,
+            r#"":workspace_roots" = { "~" = "write" }"#,
+        ] {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!(
+                    "default_permissions = \"open\"\n[permissions.open.filesystem]\n{entry}\n"
+                ),
+            );
+            assert!(
+                sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_profile_inherits_write_everywhere_through_extends() {
+        let config = "default_permissions = \"dev\"\n\
+             [permissions.base.filesystem]\n\":root\" = \"write\"\n\
+             [permissions.dev]\nextends = \"base\"\n";
+        let dir = tempdir().unwrap();
+        write_config(dir.path(), config);
+        assert!(sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()));
+
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            &format!("{config}[permissions.dev.filesystem]\n\":root\" = \"read\"\n"),
+        );
+        assert!(!sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn workspace_profile_with_extra_roots_and_network_keeps_the_sandbox() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "default_permissions = \"dev\"\n\
+             [permissions.dev]\nextends = \":workspace\"\n\
+             [permissions.dev.filesystem]\n\":workspace_roots\" = \"write\"\n\":tmpdir\" = \"write\"\n\
+             \"/opt/cache\" = \"write\"\n\":root\" = \"read\"\n\
+             [permissions.dev.network]\nenabled = true\n",
+        );
+        assert!(!sandbox_disabled(&CodexParser.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn project_profile_resolves_against_project_and_user_permissions() {
+        let (dir, p) = project_with(
+            "default_permissions = \"open\"\n[permissions.open.filesystem]\n\":root\" = \"write\"\n",
+        );
+        assert!(sandbox_disabled(&p.assess(dir.path()).unwrap()));
+
+        let (dir, p) = project_with("default_permissions = \"open\"\n");
+        write_config(
+            dir.path(),
+            "[permissions.open.filesystem]\n\":root\" = \"write\"\n",
+        );
+        assert!(sandbox_disabled(&p.assess(dir.path()).unwrap()));
+    }
+
+    fn mcp_approvals(reasons: &[AiGuardReason]) -> Vec<&AiGuardReason> {
+        reasons
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    AiGuardReason::TrustedMcpServer { .. }
+                        | AiGuardReason::McpToolsAutoApproved { .. }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn enabled_tools_bound_an_approve_all_default() {
+        let server = "[mcp_servers.gh]\nurl = \"https://x.example/mcp\"\n\
+             default_tools_approval_mode = \"approve\"\n";
+        let cases = [
+            ("enabled_tools = [\"a\", \"b\"]\n", vec!["a"]),
+            (
+                "enabled_tools = [\"a\", \"b\", \"c\"]\ndisabled_tools = [\"c\"]\n",
+                vec!["a"],
+            ),
+            ("enabled_tools = [\"b\"]\n", vec![]),
+        ];
+        for (keys, tools) in cases {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!("{server}{keys}[mcp_servers.gh.tools.b]\napproval_mode = \"prompt\"\n"),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            let expected = AiGuardReason::McpToolsAutoApproved {
+                server_name: "gh".to_string(),
+                tools: tools.iter().map(|t| t.to_string()).collect(),
+            };
+            let expected: Vec<&AiGuardReason> = if tools.is_empty() {
+                vec![]
+            } else {
+                vec![&expected]
+            };
+            assert_eq!(mcp_approvals(&reasons), expected, "{keys}");
+        }
+    }
+
+    #[test]
+    fn approve_all_default_with_prompt_overrides_still_covers_unlisted_tools() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[mcp_servers.gh]\nurl = \"https://x.example/mcp\"\n\
+             default_tools_approval_mode = \"approve\"\n\
+             [mcp_servers.gh.tools.push]\napproval_mode = \"prompt\"\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert_eq!(
+            mcp_approvals(&reasons),
+            vec![&AiGuardReason::TrustedMcpServer {
+                server_name: "gh".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn disabled_tools_are_not_listed_as_approved() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[mcp_servers.gh]\nurl = \"https://x.example/mcp\"\ndisabled_tools = [\"push\"]\n\
+             [mcp_servers.gh.tools.push]\napproval_mode = \"approve\"\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(mcp_approvals(&reasons).is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn app_tool_approvals_are_scored() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[apps.drive.tools.search]\napproval_mode = \"approve\"\n\
+             [apps.drive.tools.delete]\napproval_mode = \"prompt\"\n\
+             [apps.mail]\ndefault_tools_approval_mode = \"approve\"\n\
+             [apps.off]\nenabled = false\ndefault_tools_approval_mode = \"approve\"\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert_eq!(
+            mcp_approvals(&reasons),
+            vec![
+                &AiGuardReason::McpToolsAutoApproved {
+                    server_name: "apps.drive".to_string(),
+                    tools: vec!["search".to_string()],
+                },
+                &AiGuardReason::TrustedMcpServer {
+                    server_name: "apps.mail".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn app_default_approval_applies_to_every_configured_app() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[apps._default]\ndefault_tools_approval_mode = \"approve\"\n\
+             [apps.drive]\nenabled = true\n\
+             [apps.mail]\ndefault_tools_approval_mode = \"prompt\"\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert_eq!(
+            mcp_approvals(&reasons),
+            vec![&AiGuardReason::TrustedMcpServer {
+                server_name: "apps.drive".to_string()
+            }]
+        );
+    }
 }
