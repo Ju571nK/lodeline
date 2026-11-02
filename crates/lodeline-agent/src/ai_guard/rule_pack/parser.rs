@@ -188,7 +188,7 @@ fn interpolate_reason(
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or_else(|_| matched.key.clone());
     // #403 — a URL is redacted before it is interpolated, whatever field it lands in.
-    let value = if is_url_value(selector, &matched.value) {
+    let value = if is_url_value(selector, matched) {
         url_for_evidence(&matched.value)
     } else {
         matched.value.clone()
@@ -208,14 +208,37 @@ fn interpolate_reason(
     out
 }
 
-/// A matched value is a URL when its selector names a `…url` key (`url`,
-/// `httpUrl`, `serverURL`) or the value itself starts with `scheme://`.
-fn is_url_value(selector: &str, value: &str) -> bool {
-    selector
-        .rsplit('.')
-        .next()
-        .is_some_and(|key| key.to_ascii_lowercase().ends_with("url"))
-        || has_url_scheme(value)
+const URL_KEY_SUFFIXES: [&str; 5] = ["url", "uri", "endpoint", "address", "host"];
+
+/// A matched value is a URL when its key names one (`url`, `httpUrl`, `uri`,
+/// `endpoint`, `address`, `host`, singular or plural), whether the matched key
+/// or the selector's last named segment (`$.urls[*]`). It also is one when it
+/// starts with `scheme://` or has the `user:pw@host` shape.
+fn is_url_value(selector: &str, matched: &MatchedValue) -> bool {
+    let last = selector.rsplit('.').next().unwrap_or_default();
+    let last = last.split('[').next().unwrap_or_default();
+    [matched.key.as_str(), last].into_iter().any(names_url)
+        || has_url_scheme(&matched.value)
+        || has_userinfo(&matched.value)
+}
+
+fn names_url(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    let forms = [
+        Some(key.as_str()),
+        key.strip_suffix('s'),
+        key.strip_suffix("es"),
+    ];
+    forms
+        .iter()
+        .flatten()
+        .any(|k| URL_KEY_SUFFIXES.iter().any(|s| k.ends_with(s)))
+}
+
+/// `user:pw@host`: an `@` and a `:` before the first `/`.
+fn has_userinfo(value: &str) -> bool {
+    let head = value.split('/').next().unwrap_or_default();
+    head.contains('@') && head.contains(':')
 }
 
 #[cfg(test)]
@@ -356,6 +379,66 @@ mod tests {
                 .collect();
             got.sort();
             let want: Vec<_> = want.iter().map(|w| format!("run {w}")).collect();
+            assert_eq!(got, want, "{selector}");
+        }
+    }
+
+    /// A scheme-less URL is detected from the matched key (`uri`, `endpoint`,
+    /// `address`, `host`, an array of them) or its userinfo shape, and every
+    /// other value is interpolated as written.
+    #[test]
+    fn interpolation_redacts_urls_by_key_and_userinfo_shape() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("cfg.json");
+        std::fs::write(
+            &file,
+            r#"{"s": {"uri": "a.example/p?k=T", "Endpoint": "b.example/p?k=T",
+                       "address": "c.example/p?k=T", "host": "d.example/p?k=T",
+                       "note": "u:pw@e.example", "mail": "me@f.example",
+                       "path": "g/h@i:j", "cmd": "node a/b.js"},
+                "urls": ["k.example/p?k=T"]}"#,
+        )
+        .unwrap();
+        for (selector, want) in [
+            ("$.s.uri", vec!["a.example"]),
+            (
+                "$.s.*",
+                vec![
+                    "a.example",
+                    "b.example",
+                    "c.example",
+                    "d.example",
+                    "e.example",
+                    "me@f.example",
+                    "g/h@i:j",
+                    "node a/b.js",
+                ],
+            ),
+            ("$.urls[*]", vec!["k.example"]),
+        ] {
+            let pack = pack_with_one_rule(
+                file.to_str().unwrap(),
+                selector,
+                Matcher::Exists,
+                AiGuardReason::McpServerLocalCommand {
+                    server_name: "<selector-key>".into(),
+                    command: "run <selector-value>".into(),
+                },
+            );
+            let out = RulePackParser::new(pack)
+                .unwrap()
+                .assess(Path::new("/unused"))
+                .unwrap();
+            let mut got: Vec<_> = out
+                .iter()
+                .map(|r| match r {
+                    AiGuardReason::McpServerLocalCommand { command, .. } => command.clone(),
+                    other => panic!("got {other:?}"),
+                })
+                .collect();
+            got.sort();
+            let mut want: Vec<_> = want.iter().map(|w| format!("run {w}")).collect();
+            want.sort();
             assert_eq!(got, want, "{selector}");
         }
     }
