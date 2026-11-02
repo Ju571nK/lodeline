@@ -108,7 +108,8 @@ targets:
     std::fs::remove_file(claude.join("settings.json")).unwrap();
     std::fs::write(
         claude.join("settings.json"),
-        r#"{"permissions": {"allow": ["Read"], "deny": ["Bash"]}}"#,
+        // An explicit `default` mode: with none set, Claude Code starts in auto.
+        r#"{"permissions": {"defaultMode": "default", "allow": ["Read"], "deny": ["Bash"]}}"#,
     )
     .unwrap();
 
@@ -921,6 +922,7 @@ async fn rubric_override_changes_emitted_score() {
     std::fs::write(
         claude.join("settings.json"),
         r#"{
+          "disableAutoMode": "disable",
           "hooks": {
             "PreToolUse": [
               {"hooks": [

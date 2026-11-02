@@ -55,19 +55,26 @@ impl AiGuardParser for ClaudeCodeParser {
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        let claude = home_dir.join(".claude");
-        let base_path = claude.join("settings.json");
-        let local_path = claude.join("settings.local.json");
+        assess_user(home_dir, &super::policy_controls::claude_policy_dir())
+    }
+}
 
-        let base = super::read_json_optional(&base_path)?;
-        let local = super::read_json_optional(&local_path)?;
-        let components = super::claude_components::component_hooks(&claude);
+/// The user-global assessment. `policy_dir` is the managed-settings folder,
+/// passed in so tests do not depend on the host's real one.
+fn assess_user(home_dir: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    let claude = home_dir.join(".claude");
+    let base_path = claude.join("settings.json");
+    let local_path = claude.join("settings.local.json");
 
-        // Missing primary file with no overlay → operator hasn't enabled tool.
-        // #191 — a real unattended task (a `scheduled-tasks/<name>/SKILL.md`) is
-        // still evidence of use, so it must not be short-circuited here. An empty
-        // `scheduled-tasks/` dir is NOT evidence and stays short-circuited.
-        if base.is_none()
+    let base = super::read_json_optional(&base_path)?;
+    let local = super::read_json_optional(&local_path)?;
+    let components = super::claude_components::component_hooks(&claude);
+
+    // Missing primary file with no overlay → operator hasn't enabled tool.
+    // #191 — a real unattended task (a `scheduled-tasks/<name>/SKILL.md`) is
+    // still evidence of use, so it must not be short-circuited here. An empty
+    // `scheduled-tasks/` dir is NOT evidence and stays short-circuited.
+    if base.is_none()
             && local.is_none()
             && !claude.join("CLAUDE.md").is_file()
             && !has_scheduled_task(&claude)
@@ -75,45 +82,60 @@ impl AiGuardParser for ClaudeCodeParser {
             // prompt exists, so the tool is in use even with no settings file.
             && !claude.join("loop.md").is_file()
             && components.is_empty()
-        {
-            return Ok(Vec::new());
-        }
+    {
+        return Ok(Vec::new());
+    }
 
-        // #199 — keep the unmerged base: the auto-mode classifier does not
-        // read the `settings.local.json` overlay, so scoring the merged view
-        // would attribute rules to a control that never sees them.
-        let base_settings = base.clone().unwrap_or(Value::Object(Default::default()));
-        let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
+    // `disableAutoMode` takes effect from any file, managed ones included.
+    let auto_disabled = [&base, &local]
+        .into_iter()
+        .flatten()
+        .any(settings_disable_auto_mode)
+        || super::policy_controls::claude_controls(policy_dir)
+            .is_ok_and(|c| super::policy_controls::disables_auto_mode(&c));
+    let start = start_mode(
+        &[
+            (ModeScope::Local, local.as_ref()),
+            (ModeScope::User, base.as_ref()),
+        ],
+        true,
+        auto_disabled,
+    );
+    // #199 — keep the unmerged base: the auto-mode classifier does not
+    // read the `settings.local.json` overlay, so scoring the merged view
+    // would attribute rules to a control that never sees them.
+    let base_settings = base.clone().unwrap_or(Value::Object(Default::default()));
+    let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
 
-        let mut out = Vec::new();
-        emit_hook_reasons(&merged, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&components, &mut out);
-        emit_permission_reasons(&merged, &mut out);
-        // #191 signal 1 — `permissions.defaultMode` auto-approval posture.
-        emit_default_mode_reason(&merged, &mut out);
+    let mut out = Vec::new();
+    emit_hook_reasons(&merged, &mut out)?;
+    super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    emit_permission_reasons(&merged, &mut out);
+    // #191 signal 1 — the start mode's auto-approval posture.
+    if emit_start_mode_reason(start, &mut out) {
         // #199 — the classifier's own safety rules, when auto mode is in use.
         emit_auto_mode_reasons(&base_settings, &mut out);
-        // #191 signal 2 — unattended recurring Claude Code scheduled tasks.
-        emit_scheduled_task_reasons(&claude, &mut out);
-        // #199 — the other unattended-prompt surface, enumerated alongside.
-        emit_loop_prompt_reason(&claude, "user", &mut out);
-        emit_mcp_reasons(&merged, &mut out);
-        // #145 (codex C8) — a user-global `enableAllProjectMcpServers: true`
-        // blanket-approves project MCP servers across EVERY repo. No single
-        // repo context here, so emit on the key alone.
-        if merged
-            .get("enableAllProjectMcpServers")
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            out.push(AiGuardReason::ProjectMcpAutoEnabled {
-                mechanism: "user-global blanket: enableAllProjectMcpServers".to_string(),
-            });
-        }
-        // #146 — user-global instruction file.
-        super::instruction_scan::scan_file_path(&claude.join("CLAUDE.md"), &mut out);
-        Ok(out)
     }
+    // #191 signal 2 — unattended recurring Claude Code scheduled tasks.
+    emit_scheduled_task_reasons(&claude, &mut out);
+    // #199 — the other unattended-prompt surface, enumerated alongside.
+    emit_loop_prompt_reason(&claude, "user", &mut out);
+    emit_mcp_reasons(&merged, &mut out);
+    // #145 (codex C8) — a user-global `enableAllProjectMcpServers: true`
+    // blanket-approves project MCP servers across EVERY repo. No single
+    // repo context here, so emit on the key alone.
+    if merged
+        .get("enableAllProjectMcpServers")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        out.push(AiGuardReason::ProjectMcpAutoEnabled {
+            mechanism: "user-global blanket: enableAllProjectMcpServers".to_string(),
+        });
+    }
+    // #146 — user-global instruction file.
+    super::instruction_scan::scan_file_path(&claude.join("CLAUDE.md"), &mut out);
+    Ok(out)
 }
 
 /// Hook scripts outside `<claude_dir>/hooks` that settings or skill/subagent
@@ -577,26 +599,88 @@ pub(crate) fn emit_permission_reasons(settings: &Value, out: &mut Vec<AiGuardRea
     }
 }
 
-/// #191 signal 1 — `permissions.defaultMode` in `~/.claude/settings.json` sets
-/// the standing auto-approval posture. `"auto"`, `"bypassPermissions"`, and
-/// `"acceptEdits"` all approve tool calls without a human prompt, so each is an
-/// auto-approval posture reusing the existing `AutoApprovalEnabled` reason
-/// (which already flows into scan / #147 drift / remediation hints / rubric).
-/// `"dontAsk"` is deliberately excluded: it only runs PRE-APPROVED tools, so it
-/// is not a blanket auto-approval. `mode` carries the raw config value verbatim.
-pub(crate) fn emit_default_mode_reason(settings: &Value, out: &mut Vec<AiGuardReason>) {
-    let Some(mode) = settings
-        .get("permissions")
-        .and_then(|p| p.get("defaultMode"))
-        .and_then(Value::as_str)
-    else {
-        return;
-    };
-    if matches!(mode, "auto" | "bypassPermissions" | "acceptEdits") {
-        out.push(AiGuardReason::AutoApprovalEnabled {
-            mode: mode.to_string(),
-        });
+/// `AutoApprovalEnabled.mode` for a session that starts in `auto` because no
+/// `defaultMode` is set. Scored like an explicit `"auto"`.
+pub(crate) const BUILT_IN_AUTO_MODE: &str = "auto (built-in default)";
+
+/// A settings file a `defaultMode` is read from. Claude Code ignores `auto`
+/// and `bypassPermissions` set in project or local files.
+#[derive(Clone, Copy)]
+enum ModeScope {
+    User,
+    Project,
+    Local,
+}
+
+impl ModeScope {
+    fn takes_effect(self, mode: &str) -> bool {
+        matches!(self, ModeScope::User) || !matches!(mode, "auto" | "bypassPermissions")
     }
+}
+
+/// The permission mode a new interactive session starts in, as far as one
+/// scope's files decide it.
+enum StartMode {
+    /// A `defaultMode` that takes effect from the file it is in.
+    Explicit(String),
+    /// No effective `defaultMode`: Claude Code 2.1.283+ starts interactive
+    /// sessions in `auto`. Lodeline cannot read the installed version, so it
+    /// assumes a current one.
+    BuiltInAuto,
+}
+
+/// Resolve a scope's start mode. `layers` runs highest precedence first; a
+/// `defaultMode` its file cannot set is skipped. `None` means the session
+/// prompts as usual (`default`), including an `auto` that `disableAutoMode`
+/// turned off.
+fn start_mode(
+    layers: &[(ModeScope, Option<&Value>)],
+    built_in_auto: bool,
+    auto_disabled: bool,
+) -> Option<StartMode> {
+    let explicit = layers.iter().find_map(|&(scope, file)| {
+        let mode = file?.get("permissions")?.get("defaultMode")?.as_str()?;
+        scope.takes_effect(mode).then_some(mode)
+    });
+    match explicit {
+        Some("auto") if auto_disabled => None,
+        Some(mode) => Some(StartMode::Explicit(mode.to_string())),
+        None if built_in_auto && !auto_disabled => Some(StartMode::BuiltInAuto),
+        None => None,
+    }
+}
+
+/// `"disableAutoMode": "disable"`, documented top-level and also accepted
+/// under `permissions`.
+fn settings_disable_auto_mode(settings: &Value) -> bool {
+    [
+        settings.get("disableAutoMode"),
+        settings
+            .get("permissions")
+            .and_then(|p| p.get("disableAutoMode")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|v| v == "disable")
+}
+
+/// #191 signal 1 — `"auto"`, `"bypassPermissions"`, and `"acceptEdits"` all
+/// approve tool calls without a human prompt, so each is an auto-approval
+/// posture reusing `AutoApprovalEnabled` (which already flows into scan /
+/// #147 drift / remediation hints / rubric). `"dontAsk"` is deliberately
+/// excluded: it only runs PRE-APPROVED tools. Returns whether the session
+/// starts in `auto`, which is when the `autoMode` block is consulted.
+fn emit_start_mode_reason(start: Option<StartMode>, out: &mut Vec<AiGuardReason>) -> bool {
+    let mode = match start {
+        None => return false,
+        Some(StartMode::BuiltInAuto) => BUILT_IN_AUTO_MODE.to_string(),
+        Some(StartMode::Explicit(mode)) => mode,
+    };
+    let auto = mode == "auto" || mode == BUILT_IN_AUTO_MODE;
+    if auto || matches!(mode.as_str(), "bypassPermissions" | "acceptEdits") {
+        out.push(AiGuardReason::AutoApprovalEnabled { mode });
+    }
+    auto
 }
 
 /// #199 — the deny lists of the `autoMode` classifier block. Each is an array
@@ -609,25 +693,13 @@ const AUTO_MODE_DEFAULTS_MARKER: &str = "$defaults";
 /// #199 — check the `autoMode` block for deny lists that silently discarded
 /// the built-in rules.
 ///
-/// Two conditions, both required, because a finding here claims a live loss of
-/// protection:
-///
-/// * `permissions.defaultMode` is `auto`. The classifier is what consults these
-///   lists, so under any other mode the block is dormant configuration and
-///   reporting it would describe a risk the machine does not have.
-/// * The block comes from the base settings file. Since v2.1.207 the
-///   classifier reads `autoMode` from user settings, managed settings, and
-///   `--settings` only — never a `settings.local.json` overlay or a repo-local
-///   file — so the caller passes the unmerged base, not the overlay result.
-pub(crate) fn emit_auto_mode_reasons(base_settings: &Value, out: &mut Vec<AiGuardReason>) {
-    let in_auto_mode = base_settings
-        .get("permissions")
-        .and_then(|p| p.get("defaultMode"))
-        .and_then(Value::as_str)
-        == Some("auto");
-    if !in_auto_mode {
-        return;
-    }
+/// The caller runs this only when the session starts in `auto`: the
+/// classifier is what consults these lists, so under any other mode the block
+/// is dormant configuration. It passes the unmerged base file, because since
+/// v2.1.207 the classifier reads `autoMode` from user settings, managed
+/// settings, and `--settings` only — never a `settings.local.json` overlay or
+/// a repo-local file.
+fn emit_auto_mode_reasons(base_settings: &Value, out: &mut Vec<AiGuardReason>) {
     let Some(auto_mode) = base_settings.get("autoMode") else {
         return;
     };
@@ -743,7 +815,7 @@ pub(crate) fn emit_scheduled_task_reasons(claude_dir: &Path, out: &mut Vec<AiGua
 /// would not fit. Over-flagging is acceptable — Lodeline measures, doesn't block.
 fn is_broad_allow(rule: &str) -> bool {
     let rule = rule.trim();
-    if rule == "*" || rule == "*:*" || rule.ends_with(":*") || rule.ends_with(":.*") {
+    if rule == "*:*" || rule.ends_with(":*") || rule.ends_with(":.*") {
         return true;
     }
     // #199 — two rule forms the colon heuristic alone does not reach.
@@ -760,10 +832,16 @@ fn is_broad_allow(rule: &str) -> bool {
         debug_assert!(!tool.is_empty() || rule.starts_with('('));
         return matches!(arg.trim(), "*" | ".*" | "*:*");
     }
-    // A bare tool-name glob (`mcp__*`) has no matcher at all — it admits every
-    // tool whose name shares the prefix. Require a prefix so this stays
-    // distinct from the bare `*` handled above.
-    rule.len() > 1 && rule.ends_with('*') && !rule.contains(':') && !rule.contains('(')
+    // A bare tool-name glob has no matcher at all. Claude Code skips one in an
+    // allow list unless it follows a literal `mcp__<server>__`, so `*`, `B*`
+    // and `mcp__*` approve nothing, while `mcp__github__*` admits every tool
+    // of that server.
+    if rule.contains(':') || rule.contains('(') || !rule.contains('*') {
+        return false;
+    }
+    rule.strip_prefix("mcp__")
+        .and_then(|r| r.split_once("__"))
+        .is_some_and(|(server, _)| !server.is_empty() && !server.contains('*'))
 }
 
 pub(crate) fn emit_mcp_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
@@ -916,11 +994,22 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         {
             return Ok(Vec::new());
         }
+        // No built-in fallback here: the user scope already reports it, and a
+        // project file cannot set `auto` or `bypassPermissions`.
+        let start = start_mode(
+            &[
+                (ModeScope::Local, local.as_ref()),
+                (ModeScope::Project, base.as_ref()),
+            ],
+            false,
+            false,
+        );
         let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
         let mut out = Vec::new();
         emit_hook_reasons(&merged, &mut out)?;
         super::claude_components::emit_component_hook_reasons(&components, &mut out);
         emit_permission_reasons(&merged, &mut out);
+        emit_start_mode_reason(start, &mut out);
         emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
         // #145 — auto-enable posture: emit ONLY when a server-enable key is
         // present AND the project actually ships `.mcp.json` servers for it
@@ -1028,13 +1117,14 @@ mod tests {
         assert!(reasons.is_empty(), "expected empty, got {reasons:?}");
     }
 
+    /// The settings file alone shows Claude Code is in use; with nothing set,
+    /// the only posture is the built-in `auto` start mode.
     #[test]
-    fn empty_settings_object_returns_empty_vec() {
+    fn empty_settings_object_reports_only_built_in_auto() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), "{}");
-        let p = ClaudeCodeParser;
-        let reasons = p.assess(dir.path()).unwrap();
-        assert!(reasons.is_empty(), "expected empty, got {reasons:?}");
+        let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+        assert_eq!(reasons, vec![built_in_auto()]);
     }
 
     #[test]
@@ -1290,11 +1380,11 @@ mod tests {
     fn empty_hooks_object_emits_no_findings() {
         let dir = tempdir().unwrap();
         write_settings(dir.path(), r#"{"hooks": {}}"#);
-        let p = ClaudeCodeParser;
-        let reasons = p.assess(dir.path()).unwrap();
-        assert!(
-            reasons.is_empty(),
-            "empty hooks object should produce no findings, got {reasons:?}"
+        let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+        assert_eq!(
+            reasons,
+            vec![built_in_auto()],
+            "empty hooks object should produce no hook findings"
         );
     }
 
@@ -2029,17 +2119,144 @@ mod tests {
         );
     }
 
+    fn built_in_auto() -> AiGuardReason {
+        AiGuardReason::AutoApprovalEnabled {
+            mode: BUILT_IN_AUTO_MODE.into(),
+        }
+    }
+
+    fn auto_findings(reasons: &[AiGuardReason]) -> Vec<String> {
+        reasons
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::AutoApprovalEnabled { mode } => Some(format!("mode:{mode}")),
+                AiGuardReason::AutoModeDefaultsDropped { list } => Some(format!("dropped:{list}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Claude Code 2.1.283+ starts interactive sessions in `auto` when no
+    /// `defaultMode` is set, so the classifier posture and its `autoMode`
+    /// rules are live without any explicit opt-in.
     #[test]
-    fn absent_default_mode_does_not_emit_auto_approval() {
+    fn unset_default_mode_is_the_built_in_auto_start_mode() {
         let dir = tempdir().unwrap();
-        write_settings(dir.path(), r#"{"permissions": {"allow": ["Read"]}}"#);
-        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
-        assert!(
-            !reasons
-                .iter()
-                .any(|r| matches!(r, AiGuardReason::AutoApprovalEnabled { .. })),
-            "got {reasons:?}"
+        write_settings(
+            dir.path(),
+            r#"{"permissions": {"allow": ["Read"]}, "autoMode": {"hard_deny": []}}"#,
         );
+        let reasons = assess_user(dir.path(), &dir.path().join("no-policy")).unwrap();
+        assert_eq!(
+            auto_findings(&reasons),
+            vec![
+                format!("mode:{BUILT_IN_AUTO_MODE}"),
+                "dropped:hard_deny".into()
+            ],
+        );
+        let auto = built_in_auto();
+        assert!(
+            crate::ai_guard::rubric::dangerous_toggles(std::slice::from_ref(&auto))
+                .contains("auto_approval_enabled_classifier")
+        );
+        assert!(crate::ai_guard::remediation::hint_for_reason(&auto).contains("2.1.283"));
+    }
+
+    /// `disableAutoMode: "disable"` in any file starts sessions in `default`.
+    /// The settings reference documents it top-level and also accepts it under
+    /// `permissions`; managed settings count too.
+    #[test]
+    fn disable_auto_mode_in_either_spelling_or_managed_turns_auto_off() {
+        let empty_policy = tempdir().unwrap();
+        for settings in [
+            r#"{"disableAutoMode": "disable", "autoMode": {"hard_deny": []}}"#,
+            r#"{"permissions": {"disableAutoMode": "disable"}, "autoMode": {"hard_deny": []}}"#,
+            r#"{"disableAutoMode": "disable", "permissions": {"defaultMode": "auto"}, "autoMode": {"hard_deny": []}}"#,
+            r#"{"permissions": {"defaultMode": "auto", "disableAutoMode": "disable"}, "autoMode": {"hard_deny": []}}"#,
+        ] {
+            let dir = tempdir().unwrap();
+            write_settings(dir.path(), settings);
+            let reasons = assess_user(dir.path(), empty_policy.path()).unwrap();
+            assert!(
+                auto_findings(&reasons).is_empty(),
+                "{settings} -> {reasons:?}"
+            );
+        }
+        let dir = tempdir().unwrap();
+        write_settings(dir.path(), r#"{"autoMode": {"hard_deny": []}}"#);
+        let managed = tempdir().unwrap();
+        write_file(
+            managed.path(),
+            "managed-settings.json",
+            r#"{"disableAutoMode": "disable"}"#,
+        );
+        let reasons = assess_user(dir.path(), managed.path()).unwrap();
+        assert!(auto_findings(&reasons).is_empty(), "{reasons:?}");
+    }
+
+    /// `auto` and `bypassPermissions` do not take effect from a local file,
+    /// so `~/.claude/settings.local.json` cannot set them; `acceptEdits` can.
+    #[test]
+    fn local_file_cannot_set_auto_or_bypass() {
+        for local in ["auto", "bypassPermissions"] {
+            let dir = tempdir().unwrap();
+            write_settings(dir.path(), r#"{"permissions": {"defaultMode": "default"}}"#);
+            write_file(
+                dir.path(),
+                ".claude/settings.local.json",
+                &format!(r#"{{"permissions": {{"defaultMode": "{local}"}}}}"#),
+            );
+            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            assert!(auto_findings(&reasons).is_empty(), "{local} -> {reasons:?}");
+        }
+        let dir = tempdir().unwrap();
+        write_settings(dir.path(), r#"{"permissions": {"defaultMode": "default"}}"#);
+        write_file(
+            dir.path(),
+            ".claude/settings.local.json",
+            r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
+        );
+        let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+        assert_eq!(
+            auto_findings(&reasons),
+            vec!["mode:acceptEdits".to_string()]
+        );
+    }
+
+    /// A committed project `defaultMode` applies to everyone who opens the
+    /// repo, except `auto` and `bypassPermissions`, which project and local
+    /// files cannot set.
+    #[test]
+    fn project_default_mode_is_scored_when_it_takes_effect() {
+        let cases = [
+            (
+                "settings.json",
+                "acceptEdits",
+                vec!["mode:acceptEdits".to_string()],
+            ),
+            (
+                "settings.local.json",
+                "acceptEdits",
+                vec!["mode:acceptEdits".to_string()],
+            ),
+            ("settings.json", "bypassPermissions", vec![]),
+            ("settings.json", "auto", vec![]),
+            ("settings.local.json", "bypassPermissions", vec![]),
+            ("settings.json", "plan", vec![]),
+        ];
+        for (file, mode, want) in cases {
+            let repo = tempdir().unwrap();
+            write_file(
+                repo.path(),
+                &format!(".claude/{file}"),
+                &format!(r#"{{"permissions": {{"defaultMode": "{mode}"}}}}"#),
+            );
+            let p = ClaudeCodeProjectParser {
+                repo_root: repo.path().to_path_buf(),
+            };
+            let reasons = p.assess(Path::new("/unused")).unwrap();
+            assert_eq!(auto_findings(&reasons), want, "{file} {mode}");
+        }
     }
 
     // ---- #191 signal 2: unattended scheduled tasks ----
@@ -2565,17 +2782,22 @@ mod tests {
     fn broad_allow_classifies_real_permission_rules() {
         let cases: &[(&str, bool)] = &[
             // Genuinely broad.
-            ("*", true),
             ("*:*", true),
-            ("**", true),
             ("Bash:*", true),
             ("Bash:.*", true),
             ("Bash(*)", true),
             ("Read(.*)", true),
-            ("mcp__*", true),
+            ("mcp__github__*", true),
             // Scoped — a matcher, a path, a domain, or a parameter predicate.
             ("Bash", false),
             ("Read", false),
+            // Unanchored allow globs: Claude Code skips them, so they approve
+            // nothing.
+            ("*", false),
+            ("**", false),
+            ("B*", false),
+            ("mcp__*", false),
+            ("mcp__git*", false),
             ("Bash(run_in_background:true)", false),
             ("Agent(model:opus)", false),
             ("Bash(npm run test:*)", false),
@@ -2617,6 +2839,6 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(broad, vec!["mcp__*"], "got {reasons:?}");
+        assert!(broad.is_empty(), "got {reasons:?}");
     }
 }

@@ -209,6 +209,7 @@ pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessE
     }
     let mut out = Vec::new();
     for (key, expected) in [
+        ("disableAutoMode", Value::from("disable")),
         ("permissions.disableAutoMode", Value::from("disable")),
         (
             "permissions.disableBypassPermissionsMode",
@@ -242,6 +243,16 @@ pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessE
         }
     }
     Ok(out)
+}
+
+/// Whether `controls` (from [`claude_controls`]) turn auto mode off.
+pub(super) fn disables_auto_mode(controls: &[AiGuardControl]) -> bool {
+    controls.iter().any(|c| {
+        matches!(
+            c.setting.as_str(),
+            "disableAutoMode" | "permissions.disableAutoMode"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -296,6 +307,24 @@ mod tests {
             .iter()
             .all(|c| c.source_path == path && c.id.contains(".configured.")));
         assert!(!serde_json::to_string(&controls).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn claude_disable_auto_mode_is_reported_top_level_or_under_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed-settings.json");
+        for text in [
+            r#"{"disableAutoMode":"disable"}"#,
+            r#"{"permissions":{"disableAutoMode":"disable"}}"#,
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(
+                disables_auto_mode(&claude_controls(dir.path()).unwrap()),
+                "{text}"
+            );
+        }
+        std::fs::write(&path, r#"{"disableAutoMode":"enable"}"#).unwrap();
+        assert!(!disables_auto_mode(&claude_controls(dir.path()).unwrap()));
     }
 
     #[test]

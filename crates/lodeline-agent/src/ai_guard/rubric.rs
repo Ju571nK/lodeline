@@ -37,7 +37,10 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         // such check, so `auto` is a real auto-approval posture but a weaker
         // one, and is scored under its own key rather than folded in at the
         // same severity.
-        AiGuardReason::AutoApprovalEnabled { mode } if mode == "auto" => {
+        AiGuardReason::AutoApprovalEnabled { mode }
+            if mode == "auto"
+                || mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE =>
+        {
             "auto_approval_enabled_classifier"
         }
         AiGuardReason::AutoApprovalEnabled { .. } => "auto_approval_enabled",
