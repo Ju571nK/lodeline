@@ -55,7 +55,12 @@ pub fn load_effective_policy(
                 .map_err(|e| anyhow::anyhow!("policy.yaml parse failed: {e}"))?,
         ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(anyhow::anyhow!("policy.yaml read failed: {e}")),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "policy.yaml read failed ({}): {e}",
+                policy_path.display()
+            ))
+        }
     };
 
     // ── 2. Read the rule-pack bundle ─────────────────────────────────────────

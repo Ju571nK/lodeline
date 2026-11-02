@@ -1351,10 +1351,12 @@ fn default_policy_paths() -> PolicyPaths {
 }
 
 /// The policy file a one-shot command reads: `--policy`, else the default file in
-/// force if there is one.
+/// force if there is one. A file whose existence cannot be checked is kept, so the
+/// caller's read reports the error instead of scoring with the defaults.
 pub fn policy_path_for_command(policy_override: Option<PathBuf>) -> Option<PathBuf> {
     policy_override.or_else(|| {
-        Some(default_policy_paths().policy.in_force().to_path_buf()).filter(|p| p.exists())
+        Some(default_policy_paths().policy.in_force().to_path_buf())
+            .filter(|p| !matches!(p.try_exists(), Ok(false)))
     })
 }
 
