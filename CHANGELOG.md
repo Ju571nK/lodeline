@@ -73,6 +73,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the `doctor` socket-permission check follows the flag too. On Windows the flag is
   still ignored and these commands use the default named pipe. `lodeline status`
   already honored the flag. (#392)
+- `lodeline scan` output and posture events no longer carry credentials from a URL.
+  They used to report a remote MCP server's URL as configured, and the destination of a
+  Claude Code `http` hook, including any userinfo, path, query, and fragment. They now
+  report only `scheme://host[:port]`. The path is dropped too, because hosted MCP
+  servers put per-user tokens in path segments. A URL is reported as `<unparseable-url>`
+  when its host is not plain ASCII (an IDN host), its host is longer than 253
+  characters, its port is above 65535, or it is a bare token with no dot or colon. A
+  rule pack that puts a URL value into a message field gets the same redacted form.
+  Rule matching still runs on the full configured value, so a rule that matches a
+  scheme such as `http://` behaves as before. The reported reasons change text on
+  upgrade, so expect one fresh assessment for each affected host. (#403)
 
 ## [0.12.1] - 2026-11-02
 
