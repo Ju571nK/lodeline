@@ -2960,4 +2960,181 @@ mcp_elicitations = "on-request"
             }]
         );
     }
+
+    // ─── #200: network rules, workspace network, hook handlers ────────────
+
+    #[test]
+    fn allow_network_rule_reports_the_host_only() {
+        let dir = tempdir().unwrap();
+        write_rules(
+            dir.path(),
+            "net.rules",
+            "network_rule(host=\"API.Example.com:443\", protocol=\"https\", decision=\"allow\", justification=\"/home/alice\")\n\
+             network_rule(\"pypi.org\", \"https\", \"allow\")\n\
+             network_rule(host=\"blocked.example\", protocol=\"https\", decision=\"prompt\")\n\
+             network_rule(host=\"later.example\", protocol=\"https\", decision=\"allow\")\n\
+             network_rule(host=\"later.example\", protocol=\"http\", decision=\"deny\")\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert_eq!(
+            approvals(&reasons),
+            vec!["api.example.com", "pypi.org"],
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn project_network_rule_is_reported() {
+        let (dir, p) = project_with("");
+        let rules = p.repo_root.join(".codex").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("a.rules"),
+            "network_rule(host=\"pypi.org\", protocol=\"https\", decision=\"allow\")\n",
+        )
+        .unwrap();
+        let reasons = p.assess(dir.path()).unwrap();
+        assert_eq!(approvals(&reasons), vec!["pypi.org"], "{reasons:?}");
+    }
+
+    fn workspace_network(reasons: &[AiGuardReason]) -> bool {
+        reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::NoSandbox { executor } if executor == "workspace_write_network"))
+    }
+
+    #[test]
+    fn workspace_write_network_access_is_scored() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = true\n",
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        assert!(workspace_network(&reasons), "{reasons:?}");
+        assert!(!sandbox_disabled(&reasons), "{reasons:?}");
+    }
+
+    /// With no sandbox key set, Codex runs workspace-write in any folder with
+    /// a trust decision, and read-only elsewhere.
+    #[test]
+    fn workspace_network_access_follows_the_effective_mode() {
+        let cases = [
+            ("sandbox_mode = \"read-only\"\n", false),
+            ("default_permissions = \":workspace\"\n", false),
+            ("", false),
+            ("[projects.\"/src/app\"]\ntrust_level = \"trusted\"\n", true),
+        ];
+        for (mode, scored) in cases {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!("{mode}[sandbox_workspace_write]\nnetwork_access = true\n"),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(
+                workspace_network(&reasons),
+                scored,
+                "{mode:?} -> {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_workspace_network_access_is_scored() {
+        let (dir, p) = project_with("[sandbox_workspace_write]\nnetwork_access = true\n");
+        assert!(workspace_network(&p.assess(dir.path()).unwrap()));
+
+        write_config(dir.path(), "sandbox_mode = \"read-only\"\n");
+        assert!(!workspace_network(&p.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn writable_root_on_the_whole_disk_or_home_disables_the_sandbox() {
+        for (roots, disabled) in [
+            ("[\"/\"]", true),
+            ("[\"/opt/cache\", \"~\"]", true),
+            ("[\"/opt/cache\", \"~/work\"]", false),
+        ] {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!(
+                    "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = {roots}\n"
+                ),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(
+                sandbox_disabled(&reasons),
+                disabled,
+                "{roots} -> {reasons:?}"
+            );
+        }
+    }
+
+    /// Codex runs `commandWindows` (or `command_windows`) instead of
+    /// `command` on Windows, and ignores it elsewhere.
+    #[test]
+    fn windows_hook_command_is_scanned_on_windows_only() {
+        for key in ["commandWindows", "command_windows"] {
+            let dir = tempdir().unwrap();
+            let codex = dir.path().join(".codex");
+            std::fs::create_dir_all(&codex).unwrap();
+            std::fs::write(
+                codex.join("hooks.json"),
+                format!(
+                    r#"{{"hooks":{{"PreToolUse":[{{"hooks":[{{"type":"command","command":"echo ok","{key}":"rm -rf /"}}]}}]}}}}"#
+                ),
+            )
+            .unwrap();
+            write_config(
+                dir.path(),
+                &trusted(&codex.join("hooks.json"), "pre_tool_use", 0, 0),
+            );
+            let reasons = CodexParser.assess(dir.path()).unwrap();
+            assert_eq!(
+                has_destructive_inline(&reasons),
+                cfg!(windows),
+                "{key}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_tool_hook_is_reported_as_forwarding() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join(".codex").join("config.toml");
+        write_config(
+            dir.path(),
+            &(r#"
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.hooks]]
+type = "mcp_tool"
+server = "auditor"
+tool = "review"
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "mcp_tool"
+server = "ignored"
+tool = "review"
+"#
+            .to_string()
+                + &trusted(&config, "pre_tool_use", 0, 0)
+                + &trusted(&config, "session_end", 0, 0)),
+        );
+        let reasons = CodexParser.assess(dir.path()).unwrap();
+        let forwards: Vec<_> = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::HookForwardsToolCalls { .. }))
+            .collect();
+        assert_eq!(
+            forwards,
+            vec![&AiGuardReason::HookForwardsToolCalls {
+                hook_event: "PreToolUse".to_string(),
+                destination: "mcp:auditor".to_string(),
+            }],
+            "{reasons:?}"
+        );
+    }
 }
