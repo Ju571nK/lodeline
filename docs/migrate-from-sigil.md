@@ -385,6 +385,10 @@ settings, replaces them, and leaves every other hook alone. It is safe to run
 again. `lodeline-hook uninstall` removes both old and new entries. For Grok it
 also retires the old `~/.grok/hooks/sigil-hook.json` file.
 
+Codex runs a user-level hook only after you trust it, and it skips an untrusted
+hook with no warning. After you rerun `install --agent codex`, open `/hooks` in
+Codex and trust the new hook again, because the install changes the hook command.
+
 Install is observe-only unless you pass `--enforce`. An enforcing hook comes back
 as observe-only if you leave the flag off, so repeat it.
 

@@ -205,8 +205,16 @@ fn rule_matches(
                 .find(|ind| f.holds(Some(ind.as_str())))
                 .map(|ind| via_suffix(ind.as_str()))
         }
-        (CompiledMatch::FileEdit(f), HookAction::FileEdit { path_preview, .. }) => {
-            hit(f.holds(path_preview.as_deref()))
+        (
+            CompiledMatch::FileEdit(f),
+            HookAction::FileEdit {
+                path_preview,
+                paths,
+                ..
+            },
+        ) if paths.is_empty() => hit(f.holds(path_preview.as_deref())),
+        (CompiledMatch::FileEdit(f), HookAction::FileEdit { paths, .. }) => {
+            hit(paths.iter().any(|p| f.holds(Some(p.as_str()))))
         }
         // server/tool/label are non-optional in HookAction; wrap in Some to satisfy holds().
         (
@@ -679,5 +687,61 @@ mod tests {
             ev.evaluate(&action_a).is_none(),
             "previous (empty) evaluator should still allow rm after failed rebuild"
         );
+    }
+
+    fn no_etc() -> DenyEvaluator {
+        DenyEvaluator::new(&[DenyRule {
+            id: "no-etc".into(),
+            match_: HookActionMatch::FileEdit {
+                path: Matcher::Regex {
+                    pattern: "^/etc/".into(),
+                },
+            },
+        }])
+        .unwrap()
+    }
+
+    /// Built from wire JSON, the shape `lodeline-hook` sends.
+    fn file_edit(preview: &str, paths: &[&str]) -> HookAction {
+        serde_json::from_value(serde_json::json!({
+            "kind": "file_edit",
+            "path_hash": "ab".repeat(32),
+            "path_preview": preview,
+            "edit_hash": null,
+            "paths": paths,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn file_edit_rule_checks_every_target_path() {
+        let act = file_edit("/tmp/a\n/etc/hosts", &["/tmp/a", "/etc/hosts"]);
+        assert_eq!(no_etc().evaluate(&act).unwrap().0, "no-etc");
+    }
+
+    #[test]
+    fn file_edit_rule_sees_paths_past_the_preview_cap() {
+        let long = format!("/tmp/{}", "a".repeat(300));
+        let act = file_edit(&format!("{}…", &long[..256]), &[&long, "/etc/hosts"]);
+        assert_eq!(no_etc().evaluate(&act).unwrap().0, "no-etc");
+    }
+
+    #[test]
+    fn file_edit_rule_ignores_the_preview_when_paths_are_sent() {
+        let act = file_edit("/etc/hosts", &["/tmp/a"]);
+        assert!(no_etc().evaluate(&act).is_none());
+    }
+
+    /// A hook older than the `paths` field sends only the preview.
+    #[test]
+    fn file_edit_rule_falls_back_to_the_preview_from_an_older_hook() {
+        let act: HookAction = serde_json::from_value(serde_json::json!({
+            "kind": "file_edit",
+            "path_hash": "ab".repeat(32),
+            "path_preview": "/etc/hosts",
+            "edit_hash": null,
+        }))
+        .unwrap();
+        assert_eq!(no_etc().evaluate(&act).unwrap().0, "no-etc");
     }
 }

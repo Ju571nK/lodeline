@@ -2,14 +2,85 @@ use super::HookAdapter;
 use crate::redact::capture;
 use lodeline_core::event::AiTool;
 use lodeline_core::hook_proto::*;
+use std::path::{Component, Path, PathBuf};
 
 /// Codex CLI `PreToolUse` hook. Codex deliberately reuses the Claude Code hook
 /// shape (`tool_name` / `tool_input` / `tool_use_id`, plus `turn_id` and a
-/// Codex-only `permission_mode`), so this mirrors the Claude adapter but keys
-/// shell detection on the `tool_input.command` field (Codex's shell tool is
-/// `shell`/`local_shell`, not literally `Bash`) and treats `apply_patch` /
-/// `file_path` inputs as file edits.
+/// Codex-only `permission_mode`), so this mirrors the Claude adapter. Measured
+/// on codex-cli 0.164.0: the shell tool arrives as `Bash` and edits as
+/// `apply_patch`, and both carry their text in `tool_input.command`.
 pub struct Codex;
+
+/// Target paths of an apply_patch body, read the way codex rust-v0.166.0
+/// (parser.rs, streaming_parser.rs) reads them: headers match the trimmed line,
+/// but inside an Update hunk only trailing space is trimmed, so ` *** Add File:`
+/// there is a context line. `*** Move to:` counts only right after its Update
+/// header. Body lines start with `+`, `-`, ` ` or `@@` and are never headers.
+fn patch_paths(patch: &str) -> Vec<&str> {
+    let lines: Vec<&str> = patch.trim().lines().collect();
+    // Codex's lenient mode also takes the patch wrapped in a heredoc.
+    let lines = match lines.as_slice() {
+        [first, inner @ .., last]
+            if matches!(*first, "<<EOF" | "<<'EOF'" | "<<\"EOF\"")
+                && last.ends_with("EOF")
+                && inner.len() >= 2 =>
+        {
+            inner
+        }
+        all => all,
+    };
+    let mut paths = Vec::new();
+    let (mut in_update, mut after_update_header) = (false, false);
+    for line in lines
+        .iter()
+        .skip_while(|l| l.trim() != "*** Begin Patch")
+        .skip(1)
+    {
+        let l = if in_update {
+            line.trim_end()
+        } else {
+            line.trim()
+        };
+        if l == "*** End Patch" {
+            break;
+        }
+        let move_to = after_update_header.then(|| l.strip_prefix("*** Move to: "));
+        after_update_header = false;
+        if let Some(path) = move_to.flatten() {
+            paths.push(path);
+        } else if let Some(path) = l.strip_prefix("*** Update File: ") {
+            (in_update, after_update_header) = (true, true);
+            paths.push(path);
+        } else if let Some(path) = l
+            .strip_prefix("*** Add File: ")
+            .or_else(|| l.strip_prefix("*** Delete File: "))
+        {
+            in_update = false;
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// `path` joined onto `cwd` when relative, with `.` and `..` folded lexically
+/// (no filesystem access), so rules on absolute paths see what Codex writes.
+fn resolve(cwd: Option<&str>, path: &str) -> String {
+    let joined = match cwd {
+        Some(cwd) => Path::new(cwd).join(path),
+        None => return path.to_string(),
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out.to_string_lossy().into_owned()
+}
 
 impl HookAdapter for Codex {
     fn agent(&self) -> AiTool {
@@ -42,6 +113,13 @@ impl HookAdapter for Codex {
                 args_hash: c.hash,
                 args_preview: c.preview,
             }
+        } else if tool == "apply_patch" {
+            let patch = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let cwd = p.get("cwd").and_then(|v| v.as_str());
+            let paths = patch_paths(patch)
+                .into_iter()
+                .map(|path| resolve(cwd, path));
+            super::file_edit(paths.collect(), level)
         } else if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
             // Shell tool — keyed on the command field, not the exact tool_name.
             let c = capture(cmd, level);
@@ -49,19 +127,12 @@ impl HookAdapter for Codex {
                 command_hash: c.hash,
                 command_preview: c.preview,
             }
-        } else if matches!(tool, "Edit" | "Write" | "apply_patch")
-            || input.get("file_path").is_some()
-        {
+        } else if matches!(tool, "Edit" | "Write") || input.get("file_path").is_some() {
             let path = input
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(tool);
-            let c = capture(path, level);
-            HookAction::FileEdit {
-                path_hash: c.hash,
-                path_preview: c.preview,
-                edit_hash: None,
-            }
+            super::file_edit(vec![path.to_string()], level)
         } else {
             let detail = serde_json::to_string(&input).unwrap_or_default();
             let c = capture(&detail, level);
@@ -136,15 +207,68 @@ mod tests {
         }
     }
 
+    fn patch_preview(p: serde_json::Value) -> String {
+        match Codex.normalize(&p, CaptureLevel::Raw).unwrap().action {
+            HookAction::FileEdit { path_preview, .. } => path_preview.unwrap(),
+            other => panic!("expected FileEdit, got {other:?}"),
+        }
+    }
+
+    // Shape captured from codex-cli 0.164.0 `codex exec`: the patch text rides
+    // in `tool_input.command`, the same field the shell tool uses.
     #[test]
-    fn apply_patch_is_file_edit() {
+    fn apply_patch_is_file_edit_on_header_paths() {
         let p = serde_json::json!({
-            "tool_name":"apply_patch","tool_input":{"file_path":"/repo/src/lib.rs"}
+            "tool_name":"apply_patch","tool_input":{"command":
+                "*** Begin Patch\n*** Update File: /repo/a.txt\n*** Move to: /repo/c.txt\n\
+                 @@\n-rm -rf /\n+hello\n*** Add File: /repo/b.txt\n+*** Delete File: /etc/x\n\
+                 *** Delete File: /repo/old.txt\n*** End Patch"}
         });
-        assert!(matches!(
-            Codex.normalize(&p, CaptureLevel::Redacted).unwrap().action,
-            HookAction::FileEdit { .. }
-        ));
+        assert_eq!(
+            patch_preview(p),
+            "/repo/a.txt\n/repo/c.txt\n/repo/b.txt\n/repo/old.txt"
+        );
+    }
+
+    // codex rust-v0.166.0 streaming_parser.rs: headers match the trimmed line,
+    // except inside an Update hunk, where only trailing space is trimmed and a
+    // line with a leading space is a context line.
+    #[test]
+    fn apply_patch_headers_follow_codex_whitespace_rules() {
+        let p = serde_json::json!({
+            "tool_name":"apply_patch","tool_input":{"command":
+                "*** Begin Patch\n \t*** Add File: /etc/x\n+hi\n*** Update File: /repo/a.txt  \n\
+                 *** Move to: /repo/c.txt \n@@\n-old\n *** Update File: /etc/context-only\n+new\n\
+                 *** Delete File: /repo/old.txt\t\n*** End Patch\n"}
+        });
+        assert_eq!(
+            patch_preview(p),
+            "/etc/x\n/repo/a.txt\n/repo/c.txt\n/repo/old.txt"
+        );
+    }
+
+    #[test]
+    fn apply_patch_reads_codex_heredoc_wrapper() {
+        let p = serde_json::json!({
+            "tool_name":"apply_patch","tool_input":{"command":
+                "<<'EOF'\n*** Begin Patch\n*** Add File: /etc/x\n+hi\n*** End Patch\nEOF\n"}
+        });
+        assert_eq!(patch_preview(p), "/etc/x");
+    }
+
+    // Paths on Windows are not `/`-rooted, so the expected strings are Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn apply_patch_resolves_relative_paths_against_cwd() {
+        let p = serde_json::json!({
+            "cwd":"/repo/sub","tool_name":"apply_patch","tool_input":{"command":
+                "*** Begin Patch\n*** Add File: .env\n+X=1\n*** Update File: ../lib/x.rs\n\
+                 *** Move to: ./y/../z.rs\n@@\n-a\n+b\n*** Delete File: /abs/old\n*** End Patch"}
+        });
+        assert_eq!(
+            patch_preview(p),
+            "/repo/sub/.env\n/repo/lib/x.rs\n/repo/sub/z.rs\n/abs/old"
+        );
     }
 
     #[test]

@@ -93,12 +93,7 @@ impl HookAdapter for Antigravity {
         ) || file_path.is_some()
         {
             let path = file_path.unwrap_or(tool);
-            let c = capture(path, level);
-            HookAction::FileEdit {
-                path_hash: c.hash,
-                path_preview: c.preview,
-                edit_hash: None,
-            }
+            super::file_edit(vec![path.to_string()], level)
         } else {
             let detail = serde_json::to_string(&input).unwrap_or_default();
             let c = capture(&detail, level);
