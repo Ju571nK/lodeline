@@ -30,7 +30,7 @@ Preconditions:
 
 ## Gotchas
 
-- `--control-socket` does not reach `doctor`. It resolves the socket from `XDG_RUNTIME_DIR` or `TMPDIR`, which is why `drive.sh` sets both.
+- `doctor` dials the socket named by `--control-socket`, else the default under `XDG_RUNTIME_DIR` or `TMPDIR`, which is why `drive.sh` sets both.
 - Exit code `1` on a developer Mac can mean Full Disk Access is missing, not a regression. Read the `[WARN]` line.
 - `enumerated users` and the `[INFO] target ...` lines describe the real host. They do not follow the temp HOME.
 - `.stdout` holds real home paths. Replace them before you quote it.

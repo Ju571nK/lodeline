@@ -1,23 +1,24 @@
 //! Tiny synchronous client for the agent's control IPC. Used by `lodeline show
-//! stats|policy-status|targets` and `lodeline reload`.
+//! stats|policy-status|targets|risk`, `lodeline reload` and `lodeline doctor`.
 
 use crate::control::{Request, Response};
+use std::path::Path;
 
-/// Connect to the running daemon, send `req`, return its `Response`. Wraps
-/// `query_async` with a current-thread tokio runtime so sync `main`/CLI
-/// contexts can use it without an `.await`.
-pub fn query(req: &Request) -> anyhow::Result<Response> {
+/// Connect to the running daemon at `socket`, send `req`, return its `Response`.
+/// Wraps `query_async` with a current-thread tokio runtime so sync `main`/CLI
+/// contexts can use it without an `.await`. Windows uses the default named pipe
+/// and ignores `socket`.
+pub fn query(socket: &Path, req: &Request) -> anyhow::Result<Response> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    rt.block_on(query_async(req))
+    rt.block_on(query_async(socket, req))
 }
 
-async fn query_async(req: &Request) -> anyhow::Result<Response> {
+async fn query_async(socket: &Path, req: &Request) -> anyhow::Result<Response> {
     #[cfg(unix)]
     {
-        let socket = crate::control::default_control_socket();
-        query_unix(&socket, req).await.map_err(|e| {
+        query_unix(socket, req).await.map_err(|e| {
             anyhow::anyhow!(
                 "cannot reach the lodeline daemon at {}: {e} (is `lodeline run` running?)",
                 socket.display()
@@ -26,6 +27,7 @@ async fn query_async(req: &Request) -> anyhow::Result<Response> {
     }
     #[cfg(windows)]
     {
+        let _ = socket;
         let pipe = crate::control::default_control_pipe_name();
         query_windows(&pipe, req).await.map_err(|e| {
             anyhow::anyhow!(
