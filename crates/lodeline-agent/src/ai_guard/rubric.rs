@@ -81,6 +81,7 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         AiGuardReason::HookForwardsToolCalls { .. } => "hook_forwards_tool_calls",
         AiGuardReason::UnattendedLoopPrompt { .. } => "unattended_loop_prompt",
         AiGuardReason::StandingCommandApproval { .. } => "standing_command_approval",
+        AiGuardReason::McpToolsAutoApproved { .. } => "mcp_tools_auto_approved",
         AiGuardReason::ProjectSettingsPluginEnabled { .. } => "project_settings_plugin_enabled",
         AiGuardReason::ProjectSettingsHelperCommand { .. } => "project_settings_helper_command",
         AiGuardReason::ProjectSettingsEnvOverride { .. } => "project_settings_env_override",
@@ -141,7 +142,7 @@ pub fn dangerous_toggles(reasons: &[AiGuardReason]) -> std::collections::BTreeSe
 #[derive(Debug, Clone)]
 pub struct Rubric {
     /// kind_key → weight. Keys are static strings owned by the rubric
-    /// module (returned by `kind_key()`). Defaults populate all 29 known
+    /// module (returned by `kind_key()`). Defaults populate all 39 known
     /// kinds; with_overrides() may replace values but never adds keys.
     pub weights: HashMap<&'static str, f32>,
     /// Subset of `weights` whose value came from an operator override
@@ -204,6 +205,8 @@ impl Rubric {
         w.insert("unattended_loop_prompt", 2.5);
         // #200 — a persistent, unprompted approval for a command prefix.
         w.insert("standing_command_approval", 2.0);
+        // #200 — named tools only, so below `trusted_mcp_server`, which covers every tool.
+        w.insert("mcp_tools_auto_approved", 1.0);
         // #199 — repository settings keys, ranked by consent. A plugin enable
         // applies in every session before trust; helpers and `env` apply
         // before trust only in `claude -p`, like a project hook (`no_sandbox`
@@ -584,7 +587,8 @@ mod tests {
             r.weights.get("mcp_read_only_hint_contradiction"),
             Some(&2.0)
         );
-        assert_eq!(r.weights.len(), 38);
+        assert_eq!(r.weights.get("mcp_tools_auto_approved"), Some(&1.0));
+        assert_eq!(r.weights.len(), 39);
     }
 
     #[test]
