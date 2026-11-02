@@ -56,7 +56,7 @@ The misconfigurations that turn a helpful agent into a foothold:
 
 - **No sandbox** — the agent runs with full reach into your host. `no_sandbox`
 - **Wildcard hooks** — a `.*` `PreToolUse` matcher that lets any tool call through, or a hook that runs a destructive inline command. `broad_matcher` · `destructive_in_inline_command`
-- **Local-command MCP servers** — an `mcp.json` server set to auto-launch a shell or binary. `mcp_server_local_command`
+- **Local-command MCP servers** — an MCP server set to auto-launch a shell or binary, whether it comes from an `mcp.json` file or from Claude Code's `~/.claude.json`. `mcp_server_local_command`
 - **Empty deny lists** — permissions that look configured but block nothing. `permissions_deny_empty`
 - **Prompt-injection in instruction files** — directives planted to steer the agent off-task.
 

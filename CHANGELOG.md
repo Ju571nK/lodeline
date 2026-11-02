@@ -7,6 +7,23 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Added
+
+- The scanner now reads Claude Code MCP servers from `~/.claude.json`. That file holds
+  the user-scope servers (top-level `mcpServers`) and the local-scope servers
+  (`projects.<path>.mcpServers`), which is where `claude mcp add` writes. Each server
+  goes through the same MCP checks as a `.mcp.json` server, so a host can show new
+  `mcp_server_*` and `no_sandbox` findings, and a host that has only `~/.claude.json`
+  now shows a Claude Code row. The scanner reads only the `mcpServers` subtrees and each
+  project's `disabledMcpServers` list. It never reads OAuth, account, or session data,
+  or any server's `env` or `headers`, and it does not report credentials in a remote
+  server URL. A file over 16 MiB, or one that does not parse, is skipped with a warning.
+  A malformed project entry is skipped and the rest load. The scanner skips servers
+  disabled for their project, and local servers of a project whose directory no longer
+  exists. If the directory check fails, for example on an unmounted volume, it keeps
+  those servers. It scores an identical definition once. It does not yet read
+  `CLAUDE_CONFIG_DIR`, `managed-mcp.json`, or plugin MCP servers. (#199)
+
 ### Changed
 
 - A host with a Claude Code settings file and no effective `defaultMode` now reports
