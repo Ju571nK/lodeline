@@ -440,9 +440,24 @@ impl RuleEvidence {
     fn render(self, words: &[String]) -> String {
         match self {
             RuleEvidence::FullPrefix => words.join(" "),
-            // An alternative list `{a|b}` fails the charset and is redacted.
-            RuleEvidence::ProgramOnly => super::claude_project_settings::safe_name(&words[0]),
+            RuleEvidence::ProgramOnly => program_basename(&words[0]),
         }
+    }
+}
+
+/// Basename of the first token, so a path's directories (usernames) never
+/// leave the host. An alternative list `{a|b}` fails the charset and is redacted.
+fn program_basename(word: &str) -> String {
+    let name = word.rsplit('/').next().unwrap_or("");
+    let safe = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
+    if safe {
+        name.to_string()
+    } else {
+        "<redacted>".to_string()
     }
 }
 
@@ -538,6 +553,12 @@ fn rule_invocations(text: &str) -> Vec<&str> {
     let mut rest = text;
     while let Some(i) = rest.find("prefix_rule") {
         let after = &rest[i + "prefix_rule".len()..];
+        // Only a whole identifier counts: `my_prefix_rule(` is someone else's function.
+        let glued = text_before(text, rest, i).is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if glued {
+            rest = after;
+            continue;
+        }
         let trimmed = after.trim_start();
         let Some(body) = trimmed.strip_prefix('(') else {
             rest = after;
@@ -553,6 +574,11 @@ fn rule_invocations(text: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// The char just before byte `i` of `rest`, where `rest` is a suffix of `text`.
+fn text_before(text: &str, rest: &str, i: usize) -> Option<char> {
+    text[..text.len() - rest.len() + i].chars().next_back()
 }
 
 /// Byte offset of the `close` that balances an already-consumed `open`.
@@ -2337,6 +2363,49 @@ mcp_elicitations = "on-request"
                 assert!(!pattern.contains(bad), "{pattern:?}");
             }
         }
+    }
+
+    #[test]
+    fn project_rule_prefix_drops_directories_and_at_signs() {
+        let (dir, p) = project_with("");
+        write_rules(
+            &p.repo_root,
+            "evil.rules",
+            concat!(
+                "prefix_rule(pattern=[\"ghp_ABCDEFGHIJKLMNOP1234\"])\n",
+                "prefix_rule(pattern=[\"sk-live-123@evil.com/path\"])\n",
+                "prefix_rule(pattern=[\"/Users/alice/secretbin\"])\n",
+                "prefix_rule(pattern=[\"abcdefghijklmnopqrstuvwxyz0123456789\"])\n",
+            ),
+        );
+        let reasons = p.assess(dir.path()).unwrap();
+        let got = approvals(&reasons);
+        assert_eq!(
+            got,
+            vec![
+                "<redacted>",
+                "ghp_ABCDEFGHIJKLMNOP1234",
+                "path",
+                "secretbin"
+            ]
+        );
+        for pattern in got {
+            for bad in ["@", "/", "alice", "sk-live"] {
+                assert!(!pattern.contains(bad), "{pattern:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_rule_inside_a_longer_identifier_is_not_a_rule() {
+        assert_eq!(
+            rule_invocations("my_prefix_rule(pattern=[\"zzz\"])\nxprefix_rule(1)\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            rule_invocations("a=1; prefix_rule(pattern=[\"git\"])\n(prefix_rule(2))"),
+            vec!["pattern=[\"git\"]", "2"]
+        );
     }
 
     #[test]
