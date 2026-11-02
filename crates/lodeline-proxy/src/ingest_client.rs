@@ -30,7 +30,10 @@
 //! [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`] is the limit: past it the client is
 //! stopped. These answers back off and quarantine one event per `max_backoff`, so
 //! a stuck head leaves slowly and good events behind it resume. The stop shows as
-//! `central.ingest_stopped`, and only a 200 clears it and the count.
+//! `central.ingest_stopped`, and only a 200 clears it and the count. The count
+//! is kept in the [`GapQueue`], so a restart keeps it, and a restart at the
+//! limit starts stopped, with a full `max_backoff` before the next slow
+//! quarantine (#361).
 //!
 //! An event is never rewritten and never given a new id: the bytes sent for an
 //! event are those it serialized to from the source, on every retry.
@@ -408,7 +411,7 @@ pub struct IngestClient {
     /// Current event cap; halved by a 413, doubled back by successes.
     cap: usize,
     failures: u32,
-    /// See [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`].
+    /// See [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`]. Mirrored durably in `gaps`.
     single_quarantines: u32,
     /// Some while stopped: when the next event may be quarantined. See
     /// [`MAX_CONSECUTIVE_SINGLE_QUARANTINES`].
@@ -427,6 +430,9 @@ impl IngestClient {
         // An open outage left in the (reloaded) queue is closed when the server
         // next answers.
         let open = gaps.open_outage();
+        let single_quarantines = gaps.single_quarantines();
+        let slow_quarantine_at = (single_quarantines >= MAX_CONSECUTIVE_SINGLE_QUARANTINES)
+            .then(|| Instant::now() + params.max_backoff);
         IngestClient {
             gaps,
             central,
@@ -437,8 +443,8 @@ impl IngestClient {
             max_bytes: MAX_BATCH_BYTES,
             cap: MAX_BATCH_EVENTS,
             failures: 0,
-            single_quarantines: 0,
-            slow_quarantine_at: None,
+            single_quarantines,
+            slow_quarantine_at,
             stop_hook: None,
             holds: HashMap::new(),
             outage: Outage {
@@ -714,7 +720,10 @@ impl IngestClient {
         now: Instant,
     ) -> bool {
         if self.single_quarantines < MAX_CONSECUTIVE_SINGLE_QUARANTINES {
+            // Counted durably before the events move: a crash in between
+            // overcounts, never undercounts.
             self.single_quarantines += 1;
+            self.gaps.set_single_quarantines(self.single_quarantines);
             self.quarantine(source, ids, code).await;
             return true;
         }
@@ -765,6 +774,7 @@ impl IngestClient {
                     .record_ingest_ack(time::OffsetDateTime::now_utc());
                 self.cap = (self.cap * 2).clamp(1, self.max_events);
                 self.single_quarantines = 0;
+                self.gaps.set_single_quarantines(0);
                 self.slow_quarantine_at = None;
             }
             IngestOutcome::Quarantine { items } => {
@@ -2231,5 +2241,88 @@ mod tests {
         s.probe = Some(g.clone());
         step(&mut c, &t, &mut s).await;
         assert_eq!(s.gaps_seen_at_quarantine, vec![1]);
+    }
+
+    type Snaps = Arc<Mutex<Vec<crate::state_dir::GapQueueState>>>;
+
+    /// A queue restored from `from`, as at a start, that records every flush.
+    fn durable_queue(from: crate::state_dir::GapQueueState) -> (GapQueue, Snaps) {
+        let snaps: Snaps = Arc::default();
+        let s2 = snaps.clone();
+        let g = GapQueue::restore(from).with_persister(Box::new(move |st| {
+            s2.lock().unwrap().push(st.clone());
+            true
+        }));
+        (g, snaps)
+    }
+
+    fn saved(snaps: &Snaps) -> crate::state_dir::GapQueueState {
+        snaps.lock().unwrap().last().cloned().unwrap()
+    }
+
+    fn restarted(from: crate::state_dir::GapQueueState) -> (IngestClient, Snaps, CentralHealth) {
+        let (g, snaps) = durable_queue(from);
+        let central = CentralHealth::new();
+        let c =
+            IngestClient::new(g, central.clone(), params()).with_batch_limits(1, MAX_BATCH_BYTES);
+        (c, snaps, central)
+    }
+
+    /// #361: the count survives a restart, so a crash loop cannot quarantine
+    /// past the limit, and a restart at the limit is stopped at once.
+    #[tokio::test]
+    async fn quarantine_count_survives_a_restart() {
+        let t = Fake::new(vec![err(422, "semantic_invalid", json!([]))]);
+        let mut s = Mem::with(1..=20);
+        let (mut c, snaps, _) = restarted(Default::default());
+        for _ in 0..CAP - 1 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(s.quarantined.len(), CAP - 1);
+
+        let (mut c, snaps, central) = restarted(saved(&snaps));
+        for _ in 0..5 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(
+            s.quarantined.len(),
+            CAP,
+            "one more answer reaches the limit"
+        );
+        assert!(central.ingest_stopped());
+
+        let (mut c, _, central) = restarted(saved(&snaps));
+        t.set(vec![None]);
+        step(&mut c, &t, &mut s).await;
+        assert!(
+            central.ingest_stopped(),
+            "a restart at the limit is stopped at once"
+        );
+        t.set(vec![err(422, "semantic_invalid", json!([]))]);
+        step(&mut c, &t, &mut s).await;
+        assert_eq!(s.quarantined.len(), CAP, "and keeps the slow period");
+    }
+
+    /// #361: a 200 clears the durable count, so a restart after it has the full
+    /// limit again.
+    #[tokio::test]
+    async fn a_success_clears_the_durable_quarantine_count() {
+        let t = Fake::new(vec![err(422, "semantic_invalid", json!([]))]);
+        let mut s = Mem::with(1..=40);
+        let (mut c, snaps, _) = restarted(Default::default());
+        for _ in 0..CAP + 2 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(s.quarantined.len(), CAP);
+        t.set(vec![ok(&(1..=40).collect::<Vec<_>>(), &[])]);
+        step(&mut c, &t, &mut s).await;
+
+        let (mut c, _, central) = restarted(saved(&snaps));
+        assert!(!central.ingest_stopped());
+        t.set(vec![err(422, "semantic_invalid", json!([]))]);
+        for _ in 0..CAP + 2 {
+            step(&mut c, &t, &mut s).await;
+        }
+        assert_eq!(s.quarantined.len(), 2 * CAP, "the full limit again");
     }
 }

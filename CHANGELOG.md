@@ -320,6 +320,18 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   SMB, NFS, or exFAT, opening the NFC form of an NFD name can fail, so the hash for such
   a file can fail. (#419)
 
+- `lodeline-proxy` no longer restarts its quarantine allowance each time it restarts.
+  After a run of server refusals it stops sending and quarantines at most one event per
+  `max_backoff`, but it kept the count of that run in memory. Under the packaged
+  restart-on-failure, every restart allowed the full run again, so quarantine during a
+  long run of refusals had no limit. The count is now saved as `single_quarantines` in
+  `gap_queue.json`, and only an HTTP 200 from the server clears it. A proxy that restarts
+  at the limit still sends one request per `max_backoff`, so the next 200 clears it
+  without operator action. The field is present only while such a run is in progress. An
+  older `lodeline-proxy` refuses to start on a `gap_queue.json` that holds it, so to
+  downgrade during a run, wait for a 200 first or remove `single_quarantines` from
+  `gap_queue.json` while the proxy is stopped. (#420)
+
 ## [0.12.1] - 2026-11-02
 
 ### Added

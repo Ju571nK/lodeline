@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-01 · spool·ingest 수정 #359 #362 #363 (기준 커밋 `1af08a9`)
+갱신: 2026-11-03 · ingest quarantine count 영속화 #361 (기준 커밋 `19a321a`)
 
 ## 현재 상태
 
@@ -24,6 +24,7 @@
 | #387 | spool status의 `Full`과 admission 거절이 하나의 규칙 `admits(unsent, size, limit)`을 쓰도록 통일. status는 `event_max_bytes` 크기의 event가 들어가지 않으면 `Full`이고, 그보다 작은 event는 `Full` 중에도 들어갈 수 있다. `Ok`이면 허용된 모든 event가 들어간다 | #362 |
 | #387 | stopped 상태에서 이름 없는 409/422 응답이 backoff를 지워 5초에 요청 2개가 나가던 것을 수정. 여러 event batch의 이름 없는 응답은 stopped이면 progress가 아니고, stopped의 느린 quarantine도 progress가 아니다. 이제 stopped는 max backoff(300초, jitter 20%)당 요청 1개이고 손실은 주기당 event 1개 이하. paused clock 테스트: 4500초 구간 요청 1750 → 11–19 | #363 |
 | #389 | stopped 요청 간격 테스트가 가끔 실패하던 것(run 41317778315)을 수정. 원인은 테스트다: `jitter`의 하한은 정수 permille 800이라 300초 주기에서 정확히 240초 지연이 나올 수 있는데, 테스트는 `mul_f32(0.8)`(240.0000036초)과 비교했다. 하한을 `period * 4 / 5`로 바꿨고 제품 코드와 수치는 그대로. 수정 전 paused clock 2000회 중 60회 실패(회당 3.0%), 수정 후 24000회 실패 0 | #387 |
+| #420 | `MAX_CONSECUTIVE_SINGLE_QUARANTINES` count를 `gap_queue.json`의 `single_quarantines`에 영속화. 응답이 event를 옮기기 전에 쓰고(crash 시 과대 계산만 가능), 200의 reset도 기록한다. 한도에서 재시작하면 바로 stopped이고 다음 느린 quarantine까지 max backoff 전체를 기다리므로 crash loop에서 추가 손실이 없다. 읽을 수 없는 `gap_queue.json`은 기존대로 시작 거부. 복구는 server 수정·업그레이드 후 다음 200. 재시작 단위 테스트 2개(수정 전 8 대신 12 quarantine) | #361 |
 
 - clock-jump guard는 시도 후 리뷰에서 되돌렸다(suspend가 jump로 계산되어 R 이후 재전송 위험). 대신 결정 4로 boot-clock age를 구현했다: 행마다 `(boot_id, boot clock)` stamp를 side table에 두고 같은 boot 안에서는 boot clock, boot가 다르거나 stamp가 없으면 wall clock으로 R·Q를 잰다(macOS는 개발 환경, Windows는 wall clock만). quarantine 정책은 #302 결정 1–4로 정함(https://github.com/Ju571nK/lodeline/issues/302#issuecomment-6537627891): Q = E purge, byte 상한 없음(`quarantined_bytes` 노출), replay·upload 없음, boot-clock 기반 age.
 - 운영자 로컬 harness로 main에서 AWS 2노드 smoke 재실행(§3–§13, D1): 시나리오 27/27, ledger 22, privacy 0, outage replay 6, 재시작 fail-closed, spool 32×200/48×503(delta 32), disable/enable 정상, 감사 seq 0–4 ok.

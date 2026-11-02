@@ -456,11 +456,23 @@ so about R/449 s events drain: about 5770 in a 30-day R. R governs what remains.
 Retries back off with jitter of +/-20%, so after a server upgrade the next retry
 comes within 360 s.
 
-Two cases fall outside "backs off" and "at most 288 events per day":
+The count survives a restart (#361). It is kept in `gap_queue.json` as
+`single_quarantines`, written before the events of a counted answer move, and the
+200 that clears it clears it there too. A crash in between can count an answer
+that quarantined nothing, never the reverse. A proxy that starts at the limit
+starts stopped and waits a full max backoff period before its next slow
+quarantine, so a crash loop loses nothing more. An unreadable `gap_queue.json`
+refuses the start, as it did before the count was in it. The operator recovers by
+fixing or upgrading the server: the next 200 clears the count and the stop.
+Deleting `gap_queue.json` clears them too, but it also discards the gaps the
+server has not acknowledged, so it is not the way to recover.
+A `lodeline-proxy` from before the count was kept in `gap_queue.json` rejects the
+unknown field `single_quarantines` and refuses to start. The field is absent unless
+a run is in progress. To downgrade during one, wait for a 200 first, or remove
+`single_quarantines` from `gap_queue.json` while the proxy is stopped.
 
-- A restart clears the count and the slow period, so each restart can lose another
-  8 answers' worth (#361).
-- A 409 by item is quarantined at once, stopped or not, and has no limit.
+One case falls outside "backs off" and "at most 288 events per day": a 409 by
+item is quarantined at once, stopped or not, and has no limit.
 
 A shape the server refuses only on some events does not stop the producer while
 clean batches get 200s between them. SV-3..SV-5 answers name every bad event of a

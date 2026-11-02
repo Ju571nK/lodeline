@@ -1164,11 +1164,13 @@ mod tests {
                 q.push(lc_gap(n)).unwrap();
             }
             q.settle(&ReportOutcome::Conflict { gaps: vec![uid(2)] });
+            q.set_single_quarantines(5);
         }
         let mut lc = Lifecycle::start(&b).unwrap();
         let q = GapQueue::restore(lc.take_gap_queue().expect("queue loaded"));
         assert_eq!(q.pending_ids(), vec![uid(1), uid(3)]);
         assert_eq!(q.quarantined_ids(), vec![uid(2)]);
+        assert_eq!(q.single_quarantines(), 5, "#361");
     }
 
     /// A corrupt gap queue refuses the start, like a corrupt applied mark.

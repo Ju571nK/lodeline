@@ -17,10 +17,11 @@
 //!   database is refused (recreating it would restart the event sequence of an
 //!   epoch the server knows).
 //! * `gap_queue.json` `{schema_version, proxy_id, pending, quarantined,
-//!   overflow_count}`: gap reports not yet acknowledged by the server, those
-//!   quarantined after a 409/422, and the number of gaps that did not fit
-//!   (ledger-and-query.md L6b). Loaded at start; a corrupt or unsafe file
-//!   refuses the start, like `applied.json` and `sequence.json`.
+//!   overflow_count, open_outage?, single_quarantines?}`: gap reports not yet
+//!   acknowledged by the server, those quarantined after a 409/422, the number
+//!   of gaps that did not fit (ledger-and-query.md L6b), and the ingest client's
+//!   outage marker and quarantine count. Loaded at start; a corrupt or unsafe
+//!   file refuses the start, like `applied.json` and `sequence.json`.
 
 use std::fs::File;
 #[cfg(unix)]
@@ -164,6 +165,15 @@ pub struct GapQueueState {
     /// The open `central_outage` gap, if any (absent in files of older builds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_outage: Option<OpenOutage>,
+    /// The ingest client's count toward
+    /// [`crate::ingest_client::MAX_CONSECUTIVE_SINGLE_QUARANTINES`], so a
+    /// restart keeps the limit (#361). Absent while 0 and in older files.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub single_quarantines: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -176,6 +186,8 @@ struct GapQueueFile {
     overflow_count: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     open_outage: Option<OpenOutage>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    single_quarantines: u32,
 }
 
 /// An opened, locked state directory. The lock is released when dropped.
@@ -386,6 +398,7 @@ impl StateDir {
             quarantined: f.quarantined,
             overflow_count: f.overflow_count,
             open_outage: f.open_outage,
+            single_quarantines: f.single_quarantines,
         };
         if let Some(o) = &s.open_outage {
             let ok = lodeline_proxy_api::scalar::Uuid::new(o.gap_id.clone()).is_ok()
@@ -419,6 +432,7 @@ impl StateDir {
             quarantined: state.quarantined.clone(),
             overflow_count: state.overflow_count,
             open_outage: state.open_outage.clone(),
+            single_quarantines: state.single_quarantines,
         };
         let bytes = serde_json::to_vec(&f).expect("gap queue serializes");
         write_atomic(&self.dir, GAP_QUEUE_FILE, &bytes)
@@ -850,6 +864,7 @@ mod tests {
                 started_at: "2026-10-11T00:00:00Z".into(),
                 detected_at: "2026-10-11T00:00:05Z".into(),
             }),
+            single_quarantines: 5,
         };
         sd.write_gap_queue(&st).unwrap();
         assert_eq!(sd.read_gap_queue().unwrap(), Some(st.clone()));
@@ -868,6 +883,8 @@ mod tests {
             good.replace("0000000000aa", "zz"),
             good.replace("\"overflow_count\"", "\"x\":1,\"overflow_count\""),
             good.replace("\"overflow_count\":4", "\"overflow_count\":-1"),
+            good.replace("\"single_quarantines\":5", "\"single_quarantines\":-1"),
+            good.replace("\"single_quarantines\":5", "\"single_quarantines\":\"5\""),
             // a gap id in both lists
             good.replace(g3, g1),
             // a gap the shared validator refuses (no event ids)
