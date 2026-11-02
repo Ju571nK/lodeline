@@ -7,6 +7,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Fixed
+
+- `lodeline reload`, `lodeline show stats|policy-status|targets|risk`, and the live
+  AI Guard section of `lodeline doctor` now use `--control-socket` when you give it.
+  They ignored the flag and always dialed the default socket, so against an agent
+  started on another socket they failed with `cannot reach the lodeline daemon at
+  .../control.sock`. Without the flag they dial the same default as before. On Linux,
+  the `doctor` socket-permission check follows the flag too. On Windows the flag is
+  still ignored and these commands use the default named pipe. `lodeline status`
+  already honored the flag. (#392)
+
 ## [0.12.1] - 2026-11-02
 
 ### Added
