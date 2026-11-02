@@ -65,12 +65,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the next apply lands in the new path. Nothing in `/etc` is moved or deleted.
   `lodeline show paths` and `lodeline doctor` now print the file in force. `--policy`,
   non-root agents, and Windows do not change. `lodeline assess` reads the applied
-  files first. `/var/lib/lodeline` is `0750 root:lodeline`, so a user outside the
-  `lodeline` group gets one warning on stderr and a verdict from `/etc/lodeline`, which
-  can miss signed rules. Add such a user to the group. Any other error checking an
-  applied file also gives one warning and a verdict from `/etc/lodeline`. After the
-  applied file is deleted, `lodeline status` keeps reporting the signed version and its
-  expiry while the local file runs, and only a higher version lands.
+  files first. On the packaged Linux install `/var/lib/lodeline` is `0750 root:lodeline`,
+  so a user outside the `lodeline` group gets one warning on stderr and a verdict from
+  `/etc/lodeline`, which can miss signed rules. Add such a user to the group. Any other
+  error checking an applied file also gives one warning and a verdict from
+  `/etc/lodeline`. After the applied
+  file is deleted, `lodeline status` keeps reporting the signed version and its expiry
+  while the local file runs, and only a higher version lands.
 
 - A reload on a host with no policy file now loads the built-in defaults and any
   rule-pack bundle, as a boot does. It used to keep the previous state, so a bundle
@@ -83,10 +84,12 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   boot, for non-root agents too. It used to count as no policy file, so the agent ran
   on the built-in defaults.
 
-- A signed apply into a new directory now survives a power loss. The agent synced the
-  file into that directory but not the directory into its parent, so the file could
-  vanish while the version stayed recorded. The first boot syncs the directory it
-  creates in the same way.
+- On Unix, a signed apply into a new directory now syncs that directory into its
+  parent before the file lands, so a power loss no longer removes the file while its
+  version stays recorded. The agent synced the file into the directory but not the
+  directory into its parent. A boot that finds the policy file's directory missing
+  creates it and syncs it the same way. An existing directory is left as it is. Windows
+  does no directory sync.
 
 - `lodeline run` without `--policy` now loads the policy at its default path at
   boot. Before, boot read a policy file only
@@ -108,10 +111,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
     `policy.yaml` on either, remove its `shadow-ai-binaries-macos` override before
     you upgrade.
 
-- Boot and the next apply now sync the config directory before they finish an apply
-  that stopped after its rename. Before, the applied version could be recorded while
-  the rename was not yet durable, so a power loss could leave the record ahead of the
-  file. If the sync fails, the apply stays pending and the next boot or apply settles
+- On Unix, boot and the next apply now sync the config directory before they finish an
+  apply that stopped after its rename. Before, the applied version could be recorded
+  while the rename was not yet durable, so a power loss could leave the record ahead of
+  the file. If the sync fails, the apply stays pending and the next boot or apply settles
   it. A signed apply also works when `--policy` is a bare file name; before, it failed
   every time at the directory sync, after the file had already moved.
 
