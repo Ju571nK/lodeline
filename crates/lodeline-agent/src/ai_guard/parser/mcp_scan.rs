@@ -15,6 +15,7 @@ use crate::ai_guard::command_scan::{
 };
 use crate::ai_guard::rubric;
 use lodeline_core::event::{AiGuardReason, LauncherShape};
+use lodeline_core::redact::redact_url;
 use serde_json::Value;
 
 /// Walk `settings.mcpServers` (object keyed by server name) and push reasons.
@@ -37,7 +38,7 @@ pub(crate) fn emit_one_server(name: &str, def: &Value, out: &mut Vec<AiGuardReas
             if scheme_is_remote(u) {
                 out.push(AiGuardReason::McpServerRemote {
                     server_name: name.to_string(),
-                    url: u.to_string(),
+                    url: url_for_evidence(u),
                 });
             }
         }
@@ -115,6 +116,16 @@ pub(crate) fn emit_one_server(name: &str, def: &Value, out: &mut Vec<AiGuardReas
             }
         }
     }
+}
+
+/// #403 — `url` as it may be reported: `scheme://host[:port]`. Userinfo, the
+/// query and path segments can all carry tokens, so none of them is kept. A
+/// scheme-less value with no `.` or `:` is a bare token, not a host, so it is
+/// not echoed either.
+pub(crate) fn url_for_evidence(url: &str) -> String {
+    redact_url(url.trim())
+        .filter(|u| u.contains("://") || u.contains(['.', ':']))
+        .unwrap_or_else(|| "<unparseable-url>".into())
 }
 
 /// True iff the URL scheme (lowercased) is http/https. Lowercasing defeats
@@ -584,8 +595,35 @@ mod tests {
         emit_one_server("ws", &def, &mut out);
         assert!(out.iter().any(|r| matches!(
             r,
-            AiGuardReason::McpServerRemote { url, .. } if url == "wss://evil.example/mcp"
+            AiGuardReason::McpServerRemote { url, .. } if url == "wss://evil.example"
         )));
+    }
+
+    /// #403 — credentials in a remote URL must not reach scan output or events.
+    #[test]
+    fn remote_url_is_reported_without_credentials() {
+        for (raw, want) in [
+            (
+                "https://alice:pw@mcp.example.com:8443/v1/sse?api_key=K#frag",
+                "https://mcp.example.com:8443",
+            ),
+            (
+                "https://mcp.example.com/v1/TOKEN/sse",
+                "https://mcp.example.com",
+            ),
+            // An unencoded `/` in the password ends the authority inside it.
+            ("https://u:pa/ss@evil.example/x", "<unparseable-url>"),
+        ] {
+            let mut out = Vec::new();
+            emit_one_server("s", &serde_json::json!({ "url": raw }), &mut out);
+            assert!(
+                out.iter().any(|r| matches!(
+                    r,
+                    AiGuardReason::McpServerRemote { url, .. } if url == want
+                )),
+                "{raw} -> {out:?}"
+            );
+        }
     }
 
     #[test]

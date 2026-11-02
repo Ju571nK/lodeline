@@ -1,5 +1,6 @@
 //! Phase 3b.7 — RulePackParser: generic AiGuardParser driven by a RulePack.
 
+use crate::ai_guard::parser::mcp_scan::url_for_evidence;
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rule_pack::matcher::{
     compile_condition_regexes, compile_pack_regexes, matches_value, CompileError,
@@ -7,6 +8,7 @@ use crate::ai_guard::rule_pack::matcher::{
 use crate::ai_guard::rule_pack::selector::{eval_json, eval_toml, MatchedValue};
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
 use lodeline_core::policy::{RuleFormat, RulePack, RulePackScope};
+use lodeline_core::redact::has_url_scheme;
 use std::path::{Path, PathBuf};
 
 pub struct RulePackParser {
@@ -154,7 +156,7 @@ impl AiGuardParser for RulePackParser {
 
             for matched in &matches {
                 if matches_value(&rule.matcher, matched, self.compiled_regexes[idx].as_ref()) {
-                    out.push(interpolate_reason(&rule.emit, matched));
+                    out.push(interpolate_reason(&rule.emit, &rule.selector, matched));
                 }
             }
         }
@@ -169,7 +171,11 @@ impl AiGuardParser for RulePackParser {
 /// Interpolate `<selector-key>` and `<selector-value>` tokens in every
 /// String field of the AiGuardReason by serialize → str::replace →
 /// deserialize round-trip. Variants without String fields pass through.
-fn interpolate_reason(reason: &AiGuardReason, matched: &MatchedValue) -> AiGuardReason {
+fn interpolate_reason(
+    reason: &AiGuardReason,
+    selector: &str,
+    matched: &MatchedValue,
+) -> AiGuardReason {
     let serialized = match serde_json::to_string(reason) {
         Ok(s) => s,
         Err(_) => return reason.clone(),
@@ -181,13 +187,35 @@ fn interpolate_reason(reason: &AiGuardReason, matched: &MatchedValue) -> AiGuard
     let key_escaped = serde_json::to_string(&matched.key)
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or_else(|_| matched.key.clone());
-    let value_escaped = serde_json::to_string(&matched.value)
+    // #403 — a URL is redacted before it is interpolated, whatever field it lands in.
+    let value = if is_url_value(selector, &matched.value) {
+        url_for_evidence(&matched.value)
+    } else {
+        matched.value.clone()
+    };
+    let value_escaped = serde_json::to_string(&value)
         .map(|s| s.trim_matches('"').to_string())
-        .unwrap_or_else(|_| matched.value.clone());
+        .unwrap_or(value);
     let interpolated = serialized
         .replace("<selector-key>", &key_escaped)
         .replace("<selector-value>", &value_escaped);
-    serde_json::from_str(&interpolated).unwrap_or_else(|_| reason.clone())
+    let mut out: AiGuardReason =
+        serde_json::from_str(&interpolated).unwrap_or_else(|_| reason.clone());
+    // The url field is redacted even when the pack built it from a non-URL selector.
+    if let AiGuardReason::McpServerRemote { url, .. } = &mut out {
+        *url = url_for_evidence(url);
+    }
+    out
+}
+
+/// A matched value is a URL when its selector names a `…url` key (`url`,
+/// `httpUrl`, `serverURL`) or the value itself starts with `scheme://`.
+fn is_url_value(selector: &str, value: &str) -> bool {
+    selector
+        .rsplit('.')
+        .next()
+        .is_some_and(|key| key.to_ascii_lowercase().ends_with("url"))
+        || has_url_scheme(value)
 }
 
 #[cfg(test)]
@@ -287,6 +315,48 @@ mod tests {
                 assert_eq!(url, "https://a");
             }
             other => panic!("got {other:?}"),
+        }
+    }
+
+    /// #403 — a URL interpolated into a non-URL field is still redacted.
+    #[test]
+    fn interpolated_url_is_redacted_in_any_field() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("mcp.json");
+        std::fs::write(
+            &file,
+            r#"{"mcpServers": {"alpha": {"url": "https://u:pw@a.example/p?k=T"},
+                                "beta": {"endpoint": "https://u:pw@b.example/p"},
+                                "gamma": {"url": "u:pw@c.example"}}}"#,
+        )
+        .unwrap();
+        for (selector, want) in [
+            ("$.mcpServers.*.url", vec!["c.example", "https://a.example"]),
+            ("$.mcpServers.*.endpoint", vec!["https://b.example"]),
+        ] {
+            let pack = pack_with_one_rule(
+                file.to_str().unwrap(),
+                selector,
+                Matcher::Exists,
+                AiGuardReason::McpServerLocalCommand {
+                    server_name: "<selector-key>".into(),
+                    command: "run <selector-value>".into(),
+                },
+            );
+            let out = RulePackParser::new(pack)
+                .unwrap()
+                .assess(Path::new("/unused"))
+                .unwrap();
+            let mut got: Vec<_> = out
+                .iter()
+                .map(|r| match r {
+                    AiGuardReason::McpServerLocalCommand { command, .. } => command.clone(),
+                    other => panic!("got {other:?}"),
+                })
+                .collect();
+            got.sort();
+            let want: Vec<_> = want.iter().map(|w| format!("run {w}")).collect();
+            assert_eq!(got, want, "{selector}");
         }
     }
 

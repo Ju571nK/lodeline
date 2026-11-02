@@ -1027,7 +1027,7 @@ url = "https://mcp.example.com/sse"
             reasons.iter().any(|r| matches!(
                 r,
                 AiGuardReason::McpServerRemote { server_name, url }
-                    if server_name == "acme" && url == "https://mcp.example.com/sse"
+                    if server_name == "acme" && url == "https://mcp.example.com"
             )),
             "expected McpServerRemote, got {reasons:?}"
         );
