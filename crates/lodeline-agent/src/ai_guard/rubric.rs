@@ -4,6 +4,7 @@
 //! delegates to `Rubric::defaults().score()` so existing callers (tests,
 //! doctor static-fallback path) keep working unchanged.
 
+use crate::ai_guard::parser::claude_code::without_managed_label;
 use lodeline_core::event::{AiGuardBucket, AiGuardReason, InstructionDirectiveKind, LauncherShape};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
@@ -24,7 +25,9 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         AiGuardReason::NoSandbox { .. } => "no_sandbox",
         AiGuardReason::PermissionsAllowBroad { .. } => "permissions_allow_broad",
         AiGuardReason::ExternalScriptUnscanned { .. } => "external_script_unscanned",
-        AiGuardReason::BroadMatcher { hook_event, .. } if hook_event == "PreToolUse" => {
+        AiGuardReason::BroadMatcher { hook_event, .. }
+            if without_managed_label(hook_event) == "PreToolUse" =>
+        {
             "broad_matcher_pre_tool_use"
         }
         AiGuardReason::BroadMatcher { .. } => "broad_matcher_other",
@@ -38,7 +41,7 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         // one, and is scored under its own key rather than folded in at the
         // same severity.
         AiGuardReason::AutoApprovalEnabled { mode }
-            if mode == "auto"
+            if without_managed_label(mode) == "auto"
                 || mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE =>
         {
             "auto_approval_enabled_classifier"
