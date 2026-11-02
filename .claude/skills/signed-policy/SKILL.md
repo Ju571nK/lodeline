@@ -75,7 +75,7 @@ Read the coverage table. If your change touches a listed function or block, `che
 
 `check.py` reads the lines under the `Sync commit:` line up to the next heading. Any line there with a pipe character must be a row of the table, and the table needs the three columns Model element, File, and Function. A line that is not a row stops the run with ``check.py: SKILL.md has a coverage row that cannot be parsed: '<line>'``, because a row left out would leave a function untracked. A missing or wrong header stops it with ``check.py: SKILL.md has no coverage table under the `Sync commit:` line``.
 
-Sync commit: `9dfff8c9878db3650401ab1e7ebce9d97dea6276`
+Sync commit: `255f0f7b5aa79961ab424dc710047336eaf1208e`
 
 | Model element | File | Function |
 |---|---|---|
@@ -111,6 +111,7 @@ Sync commit: `9dfff8c9878db3650401ab1e7ebce9d97dea6276`
 | `ReloadCheck, ReloadRetry, ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
 | `ReloadCheck, ReloadRetry` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
 | `ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
+| `ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `note_unfinished` |
 | `ReloadCheck` | `crates/lodeline-agent/src/control.rs` | `Request::ReloadPolicy => {..policy_version_tx.send_modify(` |
 | `Workers` | `crates/lodeline-agent/src/control.rs` | `serve_until` |
 
