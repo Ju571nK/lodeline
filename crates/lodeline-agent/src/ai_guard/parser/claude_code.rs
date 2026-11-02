@@ -958,74 +958,95 @@ impl AiGuardParser for ClaudeCodeProjectParser {
     }
 
     fn assess(&self, _home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        let cd = self.repo_root.join(".claude");
-        let base = super::read_json_optional(&cd.join("settings.json"))?;
-        let local = super::read_json_optional(&cd.join("settings.local.json"))?;
-        let components = super::claude_components::component_hooks(&cd);
-        // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
-        // abort the whole assess and thereby blind us to a malicious
-        // `.claude/settings.json` in the same repo (a corrupt-sidecar evasion
-        // seam). A corrupt `.mcp.json` cannot launch in Claude Code anyway, so
-        // degrading it to "no payload" is safe; settings-side reasons are still
-        // scored. (Contrast `settings.json`, whose corruption Claude itself
-        // also fails on — there the `?` propagation is correct.)
-        let mcp_json = match super::read_json_optional(&self.repo_root.join(".mcp.json")) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    repo = %self.repo_root.display(), error = %e,
-                    "claude project: ignoring unparsable .mcp.json (settings still scored)"
-                );
-                None
-            }
-        };
-        if base.is_none()
-            && local.is_none()
-            && mcp_json.is_none()
-            && !self.repo_root.join("CLAUDE.md").is_file()
-            && !self.repo_root.join("AGENTS.md").is_file()
-            && !cd.join("loop.md").is_file()
-            && components.is_empty()
-        {
-            return Ok(Vec::new());
+        assess_project(
+            &self.repo_root,
+            &super::policy_controls::claude_policy_dir(),
+        )
+    }
+}
+
+/// The project assessment. `policy_dir` is the managed-settings folder,
+/// passed in so tests do not depend on the host's real one.
+fn assess_project(repo_root: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    let cd = repo_root.join(".claude");
+    let base = super::read_json_optional(&cd.join("settings.json"))?;
+    let local = super::read_json_optional(&cd.join("settings.local.json"))?;
+    let components = super::claude_components::component_hooks(&cd);
+    // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
+    // abort the whole assess and thereby blind us to a malicious
+    // `.claude/settings.json` in the same repo (a corrupt-sidecar evasion
+    // seam). A corrupt `.mcp.json` cannot launch in Claude Code anyway, so
+    // degrading it to "no payload" is safe; settings-side reasons are still
+    // scored. (Contrast `settings.json`, whose corruption Claude itself
+    // also fails on — there the `?` propagation is correct.)
+    let mcp_json = match super::read_json_optional(&repo_root.join(".mcp.json")) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                repo = %repo_root.display(), error = %e,
+                "claude project: ignoring unparsable .mcp.json (settings still scored)"
+            );
+            None
         }
-        // No built-in fallback here: the user scope already reports it, and a
-        // project file cannot set `auto` or `bypassPermissions`.
-        let start = start_mode(
+    };
+    if base.is_none()
+        && local.is_none()
+        && mcp_json.is_none()
+        && !repo_root.join("CLAUDE.md").is_file()
+        && !repo_root.join("AGENTS.md").is_file()
+        && !cd.join("loop.md").is_file()
+        && components.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    // Managed `defaultMode` outranks project and local files, and the user
+    // scope already reports it. An unreadable managed file counts as absent.
+    let managed_sets_mode = super::policy_controls::claude_managed_settings(policy_dir)
+        .ok()
+        .is_some_and(|m| {
+            m.pointer("/permissions/defaultMode")
+                .is_some_and(Value::is_string)
+        });
+    // No built-in fallback here: the user scope already reports it, and a
+    // project file cannot set `auto` or `bypassPermissions`.
+    let start = if managed_sets_mode {
+        None
+    } else {
+        start_mode(
             &[
                 (ModeScope::Local, local.as_ref()),
                 (ModeScope::Project, base.as_ref()),
             ],
             false,
             false,
-        );
-        let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
-        let mut out = Vec::new();
-        emit_hook_reasons(&merged, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&components, &mut out);
-        emit_permission_reasons(&merged, &mut out);
-        emit_start_mode_reason(start, &mut out);
-        emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
-        super::claude_project_settings::emit_project_settings_reasons(&merged, &mut out);
-        // #145 — auto-enable posture: emit ONLY when a server-enable key is
-        // present AND the project actually ships `.mcp.json` servers for it
-        // to launch (key-only with no payload -> no emit).
-        if has_project_mcp_servers(mcp_json.as_ref()) {
-            if let Some(mechanism) = project_auto_enable_mechanism(&merged) {
-                out.push(AiGuardReason::ProjectMcpAutoEnabled {
-                    mechanism: mechanism.to_string(),
-                });
-            }
+        )
+    };
+    let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
+    let mut out = Vec::new();
+    emit_hook_reasons(&merged, &mut out)?;
+    super::claude_components::emit_component_hook_reasons(&components, &mut out);
+    emit_permission_reasons(&merged, &mut out);
+    emit_start_mode_reason(start, &mut out);
+    emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
+    super::claude_project_settings::emit_project_settings_reasons(&merged, &mut out);
+    // #145 — auto-enable posture: emit ONLY when a server-enable key is
+    // present AND the project actually ships `.mcp.json` servers for it
+    // to launch (key-only with no payload -> no emit).
+    if has_project_mcp_servers(mcp_json.as_ref()) {
+        if let Some(mechanism) = project_auto_enable_mechanism(&merged) {
+            out.push(AiGuardReason::ProjectMcpAutoEnabled {
+                mechanism: mechanism.to_string(),
+            });
         }
-        // #199 — a committed loop prompt. `autoMode` is deliberately NOT read
-        // here: since v2.1.207 the classifier ignores the repo-local copy, so
-        // flagging one would report a control that is not in force.
-        emit_loop_prompt_reason(&cd, "project", &mut out);
-        // #146 — scan committed instruction files (defensive read each).
-        super::instruction_scan::scan_file_path(&self.repo_root.join("CLAUDE.md"), &mut out);
-        super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
-        Ok(out)
     }
+    // #199 — a committed loop prompt. `autoMode` is deliberately NOT read
+    // here: since v2.1.207 the classifier ignores the repo-local copy, so
+    // flagging one would report a control that is not in force.
+    emit_loop_prompt_reason(&cd, "project", &mut out);
+    // #146 — scan committed instruction files (defensive read each).
+    super::instruction_scan::scan_file_path(&repo_root.join("CLAUDE.md"), &mut out);
+    super::instruction_scan::scan_file_path(&repo_root.join("AGENTS.md"), &mut out);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -2282,6 +2303,40 @@ mod tests {
             let reasons = p.assess(Path::new("/unused")).unwrap();
             assert_eq!(auto_findings(&reasons), want, "{file} {mode}");
         }
+    }
+
+    /// Managed `defaultMode` outranks project and local files, so a managed
+    /// start mode leaves a committed `acceptEdits` unscored. User scope owns
+    /// the managed finding.
+    #[test]
+    fn managed_default_mode_outranks_the_project_default_mode() {
+        for managed in ["default", "plan", "acceptEdits", "auto"] {
+            let repo = tempdir().unwrap();
+            write_file(
+                repo.path(),
+                ".claude/settings.json",
+                r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
+            );
+            let policy = tempdir().unwrap();
+            write_file(
+                policy.path(),
+                "managed-settings.d/10-mode.json",
+                &format!(r#"{{"permissions": {{"defaultMode": "{managed}"}}}}"#),
+            );
+            let reasons = assess_project(repo.path(), policy.path()).unwrap();
+            assert!(
+                auto_findings(&reasons).is_empty(),
+                "managed {managed}: {reasons:?}"
+            );
+        }
+        let repo = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
+        );
+        let reasons = assess_project(repo.path(), &repo.path().join("no-policy")).unwrap();
+        assert_eq!(auto_findings(&reasons), ["mode:acceptEdits"]);
     }
 
     // ---- #191 signal 2: unattended scheduled tasks ----
