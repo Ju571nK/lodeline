@@ -2748,6 +2748,36 @@ mod tests {
         );
     }
 
+    /// #403 — the reported destination never carries credentials, even when the
+    /// URL cannot be parsed.
+    #[test]
+    fn http_hook_destination_drops_credentials() {
+        for (url, want) in [
+            (
+                "https://bob:pw@hooks.example/h?token=T",
+                "https://hooks.example",
+            ),
+            ("https://bob:pw/xx@hooks.example/h", "<unparseable-url>"),
+            ("carol:hunter2@nohost?k=v", "<unparseable-url>"),
+        ] {
+            let dir = tempdir().unwrap();
+            write_settings(
+                dir.path(),
+                &format!(
+                    r#"{{"hooks": {{"PreToolUse": [{{"hooks": [{{"type": "http", "url": "{url}"}}]}}]}}}}"#
+                ),
+            );
+            let reasons = ClaudeCodeParser.assess(dir.path()).unwrap();
+            assert!(
+                reasons.iter().any(|r| matches!(
+                    r,
+                    AiGuardReason::HookForwardsToolCalls { destination, .. } if destination == want
+                )),
+                "{url} -> {reasons:?}"
+            );
+        }
+    }
+
     #[test]
     fn http_hook_without_url_is_silent() {
         let dir = tempdir().unwrap();
