@@ -109,14 +109,18 @@ fn assess_user(
     // An unreadable managed file counts as absent here; the controls channel
     // reports its error.
     let managed = super::policy_controls::claude_managed_settings(policy_dir).ok();
-    // Managed hooks, rules or classifier lists apply to every session, so
-    // they are scored even when the user has configured nothing. Other
-    // managed keys, such as `sandbox`, are not evidence the tool is in use.
-    let managed_configures = managed.as_ref().is_some_and(|m| {
-        ["hooks", "permissions", "autoMode"]
-            .iter()
-            .any(|k| m.get(k).is_some())
-    });
+    let managed_mcp = super::policy_controls::claude_managed_mcp(policy_dir);
+    let managed_servers = managed_mcp_servers(managed_mcp.as_ref(), managed.as_ref());
+    // Managed hooks, rules, classifier lists or servers apply to every
+    // session, so they are scored even when the user has configured nothing.
+    // Other managed keys, such as `sandbox`, are not evidence the tool is in
+    // use.
+    let managed_configures = !managed_servers.is_empty()
+        || managed.as_ref().is_some_and(|m| {
+            ["hooks", "permissions", "autoMode"]
+                .iter()
+                .any(|k| m.get(k).is_some())
+        });
 
     // Missing primary file with no overlay → operator hasn't enabled tool.
     // #191 — a real unattended task (a `scheduled-tasks/<name>/SKILL.md`) is
@@ -197,8 +201,22 @@ fn assess_user(
     emit_scheduled_task_reasons(claude, &mut out);
     // #199 — the other unattended-prompt surface, enumerated alongside.
     emit_loop_prompt_reason(claude, "user", &mut out);
-    emit_mcp_reasons(&merged, &mut out);
-    super::claude_json::emit_mcp_reasons(&claude_json_servers, &merged, &mut out);
+    // #199 — a deployed `managed-mcp.json` takes exclusive control, so no
+    // user server loads; otherwise a provided server replaces the user's
+    // server of the same name.
+    if managed_mcp.is_none() {
+        emit_mcp_reasons(&merged, &mut out);
+        let user_servers: Vec<_> = claude_json_servers
+            .into_iter()
+            .filter(|(name, _)| !managed_servers.iter().any(|(m, _)| m == name))
+            .collect();
+        super::claude_json::emit_mcp_reasons(&user_servers, &merged, &mut out);
+    }
+    let mut found = Vec::new();
+    for (name, def) in managed_servers {
+        super::mcp_scan::emit_one_server(name, def, &mut found);
+    }
+    push_managed(found, &mut out);
     // #145 (codex C8) — a user-global `enableAllProjectMcpServers: true`
     // blanket-approves project MCP servers across EVERY repo. No single
     // repo context here, so emit on the key alone.
@@ -214,6 +232,31 @@ fn assess_user(
     // #146 — user-global instruction file.
     super::instruction_scan::scan_file_path(&claude.join("CLAUDE.md"), &mut out);
     Ok(out)
+}
+
+/// #199 — the MCP servers the organization deploys: `managed-mcp.json`
+/// first, because its entry wins a name both define, then the managed
+/// `managedMcpServers` key.
+fn managed_mcp_servers<'a>(
+    file: Option<&'a Value>,
+    settings: Option<&'a Value>,
+) -> Vec<(&'a str, &'a Value)> {
+    let mut out: Vec<(&str, &Value)> = Vec::new();
+    let maps = [
+        file.and_then(|f| f.get("mcpServers")),
+        settings.and_then(|s| s.get("managedMcpServers")),
+    ];
+    for (name, def) in maps
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .flatten()
+    {
+        if !out.iter().any(|(n, _)| n == name) {
+            out.push((name, def));
+        }
+    }
+    out
 }
 
 /// Hook scripts outside `<claude_dir>/hooks` that settings or skill/subagent
@@ -739,8 +782,9 @@ fn emit_broad_allow_reasons(perms: &Value, out: &mut Vec<AiGuardReason>) {
 /// `defaultMode` is set. Scored like an explicit `"auto"`.
 pub(crate) const BUILT_IN_AUTO_MODE: &str = "auto (built-in default)";
 
-/// Appended to the evidence of a reason read from the managed settings files,
-/// `managed-settings.json` and `managed-settings.d/*.json`. Those files are
+/// Appended to the evidence of a reason read from the managed files,
+/// `managed-settings.json`, `managed-settings.d/*.json` and
+/// `managed-mcp.json`. Those files are
 /// the only managed source Lodeline reads. The macOS plist, the Windows
 /// registry and server-managed settings are not read, and by default Claude
 /// Code applies only the highest-priority managed source, so on a host with
@@ -765,6 +809,10 @@ fn label_managed(reason: &mut AiGuardReason) {
         AiGuardReason::StandingCommandApproval { pattern } => pattern,
         AiGuardReason::AutoModeDefaultsDropped { list } => list,
         AiGuardReason::AutoApprovalEnabled { mode } => mode,
+        AiGuardReason::McpServerRemote { server_name, .. }
+        | AiGuardReason::McpServerLocalCommand { server_name, .. }
+        | AiGuardReason::McpServerSuspiciousLauncher { server_name, .. }
+        | AiGuardReason::TrustedMcpServer { server_name } => server_name,
         _ => return,
     };
     text.push_str(MANAGED_FILE_LABEL);
@@ -2808,6 +2856,15 @@ mod tests {
         assert_eq!(
             mcp_server_names(&reasons),
             ["org (managed file)", "search (managed file)"],
+            "{reasons:?}"
+        );
+
+        // A file that does not parse is not taken as deployed.
+        write_file(policy.path(), "managed-mcp.json", "{");
+        let reasons = assess();
+        assert_eq!(
+            mcp_server_names(&reasons),
+            ["mine", "search (managed file)"],
             "{reasons:?}"
         );
     }
