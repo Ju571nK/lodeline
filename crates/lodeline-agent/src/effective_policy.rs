@@ -47,15 +47,20 @@ pub fn load_effective_policy(
     rule_packs_path: &Path,
 ) -> anyhow::Result<(Rubric, DenyEvaluator, AiGuardBucket)> {
     // ── 1. Parse policy.yaml (optional — absent file → None) ─────────────────
-    let user_doc = if policy_path.exists() {
-        let yaml = std::fs::read_to_string(policy_path)
-            .map_err(|e| anyhow::anyhow!("policy.yaml read failed: {e}"))?;
-        Some(
+    // Only NotFound means absent: `exists()` also says false on a permission or
+    // not-a-directory error, which would silently score with the defaults.
+    let user_doc = match std::fs::read_to_string(policy_path) {
+        Ok(yaml) => Some(
             lodeline_core::policy::parse(&yaml)
                 .map_err(|e| anyhow::anyhow!("policy.yaml parse failed: {e}"))?,
-        )
-    } else {
-        None
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "policy.yaml read failed ({}): {e}",
+                policy_path.display()
+            ))
+        }
     };
 
     // ── 2. Read the rule-pack bundle ─────────────────────────────────────────
@@ -238,5 +243,21 @@ mod tests {
             result.is_err(),
             "expected Err for malformed policy.yaml, got Ok"
         );
+    }
+
+    /// A policy.yaml that cannot be read is an error, not an absent file.
+    #[cfg(unix)]
+    #[test]
+    fn load_effective_policy_unreadable_policy_errs() {
+        let dir = tempdir().unwrap();
+        let not_a_dir = dir.path().join("file");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let policy_path = not_a_dir.join("policy.yaml");
+        let rule_packs_path = dir.path().join("rule-packs.yaml");
+
+        let Err(err) = load_effective_policy(&policy_path, &rule_packs_path) else {
+            panic!("expected Err for an unreadable policy.yaml");
+        };
+        assert!(err.to_string().contains("policy.yaml read failed"), "{err}");
     }
 }

@@ -257,6 +257,15 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the URL does not parse. The read token was never logged or returned. Logs and MCP
   client transcripts from earlier versions still hold the base URL as written. (#412)
 
+- `lodeline assess`, `lodeline show`, and `lodeline doctor` no longer treat a
+  `policy.yaml` they cannot check as absent. A permission error on the policy folder, or
+  a path component that is a file, used to make all three use the built-in defaults
+  without saying so. Now only a missing file means "no policy", and a missing file still
+  uses the defaults as before. `lodeline assess` exits 1 with `policy load failed` and
+  the file name. `lodeline show` exits with the read error. `lodeline doctor` prints
+  `[ERROR] cannot read policy` and counts it. The agent service already failed on such
+  errors, and a `rule-packs.yaml` read error already behaved this way. (#416)
+
 ## [0.12.1] - 2026-11-02
 
 ### Added
