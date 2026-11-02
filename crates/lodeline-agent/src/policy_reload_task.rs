@@ -232,6 +232,9 @@ pub struct ReloadCtx {
     /// Why the last reload kept something from before, empty once one finished. `run`
     /// retries on each root tick until it empties.
     pub unfinished: Vec<String>,
+    /// The policy text the last finished reload applied, `None` for no file. A retry
+    /// compares what it read with this to see if it has anything to apply.
+    pub applied_policy: Option<String>,
 }
 
 /// Notes why this reload did not finish. Returns whether `last`, the reasons of the
@@ -288,9 +291,9 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     let policy_in_force = ctx.paths.policy.in_force();
     // Like boot, a host with no policy file runs on defaults, and a rule-pack bundle
     // still loads over them.
-    let doc = match std::fs::read_to_string(policy_in_force) {
+    let read = match std::fs::read_to_string(policy_in_force) {
         Ok(yaml) => match lodeline_core::policy::parse(&yaml) {
-            Ok(d) => Some(d),
+            Ok(d) => Some((d, yaml)),
             Err(e) => {
                 if note_unfinished(&mut ctx.unfinished, &last, &e.to_string()) {
                     tracing::error!(error = %e, "policy reload: re-parse failed; keeping previous targets");
@@ -314,6 +317,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             return;
         }
     };
+    let (doc, policy_text) = read.unzip();
     let defaults = match lodeline_core::policy::defaults() {
         Ok(d) => d,
         Err(e) => {
@@ -336,9 +340,9 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         BundleState::Present(_) | BundleState::Absent => None,
     };
     if let Some(reason) = kept_bundle {
-        // The reload before this one applied all else with the last good bundle, and
-        // applying again re-seeds the warmup hashes every root tick.
-        if last == [reason.as_str()] {
+        // The reload before this one applied this policy with the last good bundle,
+        // and applying again re-seeds the warmup hashes every root tick.
+        if last == [reason.as_str()] && ctx.applied_policy == policy_text {
             ctx.unfinished = last;
             return;
         }
@@ -375,6 +379,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         }
     };
     ctx.policy_file_loaded = loaded_a_file;
+    ctx.applied_policy = policy_text;
 
     // #115 / #134 — rebuild the shared deny evaluator from the freshly-merged
     // policy. Keep-previous on deny-id validation failure OR regex compile
@@ -765,6 +770,7 @@ mod tests {
                 ))),
                 last_good_bundle: None,
                 unfinished: Vec::new(),
+                applied_policy: None,
             },
             plat,
             targets_rx,
@@ -830,6 +836,7 @@ mod tests {
                 ))),
                 last_good_bundle: None,
                 unfinished: Vec::new(),
+                applied_policy: None,
             },
             plat,
             targets_rx,
@@ -1107,29 +1114,29 @@ mod tests {
         running.stop().await;
     }
 
-    /// Everything `f` logs on this thread.
+    /// Everything `f` logs on this thread. The subscriber is process-wide because
+    /// tracing caches a callsite's interest when any thread first reaches it, so a
+    /// thread-local subscriber loses a callsite another test reached first.
     fn logs_of(f: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct Lines(Arc<Mutex<Vec<u8>>>);
+        thread_local!(static LINES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) });
+        struct Lines;
         impl std::io::Write for Lines {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().extend_from_slice(bytes);
+                // A thread that is exiting may log after its buffer is gone.
+                let _ = LINES.try_with(|lines| lines.borrow_mut().extend_from_slice(bytes));
                 Ok(bytes.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
         }
-        let lines = Lines::default();
-        let writer = lines.clone();
-        tracing::subscriber::with_default(
-            tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .finish(),
-            f,
-        );
-        let bytes = lines.0.lock().clone();
-        String::from_utf8(bytes).unwrap()
+        static SUBSCRIBER: std::sync::Once = std::sync::Once::new();
+        SUBSCRIBER.call_once(|| tracing_subscriber::fmt().with_writer(|| Lines).init());
+        // A callsite first reached during the install cached no subscriber.
+        tracing::callsite::rebuild_interest_cache();
+        LINES.take();
+        f();
+        String::from_utf8(LINES.take()).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1149,7 +1156,10 @@ mod tests {
         assert_eq!(ctx.unfinished.len(), 1);
 
         std::fs::remove_file(&ctx.paths.policy.applied).unwrap();
-        let logs = logs_of(|| reload(&mut ctx, &plat));
+        let logs = logs_of(|| {
+            reload(&mut ctx, &plat);
+            reload(&mut ctx, &plat);
+        });
         assert_eq!(logs.matches("policy file is missing").count(), 1, "{logs}");
 
         std::fs::write(
@@ -1167,25 +1177,67 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_retry_that_finds_the_same_bad_bundle_applies_nothing_and_logs_nothing_new() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
-        let (mut ctx, plat, mut targets_rx) = build_ctx(dir.path(), yaml);
+        let watched = dir.path().join("a.json");
+        let yaml = policy_yaml("target-a", &watched.display().to_string(), "critical");
+        let (mut ctx, plat, mut targets_rx) = build_ctx(dir.path(), &yaml);
         let bundle = ctx.paths.rule_packs.applied.clone();
         std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
         reload(&mut ctx, &plat);
 
         for bad in ["}{not yaml", ""] {
             std::fs::write(&bundle, bad).unwrap();
+            std::fs::write(&watched, format!("seen with {bad:?}")).unwrap();
             let logs = logs_of(|| reload(&mut ctx, &plat));
             assert_eq!(logs.matches("retaining last good").count(), 1, "{logs}");
             assert!(has_pack(&ctx.parsers, "old-pack"));
+            let key = normalizer::canonicalize_glob_prefix(&watched);
+            let seeded = ctx.cache.lock().get(&key).unwrap();
+            assert!(seeded.is_some());
 
+            std::fs::write(&watched, "changed after the warmup").unwrap();
             targets_rx.mark_unchanged();
             let logs = logs_of(|| reload(&mut ctx, &plat));
             assert!(!logs.contains("retaining last good"), "{logs}");
-            assert!(!logs.contains("applied to live watcher"), "{logs}");
             assert!(!targets_rx.has_changed().unwrap());
+            assert_eq!(ctx.cache.lock().get(&key).unwrap(), seeded, "no warmup");
             assert!(!ctx.unfinished.is_empty(), "the retry goes on");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_policy_applies_on_the_root_tick_over_the_same_bad_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = format!("{}/a.json", dir.path().display());
+        let (mut ctx, plat, mut targets_rx) =
+            build_ctx(dir.path(), &policy_yaml("target-a", &path, "standard"));
+        let local = dir.path().join("local-policy.yaml");
+        std::fs::write(&local, policy_yaml("local-rule", &path, "standard")).unwrap();
+        ctx.paths.policy.local = Some(local);
+        let applied = ctx.paths.policy.applied.clone();
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+        let running = Running::start(ctx);
+
+        std::fs::write(&bundle, "}{not yaml").unwrap();
+        running.version.send(2).unwrap();
+        running.settle().await;
+        running.tick().await;
+
+        std::fs::write(&applied, policy_yaml("target-b", &path, "standard")).unwrap();
+        running.tick().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "target-b"));
+        assert!(has_pack(&running.parsers, "old-pack"));
+
+        targets_rx.mark_unchanged();
+        running.tick().await;
+        assert!(!targets_rx.has_changed().unwrap(), "nothing new to apply");
+
+        std::fs::remove_file(&applied).unwrap();
+        running.tick().await;
+        assert!(targets_rx.borrow().iter().any(|c| c.id == "local-rule"));
+        assert!(has_pack(&running.parsers, "old-pack"));
+        running.stop().await;
     }
 
     // Phase 3b.6.1 — per-repo Continue parser hot-reload reconciliation.

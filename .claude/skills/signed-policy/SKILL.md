@@ -59,9 +59,9 @@ Each config checks only the properties that list it in the last column. A proper
 
 | Config | Kind | Connections | Failed steps | Power cuts | Hand edits | Distinct states |
 |---|---|---|---|---|---|---|
-| `policy` | policy | 2 | yes | yes | no | 1,670,436 |
+| `policy` | policy | 2 | yes | yes | no | 2,075,700 |
 | `rule_packs` | bundle | 2 | yes | yes | no | 1,438,404 |
-| `local_edits` | policy | 2 | yes | no | yes | 3,637,988 |
+| `local_edits` | policy | 2 | yes | no | yes | 7,121,540 |
 
 - `policy` checks every property except `LoadedPolicyKept`. `rule_packs` checks the same less `ExpiryMatchesDisk`, which covers `policy` only.
 - A failed step is an error from `record_pending`, the rename, the directory fsync, or `promote_pending`, or a reload that fails and keeps what is live (`ReloadReadFails`).
