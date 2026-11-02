@@ -302,13 +302,7 @@ fn assess_user_layers(
     }
     // #200 — standing command approvals, which live outside config.toml.
     // System rules are managed and always load.
-    emit_rules_reasons(
-        &[
-            (system, RuleEvidence::ProgramOnly),
-            (user, RuleEvidence::FullPrefix),
-        ],
-        &mut out,
-    );
+    emit_rules_reasons(&[system, user], &mut out);
     Ok(out)
 }
 
@@ -404,12 +398,13 @@ const MAX_STANDING_APPROVAL_REASONS: usize = 32;
 /// shallow: it extracts the quoted strings from the `pattern=[...]` list of
 /// any rule that allows, and ignores rule forms it does not recognize rather
 /// than guessing at their meaning. Patterns are deduped across `layers`.
-fn emit_rules_reasons(layers: &[(&CodexLayer, RuleEvidence)], out: &mut Vec<AiGuardReason>) {
+///
+/// Only the program name of a prefix leaves the host, whatever the layer:
+/// later argv words are free text that can hold a token or URL.
+fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
     let mut patterns: Vec<String> = layers
         .iter()
-        .flat_map(|(layer, evidence)| {
-            allow_patterns_in_rules_dir(&layer.dir.join("rules"), *evidence)
-        })
+        .flat_map(|layer| allow_patterns_in_rules_dir(&layer.dir.join("rules")))
         .collect();
     patterns.sort();
     patterns.dedup();
@@ -426,27 +421,10 @@ fn emit_rules_reasons(layers: &[(&CodexLayer, RuleEvidence)], out: &mut Vec<AiGu
     }
 }
 
-/// #200 — how much of an allowed prefix a finding may carry. The user wrote
-/// `~/.codex/rules` themselves; a repo's or the system's rules are someone
-/// else's free text, which can hold a token or URL, so only the program name
-/// leaves the host.
-#[derive(Clone, Copy)]
-enum RuleEvidence {
-    FullPrefix,
-    ProgramOnly,
-}
-
-impl RuleEvidence {
-    fn render(self, words: &[String]) -> String {
-        match self {
-            RuleEvidence::FullPrefix => words.join(" "),
-            RuleEvidence::ProgramOnly => program_basename(&words[0]),
-        }
-    }
-}
-
 /// Basename of the first token, so a path's directories (usernames) never
-/// leave the host. An alternative list `{a|b}` fails the charset and is redacted,
+/// leave the host. POSIX and Windows separators both count. A home directory
+/// itself (`/home/alice`, `C:\Users\alice`) names a user, not a program, and
+/// is redacted. An alternative list `{a|b}` fails the charset and is redacted,
 /// and so does a name shaped like a token (a known token prefix, or 20+
 /// characters mixing letters and digits).
 fn program_basename(word: &str) -> String {
@@ -463,12 +441,18 @@ fn program_basename(word: &str) -> String {
         "xoxp-",
         "AKIA",
     ];
-    let name = word.rsplit('/').next().unwrap_or("");
+    let mut parts = word.rsplit(['/', '\\']);
+    let name = parts.next().unwrap_or("");
+    // Skip empty parts: an unescaped rules string keeps `\\` doubled.
+    let home_dir = parts
+        .find(|p| !p.is_empty())
+        .is_some_and(|p| p.eq_ignore_ascii_case("home") || p.eq_ignore_ascii_case("Users"));
     let token_like = TOKEN_PREFIXES.iter().any(|p| name.starts_with(p))
         || (name.len() >= 20
             && name.chars().any(|c| c.is_ascii_digit())
             && name.chars().any(|c| c.is_ascii_alphabetic()));
     let safe = !name.is_empty()
+        && !home_dir
         && !token_like
         && name.len() <= 32
         && name
@@ -482,7 +466,7 @@ fn program_basename(word: &str) -> String {
 }
 
 /// Allowed prefixes in one `rules/` dir, at most `MAX_RULES_FILES` files.
-fn allow_patterns_in_rules_dir(rules_dir: &Path, evidence: RuleEvidence) -> Vec<String> {
+fn allow_patterns_in_rules_dir(rules_dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(rules_dir) else {
         return Vec::new();
     };
@@ -511,7 +495,7 @@ fn allow_patterns_in_rules_dir(rules_dir: &Path, evidence: RuleEvidence) -> Vec<
         patterns.extend(
             allow_patterns_in_rules_text(&text)
                 .iter()
-                .map(|words| evidence.render(words)),
+                .map(|words| program_basename(&words[0])),
         );
     }
     patterns
@@ -568,37 +552,50 @@ fn strip_comments(text: &str) -> String {
 
 /// One `prefix_rule( ... )` invocation's argument text. Scans the whole file
 /// rather than a line at a time: the documented form spans several lines.
+/// Only a call at the top level counts: not one inside a string literal, not
+/// a method call `x.prefix_rule(`, and not a longer name `my_prefix_rule(`.
 fn rule_invocations(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("prefix_rule") {
-        let after = &rest[i + "prefix_rule".len()..];
-        // Only a whole identifier counts: `my_prefix_rule(` is someone else's function.
-        let glued = text_before(text, rest, i).is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if glued {
-            rest = after;
+    let mut quote: Option<char> = None;
+    let mut prev: Option<char> = None;
+    let mut resume = 0usize;
+    let mut chars = text.char_indices();
+    while let Some((i, c)) = chars.next() {
+        let before = prev.replace(c);
+        if i < resume {
             continue;
         }
-        let trimmed = after.trim_start();
-        let Some(body) = trimmed.strip_prefix('(') else {
-            rest = after;
+        if let Some(q) = quote {
+            if c == '\\' {
+                chars.next();
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+            continue;
+        }
+        if !text[i..].starts_with("prefix_rule")
+            || before.is_some_and(|b| b.is_alphanumeric() || b == '_' || b == '.')
+        {
+            continue;
+        }
+        let after = &text[i + "prefix_rule".len()..];
+        let Some(body) = after.trim_start().strip_prefix('(') else {
             continue;
         };
         match balanced_end(body, '(', ')') {
             Some(end) => {
                 out.push(&body[..end]);
-                rest = &body[end..];
+                resume = text.len() - body.len() + end;
             }
             // Unterminated invocation: nothing further to read.
             None => break,
         }
     }
     out
-}
-
-/// The char just before byte `i` of `rest`, where `rest` is a suffix of `text`.
-fn text_before(text: &str, rest: &str, i: usize) -> Option<char> {
-    text[..text.len() - rest.len() + i].chars().next_back()
 }
 
 /// Byte offset of the `close` that balances an already-consumed `open`.
@@ -980,7 +977,7 @@ impl AiGuardParser for CodexProjectParser {
                 });
             }
         }
-        emit_rules_reasons(&[(&layer, RuleEvidence::ProgramOnly)], &mut out);
+        emit_rules_reasons(&[&layer], &mut out);
         // #146 — AGENTS.md is Codex's first-class instruction file.
         super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
         Ok(out)
@@ -1749,12 +1746,8 @@ mcp_elicitations = "on-request"
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
         // The list is one argv sequence, not three independent approvals:
-        // this rule approves the command `codex mcp login`.
-        assert_eq!(
-            approvals(&reasons),
-            vec!["codex mcp login"],
-            "got {reasons:?}"
-        );
+        // this rule approves `codex mcp login`, reported by its program.
+        assert_eq!(approvals(&reasons), vec!["codex"], "got {reasons:?}");
     }
 
     fn approvals(reasons: &[AiGuardReason]) -> Vec<&str> {
@@ -1778,11 +1771,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(pattern=[\"gh\", \"pr\", [\"view\", \"list\"]], decision=\"allow\")\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(
-            approvals(&reasons),
-            vec!["gh pr {view|list}"],
-            "got {reasons:?}"
-        );
+        assert_eq!(approvals(&reasons), vec!["gh"], "got {reasons:?}");
     }
 
     /// The keyword appearing in a comment or inside a quoted string is not a
@@ -1813,7 +1802,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(\n    pattern = [\"cargo\", \"test\"],\n    decision = \"allow\",\n)\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(approvals(&reasons), vec!["cargo test"], "got {reasons:?}");
+        assert_eq!(approvals(&reasons), vec!["cargo"], "got {reasons:?}");
     }
 
     /// A bracket or comment character inside a string must not shift the
@@ -1827,11 +1816,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(pattern=[\"sh\", \"-c\", \"echo ]# not a comment\"], decision=\"allow\")\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(
-            approvals(&reasons),
-            vec!["sh -c echo ]# not a comment"],
-            "got {reasons:?}"
-        );
+        assert_eq!(approvals(&reasons), vec!["sh"], "got {reasons:?}");
     }
 
     /// A deny rule is a control, not a risk.
@@ -2254,7 +2239,7 @@ mcp_elicitations = "on-request"
             "prefix_rule(pattern=[\"git\", \"push\"])\n",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert_eq!(approvals(&reasons), vec!["git push"], "{reasons:?}");
+        assert_eq!(approvals(&reasons), vec!["git"], "{reasons:?}");
 
         write_rules(
             dir.path(),
@@ -2396,6 +2381,10 @@ mcp_elicitations = "on-request"
                 "prefix_rule(pattern=[\"sk-live-123@evil.com/path\"])\n",
                 "prefix_rule(pattern=[\"/Users/alice/secretbin\"])\n",
                 "prefix_rule(pattern=[\"abcdefghijklmnopqrstuvwxyz0123456789\"])\n",
+                "prefix_rule(pattern=[\"/home/alice\"])\n",
+                "prefix_rule(pattern=[\"/Users/alice/\"])\n",
+                "prefix_rule(pattern=[\"C:\\\\Users\\\\alice\"])\n",
+                "prefix_rule(pattern=['C:\\Users\\alice'])\n",
             ),
         );
         let reasons = p.assess(dir.path()).unwrap();
@@ -2409,9 +2398,29 @@ mcp_elicitations = "on-request"
     }
 
     #[test]
+    fn windows_paths_reduce_to_the_program_name() {
+        let (dir, p) = project_with("");
+        write_rules(
+            &p.repo_root,
+            "win.rules",
+            concat!(
+                "prefix_rule(pattern=[\"C:\\\\Tools\\\\bin\\\\git.exe\", \"push\"])\n",
+                "prefix_rule(pattern=['D:\\x\\y.exe'])\n",
+            ),
+        );
+        let reasons = p.assess(dir.path()).unwrap();
+        assert_eq!(approvals(&reasons), vec!["git.exe", "y.exe"], "{reasons:?}");
+    }
+
+    #[test]
     fn prefix_rule_inside_a_longer_identifier_is_not_a_rule() {
         assert_eq!(
-            rule_invocations("my_prefix_rule(pattern=[\"zzz\"])\nxprefix_rule(1)\n"),
+            rule_invocations(concat!(
+                "my_prefix_rule(pattern=[\"zzz\"])\nxprefix_rule(1)\n",
+                "x.prefix_rule(pattern=[\"m\"])\n",
+                "note(\"prefix_rule(pattern=[\\\"s\\\"])\")\n",
+                "note('prefix_rule(3)')\n",
+            )),
             Vec::<&str>::new()
         );
         assert_eq!(
@@ -2421,17 +2430,21 @@ mcp_elicitations = "on-request"
     }
 
     #[test]
-    fn user_rule_keeps_the_full_prefix() {
-        let dir = tempdir().unwrap();
+    fn user_and_system_rules_report_only_the_program() {
+        let (_root, system, home) = system_and_home();
+        std::fs::create_dir_all(system.join("rules")).unwrap();
+        std::fs::write(
+            system.join("rules").join("fleet.rules"),
+            "prefix_rule(pattern=[\"/opt/bin/deploy\", \"--token\", \"ghp_x\"])\n",
+        )
+        .unwrap();
         write_rules(
-            dir.path(),
+            &home,
             "u.rules",
-            "prefix_rule(pattern=[\"curl\", \"-H\", \"X-Trace: 1\"], decision=\"allow\")\n",
+            "prefix_rule(pattern=[\"/Users/alice/bin/curl\", \"-H\", \"Authorization: Bearer t\"])\n",
         );
-        assert_eq!(
-            approvals(&CodexParser.assess(dir.path()).unwrap()),
-            vec!["curl -H X-Trace: 1"]
-        );
+        let reasons = assess_user_layers(&system, &home).unwrap();
+        assert_eq!(approvals(&reasons), vec!["curl", "deploy"], "{reasons:?}");
     }
 
     #[test]
