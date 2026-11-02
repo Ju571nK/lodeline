@@ -262,7 +262,17 @@ fn strip_userinfo(value: &str) -> String {
 
 fn strip_token_userinfo(token: &str) -> String {
     let end = token.find(['?', '#']).unwrap_or(token.len());
-    let Some(at) = token[..end].rfind('@') else {
+    // An image digest (`img:1.2@sha256:…`) is not userinfo.
+    let is_digest = |i: usize| {
+        ["sha256:", "sha512:"]
+            .iter()
+            .any(|d| token[i + 1..].starts_with(d))
+    };
+    let Some(at) = token[..end]
+        .rmatch_indices('@')
+        .map(|(i, _)| i)
+        .find(|&i| !is_digest(i))
+    else {
         return token.into();
     };
     let head = &token[..at];
@@ -499,6 +509,16 @@ mod tests {
             ),
             ("command", "u:pa/ss@h.example", "<redacted>@h.example"),
             ("command", "//u:pw@host", "//<redacted>@host"),
+            (
+                "command",
+                "docker run ghcr.io/o/img:1.2@sha256:abc",
+                "docker run ghcr.io/o/img:1.2@sha256:abc",
+            ),
+            (
+                "command",
+                "pull u:pw@reg.example/img@sha256:abc",
+                "pull <redacted>@reg.example/img@sha256:abc",
+            ),
             ("my-host", "node a/b.js", "node a/b.js"),
             ("host", "localhost", "localhost"),
             ("baseUrl", "https://u:p@h:8443/p?q", "https://h:8443"),
