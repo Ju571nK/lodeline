@@ -142,6 +142,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   as they are. A password that contains an unencoded `?` or `#` is not detected. The
   hint for the built-in auto mode also names HIPAA configurations as starting in default
   mode. (#199)
+- The Codex scanner no longer puts a command's arguments into event evidence. A
+  standing approval in a Codex rules file (`prefix_rule` with an allow decision) used to
+  record the rule's whole command prefix, and the later words of a command can hold
+  tokens. Every rules layer (user `~/.codex/rules`, `/etc/codex/rules`, and project) now
+  reports only the program name. A program path whose parent folder is a home folder,
+  such as `/home/alice` or `C:\Users\alice`, is reported as `<redacted>` so that a user
+  name does not appear. A Windows path now reduces to its file name (`C:\x\y.exe`
+  becomes `y.exe`) instead of being redacted whole. (#410)
+- The Codex rules scanner now reads strings the way Starlark does. An escaped quote, a
+  raw string, or a triple-quoted string no longer makes it skip a real allow rule, and
+  `prefix_rule(` inside a string, or called as a method, is no longer counted as a rule. (#410)
 
 ## [0.12.1] - 2026-11-02
 
