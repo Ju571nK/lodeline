@@ -161,7 +161,13 @@ fn marketplace_source(def: &Value) -> String {
         "github" => source
             .and_then(|s| s.get("repo"))
             .and_then(Value::as_str)
-            .map(|repo| safe_name(repo.split(['?', '#']).next().unwrap_or_default())),
+            .map(
+                |repo| match repo.split(['?', '#']).next().unwrap_or_default() {
+                    // `owner/repo` never holds `@`; one here is userinfo such as a token.
+                    r if r.contains('@') => REDACTED.to_string(),
+                    r => safe_name(r),
+                },
+            ),
         _ => source
             .and_then(|s| s.get("url"))
             .and_then(Value::as_str)
@@ -201,7 +207,8 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 /// A repository-supplied name, kept only when it is made of plugin, marketplace
-/// and repo name characters, so free text or a credential never reaches the event.
+/// and repo name characters, so free text, whitespace or a query never reaches the
+/// event. A token made of those characters still passes.
 fn safe_name(name: &str) -> String {
     let safe = !name.is_empty()
         && name
@@ -341,6 +348,20 @@ mod tests {
                     source: "git:git.example.com".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn github_repo_with_userinfo_is_redacted() {
+        let out = reasons(json!({
+            "extraKnownMarketplaces": {"acme": {"source": {"source": "github", "repo": "ghp_tok3n@github.com/o/r"}}},
+        }));
+        assert_eq!(
+            out,
+            vec![AiGuardReason::ProjectSettingsMarketplace {
+                name: "acme".into(),
+                source: format!("github:{REDACTED}")
+            }]
         );
     }
 
