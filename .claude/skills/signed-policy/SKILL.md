@@ -13,11 +13,14 @@ description: Formally verify Lodeline's signed policy apply path with a TLA+ mod
 python3 .claude/skills/signed-policy/check.py
 ```
 
-The command exits 0 only if all three parts pass. The run takes about 35 seconds on a 12-core Mac.
+The command exits 0 only if all three parts pass. Each part runs even when an earlier one fails. The run takes 35 to 45 seconds on a 12-core Mac, and the last line is `OK in <seconds>` or `FAILED in <seconds>`.
 
-1. It compares each function and block in the coverage table with its text at the sync commit, and prints `DRIFT` for each difference.
-2. It runs TLC on `spec/policy.cfg`, `spec/rule_packs.cfg`, and `spec/local_edits.cfg`, and prints `PASS` or `FAIL` for each.
-3. It breaks the model 19 ways, and prints `KILLED` when TLC reports the expected property through the expected steps. `SURVIVED` means that a property can no longer fail. `OFF-TARGET` means that the property failed for some other reason than the mutant stands for.
+1. It compares each function and block in the coverage table with its text at the sync commit. It prints `DRIFT <file> <function> changed since the sync commit. Model element: <elements>` for each difference, or `Drift check clean.`
+2. It runs TLC on `spec/policy.cfg`, `spec/rule_packs.cfg`, and `spec/local_edits.cfg`. It prints `PASS <config>: <n> distinct states in <s>s`, or `FAIL <config>` followed by TLC's output.
+3. It breaks the model 19 ways. Each break is a text edit to the model, and TLC checks it against one property on one thread. It prints `<verdict> <break> (<code it stands for>): <property>, <s>s`, with one of three verdicts.
+   - `KILLED` means that TLC reported the property violated, and the trace took the expected actions in order.
+   - `OFF-TARGET` means that TLC reported the property violated, but the trace did not take the expected actions in order. The next line shows `wanted [...], trace took [...]`.
+   - `SURVIVED` means that TLC did not report the property violated.
 
 Use `--drift` for part 1 alone. Use `--model` for part 2 alone while you edit the model.
 
@@ -37,34 +40,38 @@ sudo apt-get install openjdk-21-jre-headless
 
 ## What the check proves
 
-Below, the applied file is `SignedFile.applied`, the local file is `SignedFile.local`, and the file in force is what `SignedFile::in_force` returns: the applied file if it exists, else the local file. Each property covers one file, `policy.yaml` or `rule-packs.yaml`, and its own version.
+Below, the applied file is `SignedFile.applied`, the local file is `SignedFile.local`, and the file in force is what `SignedFile::in_force` returns, the applied file if it exists, else the local file. Each property covers one file, `policy.yaml` or `rule-packs.yaml`, and its own version. A broken variant is checked against its own property alone.
 
-| Property | Claim | Harm if it breaks | Broken variants that TLC catches |
-|---|---|---|---|
-| `OnlySignedAccepted` | The applied file holds only an envelope that passed checks 1 and 2 of `verify_envelope`. The local file is the operator's, and this says nothing about it. | Anyone who reaches the sender or the socket can install a policy. | No signature check. |
-| `NoExpiredApplied` | An apply goes on to `record_pending` only if `now < valid_until` at verification. | A long-expired policy replaces the current one. | No expiry check. |
-| `VersionCheckHolds` | From verification to the rename, the envelope an apply holds is newer than the file in force. | An older envelope is written over a newer one. | No version check. No `apply_lock`. No settle in `apply`. |
-| `WatermarkNeverAhead` | The applied version never exceeds the version of the file in force. | A retry fails as a regression, and the host reports a version that it does not hold. | Promote before the rename. No directory fsync in `write_file_durably`. No directory sync in `settle_pending`. |
-| `NoRollback` | The version of the file in force falls only at a stop that leaves a pending row. Boot then drops that row, and the applied version never claimed the lost file. This is the one way a power cut can lower the file. The property is about the file and is not a claim about acceptance, which is `VersionCheckHolds`. | An older policy with weaker deny rules replaces a newer one. | No version check and no `record_pending` guard together. Either one alone is not enough to break it. |
-| `WatermarkMonotonic` | The applied version falls only at a stop that brings back the pending row with its file still in force, so boot finishes the same apply. | Envelopes older than the last applied one become acceptable again. | No guard on the version at any step. |
-| `BootSettles` | After boot no row is pending, and the applied record is the envelope behind the file in force, or nothing for the operator's file. | An apply checked against a stale record replaces a newer policy. | No settle at boot. Boot settles the apply target. `record_pending` at `synchronous=NORMAL`, where a power cut keeps the rename and loses the row. |
-| `LiveMatchesDisk` | With no apply in flight, no row pending, no change unseen, and no reload running, the live policy is the applied file if it exists, else the local file. | The agent acknowledges a policy and keeps enforcing the old one. | The local file read first. No reload notification. The change consumed after the read. |
-| `ExpiryMatchesDisk` | With no apply in flight and no row pending, `active_valid_until` is the expiry of the file in force. | The host reports an expiry for a policy it does not run. | No expiry seeded at boot. A settled apply not published. |
-| `LoadedPolicyKept` | A running agent that loaded a policy file keeps it when the file goes missing. | A save that unlinks before it writes drops every deny rule. | No missing-file rule in `reload`. |
+| Property | Claim | Harm if it breaks | Broken variants that TLC catches | Configs |
+|---|---|---|---|---|
+| `OnlySignedAccepted` | The applied file is absent, or holds an envelope that passed checks 1 and 2 of `verify_envelope`. It says nothing about the local file, which is the operator's. | Anyone who reaches the sender or the socket can install a policy. | No signature check. | `policy`, `rule_packs`, `local_edits` |
+| `NoExpiredApplied` | On the step from verification to `record_pending`, `now < valid_until`. It says nothing about a later tick or a settle. | A long-expired policy replaces the current one. | No expiry check. | `policy`, `rule_packs`, `local_edits` |
+| `VersionCheckHolds` | While an apply is between verification and its rename, its envelope is newer than the file in force. | An older envelope is written over a newer one. | No version check. No `apply_lock`. No settle in `apply`. | `policy`, `rule_packs`, `local_edits` |
+| `WatermarkNeverAhead` | The applied version never exceeds the version of the file in force. | A retry fails as a regression, and the host reports a version that it does not hold. | Promote before the rename. No directory fsync in `write_file_durably`. No directory sync in `settle_pending`. | `policy`, `rule_packs` |
+| `NoRollback` | The version of the file in force falls only on a step that leaves the agent down with a pending row present. It is about the file, and is not a claim about acceptance, which is `VersionCheckHolds`. | A host that took a newer policy runs an older one. | No version check and no `record_pending` guard together. Either one alone does not break it. | `policy`, `rule_packs` |
+| `WatermarkMonotonic` | The applied version falls only on a step that leaves the agent down, with the pending row equal to the file in force and that file at or above the old applied version. | Envelopes older than the last applied one become acceptable again. | No guard on the version at any step, which removes check 4 and the `record_pending` and `promote_pending` guards. | `policy`, `rule_packs`, `local_edits` |
+| `BootSettles` | On the boot step no row is left pending, and the applied record equals the envelope behind the file in force, or is empty when that file is the operator's. | An apply checked against a stale record replaces a newer policy. | No settle at boot. Boot settles the apply target. `record_pending` at `synchronous=NORMAL`, where a power cut keeps the rename and loses the row. | `policy`, `rule_packs` |
+| `LiveMatchesDisk` | With the agent up, no apply in flight, no row pending, no change unseen, and no reload between its check and its read, the live policy is the applied file if it exists, else the local file. | The agent acknowledges a policy and keeps enforcing the old one. | The local file read first. No reload notification. The change consumed after the read. | `policy`, `rule_packs` |
+| `ExpiryMatchesDisk` | For `policy` only. With the agent up, no apply in flight, and no row pending, `active_valid_until` is the expiry of the file in force. An unseen change or a running reload does not exempt it. | The host reports an expiry for a policy it does not run. | No expiry seeded at boot. A settled apply not published. | `policy` |
+| `LoadedPolicyKept` | For `policy` only. While the agent stays up, a policy file that was loaded never becomes no file loaded. | A save that unlinks before it writes drops every deny rule. | No missing-file rule in `reload`. | `local_edits` |
 
-Each config checks only the properties that it lists. A property says nothing about a config that does not list it.
+Each config checks only the properties that list it in the last column. A property says nothing about a config that does not list it.
 
-| Config | Kind | Connections | Failed steps | Power cuts | Hand edits | Properties | Distinct states |
-|---|---|---|---|---|---|---|---|
-| `policy` | policy | 2 | yes | yes | no | All but `LoadedPolicyKept` | 994,084 |
-| `rule_packs` | bundle | 2 | yes | yes | no | The same, less `ExpiryMatchesDisk` | 852,580 |
-| `local_edits` | policy | 2 | yes | no | yes | `OnlySignedAccepted`, `NoExpiredApplied`, `VersionCheckHolds`, `WatermarkMonotonic`, `LoadedPolicyKept` | 2,732,004 |
+| Config | Kind | Connections | Failed steps | Power cuts | Hand edits | Distinct states |
+|---|---|---|---|---|---|---|
+| `policy` | policy | 2 | yes | yes | no | 994,084 |
+| `rule_packs` | bundle | 2 | yes | yes | no | 852,580 |
+| `local_edits` | policy | 2 | yes | no | yes | 2,732,004 |
 
-All three configs allow a crash at every step, and start from all five hosts in `Starts`. `local_edits` leaves out the other properties because a hand edit breaks them on purpose: the documented way back to the local file keeps the signed version and its expiry while the local file runs.
+- `policy` checks every property except `LoadedPolicyKept`. `rule_packs` checks the same less `ExpiryMatchesDisk`, which covers `policy` only.
+- A failed step is an error from `record_pending`, the rename, the directory fsync, or `promote_pending`.
+- Every config allows a process crash whenever the agent is up, and starts from all five hosts in `Starts`. Crashes and power cuts share a cap of three stops.
+- `local_edits` has no power cuts. A stop there is a crash, which keeps every write the agent made, so that config says nothing about what a power cut loses. It adds the hand edits `DeleteApplied` and `EditLocal`.
+- `WatermarkNeverAhead`, `LiveMatchesDisk`, `ExpiryMatchesDisk`, `NoRollback`, and `BootSettles` are left out of `local_edits` because each fails when added there, and the first failing step involves `EditLocal`. The documented way back to the local file keeps the signed version and its expiry while the local file runs.
 
 ## Decide if your change touches verified code
 
-Read the coverage table. If your change touches a listed function or block, `check.py` prints `DRIFT` until you confirm the model at a new sync commit. A row such as `first..last` tracks the lines from the first line that contains `first` to the next line that contains `last`, for a block of a function too large to track whole.
+Read the coverage table. If your change touches a listed function or block, `check.py` prints `DRIFT` until you confirm the model at a new sync commit. A row such as `first..last` tracks the lines from the first line that contains `first` to the next line, from there on, that contains `last`, for a block of a function too large to track whole. A row prints `DRIFT` too when its function or block is gone from the current file.
 
 Sync commit: `9dfff8c9878db3650401ab1e7ebce9d97dea6276`
 
@@ -107,16 +114,18 @@ The check cannot read Rust. A `PASS` covers the model, and `DRIFT` is the only l
 
 ## Resolve a DRIFT line
 
-1. Run `git diff <sync commit> -- <file>` and read the change to the function.
+1. Run `git diff <sync commit> -- <file>` and read the change to the function or block on the `DRIFT` line.
 2. If the change alters no step, order, guard, or lock, go to step 5.
-3. Edit the matching action in `spec/SignedPolicy.tla` so that it does what the code now does. Keep one action per indivisible step in the code.
+3. Edit the actions named after `Model element` in `spec/SignedPolicy.tla` so that they do what the code now does. Keep one action per indivisible step in the code. If the function or block was renamed or moved, fix its row in the coverage table.
 4. Run `check.py --model`. Then resolve each `FAIL`.
 5. Move the sync commit in this file to a commit on `main`. A squash merge drops branch commits. Move it only after you confirm that the model describes the code at that commit.
 6. Run `check.py`. All three parts must pass.
 
+If the run stops with `check.py: cannot read <file> at <sync commit>` or `<function> is not in <file> at <sync commit>`, the sync commit is missing from your clone, or the row names text that was not there. Fetch the commit, or fix the row.
+
 ## Resolve a FAIL line
 
-TLC prints a trace. Each state names the action that produced it and the variables that changed.
+`FAIL <config>` is followed by TLC's output. A violation comes with a trace. Each state names the action that produced it and the variables that changed. If the output is an error with no trace, such as a syntax error in the model, fix the model text first.
 
 1. Find each action in the coverage table and read its code.
 2. If the code cannot take those steps in that order, the model is wrong. Fix the action, and keep the property and the bounds.
@@ -125,15 +134,22 @@ TLC prints a trace. Each state names the action that produced it and the variabl
 
 ## Resolve a SURVIVED or OFF-TARGET line
 
-A property that cannot fail proves nothing. Find out why the break no longer reaches the property, and correct the model or the mutant in `check.py`. A mutant edit must match the model text exactly once, so a rename in the model stops the run with an error.
+A property that cannot fail proves nothing. Find out why the break no longer reaches the property, and correct the model or the mutant in `check.py`. A mutant edit must match the model text exactly once, so a rename in the model stops the run with `check.py: mutant edit must match once`.
 
-`OFF-TARGET` prints the trace TLC found and the steps the mutant expects. Read the trace. If it shows the harm the mutant stands for by a shorter way, correct the expected steps. If it shows some other failure, tune the mutant until it fails for its own reason. A mutant that fails for the wrong reason says nothing about the code it stands for.
+`SURVIVED` means that TLC did not report the property violated. Read the edit in `MUTANTS` and the action it changes. Find the other step or guard that now blocks the harm, and correct the edit or the model.
+
+`OFF-TARGET` means that the property failed without the expected actions in order. The next line, `wanted [...], trace took [...]`, lists the expected actions and the actions of the trace that TLC found on one thread. Compare the two lists.
+
+1. If the trace shows the harm the mutant stands for by a shorter way, correct the expected steps in `MUTANTS`.
+2. If it shows some other failure, tune the edit until the mutant fails for its own reason. A mutant that fails for the wrong reason says nothing about the code it stands for.
 
 A property written as `[][...]_vars` skips any step that changes no variable. If the failure you want to catch leaves a value unchanged, write the property as an invariant.
 
 ## Know what a pass covers
 
-The bounds are four versions, three `valid_until` values, a clock of 0 to 3, and three stops, which crashes and power cuts share. The checks and the guards behind `apply_lock` overlap, so removing the `record_pending` or `promote_pending` guard alone changes nothing the model can see. The mutants that need one remove several at once.
+The bounds are `MaxVersion = 4`, `MaxClock = 3` (`valid_until` is 1 to 3, and the clock runs 0 to 3), `MaxCrashes = 3` (crashes and power cuts share it), and two connections in every config.
+
+Every break runs on `policy`, except `no missing-file rule`, which runs on `local_edits`. No break runs on `rule_packs`. The checks under `apply_lock` make the `record_pending` and `promote_pending` guards unreachable, so removing either guard alone passes every property of `policy` and `rule_packs`. The breaks that need those guards removed remove several at once.
 
 The model assumes these facts:
 
