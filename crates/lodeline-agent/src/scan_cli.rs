@@ -625,7 +625,7 @@ mod table_width_tests {
     #[test]
     fn display_width_counts_terminal_columns() {
         assert_eq!(display_width("abc"), 3);
-        assert_eq!(display_width("테스터"), 6);
+        assert_eq!(display_width("홍길동"), 6);
         assert_eq!(display_width("日本語"), 6);
         assert_eq!(display_width("é"), 1);
         assert_eq!(display_width("e\u{301}"), 1);
@@ -646,7 +646,7 @@ mod table_width_tests {
         let report = Report {
             rows: vec![
                 row("C:\\Users\\tester", 11.0),
-                row("C:\\Users\\테스터", 22.0),
+                row("C:\\Users\\홍길동", 22.0),
                 row("/home/cafe\u{301}", 33.0),
                 row("/home/café", 44.0),
             ],
