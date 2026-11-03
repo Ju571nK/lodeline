@@ -917,6 +917,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
         }
         // Reports are sent whether or not a refused entry is still waiting; only
         // a report that names a pending entry waits.
+        let _sending = self.store.sending();
         for report in self.store.pending_reports(REPORT_SCAN)? {
             let parsed = lodeline_proxy_api::parse_inventory_report(&report.body).ok();
             let Some(parsed) = parsed else {

@@ -158,6 +158,7 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   넘친 report는 버리되 status `registry.discarded_reports`에 센다. 새 필드가 아니므로 server 선배포는 필요 없다. complete report는 scope key의 최신 snapshot이 아닌 가장 오래된 것부터 버리고
   그 chain의 다음 report를 `initial_baseline`으로 바꾼다. 버린 구간의 drift는 서버에 남지 않고 `baseline_restated` marker와 counter로만 드러난다(조용한 손실 없음).
   로컬 registry entry는 README Retention 행대로, entry가 ACK되고 그 entry를 참조할 수 있는 spool 행(unsent, 보존 중인 acked, quarantine)이 모두 사라진 뒤에만 지운다.
+  서버 보존 기간 E는 조건이 아니다. 그런 entry는 E를 받기 전에도 지우며, E를 받기 전에 남는 것은 quarantine 행(Q = E)이 부를 수 있는 entry뿐이다.
   orchestrator 결정: inventory body 한도는 4 MiB(P1 초기 시험값)이며 parse 전에 413 `payload_too_large`로 막는다. `pending_previous` 대기는 proxy당 256개이며 넘으면 503 `storage_limit`이다.
 
 ## T-13d/T-12b2 구현 세부 확정 (2026-10-24, orchestrator)
