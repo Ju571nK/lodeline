@@ -14,6 +14,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   so those findings were duplicates. A home folder that is a repository is handled the
   same way. The project's `AGENTS.md` is still scanned. (#427)
 
+- On a host where the agent runs as root, a user-global rule pack now reads each user's
+  home. It used to resolve `~` and `$HOME` from the agent's own environment, so it never
+  read any user's config. Other variables in a rule-pack path still come from the
+  agent's environment. (#429)
+
+- When the agent's home and a user's home are two spellings of the same folder, for
+  example through a symlink or `sudo` without `-H`, that home is now read and reported
+  once instead of twice. Findings on a symlinked home now show the resolved path, so
+  each affected reading sends one new event after the upgrade. (#429)
+
+- A corrupt or unsupported shared MCP baseline file no longer stops the Codex MCP
+  assessment for every home. It is treated as absent and logged. (#429)
+
 ## [0.12.2] - 2026-11-03
 
 ### Added
