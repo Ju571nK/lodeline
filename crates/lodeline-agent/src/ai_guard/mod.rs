@@ -31,9 +31,11 @@ pub use rule_pack::parser::RulePackParser;
 pub use task::{run, CachedAssessment, StateMap, TaskCtx};
 
 /// Phase 3b.3 — shared registry mapping each parser's (tool, scope) to the
-/// external hook-script paths it currently references. Populated by runtime
-/// boot + policy_reload_task; read by `ai_guard::task::run` dispatcher to
-/// route fsnotify events on script paths to the right parser.
+/// external hook-script paths it currently references, each as (canonical
+/// home whose config references it, canonical script path). Populated by
+/// runtime boot + policy_reload_task; read by `ai_guard::task::run`
+/// dispatcher to route fsnotify events on script paths to the right parser
+/// and home (#333).
 pub type ExtScriptRegistry = std::sync::Arc<
     parking_lot::RwLock<
         std::collections::HashMap<
@@ -41,7 +43,7 @@ pub type ExtScriptRegistry = std::sync::Arc<
                 lodeline_core::event::AiTool,
                 lodeline_core::event::AiGuardScope,
             ),
-            Vec<std::path::PathBuf>,
+            Vec<(std::path::PathBuf, std::path::PathBuf)>,
         >,
     >,
 >;

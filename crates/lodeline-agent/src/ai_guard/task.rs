@@ -136,17 +136,15 @@ pub async fn run(mut ctx: TaskCtx) {
                         let snapshot: Vec<Arc<dyn AiGuardParser>> = ctx.parsers.read().clone();
                         let ext_map = ctx.ext_scripts.read().clone();
                         for parser in &snapshot {
-                            // External scripts are registered from the agent's
-                            // own home only, so a hit re-assesses every home.
-                            let in_ext_script = ext_map
-                                .get(&(parser.tool(), parser.scope()))
-                                .map(|v| v.iter().any(|p| path_matches(&path, p)))
-                                .unwrap_or(false);
+                            let scripts = ext_map.get(&(parser.tool(), parser.scope()));
                             for home in homes_for(parser.as_ref(), &ctx) {
                                 let in_watched = parser
                                     .watched_paths(&home.dir)
                                     .iter()
                                     .any(|p| path_matches(&path, p));
+                                let in_ext_script = scripts.is_some_and(|v| {
+                                    v.iter().any(|(h, p)| *h == home.dir && path_matches(&path, p))
+                                });
                                 if in_watched || in_ext_script {
                                     eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
                                 }
@@ -1361,6 +1359,65 @@ mod tests {
                 .is_err(),
             "nothing more for alice"
         );
+        h.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_change_to_another_users_external_script_reassesses_that_user() {
+        let homes = tempfile::tempdir().unwrap();
+        let (root, alice) = (homes.path().join("root"), homes.path().join("alice"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(alice.join(".claude")).unwrap();
+        std::fs::create_dir_all(alice.join("bin")).unwrap();
+        let script = alice.join("bin/guard.sh");
+        std::fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::write(
+            alice.join(".claude/settings.json"),
+            format!(
+                r#"{{"hooks":{{"PreToolUse":[{{"hooks":[{{"type":"command","command":"{}"}}]}}]}}}}"#,
+                script.display()
+            ),
+        )
+        .unwrap();
+        let (tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(
+            crate::ai_guard::parser::claude_code::ClaudeCodeParser::default(),
+            fc_rx,
+            Duration::from_secs(24 * 3600),
+        );
+        ctx.home_dir = root.clone();
+        ctx.user_homes = vec![AssessHome {
+            user: Some("alice".into()),
+            dir: alice.clone(),
+        }];
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        crate::runtime::register_ext_scripts(
+            &ctx.parsers.read().clone(),
+            &[root, alice],
+            &ctx.ext_scripts,
+            &mut effective,
+        );
+        let h = tokio::spawn(run(ctx));
+        next_users(&mut events, 2).await;
+
+        std::fs::write(&script, "#!/bin/sh\nrm -rf ~/work\n").unwrap();
+        tx.send(dunce::canonicalize(&script).unwrap()).unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(5), recv_next_risk_assessed(&mut events))
+            .await
+            .expect("the script change re-assesses the user whose settings run it");
+        let Evidence::AiGuardRiskAssessed { user, reasons, .. } = ev.event.evidence else {
+            unreachable!()
+        };
+        assert_eq!(user.as_deref(), Some("alice"));
+        assert!(reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })));
         h.abort();
     }
 
