@@ -1003,6 +1003,117 @@ mod tests {
         }
     }
 
+    fn group(matcher: &str, cmds: &[&str]) -> Value {
+        json!({"matcher": matcher, "hooks": cmds.iter()
+            .map(|c| json!({"type":"command","command":c}))
+            .collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn a_user_hook_sharing_our_group_survives_install_and_uninstall() {
+        let mine = "/u/mine.sh";
+        for agent in ["claude-code", "codex", "antigravity"] {
+            let old = format!("/old/lodeline-hook {agent} --capture redacted");
+            let only_ours = format!("/older/lodeline-hook {agent} --capture raw");
+            let start = json!({"hooks":{"PreToolUse":[
+                group("Bash", &[mine, &old]),
+                group("*", &[&only_ours]),
+            ]}});
+            let new = format!("{NEW_EXE} {agent} --capture redacted");
+
+            let mut v = start.clone();
+            assert!(merge_into(&mut v, NEW_EXE, agent, "redacted"));
+            assert_eq!(
+                v["hooks"]["PreToolUse"],
+                json!([group("Bash", &[mine]), group("*", &[&new])]),
+                "{agent}"
+            );
+            assert!(!merge_into(&mut v, NEW_EXE, agent, "redacted"), "{agent}");
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 1, "{agent}");
+
+            let mut v = start.clone();
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 2, "{agent}");
+            assert!(remove_from(&mut v, NEW_EXE, agent));
+            assert_eq!(
+                v["hooks"]["PreToolUse"],
+                json!([group("Bash", &[mine])]),
+                "{agent}"
+            );
+        }
+
+        let mut v = json!({"hooks":{"PreToolUse":[
+            group("Bash", &[mine, "/old/lodeline-hook codex --capture redacted"]),
+        ]}});
+        assert!(merge_into_enforce(
+            &mut v, NEW_EXE, "codex", "redacted", "closed"
+        ));
+        let new = format!("{NEW_EXE} codex --enforce --on-failure closed --capture redacted");
+        assert_eq!(
+            v["hooks"]["PreToolUse"],
+            json!([group("Bash", &[mine]), group("*", &[&new])])
+        );
+        assert!(!merge_into_enforce(
+            &mut v, NEW_EXE, "codex", "redacted", "closed"
+        ));
+    }
+
+    #[test]
+    fn install_never_writes_into_a_user_group() {
+        let mut v = json!({"hooks":{"PreToolUse":[group("*", &["/u/mine.sh"])]}});
+        assert!(merge_into(&mut v, NEW_EXE, "claude-code", "redacted"));
+        let new = format!("{NEW_EXE} claude-code --capture redacted");
+        assert_eq!(
+            v["hooks"]["PreToolUse"],
+            json!([group("*", &["/u/mine.sh"]), group("*", &[&new])])
+        );
+    }
+
+    #[test]
+    fn old_unquoted_path_with_a_space_from_another_folder_is_ours() {
+        let old = r"\\?\C:\Users\Jane Doe\lodeline-0.12.2\lodeline-hook.exe claude-code --capture redacted";
+        let mut v = nested_settings(&[FOREIGN, old]);
+        assert_eq!(count_lodeline_entries(&v, NEW_EXE, "claude-code"), 1);
+        assert!(merge_into(&mut v, NEW_EXE, "claude-code", "redacted"));
+        assert_eq!(
+            pretooluse_commands(&v),
+            [
+                FOREIGN,
+                &format!("{NEW_EXE} claude-code --capture redacted")
+            ]
+        );
+        for cmd in [
+            r"C:\Program Files\Lodeline\LODELINE-HOOK.EXE claude-code --capture raw",
+            "C:/x/Lodeline-Hook.exe claude-code --capture raw",
+        ] {
+            assert_eq!(
+                count_lodeline_entries(&nested_settings(&[cmd]), NEW_EXE, "claude-code"),
+                1,
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapper_around_a_spaced_path_stays_foreign() {
+        for cmd in [
+            r"cmd.exe /c C:\x y\lodeline-hook.exe claude-code --capture redacted",
+            r"C:\Windows\System32\cmd.exe /c C:\x y\lodeline-hook.exe claude-code --capture redacted",
+            r"C:\Program Files\Git\bin\bash.exe -c C:/x/lodeline-hook.exe claude-code --capture redacted",
+            "/bin/bash x y/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/env /opt/x/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/env lodeline-hook claude-code --capture redacted",
+            r"C:\x y\lodeline-hook.exe codex --capture redacted",
+            r"C:\x y\lodeline-hook.exe claude-code --verbose",
+        ] {
+            let v = nested_settings(&[cmd]);
+            assert_eq!(
+                count_lodeline_entries(&v, NEW_EXE, "claude-code"),
+                0,
+                "{cmd}"
+            );
+        }
+    }
+
     // --- Codex (nested, ~/.codex/hooks.json) ---
     #[test]
     fn codex_uses_nested_and_notes_hook_trust() {

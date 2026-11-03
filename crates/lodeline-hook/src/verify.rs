@@ -359,6 +359,30 @@ mod tests {
     }
 
     #[test]
+    fn our_hook_after_a_user_hook_in_one_group_is_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
+        let settings = serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"*","hooks":[
+            {"type":"command","command":"/u/mine.sh"},
+            {"type":"command","command":b.command},
+        ]}]}});
+        write_settings(&b, &settings.to_string());
+        assert_eq!(check_one(&b), None);
+    }
+
+    #[test]
+    fn two_of_ours_in_one_group_is_a_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
+        let settings = serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"*","hooks":[
+            {"type":"command","command":b.command},
+            {"type":"command","command":"/old/lodeline-hook claude-code --capture raw"},
+        ]}]}});
+        write_settings(&b, &settings.to_string());
+        assert!(check_one(&b).unwrap().duplicate_entries);
+    }
+
+    #[test]
     fn a_wrapper_around_our_binary_is_not_a_duplicate() {
         let dir = tempfile::tempdir().unwrap();
         let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
