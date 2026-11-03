@@ -415,6 +415,54 @@ mod tests {
     }
 
     #[test]
+    fn ai_guard_risk_future_dated_reading_neither_prunes_others_nor_outlives_48h() {
+        let mut h = HostSummary::new("h".into());
+        let t0 = datetime!(2026-05-17 12:00 UTC);
+        let reading = |tool: AiTool, user: &str, score: f32, ts: time::OffsetDateTime| {
+            ev(
+                Evidence::AiGuardRiskAssessed {
+                    controls: None,
+                    tool,
+                    scope: AiGuardScope::UserGlobal,
+                    score,
+                    bucket: AiGuardBucket::Critical,
+                    reasons: vec![],
+                    is_reattestation: false,
+                    rule_pack_id: None,
+                    tool_label: None,
+                    user: Some(user.into()),
+                },
+                Severity::Warn,
+                ts,
+            )
+        };
+        apply_event(&mut h, &reading(AiTool::Codex, "alice", 7.0, t0));
+        // The agent clock jumped three days ahead; the server got it a minute later.
+        apply_event(
+            &mut h,
+            &reading(AiTool::ClaudeCode, "bob", 9.0, t0 + time::Duration::days(3)),
+        );
+        assert!(
+            h.current_risk.contains_key(&AiTool::Codex),
+            "a future-dated reading pruned the host's other readings"
+        );
+        apply_event(
+            &mut h,
+            &reading(
+                AiTool::ClaudeCode,
+                "alice",
+                0.0,
+                t0 + time::Duration::hours(49),
+            ),
+        );
+        assert_eq!(
+            h.current_risk[&AiTool::ClaudeCode].score,
+            0.0,
+            "a future-dated reading outlived the 48h window"
+        );
+    }
+
+    #[test]
     fn policy_reloaded_updates_version_and_clears_expired() {
         let mut h = HostSummary::new("h".into());
         h.policy_state.policy_expired_active = true;
