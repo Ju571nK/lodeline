@@ -5,8 +5,8 @@
 - **Owner**: Justin Kwon
 - **Source**: Brainstorming session 2026-05-16 (Visual Companion + terminal)
 - **Scope**: Self-hostable console; boundaries defined in `CLAUDE.md`
-- **Consumed by**: `docs/superpowers/plans/2026-05-18-plan-02-foundation-and-alerts-queue.md`
-- **Wire contract**: `docs/superpowers/specs/2026-05-16-fleet-api-contract.md` (v1.0)
+- **Consumed by**: Plan 02 (`docs/superpowers/plans/2026-05-18-plan-02-foundation-and-alerts-queue.md` in the `Ju571nK/lodeline-manager` repo, not imported here)
+- **Wire contract**: [`docs/specs/fleet-api/contract.md`](../../../../docs/specs/fleet-api/contract.md) (v1.0)
 
 ## 1. Context
 
@@ -281,7 +281,7 @@ v1: **single admin user** via username/password (bcrypt hash + JWT session, 12-h
 2026-09-23 update: optional **single configurable OIDC provider** replaces the
 GitHub-specific follow-up. Local admin login remains recovery access; explicitly
 admitted provider subjects receive the same console permissions. No user
-management or RBAC is added. See [OIDC operations](../../operations/oidc.md) for
+management or RBAC is added. See [OIDC operations](../operations/oidc.md) for
 configuration, exact admission and session/revocation limitations.
 SAML, SCIM and multi-user RBAC remain outside this repository's scope.
 

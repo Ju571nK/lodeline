@@ -8,11 +8,11 @@
 - **Owner:** Justin Kwon
 - **Repo of record:** `Ju571nK/lodeline-manager` (consumer).
 - **Cross-links:**
-  - Consumer needs: `docs/superpowers/specs/2026-05-16-ui-ux-design.md`
-  - **Producer spec (locked):** `Ju571nK/lodeline` →
-    `docs/superpowers/specs/2026-05-17-phase-3b4-fleet-aggregation-api-design.html`
-  - **Producer plan:** `Ju571nK/lodeline` →
-    `docs/superpowers/plans/2026-05-17-phase-3b4-fleet-aggregation-api.html`
+  - Consumer needs: [`apps/manager/docs/specs/2026-05-16-ui-ux-design.md`](../../../apps/manager/docs/specs/2026-05-16-ui-ux-design.md)
+  - **Producer spec (locked):** `2026-05-17-phase-3b4-fleet-aggregation-api-design.html`
+    (local-only, gitignored on the producer side)
+  - **Producer plan:** `2026-05-17-phase-3b4-fleet-aggregation-api.html`
+    (local-only, gitignored on the producer side)
   - Producer evidence schema: `Ju571nK/lodeline` → `crates/lodeline-core/src/event.rs`
     (now includes `HostMetaSnapshot` shipped 2026-05-17 / merge `b34dbdd`)
   - Producer existing + new routes: `Ju571nK/lodeline` →
@@ -880,7 +880,8 @@ emits **more events with `tool=continue_dev` + `scope.kind=project`**.
 **Reference:** producer spec at
 `Ju571nK/lodeline:docs/superpowers/specs/2026-05-17-phase-3b6.1-continue-per-repo-discovery-design.html`
 and plan
-`Ju571nK/lodeline:docs/superpowers/plans/2026-05-17-phase-3b6.1-continue-per-repo-discovery.html`.
+`Ju571nK/lodeline:docs/superpowers/plans/2026-05-17-phase-3b6.1-continue-per-repo-discovery.html`
+(both local-only, gitignored on the producer side).
 
 ### 14.4 Phase 3b.6.2 — Claude Code + Codex per-repo discovery (shipped 2026-05-19, lodeline main `9ddd37b`)
 
@@ -921,7 +922,8 @@ under tool strings that have existed since Phase 3b.1.
 **Reference:** producer spec at
 `Ju571nK/lodeline:docs/superpowers/specs/2026-05-18-phase-3b6.2-claude-codex-per-repo-discovery-design.html`
 and plan
-`Ju571nK/lodeline:docs/superpowers/plans/2026-05-18-phase-3b6.2-claude-codex-per-repo-discovery.html`.
+`Ju571nK/lodeline:docs/superpowers/plans/2026-05-18-phase-3b6.2-claude-codex-per-repo-discovery.html`
+(both local-only, gitignored on the producer side).
 Producer explicitly requested this §14 entry be added (per the spec's
 producer-first §0 paragraph).
 
@@ -1000,7 +1002,7 @@ The existing four values (`claude_code`, `codex`, `claude_desktop`,
 
 **Consumer action items absorbed under this entry:**
 
-1. `humanTool()` in [`web/src/components/AlertsQueue/SlideOver.tsx`](../../web/src/components/AlertsQueue/SlideOver.tsx)
+1. `humanTool()` in [`web/src/components/AlertsQueue/SlideOver.tsx`](../../../apps/manager/web/src/components/AlertsQueue/SlideOver.tsx)
    must render `gemini` → "Gemini" and `cursor` → "Cursor" (otherwise
    the slide-over header shows the raw wire string).
 2. The reasons list in the same file SHOULD surface the
@@ -1008,7 +1010,7 @@ The existing four values (`claude_code`, `codex`, `claude_desktop`,
    same way it can surface `mcp_server_remote`'s `server_name` + `url`.
    `humanKind()` already title-cases unknown kinds, so it degrades
    gracefully if unhandled.
-3. Mock fixtures in [`internal/fleet/mock.go`](../../internal/fleet/mock.go)
+3. Mock fixtures in `internal/fleet/mock.go` (`Ju571nK/lodeline-manager` repo)
    SHOULD include at least one event of each new tool so the SPA's
    rendering paths get exercised against the full surface.
 4. `internal/fleet/types.go`: no change. `Tool` is `string` and
@@ -1041,7 +1043,7 @@ with an empty chain. No breaking change.
 
 **Consumer action items absorbed under this entry:**
 
-1. The reasons list in [`web/src/components/AlertsQueue/SlideOver.tsx`](../../web/src/components/AlertsQueue/SlideOver.tsx)
+1. The reasons list in [`web/src/components/AlertsQueue/SlideOver.tsx`](../../../apps/manager/web/src/components/AlertsQueue/SlideOver.tsx)
    renders `source_chain` as a breadcrumb (`entry.sh → utils/init.sh →
    helper.sh`) when non-empty, so the source-follow path is visible.
 2. Mock fixtures SHOULD include one `destructive_in_hook_script` reason
@@ -1413,7 +1415,8 @@ MDM context is not yet on the fleet wire: retain the existing dependency
 [manager #31](https://github.com/Ju571nK/lodeline-manager/issues/31) /
 [producer #211](https://github.com/Ju571nK/lodeline/issues/211).
 Full UI findings and suggested implementation order are recorded in
-[the 2026-09-13 audit](../../reviews/2026-09-13-webui-backend-gap-audit.md).
+the 2026-09-13 audit (`docs/reviews/2026-09-13-webui-backend-gap-audit.md` in the
+`Ju571nK/lodeline-manager` repo).
 
 
 #### 14.12.4 Consumer WebUI delivery (2026-09-13)
