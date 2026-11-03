@@ -11,6 +11,7 @@ on:
       - 'crates/lodeline-fleet-api/**'
       - 'crates/lodeline-server/**'
       - 'crates/lodeline-core/**'
+      - 'Cargo.toml'
       - 'rust-toolchain.toml'
       - '.github/workflows/manager.yml'
   pull_request:
@@ -19,6 +20,7 @@ on:
       - 'crates/lodeline-fleet-api/**'
       - 'crates/lodeline-server/**'
       - 'crates/lodeline-core/**'
+      - 'Cargo.toml'
       - 'rust-toolchain.toml'
       - '.github/workflows/manager.yml'
 
