@@ -253,6 +253,22 @@ mod tests {
     }
 
     #[test]
+    fn clean_when_quoted_path_with_spaces_matches_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(
+            dir.path(),
+            r#""C:/Program Files/테스터/lodeline-hook.exe""#,
+            "*",
+        );
+        let settings = serde_json::json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":"\"C:/Program Files/Other/tool.exe\" run"}]},
+            {"matcher":"*","hooks":[{"type":"command","command":b.command}]}
+        ]}});
+        write_settings(&b, &settings.to_string());
+        assert_eq!(check_one(&b), None);
+    }
+
+    #[test]
     fn entry_missing_when_no_lodeline_entry() {
         let dir = tempfile::tempdir().unwrap();
         let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");

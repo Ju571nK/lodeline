@@ -605,6 +605,83 @@ mod tests {
             .contains("/other/tool run"));
     }
 
+    fn pretooluse_commands(v: &Value) -> Vec<&str> {
+        v["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(claude_entry_cmd)
+            .collect()
+    }
+
+    // Registered by lodeline-hook <= 0.12.2 on Windows: canonicalize() kept the `\\?\` prefix.
+    const VERBATIM_OLD: &str =
+        r"\\?\C:\Users\테스터\x\lodeline-hook.exe claude-code --capture redacted";
+
+    #[test]
+    fn upgrade_replaces_verbatim_windows_registration() {
+        let exe = "C:/Users/테스터/x/lodeline-hook.exe";
+        let mut v = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":VERBATIM_OLD}]}
+        ]}});
+        assert_eq!(count_lodeline_entries(&v, exe, "claude-code"), 1);
+        assert!(merge_into(&mut v, exe, "claude-code", "redacted"));
+        assert_eq!(
+            pretooluse_commands(&v),
+            ["C:/Users/테스터/x/lodeline-hook.exe claude-code --capture redacted"]
+        );
+
+        let mut old = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":VERBATIM_OLD}]}
+        ]}});
+        assert!(remove_from(&mut old, exe, "claude-code"));
+        assert!(pretooluse_commands(&old).is_empty());
+    }
+
+    #[test]
+    fn quoted_path_with_spaces_dedupes_and_spares_foreign() {
+        let exe = r#""C:/Program Files/Lodeline 한글/lodeline-hook.exe""#;
+        let foreign = r#""C:/Program Files/Other/tool.exe" run"#;
+        let mut v = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":foreign}]}
+        ]}});
+        assert!(merge_into(&mut v, exe, "claude-code", "redacted"));
+        assert!(!merge_into(&mut v, exe, "claude-code", "redacted"));
+        assert_eq!(count_lodeline_entries(&v, exe, "claude-code"), 1);
+        assert!(remove_from(&mut v, exe, "claude-code"));
+        assert_eq!(pretooluse_commands(&v), [foreign]);
+    }
+
+    #[test]
+    fn upgrade_replaces_old_unquoted_path_with_spaces() {
+        let old = r"C:\Program Files\Lodeline\lodeline-hook.exe codex --capture redacted";
+        let exe = r#""C:\Program Files\Lodeline\lodeline-hook.exe""#;
+        let mut v = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":old}]}
+        ]}});
+        assert!(merge_into(&mut v, exe, "codex", "redacted"));
+        assert_eq!(
+            pretooluse_commands(&v),
+            [r#""C:\Program Files\Lodeline\lodeline-hook.exe" codex --capture redacted"#]
+        );
+    }
+
+    #[test]
+    fn cursor_upgrade_replaces_verbatim_windows_registration() {
+        let old = r"\\?\C:\Users\테스터\x\lodeline-hook.exe cursor --capture redacted";
+        let exe = "C:/Users/테스터/x/lodeline-hook.exe";
+        let mut v = json!({"version":1,"hooks":{
+            "beforeShellExecution":[{"command":old}],
+            "beforeMCPExecution":[{"command":old}],
+        }});
+        assert!(merge_into(&mut v, exe, "cursor", "redacted"));
+        assert_eq!(count_lodeline_entries(&v, exe, "cursor"), 2);
+        assert_eq!(
+            v["hooks"]["beforeMCPExecution"][0]["command"],
+            json!("C:/Users/테스터/x/lodeline-hook.exe cursor --capture redacted")
+        );
+    }
+
     // --- Codex (nested, ~/.codex/hooks.json) ---
     #[test]
     fn codex_uses_nested_and_notes_hook_trust() {
