@@ -26,3 +26,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# The Windows capture e2e test runs the agent's hook pipe listener in process.
+[target.'cfg(windows)'.dev-dependencies]
+lodeline-agent = { path = "../lodeline-agent" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }

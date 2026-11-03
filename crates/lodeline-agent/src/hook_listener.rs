@@ -346,6 +346,34 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn hook_pipe_refuses_a_name_already_in_use() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let name = format!(
+            r"\\.\pipe\lodeline-hook-taken-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        // Same access mode as the listener, so only first_pipe_instance(true) refuses it.
+        let _other = ServerOptions::new()
+            .access_outbound(false)
+            .create(&name)
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let result = serve_pipe_until(
+            name,
+            tx,
+            "host-x".into(),
+            crate::hook_silence::new_map(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a second owner of the hook pipe name must fail"
+        );
+    }
+
     #[test]
     fn drift_report_becomes_hook_config_drift_event() {
         use lodeline_core::hook_proto::{
