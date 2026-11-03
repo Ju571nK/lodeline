@@ -51,9 +51,9 @@ fn command_string(exe: &str, agent: &str, capture: &str) -> String {
 }
 
 fn command_string_enforce(exe: &str, agent: &str, capture: &str, on_failure: &str) -> String {
-    // Registrations dedupe by binary path: installing enforce over an existing observe
-    // registration (same exe) REPLACES it — operators upgrading observe→enforce get the
-    // observe entry overwritten, not a second entry.
+    // Registrations dedupe by shape (see `is_our_command`): installing enforce over an
+    // existing observe registration REPLACES it, so operators upgrading observe→enforce
+    // get the observe entry overwritten, not a second entry.
     format!("{exe} {agent} --enforce --on-failure {on_failure} --capture {capture}")
 }
 
@@ -107,6 +107,96 @@ fn invokes_exe(cmd: &str, exe: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(SHELL_WS))
 }
 
+/// Whether `cmd` has the shape install writes for `agent` from any folder:
+/// `<path>/lodeline-hook[.exe] <agent> ... --capture <mode>`. Release archives
+/// unpack into a versioned folder, so an upgrade must find the old entry by
+/// shape. Only the binary's own path may come before it, so a wrapper such as
+/// `cmd.exe /c ...` or `bash -c ...` stays the user's.
+fn is_our_command(cmd: &str, agent: &str) -> bool {
+    let tokens = |s| str::split(s, SHELL_WS).filter(|t| !t.is_empty());
+    let exe = command_exe(cmd);
+    if is_hook_binary(exe.trim_matches('"')) {
+        let rest = &cmd.trim_start_matches(SHELL_WS)[exe.len()..];
+        return has_our_args(tokens(rest), agent);
+    }
+    // lodeline-hook <= 0.12.2 wrote a path with a space unquoted, so the binary
+    // can be a later token. Every token before it must read as part of one path.
+    let tokens: Vec<&str> = tokens(cmd).collect();
+    let Some(bin) = tokens.iter().position(|t| is_hook_binary(t)) else {
+        return false;
+    };
+    let path = &tokens[..=bin];
+    starts_absolute(path[0])
+        && path[1..]
+            .iter()
+            .all(|t| !t.starts_with(['/', '\\', '-', '.', '~']) && !starts_absolute(t))
+        && path[bin].contains(['/', '\\'])
+        && !path.iter().any(|t| t.contains(['"', '\'']))
+        && !path[..bin].iter().any(|t| is_launcher(t))
+        && has_our_args(tokens[bin + 1..].iter().copied(), agent)
+}
+
+/// The last path component is our binary. Windows file names ignore case.
+fn is_hook_binary(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    ["lodeline-hook", "lodeline-hook.exe"]
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
+
+/// Programs that run the rest of their command line.
+const LAUNCHERS: [&str; 23] = [
+    "cmd",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "pwsh",
+    "powershell",
+    "env",
+    "wsl",
+    "sudo",
+    "doas",
+    "nice",
+    "nohup",
+    "time",
+    "timeout",
+    "xargs",
+    "stdbuf",
+    "ionice",
+    "chrt",
+    "command",
+    "exec",
+    "setsid",
+    "taskset",
+];
+
+/// A shell, wrapper, executable or script, which a folder name in an old
+/// spaced path is not.
+fn is_launcher(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let name = name.to_ascii_lowercase();
+    LAUNCHERS.contains(&name.as_str())
+        || [".exe", ".cmd", ".bat", ".com", ".sh", ".ps1"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+}
+
+/// `/x`, `\x`, `\\?\C:...` or `C:...`.
+fn starts_absolute(token: &str) -> bool {
+    let b = token.as_bytes();
+    token.starts_with(['/', '\\']) || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+}
+
+fn has_our_args<'a>(mut args: impl Iterator<Item = &'a str>, agent: &str) -> bool {
+    args.next() == Some(agent) && args.any(|t| t == "--capture")
+}
+
+/// Ours at any path, or any command that runs `exe` itself.
+fn is_ours(cmd: &str, exe: &str, agent: &str) -> bool {
+    is_our_command(cmd, agent) || invokes_exe(cmd, exe)
+}
+
 // --- Claude-style entry helpers ---
 
 fn claude_entry(cmd: &str) -> Value {
@@ -123,18 +213,48 @@ pub(crate) fn claude_entry_cmd(entry: &Value) -> Option<&str> {
         .and_then(|c| c.as_str())
 }
 
-pub(crate) fn claude_entry_is_ours(entry: &Value, exe: &str) -> bool {
-    entry
+fn group_hooks(group: &Value) -> &[Value] {
+    group
         .get("hooks")
-        .and_then(|h| h.as_array())
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| invokes_exe(c, exe))
-            })
-        })
-        .unwrap_or(false)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn hook_command(hook: &Value) -> Option<&str> {
+    hook.get("command").and_then(Value::as_str)
+}
+
+/// Each inner hook command of ours, with the group that holds it. A group can
+/// also hold the user's own hooks, so ours are counted and removed one by one.
+pub(crate) fn nested_ours<'a>(
+    groups: &'a [Value],
+    exe: &'a str,
+    agent: &'a str,
+) -> impl Iterator<Item = (&'a Value, &'a str)> + 'a {
+    groups.iter().flat_map(move |g| {
+        group_hooks(g)
+            .iter()
+            .filter_map(hook_command)
+            .filter(move |c| is_ours(c, exe, agent))
+            .map(move |c| (g, c))
+    })
+}
+
+/// Drop the inner hooks whose command matches, and a group only when that
+/// empties it, so a user's hook sharing the group survives. Returns how many
+/// hooks went.
+pub(crate) fn strip_nested(groups: &mut Vec<Value>, is: impl Fn(&str) -> bool) -> usize {
+    let mut removed = 0;
+    groups.retain_mut(|group| {
+        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = hooks.len();
+        hooks.retain(|h| !hook_command(h).is_some_and(&is));
+        removed += before - hooks.len();
+        hooks.len() == before || !hooks.is_empty()
+    });
+    removed
 }
 
 /// Get-or-create the nested `hooks.PreToolUse` array.
@@ -185,21 +305,45 @@ fn pretooluse_array_mut(root: &mut Value) -> &mut Vec<Value> {
     h["PreToolUse"].as_array_mut().unwrap()
 }
 
-fn merge_claude(arr: &mut Vec<Value>, exe: &str, cmd: &str) -> bool {
-    match arr.iter().position(|e| claude_entry_is_ours(e, exe)) {
-        Some(i) => {
-            if claude_entry_cmd(&arr[i]) == Some(cmd) {
-                false
-            } else {
-                arr[i] = claude_entry(cmd);
-                true
-            }
-        }
-        None => {
-            arr.push(claude_entry(cmd));
-            true
-        }
+/// Remove each hook of ours and put `cmd` in a group of its own, where the
+/// first group that held only ours was. A user's group is never written into.
+fn merge_claude(arr: &mut Vec<Value>, exe: &str, agent: &str, cmd: &str) -> bool {
+    let ours = |c: &str| is_ours(c, exe, agent);
+    // Exactly the groups `strip_nested` drops.
+    let only_ours = |g: &Value| {
+        let hooks = group_hooks(g);
+        !hooks.is_empty() && hooks.iter().all(|h| hook_command(h).is_some_and(ours))
+    };
+    let slot = arr.iter().position(only_ours);
+    if slot.is_some_and(|i| claude_entry_cmd(&arr[i]) == Some(cmd))
+        && nested_ours(arr, exe, agent).count() == 1
+    {
+        return false;
     }
+    let at = slot.map_or(usize::MAX, |i| {
+        arr[..i].iter().filter(|g| !only_ours(g)).count()
+    });
+    strip_nested(arr, ours);
+    arr.insert(at.min(arr.len()), claude_entry(cmd));
+    true
+}
+
+/// Replace every flat entry of ours with one `entry`, at the first one's position.
+/// Returns false when `arr` already holds exactly one entry of ours and `same`
+/// accepts it.
+fn replace_ours(
+    arr: &mut Vec<Value>,
+    ours: impl Fn(&Value) -> bool,
+    same: impl Fn(&Value) -> bool,
+    entry: Value,
+) -> bool {
+    let first = arr.iter().position(&ours);
+    if first.is_some_and(|i| same(&arr[i])) && arr.iter().filter(|e| ours(e)).count() == 1 {
+        return false;
+    }
+    arr.retain(|e| !ours(e));
+    arr.insert(first.unwrap_or(arr.len()), entry);
+    true
 }
 
 // --- Cursor helpers ---
@@ -208,7 +352,7 @@ pub(crate) fn cursor_entry_is_ours(entry: &Value, exe: &str) -> bool {
     entry
         .get("command")
         .and_then(|c| c.as_str())
-        .is_some_and(|c| invokes_exe(c, exe))
+        .is_some_and(|c| is_ours(c, exe, "cursor"))
 }
 
 /// The `command` string of a Cursor settings entry, if present.
@@ -241,7 +385,7 @@ fn cursor_enforce_entry(cmd: &str, on_failure: &str) -> Value {
     }
 }
 
-/// Upsert our prebuilt entry on BOTH Cursor gate events, keyed by exe.
+/// Upsert our prebuilt entry on BOTH Cursor gate events, replacing every entry of ours.
 /// Replaces the whole entry object on change (so a stale `failClosed` from a prior
 /// closed install is dropped on a later open install). Returns true if changed.
 fn upsert_cursor_entry(root: &mut Value, exe: &str, entry: &Value) -> bool {
@@ -264,18 +408,12 @@ fn upsert_cursor_entry(root: &mut Value, exe: &str, entry: &Value) -> bool {
             }
             h[ev].as_array_mut().unwrap()
         };
-        match arr.iter().position(|e| cursor_entry_is_ours(e, exe)) {
-            Some(i) => {
-                if &arr[i] != entry {
-                    arr[i] = entry.clone();
-                    changed = true;
-                }
-            }
-            None => {
-                arr.push(entry.clone());
-                changed = true;
-            }
-        }
+        changed |= replace_ours(
+            arr,
+            |e| cursor_entry_is_ours(e, exe),
+            |e| e == entry,
+            entry.clone(),
+        );
     }
     changed
 }
@@ -345,7 +483,9 @@ pub fn merge_into(root: &mut Value, exe: &str, agent: &str, capture: &str) -> bo
     let cmd = command_string(exe, agent, capture);
     let replaced = crate::legacy::strip_entries(root, agent) > 0;
     let merged = match agent_format(agent) {
-        Some(HookFormat::NestedPreToolUse) => merge_claude(pretooluse_array_mut(root), exe, &cmd),
+        Some(HookFormat::NestedPreToolUse) => {
+            merge_claude(pretooluse_array_mut(root), exe, agent, &cmd)
+        }
         Some(HookFormat::Cursor) => merge_cursor(root, exe, &cmd),
         None => false,
     };
@@ -374,24 +514,22 @@ pub fn merge_into_enforce(
     let cmd = command_string_enforce(exe, agent, capture, on_failure);
     let replaced = crate::legacy::strip_entries(root, agent) > 0;
     let merged = match agent_format(agent) {
-        Some(HookFormat::NestedPreToolUse) => merge_claude(pretooluse_array_mut(root), exe, &cmd),
+        Some(HookFormat::NestedPreToolUse) => {
+            merge_claude(pretooluse_array_mut(root), exe, agent, &cmd)
+        }
         Some(HookFormat::Cursor) => merge_cursor_enforce(root, exe, &cmd, on_failure),
         None => false,
     };
     replaced || merged
 }
 
-/// Remove every lodeline-hook entry for `exe`. Returns `true` if anything was
+/// Remove every lodeline-hook entry for `agent`, at any path. Returns `true` if anything was
 /// removed. Leaves unrelated hooks untouched.
 pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
     let replaced = crate::legacy::strip_entries(root, agent) > 0;
     let removed = match agent_format(agent) {
         Some(HookFormat::NestedPreToolUse) => match root["hooks"]["PreToolUse"].as_array_mut() {
-            Some(a) => {
-                let before = a.len();
-                a.retain(|e| !claude_entry_is_ours(e, exe));
-                a.len() < before
-            }
+            Some(a) => strip_nested(a, |c| is_ours(c, exe, agent)) > 0,
             None => false,
         },
         Some(HookFormat::Cursor) => {
@@ -410,7 +548,7 @@ pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
     replaced || removed
 }
 
-/// Count lodeline-hook entries for `exe` (across all relevant arrays), plus
+/// Count lodeline-hook entries for `agent` at any path (across all relevant arrays), plus
 /// entries from before the rename, which uninstall removes as well.
 pub fn count_lodeline_entries(root: &Value, exe: &str, agent: &str) -> usize {
     let legacy = crate::legacy::count_entries(root, agent);
@@ -418,7 +556,7 @@ pub fn count_lodeline_entries(root: &Value, exe: &str, agent: &str) -> usize {
         + match agent_format(agent) {
             Some(HookFormat::NestedPreToolUse) => root["hooks"]["PreToolUse"]
                 .as_array()
-                .map(|a| a.iter().filter(|e| claude_entry_is_ours(e, exe)).count())
+                .map(|a| nested_ours(a, exe, agent).count())
                 .unwrap_or(0),
             Some(HookFormat::Cursor) => CURSOR_EVENTS
                 .iter()
@@ -827,6 +965,264 @@ mod tests {
             v["hooks"]["beforeMCPExecution"][0]["command"],
             json!("C:/Users/alice/x/lodeline-hook.exe cursor --capture redacted")
         );
+    }
+
+    // Release archives unpack into a versioned folder, so an upgrade installs
+    // from a new path while the old entry still names the old folder.
+    const OLD_DIR: &str = r"C:\Users\alice\lodeline-0.12.2-x86_64-pc-windows-msvc";
+    const NEW_EXE: &str = "C:/Users/alice/lodeline-0.12.3-x86_64-pc-windows-msvc/lodeline-hook.exe";
+    const FOREIGN: &str = "/other/tool run";
+
+    fn old_commands(agent: &str) -> [String; 2] {
+        [
+            format!(r"\\?\{OLD_DIR}\lodeline-hook.exe {agent} --capture redacted"),
+            format!(
+                "{}/lodeline-hook.exe {agent} --enforce --on-failure open --capture raw",
+                OLD_DIR.replace('\\', "/")
+            ),
+        ]
+    }
+
+    fn wrapper(agent: &str) -> String {
+        format!("cmd.exe /c {NEW_EXE} {agent} --capture redacted")
+    }
+
+    fn nested_settings(cmds: &[&str]) -> Value {
+        json!({"hooks":{"PreToolUse": cmds.iter()
+            .map(|c| json!({"matcher":"*","hooks":[{"type":"command","command":c}]}))
+            .collect::<Vec<_>>()}})
+    }
+
+    #[test]
+    fn upgrade_from_another_folder_leaves_one_entry() {
+        for agent in ["claude-code", "codex", "antigravity"] {
+            let [verbatim, slash] = old_commands(agent);
+            let wrap = wrapper(agent);
+            let mut v = nested_settings(&[FOREIGN, &verbatim, &wrap, &slash]);
+            assert!(merge_into(&mut v, NEW_EXE, agent, "redacted"));
+            let new = format!("{NEW_EXE} {agent} --capture redacted");
+            assert_eq!(pretooluse_commands(&v), [FOREIGN, &new, &wrap], "{agent}");
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 1, "{agent}");
+            assert!(!merge_into(&mut v, NEW_EXE, agent, "redacted"), "{agent}");
+        }
+    }
+
+    #[test]
+    fn enforce_upgrade_from_another_folder_leaves_one_entry() {
+        let [verbatim, slash] = old_commands("codex");
+        let mut v = nested_settings(&[&verbatim, &slash]);
+        assert!(merge_into_enforce(
+            &mut v, NEW_EXE, "codex", "redacted", "closed"
+        ));
+        assert_eq!(
+            pretooluse_commands(&v),
+            [format!(
+                "{NEW_EXE} codex --enforce --on-failure closed --capture redacted"
+            )]
+        );
+    }
+
+    #[test]
+    fn cursor_upgrade_from_another_folder_leaves_one_entry_per_event() {
+        let [verbatim, slash] = old_commands("cursor");
+        let wrap = wrapper("cursor");
+        let event =
+            json!([{"command":FOREIGN},{"command":verbatim},{"command":wrap},{"command":slash}]);
+        let mut v = json!({"version":1,"hooks":{
+            "beforeShellExecution": event.clone(),
+            "beforeMCPExecution": event,
+        }});
+        assert!(merge_into(&mut v, NEW_EXE, "cursor", "redacted"));
+        let new = format!("{NEW_EXE} cursor --capture redacted");
+        for ev in CURSOR_EVENTS {
+            assert_eq!(
+                v["hooks"][ev],
+                json!([{"command":FOREIGN},{"command":new},{"command":wrap}]),
+                "{ev}"
+            );
+        }
+        assert_eq!(count_lodeline_entries(&v, NEW_EXE, "cursor"), 2);
+    }
+
+    #[test]
+    fn tarball_to_package_upgrade_replaces_the_tarball_entry() {
+        let old = "/home/alice/lodeline-0.12.2-x86_64-unknown-linux-gnu/lodeline-hook claude-code --capture redacted";
+        let mut v = nested_settings(&[old]);
+        assert!(merge_into(
+            &mut v,
+            "/usr/bin/lodeline-hook",
+            "claude-code",
+            "redacted"
+        ));
+        assert_eq!(
+            pretooluse_commands(&v),
+            ["/usr/bin/lodeline-hook claude-code --capture redacted"]
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_our_entries_at_any_path() {
+        for agent in ["claude-code", "codex"] {
+            let [verbatim, slash] = old_commands(agent);
+            let wrap = wrapper(agent);
+            let mut v = nested_settings(&[FOREIGN, &verbatim, &wrap, &slash]);
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 2, "{agent}");
+            assert!(remove_from(&mut v, NEW_EXE, agent));
+            assert_eq!(pretooluse_commands(&v), [FOREIGN, &wrap], "{agent}");
+        }
+        let [verbatim, slash] = old_commands("cursor");
+        let mut v = json!({"version":1,"hooks":{
+            "beforeShellExecution":[{"command":verbatim},{"command":FOREIGN}],
+            "beforeMCPExecution":[{"command":slash}],
+        }});
+        assert_eq!(count_lodeline_entries(&v, NEW_EXE, "cursor"), 2);
+        assert!(remove_from(&mut v, NEW_EXE, "cursor"));
+        assert_eq!(
+            v["hooks"],
+            json!({"beforeShellExecution":[{"command":FOREIGN}],"beforeMCPExecution":[]})
+        );
+    }
+
+    #[test]
+    fn commands_that_only_mention_our_binary_are_not_ours() {
+        let agent = "claude-code";
+        for cmd in [
+            wrapper(agent),
+            format!("bash -c '{NEW_EXE} {agent} --capture redacted'"),
+            format!("/bin/sh -c \"{NEW_EXE} {agent} --capture redacted\""),
+            "/opt/x/lodeline-hook.bak claude-code --capture redacted".to_string(),
+            "/opt/x/my-lodeline-hook claude-code --capture redacted".to_string(),
+            "/opt/x/lodeline-hook claude-code --verbose".to_string(),
+            "/opt/x/lodeline-hook codex --capture redacted".to_string(),
+        ] {
+            let mut v = nested_settings(&[&cmd]);
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 0, "{cmd}");
+            assert!(merge_into(&mut v, NEW_EXE, agent, "redacted"));
+            assert_eq!(pretooluse_commands(&v)[0], cmd);
+            assert_eq!(pretooluse_commands(&v).len(), 2, "{cmd}");
+        }
+    }
+
+    fn group(matcher: &str, cmds: &[&str]) -> Value {
+        json!({"matcher": matcher, "hooks": cmds.iter()
+            .map(|c| json!({"type":"command","command":c}))
+            .collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn a_user_hook_sharing_our_group_survives_install_and_uninstall() {
+        let mine = "/u/mine.sh";
+        for agent in ["claude-code", "codex", "antigravity"] {
+            let old = format!("/old/lodeline-hook {agent} --capture redacted");
+            let only_ours = format!("/older/lodeline-hook {agent} --capture raw");
+            let start = json!({"hooks":{"PreToolUse":[
+                group("Bash", &[mine, &old]),
+                group("*", &[&only_ours]),
+            ]}});
+            let new = format!("{NEW_EXE} {agent} --capture redacted");
+
+            let mut v = start.clone();
+            assert!(merge_into(&mut v, NEW_EXE, agent, "redacted"));
+            assert_eq!(
+                v["hooks"]["PreToolUse"],
+                json!([group("Bash", &[mine]), group("*", &[&new])]),
+                "{agent}"
+            );
+            assert!(!merge_into(&mut v, NEW_EXE, agent, "redacted"), "{agent}");
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 1, "{agent}");
+
+            let mut v = start.clone();
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 2, "{agent}");
+            assert!(remove_from(&mut v, NEW_EXE, agent));
+            assert_eq!(
+                v["hooks"]["PreToolUse"],
+                json!([group("Bash", &[mine])]),
+                "{agent}"
+            );
+        }
+
+        let mut v = json!({"hooks":{"PreToolUse":[
+            group("Bash", &[mine, "/old/lodeline-hook codex --capture redacted"]),
+        ]}});
+        assert!(merge_into_enforce(
+            &mut v, NEW_EXE, "codex", "redacted", "closed"
+        ));
+        let new = format!("{NEW_EXE} codex --enforce --on-failure closed --capture redacted");
+        assert_eq!(
+            v["hooks"]["PreToolUse"],
+            json!([group("Bash", &[mine]), group("*", &[&new])])
+        );
+        assert!(!merge_into_enforce(
+            &mut v, NEW_EXE, "codex", "redacted", "closed"
+        ));
+    }
+
+    #[test]
+    fn install_never_writes_into_a_user_group() {
+        let mut v = json!({"hooks":{"PreToolUse":[group("*", &["/u/mine.sh"])]}});
+        assert!(merge_into(&mut v, NEW_EXE, "claude-code", "redacted"));
+        let new = format!("{NEW_EXE} claude-code --capture redacted");
+        assert_eq!(
+            v["hooks"]["PreToolUse"],
+            json!([group("*", &["/u/mine.sh"]), group("*", &[&new])])
+        );
+    }
+
+    #[test]
+    fn old_unquoted_path_with_a_space_from_another_folder_is_ours() {
+        let old = r"\\?\C:\Users\Jane Doe\lodeline-0.12.2\lodeline-hook.exe claude-code --capture redacted";
+        let mut v = nested_settings(&[FOREIGN, old]);
+        assert_eq!(count_lodeline_entries(&v, NEW_EXE, "claude-code"), 1);
+        assert!(merge_into(&mut v, NEW_EXE, "claude-code", "redacted"));
+        assert_eq!(
+            pretooluse_commands(&v),
+            [
+                FOREIGN,
+                &format!("{NEW_EXE} claude-code --capture redacted")
+            ]
+        );
+        for cmd in [
+            r"C:\Program Files\Lodeline\LODELINE-HOOK.EXE claude-code --capture raw",
+            "C:/x/Lodeline-Hook.exe claude-code --capture raw",
+            "/Users/Jane Doe/lodeline-0.12.2/lodeline-hook claude-code --capture redacted",
+            "/home/a b c/lodeline-hook claude-code --capture redacted",
+        ] {
+            assert_eq!(
+                count_lodeline_entries(&nested_settings(&[cmd]), NEW_EXE, "claude-code"),
+                1,
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapper_around_a_spaced_path_stays_foreign() {
+        let claimed: Vec<&str> = [
+            r"cmd.exe /c C:\x y\lodeline-hook.exe claude-code --capture redacted",
+            r"C:\Windows\System32\cmd.exe /c C:\x y\lodeline-hook.exe claude-code --capture redacted",
+            r"C:\Program Files\Git\bin\bash.exe -c C:/x/lodeline-hook.exe claude-code --capture redacted",
+            "/bin/bash x y/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/env /opt/x/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/env lodeline-hook claude-code --capture redacted",
+            r"C:\x y\lodeline-hook.exe codex --capture redacted",
+            r"C:\x y\lodeline-hook.exe claude-code --verbose",
+            "/usr/bin/sudo x y/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/nice ./lodeline-hook claude-code --capture redacted",
+            "/usr/bin/time ../bin/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/nohup bin/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/timeout 5 bin/lodeline-hook claude-code --capture redacted",
+            "/opt/wrap.sh bin/lodeline-hook claude-code --capture redacted",
+            "C:/tools/run.exe a/lodeline-hook.exe claude-code --capture redacted",
+            "/opt/x ~/lodeline-hook claude-code --capture redacted",
+        ]
+        .into_iter()
+        .filter(|cmd| {
+            let mut v = nested_settings(&[cmd]);
+            count_lodeline_entries(&v, NEW_EXE, "claude-code") != 0
+                || remove_from(&mut v, NEW_EXE, "claude-code")
+        })
+        .collect();
+        assert!(claimed.is_empty(), "claimed as ours: {claimed:#?}");
     }
 
     // --- Codex (nested, ~/.codex/hooks.json) ---

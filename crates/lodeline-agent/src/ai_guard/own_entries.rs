@@ -16,9 +16,11 @@ const MCP_SERVER_NAMES: [&str; 4] = [
     "sigil-fleet",
 ];
 
-fn binary_name(path: &str) -> &str {
+/// Lowercased, because Windows file names ignore case.
+fn binary_name(path: &str) -> String {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    name.strip_suffix(".exe").unwrap_or(name)
+    let name = name.to_ascii_lowercase();
+    name.strip_suffix(".exe").unwrap_or(&name).to_string()
 }
 
 /// `<path>/lodeline-hook <agent> ... --capture <mode>`, the shape install writes.
@@ -31,12 +33,13 @@ pub(crate) fn is_own_hook_command(cmd: &str) -> bool {
         Some((exe, args)) => (exe, args),
         None => cmd.split_once(SHELL_WS).unwrap_or((cmd, "")),
     };
-    HOOK_BINARIES.contains(&binary_name(exe)) && args.split(SHELL_WS).any(|t| t == "--capture")
+    HOOK_BINARIES.contains(&binary_name(exe).as_str())
+        && args.split(SHELL_WS).any(|t| t == "--capture")
 }
 
 /// An MCP entry under one of our server names that runs our binary.
 pub(crate) fn is_own_mcp_server(name: &str, command: &str) -> bool {
-    MCP_SERVER_NAMES.contains(&name) && MCP_BINARIES.contains(&binary_name(command))
+    MCP_SERVER_NAMES.contains(&name) && MCP_BINARIES.contains(&binary_name(command).as_str())
 }
 
 #[cfg(test)]
@@ -68,9 +71,15 @@ mod tests {
         assert!(is_own_hook_command(
             "C:/Users/alice/新しい\u{3000}フォルダー/lodeline-hook.exe codex --capture redacted"
         ));
+        assert!(is_own_hook_command(
+            r"C:\Lodeline\Lodeline-Hook.EXE codex --capture redacted"
+        ));
         assert!(!is_own_hook_command("/usr/bin/sigil-hook"));
         assert!(!is_own_hook_command("/tmp/evil.sh --capture raw"));
         assert!(!is_own_hook_command("sh -c 'sigil-hook --capture raw'"));
+        assert!(!is_own_hook_command(
+            "cmd.exe /c C:/bin/lodeline-hook.exe claude-code --capture redacted"
+        ));
     }
 
     #[test]

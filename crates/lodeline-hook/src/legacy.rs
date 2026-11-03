@@ -2,7 +2,7 @@
 //! rename. They point at a command that upgrades removed, so install and
 //! uninstall take them out. Nothing else in a settings file is touched.
 
-use crate::install::{agent_format, HookFormat, CURSOR_EVENTS};
+use crate::install::{agent_format, strip_nested, HookFormat, CURSOR_EVENTS};
 use serde_json::Value;
 use std::path::Path;
 
@@ -25,22 +25,6 @@ fn command_is_legacy(hook: &Value) -> bool {
         .is_some_and(is_legacy_command)
 }
 
-/// Drop legacy inner hooks, and an entry only when that empties it, so a user's
-/// hook sharing the entry survives. Returns how many hooks went.
-fn strip_nested(entries: &mut Vec<Value>) -> usize {
-    let mut removed = 0;
-    entries.retain_mut(|entry| {
-        let Some(hooks) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
-            return true;
-        };
-        let before = hooks.len();
-        hooks.retain(|h| !command_is_legacy(h));
-        removed += before - hooks.len();
-        hooks.len() == before || !hooks.is_empty()
-    });
-    removed
-}
-
 fn strip_flat(entries: &mut Vec<Value>) -> usize {
     let before = entries.len();
     entries.retain(|e| !command_is_legacy(e));
@@ -56,7 +40,7 @@ pub(crate) fn strip_entries(root: &mut Value, agent: &str) -> usize {
         Some(HookFormat::NestedPreToolUse) => hooks
             .get_mut("PreToolUse")
             .and_then(Value::as_array_mut)
-            .map_or(0, strip_nested),
+            .map_or(0, |entries| strip_nested(entries, is_legacy_command)),
         Some(HookFormat::Cursor) => {
             let mut removed = 0;
             for ev in CURSOR_EVENTS {
@@ -91,7 +75,7 @@ pub(crate) fn retire_grok_file(path: &Path) -> std::io::Result<bool> {
     else {
         return Ok(false);
     };
-    if strip_nested(entries) == 0 {
+    if strip_nested(entries, is_legacy_command) == 0 {
         return Ok(false);
     }
     if entries.is_empty() {

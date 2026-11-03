@@ -7,6 +7,23 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Fixed
+
+- `lodeline-hook install --write` from a new release folder now replaces the entry
+  that an older version wrote from another folder. Before, the old entry stayed beside
+  the new one. On Windows that old entry used the `\\?\` path form, which fails on every
+  tool call under Git Bash. An old entry whose path has a space and no quotes is found
+  too. `uninstall` now removes Lodeline's entries at any path. A wrapper such as
+  `cmd.exe /c` or `bash -c` is still left alone. (#443)
+- In Claude Code, Codex and Antigravity, install and uninstall now remove only
+  Lodeline's own command from a hook group. Before, they removed the whole group, so a
+  user's hook in the same group was lost. Install writes its command in a group of its
+  own. (#443)
+- `verify` now reports `command_drift` when more than one Lodeline entry is present, or
+  when the entry points at another binary. A leftover `sigil-hook` entry beside the new
+  one counts, so `verify` reports `command_drift` until `install --write` removes it.
+  (#443)
+
 ## [0.12.3] - 2026-11-03
 
 ### Added

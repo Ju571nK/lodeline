@@ -972,6 +972,10 @@ fn cmd_verify(agent: &str) -> i32 {
             "[DRIFT] no lodeline hook entry in {} (entry_missing)",
             report.settings_path
         ),
+        DriftKind::CommandDrift if report.duplicate_entries => println!(
+            "[DRIFT] more than one lodeline hook entry in {}. Run install --write to keep one (command_drift)",
+            report.settings_path
+        ),
         DriftKind::CommandDrift => println!(
             "[DRIFT] hook command changed in {} — binary repoint / flag flip (command_drift)",
             report.settings_path

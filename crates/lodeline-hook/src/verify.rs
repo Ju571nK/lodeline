@@ -28,6 +28,9 @@ pub struct DriftReport {
     pub observed_matcher: Option<String>,
     pub expected_fail_closed: Option<bool>,
     pub observed_fail_closed: Option<bool>,
+    /// More than one entry of ours, such as one an upgrade from another folder
+    /// left behind. Sent as `CommandDrift`, which an older agent can read.
+    pub duplicate_entries: bool,
 }
 
 /// Load the baseline, or None if absent/unreadable/malformed.
@@ -46,6 +49,7 @@ fn absent(path: &str) -> DriftReport {
         observed_matcher: None,
         expected_fail_closed: None,
         observed_fail_closed: None,
+        duplicate_entries: false,
     }
 }
 
@@ -63,6 +67,7 @@ pub fn check(agent: &str) -> Option<DriftReport> {
 /// Compare one baseline against its live settings file. None = clean.
 /// Dispatches by agent format: Cursor gets a 3-pass algorithm (missing > command > fail-mode);
 /// Claude/codex use the NestedPreToolUse path (entry_missing -> command_drift -> matcher_drift).
+/// A second entry of ours is command_drift with `duplicate_entries` set.
 pub fn check_one(b: &Baseline) -> Option<DriftReport> {
     match install::agent_format(&b.agent) {
         Some(install::HookFormat::Cursor) => check_one_cursor(b),
@@ -80,13 +85,12 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
         // treat both an absent and a corrupt settings file as "entry not present" —
         // the lodeline entry simply can't be found, yielding EntryMissing.
         .unwrap_or(serde_json::Value::Null);
-    let entry = root
+    let groups = root
         .get("hooks")
         .and_then(|h| h.get("PreToolUse"))
         .and_then(|p| p.as_array())
-        .and_then(|arr| arr.iter().find(|e| install::claude_entry_is_ours(e, &exe)));
-
-    let Some(entry) = entry else {
+        .map_or(&[][..], Vec::as_slice);
+    let Some((entry, live_cmd)) = install::nested_ours(groups, &exe, &b.agent).next() else {
         return Some(DriftReport {
             kind: DriftKind::EntryMissing,
             settings_path: b.settings_path.clone(),
@@ -96,22 +100,20 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
             observed_matcher: None,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries: false,
         });
     };
 
-    // block_hash was written as blake3(full command string); claude_entry_cmd
-    // returns that same inner command, so the hashes line up.
-    let live_cmd = install::claude_entry_cmd(entry).unwrap_or("");
+    // block_hash was written as blake3(full command string), the same inner command.
     let observed_hash = blake3::hash(live_cmd.as_bytes()).to_hex().to_string();
     let observed_matcher = entry
         .get("matcher")
         .and_then(|m| m.as_str())
         .map(String::from);
 
-    // note: a change to the binary PATH makes claude_entry_is_ours not match →
-    // EntryMissing, not CommandDrift; CommandDrift covers arg/flag-level changes
-    // to the same exe.
-    if observed_hash != b.block_hash {
+    // Entries match by shape, so a repointed binary is CommandDrift too.
+    let duplicate_entries = install::count_lodeline_entries(&root, &exe, &b.agent) > 1;
+    if duplicate_entries || observed_hash != b.block_hash {
         return Some(DriftReport {
             kind: DriftKind::CommandDrift,
             settings_path: b.settings_path.clone(),
@@ -121,6 +123,7 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
             observed_matcher,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries,
         });
     }
     if observed_matcher.as_deref() != Some(b.matcher.as_str()) {
@@ -133,6 +136,7 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
             observed_matcher,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries: false,
         });
     }
     None // clean
@@ -144,9 +148,9 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
 /// could strip coverage from one event. `failClosed` is a Cursor-native field
 /// (gates whether a crashing hook blocks vs passes through) — absent from the
 /// Claude/Codex format, which is why only this path checks it.
-/// PASS 1 — entry missing in any event (highest priority)
-/// PASS 2 — command hash differs in any event
-/// PASS 3 — failClosed differs from baseline in any event
+/// Pass 1 reports an event without our entry. It goes first.
+/// Pass 2 reports a second entry of ours, or a command hash that differs.
+/// Pass 3 reports a failClosed that differs from the baseline.
 fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
     use install::{
         command_exe, cursor_entry_command, cursor_entry_fail_closed, cursor_entry_is_ours,
@@ -166,7 +170,7 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
     let entries: Vec<(&str, Option<serde_json::Value>)> =
         CURSOR_EVENTS.iter().map(|ev| (*ev, our(ev))).collect();
 
-    // PASS 1 — any event missing our entry
+    // Pass 1. An event is missing our entry.
     if entries.iter().any(|(_, e)| e.is_none()) {
         return Some(DriftReport {
             kind: DriftKind::EntryMissing,
@@ -177,15 +181,18 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
             observed_matcher: None,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries: false,
         });
     }
-    // PASS 2 — any event's command hash differs
+    // Pass 2. A second entry of ours, or a command hash that differs.
+    let duplicate_entries =
+        install::count_lodeline_entries(&root, &exe, &b.agent) > CURSOR_EVENTS.len();
     for (_, e) in &entries {
         let v = e.as_ref().unwrap(); // guaranteed Some past PASS 1
                                      // cursor_entry_is_ours already matched on the command, so command is present past PASS 1
         let cmd = cursor_entry_command(v).unwrap_or("");
         let observed = blake3::hash(cmd.as_bytes()).to_hex().to_string();
-        if observed != b.block_hash {
+        if duplicate_entries || observed != b.block_hash {
             return Some(DriftReport {
                 kind: DriftKind::CommandDrift,
                 settings_path: b.settings_path.clone(),
@@ -195,10 +202,11 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
                 observed_matcher: None,
                 expected_fail_closed: None,
                 observed_fail_closed: None,
+                duplicate_entries,
             });
         }
     }
-    // PASS 3 — any event's failClosed differs from baseline
+    // Pass 3. A failClosed that differs from the baseline.
     let expected_fc = b.fail_closed.unwrap_or(false);
     for (_, e) in &entries {
         let v = e.as_ref().unwrap(); // guaranteed Some past PASS 1
@@ -213,6 +221,7 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
                 observed_matcher: None,
                 expected_fail_closed: Some(expected_fc),
                 observed_fail_closed: Some(observed_fc),
+                duplicate_entries: false,
             });
         }
     }
@@ -301,6 +310,93 @@ mod tests {
         let r = check_one(&b).unwrap();
         assert_eq!(r.kind, DriftKind::MatcherDrift);
         assert_eq!(r.observed_matcher.as_deref(), Some("Bash"));
+    }
+
+    fn nested_settings(cmds: &[&str]) -> String {
+        serde_json::json!({"hooks":{"PreToolUse": cmds.iter()
+            .map(|c| serde_json::json!({"matcher":"*","hooks":[{"type":"command","command":c}]}))
+            .collect::<Vec<_>>()}})
+        .to_string()
+    }
+
+    const OLD_CMD: &str =
+        r"\\?\C:\Users\alice\lodeline-0.12.2\lodeline-hook.exe claude-code --capture redacted";
+
+    #[test]
+    fn duplicate_left_by_an_upgrade_is_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(
+            dir.path(),
+            "C:/Users/alice/lodeline-0.12.3/lodeline-hook.exe",
+            "*",
+        );
+        for cmds in [[OLD_CMD, &b.command], [&b.command, &b.command]] {
+            write_settings(&b, &nested_settings(&cmds));
+            let r = check_one(&b).expect("a second entry of ours is drift");
+            assert_eq!(r.kind, DriftKind::CommandDrift);
+            assert!(r.duplicate_entries);
+        }
+    }
+
+    #[test]
+    fn our_entry_at_another_path_is_command_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(
+            dir.path(),
+            "C:/Users/alice/lodeline-0.12.3/lodeline-hook.exe",
+            "*",
+        );
+        write_settings(&b, &nested_settings(&[OLD_CMD]));
+        let r = check_one(&b).unwrap();
+        assert_eq!(r.kind, DriftKind::CommandDrift);
+        assert!(!r.duplicate_entries);
+    }
+
+    #[test]
+    fn our_hook_after_a_user_hook_in_one_group_is_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
+        let settings = serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"*","hooks":[
+            {"type":"command","command":"/u/mine.sh"},
+            {"type":"command","command":b.command},
+        ]}]}});
+        write_settings(&b, &settings.to_string());
+        assert_eq!(check_one(&b), None);
+    }
+
+    #[test]
+    fn two_of_ours_in_one_group_is_a_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
+        let settings = serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"*","hooks":[
+            {"type":"command","command":b.command},
+            {"type":"command","command":"/old/lodeline-hook claude-code --capture raw"},
+        ]}]}});
+        write_settings(&b, &settings.to_string());
+        assert!(check_one(&b).unwrap().duplicate_entries);
+    }
+
+    #[test]
+    fn a_leftover_sigil_hook_entry_beside_ours_is_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
+        let old = "/usr/bin/sigil-hook claude-code --capture redacted";
+        write_settings(&b, &nested_settings(&[&b.command, old]));
+        let r = check_one(&b).unwrap();
+        assert_eq!(r.kind, DriftKind::CommandDrift);
+        assert!(r.duplicate_entries);
+    }
+
+    #[test]
+    fn a_wrapper_around_our_binary_is_not_a_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
+        let wrap = format!("bash -c '{}'", b.command);
+        write_settings(
+            &b,
+            &nested_settings(&[&wrap, "/other/tool run", &b.command]),
+        );
+        assert_eq!(check_one(&b), None);
     }
 
     #[test]
@@ -454,6 +550,18 @@ mod tests {
         assert_eq!(r.kind, DriftKind::FailModeDrift);
         assert_eq!(r.expected_fail_closed, Some(true));
         assert_eq!(r.observed_fail_closed, Some(false));
+    }
+
+    #[test]
+    fn cursor_duplicate_in_one_event_is_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = cursor_baseline(dir.path(), true);
+        let entry = format!(r#"{{"command":"{}","failClosed":true}}"#, b.command);
+        let old = r#"{"command":"/opt/lodeline-0.12.2/lodeline-hook cursor --capture redacted"}"#;
+        write_cursor_settings(&b, &format!("{old},{entry}"), &entry);
+        let r = check_one(&b).unwrap();
+        assert_eq!(r.kind, DriftKind::CommandDrift);
+        assert!(r.duplicate_entries);
     }
 
     #[test]
