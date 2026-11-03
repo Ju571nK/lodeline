@@ -1406,17 +1406,38 @@ impl AiGuardParser for CodexProjectParser {
         self.assess_layers(&super::policy_controls::codex_system_dir(), home_dir)
     }
 
-    fn collect_external_script_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
+    fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
+        if self.is_codex_home(home_dir) {
+            return Vec::new();
+        }
         CodexLayer::read_lenient(&self.repo_root.join(".codex")).external_script_paths()
     }
 }
 
 impl CodexProjectParser {
+    /// Codex skips a project `.codex` that is its own home
+    /// (`discover_project_layers`, `config/src/loader/mod.rs`, rust-v0.166.0),
+    /// so a project at the home folder has no Codex layer; the user parser
+    /// already scores that folder.
+    fn is_codex_home(&self, home_dir: &Path) -> bool {
+        let (dot_codex, codex_home) = (self.repo_root.join(".codex"), home_dir.join(".codex"));
+        dot_codex == codex_home
+            || matches!(
+                (dunce::canonicalize(&dot_codex), dunce::canonicalize(&codex_home)),
+                (Ok(a), Ok(b)) if a == b
+            )
+    }
+
     fn assess_layers(
         &self,
         system_dir: &Path,
         home_dir: &Path,
     ) -> Result<Vec<AiGuardReason>, AssessError> {
+        if self.is_codex_home(home_dir) {
+            let mut out = Vec::new();
+            super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
+            return Ok(out);
+        }
         let system = CodexLayer::read_lenient(system_dir);
         let both = [
             CodexLayer::read_lenient(&home_dir.join(".codex")),
@@ -3787,6 +3808,21 @@ base_url = "https://llm.corp.example/v1"
         write_config(dir.path(), "approval_policy = \"never\"");
         let reasons = project.assess(dir.path()).unwrap();
         assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_project_at_the_home_folder_does_not_rescore_the_user_config() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "approval_policy = \"never\"\n[mcp_servers.x]\ncommand = \"/bin/x\"\n",
+        );
+        let home = CodexProjectParser {
+            repo_root: dir.path().to_path_buf(),
+        };
+        assert!(home.assess(dir.path()).unwrap().is_empty());
+        assert!(home.collect_external_script_paths(dir.path()).is_empty());
+        assert!(!CodexParser.assess(dir.path()).unwrap().is_empty());
     }
 
     #[test]
