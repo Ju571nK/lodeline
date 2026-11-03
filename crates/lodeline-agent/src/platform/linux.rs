@@ -118,12 +118,16 @@ impl UserEnumerator for LinuxPlatform {
                     .filter_map(|u| u.home.parent().map(PathBuf::from)),
             )
             .collect();
-        merge_users(passwd, nss_users(roots))
+        let (nss, listed) = nss_users(roots);
+        merge_users(passwd, nss, &listed)
     }
 }
 
 /// A `passwd` entry from the system user database: name, uid, home.
 type NssEntry = (String, u32, String);
+
+/// The user database's entries, and the folders seen under the home roots.
+type NssWalk = (Vec<NssEntry>, BTreeSet<PathBuf>);
 
 /// How long `list` waits for the user database before it settles for
 /// `/etc/passwd`. A directory server that is down or slow must not stall boot,
@@ -131,15 +135,22 @@ type NssEntry = (String, u32, String);
 const NSS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// `/etc/passwd`'s human users, then the human users only the user database
-/// (NSS: LDAP, SSSD, ...) knows. Those also need their home on disk: a large
-/// directory holds many accounts that never used this host.
-fn merge_users(mut users: Vec<UserContext>, nss: Vec<NssEntry>) -> Vec<UserContext> {
+/// (NSS: LDAP, SSSD, ...) knows. Those also need their home in `listed`, the
+/// folders seen under the home roots: a large directory holds many accounts
+/// that never used this host, and a stat of each home would mount it on autofs.
+/// With autofs browse off, a home shows up only while mounted, so an idle
+/// directory user drops out until their home is mounted again.
+fn merge_users(
+    mut users: Vec<UserContext>,
+    nss: Vec<NssEntry>,
+    listed: &BTreeSet<PathBuf>,
+) -> Vec<UserContext> {
     let mut seen: BTreeSet<String> = users.iter().map(|u| u.name.clone()).collect();
     for (name, uid, home) in nss {
         if seen.contains(&name) {
             continue;
         }
-        if let Some(u) = human_user(&name, uid, &home).filter(|u| u.home.is_dir()) {
+        if let Some(u) = human_user(&name, uid, &home).filter(|u| listed.contains(&u.home)) {
             seen.insert(name);
             users.push(u);
         }
@@ -154,10 +165,11 @@ fn merge_users(mut users: Vec<UserContext>, nss: Vec<NssEntry>) -> Vec<UserConte
 /// enumeration off (`enumerate = false`), so `getpwent` returns only local
 /// users: the full walk, and the owner of each directory under `roots` when
 /// that owner's home is the directory, which finds a directory user who has
-/// logged in here.
-fn nss_users(roots: BTreeSet<PathBuf>) -> Vec<NssEntry> {
+/// logged in here. Also returns the folders and symlinks seen under `roots`,
+/// typed from the directory entry alone so no automount is followed.
+fn nss_users(roots: BTreeSet<PathBuf>) -> NssWalk {
     static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static LAST: std::sync::Mutex<Vec<NssEntry>> = std::sync::Mutex::new(Vec::new());
+    static LAST: std::sync::Mutex<NssWalk> = std::sync::Mutex::new((Vec::new(), BTreeSet::new()));
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         // A walk still stuck on a slow server holds the lock; skip, don't queue.
@@ -167,6 +179,7 @@ fn nss_users(roots: BTreeSet<PathBuf>) -> Vec<NssEntry> {
             Err(std::sync::TryLockError::WouldBlock) => return,
         };
         let mut out = Vec::new();
+        let mut listed = BTreeSet::new();
         // SAFETY: `WALK` serializes this process's use of the non-reentrant
         // getpwent/getpwuid state, and each entry is copied out before the
         // next call reuses its buffer.
@@ -187,6 +200,10 @@ fn nss_users(roots: BTreeSet<PathBuf>) -> Vec<NssEntry> {
             {
                 use std::os::unix::fs::MetadataExt;
                 let Ok(dir) = dir else { continue };
+                if dir.file_type().is_ok_and(|t| t.is_dir() || t.is_symlink()) {
+                    listed.insert(dir.path());
+                }
+                // `DirEntry::metadata` is an lstat, so it does not mount an autofs home.
                 let Ok(meta) = dir.metadata() else { continue };
                 let pw = libc::getpwuid(meta.uid());
                 if let Some(entry) = (!pw.is_null()).then(|| nss_entry(&*pw)).flatten() {
@@ -196,8 +213,9 @@ fn nss_users(roots: BTreeSet<PathBuf>) -> Vec<NssEntry> {
                 }
             }
         }
-        *LAST.lock().unwrap_or_else(|p| p.into_inner()) = out.clone();
-        let _ = tx.send(out);
+        let walk = (out, listed);
+        *LAST.lock().unwrap_or_else(|p| p.into_inner()) = walk.clone();
+        let _ = tx.send(walk);
     });
     rx.recv_timeout(NSS_TIMEOUT)
         .unwrap_or_else(|_| LAST.lock().unwrap_or_else(|p| p.into_inner()).clone())
@@ -468,18 +486,14 @@ mod tests {
 
     #[test]
     fn a_user_only_the_user_database_knows_is_listed() {
-        let homes = tempfile::tempdir().unwrap();
-        let carol = homes.path().join("carol");
-        std::fs::create_dir(&carol).unwrap();
-        let carol = carol.to_str().unwrap().to_string();
         let passwd = vec![parse_passwd_line("alice:x:1001:1001::/home/alice:/bin/bash").unwrap()];
         let nss = vec![
             ("alice".into(), 1001, "/home/alice".into()),
-            ("carol".into(), 1_876_400_001, carol.clone()),
-            ("dave".into(), 1_876_400_002, "/home/never-logged-in".into()),
-            ("sssd-svc".into(), 990, carol.clone()),
+            ("carol".into(), 1_876_400_001, "/home/carol".into()),
+            ("sssd-svc".into(), 990, "/home/carol".into()),
         ];
-        let users: Vec<(String, PathBuf)> = merge_users(passwd, nss)
+        let listed = BTreeSet::from([PathBuf::from("/home/carol")]);
+        let users: Vec<(String, PathBuf)> = merge_users(passwd, nss, &listed)
             .into_iter()
             .map(|u| (u.name, u.home))
             .collect();
@@ -487,9 +501,22 @@ mod tests {
             users,
             vec![
                 ("alice".into(), PathBuf::from("/home/alice")),
-                ("carol".into(), PathBuf::from(carol)),
+                ("carol".into(), PathBuf::from("/home/carol")),
             ]
         );
+    }
+
+    #[test]
+    fn an_nss_only_user_whose_home_is_not_in_a_listed_directory_is_not_listed() {
+        // dave's home exists on disk, but only the listed folders count.
+        let homes = tempfile::tempdir().unwrap();
+        let dave = homes.path().to_str().unwrap().to_string();
+        let nss = vec![
+            ("dave".into(), 1_876_400_002, dave),
+            ("erin".into(), 1_876_400_003, "/home/never-logged-in".into()),
+        ];
+        let listed = BTreeSet::from([PathBuf::from("/home/carol")]);
+        assert!(merge_users(Vec::new(), nss, &listed).is_empty());
     }
 
     #[test]
