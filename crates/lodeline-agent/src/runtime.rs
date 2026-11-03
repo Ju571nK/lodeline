@@ -152,6 +152,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             );
         }
     }
+    let rule_packs_read = crate::policy_reload_task::rule_packs_on_disk(&cfg.policy_paths);
     // Fail-open: missing/corrupt rule-packs.yaml → None (no bundle packs).
     let rule_packs_in_force = cfg.policy_paths.rule_packs.in_force();
     let bundle_doc = std::fs::read_to_string(rule_packs_in_force)
@@ -611,6 +612,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 last_good_bundle: bundle_doc_for_ctx,
                 unfinished: Vec::new(),
                 applied_policy: None,
+                rule_packs_read,
             },
         )),
     );
