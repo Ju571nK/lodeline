@@ -370,6 +370,7 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - `lodeline-mcp` no longer includes the fleet read token in its config's debug output.
   The debug output shows the server URL without credentials, path, or query. No caller
   printed it before. This keeps a future one from doing so. (#424)
+
 - A project's Codex `approvals_reviewer = "auto_review"` finding now respects an
   `approval_policy` set in the system Codex config when the user config sets none. A
   host-wide `never` no longer produces that finding. Changes to the system config now
