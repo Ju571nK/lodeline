@@ -130,6 +130,60 @@ pub async fn serve_until(
     connections.drain().await
 }
 
+/// Windows hook listener over a named pipe. Mirrors the Unix listener above;
+/// the per-connection logic is shared via `handle_hook_conn`. Windows named
+/// pipes carry no peer uid, so the caller is recorded as `u32::MAX`.
+#[cfg(windows)]
+pub async fn serve_pipe_until(
+    pipe_name: String,
+    tx: mpsc::Sender<CommittableEvent>,
+    host_id: String,
+    activity_map: crate::hook_silence::ActivityMap,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    let create = |first: bool| {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            .access_outbound(false)
+            .create(&pipe_name)
+    };
+    // The first instance fails if another process already serves this name.
+    let mut server = create(true)?;
+    let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
+    tracing::info!(pipe = %pipe_name, "hook IPC listening");
+    let mut connections = crate::ipc_lifecycle::Connections::default();
+    loop {
+        let Some(connected) = connections.accept(server.connect(), &shutdown).await else {
+            break;
+        };
+        // Open the next instance before handling this one, so a hook that
+        // arrives meanwhile finds the pipe listening instead of busy.
+        let stream = std::mem::replace(&mut server, create(false)?);
+        if let Err(e) = connected {
+            tracing::warn!(error = ?e, "hook pipe connect failed");
+            continue;
+        }
+        let permit = match sem.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::debug!("hook overload: dropping connection (MAX_INFLIGHT reached)");
+                drop(stream);
+                continue;
+            }
+        };
+        let tx = tx.clone();
+        let host_id = host_id.clone();
+        let activity_map = activity_map.clone();
+        connections.spawn(async move {
+            let _permit = permit;
+            handle_hook_conn(stream, u32::MAX, tx, host_id, activity_map).await;
+        });
+    }
+    drop(server);
+    connections.drain().await
+}
+
 /// Transport-independent per-connection handler shared by the Unix-socket and
 /// Windows-named-pipe listeners: read one bounded envelope line, record hook
 /// activity, and queue the event. `peer_uid` is the caller's uid on Unix,

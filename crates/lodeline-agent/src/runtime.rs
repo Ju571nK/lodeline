@@ -36,6 +36,8 @@ pub struct RuntimeConfig {
     pub events_dir: PathBuf,
     pub control_socket: PathBuf,
     pub control_pipe_name: String,
+    /// Windows only: the one-way hook pipe, the counterpart of `hook.sock`.
+    pub hook_pipe_name: String,
     /// Force a polling watcher instead of the OS-native backend (`--poll`).
     pub poll_watcher: bool,
     /// Override the policy-signing keystore path (tests). `None` → `keystore_path()`.
@@ -898,6 +900,29 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             tokio::spawn(async move {
                 crate::hook_listener::serve_until(
                     hook_sock.clone(),
+                    tx_hook,
+                    host_id_hook,
+                    hook_activity_map,
+                    shutdown,
+                )
+                .await
+            }),
+        );
+    }
+
+    // Windows: the same one-way listener on a named pipe, which carries no peer uid.
+    #[cfg(windows)]
+    {
+        let hook_pipe = cfg.hook_pipe_name.clone();
+        let tx_hook = tx_sink.clone();
+        let host_id_hook = host_id.clone();
+        let hook_activity_map = activity_map.clone();
+        let shutdown = cancel.clone();
+        sup.track_result(
+            "hook_listener",
+            tokio::spawn(async move {
+                crate::hook_listener::serve_pipe_until(
+                    hook_pipe,
                     tx_hook,
                     host_id_hook,
                     hook_activity_map,

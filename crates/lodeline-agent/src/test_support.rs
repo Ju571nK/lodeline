@@ -76,6 +76,7 @@ impl TestAgentBuilder {
             events_dir: events_dir.clone(),
             control_socket: control_socket.clone(),
             control_pipe_name: control_pipe_name.clone(),
+            hook_pipe_name: format!("{control_pipe_name}-hook"),
             poll_watcher: self.poll_watcher,
             keystore_path,
         };
