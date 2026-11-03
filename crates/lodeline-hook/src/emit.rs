@@ -71,12 +71,22 @@ pub fn send_envelope(socket: &Path, line: &str, write_timeout: Duration) -> std:
     Ok(())
 }
 
-/// Non-unix stub. The agent's IPC on Windows is a named pipe (see `control.rs`'s
-/// `#[cfg(windows)]` path); Stage 1 does not wire a named-pipe hook emit yet, so
-/// the emit is a no-op here (fail-open, consistent with a down agent). Named-pipe
-/// emit is a follow-up.
+/// Windows: the agent serves the hook IPC on a named pipe. The hook has no
+/// tokio, so it opens the pipe as a file on a worker thread and waits at most
+/// `write_timeout`, like `decide::request_verdict`. A missing or busy pipe, or
+/// a write that outlasts the timeout, is silent success, as on Unix.
 #[cfg(not(unix))]
-pub fn send_envelope(_socket: &Path, _line: &str, _write_timeout: Duration) -> std::io::Result<()> {
+pub fn send_envelope(pipe: &Path, line: &str, write_timeout: Duration) -> std::io::Result<()> {
+    let pipe = pipe.to_path_buf();
+    let bytes = format!("{line}\n");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&pipe) {
+            let _ = f.write_all(bytes.as_bytes());
+        }
+        let _ = tx.send(());
+    });
+    let _ = rx.recv_timeout(write_timeout);
     Ok(())
 }
 
@@ -112,12 +122,16 @@ pub fn test_seam(point: &str) {
 #[cfg(not(debug_assertions))]
 pub fn test_seam(_point: &str) {}
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn emit_to_missing_socket_is_ok() {
-        let path = std::path::Path::new("/nonexistent/lodeline/hook.sock");
-        assert!(send_envelope(path, "{\"x\":1}", std::time::Duration::from_millis(150)).is_ok());
+        let path = if cfg!(windows) {
+            r"\\.\pipe\lodeline-nonexistent-hook-test"
+        } else {
+            "/nonexistent/lodeline/hook.sock"
+        };
+        assert!(send_envelope(Path::new(path), "{\"x\":1}", Duration::from_millis(150)).is_ok());
     }
 }

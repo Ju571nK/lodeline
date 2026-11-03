@@ -105,13 +105,13 @@ fn hook_socket_path() -> PathBuf {
         .with_file_name("hook.sock")
 }
 
-/// Non-unix: only the `LODELINE_HOOK_SOCKET` override (the emit is a no-op stub on
-/// Windows — see `emit::send_envelope`), so the value is effectively unused.
+/// Windows: the agent's hook named pipe. The path string is the pipe name;
+/// `emit::send_envelope` opens it as a file. `LODELINE_HOOK_SOCKET` overrides it.
 #[cfg(not(unix))]
 fn hook_socket_path() -> PathBuf {
     std::env::var("LODELINE_HOOK_SOCKET")
         .map(PathBuf::from)
-        .unwrap_or_default()
+        .unwrap_or_else(|_| PathBuf::from(lodeline_core::control_proto::DEFAULT_HOOK_PIPE))
 }
 
 /// Resolve the decide socket for the enforce path. Mirrors `hook_socket_path`
