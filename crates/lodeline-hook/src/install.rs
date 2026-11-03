@@ -5,7 +5,8 @@
 //   - Claude Code / Codex: nested `hooks.PreToolUse[]` with
 //     `{matcher, hooks:[{type:"command", command}]}`.
 //       Claude Code: ~/.claude/settings.json
-//       Codex:       ~/.codex/hooks.json   (runs only once the user trusts
+//       Codex:       $CODEX_HOME/hooks.json, else ~/.codex/hooks.json
+//                    (runs only once the user trusts
 //                    it in Codex — surfaced as CODEX_TRUST_NOTE)
 //   - Cursor: ~/.cursor/hooks.json with `version:1` + per-event arrays
 //     (`beforeShellExecution`, `beforeMCPExecution`) of `{command}`.
@@ -468,7 +469,17 @@ pub fn settings_path(agent: &str) -> Option<PathBuf> {
     let home = home_dir()?;
     let p = match agent {
         "claude-code" => home.join(".claude/settings.json"),
-        "codex" => home.join(".codex/hooks.json"),
+        // Codex reads `CODEX_HOME` with `env::var`, so an empty or non-UTF-8
+        // value means `~/.codex` (`find_codex_home`, rust-v0.166.0). Codex
+        // canonicalizes a relative value, so the baseline must store it absolute.
+        "codex" => std::env::var("CODEX_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map_or_else(
+                || home.join(".codex"),
+                |v| std::path::absolute(&v).unwrap_or_else(|_| v.into()),
+            )
+            .join("hooks.json"),
         "cursor" => home.join(".cursor/hooks.json"),
         // #208 — the SHARED hooks file, which agy's own `/hooks` TUI also
         // writes. Re-verified on agy 1.2.0: this path and workspace
