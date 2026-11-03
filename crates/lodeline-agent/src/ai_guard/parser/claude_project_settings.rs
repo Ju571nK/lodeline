@@ -127,7 +127,7 @@ pub(crate) fn emit_project_settings_reasons(
     }
 }
 
-fn env_reason(variable: &str, value: &str) -> Option<AiGuardReason> {
+pub(crate) fn env_reason(variable: &str, value: &str) -> Option<AiGuardReason> {
     let value = value.trim();
     // An empty value cancels a variable rather than setting one (settings-reference.md, `env`).
     if value.is_empty() {
@@ -190,7 +190,7 @@ fn marketplace_source(def: &Value) -> String {
 /// The host of a URL or a scheme-less `host:port` proxy value. Userinfo, port,
 /// path and query are dropped, and an unrecognizable value yields `None`
 /// rather than falling back to the raw string.
-fn host_for_evidence(value: &str) -> Option<String> {
+pub(crate) fn host_for_evidence(value: &str) -> Option<String> {
     let rest = value.split_once("://").map_or(value, |(_, r)| r);
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority.rsplit('@').next()?;
@@ -206,7 +206,7 @@ fn host_for_evidence(value: &str) -> Option<String> {
     is_host.then(|| cap(&host.to_ascii_lowercase()))
 }
 
-fn is_loopback_host(host: &str) -> bool {
+pub(crate) fn is_loopback_host(host: &str) -> bool {
     host == "localhost"
         || host
             .parse::<std::net::IpAddr>()

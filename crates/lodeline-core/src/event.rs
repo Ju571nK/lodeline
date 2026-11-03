@@ -374,7 +374,9 @@ pub enum AiGuardReason {
     /// #199 — a repository's Claude Code settings hold a helper command
     /// (`apiKeyHelper` and its siblings). `claude -p` and the SDK run it in a
     /// folder that was never trusted. `key` names the setting; the command is
-    /// not recorded, because a helper can embed a credential. POSTURE only.
+    /// not recorded, because a helper can embed a credential. #200 — also
+    /// Codex `notify` (`key = "notify"`), a program run after every turn,
+    /// from user or system config. POSTURE only.
     ProjectSettingsHelperCommand {
         key: String,
     },
@@ -383,7 +385,9 @@ pub enum AiGuardReason {
     /// It applies at startup in `claude -p`; interactive sessions wait for the
     /// trust dialog. `effect` is `redirect` | `exec_code` | `weaken_tls`, and
     /// `destination` the target host of a `redirect`. The value itself is not
-    /// recorded. POSTURE only.
+    /// recorded. #200 — also Codex config: `variable` is then the config key
+    /// (`openai_base_url`, `model_providers.<id>.base_url`, or
+    /// `shell_environment_policy.set.<NAME>`). POSTURE only.
     ProjectSettingsEnvOverride {
         variable: String,
         effect: String,

@@ -65,6 +65,8 @@ impl AiGuardParser for CodexParser {
             // #200 — a standing command-approval rule appearing here is an
             // OFF→ON drift, so the daemon must re-assess when the dir changes.
             codex_dir.join("rules"),
+            codex_dir.join(GLOBAL_AGENTS_MD[0]),
+            codex_dir.join(GLOBAL_AGENTS_MD[1]),
             system_dir.join("config.toml"),
             system_dir.join(HOOKS_JSON),
             system_dir.join("rules"),
@@ -312,6 +314,8 @@ fn assess_user_layers(
     if let Some(val) = &effective {
         // #200 — whether a human is asked before a tool runs.
         emit_approval_policy_reasons(val, &mut out);
+        emit_user_command_key_reasons(val, &mut out);
+        emit_shell_environment_reasons(val, &mut out);
     }
     let [system, user] = &layers;
     system.emit_hook_reasons(&HookTrust::Managed, &mut out);
@@ -322,8 +326,19 @@ fn assess_user_layers(
     // #200 — standing command approvals, which live outside config.toml.
     // System rules are managed and always load.
     emit_rules_reasons(&[system, user], &mut out);
+    // #200 — Codex reads the first non-empty file of these two as the global
+    // instructions (`codex-home/src/instructions/mod.rs`, rust-v0.166.0).
+    for name in GLOBAL_AGENTS_MD {
+        let path = codex_dir.join(name);
+        if let Ok(Some(text)) = super::read_text_optional(&path) {
+            super::instruction_scan::scan_instruction_file(&path, &text, &mut out);
+            break;
+        }
+    }
     Ok(out)
 }
+
+const GLOBAL_AGENTS_MD: [&str; 2] = ["AGENTS.override.md", "AGENTS.md"];
 
 /// Verified schema: `sandbox_mode` is a **top-level flat key** (not `[sandbox]
 /// mode`). The dangerous value is `"danger-full-access"` which disables all
@@ -509,21 +524,118 @@ fn writable_root_everywhere(p: &str) -> bool {
 /// when they may not be. The accepted values need hardware verification before
 /// this can say anything; until then the honest answer is silence, and the
 /// silence is recorded here rather than left to look like a clean result.
+///
+/// `approvals_reviewer = "auto_review"` sends each escalation to a model
+/// reviewer first, and its `allow` approves the action with no human
+/// (`ext/guardian-reviewer/src/routing.rs`, rust-v0.166.0). Codex routes only
+/// `on-request` (the default) and granular policies to it. The reviewer can
+/// still refuse, so it scores as a classifier auto-approval.
 pub(crate) fn emit_approval_policy_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
-    let Some(policy) = val.get("approval_policy") else {
+    let policy = val.get("approval_policy");
+    let routed_to_reviewer = match policy {
+        None => true,
+        Some(policy) => match policy.as_str() {
+            Some("never") => {
+                out.push(AiGuardReason::AutoApprovalEnabled {
+                    mode: "never".to_string(),
+                });
+                false
+            }
+            // `untrusted` / `on-request` still prompt; the deprecated
+            // `on-failure` is an alias of `on-request`.
+            Some(scalar) => matches!(scalar, "on-request" | "on-failure"),
+            None => {
+                let granular = policy.get("granular").is_some();
+                if granular {
+                    tracing::info!(
+                        "codex approval_policy: granular form not yet scored (see #200)"
+                    );
+                }
+                granular
+            }
+        },
+    };
+    if routed_to_reviewer
+        && val.get("approvals_reviewer").and_then(Value::as_str) == Some("auto_review")
+    {
+        out.push(AiGuardReason::AutoApprovalEnabled {
+            mode: "auto_review".to_string(),
+        });
+    }
+}
+
+/// #200 — user-scope keys that run a program or send model traffic elsewhere.
+/// A project file cannot set them (`PROJECT_LOCAL_CONFIG_DENYLIST`,
+/// `config/src/loader/mod.rs`, rust-v0.166.0), so only the user parser calls this.
+/// Evidence names the key and a host, never argv or a full URL.
+fn emit_user_command_key_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
+    // `notify` is an argv list Codex spawns after every turn, outside the
+    // sandbox, with the turn's messages as the last argument (`hooks/src/legacy_notify.rs`).
+    let notify = val.get("notify").and_then(Value::as_array);
+    if notify
+        .and_then(|argv| argv.first())
+        .and_then(Value::as_str)
+        .is_some_and(|program| !program.trim().is_empty())
+    {
+        out.push(AiGuardReason::ProjectSettingsHelperCommand {
+            key: "notify".to_string(),
+        });
+    }
+    // `openai_base_url` applies only to the built-in `openai` provider, and a
+    // built-in provider's `base_url` cannot be overridden from config
+    // (`model-provider-info/src/lib.rs`).
+    let provider = val
+        .get("model_provider")
+        .and_then(Value::as_str)
+        .unwrap_or("openai");
+    let (key, url) = if provider == "openai" {
+        ("openai_base_url".to_string(), val.get("openai_base_url"))
+    } else {
+        let url = val
+            .get("model_providers")
+            .and_then(|p| p.get(provider))
+            .and_then(|p| p.get("base_url"));
+        let id = super::claude_project_settings::safe_name(provider);
+        (format!("model_providers.{id}.base_url"), url)
+    };
+    let Some(url) = url.and_then(Value::as_str) else {
         return;
     };
-    match policy.as_str() {
-        Some("never") => out.push(AiGuardReason::AutoApprovalEnabled {
-            mode: "never".to_string(),
-        }),
-        // `untrusted` / `on-request` still prompt; the deprecated `on-failure`
-        // prompts on error. None is a blanket auto-approval.
-        Some(_) => {}
-        None => {
-            if policy.get("granular").is_some() {
-                tracing::info!("codex approval_policy: granular form not yet scored (see #200)");
+    let host = super::claude_project_settings::host_for_evidence(url.trim());
+    if host.as_deref().is_some_and(|h| {
+        h == "api.openai.com" || super::claude_project_settings::is_loopback_host(h)
+    }) {
+        return;
+    }
+    out.push(AiGuardReason::ProjectSettingsEnvOverride {
+        variable: key,
+        effect: "redirect".to_string(),
+        destination: host,
+    });
+}
+
+/// #200 — `shell_environment_policy.set` adds variables to every command Codex
+/// runs (`protocol/src/shell_environment.rs`, rust-v0.166.0). It is not on the
+/// project denylist, so both parsers call this. Values are never recorded.
+/// shortcut: an `include_only` that drops the variable again is not applied;
+/// read it if that combination shows up.
+fn emit_shell_environment_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
+    let Some(set) = val
+        .get("shell_environment_policy")
+        .and_then(|p| p.get("set"))
+        .and_then(Value::as_table)
+    else {
+        return;
+    };
+    for (variable, value) in set {
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        if let Some(mut reason) = super::claude_project_settings::env_reason(variable, value) {
+            if let AiGuardReason::ProjectSettingsEnvOverride { variable, .. } = &mut reason {
+                *variable = format!("shell_environment_policy.set.{variable}");
             }
+            out.push(reason);
         }
     }
 }
@@ -1299,6 +1411,7 @@ impl AiGuardParser for CodexProjectParser {
         emit_workspace_write_reasons(&both, workspace_write, true, &mut out);
         if let Some(val) = &layer.config {
             emit_approval_policy_reasons(val, &mut out);
+            emit_shell_environment_reasons(val, &mut out);
         }
         layer.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
         if let Some(val) = &layer.config {
@@ -3436,7 +3549,10 @@ tool = "review"
             "approval_policy = \"never\"\napprovals_reviewer = \"auto_review\"",
         );
         let reasons = CodexParser.assess(dir.path()).unwrap();
-        assert!(!auto_review(&reasons), "never is reported alone: {reasons:?}");
+        assert!(
+            !auto_review(&reasons),
+            "never is reported alone: {reasons:?}"
+        );
     }
 
     #[test]
@@ -3598,6 +3714,9 @@ base_url = "https://llm.corp.example/v1"
 
         let watched = CodexParser.watched_paths(dir.path());
         assert!(watched.contains(&codex.join("AGENTS.md")), "{watched:?}");
-        assert!(watched.contains(&codex.join("AGENTS.override.md")), "{watched:?}");
+        assert!(
+            watched.contains(&codex.join("AGENTS.override.md")),
+            "{watched:?}"
+        );
     }
 }

@@ -39,10 +39,12 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         // that can still refuse. `bypassPermissions` and `acceptEdits` have no
         // such check, so `auto` is a real auto-approval posture but a weaker
         // one, and is scored under its own key rather than folded in at the
-        // same severity.
+        // same severity. #200 — Codex `auto_review` hands escalations to a
+        // model reviewer that can also refuse, so it shares this key.
         AiGuardReason::AutoApprovalEnabled { mode }
             if without_managed_label(mode) == "auto"
-                || mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE =>
+                || mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE
+                || mode == "auto_review" =>
         {
             "auto_approval_enabled_classifier"
         }
