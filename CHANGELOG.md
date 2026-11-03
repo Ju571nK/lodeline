@@ -367,6 +367,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   downgrade during a run, wait for a 200 first or remove `single_quarantines` from
   `gap_queue.json` while the proxy is stopped. (#420)
 
+- A project's Codex `approvals_reviewer = "auto_review"` finding now respects an
+  `approval_policy` set in the system Codex config when the user config sets none. A
+  host-wide `never` no longer produces that finding. Changes to the system config now
+  rescan projects. (#425)
+
 ## [0.12.1] - 2026-11-02
 
 ### Added
