@@ -56,6 +56,10 @@ fn command_string_enforce(exe: &str, agent: &str, capture: &str, on_failure: &st
     format!("{exe} {agent} --enforce --on-failure {on_failure} --capture {capture}")
 }
 
+/// Whitespace a shell splits a command on. Not Unicode whitespace: a path with
+/// U+3000 or U+00A0 is one token to a shell and must stay unquoted.
+const SHELL_WS: [char; 4] = [' ', '\t', '\r', '\n'];
+
 /// The binary path as written into a hook command.
 ///
 /// On Windows, `/` is the one separator that runs under Git Bash (Claude Code),
@@ -69,7 +73,7 @@ pub(crate) fn hook_exe(path: &str, windows: bool) -> String {
     // Quoted runs under Git Bash and cmd but not PowerShell, which needs `& "..."`
     // that the other two reject; no Windows API crate here for an 8.3 short path,
     // and release zips unpack anywhere, so install warns instead (see main.rs).
-    if p.contains(char::is_whitespace) {
+    if p.contains(SHELL_WS) {
         format!("\"{p}\"")
     } else {
         p
@@ -79,10 +83,10 @@ pub(crate) fn hook_exe(path: &str, windows: bool) -> String {
 /// The binary path at the start of a hook command: a leading double-quoted
 /// string, else the first whitespace token.
 pub(crate) fn command_exe(cmd: &str) -> &str {
-    let cmd = cmd.trim_start();
+    let cmd = cmd.trim_start_matches(SHELL_WS);
     match cmd.strip_prefix('"').and_then(|rest| rest.find('"')) {
         Some(end) => &cmd[..end + 2],
-        None => cmd.split_whitespace().next().unwrap_or(""),
+        None => cmd.split(SHELL_WS).next().unwrap_or(""),
     }
 }
 
@@ -92,14 +96,14 @@ pub(crate) fn command_exe(cmd: &str) -> &str {
 /// contains a space.
 fn invokes_exe(cmd: &str, exe: &str) -> bool {
     let key = |s: &str| {
-        let s = s.trim_start().replace('"', "");
+        let s = s.trim_start_matches(SHELL_WS).replace('"', "");
         s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/")
     };
     let (cmd, exe) = (key(cmd), key(exe));
     !exe.is_empty()
         && cmd
             .strip_prefix(&exe)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(SHELL_WS))
 }
 
 // --- Claude-style entry helpers ---
@@ -655,7 +659,7 @@ mod tests {
 
     // Registered by lodeline-hook <= 0.12.2 on Windows: canonicalize() kept the `\\?\` prefix.
     const VERBATIM_OLD: &str =
-        r"\\?\C:\Users\테스터\x\lodeline-hook.exe claude-code --capture redacted";
+        r"\\?\C:\Users\alice\x\lodeline-hook.exe claude-code --capture redacted";
 
     #[test]
     fn hook_exe_per_platform() {
@@ -668,8 +672,19 @@ mod tests {
             r#""/Users/a b/lodeline-hook""#
         );
         assert_eq!(
-            hook_exe(r"C:\Users\테스터\lodeline-test\x\lodeline-hook.exe", true),
-            "C:/Users/테스터/lodeline-test/x/lodeline-hook.exe"
+            hook_exe(r"C:\Users\alice\tools\x\lodeline-hook.exe", true),
+            "C:/Users/alice/tools/x/lodeline-hook.exe"
+        );
+        assert_eq!(
+            hook_exe(
+                "C:\\Users\\alice\\新しい\u{3000}フォルダー\\lodeline-hook.exe",
+                true
+            ),
+            "C:/Users/alice/新しい\u{3000}フォルダー/lodeline-hook.exe"
+        );
+        assert_eq!(
+            hook_exe("/home/alice/a\u{a0}b\u{85}c/lodeline-hook", false),
+            "/home/alice/a\u{a0}b\u{85}c/lodeline-hook"
         );
         assert_eq!(
             hook_exe(r"C:\Program Files\Lodeline 한글\lodeline-hook.exe", true),
@@ -679,14 +694,14 @@ mod tests {
 
     #[test]
     fn windows_commands_use_forward_slashes_for_every_agent() {
-        let exe = hook_exe(r"C:\Users\테스터\x\lodeline-hook.exe", true);
+        let exe = hook_exe(r"C:\Users\alice\x\lodeline-hook.exe", true);
         for agent in ["claude-code", "codex"] {
             let mut v = json!({});
             assert!(merge_into(&mut v, &exe, agent, "redacted"));
             assert_eq!(
                 pretooluse_commands(&v),
                 [format!(
-                    "C:/Users/테스터/x/lodeline-hook.exe {agent} --capture redacted"
+                    "C:/Users/alice/x/lodeline-hook.exe {agent} --capture redacted"
                 )]
             );
         }
@@ -694,10 +709,10 @@ mod tests {
 
     #[test]
     fn codex_upgrade_replaces_old_backslash_registration() {
-        let exe = hook_exe(r"C:\Users\테스터\x\lodeline-hook.exe", true);
+        let exe = hook_exe(r"C:\Users\alice\x\lodeline-hook.exe", true);
         for old in [
-            r"C:\Users\테스터\x\lodeline-hook.exe codex --capture redacted",
-            r"\\?\C:\Users\테스터\x\lodeline-hook.exe codex --capture redacted",
+            r"C:\Users\alice\x\lodeline-hook.exe codex --capture redacted",
+            r"\\?\C:\Users\alice\x\lodeline-hook.exe codex --capture redacted",
         ] {
             let mut v = json!({"hooks":{"PreToolUse":[
                 {"matcher":"*","hooks":[{"type":"command","command":old}]}
@@ -706,7 +721,7 @@ mod tests {
             assert!(merge_into(&mut v, &exe, "codex", "redacted"));
             assert_eq!(
                 pretooluse_commands(&v),
-                ["C:/Users/테스터/x/lodeline-hook.exe codex --capture redacted"]
+                ["C:/Users/alice/x/lodeline-hook.exe codex --capture redacted"]
             );
         }
     }
@@ -729,11 +744,19 @@ mod tests {
             "/usr/bin/lodeline-hook\tclaude-code --capture redacted",
             "/usr/bin/lodeline-hook"
         ));
+        let wide = "C:/Users/alice/新しい\u{3000}フォルダー/lodeline-hook.exe";
+        let cmd = format!("{wide} codex --capture redacted");
+        assert_eq!(command_exe(&cmd), wide);
+        assert!(invokes_exe(&cmd, wide));
+        assert!(!invokes_exe(
+            &format!("{wide}\u{3000}codex --capture redacted"),
+            wide
+        ));
     }
 
     #[test]
     fn upgrade_replaces_verbatim_windows_registration() {
-        let exe = "C:/Users/테스터/x/lodeline-hook.exe";
+        let exe = "C:/Users/alice/x/lodeline-hook.exe";
         let mut v = json!({"hooks":{"PreToolUse":[
             {"matcher":"*","hooks":[{"type":"command","command":VERBATIM_OLD}]}
         ]}});
@@ -741,7 +764,7 @@ mod tests {
         assert!(merge_into(&mut v, exe, "claude-code", "redacted"));
         assert_eq!(
             pretooluse_commands(&v),
-            ["C:/Users/테스터/x/lodeline-hook.exe claude-code --capture redacted"]
+            ["C:/Users/alice/x/lodeline-hook.exe claude-code --capture redacted"]
         );
 
         let mut old = json!({"hooks":{"PreToolUse":[
@@ -781,8 +804,8 @@ mod tests {
 
     #[test]
     fn cursor_upgrade_replaces_verbatim_windows_registration() {
-        let old = r"\\?\C:\Users\테스터\x\lodeline-hook.exe cursor --capture redacted";
-        let exe = "C:/Users/테스터/x/lodeline-hook.exe";
+        let old = r"\\?\C:\Users\alice\x\lodeline-hook.exe cursor --capture redacted";
+        let exe = "C:/Users/alice/x/lodeline-hook.exe";
         let mut v = json!({"version":1,"hooks":{
             "beforeShellExecution":[{"command":old}],
             "beforeMCPExecution":[{"command":old}],
@@ -791,7 +814,7 @@ mod tests {
         assert_eq!(count_lodeline_entries(&v, exe, "cursor"), 2);
         assert_eq!(
             v["hooks"]["beforeMCPExecution"][0]["command"],
-            json!("C:/Users/테스터/x/lodeline-hook.exe cursor --capture redacted")
+            json!("C:/Users/alice/x/lodeline-hook.exe cursor --capture redacted")
         );
     }
 

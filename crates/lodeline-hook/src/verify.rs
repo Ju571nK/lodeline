@@ -257,7 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let b = baseline(
             dir.path(),
-            r#""C:/Program Files/테스터/lodeline-hook.exe""#,
+            r#""C:/Program Files/Lodeline/lodeline-hook.exe""#,
             "*",
         );
         let settings = serde_json::json!({"hooks":{"PreToolUse":[
