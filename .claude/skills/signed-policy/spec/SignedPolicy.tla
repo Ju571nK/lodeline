@@ -279,8 +279,9 @@ ReloadChoice == IF target # NoFile THEN "applied" ELSE "local"
 
 \* policy_reload_task::run wakes, clears ctx.unfinished, and reload calls in_force.
 \* A wake on this kind's channel consumes the change. The other kind's channel, the
-\* rule-packs file watcher, and Request::ReloadPolicy wake it too, at any time, and
-\* leave any change on this channel unseen.
+\* rule-packs file watcher, a root tick that finds the rule-pack file in force no
+\* longer matches the last load's read, and Request::ReloadPolicy wake it too, at any
+\* time, and leave any change on this channel unseen.
 ReloadCheck ==
     /\ up
     /\ reading = "no"
