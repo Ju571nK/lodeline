@@ -75,7 +75,7 @@ Read the coverage table. If your change touches a listed function or block, `che
 
 `check.py` reads the lines under the `Sync commit:` line up to the next heading. Any line there with a pipe character must be a row of the table, and the table needs the three columns Model element, File, and Function. A line that is not a row stops the run with ``check.py: SKILL.md has a coverage row that cannot be parsed: '<line>'``, because a row left out would leave a function untracked. A missing or wrong header stops it with ``check.py: SKILL.md has no coverage table under the `Sync commit:` line``.
 
-Sync commit: `e443b484287e70c47a60cf2a79f034c41f1f0093`
+Sync commit: `a1dcfd4d1979965381ce12e4d509a84fd84c7d24`
 
 | Model element | File | Function |
 |---|---|---|
