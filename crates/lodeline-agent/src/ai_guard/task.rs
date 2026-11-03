@@ -190,8 +190,7 @@ fn homes_for(parser: &dyn AiGuardParser, ctx: &TaskCtx) -> Vec<AssessHome> {
         user: None,
         dir: ctx.home_dir.clone(),
     };
-    // Rule packs expand `~` from the agent's own environment, not `home`.
-    if matches!(parser.scope(), AiGuardScope::Project { .. }) || parser.rule_pack_id().is_some() {
+    if matches!(parser.scope(), AiGuardScope::Project { .. }) {
         return vec![own];
     }
     std::iter::once(own)
@@ -596,15 +595,88 @@ mod tests {
             ]
         );
         assert_eq!(ctx.state.read().len(), 3);
-        let pack = ScriptedParser {
-            tool: AiTool::Codex,
-            scope: AiGuardScope::UserGlobal,
-            pack_id: Some("pack".into()),
+    }
+
+    #[tokio::test]
+    async fn root_agent_reads_each_user_home_for_a_rule_pack() {
+        use lodeline_core::policy::{Matcher, RuleEntry, RuleFormat, RulePack, RulePackScope};
+        let homes = tempfile::tempdir().unwrap();
+        let (root, alice, bob) = (
+            homes.path().join("root"),
+            homes.path().join("alice"),
+            homes.path().join("bob"),
+        );
+        for (home, sandbox) in [(&root, true), (&alice, false), (&bob, true)] {
+            std::fs::create_dir_all(home.join(".gemini")).unwrap();
+            std::fs::write(
+                home.join(".gemini/settings.json"),
+                format!(r#"{{"sandbox":{sandbox}}}"#),
+            )
+            .unwrap();
+        }
+        let pack = crate::ai_guard::rule_pack::parser::RulePackParser::new(RulePack {
+            id: "pack".into(),
+            pack_version: 1,
+            tool: AiTool::Gemini,
+            scope: RulePackScope::UserGlobal,
+            watched_paths: vec!["~/.gemini/settings.json".into()],
+            platforms: None,
             tool_label: None,
-            scripts: StdMutex::new(vec![]),
-            watched: vec![],
-        };
-        assert_eq!(homes_for(&pack, &ctx).len(), 1);
+            rules: vec![RuleEntry {
+                id: "r1".into(),
+                on_file: "~/.gemini/settings.json".into(),
+                format: RuleFormat::Json,
+                selector: "$.sandbox".into(),
+                matcher: Matcher::Equals {
+                    value: "false".into(),
+                },
+                emit: AiGuardReason::SandboxDisabled,
+                when: vec![],
+            }],
+        })
+        .unwrap();
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(pack, fc_rx, Duration::from_secs(3600));
+        ctx.home_dir = root;
+        ctx.user_homes = vec![
+            AssessHome {
+                user: Some("alice".into()),
+                dir: alice.clone(),
+            },
+            AssessHome {
+                user: Some("bob".into()),
+                dir: bob,
+            },
+        ];
+        let parser = ctx.parsers.read()[0].clone();
+        assert!(parser
+            .watched_paths(&alice)
+            .contains(&alice.join(".gemini/settings.json")));
+        for home in homes_for(parser.as_ref(), &ctx) {
+            eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        }
+        let mut seen = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let Evidence::AiGuardRiskAssessed {
+                user,
+                reasons,
+                rule_pack_id,
+                ..
+            } = ev.event.evidence
+            {
+                assert_eq!(rule_pack_id.as_deref(), Some("pack"));
+                seen.push((user, !reasons.is_empty()));
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (None, false),
+                (Some("alice".into()), true),
+                (Some("bob".into()), false)
+            ]
+        );
     }
 
     /// Receive the next `AiGuardRiskAssessed` event, skipping any
