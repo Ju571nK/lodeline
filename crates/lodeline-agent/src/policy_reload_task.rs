@@ -1090,6 +1090,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_bundle_change_no_watcher_reported_loads_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, _trx, _parsers, _state) = build_ctx_with_parsers(dir.path(), yaml);
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+        let running = Running::start(ctx);
+
+        std::fs::remove_file(&bundle).unwrap();
+        running.tick().await;
+
+        assert!(!has_pack(&running.parsers, "old-pack"));
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_new_version_applies_while_a_kept_bundle_waits_for_its_retry() {
         let dir = tempfile::tempdir().unwrap();
         let path = format!("{}/a.json", dir.path().display());
