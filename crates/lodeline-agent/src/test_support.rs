@@ -124,7 +124,7 @@ async fn wait_for_control(
             #[cfg(unix)]
             let connection = tokio::net::UnixStream::connect(_socket).await;
             #[cfg(windows)]
-            let connection = tokio::net::windows::named_pipe::ClientOptions::new().open(_pipe);
+            let connection = crate::win_pipe::open_client(_pipe);
             if let Ok(stream) = connection {
                 let request = async {
                     let mut reader = BufReader::new(stream);

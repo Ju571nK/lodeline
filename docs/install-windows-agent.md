@@ -80,6 +80,16 @@ reach an agent that runs as a service. A hook that runs as a different Windows u
 than the agent needs a hook and an agent that both have this change, so upgrade them
 together.
 
+The control pipe grants access only to the account that runs the agent, SYSTEM, and
+Administrators. Other signed-in users cannot connect to it. They could not use it before
+either, because every control request needs read and write access and the default pipe
+permissions gave them read access only. When the agent runs as a service or from an
+elevated prompt, run the commands that query the agent (`lodeline status`,
+`lodeline show stats`, `lodeline reload`) from an elevated prompt, and run
+`lodeline-sender` as SYSTEM or as an administrator. If another process already uses the
+control pipe name, the agent retries for about 5.5 seconds, then logs an error that names
+the pipe and exits with status 1.
+
 Override any of them on the command line:
 
 ```powershell

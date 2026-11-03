@@ -48,8 +48,7 @@ pub(crate) async fn query_unix(
 
 #[cfg(windows)]
 pub(crate) async fn query_windows(pipe_name: &str, req: &Request) -> anyhow::Result<Response> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-    let client = ClientOptions::new().open(pipe_name)?;
+    let client = crate::win_pipe::open_client(pipe_name)?;
     Ok(lodeline_core::control_client::exchange(client, req).await?)
 }
 

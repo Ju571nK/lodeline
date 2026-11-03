@@ -9,9 +9,9 @@ use uuid::Uuid;
 /// Hook IPC protocol version. Bump on any breaking wire change.
 pub const HOOK_PROTOCOL_VERSION: u16 = 2;
 
-/// Access a hook requests on a Windows hook pipe, and all the agent grants other
-/// users: FILE_GENERIC_READ | FILE_GENERIC_WRITE minus FILE_CREATE_PIPE_INSTANCE
-/// (0x4), so the hook asks only for the access a client needs.
+/// Access a client requests on the agent's Windows pipes, hook and control, and
+/// all the hook pipes grant other users: FILE_GENERIC_READ | FILE_GENERIC_WRITE
+/// minus FILE_CREATE_PIPE_INSTANCE (0x4), so a client asks only for what it needs.
 pub const PIPE_CLIENT_ACCESS: u32 = 0x0012_019b;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

@@ -7,6 +7,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Changed
+
+- On Windows, the agent's control pipe `\\.\pipe\lodeline-control` now grants access
+  explicitly, only to the account that runs the agent, SYSTEM, and Administrators. Before,
+  it used the default pipe permissions, which also gave every user read access. No caller
+  loses access, because every control request needs read and write access. The agent no
+  longer joins a control pipe that another process already serves. It retries for about
+  5.5 seconds, so a restarted agent can take over from the previous one, then logs an
+  error that names the pipe and exits with status 1. The `lodeline` CLI and `lodeline-sender`
+  now open the pipe with only the access a client needs.
+
 ## [0.12.5] - 2026-11-03
 
 ### Fixed
