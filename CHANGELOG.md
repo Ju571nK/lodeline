@@ -44,6 +44,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - A corrupt or unsupported shared MCP baseline file no longer stops the Codex MCP
   assessment for every home. It is treated as absent and logged. (#429)
 
+- `lodeline-proxy` now deletes a local registry entry once the server has acknowledged it
+  and every event that references it, so the local registry no longer grows without
+  limit. While the server is unreachable, queued complete inventory reports are capped at
+  256. Past the cap, the oldest one that is not the latest for its scope is dropped, and
+  the next report restates its baseline. Every dropped report, complete or incomplete, is
+  counted in `registry.discarded_reports` in the proxy status. (#432)
+
 ## [0.12.2] - 2026-11-03
 
 ### Added
