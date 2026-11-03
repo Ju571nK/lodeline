@@ -110,24 +110,69 @@ fn invokes_exe(cmd: &str, exe: &str) -> bool {
 /// Whether `cmd` has the shape install writes for `agent` from any folder:
 /// `<path>/lodeline-hook[.exe] <agent> ... --capture <mode>`. Release archives
 /// unpack into a versioned folder, so an upgrade must find the old entry by
-/// shape. The binary has to be the first token, so a wrapper such as
+/// shape. Only the binary's own path may come before it, so a wrapper such as
 /// `cmd.exe /c ...` or `bash -c ...` stays the user's.
 fn is_our_command(cmd: &str, agent: &str) -> bool {
+    let tokens = |s| str::split(s, SHELL_WS).filter(|t| !t.is_empty());
     let exe = command_exe(cmd);
-    let name = exe
-        .trim_matches('"')
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("");
-    let rest = &cmd.trim_start_matches(SHELL_WS)[exe.len()..];
-    let mut args = rest.split(SHELL_WS).filter(|t| !t.is_empty());
-    matches!(name, "lodeline-hook" | "lodeline-hook.exe")
-        && args.next() == Some(agent)
-        && args.any(|t| t == "--capture")
+    if is_hook_binary(exe.trim_matches('"')) {
+        let rest = &cmd.trim_start_matches(SHELL_WS)[exe.len()..];
+        return has_our_args(tokens(rest), agent);
+    }
+    // lodeline-hook <= 0.12.2 wrote a path with a space unquoted, so the binary
+    // can be a later token. Every token before it must read as part of one path.
+    let tokens: Vec<&str> = tokens(cmd).collect();
+    let Some(bin) = tokens.iter().position(|t| is_hook_binary(t)) else {
+        return false;
+    };
+    let path = &tokens[..=bin];
+    starts_absolute(path[0])
+        && path[1..]
+            .iter()
+            .all(|t| !t.starts_with(['/', '\\', '-']) && !starts_absolute(t))
+        && path[bin].contains(['/', '\\'])
+        && !path.iter().any(|t| t.contains(['"', '\'']) || is_shell(t))
+        && has_our_args(tokens[bin + 1..].iter().copied(), agent)
 }
 
-/// Ours at any path, or at `exe` in a form [`is_our_command`] cannot split,
-/// such as an old unquoted path with a space.
+/// The last path component is our binary. Windows file names ignore case.
+fn is_hook_binary(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    ["lodeline-hook", "lodeline-hook.exe"]
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
+
+const SHELLS: [&str; 9] = [
+    "cmd",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "pwsh",
+    "powershell",
+    "env",
+    "wsl",
+];
+
+fn is_shell(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    SHELLS.contains(&name)
+}
+
+/// `/x`, `\x`, `\\?\C:...` or `C:...`.
+fn starts_absolute(token: &str) -> bool {
+    let b = token.as_bytes();
+    token.starts_with(['/', '\\']) || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+}
+
+fn has_our_args<'a>(mut args: impl Iterator<Item = &'a str>, agent: &str) -> bool {
+    args.next() == Some(agent) && args.any(|t| t == "--capture")
+}
+
+/// Ours at any path, or any command that runs `exe` itself.
 fn is_ours(cmd: &str, exe: &str, agent: &str) -> bool {
     is_our_command(cmd, agent) || invokes_exe(cmd, exe)
 }
@@ -148,18 +193,48 @@ pub(crate) fn claude_entry_cmd(entry: &Value) -> Option<&str> {
         .and_then(|c| c.as_str())
 }
 
-pub(crate) fn claude_entry_is_ours(entry: &Value, exe: &str, agent: &str) -> bool {
-    entry
+fn group_hooks(group: &Value) -> &[Value] {
+    group
         .get("hooks")
-        .and_then(|h| h.as_array())
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| is_ours(c, exe, agent))
-            })
-        })
-        .unwrap_or(false)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn hook_command(hook: &Value) -> Option<&str> {
+    hook.get("command").and_then(Value::as_str)
+}
+
+/// Each inner hook command of ours, with the group that holds it. A group can
+/// also hold the user's own hooks, so ours are counted and removed one by one.
+pub(crate) fn nested_ours<'a>(
+    groups: &'a [Value],
+    exe: &'a str,
+    agent: &'a str,
+) -> impl Iterator<Item = (&'a Value, &'a str)> + 'a {
+    groups.iter().flat_map(move |g| {
+        group_hooks(g)
+            .iter()
+            .filter_map(hook_command)
+            .filter(move |c| is_ours(c, exe, agent))
+            .map(move |c| (g, c))
+    })
+}
+
+/// Drop the inner hooks whose command matches, and a group only when that
+/// empties it, so a user's hook sharing the group survives. Returns how many
+/// hooks went.
+pub(crate) fn strip_nested(groups: &mut Vec<Value>, is: impl Fn(&str) -> bool) -> usize {
+    let mut removed = 0;
+    groups.retain_mut(|group| {
+        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = hooks.len();
+        hooks.retain(|h| !hook_command(h).is_some_and(&is));
+        removed += before - hooks.len();
+        hooks.len() == before || !hooks.is_empty()
+    });
+    removed
 }
 
 /// Get-or-create the nested `hooks.PreToolUse` array.
@@ -210,17 +285,30 @@ fn pretooluse_array_mut(root: &mut Value) -> &mut Vec<Value> {
     h["PreToolUse"].as_array_mut().unwrap()
 }
 
+/// Remove each hook of ours and put `cmd` in a group of its own, where the
+/// first group that held only ours was. A user's group is never written into.
 fn merge_claude(arr: &mut Vec<Value>, exe: &str, agent: &str, cmd: &str) -> bool {
-    let ours = |e: &Value| claude_entry_is_ours(e, exe, agent);
-    replace_ours(
-        arr,
-        ours,
-        |e| claude_entry_cmd(e) == Some(cmd),
-        claude_entry(cmd),
-    )
+    let ours = |c: &str| is_ours(c, exe, agent);
+    // Exactly the groups `strip_nested` drops.
+    let only_ours = |g: &Value| {
+        let hooks = group_hooks(g);
+        !hooks.is_empty() && hooks.iter().all(|h| hook_command(h).is_some_and(ours))
+    };
+    let slot = arr.iter().position(only_ours);
+    if slot.is_some_and(|i| claude_entry_cmd(&arr[i]) == Some(cmd))
+        && nested_ours(arr, exe, agent).count() == 1
+    {
+        return false;
+    }
+    let at = slot.map_or(usize::MAX, |i| {
+        arr[..i].iter().filter(|g| !only_ours(g)).count()
+    });
+    strip_nested(arr, ours);
+    arr.insert(at.min(arr.len()), claude_entry(cmd));
+    true
 }
 
-/// Replace every entry of ours with one `entry`, at the first one's position.
+/// Replace every flat entry of ours with one `entry`, at the first one's position.
 /// Returns false when `arr` already holds exactly one entry of ours and `same`
 /// accepts it.
 fn replace_ours(
@@ -421,11 +509,7 @@ pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
     let replaced = crate::legacy::strip_entries(root, agent) > 0;
     let removed = match agent_format(agent) {
         Some(HookFormat::NestedPreToolUse) => match root["hooks"]["PreToolUse"].as_array_mut() {
-            Some(a) => {
-                let before = a.len();
-                a.retain(|e| !claude_entry_is_ours(e, exe, agent));
-                a.len() < before
-            }
+            Some(a) => strip_nested(a, |c| is_ours(c, exe, agent)) > 0,
             None => false,
         },
         Some(HookFormat::Cursor) => {
@@ -452,11 +536,7 @@ pub fn count_lodeline_entries(root: &Value, exe: &str, agent: &str) -> usize {
         + match agent_format(agent) {
             Some(HookFormat::NestedPreToolUse) => root["hooks"]["PreToolUse"]
                 .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter(|e| claude_entry_is_ours(e, exe, agent))
-                        .count()
-                })
+                .map(|a| nested_ours(a, exe, agent).count())
                 .unwrap_or(0),
             Some(HookFormat::Cursor) => CURSOR_EVENTS
                 .iter()
