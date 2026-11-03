@@ -57,6 +57,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   old rule pack in force until some other change. The agent now checks the file every 5
   seconds against the one in force and reloads when they differ. (#433)
 
+- `lodeline scan` and `lodeline-hook install|uninstall --agent codex` now use `CODEX_HOME`
+  when it is set, as Codex does. Before, they always used `~/.codex`, so the scan showed
+  no Codex settings and the hook was written to a file Codex does not read. With `--home`,
+  scan ignores `CODEX_HOME`. The background agent does not read it. (#438)
+
 - `lodeline-server` no longer drops a host's other AI Guard readings early when one
   agent's clock runs ahead. It used to age readings by the agent's own timestamp, so one
   reading dated days ahead made the 48-hour cleanup remove the host's other readings, and

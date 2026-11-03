@@ -234,9 +234,11 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // `user_global_parsers()`); per-repo parsers are appended below.
     let mut parsers_vec: Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>> =
         // The daemon's env is not a user's shell, and one parser is assessed
-        // against every user home, so `CLAUDE_CONFIG_DIR` is not honored here.
+        // against every user home, so `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
+        // are not honored here.
         crate::ai_guard::user_global_parsers_with_baseline(
             Some(cfg.state_db_path.with_extension("mcp-baselines")),
+            None,
             None,
         );
     for repo_root in &continue_repos {
