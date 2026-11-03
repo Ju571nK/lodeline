@@ -10,8 +10,8 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
-// SYSTEM, Administrators and the owner: full control. Interactive and authenticated users: 0x12019b (`PIPE_CLIENT_ACCESS`), read/write without FILE_CREATE_PIPE_INSTANCE, so only the agent adds instances.
-const SDDL: &str = "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;0x12019b;;;IU)(A;;0x12019b;;;AU)";
+// SYSTEM, Administrators and the owner get full control. Authenticated users get 0x12019b (`PIPE_CLIENT_ACCESS`), read/write without FILE_CREATE_PIPE_INSTANCE, so only the agent adds instances.
+const SDDL: &str = "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;0x12019b;;;AU)";
 
 /// Claims `name`. Fails when another process already serves it; see [`name_in_use`].
 pub fn first_instance(name: &str) -> io::Result<NamedPipeServer> {

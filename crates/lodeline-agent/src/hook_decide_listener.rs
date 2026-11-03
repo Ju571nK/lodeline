@@ -21,6 +21,14 @@ use tokio::sync::{mpsc, Semaphore};
 const MAX_INFLIGHT: usize = 16;
 const MAX_LINE: u64 = 1024 * 1024;
 
+// The previous agent's drain lasts up to 5 s, so the retries span about that long.
+#[cfg(windows)]
+const NAME_IN_USE_TRIES: u32 = 10;
+#[cfg(all(windows, not(test)))]
+const NAME_IN_USE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+#[cfg(all(windows, test))]
+const NAME_IN_USE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 #[cfg(unix)]
 pub async fn serve(
     socket: PathBuf,
@@ -131,18 +139,29 @@ pub async fn serve_pipe_until(
     activity_map: crate::hook_silence::ActivityMap,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
-    let mut listening = match crate::win_pipe::first_instance(&pipe_name) {
-        Ok(server) => server,
-        Err(e) if crate::win_pipe::name_in_use(&e) => {
-            tracing::error!(
-                pipe = %pipe_name,
-                error = %e,
-                "hook-decide pipe name is already in use by another process; \
-                 not serving enforce verdicts, hooks follow --on-failure"
-            );
-            return Ok(());
+    let mut tries = 0;
+    let mut listening = loop {
+        match crate::win_pipe::first_instance(&pipe_name) {
+            Ok(server) => break server,
+            Err(e) if crate::win_pipe::name_in_use(&e) => {
+                tries += 1;
+                if tries == NAME_IN_USE_TRIES {
+                    tracing::error!(
+                        pipe = %pipe_name,
+                        error = %e,
+                        "hook-decide pipe name is already in use by another process; \
+                         not serving enforce verdicts, hooks follow --on-failure"
+                    );
+                    return Ok(());
+                }
+                // A restarted agent can overlap the previous one while it drains.
+                tokio::select! {
+                    _ = shutdown.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(NAME_IN_USE_WAIT) => {}
+                }
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e),
     };
     let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     tracing::info!(pipe = %pipe_name, "hook-decide IPC listening");
@@ -497,6 +516,46 @@ mod win_tests {
         assert!(matches!(served, Ok(Ok(()))), "listener stops: {served:?}");
     }
 
+    fn open_as_hook(name: &str) -> std::fs::File {
+        (0..500)
+            .find_map(|_| {
+                let opened = std::fs::OpenOptions::new()
+                    .access_mode(PIPE_CLIENT_ACCESS)
+                    .open(name);
+                if opened.is_err() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                opened.ok()
+            })
+            .expect("hook opens the decide pipe")
+    }
+
+    #[tokio::test]
+    async fn name_freed_during_retries_is_served() {
+        let name = unique_name();
+        let other = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let listener = tokio::spawn(serve_pipe(
+            name.clone(),
+            tx,
+            "host-x".into(),
+            evaluator(),
+            crate::hook_silence::new_map(),
+        ));
+        tokio::time::sleep(NAME_IN_USE_WAIT).await;
+        drop(other);
+        tokio::task::spawn_blocking(move || open_as_hook(&name))
+            .await
+            .unwrap();
+        assert!(
+            !listener.is_finished(),
+            "listener serves after the name frees"
+        );
+    }
+
     #[tokio::test]
     async fn hook_access_mask_gets_a_verdict() {
         let name = unique_name();
@@ -529,17 +588,7 @@ mod win_tests {
         let mut line = serde_json::to_string(&request).unwrap();
         line.push('\n');
         let resp = tokio::task::spawn_blocking(move || {
-            let mut pipe = (0..500)
-                .find_map(|_| {
-                    let opened = std::fs::OpenOptions::new()
-                        .access_mode(PIPE_CLIENT_ACCESS)
-                        .open(&name);
-                    if opened.is_err() {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    opened.ok()
-                })
-                .expect("hook opens the decide pipe");
+            let mut pipe = open_as_hook(&name);
             pipe.write_all(line.as_bytes()).unwrap();
             let mut resp = String::new();
             std::io::BufReader::new(pipe).read_line(&mut resp).unwrap();

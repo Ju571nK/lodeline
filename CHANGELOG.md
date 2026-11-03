@@ -10,9 +10,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 ### Fixed
 
 - On Windows, the agent no longer opens the enforce pipe `\\.\pipe\lodeline-hook-decide`
-  when another process already uses that name. It logs an error that names the pipe and
-  keeps running, and hooks follow `--on-failure`. The pipe now grants access explicitly,
-  so a hook in a standard user session can reach an agent that runs as a service. (#446)
+  when another process already uses that name. It retries for about 5 seconds, so a
+  restarted agent can take over from the previous one, then logs an error that names the
+  pipe and keeps running, and hooks follow `--on-failure`. The pipe now grants access
+  explicitly. Signed-in local users can connect to it to ask for a verdict, which is what
+  lets a hook in another session reach an agent that runs as a service. A hook that runs
+  as a different Windows user than the agent needs both the hook and the agent from this
+  release or later, so upgrade them together. (#446)
 
 ## [0.12.4] - 2026-11-03
 
