@@ -129,9 +129,10 @@ fn is_our_command(cmd: &str, agent: &str) -> bool {
     starts_absolute(path[0])
         && path[1..]
             .iter()
-            .all(|t| !t.starts_with(['/', '\\', '-']) && !starts_absolute(t))
+            .all(|t| !t.starts_with(['/', '\\', '-', '.', '~']) && !starts_absolute(t))
         && path[bin].contains(['/', '\\'])
-        && !path.iter().any(|t| t.contains(['"', '\'']) || is_shell(t))
+        && !path.iter().any(|t| t.contains(['"', '\'']))
+        && !path[..bin].iter().any(|t| is_launcher(t))
         && has_our_args(tokens[bin + 1..].iter().copied(), agent)
 }
 
@@ -143,7 +144,8 @@ fn is_hook_binary(path: &str) -> bool {
         .any(|n| name.eq_ignore_ascii_case(n))
 }
 
-const SHELLS: [&str; 9] = [
+/// Programs that run the rest of their command line.
+const LAUNCHERS: [&str; 23] = [
     "cmd",
     "sh",
     "bash",
@@ -153,13 +155,31 @@ const SHELLS: [&str; 9] = [
     "powershell",
     "env",
     "wsl",
+    "sudo",
+    "doas",
+    "nice",
+    "nohup",
+    "time",
+    "timeout",
+    "xargs",
+    "stdbuf",
+    "ionice",
+    "chrt",
+    "command",
+    "exec",
+    "setsid",
+    "taskset",
 ];
 
-fn is_shell(path: &str) -> bool {
+/// A shell, wrapper, executable or script, which a folder name in an old
+/// spaced path is not.
+fn is_launcher(path: &str) -> bool {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let name = name.to_ascii_lowercase();
-    let name = name.strip_suffix(".exe").unwrap_or(&name);
-    SHELLS.contains(&name)
+    LAUNCHERS.contains(&name.as_str())
+        || [".exe", ".cmd", ".bat", ".com", ".sh", ".ps1"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
 }
 
 /// `/x`, `\x`, `\\?\C:...` or `C:...`.
