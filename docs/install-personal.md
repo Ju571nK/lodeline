@@ -13,7 +13,7 @@ The **personal profile** installs everything you need to monitor your own machin
 | `lodeline-hook` | PreToolUse hook — observe tool calls and optionally enforce deny rules |
 | `lodeline-rules-basic` (built-in) | Built-in parsers that assess AI-tool config files and produce risk scores / posture — active with no config needed. **No built-in `hook_deny_rules`**: enforcement (lodeline-hook blocking) requires you to supply a `rule-packs.yaml`. |
 
-Rule evaluation is **daemon-centric**: all rules run inside the `lodeline` daemon. `lodeline-mcp` and `lodeline-hook` are thin clients of the daemon's Unix sockets and do nothing without it.
+Rule evaluation is **daemon-centric**: all rules run inside the `lodeline` daemon. `lodeline-mcp` and `lodeline-hook` are thin clients of the daemon and do nothing without it. They reach it over Unix sockets on macOS and Linux. On Windows, `lodeline-hook` reaches it over named pipes.
 
 ---
 
@@ -102,7 +102,7 @@ sudo systemctl enable --now lodeline
 lodeline run
 ```
 
-The daemon must be running for `lodeline-mcp` and `lodeline-hook` to function. Both are clients of the daemon's Unix sockets — they have no independent capability without it.
+The daemon must be running for `lodeline-mcp` and `lodeline-hook` to function. Both are clients of the daemon and have no independent capability without it. On macOS and Linux they connect over Unix sockets. On Windows, `lodeline-hook` connects over named pipes.
 
 ---
 
@@ -305,6 +305,6 @@ A future optional community-pubkey gate for local packs is out of scope for this
 
 ## Platform
 
-The personal profile is **Unix-first**. `lodeline-mcp` local mode and `lodeline-hook` enforce are Unix-only; on non-Unix platforms these fall back to a stub / no-verdict path. Windows gets partial support via tarball install and fsnotify-based watching; full parity with the Unix personal profile is out of scope for this release.
+The personal profile is **Unix-first**. `lodeline-mcp` local mode is Unix-only and returns an error on other platforms. `lodeline-hook` supports capture and enforce on Windows too. It uses Unix sockets on macOS and Linux and named pipes on Windows. Windows gets partial support via tarball install and fsnotify-based watching; full parity with the Unix personal profile is out of scope for this release.
 
 For the fleet profile (central server, signed rule-pack push, `lodeline-sender`, `lodeline-server`, `lodeline-sign`), install with `LODELINE_PROFILE=fleet`.

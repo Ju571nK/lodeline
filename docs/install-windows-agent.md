@@ -72,6 +72,7 @@ these Windows-specific default locations:
 | state.db | `%ProgramData%\Lodeline\state.db` |
 | events dir | `%ProgramData%\Lodeline\events` |
 | control IPC | named pipe `\\.\pipe\lodeline-control` |
+| hook IPC | named pipes `\\.\pipe\lodeline-hook` (capture) and `\\.\pipe\lodeline-hook-decide` (enforce) |
 | keystore | `%LOCALAPPDATA%\Lodeline\policy-signing-pubkeys.pem` |
 
 Override any of them on the command line:
