@@ -303,6 +303,56 @@ mod tests {
         assert_eq!(r.observed_matcher.as_deref(), Some("Bash"));
     }
 
+    fn nested_settings(cmds: &[&str]) -> String {
+        serde_json::json!({"hooks":{"PreToolUse": cmds.iter()
+            .map(|c| serde_json::json!({"matcher":"*","hooks":[{"type":"command","command":c}]}))
+            .collect::<Vec<_>>()}})
+        .to_string()
+    }
+
+    const OLD_CMD: &str =
+        r"\\?\C:\Users\alice\lodeline-0.12.2\lodeline-hook.exe claude-code --capture redacted";
+
+    #[test]
+    fn duplicate_left_by_an_upgrade_is_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(
+            dir.path(),
+            "C:/Users/alice/lodeline-0.12.3/lodeline-hook.exe",
+            "*",
+        );
+        for cmds in [[OLD_CMD, &b.command], [&b.command, &b.command]] {
+            write_settings(&b, &nested_settings(&cmds));
+            let r = check_one(&b).expect("a second entry of ours is drift");
+            assert_eq!(r.kind, DriftKind::CommandDrift);
+        }
+    }
+
+    #[test]
+    fn our_entry_at_another_path_is_command_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(
+            dir.path(),
+            "C:/Users/alice/lodeline-0.12.3/lodeline-hook.exe",
+            "*",
+        );
+        write_settings(&b, &nested_settings(&[OLD_CMD]));
+        let r = check_one(&b).unwrap();
+        assert_eq!(r.kind, DriftKind::CommandDrift);
+    }
+
+    #[test]
+    fn a_wrapper_around_our_binary_is_not_a_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(dir.path(), "/usr/bin/lodeline-hook", "*");
+        let wrap = format!("bash -c '{}'", b.command);
+        write_settings(
+            &b,
+            &nested_settings(&[&wrap, "/other/tool run", &b.command]),
+        );
+        assert_eq!(check_one(&b), None);
+    }
+
     #[test]
     fn entry_missing_when_settings_file_absent() {
         let dir = tempfile::tempdir().unwrap();
@@ -454,6 +504,17 @@ mod tests {
         assert_eq!(r.kind, DriftKind::FailModeDrift);
         assert_eq!(r.expected_fail_closed, Some(true));
         assert_eq!(r.observed_fail_closed, Some(false));
+    }
+
+    #[test]
+    fn cursor_duplicate_in_one_event_is_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = cursor_baseline(dir.path(), true);
+        let entry = format!(r#"{{"command":"{}","failClosed":true}}"#, b.command);
+        let old = r#"{"command":"/opt/lodeline-0.12.2/lodeline-hook cursor --capture redacted"}"#;
+        write_cursor_settings(&b, &format!("{old},{entry}"), &entry);
+        let r = check_one(&b).unwrap();
+        assert_eq!(r.kind, DriftKind::CommandDrift);
     }
 
     #[test]

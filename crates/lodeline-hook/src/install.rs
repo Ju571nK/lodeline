@@ -829,6 +829,142 @@ mod tests {
         );
     }
 
+    // Release archives unpack into a versioned folder, so an upgrade installs
+    // from a new path while the old entry still names the old folder.
+    const OLD_DIR: &str = r"C:\Users\alice\lodeline-0.12.2-x86_64-pc-windows-msvc";
+    const NEW_EXE: &str = "C:/Users/alice/lodeline-0.12.3-x86_64-pc-windows-msvc/lodeline-hook.exe";
+    const FOREIGN: &str = "/other/tool run";
+
+    fn old_commands(agent: &str) -> [String; 2] {
+        [
+            format!(r"\\?\{OLD_DIR}\lodeline-hook.exe {agent} --capture redacted"),
+            format!(
+                "{}/lodeline-hook.exe {agent} --enforce --on-failure open --capture raw",
+                OLD_DIR.replace('\\', "/")
+            ),
+        ]
+    }
+
+    fn wrapper(agent: &str) -> String {
+        format!("cmd.exe /c {NEW_EXE} {agent} --capture redacted")
+    }
+
+    fn nested_settings(cmds: &[&str]) -> Value {
+        json!({"hooks":{"PreToolUse": cmds.iter()
+            .map(|c| json!({"matcher":"*","hooks":[{"type":"command","command":c}]}))
+            .collect::<Vec<_>>()}})
+    }
+
+    #[test]
+    fn upgrade_from_another_folder_leaves_one_entry() {
+        for agent in ["claude-code", "codex", "antigravity"] {
+            let [verbatim, slash] = old_commands(agent);
+            let wrap = wrapper(agent);
+            let mut v = nested_settings(&[FOREIGN, &verbatim, &wrap, &slash]);
+            assert!(merge_into(&mut v, NEW_EXE, agent, "redacted"));
+            let new = format!("{NEW_EXE} {agent} --capture redacted");
+            assert_eq!(pretooluse_commands(&v), [FOREIGN, &new, &wrap], "{agent}");
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 1, "{agent}");
+            assert!(!merge_into(&mut v, NEW_EXE, agent, "redacted"), "{agent}");
+        }
+    }
+
+    #[test]
+    fn enforce_upgrade_from_another_folder_leaves_one_entry() {
+        let [verbatim, slash] = old_commands("codex");
+        let mut v = nested_settings(&[&verbatim, &slash]);
+        assert!(merge_into_enforce(
+            &mut v, NEW_EXE, "codex", "redacted", "closed"
+        ));
+        assert_eq!(
+            pretooluse_commands(&v),
+            [format!(
+                "{NEW_EXE} codex --enforce --on-failure closed --capture redacted"
+            )]
+        );
+    }
+
+    #[test]
+    fn cursor_upgrade_from_another_folder_leaves_one_entry_per_event() {
+        let [verbatim, slash] = old_commands("cursor");
+        let wrap = wrapper("cursor");
+        let event =
+            json!([{"command":FOREIGN},{"command":verbatim},{"command":wrap},{"command":slash}]);
+        let mut v = json!({"version":1,"hooks":{
+            "beforeShellExecution": event.clone(),
+            "beforeMCPExecution": event,
+        }});
+        assert!(merge_into(&mut v, NEW_EXE, "cursor", "redacted"));
+        let new = format!("{NEW_EXE} cursor --capture redacted");
+        for ev in CURSOR_EVENTS {
+            assert_eq!(
+                v["hooks"][ev],
+                json!([{"command":FOREIGN},{"command":new},{"command":wrap}]),
+                "{ev}"
+            );
+        }
+        assert_eq!(count_lodeline_entries(&v, NEW_EXE, "cursor"), 2);
+    }
+
+    #[test]
+    fn tarball_to_package_upgrade_replaces_the_tarball_entry() {
+        let old = "/home/alice/lodeline-0.12.2-x86_64-unknown-linux-gnu/lodeline-hook claude-code --capture redacted";
+        let mut v = nested_settings(&[old]);
+        assert!(merge_into(
+            &mut v,
+            "/usr/bin/lodeline-hook",
+            "claude-code",
+            "redacted"
+        ));
+        assert_eq!(
+            pretooluse_commands(&v),
+            ["/usr/bin/lodeline-hook claude-code --capture redacted"]
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_our_entries_at_any_path() {
+        for agent in ["claude-code", "codex"] {
+            let [verbatim, slash] = old_commands(agent);
+            let wrap = wrapper(agent);
+            let mut v = nested_settings(&[FOREIGN, &verbatim, &wrap, &slash]);
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 2, "{agent}");
+            assert!(remove_from(&mut v, NEW_EXE, agent));
+            assert_eq!(pretooluse_commands(&v), [FOREIGN, &wrap], "{agent}");
+        }
+        let [verbatim, slash] = old_commands("cursor");
+        let mut v = json!({"version":1,"hooks":{
+            "beforeShellExecution":[{"command":verbatim},{"command":FOREIGN}],
+            "beforeMCPExecution":[{"command":slash}],
+        }});
+        assert_eq!(count_lodeline_entries(&v, NEW_EXE, "cursor"), 2);
+        assert!(remove_from(&mut v, NEW_EXE, "cursor"));
+        assert_eq!(
+            v["hooks"],
+            json!({"beforeShellExecution":[{"command":FOREIGN}],"beforeMCPExecution":[]})
+        );
+    }
+
+    #[test]
+    fn commands_that_only_mention_our_binary_are_not_ours() {
+        let agent = "claude-code";
+        for cmd in [
+            wrapper(agent),
+            format!("bash -c '{NEW_EXE} {agent} --capture redacted'"),
+            format!("/bin/sh -c \"{NEW_EXE} {agent} --capture redacted\""),
+            "/opt/x/lodeline-hook.bak claude-code --capture redacted".to_string(),
+            "/opt/x/my-lodeline-hook claude-code --capture redacted".to_string(),
+            "/opt/x/lodeline-hook claude-code --verbose".to_string(),
+            "/opt/x/lodeline-hook codex --capture redacted".to_string(),
+        ] {
+            let mut v = nested_settings(&[&cmd]);
+            assert_eq!(count_lodeline_entries(&v, NEW_EXE, agent), 0, "{cmd}");
+            assert!(merge_into(&mut v, NEW_EXE, agent, "redacted"));
+            assert_eq!(pretooluse_commands(&v)[0], cmd);
+            assert_eq!(pretooluse_commands(&v).len(), 2, "{cmd}");
+        }
+    }
+
     // --- Codex (nested, ~/.codex/hooks.json) ---
     #[test]
     fn codex_uses_nested_and_notes_hook_trust() {
