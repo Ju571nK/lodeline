@@ -102,7 +102,7 @@ fn invokes_exe(cmd: &str, exe: &str) -> bool {
     !exe.is_empty()
         && cmd
             .strip_prefix(&exe)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
 // --- Claude-style entry helpers ---
@@ -696,6 +696,10 @@ mod tests {
         );
         assert!(!invokes_exe(
             "/usr/bin/lodeline-hook.bak claude-code",
+            "/usr/bin/lodeline-hook"
+        ));
+        assert!(invokes_exe(
+            "/usr/bin/lodeline-hook\tclaude-code --capture redacted",
             "/usr/bin/lodeline-hook"
         ));
     }

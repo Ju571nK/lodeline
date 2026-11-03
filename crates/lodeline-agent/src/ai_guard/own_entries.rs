@@ -22,12 +22,14 @@ fn binary_name(path: &str) -> &str {
 }
 
 /// `<path>/lodeline-hook <agent> ... --capture <mode>`, the shape install writes.
+/// Install double-quotes a path that contains whitespace.
 pub(crate) fn is_own_hook_command(cmd: &str) -> bool {
-    let mut tokens = cmd.split_whitespace();
-    tokens
-        .next()
-        .is_some_and(|exe| HOOK_BINARIES.contains(&binary_name(exe)))
-        && tokens.any(|t| t == "--capture")
+    let cmd = cmd.trim_start();
+    let (exe, args) = match cmd.strip_prefix('"').and_then(|rest| rest.split_once('"')) {
+        Some((exe, args)) => (exe, args),
+        None => cmd.split_once(char::is_whitespace).unwrap_or((cmd, "")),
+    };
+    HOOK_BINARIES.contains(&binary_name(exe)) && args.split_whitespace().any(|t| t == "--capture")
 }
 
 /// An MCP entry under one of our server names that runs our binary.
@@ -51,6 +53,9 @@ mod tests {
         ));
         assert!(is_own_hook_command(
             r"C:\bin\lodeline-hook.exe codex --enforce --capture raw"
+        ));
+        assert!(is_own_hook_command(
+            r#""C:/Program Files/Lodeline/lodeline-hook.exe" claude-code --capture redacted"#
         ));
         assert!(!is_own_hook_command("/usr/bin/sigil-hook"));
         assert!(!is_own_hook_command("/tmp/evil.sh --capture raw"));
