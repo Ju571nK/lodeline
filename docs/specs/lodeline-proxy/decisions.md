@@ -154,6 +154,10 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
   2026-10-31(#302): status `spool` 블록에 선택 필드 `quarantined_bytes`를 둔다. 같은 이유로 server를 proxy보다 먼저 올린다. read API `spool`은 `quarantined_events`와 `quarantined_bytes`를 노출한다.
   2026-11-01(#339): status `central` 블록에 선택 필드 `ingest_stopped`를 둔다. 같은 이유로 server를 proxy보다 먼저 올린다. read API는 `central`을 그대로 노출하며, 목록 화면을 위해 proxy는 stopped 동안 `spool.state`를 `ok` 대신 `degraded`로 보고한다.
   canonical JSON은 2^53을 넘는 정수도 RFC 8785대로 double로 반올림한다.
+  2026-11-03(#307): proxy 로컬 inventory report backlog의 크기는 계약에 없어 보수적으로 정한다. 대기 complete report는 256개(P1 시험값), incomplete는 기존대로 64개까지 두고,
+  넘친 report는 버리되 status `registry.discarded_reports`에 센다. 새 필드가 아니므로 server 선배포는 필요 없다. complete report는 scope key의 최신 snapshot이 아닌 가장 오래된 것부터 버리고
+  그 chain의 다음 report를 `initial_baseline`으로 바꾼다. 버린 구간의 drift는 서버에 남지 않고 `baseline_restated` marker와 counter로만 드러난다(조용한 손실 없음).
+  로컬 registry entry는 README Retention 행대로, entry가 ACK되고 그 entry를 참조할 수 있는 spool 행(unsent, 보존 중인 acked, quarantine)이 모두 사라진 뒤에만 지운다.
   orchestrator 결정: inventory body 한도는 4 MiB(P1 초기 시험값)이며 parse 전에 413 `payload_too_large`로 막는다. `pending_previous` 대기는 proxy당 256개이며 넘으면 503 `storage_limit`이다.
 
 ## T-13d/T-12b2 구현 세부 확정 (2026-10-24, orchestrator)
