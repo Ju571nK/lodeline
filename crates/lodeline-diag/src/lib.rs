@@ -616,8 +616,30 @@ async fn send(endpoint: &Path, self_uid: u32, req: &Request) -> io::Result<Respo
 
 #[cfg(windows)]
 async fn send(endpoint: &Path, _self_uid: u32, req: &Request) -> io::Result<Response> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-    exchange(ClientOptions::new().open(endpoint)?, req).await
+    exchange(open_control_pipe(endpoint)?, req).await
+}
+
+/// Opens the agent's control pipe with `PIPE_CLIENT_ACCESS` rather than generic
+/// read/write, at `SECURITY_IDENTIFICATION`: the agent may identify the caller
+/// but cannot act as it. The agent crate keeps a copy, because its hardened
+/// build does not link this crate.
+#[cfg(windows)]
+pub fn open_control_pipe(
+    name: &Path,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, SECURITY_IDENTIFICATION};
+    let file = std::fs::OpenOptions::new()
+        .access_mode(lodeline_core::hook_proto::PIPE_CLIENT_ACCESS)
+        .custom_flags(FILE_FLAG_OVERLAPPED)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(name)?;
+    // SAFETY: the handle is a named-pipe client opened for overlapped I/O, and
+    // `into_raw_handle` hands its sole ownership to the client.
+    unsafe {
+        tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(file.into_raw_handle())
+    }
 }
 
 fn read_fleet(candidates: &[PathBuf], now: OffsetDateTime) -> FleetLink {

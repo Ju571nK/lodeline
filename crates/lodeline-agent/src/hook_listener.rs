@@ -145,7 +145,8 @@ pub async fn serve_pipe_until(
     activity_map: crate::hook_silence::ActivityMap,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
-    let first = match crate::win_pipe::claim(&pipe_name, &shutdown).await {
+    use crate::win_pipe::HOOK_SDDL;
+    let first = match crate::win_pipe::claim(&pipe_name, HOOK_SDDL, &shutdown).await {
         Ok(Some(server)) => server,
         Ok(None) => return Ok(()),
         Err(error) => {
@@ -156,7 +157,7 @@ pub async fn serve_pipe_until(
     let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     tracing::info!(pipe = %pipe_name, "hook IPC listening");
     let mut connections = crate::ipc_lifecycle::Connections::default();
-    let open_next = || match crate::win_pipe::next_instance(&pipe_name) {
+    let open_next = || match crate::win_pipe::next_instance(&pipe_name, HOOK_SDDL) {
         Ok(server) => Some(server),
         Err(error) => {
             tracing::warn!(pipe = %pipe_name, %error, "hook pipe instance create failed; retrying");

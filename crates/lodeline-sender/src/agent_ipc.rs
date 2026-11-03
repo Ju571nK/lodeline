@@ -132,11 +132,8 @@ pub async fn apply_policy(
     response: &SignedPolicyResponse,
 ) -> Result<AgentResponse, IpcError> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::windows::named_pipe::ClientOptions;
-    let pipe_str = pipe_name.to_string_lossy().to_string();
-    let mut client = ClientOptions::new()
-        .open(pipe_str.as_str())
-        .map_err(|source| IpcError::Connect {
+    let mut client =
+        lodeline_diag::open_control_pipe(pipe_name).map_err(|source| IpcError::Connect {
             path: pipe_name.to_path_buf(),
             source,
         })?;
@@ -159,11 +156,8 @@ pub async fn apply_rule_packs(
     response: &SignedPolicyResponse,
 ) -> Result<AgentResponse, IpcError> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::windows::named_pipe::ClientOptions;
-    let pipe_str = pipe_name.to_string_lossy().to_string();
-    let mut client = ClientOptions::new()
-        .open(pipe_str.as_str())
-        .map_err(|source| IpcError::Connect {
+    let mut client =
+        lodeline_diag::open_control_pipe(pipe_name).map_err(|source| IpcError::Connect {
             path: pipe_name.to_path_buf(),
             source,
         })?;

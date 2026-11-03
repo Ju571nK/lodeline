@@ -131,7 +131,8 @@ pub async fn serve_pipe_until(
     activity_map: crate::hook_silence::ActivityMap,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
-    let mut listening = match crate::win_pipe::claim(&pipe_name, &shutdown).await {
+    use crate::win_pipe::HOOK_SDDL;
+    let mut listening = match crate::win_pipe::claim(&pipe_name, HOOK_SDDL, &shutdown).await {
         Ok(Some(server)) => server,
         Ok(None) => return Ok(()),
         Err(e) if crate::win_pipe::name_in_use(&e) => {
@@ -154,7 +155,10 @@ pub async fn serve_pipe_until(
         };
         connected?;
         // Open the next instance before handing this one off, so the name never lapses.
-        let server = std::mem::replace(&mut listening, crate::win_pipe::next_instance(&pipe_name)?);
+        let server = std::mem::replace(
+            &mut listening,
+            crate::win_pipe::next_instance(&pipe_name, HOOK_SDDL)?,
+        );
         // Overload: drop the connection. The hook treats no-answer-within-deadline
         // as the no-verdict case and applies its local on_failure (fail-open default).
         let permit = match sem.clone().try_acquire_owned() {
@@ -174,6 +178,8 @@ pub async fn serve_pipe_until(
             handle_decide_conn(server, u32::MAX, tx, host_id, evaluator, activity_map).await;
         });
     }
+    // Release the name before draining, so a restarting agent can claim it.
+    drop(listening);
     connections.drain().await
 }
 

@@ -587,26 +587,38 @@ pub async fn serve(pipe_name: &str, ctx: Arc<ControlContext>) -> std::io::Result
     serve_until(pipe_name, ctx, tokio_util::sync::CancellationToken::new()).await
 }
 
+/// Windows control pipe. If another process still holds the name after the
+/// retries, this returns an error that names the pipe and the agent exits,
+/// because an agent without its control pipe would take no signed policy.
 #[cfg(windows)]
 pub async fn serve_until(
     pipe_name: &str,
     ctx: Arc<ControlContext>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
+    use crate::win_pipe::{claim, name_in_use, next_instance, CONTROL_SDDL};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::windows::named_pipe::ServerOptions;
 
+    let mut listening = match claim(pipe_name, CONTROL_SDDL, &shutdown).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return Ok(()),
+        Err(e) if name_in_use(&e) => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!("control pipe {pipe_name} is already in use by another process: {e}"),
+            ))
+        }
+        Err(e) => return Err(e),
+    };
+    tracing::info!(pipe = %pipe_name, "control IPC listening");
     let mut connections = crate::ipc_lifecycle::Connections::default();
     loop {
-        let server = ServerOptions::new()
-            .first_pipe_instance(false)
-            .access_inbound(true)
-            .access_outbound(true)
-            .create(pipe_name)?;
-        let Some(connected) = connections.accept(server.connect(), &shutdown).await else {
+        let Some(connected) = connections.accept(listening.connect(), &shutdown).await else {
             break;
         };
         connected?;
+        // Open the next instance before handing this one off, so the name never lapses.
+        let server = std::mem::replace(&mut listening, next_instance(pipe_name, CONTROL_SDDL)?);
         let ctx = ctx.clone();
         connections.spawn(async move {
             let (rd, mut wr) = tokio::io::split(server);
@@ -635,5 +647,7 @@ pub async fn serve_until(
             }
         });
     }
+    // Release the name before draining, so a restarting agent can claim it.
+    drop(listening);
     connections.drain().await
 }
