@@ -1164,6 +1164,8 @@ mod tests {
         for cmd in [
             r"C:\Program Files\Lodeline\LODELINE-HOOK.EXE claude-code --capture raw",
             "C:/x/Lodeline-Hook.exe claude-code --capture raw",
+            "/Users/Jane Doe/lodeline-0.12.2/lodeline-hook claude-code --capture redacted",
+            "/home/a b c/lodeline-hook claude-code --capture redacted",
         ] {
             assert_eq!(
                 count_lodeline_entries(&nested_settings(&[cmd]), NEW_EXE, "claude-code"),
@@ -1175,7 +1177,7 @@ mod tests {
 
     #[test]
     fn a_wrapper_around_a_spaced_path_stays_foreign() {
-        for cmd in [
+        let claimed: Vec<&str> = [
             r"cmd.exe /c C:\x y\lodeline-hook.exe claude-code --capture redacted",
             r"C:\Windows\System32\cmd.exe /c C:\x y\lodeline-hook.exe claude-code --capture redacted",
             r"C:\Program Files\Git\bin\bash.exe -c C:/x/lodeline-hook.exe claude-code --capture redacted",
@@ -1184,14 +1186,23 @@ mod tests {
             "/usr/bin/env lodeline-hook claude-code --capture redacted",
             r"C:\x y\lodeline-hook.exe codex --capture redacted",
             r"C:\x y\lodeline-hook.exe claude-code --verbose",
-        ] {
-            let v = nested_settings(&[cmd]);
-            assert_eq!(
-                count_lodeline_entries(&v, NEW_EXE, "claude-code"),
-                0,
-                "{cmd}"
-            );
-        }
+            "/usr/bin/sudo x y/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/nice ./lodeline-hook claude-code --capture redacted",
+            "/usr/bin/time ../bin/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/nohup bin/lodeline-hook claude-code --capture redacted",
+            "/usr/bin/timeout 5 bin/lodeline-hook claude-code --capture redacted",
+            "/opt/wrap.sh bin/lodeline-hook claude-code --capture redacted",
+            "C:/tools/run.exe a/lodeline-hook.exe claude-code --capture redacted",
+            "/opt/x ~/lodeline-hook claude-code --capture redacted",
+        ]
+        .into_iter()
+        .filter(|cmd| {
+            let mut v = nested_settings(&[cmd]);
+            count_lodeline_entries(&v, NEW_EXE, "claude-code") != 0
+                || remove_from(&mut v, NEW_EXE, "claude-code")
+        })
+        .collect();
+        assert!(claimed.is_empty(), "claimed as ours: {claimed:#?}");
     }
 
     // --- Codex (nested, ~/.codex/hooks.json) ---
