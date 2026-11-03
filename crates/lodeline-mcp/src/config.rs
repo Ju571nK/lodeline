@@ -1,11 +1,20 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub base_url: String,
     pub token: String,
     pub mtls: Option<MtlsPaths>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("base_url", &crate::upstream::display_url(&self.base_url))
+            .field("mtls", &self.mtls)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +176,19 @@ mod tests {
         assert_eq!(c.base_url, "http://127.0.0.1:9090");
         assert_eq!(c.token, "tok");
         assert!(c.mtls.is_none());
+    }
+
+    #[test]
+    fn debug_hides_the_token_and_url_credentials() {
+        let m = map(&[
+            ("LODELINE_SERVER_BASE_URL", "https://user:pw@h:8443/x?k=v"),
+            ("LODELINE_SERVER_READ_TOKEN", "s3cret-token"),
+        ]);
+        let shown = format!("{:?}", Mode::from_map(&m).unwrap());
+        for secret in ["s3cret-token", "pw", "k=v"] {
+            assert!(!shown.contains(secret), "{secret} in {shown}");
+        }
+        assert!(shown.contains("h:8443"), "{shown}");
     }
 
     #[test]
