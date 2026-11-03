@@ -1,12 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * Playwright runs e2e specs against the **production Go binary** with the
+ * Playwright runs e2e specs against the **production binary** with the
  * embedded SPA, not the Vite dev server. That way we exercise the same
- * routing + cookie semantics + chi middleware that ship in Docker.
+ * routing + cookie semantics + middleware that ship.
  *
  * Before running, the harness expects:
- *   - the binary built at `../lodeline-manager` (Makefile `make e2e` handles this),
+ *   - the binary at `MANAGER_BIN`, or a release build at
+ *     `../target/release/lodeline-manager` made after `npm run build`,
  *   - `MOCK_FLEET=1` so no live lodeline-server is needed,
  *   - the env vars below (which match `.env.example`).
  *
@@ -37,7 +38,7 @@ export default defineConfig({
   },
 
   webServer: {
-    command: '../lodeline-manager',
+    command: process.env.MANAGER_BIN ?? '../target/release/lodeline-manager',
     url: `${BASE_URL}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
