@@ -83,7 +83,10 @@ impl DenyEvaluator {
                     CompiledMatch::BashIndirection(FieldMatch::compile(indirection)?)
                 }
                 HookActionMatch::FileEdit { path } => CompiledMatch::FileEdit {
-                    in_match_form: FieldMatch::compile(&path_matcher_in_match_form(path))?,
+                    // NFC can turn a valid pattern invalid (`>` + U+0338 becomes `≯`);
+                    // keep the rule as written rather than fail every rule.
+                    in_match_form: FieldMatch::compile(&path_matcher_in_match_form(path))
+                        .or_else(|_| FieldMatch::compile(path))?,
                     as_written: match path {
                         Matcher::Regex { .. } if cfg!(target_os = "macos") => {
                             Some(FieldMatch::compile(path)?)
@@ -873,6 +876,15 @@ mod tests {
                 "preview: {pattern}"
             );
         }
+    }
+
+    #[test]
+    fn regex_rule_that_nfc_would_break_still_loads() {
+        let ev = deny_path(Matcher::Regex {
+            pattern: "(?P<n>\u{338}x)".into(),
+        });
+        let path = "/tmp/\u{338}x";
+        assert!(ev.evaluate(&file_edit(path, &[path])).is_some());
     }
 
     #[cfg(not(target_os = "macos"))]
