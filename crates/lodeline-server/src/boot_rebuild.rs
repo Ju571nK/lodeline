@@ -202,31 +202,95 @@ mod tests {
         assert_eq!(map.get(HID).unwrap().hostname(), Some("new-name"));
     }
 
+    fn reading(tool: &str, user: &str, ts: &str) -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "event_id": uuid::Uuid::now_v7().to_string(),
+            "ts": ts,
+            "host_id": HID,
+            "agent_version": "0.5.0",
+            "severity": "warn",
+            "source": {"kind": "agent"},
+            "subject": {"kind": "self"},
+            "evidence": {
+                "kind": "ai_guard_risk_assessed",
+                "tool": tool,
+                "scope": {"kind": "user_global"},
+                "score": 7.0,
+                "bucket": "critical",
+                "reasons": [],
+                "is_reattestation": false,
+                "user": user
+            },
+            "target_id": null
+        })
+    }
+
+    /// Rebuilds `(file name, reading)` pairs and returns the tools left in
+    /// `current_risk`.
+    fn rebuilt_tools(files: &[(&str, serde_json::Value)]) -> Vec<lodeline_core::event::AiTool> {
+        let dir = tempdir().unwrap();
+        let host_dir = dir.path().join(HID);
+        std::fs::create_dir_all(&host_dir).unwrap();
+        for (name, line) in files {
+            write_line(&host_dir.join(name), line);
+        }
+        let map = rebuild_from_jsonl(dir.path()).unwrap();
+        map[HID].current_risk.keys().copied().collect()
+    }
+
+    #[test]
+    fn rebuild_keeps_a_reading_live_ingest_keeps() {
+        use lodeline_core::event::AiTool;
+        // Codex at T. Claude Code arrives at T+25h, just after midnight, dated
+        // days ahead. Live ingest cuts at T-23h, so the Codex reading stays.
+        let tools = rebuilt_tools(&[
+            (
+                "received-2026-05-16.jsonl",
+                reading("codex", "alice", "2026-05-16T23:30:00Z"),
+            ),
+            (
+                "received-2026-05-18.jsonl",
+                reading("claude_code", "bob", "2026-05-20T12:00:00Z"),
+            ),
+        ]);
+        assert_eq!(tools, [AiTool::ClaudeCode, AiTool::Codex]);
+    }
+
+    #[test]
+    fn rebuild_drops_a_reading_older_than_48h_and_a_day() {
+        use lodeline_core::event::AiTool;
+        let tools = rebuilt_tools(&[
+            (
+                "received-2026-05-10.jsonl",
+                reading("codex", "alice", "2026-05-10T12:00:00Z"),
+            ),
+            (
+                "received-2026-05-13.jsonl",
+                reading("claude_code", "bob", "2026-05-13T12:00:00Z"),
+            ),
+        ]);
+        assert_eq!(tools, [AiTool::ClaudeCode]);
+    }
+
+    #[test]
+    fn rebuild_never_prunes_by_a_file_with_no_receive_day() {
+        use lodeline_core::event::AiTool;
+        let tools = rebuilt_tools(&[
+            (
+                "received-2026-05-17.jsonl",
+                reading("codex", "alice", "2026-05-17T12:00:00Z"),
+            ),
+            (
+                "received-unknown.jsonl",
+                reading("claude_code", "bob", "2099-01-01T00:00:00Z"),
+            ),
+        ]);
+        assert_eq!(tools, [AiTool::ClaudeCode, AiTool::Codex]);
+    }
+
     #[test]
     fn rebuild_caps_a_future_dated_reading_at_its_receive_day() {
-        let reading = |tool: &str, user: &str, ts: &str| {
-            json!({
-                "schema_version": 1,
-                "event_id": uuid::Uuid::now_v7().to_string(),
-                "ts": ts,
-                "host_id": HID,
-                "agent_version": "0.5.0",
-                "severity": "warn",
-                "source": {"kind": "agent"},
-                "subject": {"kind": "self"},
-                "evidence": {
-                    "kind": "ai_guard_risk_assessed",
-                    "tool": tool,
-                    "scope": {"kind": "user_global"},
-                    "score": 7.0,
-                    "bucket": "critical",
-                    "reasons": [],
-                    "is_reattestation": false,
-                    "user": user
-                },
-                "target_id": null
-            })
-        };
         let dir = tempdir().unwrap();
         let host_dir = dir.path().join(HID);
         std::fs::create_dir_all(&host_dir).unwrap();
