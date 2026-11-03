@@ -620,8 +620,9 @@ async fn send(endpoint: &Path, _self_uid: u32, req: &Request) -> io::Result<Resp
 }
 
 /// Opens the agent's control pipe with `PIPE_CLIENT_ACCESS` rather than generic
-/// read/write, and lets the agent identify but not impersonate the caller. The
-/// agent crate keeps a copy, because its hardened build does not link this crate.
+/// read/write, at `SECURITY_IDENTIFICATION`: the agent may identify the caller
+/// but cannot act as it. The agent crate keeps a copy, because its hardened
+/// build does not link this crate.
 #[cfg(windows)]
 pub fn open_control_pipe(
     name: &Path,

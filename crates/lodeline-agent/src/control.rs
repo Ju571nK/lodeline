@@ -588,8 +588,8 @@ pub async fn serve(pipe_name: &str, ctx: Arc<ControlContext>) -> std::io::Result
 }
 
 /// Windows control pipe. If another process still holds the name after the
-/// retries, this returns the error and the agent stops, as when the Unix socket
-/// cannot bind: an agent without its control pipe would take no signed policy.
+/// retries, this returns an error that names the pipe and the agent exits,
+/// because an agent without its control pipe would take no signed policy.
 #[cfg(windows)]
 pub async fn serve_until(
     pipe_name: &str,
@@ -647,5 +647,7 @@ pub async fn serve_until(
             }
         });
     }
+    // Release the name before draining, so a restarting agent can claim it.
+    drop(listening);
     connections.drain().await
 }

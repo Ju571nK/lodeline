@@ -178,6 +178,8 @@ pub async fn serve_pipe_until(
             handle_decide_conn(server, u32::MAX, tx, host_id, evaluator, activity_map).await;
         });
     }
+    // Release the name before draining, so a restarting agent can claim it.
+    drop(listening);
     connections.drain().await
 }
 

@@ -65,7 +65,8 @@ pub fn next_instance(name: &str, sddl: &str) -> io::Result<NamedPipeServer> {
 }
 
 /// Opens `name` as a client with [`PIPE_CLIENT_ACCESS`] rather than generic
-/// read/write, and lets the server identify but not impersonate the caller.
+/// read/write, at `SECURITY_IDENTIFICATION`: the server may identify the caller
+/// but cannot act as it.
 pub fn open_client(name: &str) -> io::Result<NamedPipeClient> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::IntoRawHandle;
