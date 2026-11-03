@@ -40,6 +40,9 @@ pub fn resolve_control_socket(
 /// The agent's control named pipe on Windows.
 pub const DEFAULT_CONTROL_PIPE: &str = r"\\.\pipe\lodeline-control";
 
+/// The agent's one-way hook named pipe on Windows, the counterpart of `hook.sock`.
+pub const DEFAULT_HOOK_PIPE: &str = r"\\.\pipe\lodeline-hook";
+
 /// The control socket is trusted only if its peer is root (the system agent) or
 /// the same user as this process (the individual-developer case). Any other
 /// local user owning the socket is treated as a spoofing attempt (#57).

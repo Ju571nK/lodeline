@@ -72,7 +72,13 @@ these Windows-specific default locations:
 | state.db | `%ProgramData%\Lodeline\state.db` |
 | events dir | `%ProgramData%\Lodeline\events` |
 | control IPC | named pipe `\\.\pipe\lodeline-control` |
+| hook IPC | named pipes `\\.\pipe\lodeline-hook` (capture) and `\\.\pipe\lodeline-hook-decide` (enforce) |
 | keystore | `%LOCALAPPDATA%\Lodeline\policy-signing-pubkeys.pem` |
+
+Both hook pipes let signed-in local users connect, so a hook in a user session can
+reach an agent that runs as a service. A hook that runs as a different Windows user
+than the agent needs a hook and an agent that both have this change, so upgrade them
+together.
 
 Override any of them on the command line:
 

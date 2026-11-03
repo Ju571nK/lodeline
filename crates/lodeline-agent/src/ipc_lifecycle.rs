@@ -4,6 +4,8 @@ use std::{future::Future, io, time::Duration};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 pub(crate) struct Connections(JoinSet<()>);
 
@@ -33,7 +35,7 @@ impl Connections {
     }
 
     pub async fn drain(mut self) -> io::Result<()> {
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let result = tokio::time::timeout(DRAIN_TIMEOUT, async {
             while let Some(done) = self.0.join_next().await {
                 done.map_err(io::Error::other)?;
             }

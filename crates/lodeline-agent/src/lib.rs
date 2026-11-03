@@ -16,12 +16,11 @@ pub mod heartbeat;
 pub mod hook_deny;
 pub mod hook_silence;
 // `hook_event` holds the cross-platform event-conversion helpers (`to_event`).
-// The one-way `hook_listener` (observe) is a Unix-socket listener — unix-only.
-// The two-way `hook_decide_listener` (enforce) serves a Unix socket on Unix and
-// a named pipe on Windows (#162), so it compiles on both.
+// Both hook listeners, one-way `hook_listener` (observe) and two-way
+// `hook_decide_listener` (enforce), serve a Unix socket on Unix and a named
+// pipe on Windows (#162), so they compile on both.
 pub mod hook_decide_listener;
 pub mod hook_event;
-#[cfg(unix)]
 pub mod hook_listener;
 pub mod host_meta_snapshot;
 pub mod host_meta_snapshot_task;

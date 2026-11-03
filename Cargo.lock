@@ -2043,11 +2043,14 @@ dependencies = [
  "clap",
  "dunce",
  "libc",
+ "lodeline-agent",
  "lodeline-core",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tokio-util",
  "uuid",
 ]
 

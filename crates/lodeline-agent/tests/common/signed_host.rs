@@ -117,6 +117,7 @@ impl Host {
             events_dir: self.path("events"),
             control_socket: self.path("c.sock"),
             control_pipe_name: String::new(),
+            hook_pipe_name: String::new(),
             // These tests use no file events, and native watch setup took 40 s per
             // boot on a developer Mac with the tests running in parallel.
             poll_watcher: true,

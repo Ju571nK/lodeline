@@ -21,14 +21,6 @@ use tokio::sync::{mpsc, Semaphore};
 const MAX_INFLIGHT: usize = 16;
 const MAX_LINE: u64 = 1024 * 1024;
 
-// The previous agent's drain lasts up to 5 s, so the retries span about that long.
-#[cfg(windows)]
-const NAME_IN_USE_TRIES: u32 = 10;
-#[cfg(all(windows, not(test)))]
-const NAME_IN_USE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
-#[cfg(all(windows, test))]
-const NAME_IN_USE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
-
 #[cfg(unix)]
 pub async fn serve(
     socket: PathBuf,
@@ -139,29 +131,19 @@ pub async fn serve_pipe_until(
     activity_map: crate::hook_silence::ActivityMap,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
-    let mut tries = 0;
-    let mut listening = loop {
-        match crate::win_pipe::first_instance(&pipe_name) {
-            Ok(server) => break server,
-            Err(e) if crate::win_pipe::name_in_use(&e) => {
-                tries += 1;
-                if tries == NAME_IN_USE_TRIES {
-                    tracing::error!(
-                        pipe = %pipe_name,
-                        error = %e,
-                        "hook-decide pipe name is already in use by another process; \
-                         not serving enforce verdicts, hooks follow --on-failure"
-                    );
-                    return Ok(());
-                }
-                // A restarted agent can overlap the previous one while it drains.
-                tokio::select! {
-                    _ = shutdown.cancelled() => return Ok(()),
-                    _ = tokio::time::sleep(NAME_IN_USE_WAIT) => {}
-                }
-            }
-            Err(e) => return Err(e),
+    let mut listening = match crate::win_pipe::claim(&pipe_name, &shutdown).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return Ok(()),
+        Err(e) if crate::win_pipe::name_in_use(&e) => {
+            tracing::error!(
+                pipe = %pipe_name,
+                error = %e,
+                "hook-decide pipe name is already in use by another process; \
+                 not serving enforce verdicts, hooks follow --on-failure"
+            );
+            return Ok(());
         }
+        Err(e) => return Err(e),
     };
     let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     tracing::info!(pipe = %pipe_name, "hook-decide IPC listening");
@@ -545,7 +527,7 @@ mod win_tests {
             evaluator(),
             crate::hook_silence::new_map(),
         ));
-        tokio::time::sleep(NAME_IN_USE_WAIT).await;
+        tokio::time::sleep(crate::win_pipe::NAME_IN_USE_WAIT).await;
         drop(other);
         tokio::task::spawn_blocking(move || open_as_hook(&name))
             .await

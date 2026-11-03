@@ -23,6 +23,7 @@ fn main() -> anyhow::Result<()> {
                 events_dir: cli.events_dir.clone().unwrap_or_else(default_events_dir),
                 control_socket,
                 control_pipe_name: default_control_pipe_name(),
+                hook_pipe_name: lodeline_core::control_proto::DEFAULT_HOOK_PIPE.to_string(),
                 poll_watcher: cli.poll,
                 keystore_path: cli.keystore.clone(),
             };

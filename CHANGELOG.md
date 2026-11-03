@@ -9,8 +9,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Fixed
 
+- On Windows, `lodeline-hook` in its default capture mode now sends hook events to the
+  agent. Before, it recorded nothing on Windows, and drift reports from
+  `lodeline-hook verify` were not delivered either. The agent listens on a named pipe for
+  them. If another process already uses the pipe name, the agent retries for about 5.5
+  seconds, then does not open the hook pipe and keeps running. Like the enforce pipe, the
+  hook pipe lets signed-in local users connect, so a hook in another session reaches an
+  agent that runs as a service. (#445)
+
 - On Windows, the agent no longer opens the enforce pipe `\\.\pipe\lodeline-hook-decide`
-  when another process already uses that name. It retries for about 5 seconds, so a
+  when another process already uses that name. It retries for about 5.5 seconds, so a
   restarted agent can take over from the previous one, then logs an error that names the
   pipe and keeps running, and hooks follow `--on-failure`. The pipe now grants access
   explicitly. Signed-in local users can connect to it to ask for a verdict, which is what
