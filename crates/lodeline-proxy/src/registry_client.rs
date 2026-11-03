@@ -28,14 +28,14 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::Instant;
 
 use lodeline_proxy_api::registry::{
-    Canon, Comparison, InventoryReport, ObservationSource, RegistryEntry, RegistryProtocolVersion,
+    Canon, InventoryReport, ObservationSource, RegistryEntry, RegistryProtocolVersion,
     UploadRequest,
 };
 use lodeline_proxy_api::status::{ConflictDetector, RegistryConflictGap};
@@ -46,7 +46,6 @@ use lodeline_proxy_api::{
 
 use crate::ingest_client::STALL_ATTEMPTS;
 use crate::jcs;
-use crate::registry_key::ScopeKey;
 use crate::registry_store::{
     EntryCheck, EntryRecord, EntryState, RegistryError, RegistryStore, StoredReport,
 };
@@ -743,9 +742,7 @@ pub struct RegistryClient<T: RegistryTransport> {
     /// Current entries-per-request cap (halved by 413, 1 while isolating).
     cap: usize,
     failures: u32,
-    discarded_reports: u64,
-    /// Mirrors of `discarded_reports` and `failures` for the status probe.
-    shared_discarded: Arc<AtomicU64>,
+    /// Mirror of `failures` for the status probe.
     shared_failures: Arc<AtomicU32>,
     resumed: bool,
     /// A failed conflict resume is not tried again before this instant.
@@ -776,8 +773,6 @@ impl<T: RegistryTransport> RegistryClient<T> {
             proxy_id,
             cap: MAX_UPLOAD_ENTRIES,
             failures: 0,
-            discarded_reports: 0,
-            shared_discarded: Arc::new(AtomicU64::new(0)),
             shared_failures: Arc::new(AtomicU32::new(0)),
             resumed: false,
             resume_after: None,
@@ -792,10 +787,10 @@ impl<T: RegistryTransport> RegistryClient<T> {
         &self.conflicts
     }
 
-    /// Reports given up on (409, 413, 422, a repeated 424, or a member that can
-    /// never be registered).
+    /// Reports given up on (409, 413, 422, a repeated 424, a member that can
+    /// never be registered, or dropped because the local backlog was full).
     pub fn discarded_reports(&self) -> u64 {
-        self.discarded_reports
+        self.store.discarded_reports()
     }
 
     pub fn consecutive_failures(&self) -> u32 {
@@ -807,7 +802,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
             pending_entries: self.store.pending_entry_count()?,
             pending_reports: self.store.pending_reports(10_000)?.len() as u64,
             poisoned_entries: self.store.poisoned_count()?,
-            discarded_reports: self.discarded_reports,
+            discarded_reports: self.store.discarded_reports(),
             consecutive_failures: self.failures,
             quarantined_entries: self.store.quarantined_count()?,
         })
@@ -819,7 +814,6 @@ impl<T: RegistryTransport> RegistryClient<T> {
     /// after [`STALL_ATTEMPTS`] consecutive failed steps.
     pub fn health_probe(&self) -> RegistryProbe {
         let store = self.store.clone();
-        let discarded = self.shared_discarded.clone();
         let failures = self.shared_failures.clone();
         Arc::new(move || {
             Some(RegistrySnapshot {
@@ -827,7 +821,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
                 sync_stalled: failures.load(Ordering::Relaxed) >= STALL_ATTEMPTS,
                 quarantined_entries: store.quarantined_count().ok()?,
                 poisoned_entries: store.poisoned_count().ok()?,
-                discarded_reports: discarded.load(Ordering::Relaxed),
+                discarded_reports: store.discarded_reports(),
             })
         })
     }
@@ -923,6 +917,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
         }
         // Reports are sent whether or not a refused entry is still waiting; only
         // a report that names a pending entry waits.
+        let _sending = self.store.sending();
         for report in self.store.pending_reports(REPORT_SCAN)? {
             let parsed = lodeline_proxy_api::parse_inventory_report(&report.body).ok();
             let Some(parsed) = parsed else {
@@ -1146,57 +1141,14 @@ impl<T: RegistryTransport> RegistryClient<T> {
         })
     }
 
-    /// Give up on a report. A discarded COMPLETE report breaks the server's
-    /// chain for its scope key (the server never saw that snapshot), so:
-    ///
-    /// * the local latest snapshot is forgotten if it is that one, making the
-    ///   next complete listing an `initial_baseline`;
-    /// * queued reports that name it as their previous snapshot are rewritten to
-    ///   `initial_baseline` (their own members and snapshot stay valid).
+    /// Give up on a report ([`RegistryStore::discard_report`] repairs its chain
+    /// and counts it).
     fn drop_report(
         &mut self,
         report: &StoredReport,
         parsed: Option<&InventoryReport>,
     ) -> Result<(), RegistryError> {
-        self.store.report_done(&report.report_id)?;
-        self.discarded_reports += 1;
-        self.shared_discarded
-            .store(self.discarded_reports, Ordering::Relaxed);
-        let Some(p) = parsed else { return Ok(()) };
-        let Some(inv) = p.inventory_id.as_ref() else {
-            return Ok(()); // an incomplete report is not part of the chain
-        };
-        let scope = ScopeKey {
-            proxy_id: p.proxy_id.as_str().to_string(),
-            upstream_id: p.scope.upstream_id.as_str().to_string(),
-            credential_scope_id: p.scope.credential_scope_id.as_str().to_string(),
-            protocol_version: "2025-11-25".to_string(),
-            observation_source: "proxy_live".to_string(),
-        };
-        self.store.forget_snapshot(&scope, inv.as_str())?;
-        for r in self.store.pending_reports(10_000)? {
-            let Ok(mut q) = lodeline_proxy_api::parse_inventory_report(&r.body) else {
-                continue;
-            };
-            let names_it = match &q.comparison {
-                Some(Comparison::Compared {
-                    previous_inventory_id,
-                    ..
-                })
-                | Some(Comparison::Rebaseline {
-                    previous_inventory_id,
-                    ..
-                }) => previous_inventory_id.as_str() == inv.as_str(),
-                _ => false,
-            };
-            if names_it {
-                q.comparison = Some(Comparison::InitialBaseline {});
-                if let Ok(body) = serde_json::to_vec(&q) {
-                    self.store.replace_report_body(&r.report_id, &body)?;
-                }
-            }
-        }
-        Ok(())
+        self.store.discard_report(&report.report_id, parsed)
     }
 
     // --------------------------------------------------------------------- run
