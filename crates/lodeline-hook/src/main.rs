@@ -488,11 +488,13 @@ fn main() {
     }
 }
 
+/// This binary's path as written into a hook command. `dunce` stops
+/// `canonicalize` from returning a `\\?\` verbatim path on Windows.
 fn exe_path() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.canonicalize().ok())
-        .map(|p| p.to_string_lossy().into_owned())
+        .and_then(|p| dunce::canonicalize(p).ok())
+        .map(|p| install::hook_exe(&p.to_string_lossy(), cfg!(windows)))
         .unwrap_or_else(|| "lodeline-hook".to_string())
 }
 
@@ -514,6 +516,14 @@ fn cmd_install(
         OnFailureArg::Closed => "closed",
     };
     let exe = exe_path();
+    if cfg!(windows) && exe.starts_with('"') {
+        eprintln!(
+            "warning: the path to lodeline-hook contains a space, so the hook command quotes it. \
+             PowerShell cannot run a quoted command, and Codex runs hooks in PowerShell on \
+             Windows, as does Claude Code without Git Bash. There the hook does nothing. Move \
+             lodeline-hook.exe to a folder whose path has no spaces and run install again."
+        );
+    }
 
     // #208 — Antigravity now installs through the ordinary settings-merge path
     // (`~/.gemini/config/hooks.json`), which is the mechanism #202 verified on

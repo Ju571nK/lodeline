@@ -31,6 +31,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   so those findings were duplicates. A home folder that is a repository is handled the
   same way. The project's `AGENTS.md` is still scanned. (#427)
 
+- On Windows, `lodeline-hook install` now writes a hook command that Claude Code and
+  Codex can run. It used to write a `\\?\C:\...` path with backslashes. Claude Code runs
+  hooks in Git Bash, which drops the backslashes, so the command failed and the hook did
+  nothing. The path now uses forward slashes for every agent. A path with a space is
+  quoted. That runs under Git Bash, but not under PowerShell, which Codex uses on
+  Windows, as does Claude Code without Git Bash. Install prints a warning in that case.
+  Keep `lodeline-hook.exe` in a folder whose path has no spaces. Reinstalling over an
+  existing entry replaces it. If you installed hooks on Windows, rerun
+  `lodeline-hook install --write` for each agent after you upgrade. (#428)
+
 - On a host where the agent runs as root, a user-global rule pack now reads each user's
   home. It used to resolve `~` and `$HOME` from the agent's own environment, so it never
   read any user's config. Other variables in a rule-pack path still come from the
@@ -51,6 +61,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the next report restates its baseline. Every dropped report, complete or incomplete, is
   counted in `registry.discarded_reports` in the proxy status. (#432)
 
+- The `lodeline scan` table now lines up when a scope path has non-ASCII characters,
+  such as a Korean user folder or an accented name. Column widths used to count bytes,
+  so the columns after such a path were out of line. The JSON output is unchanged.
+  (#434)
+
 - The agent now notices a rule-pack file that changed or was removed without a file-watcher
   event. With `--poll`, and on file systems where the watcher only sees whole-second times,
   a rule-pack file written and then deleted or edited within the same second could leave the
@@ -61,6 +76,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   when it is set, as Codex does. Before, they always used `~/.codex`, so the scan showed
   no Codex settings and the hook was written to a file Codex does not read. With `--home`,
   scan ignores `CODEX_HOME`. The background agent does not read it. (#438)
+
+- `lodeline-server` no longer drops a host's other AI Guard readings early when one
+  agent's clock runs ahead. It used to age readings by the agent's own timestamp, so one
+  reading dated days ahead made the 48-hour cleanup remove the host's other readings, and
+  that reading stayed too long. Readings are now aged by the earlier of their timestamp and
+  the time the server received them. The event's own timestamp is unchanged in stored data,
+  SIEM output and the API. (#436)
 
 - A root `lodeline-agent` now re-lists the host's users every 15 minutes. Users added
   after it started are assessed, and the readings of removed users are dropped. On Linux
