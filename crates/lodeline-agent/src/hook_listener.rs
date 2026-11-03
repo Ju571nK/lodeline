@@ -134,9 +134,9 @@ pub async fn serve_until(
 /// the per-connection logic is shared via `handle_hook_conn`. Windows named
 /// pipes carry no peer uid, so the caller is recorded as `u32::MAX`.
 ///
-/// If the pipe name stays taken through the retries this logs an error and
-/// returns `Ok(())`: the agent keeps running without the hook pipe, and hooks
-/// fail open.
+/// If the pipe cannot be claimed (for example the name stays taken through the
+/// retries) this logs an error and returns `Ok(())`: capture is skipped, the
+/// agent keeps running without the hook pipe, and hooks fail open.
 #[cfg(windows)]
 pub async fn serve_pipe_until(
     pipe_name: String,
@@ -236,7 +236,7 @@ async fn handle_hook_conn<S>(
     S: tokio::io::AsyncRead + Unpin,
 {
     let mut line = String::new();
-    // Limit bytes read to guard against a misbehaving / malicious sender
+    // Limit bytes read to guard against a misbehaving or oversized sender
     // filling memory. `take` wraps the raw stream; BufReader sits on top.
     let mut rd = BufReader::new(stream.take(MAX_LINE));
     if rd.read_line(&mut line).await.is_err() {
