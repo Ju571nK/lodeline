@@ -133,6 +133,9 @@ pub async fn serve_until(
 /// Windows hook listener over a named pipe. Mirrors the Unix listener above;
 /// the per-connection logic is shared via `handle_hook_conn`. Windows named
 /// pipes carry no peer uid, so the caller is recorded as `u32::MAX`.
+///
+/// If the pipe name is already taken this logs an error and returns `Ok(())`:
+/// the agent keeps running without the hook pipe, and hooks fail open.
 #[cfg(windows)]
 pub async fn serve_pipe_until(
     pipe_name: String,
@@ -149,26 +152,49 @@ pub async fn serve_pipe_until(
             .create(&pipe_name)
     };
     // The first instance fails if another process already serves this name.
-    let mut server = create(true)?;
+    let first = match create(true) {
+        Ok(server) => server,
+        Err(error) => {
+            tracing::error!(pipe = %pipe_name, %error, "hook pipe unavailable; running without hook events");
+            return Ok(());
+        }
+    };
     let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     tracing::info!(pipe = %pipe_name, "hook IPC listening");
     let mut connections = crate::ipc_lifecycle::Connections::default();
+    let open_next = || match create(false) {
+        Ok(server) => Some(server),
+        Err(error) => {
+            tracing::warn!(pipe = %pipe_name, %error, "hook pipe instance create failed; retrying");
+            None
+        }
+    };
+    let mut next = Some(first);
     loop {
+        let Some(server) = next.take() else {
+            if pipe_backoff(&shutdown).await {
+                break;
+            }
+            next = open_next();
+            continue;
+        };
         let Some(connected) = connections.accept(server.connect(), &shutdown).await else {
             break;
         };
         // Open the next instance before handling this one, so a hook that
         // arrives meanwhile finds the pipe listening instead of busy.
-        let stream = std::mem::replace(&mut server, create(false)?);
-        if let Err(e) = connected {
-            tracing::warn!(error = ?e, "hook pipe connect failed");
+        next = open_next();
+        if let Err(error) = connected {
+            tracing::warn!(%error, "hook pipe connect failed");
+            if pipe_backoff(&shutdown).await {
+                break;
+            }
             continue;
         }
         let permit = match sem.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
                 tracing::debug!("hook overload: dropping connection (MAX_INFLIGHT reached)");
-                drop(stream);
                 continue;
             }
         };
@@ -177,11 +203,29 @@ pub async fn serve_pipe_until(
         let activity_map = activity_map.clone();
         connections.spawn(async move {
             let _permit = permit;
-            handle_hook_conn(stream, u32::MAX, tx, host_id, activity_map).await;
+            // A client that never writes must not hold its permit forever.
+            let _ = tokio::time::timeout(
+                PIPE_READ_TIMEOUT,
+                handle_hook_conn(server, u32::MAX, tx, host_id, activity_map),
+            )
+            .await;
         });
     }
-    drop(server);
+    drop(next);
     connections.drain().await
+}
+
+#[cfg(windows)]
+const PIPE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Short pause after a pipe error so a persistent failure does not spin.
+/// Returns true when shutdown was requested meanwhile.
+#[cfg(windows)]
+async fn pipe_backoff(shutdown: &tokio_util::sync::CancellationToken) -> bool {
+    tokio::select! {
+        _ = shutdown.cancelled() => true,
+        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
+    }
 }
 
 /// Transport-independent per-connection handler shared by the Unix-socket and
@@ -348,7 +392,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn hook_pipe_refuses_a_name_already_in_use() {
+    async fn hook_pipe_name_in_use_leaves_the_agent_running() {
         use tokio::net::windows::named_pipe::ServerOptions;
         let name = format!(
             r"\\.\pipe\lodeline-hook-taken-{}",
@@ -360,17 +404,22 @@ mod tests {
             .create(&name)
             .unwrap();
         let (tx, _rx) = mpsc::channel(1);
-        let result = serve_pipe_until(
-            name,
-            tx,
-            "host-x".into(),
-            crate::hook_silence::new_map(),
-            tokio_util::sync::CancellationToken::new(),
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            serve_pipe_until(
+                name,
+                tx,
+                "host-x".into(),
+                crate::hook_silence::new_map(),
+                tokio_util::sync::CancellationToken::new(),
+            ),
         )
-        .await;
+        .await
+        .expect("listener gives up on a taken name instead of waiting");
+        // The supervisor stops the whole agent only when a tracked task returns Err.
         assert!(
-            result.is_err(),
-            "a second owner of the hook pipe name must fail"
+            result.is_ok(),
+            "a taken hook pipe name must not stop the agent: {result:?}"
         );
     }
 
