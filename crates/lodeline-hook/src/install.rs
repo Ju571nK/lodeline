@@ -51,9 +51,9 @@ fn command_string(exe: &str, agent: &str, capture: &str) -> String {
 }
 
 fn command_string_enforce(exe: &str, agent: &str, capture: &str, on_failure: &str) -> String {
-    // Registrations dedupe by binary path: installing enforce over an existing observe
-    // registration (same exe) REPLACES it — operators upgrading observe→enforce get the
-    // observe entry overwritten, not a second entry.
+    // Registrations dedupe by shape (see `is_our_command`): installing enforce over an
+    // existing observe registration REPLACES it, so operators upgrading observe→enforce
+    // get the observe entry overwritten, not a second entry.
     format!("{exe} {agent} --enforce --on-failure {on_failure} --capture {capture}")
 }
 
@@ -107,6 +107,31 @@ fn invokes_exe(cmd: &str, exe: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(SHELL_WS))
 }
 
+/// Whether `cmd` has the shape install writes for `agent` from any folder:
+/// `<path>/lodeline-hook[.exe] <agent> ... --capture <mode>`. Release archives
+/// unpack into a versioned folder, so an upgrade must find the old entry by
+/// shape. The binary has to be the first token, so a wrapper such as
+/// `cmd.exe /c ...` or `bash -c ...` stays the user's.
+fn is_our_command(cmd: &str, agent: &str) -> bool {
+    let exe = command_exe(cmd);
+    let name = exe
+        .trim_matches('"')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    let rest = &cmd.trim_start_matches(SHELL_WS)[exe.len()..];
+    let mut args = rest.split(SHELL_WS).filter(|t| !t.is_empty());
+    matches!(name, "lodeline-hook" | "lodeline-hook.exe")
+        && args.next() == Some(agent)
+        && args.any(|t| t == "--capture")
+}
+
+/// Ours at any path, or at `exe` in a form [`is_our_command`] cannot split,
+/// such as an old unquoted path with a space.
+fn is_ours(cmd: &str, exe: &str, agent: &str) -> bool {
+    is_our_command(cmd, agent) || invokes_exe(cmd, exe)
+}
+
 // --- Claude-style entry helpers ---
 
 fn claude_entry(cmd: &str) -> Value {
@@ -123,7 +148,7 @@ pub(crate) fn claude_entry_cmd(entry: &Value) -> Option<&str> {
         .and_then(|c| c.as_str())
 }
 
-pub(crate) fn claude_entry_is_ours(entry: &Value, exe: &str) -> bool {
+pub(crate) fn claude_entry_is_ours(entry: &Value, exe: &str, agent: &str) -> bool {
     entry
         .get("hooks")
         .and_then(|h| h.as_array())
@@ -131,7 +156,7 @@ pub(crate) fn claude_entry_is_ours(entry: &Value, exe: &str) -> bool {
             hooks.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .is_some_and(|c| invokes_exe(c, exe))
+                    .is_some_and(|c| is_ours(c, exe, agent))
             })
         })
         .unwrap_or(false)
@@ -185,21 +210,32 @@ fn pretooluse_array_mut(root: &mut Value) -> &mut Vec<Value> {
     h["PreToolUse"].as_array_mut().unwrap()
 }
 
-fn merge_claude(arr: &mut Vec<Value>, exe: &str, cmd: &str) -> bool {
-    match arr.iter().position(|e| claude_entry_is_ours(e, exe)) {
-        Some(i) => {
-            if claude_entry_cmd(&arr[i]) == Some(cmd) {
-                false
-            } else {
-                arr[i] = claude_entry(cmd);
-                true
-            }
-        }
-        None => {
-            arr.push(claude_entry(cmd));
-            true
-        }
+fn merge_claude(arr: &mut Vec<Value>, exe: &str, agent: &str, cmd: &str) -> bool {
+    let ours = |e: &Value| claude_entry_is_ours(e, exe, agent);
+    replace_ours(
+        arr,
+        ours,
+        |e| claude_entry_cmd(e) == Some(cmd),
+        claude_entry(cmd),
+    )
+}
+
+/// Replace every entry of ours with one `entry`, at the first one's position.
+/// Returns false when `arr` already holds exactly one entry of ours and `same`
+/// accepts it.
+fn replace_ours(
+    arr: &mut Vec<Value>,
+    ours: impl Fn(&Value) -> bool,
+    same: impl Fn(&Value) -> bool,
+    entry: Value,
+) -> bool {
+    let first = arr.iter().position(&ours);
+    if first.is_some_and(|i| same(&arr[i])) && arr.iter().filter(|e| ours(e)).count() == 1 {
+        return false;
     }
+    arr.retain(|e| !ours(e));
+    arr.insert(first.unwrap_or(arr.len()), entry);
+    true
 }
 
 // --- Cursor helpers ---
@@ -208,7 +244,7 @@ pub(crate) fn cursor_entry_is_ours(entry: &Value, exe: &str) -> bool {
     entry
         .get("command")
         .and_then(|c| c.as_str())
-        .is_some_and(|c| invokes_exe(c, exe))
+        .is_some_and(|c| is_ours(c, exe, "cursor"))
 }
 
 /// The `command` string of a Cursor settings entry, if present.
@@ -241,7 +277,7 @@ fn cursor_enforce_entry(cmd: &str, on_failure: &str) -> Value {
     }
 }
 
-/// Upsert our prebuilt entry on BOTH Cursor gate events, keyed by exe.
+/// Upsert our prebuilt entry on BOTH Cursor gate events, replacing every entry of ours.
 /// Replaces the whole entry object on change (so a stale `failClosed` from a prior
 /// closed install is dropped on a later open install). Returns true if changed.
 fn upsert_cursor_entry(root: &mut Value, exe: &str, entry: &Value) -> bool {
@@ -264,18 +300,12 @@ fn upsert_cursor_entry(root: &mut Value, exe: &str, entry: &Value) -> bool {
             }
             h[ev].as_array_mut().unwrap()
         };
-        match arr.iter().position(|e| cursor_entry_is_ours(e, exe)) {
-            Some(i) => {
-                if &arr[i] != entry {
-                    arr[i] = entry.clone();
-                    changed = true;
-                }
-            }
-            None => {
-                arr.push(entry.clone());
-                changed = true;
-            }
-        }
+        changed |= replace_ours(
+            arr,
+            |e| cursor_entry_is_ours(e, exe),
+            |e| e == entry,
+            entry.clone(),
+        );
     }
     changed
 }
@@ -345,7 +375,9 @@ pub fn merge_into(root: &mut Value, exe: &str, agent: &str, capture: &str) -> bo
     let cmd = command_string(exe, agent, capture);
     let replaced = crate::legacy::strip_entries(root, agent) > 0;
     let merged = match agent_format(agent) {
-        Some(HookFormat::NestedPreToolUse) => merge_claude(pretooluse_array_mut(root), exe, &cmd),
+        Some(HookFormat::NestedPreToolUse) => {
+            merge_claude(pretooluse_array_mut(root), exe, agent, &cmd)
+        }
         Some(HookFormat::Cursor) => merge_cursor(root, exe, &cmd),
         None => false,
     };
@@ -374,14 +406,16 @@ pub fn merge_into_enforce(
     let cmd = command_string_enforce(exe, agent, capture, on_failure);
     let replaced = crate::legacy::strip_entries(root, agent) > 0;
     let merged = match agent_format(agent) {
-        Some(HookFormat::NestedPreToolUse) => merge_claude(pretooluse_array_mut(root), exe, &cmd),
+        Some(HookFormat::NestedPreToolUse) => {
+            merge_claude(pretooluse_array_mut(root), exe, agent, &cmd)
+        }
         Some(HookFormat::Cursor) => merge_cursor_enforce(root, exe, &cmd, on_failure),
         None => false,
     };
     replaced || merged
 }
 
-/// Remove every lodeline-hook entry for `exe`. Returns `true` if anything was
+/// Remove every lodeline-hook entry for `agent`, at any path. Returns `true` if anything was
 /// removed. Leaves unrelated hooks untouched.
 pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
     let replaced = crate::legacy::strip_entries(root, agent) > 0;
@@ -389,7 +423,7 @@ pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
         Some(HookFormat::NestedPreToolUse) => match root["hooks"]["PreToolUse"].as_array_mut() {
             Some(a) => {
                 let before = a.len();
-                a.retain(|e| !claude_entry_is_ours(e, exe));
+                a.retain(|e| !claude_entry_is_ours(e, exe, agent));
                 a.len() < before
             }
             None => false,
@@ -410,7 +444,7 @@ pub fn remove_from(root: &mut Value, exe: &str, agent: &str) -> bool {
     replaced || removed
 }
 
-/// Count lodeline-hook entries for `exe` (across all relevant arrays), plus
+/// Count lodeline-hook entries for `agent` at any path (across all relevant arrays), plus
 /// entries from before the rename, which uninstall removes as well.
 pub fn count_lodeline_entries(root: &Value, exe: &str, agent: &str) -> usize {
     let legacy = crate::legacy::count_entries(root, agent);
@@ -418,7 +452,11 @@ pub fn count_lodeline_entries(root: &Value, exe: &str, agent: &str) -> usize {
         + match agent_format(agent) {
             Some(HookFormat::NestedPreToolUse) => root["hooks"]["PreToolUse"]
                 .as_array()
-                .map(|a| a.iter().filter(|e| claude_entry_is_ours(e, exe)).count())
+                .map(|a| {
+                    a.iter()
+                        .filter(|e| claude_entry_is_ours(e, exe, agent))
+                        .count()
+                })
                 .unwrap_or(0),
             Some(HookFormat::Cursor) => CURSOR_EVENTS
                 .iter()

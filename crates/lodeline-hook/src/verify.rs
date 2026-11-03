@@ -28,6 +28,9 @@ pub struct DriftReport {
     pub observed_matcher: Option<String>,
     pub expected_fail_closed: Option<bool>,
     pub observed_fail_closed: Option<bool>,
+    /// More than one entry of ours, such as one an upgrade from another folder
+    /// left behind. Sent as `CommandDrift`, which an older agent can read.
+    pub duplicate_entries: bool,
 }
 
 /// Load the baseline, or None if absent/unreadable/malformed.
@@ -46,6 +49,7 @@ fn absent(path: &str) -> DriftReport {
         observed_matcher: None,
         expected_fail_closed: None,
         observed_fail_closed: None,
+        duplicate_entries: false,
     }
 }
 
@@ -63,6 +67,7 @@ pub fn check(agent: &str) -> Option<DriftReport> {
 /// Compare one baseline against its live settings file. None = clean.
 /// Dispatches by agent format: Cursor gets a 3-pass algorithm (missing > command > fail-mode);
 /// Claude/codex use the NestedPreToolUse path (entry_missing -> command_drift -> matcher_drift).
+/// A second entry of ours is command_drift with `duplicate_entries` set.
 pub fn check_one(b: &Baseline) -> Option<DriftReport> {
     match install::agent_format(&b.agent) {
         Some(install::HookFormat::Cursor) => check_one_cursor(b),
@@ -84,7 +89,10 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
         .get("hooks")
         .and_then(|h| h.get("PreToolUse"))
         .and_then(|p| p.as_array())
-        .and_then(|arr| arr.iter().find(|e| install::claude_entry_is_ours(e, &exe)));
+        .and_then(|arr| {
+            arr.iter()
+                .find(|e| install::claude_entry_is_ours(e, &exe, &b.agent))
+        });
 
     let Some(entry) = entry else {
         return Some(DriftReport {
@@ -96,6 +104,7 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
             observed_matcher: None,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries: false,
         });
     };
 
@@ -108,10 +117,9 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
         .and_then(|m| m.as_str())
         .map(String::from);
 
-    // note: a change to the binary PATH makes claude_entry_is_ours not match →
-    // EntryMissing, not CommandDrift; CommandDrift covers arg/flag-level changes
-    // to the same exe.
-    if observed_hash != b.block_hash {
+    // Entries match by shape, so a repointed binary is CommandDrift too.
+    let duplicate_entries = install::count_lodeline_entries(&root, &exe, &b.agent) > 1;
+    if duplicate_entries || observed_hash != b.block_hash {
         return Some(DriftReport {
             kind: DriftKind::CommandDrift,
             settings_path: b.settings_path.clone(),
@@ -121,6 +129,7 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
             observed_matcher,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries,
         });
     }
     if observed_matcher.as_deref() != Some(b.matcher.as_str()) {
@@ -133,6 +142,7 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
             observed_matcher,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries: false,
         });
     }
     None // clean
@@ -145,7 +155,7 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
 /// (gates whether a crashing hook blocks vs passes through) — absent from the
 /// Claude/Codex format, which is why only this path checks it.
 /// PASS 1 — entry missing in any event (highest priority)
-/// PASS 2 — command hash differs in any event
+/// PASS 2 — a second entry of ours, or a command hash differs in any event
 /// PASS 3 — failClosed differs from baseline in any event
 fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
     use install::{
@@ -177,15 +187,18 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
             observed_matcher: None,
             expected_fail_closed: None,
             observed_fail_closed: None,
+            duplicate_entries: false,
         });
     }
-    // PASS 2 — any event's command hash differs
+    // PASS 2 — a second entry of ours, or any event's command hash differs
+    let duplicate_entries =
+        install::count_lodeline_entries(&root, &exe, &b.agent) > CURSOR_EVENTS.len();
     for (_, e) in &entries {
         let v = e.as_ref().unwrap(); // guaranteed Some past PASS 1
                                      // cursor_entry_is_ours already matched on the command, so command is present past PASS 1
         let cmd = cursor_entry_command(v).unwrap_or("");
         let observed = blake3::hash(cmd.as_bytes()).to_hex().to_string();
-        if observed != b.block_hash {
+        if duplicate_entries || observed != b.block_hash {
             return Some(DriftReport {
                 kind: DriftKind::CommandDrift,
                 settings_path: b.settings_path.clone(),
@@ -195,6 +208,7 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
                 observed_matcher: None,
                 expected_fail_closed: None,
                 observed_fail_closed: None,
+                duplicate_entries,
             });
         }
     }
@@ -213,6 +227,7 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
                 observed_matcher: None,
                 expected_fail_closed: Some(expected_fc),
                 observed_fail_closed: Some(observed_fc),
+                duplicate_entries: false,
             });
         }
     }
@@ -325,6 +340,7 @@ mod tests {
             write_settings(&b, &nested_settings(&cmds));
             let r = check_one(&b).expect("a second entry of ours is drift");
             assert_eq!(r.kind, DriftKind::CommandDrift);
+            assert!(r.duplicate_entries);
         }
     }
 
@@ -339,6 +355,7 @@ mod tests {
         write_settings(&b, &nested_settings(&[OLD_CMD]));
         let r = check_one(&b).unwrap();
         assert_eq!(r.kind, DriftKind::CommandDrift);
+        assert!(!r.duplicate_entries);
     }
 
     #[test]
@@ -515,6 +532,7 @@ mod tests {
         write_cursor_settings(&b, &format!("{old},{entry}"), &entry);
         let r = check_one(&b).unwrap();
         assert_eq!(r.kind, DriftKind::CommandDrift);
+        assert!(r.duplicate_entries);
     }
 
     #[test]
