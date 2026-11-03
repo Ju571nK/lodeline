@@ -663,6 +663,44 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // Phase 3b.6.1 — `parsers` is shared with `policy_reload_task` via an
     // `Arc<RwLock<..>>` so hot-reload can mutate the live parser set.
     {
+        let user_homes = other_user_homes(&plat);
+        let (users_tx, users_rx) = watch::channel(user_homes.clone());
+        // #333 — accounts come and go while the agent runs, and directory
+        // (LDAP, SSSD) users never touch /etc/passwd, so re-list them. A new set
+        // goes to ai_guard and triggers a policy reload, which re-expands the
+        // per-user watch paths and re-registers each home's external scripts.
+        sup.track(
+            "user_refresh",
+            tokio::spawn({
+                let policy_version_tx = policy_version_tx.clone();
+                let shutdown = cancel.clone();
+                async move {
+                    let mut tick = tokio::time::interval(USER_REFRESH_INTERVAL);
+                    tick.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            _ = tick.tick() => {}
+                        }
+                        let Ok(homes) =
+                            tokio::task::spawn_blocking(
+                                || other_user_homes(&ActivePlatform::new()),
+                            )
+                            .await
+                        else {
+                            continue;
+                        };
+                        if users_tx.send_if_modified(|cur| {
+                            let changed = *cur != homes;
+                            *cur = homes;
+                            changed
+                        }) {
+                            policy_version_tx.send_modify(|_| {});
+                        }
+                    }
+                }
+            }),
+        );
         let ctx = crate::ai_guard::TaskCtx {
             parsers: ai_guard_parsers,
             fc_rx: ai_guard_fc_tx.subscribe(),
@@ -670,18 +708,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             state: ai_guard_state.clone(),
             heartbeat_interval: std::time::Duration::from_secs(24 * 3600),
             home_dir: home_dir.clone(),
-            // #329 — a root agent reads every user's configs, not just root's.
-            user_homes: if crate::control::is_root() {
-                UserEnumerator::list(&plat)
-                    .into_iter()
-                    .map(|u| crate::ai_guard::task::AssessHome {
-                        user: Some(u.name),
-                        dir: u.home,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            },
+            user_homes,
+            users_rx,
             host_id: host_id.clone(),
             // Phase 3b.3 Task 6 — registry populated from parser configs at
             // boot above. Task 7 will share the same handle with
@@ -1028,6 +1056,27 @@ fn glob_root_dir(p: &Path) -> PathBuf {
         }
         None => p.to_path_buf(),
     }
+}
+
+/// How often a running agent re-lists the host's users (#333).
+const USER_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// #329 — the other users' homes a root agent assesses, sorted so that two
+/// listings of the same users compare equal. Empty for a normal user, who can
+/// read only its own home.
+pub(crate) fn other_user_homes(plat: &ActivePlatform) -> Vec<crate::ai_guard::task::AssessHome> {
+    if !crate::control::is_root() {
+        return Vec::new();
+    }
+    let mut homes: Vec<_> = UserEnumerator::list(plat)
+        .into_iter()
+        .map(|u| crate::ai_guard::task::AssessHome {
+            user: Some(u.name),
+            dir: u.home,
+        })
+        .collect();
+    homes.sort();
+    homes
 }
 
 /// Expand a policy's per-user path templates into concrete watch paths and the
@@ -1903,73 +1952,95 @@ pub(crate) fn tool_display_for_extscript(tool: lodeline_core::event::AiTool) -> 
     }
 }
 
-/// Phase 3b.3 — best-effort expansion of `~` and `$VAR` in a script path.
-/// Uses the existing lodeline-core expand machinery (with the `EnvLookup` unit
-/// type that defers to `std::env`) for parity with policy expansion. Falls
-/// back to the original path on any error.
-pub(crate) fn expand_user_path_for_ext_script(p: &std::path::Path) -> std::path::PathBuf {
-    let raw = p.to_string_lossy();
-    match lodeline_core::policy::expand::expand(&raw, &EnvLookup) {
-        Ok(pb) => pb,
-        Err(_) => p.to_path_buf(),
-    }
+/// Phase 3b.3 — best-effort expansion of `~` and `$VAR` in a script path, with
+/// `~` / `$HOME` as `home`, the home whose config names the script (#333).
+/// Falls back to the original path on any error.
+fn expand_user_path_for_ext_script(p: &std::path::Path, home: &std::path::Path) -> PathBuf {
+    use lodeline_core::policy::expand::PerUserLookup;
+    let lookup = PerUserLookup {
+        user_home: home.to_path_buf(),
+        inner: &EnvLookup,
+    };
+    lodeline_core::policy::expand::expand(&p.to_string_lossy(), &lookup)
+        .unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Phase 3b.3 — for every parser in `parsers`, call
-/// `collect_external_script_paths`, expand + canonicalize each path,
-/// deduplicate across parsers, register results in `registry`, and push one
-/// synthetic WatchTarget per unique canonical path. Skips paths that fail
-/// to expand or canonicalize (e.g., the script is not yet installed on
-/// disk — registry will pick it up on the next reload after the operator
-/// drops the file in).
+/// Phase 3b.3 — register the external hook scripts of the agent's own home
+/// (`home_dir`) and, on a root agent, of every other user's home (#333). See
+/// [`register_ext_scripts`].
 pub(crate) fn discover_and_register_ext_scripts(
     parsers: &[std::sync::Arc<dyn crate::ai_guard::parser::AiGuardParser>],
     home_dir: &std::path::Path,
     registry: &crate::ai_guard::ExtScriptRegistry,
     effective: &mut lodeline_core::policy::EffectivePolicy,
 ) {
-    use std::collections::{BTreeSet, HashMap};
+    let homes: Vec<PathBuf> = std::iter::once(home_dir.to_path_buf())
+        .chain(
+            other_user_homes(&ActivePlatform::new())
+                .into_iter()
+                .map(|h| h.dir),
+        )
+        .collect();
+    register_ext_scripts(parsers, &homes, registry, effective);
+}
 
+/// For every parser and every home it is assessed against (`homes` starts
+/// with the agent's own home, the only one a project parser reads), call
+/// `collect_external_script_paths`, expand + canonicalize each path, register
+/// it in `registry` under that canonical home, and push one synthetic
+/// WatchTarget per unique canonical path. Skips paths that fail to expand or canonicalize (e.g., the script is
+/// not yet installed on disk — registry will pick it up on the next reload
+/// after the operator drops the file in).
+pub(crate) fn register_ext_scripts(
+    parsers: &[std::sync::Arc<dyn crate::ai_guard::parser::AiGuardParser>],
+    homes: &[PathBuf],
+    registry: &crate::ai_guard::ExtScriptRegistry,
+    effective: &mut lodeline_core::policy::EffectivePolicy,
+) {
+    use std::collections::BTreeSet;
+
+    let mut seen = BTreeSet::new();
+    let homes: Vec<PathBuf> = homes
+        .iter()
+        .map(|h| crate::ai_guard::task::canonical_home(h))
+        .filter(|h| seen.insert(h.clone()))
+        .collect();
     let mut per_parser: HashMap<
         (
             lodeline_core::event::AiTool,
             lodeline_core::event::AiGuardScope,
         ),
-        Vec<std::path::PathBuf>,
+        Vec<(PathBuf, PathBuf)>,
     > = HashMap::new();
 
-    let mut already_synthesized: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    let mut already_synthesized: BTreeSet<PathBuf> = BTreeSet::new();
 
     for parser in parsers {
-        let raw_paths = parser.collect_external_script_paths(home_dir);
-        if raw_paths.is_empty() {
-            continue;
-        }
-        let mut canon_paths = Vec::with_capacity(raw_paths.len());
-        for raw in raw_paths {
-            let expanded = expand_user_path_for_ext_script(&raw);
-            let Ok(canon) = dunce::canonicalize(&expanded) else {
-                continue;
-            };
-            if already_synthesized.insert(canon.clone()) {
-                let display = tool_display_for_extscript(parser.tool());
-                push_ext_script_synthetic_target(effective, display, &canon);
+        let parser_homes = match parser.scope() {
+            lodeline_core::event::AiGuardScope::Project { .. } => &homes[..1],
+            _ => &homes[..],
+        };
+        for home in parser_homes {
+            for raw in parser.collect_external_script_paths(home) {
+                let expanded = expand_user_path_for_ext_script(&raw, home);
+                let Ok(canon) = dunce::canonicalize(&expanded) else {
+                    continue;
+                };
+                if already_synthesized.insert(canon.clone()) {
+                    let display = tool_display_for_extscript(parser.tool());
+                    push_ext_script_synthetic_target(effective, display, &canon);
+                }
+                per_parser
+                    .entry((parser.tool(), parser.scope()))
+                    .or_default()
+                    .push((home.clone(), canon));
             }
-            canon_paths.push(canon);
-        }
-        if !canon_paths.is_empty() {
-            per_parser
-                .entry((parser.tool(), parser.scope()))
-                .or_default()
-                .extend(canon_paths);
         }
     }
 
     let mut w = registry.write();
     w.clear();
-    for (k, v) in per_parser {
-        w.insert(k, v);
-    }
+    w.extend(per_parser);
 }
 
 #[cfg(test)]

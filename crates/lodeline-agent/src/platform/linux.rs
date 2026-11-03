@@ -1,5 +1,5 @@
-//! Linux platform: host_id, multi-user enumeration via `/etc/passwd`,
-//! hardware fingerprint via `/etc/machine-id` + `/proc/cpuinfo`.
+//! Linux platform: host_id, multi-user enumeration via `/etc/passwd` and the
+//! system user database (NSS), hardware fingerprint via `/etc/machine-id` + `/proc/cpuinfo`.
 //!
 //! Status: minimal foundation (Phase 3a). The file watcher itself is the
 //! `notify` crate's inotify backend, which is platform-agnostic from the
@@ -18,15 +18,11 @@
 //! informative implementation could reflect whether the daemon runs as root
 //! / with `CAP_DAC_READ_SEARCH` vs. a limited user, and surface that in
 //! `doctor`.
-//!
-//! `TODO(community)`: `list()` parses `/etc/passwd` directly. On hosts joined
-//! to LDAP / Active Directory, real users may only be visible via
-//! `getent passwd`. Adding an opt-in `getent` path (config-gated, since AD
-//! homes are often NFS-mounted and slow) would broaden coverage.
 
 use super::{FdaState, Platform};
 use lodeline_core::host_id::HostIdResolver;
 use lodeline_core::policy::expand::{UserContext, UserEnumerator};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -110,11 +106,132 @@ impl HostIdResolver for LinuxPlatform {
 
 impl UserEnumerator for LinuxPlatform {
     fn list(&self) -> Vec<UserContext> {
-        let Ok(text) = std::fs::read_to_string("/etc/passwd") else {
-            return Vec::new();
-        };
-        text.lines().filter_map(parse_passwd_line).collect()
+        let passwd: Vec<UserContext> = std::fs::read_to_string("/etc/passwd")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(parse_passwd_line)
+            .collect();
+        let roots: BTreeSet<PathBuf> = std::iter::once(PathBuf::from("/home"))
+            .chain(
+                passwd
+                    .iter()
+                    .filter_map(|u| u.home.parent().map(PathBuf::from)),
+            )
+            .collect();
+        let (nss, listed) = nss_users(roots);
+        merge_users(passwd, nss, &listed)
     }
+}
+
+/// A `passwd` entry from the system user database: name, uid, home.
+type NssEntry = (String, u32, String);
+
+/// The user database's entries, and the folders seen under the home roots.
+type NssWalk = (Vec<NssEntry>, BTreeSet<PathBuf>);
+
+/// How long `list` waits for the user database before it settles for
+/// `/etc/passwd`. A directory server that is down or slow must not stall boot,
+/// a reload or the user refresh.
+const NSS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `/etc/passwd`'s human users, then the human users only the user database
+/// (NSS: LDAP, SSSD, ...) knows. Those also need their home in `listed`, the
+/// folders seen under the home roots: a large directory holds many accounts
+/// that never used this host, and a stat of each home would mount it on autofs.
+/// With autofs browse off, a home shows up only while mounted, so an idle
+/// directory user drops out until their home is mounted again.
+fn merge_users(
+    mut users: Vec<UserContext>,
+    nss: Vec<NssEntry>,
+    listed: &BTreeSet<PathBuf>,
+) -> Vec<UserContext> {
+    let mut seen: BTreeSet<String> = users.iter().map(|u| u.name.clone()).collect();
+    for (name, uid, home) in nss {
+        if seen.contains(&name) {
+            continue;
+        }
+        if let Some(u) = human_user(&name, uid, &home).filter(|u| listed.contains(&u.home)) {
+            seen.insert(name);
+            users.push(u);
+        }
+    }
+    users
+}
+
+/// The user database's entries, read on a thread `list` stops waiting for
+/// after [`NSS_TIMEOUT`]. A walk that times out, or that another walk still
+/// blocks, yields the last complete walk instead, so a directory outage does
+/// not drop its users from the refreshed set. Two sources, since SSSD and AD hosts usually turn
+/// enumeration off (`enumerate = false`), so `getpwent` returns only local
+/// users: the full walk, and the owner of each directory under `roots` when
+/// that owner's home is the directory, which finds a directory user who has
+/// logged in here. Also returns the folders and symlinks seen under `roots`,
+/// typed from the directory entry alone so no automount is followed.
+fn nss_users(roots: BTreeSet<PathBuf>) -> NssWalk {
+    static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static LAST: std::sync::Mutex<NssWalk> = std::sync::Mutex::new((Vec::new(), BTreeSet::new()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // A walk still stuck on a slow server holds the lock; skip, don't queue.
+        let _walk = match WALK.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        let mut out = Vec::new();
+        let mut listed = BTreeSet::new();
+        // SAFETY: `WALK` serializes this process's use of the non-reentrant
+        // getpwent/getpwuid state, and each entry is copied out before the
+        // next call reuses its buffer.
+        unsafe {
+            libc::setpwent();
+            loop {
+                let pw = libc::getpwent();
+                if pw.is_null() {
+                    break;
+                }
+                out.extend(nss_entry(&*pw));
+            }
+            libc::endpwent();
+            for dir in roots
+                .iter()
+                .filter_map(|r| std::fs::read_dir(r).ok())
+                .flatten()
+            {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(dir) = dir else { continue };
+                if dir.file_type().is_ok_and(|t| t.is_dir() || t.is_symlink()) {
+                    listed.insert(dir.path());
+                }
+                // `DirEntry::metadata` is an lstat, so it does not mount an autofs home.
+                let Ok(meta) = dir.metadata() else { continue };
+                let pw = libc::getpwuid(meta.uid());
+                if let Some(entry) = (!pw.is_null()).then(|| nss_entry(&*pw)).flatten() {
+                    if std::path::Path::new(&entry.2) == dir.path() {
+                        out.push(entry);
+                    }
+                }
+            }
+        }
+        let walk = (out, listed);
+        *LAST.lock().unwrap_or_else(|p| p.into_inner()) = walk.clone();
+        let _ = tx.send(walk);
+    });
+    rx.recv_timeout(NSS_TIMEOUT)
+        .unwrap_or_else(|_| LAST.lock().unwrap_or_else(|p| p.into_inner()).clone())
+}
+
+/// Copy a `passwd` record out of libc's buffer. `None` for a non-UTF-8 name or home.
+///
+/// # Safety
+/// `pw` must point to a valid record from getpwent/getpwuid.
+unsafe fn nss_entry(pw: &libc::passwd) -> Option<NssEntry> {
+    if pw.pw_name.is_null() || pw.pw_dir.is_null() {
+        return None;
+    }
+    let name = std::ffi::CStr::from_ptr(pw.pw_name).to_str().ok()?;
+    let home = std::ffi::CStr::from_ptr(pw.pw_dir).to_str().ok()?;
+    Some((name.to_string(), pw.pw_uid, home.to_string()))
 }
 
 use super::hw_fingerprint::{pick_stable_mac, HardwareFingerprint, IfaceKind};
@@ -195,8 +312,6 @@ fn cpu_brand_from_cpuinfo(contents: &str) -> String {
 /// system / service account, a malformed line, or has no real home directory.
 ///
 /// Format: `name:passwd:uid:gid:gecos:home:shell` (7 colon-separated fields).
-/// Keep entries with UID in `[1000, 65534)` (the conventional human range on
-/// modern distros; 65534 is `nobody`) that have a non-trivial home.
 fn parse_passwd_line(line: &str) -> Option<UserContext> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
@@ -210,13 +325,19 @@ fn parse_passwd_line(line: &str) -> Option<UserContext> {
     if fields.len() < 7 {
         return None;
     }
-    let name = fields[0];
-    let uid: u32 = fields[2].parse().ok()?;
-    let home = fields[5];
+    human_user(fields[0], fields[2].parse().ok()?, fields[5])
+}
+
+/// Keep an account with a UID from 1000 up (the conventional human range on
+/// modern distros) that has a non-trivial home. There is no upper bound below
+/// the overflow IDs, since SSSD maps directory users to UIDs from 200000 up;
+/// 65534 is `nobody`, and 65535, 2^32-2 and 2^32-1 are the 16- and 32-bit `-1`
+/// and `-2`.
+fn human_user(name: &str, uid: u32, home: &str) -> Option<UserContext> {
     if name.is_empty() || name == "nobody" {
         return None;
     }
-    if !(1000..65534).contains(&uid) {
+    if uid < 1000 || matches!(uid, 65534 | 65535 | 4_294_967_294 | u32::MAX) {
         return None;
     }
     if home.is_empty() || home == "/" || home == "/nonexistent" || home == "/dev/null" {
@@ -350,6 +471,10 @@ mod tests {
             parse_passwd_line("nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin")
                 .is_none()
         );
+        assert!(
+            parse_passwd_line("nfsnobody:x:4294967294:4294967294::/var/lib/nfs:/sbin/nologin")
+                .is_none()
+        );
         // Service-ish account inside the human UID range but with no real home.
         assert!(parse_passwd_line("svc:x:1500:1500::/nonexistent:/usr/sbin/nologin").is_none());
         // NIS compat / comments / malformed.
@@ -357,6 +482,41 @@ mod tests {
         assert!(parse_passwd_line("# comment").is_none());
         assert!(parse_passwd_line("garbage").is_none());
         assert!(parse_passwd_line("a:b:notanumber:d:e:f:g").is_none());
+    }
+
+    #[test]
+    fn a_user_only_the_user_database_knows_is_listed() {
+        let passwd = vec![parse_passwd_line("alice:x:1001:1001::/home/alice:/bin/bash").unwrap()];
+        let nss = vec![
+            ("alice".into(), 1001, "/home/alice".into()),
+            ("carol".into(), 1_876_400_001, "/home/carol".into()),
+            ("sssd-svc".into(), 990, "/home/carol".into()),
+        ];
+        let listed = BTreeSet::from([PathBuf::from("/home/carol")]);
+        let users: Vec<(String, PathBuf)> = merge_users(passwd, nss, &listed)
+            .into_iter()
+            .map(|u| (u.name, u.home))
+            .collect();
+        assert_eq!(
+            users,
+            vec![
+                ("alice".into(), PathBuf::from("/home/alice")),
+                ("carol".into(), PathBuf::from("/home/carol")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_nss_only_user_whose_home_is_not_in_a_listed_directory_is_not_listed() {
+        // dave's home exists on disk, but only the listed folders count.
+        let homes = tempfile::tempdir().unwrap();
+        let dave = homes.path().to_str().unwrap().to_string();
+        let nss = vec![
+            ("dave".into(), 1_876_400_002, dave),
+            ("erin".into(), 1_876_400_003, "/home/never-logged-in".into()),
+        ];
+        let listed = BTreeSet::from([PathBuf::from("/home/carol")]);
+        assert!(merge_users(Vec::new(), nss, &listed).is_empty());
     }
 
     #[test]

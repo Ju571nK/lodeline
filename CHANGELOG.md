@@ -84,6 +84,15 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the time the server received them. The event's own timestamp is unchanged in stored data,
   SIEM output and the API. (#436)
 
+- A root `lodeline-agent` now re-lists the host's users every 15 minutes. Users added
+  after it started are assessed, and the readings of removed users are dropped. On Linux
+  it also reads the system user database, so directory users (SSSD, LDAP) with a home
+  folder in `/home`, or beside a local user's home, are included. Users with UIDs above 65535 are now included too.
+  (#437)
+
+- A root agent now watches other users' external hook scripts. A change to one
+  re-assesses the user whose settings run it. (#437)
+
 ## [0.12.2] - 2026-11-03
 
 ### Added

@@ -379,7 +379,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                 std::collections::BTreeSet::new();
             let parser_entries = ext_map.len();
             for v in ext_map.values() {
-                for p in v {
+                for (_, p) in v {
                     unique.insert(p.clone());
                 }
             }
