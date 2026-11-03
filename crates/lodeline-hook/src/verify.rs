@@ -73,7 +73,7 @@ pub fn check_one(b: &Baseline) -> Option<DriftReport> {
 /// Claude/codex path (verbatim original check_one logic).
 /// Order: entry_missing -> command_drift -> matcher_drift.
 fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
-    let exe = install::first_token(&b.command).to_string();
+    let exe = install::command_exe(&b.command).to_string();
     let root: serde_json::Value = std::fs::read(&b.settings_path)
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -149,10 +149,10 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
 /// PASS 3 — failClosed differs from baseline in any event
 fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
     use install::{
-        cursor_entry_command, cursor_entry_fail_closed, cursor_entry_is_ours, first_token,
+        command_exe, cursor_entry_command, cursor_entry_fail_closed, cursor_entry_is_ours,
         CURSOR_EVENTS,
     };
-    let exe = first_token(&b.command).to_string();
+    let exe = command_exe(&b.command).to_string();
     let root: serde_json::Value = std::fs::read(&b.settings_path)
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -182,7 +182,7 @@ fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
     // PASS 2 — any event's command hash differs
     for (_, e) in &entries {
         let v = e.as_ref().unwrap(); // guaranteed Some past PASS 1
-                                     // cursor_entry_is_ours already matched on first_token(command), so command is present past PASS 1
+                                     // cursor_entry_is_ours already matched on the command, so command is present past PASS 1
         let cmd = cursor_entry_command(v).unwrap_or("");
         let observed = blake3::hash(cmd.as_bytes()).to_hex().to_string();
         if observed != b.block_hash {
@@ -249,6 +249,22 @@ mod tests {
             &b,
             r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/lodeline-hook claude-code --capture redacted"}]}]}}"#,
         );
+        assert_eq!(check_one(&b), None);
+    }
+
+    #[test]
+    fn clean_when_quoted_path_with_spaces_matches_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = baseline(
+            dir.path(),
+            r#""C:/Program Files/Lodeline/lodeline-hook.exe""#,
+            "*",
+        );
+        let settings = serde_json::json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":"\"C:/Program Files/Other/tool.exe\" run"}]},
+            {"matcher":"*","hooks":[{"type":"command","command":b.command}]}
+        ]}});
+        write_settings(&b, &settings.to_string());
         assert_eq!(check_one(&b), None);
     }
 

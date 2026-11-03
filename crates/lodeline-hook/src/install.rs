@@ -57,9 +57,54 @@ fn command_string_enforce(exe: &str, agent: &str, capture: &str, on_failure: &st
     format!("{exe} {agent} --enforce --on-failure {on_failure} --capture {capture}")
 }
 
-/// First whitespace token of a command string (= the binary path).
-pub(crate) fn first_token(cmd: &str) -> &str {
-    cmd.split_whitespace().next().unwrap_or("")
+/// Whitespace a shell splits a command on. Not Unicode whitespace: a path with
+/// U+3000 or U+00A0 is one token to a shell and must stay unquoted.
+const SHELL_WS: [char; 4] = [' ', '\t', '\r', '\n'];
+
+/// The binary path as written into a hook command.
+///
+/// On Windows, `/` is the one separator that runs under Git Bash (Claude Code),
+/// PowerShell (Codex) and `cmd /C`; Git Bash drops an unquoted `\`.
+pub(crate) fn hook_exe(path: &str, windows: bool) -> String {
+    let p = if windows {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    };
+    // Quoted runs under Git Bash and cmd but not PowerShell, which needs `& "..."`
+    // that the other two reject; no Windows API crate here for an 8.3 short path,
+    // and release zips unpack anywhere, so install warns instead (see main.rs).
+    if p.contains(SHELL_WS) {
+        format!("\"{p}\"")
+    } else {
+        p
+    }
+}
+
+/// The binary path at the start of a hook command: a leading double-quoted
+/// string, else the first whitespace token.
+pub(crate) fn command_exe(cmd: &str) -> &str {
+    let cmd = cmd.trim_start_matches(SHELL_WS);
+    match cmd.strip_prefix('"').and_then(|rest| rest.find('"')) {
+        Some(end) => &cmd[..end + 2],
+        None => cmd.split(SHELL_WS).next().unwrap_or(""),
+    }
+}
+
+/// Whether `cmd` runs `exe`, comparing in a form that ignores quoting, `\` vs
+/// `/`, and the `\\?\` prefix lodeline-hook <= 0.12.2 wrote on Windows. Matching
+/// a prefix rather than the first token also catches an old unquoted path that
+/// contains a space.
+fn invokes_exe(cmd: &str, exe: &str) -> bool {
+    let key = |s: &str| {
+        let s = s.trim_start_matches(SHELL_WS).replace('"', "");
+        s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/")
+    };
+    let (cmd, exe) = (key(cmd), key(exe));
+    !exe.is_empty()
+        && cmd
+            .strip_prefix(&exe)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(SHELL_WS))
 }
 
 // --- Claude-style entry helpers ---
@@ -86,8 +131,7 @@ pub(crate) fn claude_entry_is_ours(entry: &Value, exe: &str) -> bool {
             hooks.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| first_token(c) == exe)
-                    .unwrap_or(false)
+                    .is_some_and(|c| invokes_exe(c, exe))
             })
         })
         .unwrap_or(false)
@@ -164,8 +208,7 @@ pub(crate) fn cursor_entry_is_ours(entry: &Value, exe: &str) -> bool {
     entry
         .get("command")
         .and_then(|c| c.as_str())
-        .map(|c| first_token(c) == exe)
-        .unwrap_or(false)
+        .is_some_and(|c| invokes_exe(c, exe))
 }
 
 /// The `command` string of a Cursor settings entry, if present.
@@ -198,7 +241,7 @@ fn cursor_enforce_entry(cmd: &str, on_failure: &str) -> Value {
     }
 }
 
-/// Upsert our prebuilt entry on BOTH Cursor gate events, keyed by exe first-token.
+/// Upsert our prebuilt entry on BOTH Cursor gate events, keyed by exe.
 /// Replaces the whole entry object on change (so a stale `failClosed` from a prior
 /// closed install is dropped on a later open install). Returns true if changed.
 fn upsert_cursor_entry(root: &mut Value, exe: &str, entry: &Value) -> bool {
@@ -614,6 +657,176 @@ mod tests {
         assert!(serde_json::to_string(&v)
             .unwrap()
             .contains("/other/tool run"));
+    }
+
+    fn pretooluse_commands(v: &Value) -> Vec<&str> {
+        v["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(claude_entry_cmd)
+            .collect()
+    }
+
+    // Registered by lodeline-hook <= 0.12.2 on Windows: canonicalize() kept the `\\?\` prefix.
+    const VERBATIM_OLD: &str =
+        r"\\?\C:\Users\alice\x\lodeline-hook.exe claude-code --capture redacted";
+
+    #[test]
+    fn hook_exe_per_platform() {
+        assert_eq!(
+            hook_exe("/usr/local/bin/lodeline-hook", false),
+            "/usr/local/bin/lodeline-hook"
+        );
+        assert_eq!(
+            hook_exe("/Users/a b/lodeline-hook", false),
+            r#""/Users/a b/lodeline-hook""#
+        );
+        assert_eq!(
+            hook_exe(r"C:\Users\alice\tools\x\lodeline-hook.exe", true),
+            "C:/Users/alice/tools/x/lodeline-hook.exe"
+        );
+        assert_eq!(
+            hook_exe(
+                "C:\\Users\\alice\\新しい\u{3000}フォルダー\\lodeline-hook.exe",
+                true
+            ),
+            "C:/Users/alice/新しい\u{3000}フォルダー/lodeline-hook.exe"
+        );
+        assert_eq!(
+            hook_exe("/home/alice/a\u{a0}b\u{85}c/lodeline-hook", false),
+            "/home/alice/a\u{a0}b\u{85}c/lodeline-hook"
+        );
+        assert_eq!(
+            hook_exe(r"C:\Program Files\Lodeline 한글\lodeline-hook.exe", true),
+            r#""C:/Program Files/Lodeline 한글/lodeline-hook.exe""#
+        );
+    }
+
+    #[test]
+    fn windows_commands_use_forward_slashes_for_every_agent() {
+        let exe = hook_exe(r"C:\Users\alice\x\lodeline-hook.exe", true);
+        for agent in ["claude-code", "codex"] {
+            let mut v = json!({});
+            assert!(merge_into(&mut v, &exe, agent, "redacted"));
+            assert_eq!(
+                pretooluse_commands(&v),
+                [format!(
+                    "C:/Users/alice/x/lodeline-hook.exe {agent} --capture redacted"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn codex_upgrade_replaces_old_backslash_registration() {
+        let exe = hook_exe(r"C:\Users\alice\x\lodeline-hook.exe", true);
+        for old in [
+            r"C:\Users\alice\x\lodeline-hook.exe codex --capture redacted",
+            r"\\?\C:\Users\alice\x\lodeline-hook.exe codex --capture redacted",
+        ] {
+            let mut v = json!({"hooks":{"PreToolUse":[
+                {"matcher":"*","hooks":[{"type":"command","command":old}]}
+            ]}});
+            assert_eq!(count_lodeline_entries(&v, &exe, "codex"), 1, "{old}");
+            assert!(merge_into(&mut v, &exe, "codex", "redacted"));
+            assert_eq!(
+                pretooluse_commands(&v),
+                ["C:/Users/alice/x/lodeline-hook.exe codex --capture redacted"]
+            );
+        }
+    }
+
+    #[test]
+    fn command_exe_reads_quoted_and_bare_paths() {
+        assert_eq!(
+            command_exe(r#""C:/Program Files/x.exe" claude-code --capture redacted"#),
+            r#""C:/Program Files/x.exe""#
+        );
+        assert_eq!(
+            command_exe("/usr/bin/lodeline-hook claude-code --capture redacted"),
+            "/usr/bin/lodeline-hook"
+        );
+        assert!(!invokes_exe(
+            "/usr/bin/lodeline-hook.bak claude-code",
+            "/usr/bin/lodeline-hook"
+        ));
+        assert!(invokes_exe(
+            "/usr/bin/lodeline-hook\tclaude-code --capture redacted",
+            "/usr/bin/lodeline-hook"
+        ));
+        let wide = "C:/Users/alice/新しい\u{3000}フォルダー/lodeline-hook.exe";
+        let cmd = format!("{wide} codex --capture redacted");
+        assert_eq!(command_exe(&cmd), wide);
+        assert!(invokes_exe(&cmd, wide));
+        assert!(!invokes_exe(
+            &format!("{wide}\u{3000}codex --capture redacted"),
+            wide
+        ));
+    }
+
+    #[test]
+    fn upgrade_replaces_verbatim_windows_registration() {
+        let exe = "C:/Users/alice/x/lodeline-hook.exe";
+        let mut v = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":VERBATIM_OLD}]}
+        ]}});
+        assert_eq!(count_lodeline_entries(&v, exe, "claude-code"), 1);
+        assert!(merge_into(&mut v, exe, "claude-code", "redacted"));
+        assert_eq!(
+            pretooluse_commands(&v),
+            ["C:/Users/alice/x/lodeline-hook.exe claude-code --capture redacted"]
+        );
+
+        let mut old = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":VERBATIM_OLD}]}
+        ]}});
+        assert!(remove_from(&mut old, exe, "claude-code"));
+        assert!(pretooluse_commands(&old).is_empty());
+    }
+
+    #[test]
+    fn quoted_path_with_spaces_dedupes_and_spares_foreign() {
+        let exe = r#""C:/Program Files/Lodeline 한글/lodeline-hook.exe""#;
+        let foreign = r#""C:/Program Files/Other/tool.exe" run"#;
+        let mut v = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":foreign}]}
+        ]}});
+        assert!(merge_into(&mut v, exe, "claude-code", "redacted"));
+        assert!(!merge_into(&mut v, exe, "claude-code", "redacted"));
+        assert_eq!(count_lodeline_entries(&v, exe, "claude-code"), 1);
+        assert!(remove_from(&mut v, exe, "claude-code"));
+        assert_eq!(pretooluse_commands(&v), [foreign]);
+    }
+
+    #[test]
+    fn upgrade_replaces_old_unquoted_path_with_spaces() {
+        let old = r"C:\Program Files\Lodeline\lodeline-hook.exe codex --capture redacted";
+        let exe = r#""C:/Program Files/Lodeline/lodeline-hook.exe""#;
+        let mut v = json!({"hooks":{"PreToolUse":[
+            {"matcher":"*","hooks":[{"type":"command","command":old}]}
+        ]}});
+        assert!(merge_into(&mut v, exe, "codex", "redacted"));
+        assert_eq!(
+            pretooluse_commands(&v),
+            [r#""C:/Program Files/Lodeline/lodeline-hook.exe" codex --capture redacted"#]
+        );
+    }
+
+    #[test]
+    fn cursor_upgrade_replaces_verbatim_windows_registration() {
+        let old = r"\\?\C:\Users\alice\x\lodeline-hook.exe cursor --capture redacted";
+        let exe = "C:/Users/alice/x/lodeline-hook.exe";
+        let mut v = json!({"version":1,"hooks":{
+            "beforeShellExecution":[{"command":old}],
+            "beforeMCPExecution":[{"command":old}],
+        }});
+        assert!(merge_into(&mut v, exe, "cursor", "redacted"));
+        assert_eq!(count_lodeline_entries(&v, exe, "cursor"), 2);
+        assert_eq!(
+            v["hooks"]["beforeMCPExecution"][0]["command"],
+            json!("C:/Users/alice/x/lodeline-hook.exe cursor --capture redacted")
+        );
     }
 
     // --- Codex (nested, ~/.codex/hooks.json) ---
