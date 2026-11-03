@@ -58,14 +58,22 @@ impl RulePackParser {
         Ok(p)
     }
 
-    /// UserGlobal: env-expand the raw path (absolute). Project: join the raw
-    /// (relative) path under repo_root.
-    fn resolve(&self, raw: &str) -> Option<PathBuf> {
+    /// UserGlobal: expand the raw path with `~` / `$HOME` as the assessed
+    /// `home` (#333). Project: join the raw (relative) path under repo_root.
+    // shortcut: other variables (`%APPDATA%`, `$XDG_CONFIG_HOME`) still come from
+    // the agent's env, so another user's reading would read the agent's file.
+    // Harmless while only Unix fans out and its packs use `~`; derive them per
+    // home before Windows fans out to users (#333).
+    fn resolve(&self, raw: &str, home: &Path) -> Option<PathBuf> {
+        use lodeline_core::policy::expand::{expand, EnvLookup, PerUserLookup};
         match &self.repo_root {
             Some(root) => Some(root.join(raw)),
-            None => lodeline_core::policy::expand::expand(
+            None => expand(
                 raw,
-                &lodeline_core::policy::expand::EnvLookup,
+                &PerUserLookup {
+                    user_home: home.into(),
+                    inner: &EnvLookup,
+                },
             )
             .ok(),
         }
@@ -94,18 +102,18 @@ impl AiGuardParser for RulePackParser {
         self.pack.tool_label.as_deref()
     }
 
-    fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
+    fn watched_paths(&self, home: &Path) -> Vec<PathBuf> {
         self.pack
             .watched_paths
             .iter()
-            .filter_map(|raw| self.resolve(raw))
+            .filter_map(|raw| self.resolve(raw, home))
             .collect()
     }
 
-    fn assess(&self, _home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
         let mut out = Vec::new();
         for (idx, rule) in self.pack.rules.iter().enumerate() {
-            let Some(file_path) = self.resolve(&rule.on_file) else {
+            let Some(file_path) = self.resolve(&rule.on_file, home) else {
                 return Err(AssessError::Parse {
                     path: PathBuf::from(&rule.on_file),
                     message: "resolve failed".into(),
