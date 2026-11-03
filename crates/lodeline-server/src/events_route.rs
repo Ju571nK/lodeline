@@ -141,6 +141,7 @@ pub async fn post_events(
         }
     }
 
+    let received = OffsetDateTime::now_utc();
     {
         let mut hw = match state.high_water.lock() {
             Ok(g) => g,
@@ -151,7 +152,7 @@ pub async fn post_events(
             &req.envelope.host_id,
             &to_persist,
             &mut hw,
-            OffsetDateTime::now_utc(),
+            received,
         ) {
             tracing::error!(error = ?e, host_id = %req.envelope.host_id, "persist failed");
             return (
@@ -174,7 +175,7 @@ pub async fn post_events(
             continue;
         }
         match serde_json::from_value::<lodeline_core::event::Event>(entry.payload.clone()) {
-            Ok(event) => state.fleet_index.apply_event(&event),
+            Ok(event) => state.fleet_index.apply_event(&event, received),
             Err(e) => {
                 tracing::warn!(error = ?e, event_id = %entry.event_id, "fleet_index apply skipped")
             }

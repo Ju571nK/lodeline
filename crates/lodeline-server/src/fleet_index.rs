@@ -138,10 +138,12 @@ pub struct HostSummary {
 
     /// Per tool, the riskiest of that tool's readings in `risk_sources`.
     pub current_risk: BTreeMap<AiTool, RiskEntry>,
-    /// Latest reading per source from the last 48h (#329). Rebuilt from JSONL
-    /// on start, so it is not serialized.
+    /// Latest reading per source from the last 48h (#329), with the time the
+    /// prune measures it by: its `ts`, capped at when the server received it.
+    /// Rebuilt from JSONL on start, where the cap is the end of the receive
+    /// day, so it is not serialized.
     #[serde(skip)]
-    pub risk_sources: std::collections::HashMap<RiskSourceKey, RiskEntry>,
+    pub risk_sources: std::collections::HashMap<RiskSourceKey, (OffsetDateTime, RiskEntry)>,
 
     pub policy_state: PolicyState,
     pub agent_health: AgentHealth,
@@ -271,12 +273,12 @@ impl FleetIndex {
 
     /// Apply an event under write lock. Creates the host's HostSummary
     /// on first ingest (key = `event.host_id`).
-    pub fn apply_event(&self, event: &lodeline_core::event::Event) {
+    pub fn apply_event(&self, event: &lodeline_core::event::Event, received: OffsetDateTime) {
         let mut w = self.inner.write();
         let entry = w
             .entry(event.host_id.clone())
             .or_insert_with(|| HostSummary::new(event.host_id.clone()));
-        crate::fleet_index_update::apply_event(entry, event);
+        crate::fleet_index_update::apply_event(entry, event, received);
     }
 
     /// Clone of one host's summary, or None.
@@ -356,7 +358,7 @@ mod index_tests {
     fn apply_event_creates_host_on_first_seen() {
         let idx = FleetIndex::new();
         assert!(idx.is_empty());
-        idx.apply_event(&snap_ev("h1", "alice"));
+        idx.apply_event(&snap_ev("h1", "alice"), OffsetDateTime::now_utc());
         assert_eq!(idx.len(), 1);
         let h = idx.get_host("h1").unwrap();
         assert_eq!(h.hostname(), Some("alice"));
@@ -365,8 +367,8 @@ mod index_tests {
     #[test]
     fn apply_event_updates_existing_host_in_place() {
         let idx = FleetIndex::new();
-        idx.apply_event(&snap_ev("h1", "alice"));
-        idx.apply_event(&snap_ev("h1", "alice-renamed"));
+        idx.apply_event(&snap_ev("h1", "alice"), OffsetDateTime::now_utc());
+        idx.apply_event(&snap_ev("h1", "alice-renamed"), OffsetDateTime::now_utc());
         assert_eq!(idx.len(), 1);
         assert_eq!(
             idx.get_host("h1").unwrap().hostname(),
@@ -377,8 +379,8 @@ mod index_tests {
     #[test]
     fn snapshot_all_returns_clones() {
         let idx = FleetIndex::new();
-        idx.apply_event(&snap_ev("h1", "alice"));
-        idx.apply_event(&snap_ev("h2", "bob"));
+        idx.apply_event(&snap_ev("h1", "alice"), OffsetDateTime::now_utc());
+        idx.apply_event(&snap_ev("h2", "bob"), OffsetDateTime::now_utc());
         let all = idx.snapshot_all();
         assert_eq!(all.len(), 2);
     }
@@ -386,7 +388,7 @@ mod index_tests {
     #[test]
     fn replace_swaps_contents() {
         let idx = FleetIndex::new();
-        idx.apply_event(&snap_ev("h1", "alice"));
+        idx.apply_event(&snap_ev("h1", "alice"), OffsetDateTime::now_utc());
         let mut fresh = HashMap::new();
         fresh.insert("h2".to_string(), HostSummary::new("h2".into()));
         idx.replace(fresh);

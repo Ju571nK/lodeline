@@ -1,8 +1,10 @@
 //! Per-evidence-variant update mapping. Spec §3.3 table. Pure function so it
 //! can be exercised by unit tests without spinning up a FleetIndex.
 
-use crate::fleet_index::HostSummary;
+use crate::fleet_index::{HostSummary, RiskEntry};
 use lodeline_core::event::{AiGuardBucket, Event, Evidence, Severity};
+use std::collections::BTreeMap;
+use time::OffsetDateTime;
 
 /// True if this evidence matches `/v1/meta.alerts_definition_default` (issue #21):
 /// AiGuardRiskAssessed in {high, critical} + the additional alert kinds.
@@ -23,8 +25,20 @@ fn is_alert_evidence(ev: &Evidence) -> bool {
 }
 
 /// Apply one event to a HostSummary. Caller (FleetIndex in Task 5 / boot_rebuild
-/// in Task 6) holds the write lock and the `host_id`-keyed entry.
-pub fn apply_event(host: &mut HostSummary, event: &Event) {
+/// in Task 6) holds the write lock and the `host_id`-keyed entry. `received` is
+/// the server's receive time.
+pub fn apply_event(host: &mut HostSummary, event: &Event, received: OffsetDateTime) {
+    apply_event_received_between(host, event, received, received);
+}
+
+/// `apply_event` for boot replay, which knows only that the server received
+/// the event between `earliest` and `latest`.
+pub fn apply_event_received_between(
+    host: &mut HostSummary,
+    event: &Event,
+    earliest: OffsetDateTime,
+    latest: OffsetDateTime,
+) {
     // Identity bookkeeping — every variant updates these.
     host.agent_version = event.agent_version.clone();
     if host.last_seen_ts.is_none_or(|t| event.ts > t) {
@@ -65,36 +79,45 @@ pub fn apply_event(host: &mut HostSummary, event: &Event) {
         } => {
             // The agent re-sends every reading each 24h, so one older than two
             // heartbeats is gone (a removed repo, user or pack) and must not
-            // hold the host's risk up.
-            let cutoff = event.ts - time::Duration::hours(48);
-            host.risk_sources.retain(|_, e| e.assessed_ts >= cutoff);
+            // hold the host's risk up. Age is capped at the receive time, so an
+            // agent clock running ahead neither moves the cutoff forward nor
+            // keeps its own reading past 48h. The cutoff takes the earliest
+            // receive time and the stored age the latest, so boot replay never
+            // drops a reading that live ingest would keep.
+            let cutoff = event.ts.min(earliest) - time::Duration::hours(48);
+            host.risk_sources.retain(|_, (t, _)| *t >= cutoff);
             host.risk_sources.insert(
                 (*tool, scope.clone(), user.clone(), rule_pack_id.clone()),
-                crate::fleet_index::RiskEntry {
-                    controls: controls.clone(),
-                    score: *score,
-                    bucket: *bucket,
-                    assessed_ts: event.ts,
-                    is_reattestation: *is_reattestation,
-                    scope: scope.clone(),
-                    reasons: reasons.clone(),
-                },
+                (
+                    event.ts.min(latest),
+                    RiskEntry {
+                        controls: controls.clone(),
+                        score: *score,
+                        bucket: *bucket,
+                        assessed_ts: event.ts,
+                        is_reattestation: *is_reattestation,
+                        scope: scope.clone(),
+                        reasons: reasons.clone(),
+                    },
+                ),
             );
             // A clean reading for one user or project must not hide another's;
             // on a tie the newest reading is shown. Rebuilt for every tool, so
             // a tool whose readings were all pruned drops out.
-            host.current_risk.clear();
-            for ((t, ..), e) in &host.risk_sources {
-                let keep = host.current_risk.get(t).is_some_and(|top| {
-                    top.score
-                        .total_cmp(&e.score)
-                        .then(top.assessed_ts.cmp(&e.assessed_ts))
+            let mut top: BTreeMap<_, &(OffsetDateTime, RiskEntry)> = BTreeMap::new();
+            for ((t, ..), r) in &host.risk_sources {
+                let keep = top.get(t).is_some_and(|best| {
+                    best.1
+                        .score
+                        .total_cmp(&r.1.score)
+                        .then(best.0.cmp(&r.0))
                         .is_ge()
                 });
                 if !keep {
-                    host.current_risk.insert(*t, e.clone());
+                    top.insert(*t, r);
                 }
             }
+            host.current_risk = top.into_iter().map(|(t, r)| (t, r.1.clone())).collect();
         }
         Evidence::Heartbeat {
             hash_p99_ms,
@@ -182,7 +205,6 @@ mod tests {
         AgentDyingReason, AiGuardBucket, AiGuardScope, AiTool, Event, Evidence, HostMetaSnapshot,
         PolicySignatureInvalidReason, Severity, SourceKind, Subject, SCHEMA_VERSION,
     };
-    use std::collections::BTreeMap;
     use time::macros::datetime;
     use uuid::Uuid;
 
@@ -290,6 +312,11 @@ mod tests {
         }
     }
 
+    /// Ingest `e` as if the server received it at its own `ts`.
+    fn apply(h: &mut HostSummary, e: &Event) {
+        apply_event(h, e, e.ts);
+    }
+
     fn heartbeat(
         hash_p99_ms: u32,
         jsonl_above_soft_floor: bool,
@@ -335,7 +362,7 @@ mod tests {
             Severity::Info,
             datetime!(2026-05-17 12:00 UTC),
         );
-        apply_event(&mut h, &e);
+        apply(&mut h, &e);
         assert_eq!(
             h.latest_host_meta.as_ref().unwrap().hostname.as_deref(),
             Some("alice")
@@ -361,7 +388,7 @@ mod tests {
             Severity::Warn,
             datetime!(2026-05-17 12:00 UTC),
         );
-        apply_event(&mut h, &e);
+        apply(&mut h, &e);
         let entry = h.current_risk.get(&AiTool::ClaudeCode).unwrap();
         assert_eq!(entry.score, 7.2);
         assert_eq!(entry.bucket, AiGuardBucket::Critical);
@@ -393,24 +420,73 @@ mod tests {
             )
         };
         let score = |h: &HostSummary| h.current_risk[&AiTool::ClaudeCode].score;
-        apply_event(&mut h, &reading("alice", None, 7.0, 0));
-        apply_event(&mut h, &reading("bob", None, 0.0, 1));
+        apply(&mut h, &reading("alice", None, 7.0, 0));
+        apply(&mut h, &reading("bob", None, 0.0, 1));
         assert_eq!(score(&h), 7.0, "bob's clean reading hid alice");
-        apply_event(&mut h, &reading("alice", Some("pack"), 0.0, 2));
+        apply(&mut h, &reading("alice", Some("pack"), 0.0, 2));
         assert_eq!(score(&h), 7.0, "a clean pack reading hid the built-in one");
-        apply_event(&mut h, &reading("alice", None, 0.0, 3));
+        apply(&mut h, &reading("alice", None, 0.0, 3));
         assert_eq!(score(&h), 0.0, "alice fixed her config");
-        apply_event(&mut h, &reading("bob", None, 7.0, 4));
+        apply(&mut h, &reading("bob", None, 7.0, 4));
         let mut codex = reading("bob", None, 7.0, 5);
         if let Evidence::AiGuardRiskAssessed { tool, .. } = &mut codex.evidence {
             *tool = AiTool::Codex;
         }
-        apply_event(&mut h, &codex);
-        apply_event(&mut h, &reading("alice", None, 0.0, 49 * 60));
+        apply(&mut h, &codex);
+        apply(&mut h, &reading("alice", None, 0.0, 49 * 60));
         assert_eq!(score(&h), 0.0, "bob's reading from 49h ago still counts");
         assert!(
             !h.current_risk.contains_key(&AiTool::Codex),
             "a tool with only pruned readings kept its risk"
+        );
+    }
+
+    #[test]
+    fn ai_guard_risk_future_dated_reading_neither_prunes_others_nor_outlives_48h() {
+        let mut h = HostSummary::new("h".into());
+        let t0 = datetime!(2026-05-17 12:00 UTC);
+        let reading = |tool: AiTool, user: &str, score: f32, ts: time::OffsetDateTime| {
+            ev(
+                Evidence::AiGuardRiskAssessed {
+                    controls: None,
+                    tool,
+                    scope: AiGuardScope::UserGlobal,
+                    score,
+                    bucket: AiGuardBucket::Critical,
+                    reasons: vec![],
+                    is_reattestation: false,
+                    rule_pack_id: None,
+                    tool_label: None,
+                    user: Some(user.into()),
+                },
+                Severity::Warn,
+                ts,
+            )
+        };
+        apply(&mut h, &reading(AiTool::Codex, "alice", 7.0, t0));
+        // The agent clock jumped three days ahead; the server got it a minute later.
+        apply_event(
+            &mut h,
+            &reading(AiTool::ClaudeCode, "bob", 9.0, t0 + time::Duration::days(3)),
+            t0 + time::Duration::minutes(1),
+        );
+        assert!(
+            h.current_risk.contains_key(&AiTool::Codex),
+            "a future-dated reading pruned the host's other readings"
+        );
+        apply(
+            &mut h,
+            &reading(
+                AiTool::ClaudeCode,
+                "alice",
+                0.0,
+                t0 + time::Duration::hours(49),
+            ),
+        );
+        assert_eq!(
+            h.current_risk[&AiTool::ClaudeCode].score,
+            0.0,
+            "a future-dated reading outlived the 48h window"
         );
     }
 
@@ -423,7 +499,7 @@ mod tests {
             Severity::Info,
             datetime!(2026-05-17 12:00 UTC),
         );
-        apply_event(&mut h, &e);
+        apply(&mut h, &e);
         assert_eq!(h.policy_state.last_applied_policy_version, 17);
         assert!(!h.policy_state.policy_expired_active);
         assert_eq!(
@@ -443,7 +519,7 @@ mod tests {
             Severity::Warn,
             datetime!(2026-05-17 12:00 UTC),
         );
-        apply_event(&mut h, &e);
+        apply(&mut h, &e);
         assert!(h.policy_state.policy_expired_active);
     }
 
@@ -460,7 +536,7 @@ mod tests {
             Severity::Warn,
             datetime!(2026-05-17 12:00 UTC),
         );
-        apply_event(&mut h, &e);
+        apply(&mut h, &e);
         assert_eq!(h.counts_24h.sum_sig_failures(), 1);
     }
 
@@ -472,7 +548,7 @@ mod tests {
             Severity::Info,
             datetime!(2026-05-17 12:00 UTC),
         );
-        apply_event(&mut h, &e);
+        apply(&mut h, &e);
         assert_eq!(h.agent_health.hash_p99_ms_latest, Some(12));
         assert_eq!(h.agent_health.jsonl_above_soft_floor_latest, Some(false));
         assert_eq!(
@@ -489,11 +565,11 @@ mod tests {
         let mut h = HostSummary::new("h".into());
         let t1 = datetime!(2026-05-17 12:00 UTC);
         let t2 = datetime!(2026-05-17 13:00 UTC);
-        apply_event(
+        apply(
             &mut h,
             &ev(heartbeat(1, false, 0, false), Severity::Info, t1),
         );
-        apply_event(
+        apply(
             &mut h,
             &ev(heartbeat(1, false, 0, false), Severity::Info, t2),
         );
@@ -505,11 +581,11 @@ mod tests {
         let mut h = HostSummary::new("h".into());
         let recent = datetime!(2026-05-17 12:00 UTC);
         let ancient = datetime!(2026-05-15 12:00 UTC); // 2 days old (out of 24h window)
-        apply_event(
+        apply(
             &mut h,
             &ev(heartbeat(1, false, 0, false), Severity::Info, recent),
         );
-        apply_event(
+        apply(
             &mut h,
             &ev(heartbeat(1, false, 0, false), Severity::Info, ancient),
         );
@@ -523,7 +599,7 @@ mod tests {
     fn alerts_bucket_counts_only_alert_definition_events() {
         let mut h = HostSummary::new("h".into());
         let t = datetime!(2026-05-17 12:00 UTC);
-        apply_event(
+        apply(
             &mut h,
             &ev(
                 Evidence::AiGuardRiskAssessed {
@@ -542,7 +618,7 @@ mod tests {
                 t,
             ),
         );
-        apply_event(
+        apply(
             &mut h,
             &ev(
                 Evidence::TlsFailure {
@@ -552,7 +628,7 @@ mod tests {
                 t,
             ),
         );
-        apply_event(
+        apply(
             &mut h,
             &ev(
                 Evidence::SenderLagCritical {
@@ -564,7 +640,7 @@ mod tests {
                 t,
             ),
         );
-        apply_event(
+        apply(
             &mut h,
             &ev(
                 Evidence::PolicySignatureInvalid {
@@ -577,7 +653,7 @@ mod tests {
                 t,
             ),
         );
-        apply_event(
+        apply(
             &mut h,
             &ev(
                 Evidence::WatcherDegraded {
@@ -601,7 +677,7 @@ mod tests {
     fn ai_guard_low_medium_are_not_alerts() {
         let mut h = HostSummary::new("h".into());
         let t = datetime!(2026-05-17 12:00 UTC);
-        apply_event(
+        apply(
             &mut h,
             &ev(
                 Evidence::AiGuardRiskAssessed {
