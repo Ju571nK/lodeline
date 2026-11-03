@@ -126,7 +126,8 @@ pub const DANGEROUS_TOGGLE_KINDS: &[&str] = &[
     "unattended_loop_prompt",
     "standing_command_approval",
     // #199 — a repository change that runs code or reroutes traffic before
-    // anyone accepts the trust dialog.
+    // anyone accepts the trust dialog. #200 — the same kinds also carry
+    // Codex user-scope keys (`notify`, provider URLs, `shell_environment_policy.set`).
     "project_settings_plugin_enabled",
     "project_settings_helper_command",
     "project_settings_env_override",
@@ -216,6 +217,7 @@ impl Rubric {
         // applies in every session before trust; helpers and `env` apply
         // before trust only in `claude -p`, like a project hook (`no_sandbox`
         // 2.0); interface commands and marketplaces wait for the dialog.
+        // #200 — Codex user-scope findings reuse the helper and env kinds.
         w.insert("project_settings_plugin_enabled", 2.5);
         w.insert("project_settings_helper_command", 2.0);
         w.insert("project_settings_env_override", 2.0);
