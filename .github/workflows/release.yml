@@ -275,12 +275,12 @@ jobs:
 
           Every archive contains all six binaries: `lodeline`, `lodeline-sender`, `lodeline-server`, `lodeline-sign`, `lodeline-mcp`, `lodeline-hook`.
 
-          `lodeline-mcp` is the read-only fleet MCP server — point an MCP client (Claude Desktop/Code) at a `lodeline-server`'s read API to query and reason over fleet posture. See [crates/lodeline-mcp/README.md](https://github.com/Ju571nK/lodeline/blob/main/crates/lodeline-mcp/README.md).
+          `lodeline-mcp` is the read-only fleet MCP server. Point an MCP client (Claude Desktop/Code) at a `lodeline-server`'s read API to query and reason over fleet posture. See [crates/lodeline-mcp/README.md](https://github.com/Ju571nK/lodeline/blob/main/crates/lodeline-mcp/README.md).
 
           ## Server + agent (Linux, x86_64 and aarch64)
 
-          Prebuilt `.deb` / `.rpm` packages (static binaries — work on RHEL/Rocky and
-          Debian/Ubuntu, on both x86_64 and ARM64). See [docs/install-server.md](https://github.com/Ju571nK/lodeline/blob/main/docs/install-server.md).
+          Prebuilt `.deb` / `.rpm` packages. The binaries are static, so they work on RHEL/Rocky and
+          Debian/Ubuntu, on both x86_64 and ARM64. See [docs/install-server.md](https://github.com/Ju571nK/lodeline/blob/main/docs/install-server.md).
 
           ```sh
           sudo dnf install ./lodeline-server-*.x86_64.rpm     # RHEL / Rocky / Fedora (x86_64)

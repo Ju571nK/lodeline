@@ -94,7 +94,7 @@ impl LocalUpstream {
     }
 
     /// Verify the connected peer is root or this user before trusting any data
-    /// it sends. Closes the spoofing gap where another local user could bind a
+    /// it sends. Closes the gap where another local user could bind a
     /// fake control socket at a predictable path (#57). Uses tokio's portable
     /// peer-credential lookup (SO_PEERCRED on Linux, getpeereid on macOS).
     #[cfg(unix)]
