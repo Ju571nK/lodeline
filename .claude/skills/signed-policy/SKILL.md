@@ -107,7 +107,7 @@ Sync commit: `03e59cd0fddc02ff2ed2581316d7b6622dbaee2e`
 | `InForce` | `crates/lodeline-agent/src/runtime.rs` | `policy_path_for_command` |
 | `Boot` | `crates/lodeline-agent/src/runtime.rs` | `let policy_path_for_apply = cfg..let bundle_doc_for_ctx` |
 | `Settle, Rename` | `crates/lodeline-agent/src/runtime.rs` | `let apply_ctx = Arc::new..apply_lock: Default::default()` |
-| `ReloadCheck, ReloadRead, loaded, retry` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..applied_policy: None,` |
+| `ReloadCheck, ReloadRead, loaded, retry` | `crates/lodeline-agent/src/runtime.rs` | `paths: cfg.policy_paths.clone()..rule_packs_read,` |
 | `ReloadCheck, ReloadRetry, ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `reload` |
 | `ReloadCheck, ReloadRetry` | `crates/lodeline-agent/src/policy_reload_task.rs` | `run` |
 | `ReloadRead, ReloadReadFails` | `crates/lodeline-agent/src/policy_reload_task.rs` | `read_bundle_state` |
@@ -175,7 +175,7 @@ The model leaves out these parts:
 - `lodeline-sender`, `lodeline-server`, and `lodeline-sign`.
 - Document content: check 5 of `verify_envelope`, `merge`, and deny-rule compilation. A failure of `merge` counts as `ReloadReadFails`. A deny-rule failure keeps the previous evaluator, finishes the reload, and does not retry.
 - A `rule-packs.yaml` that does not parse at boot. Boot ignores it with a warning, so it is document content, and the `Boot` row ends at the bundle read.
-- `policy_expiry_task`, and the wake-ups of `rule_packs_watch`, which `ReloadCheck` only stands for as a reload at any time.
+- `policy_expiry_task`, the wake-ups of `rule_packs_watch`, and the root tick that reloads when the rule-pack file in force no longer matches the last load's read. `ReloadCheck` only stands for these as a reload at any time. The model has no liveness property, so it does not show that a hand edit is ever looked at. The root tick is what makes that true for `rule-packs.yaml` when a poll watcher misses a change.
 - Commands that only read the files: `assess`, `show`, `doctor`, and `status`.
 - `host_meta_get` reading version 1 with no expiry as no envelope, and a recorded version with no expiry.
 - `DeploymentStore` and `DeploymentCoordinator`, which `runtime::run` does not use yet.
