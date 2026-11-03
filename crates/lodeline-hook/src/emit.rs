@@ -77,11 +77,16 @@ pub fn send_envelope(socket: &Path, line: &str, write_timeout: Duration) -> std:
 /// a write that outlasts the timeout, is silent success, as on Unix.
 #[cfg(not(unix))]
 pub fn send_envelope(pipe: &Path, line: &str, write_timeout: Duration) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
     let pipe = pipe.to_path_buf();
     let bytes = format!("{line}\n");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&pipe) {
+        // Request only the client access the agent grants other users.
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .access_mode(lodeline_core::hook_proto::PIPE_CLIENT_ACCESS)
+            .open(&pipe)
+        {
             let _ = f.write_all(bytes.as_bytes());
         }
         let _ = tx.send(());

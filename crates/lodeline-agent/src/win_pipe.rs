@@ -3,7 +3,9 @@
 //! explicit DACL so a hook in a standard user session can reach an agent that
 //! runs as a service.
 use std::io;
+use std::time::Duration;
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio_util::sync::CancellationToken;
 use windows_sys::Win32::Foundation::{LocalFree, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -12,6 +14,39 @@ use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
 // SYSTEM, Administrators and the owner get full control. Authenticated users get 0x12019b (`PIPE_CLIENT_ACCESS`), read/write without FILE_CREATE_PIPE_INSTANCE, so only the agent adds instances.
 const SDDL: &str = "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;0x12019b;;;AU)";
+
+// A restarted agent can start while the previous one still drains its pipes, so
+// the retries outlast that drain: 11 waits of 500 ms is 5.5 s.
+pub(crate) const NAME_IN_USE_TRIES: u32 = 12;
+#[cfg(not(test))]
+pub(crate) const NAME_IN_USE_WAIT: Duration = Duration::from_millis(500);
+#[cfg(test)]
+pub(crate) const NAME_IN_USE_WAIT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const _: () = assert!(
+    NAME_IN_USE_WAIT.as_millis() * (NAME_IN_USE_TRIES as u128 - 1)
+        > crate::ipc_lifecycle::DRAIN_TIMEOUT.as_millis()
+);
+
+/// [`first_instance`], retried while the name is in use. `Ok(None)` means
+/// shutdown came first. The error after the last try still satisfies
+/// [`name_in_use`] when the name stayed taken.
+pub async fn claim(
+    name: &str,
+    shutdown: &CancellationToken,
+) -> io::Result<Option<NamedPipeServer>> {
+    for _ in 1..NAME_IN_USE_TRIES {
+        match first_instance(name) {
+            Err(e) if name_in_use(&e) => {}
+            done => return done.map(Some),
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => return Ok(None),
+            _ = tokio::time::sleep(NAME_IN_USE_WAIT) => {}
+        }
+    }
+    first_instance(name).map(Some)
+}
 
 /// Claims `name`. Fails when another process already serves it; see [`name_in_use`].
 pub fn first_instance(name: &str) -> io::Result<NamedPipeServer> {

@@ -134,8 +134,9 @@ pub async fn serve_until(
 /// the per-connection logic is shared via `handle_hook_conn`. Windows named
 /// pipes carry no peer uid, so the caller is recorded as `u32::MAX`.
 ///
-/// If the pipe name is already taken this logs an error and returns `Ok(())`:
-/// the agent keeps running without the hook pipe, and hooks fail open.
+/// If the pipe name stays taken through the retries this logs an error and
+/// returns `Ok(())`: the agent keeps running without the hook pipe, and hooks
+/// fail open.
 #[cfg(windows)]
 pub async fn serve_pipe_until(
     pipe_name: String,
@@ -144,16 +145,9 @@ pub async fn serve_pipe_until(
     activity_map: crate::hook_silence::ActivityMap,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
-    use tokio::net::windows::named_pipe::ServerOptions;
-    let create = |first: bool| {
-        ServerOptions::new()
-            .first_pipe_instance(first)
-            .access_outbound(false)
-            .create(&pipe_name)
-    };
-    // The first instance fails if another process already serves this name.
-    let first = match create(true) {
-        Ok(server) => server,
+    let first = match crate::win_pipe::claim(&pipe_name, &shutdown).await {
+        Ok(Some(server)) => server,
+        Ok(None) => return Ok(()),
         Err(error) => {
             tracing::error!(pipe = %pipe_name, %error, "hook pipe unavailable; running without hook events");
             return Ok(());
@@ -162,7 +156,7 @@ pub async fn serve_pipe_until(
     let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     tracing::info!(pipe = %pipe_name, "hook IPC listening");
     let mut connections = crate::ipc_lifecycle::Connections::default();
-    let open_next = || match create(false) {
+    let open_next = || match crate::win_pipe::next_instance(&pipe_name) {
         Ok(server) => Some(server),
         Err(error) => {
             tracing::warn!(pipe = %pipe_name, %error, "hook pipe instance create failed; retrying");
@@ -393,14 +387,12 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn hook_pipe_name_in_use_leaves_the_agent_running() {
-        use tokio::net::windows::named_pipe::ServerOptions;
         let name = format!(
             r"\\.\pipe\lodeline-hook-taken-{}",
             uuid::Uuid::new_v4().simple()
         );
-        // Same access mode as the listener, so only first_pipe_instance(true) refuses it.
-        let _other = ServerOptions::new()
-            .access_outbound(false)
+        let _other = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
             .create(&name)
             .unwrap();
         let (tx, _rx) = mpsc::channel(1);
@@ -420,6 +412,50 @@ mod tests {
         assert!(
             result.is_ok(),
             "a taken hook pipe name must not stop the agent: {result:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn hook_pipe_name_freed_during_retries_is_served() {
+        use lodeline_core::hook_proto::PIPE_CLIENT_ACCESS;
+        use std::os::windows::fs::OpenOptionsExt;
+        let name = format!(
+            r"\\.\pipe\lodeline-hook-freed-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let other = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let listener = tokio::spawn(serve_pipe_until(
+            name.clone(),
+            tx,
+            "host-x".into(),
+            crate::hook_silence::new_map(),
+            tokio_util::sync::CancellationToken::new(),
+        ));
+        tokio::time::sleep(crate::win_pipe::NAME_IN_USE_WAIT).await;
+        drop(other);
+        tokio::task::spawn_blocking(move || {
+            (0..500)
+                .find_map(|_| {
+                    let opened = std::fs::OpenOptions::new()
+                        .access_mode(PIPE_CLIENT_ACCESS)
+                        .open(&name);
+                    if opened.is_err() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    opened.ok()
+                })
+                .expect("hook opens the hook pipe with the client access mask")
+        })
+        .await
+        .unwrap();
+        assert!(
+            !listener.is_finished(),
+            "listener serves after the name frees"
         );
     }
 
