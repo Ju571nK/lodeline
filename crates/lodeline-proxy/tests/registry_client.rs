@@ -115,6 +115,8 @@ struct SimState {
     meta_bodies: Vec<Vec<u8>>,
     inv_bodies: Vec<Vec<u8>>,
     log: Vec<&'static str>,
+    /// Run once inside the next inventory post, while the client waits on it.
+    on_inv: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Default)]
@@ -190,6 +192,10 @@ impl RegistryTransport for Tr {
 
     fn post_inventory(&self, body: Vec<u8>) -> PostFuture<'_> {
         Box::pin(async move {
+            let hook = self.0.st().on_inv.take();
+            if let Some(h) = hook {
+                h();
+            }
             let mut s = self.0.st();
             s.log.push("inv");
             s.inv_bodies.push(body.clone());
@@ -1525,6 +1531,85 @@ async fn an_entry_is_deleted_only_after_it_and_its_events_are_acked() {
         f.store.entry(&old).unwrap().unwrap().state,
         EntryState::Pending
     );
+}
+
+/// A ref that leaves the snapshot, is listed again and leaves again between two
+/// passes may be named by an event appended after its first mark.
+#[tokio::test]
+async fn an_entry_listed_again_between_passes_is_not_deleted_on_its_old_mark() {
+    use lodeline_proxy::ingest_client::EventSource;
+    use lodeline_proxy::registry_store::EntryRetention;
+    let mut f = fx();
+    let sd = dir();
+    let mut spool = retention_spool(sd.path());
+    let mut ret = EntryRetention::default();
+    let old = list(&mut f.engine, vec![tool("a", "v1")]).tools[0]
+        .1
+        .clone();
+    list(&mut f.engine, vec![tool("a", "v2")]);
+    drain(&mut f.client).await;
+    assert_eq!(ret.pass(&f.store, &spool).unwrap(), 0, "first sighting");
+
+    // Within one interval: listed again, a call names it, it leaves again.
+    list(&mut f.engine, vec![tool("a", "v1")]);
+    spool.append(started_event(1, &old)).unwrap();
+    list(&mut f.engine, vec![tool("a", "v2")]);
+    drain(&mut f.client).await;
+    for _ in 0..3 {
+        assert_eq!(ret.pass(&f.store, &spool).unwrap(), 0, "unsent event: kept");
+    }
+    assert!(f.store.entry(&old).unwrap().is_some());
+
+    let sent = spool.next_events(10, &HashSet::new());
+    spool.acknowledged(&[sent[0].event_id.as_str().to_string()]);
+    spool.expire_now().unwrap();
+    assert_eq!(ret.pass(&f.store, &spool).unwrap(), 1);
+    assert!(f.store.entry(&old).unwrap().is_none());
+}
+
+/// A listing committed while a report is on the wire neither discards nor
+/// rewrites the reports the client is sending; the cap is enforced at the next
+/// listing.
+#[tokio::test]
+async fn a_listing_during_a_report_send_leaves_that_chain_intact() {
+    use lodeline_proxy::registry_store::MAX_PENDING_COMPLETE_REPORTS;
+    let complete = |s: &RegistryStore| -> Vec<lodeline_proxy_api::registry::InventoryReport> {
+        s.pending_reports(1000)
+            .unwrap()
+            .iter()
+            .filter(|r| r.complete)
+            .map(|r| lodeline_proxy_api::parse_inventory_report(&r.body).unwrap())
+            .collect()
+    };
+    let mut f = fx();
+    for i in 0..MAX_PENDING_COMPLETE_REPORTS {
+        list(&mut f.engine, vec![tool("a", &i.to_string())]);
+    }
+    let mut during = InventoryEngine::new(f.store.clone(), EPOCH, InventoryLimits::default());
+    f.sim.st().on_inv = Some(Box::new(move || {
+        list(&mut during, vec![tool("a", "during")]);
+    }));
+    for _ in 0..10 {
+        if !f.sim.st().inv_bodies.is_empty() {
+            break;
+        }
+        f.client.sync_once().await;
+    }
+    let sent = lodeline_proxy_api::parse_inventory_report(&f.sim.st().inv_bodies[0]).unwrap();
+    assert_eq!(f.client.discarded_reports(), 0, "nothing dropped mid-send");
+    let queued = complete(&f.store);
+    assert_eq!(queued.len(), MAX_PENDING_COMPLETE_REPORTS);
+    match &queued[0].comparison {
+        Some(lodeline_proxy_api::registry::Comparison::Compared {
+            previous_inventory_id,
+            ..
+        }) => assert_eq!(Some(previous_inventory_id), sent.inventory_id.as_ref()),
+        other => panic!("the next report still builds on the sent one: {other:?}"),
+    }
+
+    list(&mut f.engine, vec![tool("a", "after")]);
+    assert_eq!(f.client.discarded_reports(), 1);
+    assert_eq!(complete(&f.store).len(), MAX_PENDING_COMPLETE_REPORTS);
 }
 
 #[tokio::test]
