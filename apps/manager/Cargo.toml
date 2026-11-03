@@ -1,0 +1,32 @@
+# A separate workspace: the root workspace and its CI, release and packages
+# workflows do not build this app. See .github/workflows/manager.yml.
+[workspace]
+resolver = "3"
+
+[package]
+name = "lodeline-manager"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+authors = ["Lodeline contributors"]
+repository = "https://github.com/Ju571nK/lodeline"
+description = "Read-only web console for a lodeline-server fleet."
+publish = false
+
+[dependencies]
+lodeline-fleet-api = { path = "../../crates/lodeline-fleet-api" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Same as the root workspace: Cargo allows one libsqlite3-sys per graph, and
+# lodeline-server will join this graph as a dev-dependency.
+rusqlite = { version = "0.31", features = ["bundled"] }
+bcrypt = "0.19"
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+openidconnect = "4.1"
+subtle = "2.6"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

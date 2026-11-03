@@ -1,0 +1,57 @@
+name: Manager
+
+# apps/manager is its own Cargo workspace, which ci.yml ignores. It also runs
+# when the shared fleet API types or the server and core crates behind them
+# change, so a shape change breaks the manager build in the same PR.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/manager/**'
+      - 'crates/lodeline-fleet-api/**'
+      - 'crates/lodeline-server/**'
+      - 'crates/lodeline-core/**'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/manager.yml'
+  pull_request:
+    paths:
+      - 'apps/manager/**'
+      - 'crates/lodeline-fleet-api/**'
+      - 'crates/lodeline-server/**'
+      - 'crates/lodeline-core/**'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/manager.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+defaults:
+  run:
+    working-directory: apps/manager
+
+jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/manager -> target
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
+      - name: check (MSRV)
+        run: cargo +1.88 check --locked
