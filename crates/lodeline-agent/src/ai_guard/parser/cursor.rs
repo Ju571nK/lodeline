@@ -1,11 +1,18 @@
-//! Phase 3b.8 — Cursor parser. Reads `~/.cursor/mcp.json` (user-global) and
-//! `<repo>/.cursor/mcp.json` (per-repo) and maps MCP servers to reasons.
-//! Cursor's only host-watchable guard surface is mcp.json; YOLO/auto-run is a
-//! UI setting, out of scope.
+//! Phase 3b.8 — Cursor parser. Reads `mcp.json` and `hooks.json` from
+//! `~/.cursor` (user-global) and `<repo>/.cursor` (per-repo), plus the
+//! enterprise `hooks.json`, and maps MCP servers and hook commands to reasons.
+//! YOLO/auto-run is a UI setting, out of scope.
+//!
+//! #203 — Cursor runs the hooks of every layer (enterprise, team, project,
+//! user) and merges their verdicts, deny over ask over allow (cursor-agent
+//! 2026.10.22 `executeAllAndMerge`), so each file is scored on its own. Team
+//! hooks are fetched from the dashboard and held in memory, and are not read.
 
+use crate::ai_guard::parser::claude_code::{classify_command, external_path_from_command};
 use crate::ai_guard::parser::mcp_scan::emit_mcp_reasons;
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 fn assess_path(path: PathBuf) -> Result<Vec<AiGuardReason>, AssessError> {
@@ -14,6 +21,66 @@ fn assess_path(path: PathBuf) -> Result<Vec<AiGuardReason>, AssessError> {
     };
     let mut out = Vec::new();
     emit_mcp_reasons(&val, &mut out);
+    Ok(out)
+}
+
+/// The `command` of every command hook in a Cursor `hooks.json`
+/// (`{"version": 1, "hooks": {<event>: [<entry>, ...]}}`), with its event.
+/// Entries sit straight under the event, not in Claude's matcher groups. An
+/// entry without `type` is a command hook. A `prompt` hook runs no host
+/// command, and its passing verdict is `allow`, which cursor-agent 2026.10.22
+/// ignores (only `deny` and `ask` change a call), so it approves nothing.
+fn hook_commands(hooks_json: &Value) -> Vec<(&str, &str)> {
+    let Some(hooks) = hooks_json.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    hooks
+        .iter()
+        .filter_map(|(event, entries)| Some((event, entries.as_array()?)))
+        .flat_map(|(event, entries)| entries.iter().map(move |e| (event.as_str(), e)))
+        .filter(|(_, e)| {
+            matches!(
+                e.get("type").and_then(Value::as_str),
+                None | Some("command")
+            )
+        })
+        .filter_map(|(event, e)| Some((event, e.get("command")?.as_str()?)))
+        .collect()
+}
+
+/// Cursor skips a `hooks.json` it cannot parse (it also accepts JSONC, which
+/// strict JSON rejects), so one is skipped here too rather than failing the
+/// MCP findings beside it, as Codex `hooks.json` is.
+fn emit_hook_reasons(path: &Path, out: &mut Vec<AiGuardReason>) {
+    match super::read_json_optional(path) {
+        Ok(Some(val)) => {
+            for (event, cmd) in hook_commands(&val) {
+                classify_command(cmd, event, out);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(path = %path.display(), %error, "cursor hooks.json skipped"),
+    }
+}
+
+fn external_script_paths(hooks_json: &Path, hooks_dir: &Path) -> Vec<PathBuf> {
+    let Ok(Some(val)) = super::read_json_optional(hooks_json) else {
+        return Vec::new();
+    };
+    hook_commands(&val)
+        .into_iter()
+        .filter_map(|(_, cmd)| external_path_from_command(cmd, hooks_dir))
+        .collect()
+}
+
+fn assess_user(
+    home_dir: &Path,
+    enterprise_hooks: &Path,
+) -> Result<Vec<AiGuardReason>, AssessError> {
+    let cursor = home_dir.join(".cursor");
+    let mut out = assess_path(cursor.join("mcp.json"))?;
+    emit_hook_reasons(&cursor.join("hooks.json"), &mut out);
+    emit_hook_reasons(enterprise_hooks, &mut out);
     Ok(out)
 }
 
@@ -29,10 +96,29 @@ impl AiGuardParser for CursorParser {
         }
     }
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        vec![home_dir.join(".cursor").join("mcp.json")]
+        let cursor = home_dir.join(".cursor");
+        vec![
+            cursor.join("mcp.json"),
+            cursor.join("hooks.json"),
+            cursor.join("hooks"),
+            super::policy_controls::cursor_enterprise_hooks_path(),
+        ]
     }
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        assess_path(home_dir.join(".cursor").join("mcp.json"))
+        assess_user(
+            home_dir,
+            &super::policy_controls::cursor_enterprise_hooks_path(),
+        )
+    }
+    fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
+        let hooks_dir = home_dir.join(".cursor").join("hooks");
+        let mut paths =
+            external_script_paths(&home_dir.join(".cursor").join("hooks.json"), &hooks_dir);
+        paths.extend(external_script_paths(
+            &super::policy_controls::cursor_enterprise_hooks_path(),
+            &hooks_dir,
+        ));
+        paths
     }
 }
 
@@ -52,6 +138,7 @@ impl AiGuardParser for CursorProjectParser {
     fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
         vec![
             self.repo_root.join(".cursor").join("mcp.json"),
+            self.repo_root.join(".cursor").join("hooks.json"),
             self.repo_root.join(".cursorrules"),
             self.repo_root.join(".cursor").join("rules"), // dir → starts_with matches child files
         ]
@@ -65,6 +152,8 @@ impl AiGuardParser for CursorProjectParser {
                 mechanism: "folder-trust autorun (default)".to_string(),
             });
         }
+        // #203 — a committed hooks.json runs in every trusted checkout.
+        emit_hook_reasons(&self.repo_root.join(".cursor").join("hooks.json"), &mut out);
         // #146 — instruction files.
         super::instruction_scan::scan_file_path(&self.repo_root.join(".cursorrules"), &mut out);
         super::instruction_scan::scan_rules_dir(
@@ -206,6 +295,124 @@ mod tests {
                 .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
             "benign remote must not amplify; got {out:?}"
         );
+    }
+
+    fn write_hooks(dir: &Path, body: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("hooks.json");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn destructive_events(out: &[AiGuardReason]) -> Vec<&str> {
+        let mut events: Vec<&str> = out
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::DestructiveInInlineCommand { hook_event, .. } => {
+                    Some(hook_event.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        events.sort_unstable();
+        events
+    }
+
+    const DESTRUCTIVE_HOOKS: &str = r#"{"version": 1, "hooks": {
+        "beforeShellExecution": [{"command": "rm -rf /tmp/lodeline-c"}],
+        "afterFileEdit": [{"type": "command", "command": "rm -rf /tmp/lodeline-d"}]
+    }}"#;
+
+    #[test]
+    fn user_hooks_json_commands_are_classified() {
+        let home = tempdir().unwrap();
+        write_hooks(&home.path().join(".cursor"), DESTRUCTIVE_HOOKS);
+        let out = assess_user(home.path(), &home.path().join("no-enterprise")).unwrap();
+        assert_eq!(
+            destructive_events(&out),
+            ["afterFileEdit", "beforeShellExecution"],
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn enterprise_hooks_json_is_scored_with_the_user_file() {
+        let home = tempdir().unwrap();
+        let enterprise = write_hooks(&home.path().join("etc"), DESTRUCTIVE_HOOKS);
+        let out = assess_user(home.path(), &enterprise).unwrap();
+        assert_eq!(destructive_events(&out).len(), 2, "got {out:?}");
+    }
+
+    #[test]
+    fn unparsable_hooks_json_does_not_fail_the_mcp_scan() {
+        let home = tempdir().unwrap();
+        write(home.path(), r#"{"mcpServers":{"a":{"url":"https://x"}}}"#);
+        write_hooks(&home.path().join(".cursor"), "{ // jsonc\n }");
+        let enterprise = write_hooks(&home.path().join("etc"), "{ not json");
+        let out = assess_user(home.path(), &enterprise).unwrap();
+        assert!(out
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::McpServerRemote { .. })));
+    }
+
+    #[test]
+    fn prompt_hook_text_is_not_read_as_a_command() {
+        let home = tempdir().unwrap();
+        write_hooks(
+            &home.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"beforeShellExecution": [
+                {"type": "prompt", "prompt": "deny if it runs rm -rf /", "command": "rm -rf /"}
+            ]}}"#,
+        );
+        let out = assess_user(home.path(), &home.path().join("no-enterprise")).unwrap();
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn own_cursor_hook_entry_is_not_a_finding() {
+        let home = tempdir().unwrap();
+        write_hooks(
+            &home.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"beforeShellExecution": [
+                {"command": "/nonexistent/lodeline-hook cursor --enforce --on-failure closed --capture redacted", "failClosed": true}
+            ]}}"#,
+        );
+        let out = assess_user(home.path(), &home.path().join("no-enterprise")).unwrap();
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn project_hooks_json_commands_are_classified() {
+        let repo = tempdir().unwrap();
+        write_hooks(&repo.path().join(".cursor"), DESTRUCTIVE_HOOKS);
+        let out = CursorProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        }
+        .assess(repo.path())
+        .unwrap();
+        assert_eq!(destructive_events(&out).len(), 2, "got {out:?}");
+        assert!(
+            !out.iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
+            "a hook is not an MCP server; got {out:?}"
+        );
+    }
+
+    #[test]
+    fn external_hook_scripts_outside_the_hooks_dir_are_watched() {
+        let home = tempdir().unwrap();
+        write_hooks(
+            &home.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"beforeShellExecution": [
+                {"command": "/opt/guards/check.sh"},
+                {"type": "prompt", "prompt": "/opt/guards/prompt.sh"}
+            ]}}"#,
+        );
+        let paths = external_script_paths(
+            &home.path().join(".cursor").join("hooks.json"),
+            &home.path().join(".cursor").join("hooks"),
+        );
+        assert_eq!(paths, [PathBuf::from("/opt/guards/check.sh")]);
     }
 
     #[test]

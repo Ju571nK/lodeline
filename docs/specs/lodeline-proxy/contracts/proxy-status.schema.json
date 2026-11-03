@@ -573,7 +573,7 @@
         },
         "discarded_reports": {
           "$ref": "#/$defs/nonnegative_int64",
-          "description": "Inventory reports the proxy gave up on, counted since the proxy process started. Optional: older proxies omit it."
+          "description": "Inventory reports the proxy gave up on (refused, unsendable, or dropped because the local backlog was full), counted since the proxy process started. Optional: older proxies omit it."
         }
       },
       "required": [

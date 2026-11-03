@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-03 · ingest quarantine count 영속화 #361 (기준 커밋 `19a321a`)
+갱신: 2026-11-03 · registry entry 보존과 inventory report backlog 상한 #307 (기준 커밋 `faf944a`)
 
 ## 현재 상태
 
@@ -25,11 +25,13 @@
 | #387 | stopped 상태에서 이름 없는 409/422 응답이 backoff를 지워 5초에 요청 2개가 나가던 것을 수정. 여러 event batch의 이름 없는 응답은 stopped이면 progress가 아니고, stopped의 느린 quarantine도 progress가 아니다. 이제 stopped는 max backoff(300초, jitter 20%)당 요청 1개이고 손실은 주기당 event 1개 이하. paused clock 테스트: 4500초 구간 요청 1750 → 11–19 | #363 |
 | #389 | stopped 요청 간격 테스트가 가끔 실패하던 것(run 41317778315)을 수정. 원인은 테스트다: `jitter`의 하한은 정수 permille 800이라 300초 주기에서 정확히 240초 지연이 나올 수 있는데, 테스트는 `mul_f32(0.8)`(240.0000036초)과 비교했다. 하한을 `period * 4 / 5`로 바꿨고 제품 코드와 수치는 그대로. 수정 전 paused clock 2000회 중 60회 실패(회당 3.0%), 수정 후 24000회 실패 0 | #387 |
 | #420 | `MAX_CONSECUTIVE_SINGLE_QUARANTINES` count를 `gap_queue.json`의 `single_quarantines`에 영속화. 응답이 event를 옮기기 전에 쓰고(crash 시 과대 계산만 가능), 200의 reset도 기록한다. 한도에서 재시작하면 바로 stopped이고 다음 느린 quarantine까지 max backoff 전체를 기다리므로 crash loop에서 추가 손실이 없다. 읽을 수 없는 `gap_queue.json`은 기존대로 시작 거부. 복구는 server 수정·업그레이드 후 다음 200. 재시작 단위 테스트 2개(수정 전 8 대신 12 quarantine) | #361 |
+| `fix/proxy-registry-retention` | registry `entries` 보존(README "D-05 metadata registry (N9)" Retention 행). 60초마다 도는 retention pass가 ACK된 entry 중 snapshot과 대기 report가 부르지 않는 것을 표시하고 그때의 spool `last_assigned_sequence`를 기억한다. 다음 pass에서 spool에 그 sequence 이하의 행(unsent, 보존 중인 acked, quarantine)이 없으면 지운다. 두 pass 사이에 snapshot에 다시 나온 entry는 표시를 버리고 다음 pass에서 다시 표시한다(그사이 start가 그 entry로 조회되었을 수 있음). 서버 보존 기간 E는 확인하지 않는다(README Retention 행도 E를 조건으로 두지 않음). ACK되고 snapshot·대기 report·spool 행 어느 것도 부르지 않는 entry는 E를 받기 전에도 지운다. E는 quarantine 행을 통해서만 영향을 준다. quarantine 행은 Q = E가 지나야 사라지므로, E를 받기 전에는 quarantine 행이 부를 수 있는 entry만 남는다. 표시는 메모리에만 있고 재시작하면 더 높은 sequence로 다시 표시한다(더 오래 보존할 뿐). 표시 직전에 조회한 start가 표시 뒤에 append되면 지운 entry를 부를 수 있으며, 이때는 README "Not-yet-synced refs"대로 그대로 보내고 서버가 판정한다(서버는 ACK한 entry를 보존). 같은 정의가 다시 목록에 나오면 새로 저장하고 다시 올린다. 수정 전 실패 테스트 3개 | #307 |
+| `fix/proxy-registry-retention` | inventory report backlog 상한. 대기 complete report는 256개(서버 `pending_previous` 한도와 같은 P1 시험값)까지 두고, 넘으면 scope key의 최신 snapshot이 아닌 가장 오래된 report를 거절된 report와 같은 경로로 버린다(chain의 다음 report는 `initial_baseline`이 되고 서버는 `baseline_restated`로 본다). 최신 snapshot의 report는 버리지 않으므로 상한은 256 + scope key 수다. 이 경우와 incomplete 64개 상한에서 버린 report를 status `registry.discarded_reports`에 센다(새 필드 없음, [decisions.md](decisions.md) 2026-11-03). report 하나를 버리는 일(report 삭제, snapshot 정리, 다음 report 재작성)은 transaction 하나다. client가 report를 읽어 보내고 정리하는 동안에는 listing의 상한 정리를 건너뛰고 다음 listing에서 한다(보내는 중인 report를 버리거나 그 다음 report를 바꾸지 않음). 수정 전 실패 테스트 2개(259개 보관, 0개 계산; 전송 중 정리로 1개 버림) | #307 |
 
 - clock-jump guard는 시도 후 리뷰에서 되돌렸다(suspend가 jump로 계산되어 R 이후 재전송 위험). 대신 결정 4로 boot-clock age를 구현했다: 행마다 `(boot_id, boot clock)` stamp를 side table에 두고 같은 boot 안에서는 boot clock, boot가 다르거나 stamp가 없으면 wall clock으로 R·Q를 잰다(macOS는 개발 환경, Windows는 wall clock만). quarantine 정책은 #302 결정 1–4로 정함(https://github.com/Ju571nK/lodeline/issues/302#issuecomment-6537627891): Q = E purge, byte 상한 없음(`quarantined_bytes` 노출), replay·upload 없음, boot-clock 기반 age.
 - 운영자 로컬 harness로 main에서 AWS 2노드 smoke 재실행(§3–§13, D1): 시나리오 27/27, ledger 22, privacy 0, outage replay 6, 재시작 fail-closed, spool 32×200/48×503(delta 32), disable/enable 정상, 감사 seq 0–4 ok.
 - 미측정: vendor client, D2, stateless/SSE 변형, SELinux.
-- 남은 P1: T-15(lodeline-manager#37), T-16, 후속 #302, #307, #279, #269, #284.
+- 남은 P1: T-15(lodeline-manager#37), T-16, 후속 #302, #307, #279, #269.
 
 ## 2026-10-25 AWS 2노드 실기 (H)
 

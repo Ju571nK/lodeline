@@ -94,6 +94,13 @@ pub struct TaskCtx {
 /// Main task loop. Boots, then selects between file-change broadcasts and
 /// the heartbeat tick until the broadcast sender is dropped (shutdown).
 pub async fn run(mut ctx: TaskCtx) {
+    // #333 — one spelling per home (`/home -> /var/home`), so `homes_for` does
+    // not assess the agent's own home a second time under a user's name.
+    let canonical = |dir: &PathBuf| dunce::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+    ctx.home_dir = canonical(&ctx.home_dir);
+    for home in &mut ctx.user_homes {
+        home.dir = canonical(&home.dir);
+    }
     // 1. Initial scan on boot. Snapshot-clone the parsers vec before any
     //    `.await` so the parking_lot RwLockReadGuard is dropped — guards are
     //    NOT Send across an await. Cloning a `Vec<Arc<dyn>>` just bumps each
@@ -183,8 +190,7 @@ fn homes_for(parser: &dyn AiGuardParser, ctx: &TaskCtx) -> Vec<AssessHome> {
         user: None,
         dir: ctx.home_dir.clone(),
     };
-    // Rule packs expand `~` from the agent's own environment, not `home`.
-    if matches!(parser.scope(), AiGuardScope::Project { .. }) || parser.rule_pack_id().is_some() {
+    if matches!(parser.scope(), AiGuardScope::Project { .. }) {
         return vec![own];
     }
     std::iter::once(own)
@@ -589,15 +595,88 @@ mod tests {
             ]
         );
         assert_eq!(ctx.state.read().len(), 3);
-        let pack = ScriptedParser {
-            tool: AiTool::Codex,
-            scope: AiGuardScope::UserGlobal,
-            pack_id: Some("pack".into()),
+    }
+
+    #[tokio::test]
+    async fn root_agent_reads_each_user_home_for_a_rule_pack() {
+        use lodeline_core::policy::{Matcher, RuleEntry, RuleFormat, RulePack, RulePackScope};
+        let homes = tempfile::tempdir().unwrap();
+        let (root, alice, bob) = (
+            homes.path().join("root"),
+            homes.path().join("alice"),
+            homes.path().join("bob"),
+        );
+        for (home, sandbox) in [(&root, true), (&alice, false), (&bob, true)] {
+            std::fs::create_dir_all(home.join(".gemini")).unwrap();
+            std::fs::write(
+                home.join(".gemini/settings.json"),
+                format!(r#"{{"sandbox":{sandbox}}}"#),
+            )
+            .unwrap();
+        }
+        let pack = crate::ai_guard::rule_pack::parser::RulePackParser::new(RulePack {
+            id: "pack".into(),
+            pack_version: 1,
+            tool: AiTool::Gemini,
+            scope: RulePackScope::UserGlobal,
+            watched_paths: vec!["~/.gemini/settings.json".into()],
+            platforms: None,
             tool_label: None,
-            scripts: StdMutex::new(vec![]),
-            watched: vec![],
-        };
-        assert_eq!(homes_for(&pack, &ctx).len(), 1);
+            rules: vec![RuleEntry {
+                id: "r1".into(),
+                on_file: "~/.gemini/settings.json".into(),
+                format: RuleFormat::Json,
+                selector: "$.sandbox".into(),
+                matcher: Matcher::Equals {
+                    value: "false".into(),
+                },
+                emit: AiGuardReason::SandboxDisabled,
+                when: vec![],
+            }],
+        })
+        .unwrap();
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(pack, fc_rx, Duration::from_secs(3600));
+        ctx.home_dir = root;
+        ctx.user_homes = vec![
+            AssessHome {
+                user: Some("alice".into()),
+                dir: alice.clone(),
+            },
+            AssessHome {
+                user: Some("bob".into()),
+                dir: bob,
+            },
+        ];
+        let parser = ctx.parsers.read()[0].clone();
+        assert!(parser
+            .watched_paths(&alice)
+            .contains(&alice.join(".gemini/settings.json")));
+        for home in homes_for(parser.as_ref(), &ctx) {
+            eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        }
+        let mut seen = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let Evidence::AiGuardRiskAssessed {
+                user,
+                reasons,
+                rule_pack_id,
+                ..
+            } = ev.event.evidence
+            {
+                assert_eq!(rule_pack_id.as_deref(), Some("pack"));
+                seen.push((user, !reasons.is_empty()));
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (None, false),
+                (Some("alice".into()), true),
+                (Some("bob".into()), false)
+            ]
+        );
     }
 
     /// Receive the next `AiGuardRiskAssessed` event, skipping any
@@ -1113,6 +1192,56 @@ mod tests {
         let incoming = real.canonicalize().unwrap().join("requirements.toml");
         assert!(path_matches(&incoming, &link.join("requirements.toml")));
         assert!(!path_matches(&incoming, &link.join("other.toml")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_symlinked_home_is_one_home_and_its_changes_match() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("var/home");
+        std::fs::create_dir_all(real.join("alice/.claude")).unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join("home")).unwrap();
+        let settings = real
+            .canonicalize()
+            .unwrap()
+            .join("alice/.claude/settings.json");
+        std::fs::write(&settings, "{}").unwrap();
+        let (tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(
+            crate::ai_guard::parser::claude_code::ClaudeCodeParser::default(),
+            fc_rx,
+            Duration::from_secs(24 * 3600),
+        );
+        // A root agent that kept alice's HOME (`sudo` without -H), spelled
+        // through `/home -> /var/home`, while passwd names the real path.
+        ctx.home_dir = root.path().join("home/alice");
+        ctx.user_homes = vec![AssessHome {
+            user: Some("alice".into()),
+            dir: real.join("alice"),
+        }];
+        let h = tokio::spawn(run(ctx));
+        recv_next_risk_assessed(&mut events).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .is_err(),
+            "one reading per home, not one per spelling of it"
+        );
+        std::fs::write(
+            &settings,
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"rm -rf ~/work"}]}]}}"#,
+        )
+        .unwrap();
+        tx.send(settings).unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(5), recv_next_risk_assessed(&mut events))
+            .await
+            .expect("a change in the symlinked home re-assesses it");
+        assert!(matches!(
+            ev.event.evidence,
+            Evidence::AiGuardRiskAssessed { ref reasons, .. }
+                if reasons.iter().any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+        ));
+        h.abort();
     }
 
     /// Drain the channel and return only the `AiGuardToggleDrift` toggles, in

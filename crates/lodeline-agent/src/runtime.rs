@@ -152,6 +152,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             );
         }
     }
+    let rule_packs_read = crate::policy_reload_task::rule_packs_on_disk(&cfg.policy_paths);
     // Fail-open: missing/corrupt rule-packs.yaml → None (no bundle packs).
     let rule_packs_in_force = cfg.policy_paths.rule_packs.in_force();
     let bundle_doc = std::fs::read_to_string(rule_packs_in_force)
@@ -287,7 +288,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             Cursor => &cursor_repos,
             Antigravity => &antigravity_repos,
             ClaudeDesktop => &[],
-            Grok => &[], // #110: no Grok project parser/workspace yet
+            Grok => &[], // #203: no grok_workspaces policy key; `lodeline scan` reads Grok projects
             Other => &[],
         }
     };
@@ -609,6 +610,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 last_good_bundle: bundle_doc_for_ctx,
                 unfinished: Vec::new(),
                 applied_policy: None,
+                rule_packs_read,
             },
         )),
     );
@@ -1826,6 +1828,11 @@ pub(crate) fn push_cursor_synthetic_target(
         platform: lodeline_core::policy::Platform::Any,
         paths: vec![
             config.to_string_lossy().to_string(),
+            repo_root
+                .join(".cursor")
+                .join("hooks.json")
+                .to_string_lossy()
+                .to_string(),
             repo_root.join(".cursorrules").to_string_lossy().to_string(),
         ],
         recursive: false,
@@ -1965,6 +1972,28 @@ pub(crate) fn discover_and_register_ext_scripts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_project_target_watches_hooks_json() {
+        let repo = std::path::Path::new("/repo");
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_cursor_synthetic_target(&mut effective, repo);
+        let hooks = repo.join(".cursor").join("hooks.json");
+        assert!(
+            effective
+                .targets
+                .iter()
+                .flat_map(|t| &t.paths)
+                .any(|p| std::path::Path::new(p) == hooks),
+            "a project hooks.json edit must reach the parser"
+        );
+    }
+
     #[test]
     fn cursor_rules_glob_matches_child_and_nested_file() {
         use lodeline_core::policy::glob::CompiledGlob;

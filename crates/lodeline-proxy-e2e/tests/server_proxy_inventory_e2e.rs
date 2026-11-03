@@ -11,19 +11,12 @@
 //!
 //! Requirements: PX-005, PX-010, PX-011; acceptance AC-02, AC-05.
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use lodeline_proxy_api::verifier::verifier_for;
 use lodeline_proxy_api::{parse_config, RegistryEntry};
-use lodeline_server::app::{build_router_with_proxy, AppState};
-use lodeline_server::auth::ReadToken;
+use lodeline_server::app::build_router_with_proxy;
 use lodeline_server::config::ServerConfig;
-use lodeline_server::fleet_index::FleetIndex;
-use lodeline_server::persist::HighWater;
 use lodeline_server::proxy::identity::proxy_san;
 use lodeline_server::proxy::registry::{ProxyRecord, ProxyState};
 use lodeline_server::proxy::store::{ProxyEntry, StoredConfig};
@@ -31,221 +24,12 @@ use lodeline_server::proxy::ProxyContext;
 use lodeline_server::tls_accept::PeerCertAcceptor;
 use serde_json::{json, Value};
 
+mod common;
+use common::{app_state, client_ext, fingerprint, mtls_client, pki, tls_config, Pki};
+
 const READ_BEARER: &str = "read-bearer";
 const CANARY_NAME: &str = "canarytoolname7f3a";
 const SCOPE: &str = "cs-0123456789abcdef0123456789abcdef";
-
-// ---------------------------------------------------------------- openssl
-
-fn find_openssl() -> Option<PathBuf> {
-    [
-        "/usr/bin/openssl",
-        "/opt/homebrew/bin/openssl",
-        "/opt/homebrew/opt/openssl@3/bin/openssl",
-        "/usr/local/bin/openssl",
-        "/usr/local/opt/openssl@3/bin/openssl",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
-}
-
-fn run_ossl(ossl: &Path, args: &[&std::ffi::OsStr]) {
-    let o = Command::new(ossl)
-        .env_remove("OPENSSL_CONF")
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        o.status.success(),
-        "openssl {args:?}: {}",
-        String::from_utf8_lossy(&o.stderr)
-    );
-}
-
-struct Pki {
-    dir: tempfile::TempDir,
-    ossl: PathBuf,
-    serial: AtomicUsize,
-}
-
-impl Pki {
-    fn p(&self, f: &str) -> PathBuf {
-        self.dir.path().join(f)
-    }
-
-    fn ca(&self, name: &str, cn: &str, serial: &str) {
-        let key = self.p(&format!("{name}.key"));
-        run_ossl(
-            &self.ossl,
-            &[
-                "req".as_ref(),
-                "-x509".as_ref(),
-                "-new".as_ref(),
-                "-newkey".as_ref(),
-                "rsa:2048".as_ref(),
-                "-nodes".as_ref(),
-                "-keyout".as_ref(),
-                key.as_os_str(),
-                "-days".as_ref(),
-                "2".as_ref(),
-                "-set_serial".as_ref(),
-                serial.as_ref(),
-                "-subj".as_ref(),
-                format!("/CN={cn}").as_ref(),
-                "-addext".as_ref(),
-                "basicConstraints=critical,CA:TRUE".as_ref(),
-                "-addext".as_ref(),
-                "subjectKeyIdentifier=hash".as_ref(),
-                "-out".as_ref(),
-                self.p(&format!("{name}.crt")).as_os_str(),
-            ],
-        );
-    }
-
-    /// CA-signed RSA-2048 leaf, `-set_serial` (never `-CAcreateserial`).
-    fn leaf(&self, ca: &str, name: &str, cn: &str, ext: &str) -> (PathBuf, PathBuf) {
-        let (key, csr, crt, extf) = (
-            self.p(&format!("{name}.key")),
-            self.p(&format!("{name}.csr")),
-            self.p(&format!("{name}.crt")),
-            self.p(&format!("{name}.ext")),
-        );
-        std::fs::write(&extf, ext).unwrap();
-        run_ossl(
-            &self.ossl,
-            &[
-                "req".as_ref(),
-                "-new".as_ref(),
-                "-newkey".as_ref(),
-                "rsa:2048".as_ref(),
-                "-nodes".as_ref(),
-                "-keyout".as_ref(),
-                key.as_os_str(),
-                "-subj".as_ref(),
-                format!("/CN={cn}").as_ref(),
-                "-out".as_ref(),
-                csr.as_os_str(),
-            ],
-        );
-        let serial = format!("{}", 100 + self.serial.fetch_add(1, Ordering::Relaxed));
-        run_ossl(
-            &self.ossl,
-            &[
-                "x509".as_ref(),
-                "-req".as_ref(),
-                "-in".as_ref(),
-                csr.as_os_str(),
-                "-CA".as_ref(),
-                self.p(&format!("{ca}.crt")).as_os_str(),
-                "-CAkey".as_ref(),
-                self.p(&format!("{ca}.key")).as_os_str(),
-                "-set_serial".as_ref(),
-                serial.as_ref(),
-                "-days".as_ref(),
-                "2".as_ref(),
-                "-extfile".as_ref(),
-                extf.as_os_str(),
-                "-out".as_ref(),
-                crt.as_os_str(),
-            ],
-        );
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
-        (crt, key)
-    }
-}
-
-/// `None` when openssl is missing and `CI` is unset (skip); panics under CI.
-fn pki() -> Option<Pki> {
-    let Some(ossl) = find_openssl() else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "openssl CLI not found but CI is set"
-        );
-        eprintln!("skipped: openssl CLI not found");
-        return None;
-    };
-    let pki = Pki {
-        dir: tempfile::tempdir().unwrap(),
-        ossl,
-        serial: AtomicUsize::new(0),
-    };
-    pki.ca("hostca", "ing-host-ca", "1");
-    pki.ca("proxyca", "ing-proxy-ca", "2");
-    let mut bundle = std::fs::read(pki.p("hostca.crt")).unwrap();
-    bundle.extend(std::fs::read(pki.p("proxyca.crt")).unwrap());
-    std::fs::write(pki.p("bundle.pem"), bundle).unwrap();
-    pki.leaf(
-        "hostca",
-        "server",
-        "localhost",
-        "subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n",
-    );
-    Some(pki)
-}
-
-fn fingerprint(crt: &Path) -> String {
-    let pem = std::fs::read(crt).unwrap();
-    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&pem[..]))
-        .collect::<Result<_, _>>()
-        .unwrap();
-    blake3::hash(certs[0].as_ref()).to_hex().to_string()
-}
-
-fn mtls_client(trust: &Path, crt: &Path, key: &Path) -> reqwest::Client {
-    let mut id = std::fs::read(key).unwrap();
-    id.extend_from_slice(&std::fs::read(crt).unwrap());
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .pool_max_idle_per_host(0)
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(&std::fs::read(trust).unwrap()).unwrap(),
-        )
-        .identity(reqwest::Identity::from_pem(&id).unwrap())
-        .build()
-        .unwrap()
-}
-
-fn tls_config(pki: &Pki) -> rustls::ServerConfig {
-    let rd = |f: &str| std::fs::read(pki.p(f)).unwrap();
-    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&rd("server.crt")[..]))
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&rd("server.key")[..]))
-        .unwrap()
-        .unwrap();
-    let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut std::io::BufReader::new(&rd("bundle.pem")[..])) {
-        roots.add(c.unwrap()).unwrap();
-    }
-    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-        .build()
-        .unwrap();
-    rustls::ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)
-        .unwrap()
-}
-
-fn app_state(dir: &Path) -> Arc<AppState> {
-    Arc::new(AppState {
-        events_out_dir: dir.to_path_buf(),
-        policy_bundle_path: dir.join("signed-policy.json"),
-        rule_packs_bundle_path: None,
-        artifacts_dir: None,
-        high_water_path: dir.join(".high-water.json"),
-        allowlist: parking_lot::RwLock::new(None),
-        high_water: Mutex::new(HighWater::default()),
-        fleet_index: FleetIndex::new(),
-        read_token: ReadToken(Some("read-bearer".into())),
-        active_window_days: 7,
-        audit_key: None,
-        audit_head: Mutex::new(None),
-        allowlist_path: None,
-        enroll: None,
-        events_require_cert_host_match: false,
-    })
-}
 
 // ----------------------------------------------------------------- fixtures
 
@@ -379,12 +163,7 @@ impl Env {
             ctx.metadata.register(id, &all, 1_000).unwrap();
             clients.push(mtls_client(&pki.p("hostca.crt"), &cert.0, &cert.1));
         }
-        let host = pki.leaf(
-            "hostca",
-            "host",
-            "host-1",
-            "subjectAltName=DNS:host-1\nextendedKeyUsage=clientAuth\nbasicConstraints=CA:FALSE\n",
-        );
+        let host = pki.leaf("hostca", "host", "host-1", &client_ext("host-1"));
         let host_client = mtls_client(&pki.p("hostca.crt"), &host.0, &host.1);
 
         let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config(&pki)));
@@ -454,7 +233,7 @@ fn code(t: &str) -> String {
 
 #[tokio::test]
 async fn inventory_over_mtls_ingest_projection_and_read() {
-    let Some(pki) = pki() else { return };
+    let Some(pki) = pki("ing") else { return };
     let env = Env::start(pki).await;
     let mut seen: Vec<String> = Vec::new();
 

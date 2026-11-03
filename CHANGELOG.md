@@ -7,6 +7,23 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Added
+
+- The scanner now reads every Cursor `hooks.json` layer. These are the user file, the
+  enterprise file (macOS, Linux and Windows paths), and the project file. Command hooks
+  are scored like other hook commands. Prompt hooks are not scored. A `hooks.json` that
+  does not parse is skipped with a warning. The daemon now watches a Cursor project's
+  `hooks.json`. (#430)
+
+- A new Grok Build parser reads user and project hook files, user `[hooks]` in
+  `~/.grok/config.toml`, and MCP servers in the user and project `config.toml`.
+  `lodeline scan` picks up a Grok project by `.grok/hooks/` or `.grok/config.toml`. The
+  daemon does not yet discover Grok projects. (#430)
+
+- Lodeline's own Grok hook now adds a small score for its broad matcher, the same way
+  Lodeline's own Claude Code hook already does. Hosts with it installed may see a
+  slightly higher score. (#430)
+
 ### Fixed
 
 - Running `lodeline scan` from the home folder no longer scores your Codex config a
@@ -22,6 +39,32 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   still does not run under PowerShell, which Claude Code uses when Git Bash is not
   installed, and Cursor. If you installed hooks on Windows, rerun
   `lodeline-hook install --write` for each agent after you upgrade. (#428)
+
+- On a host where the agent runs as root, a user-global rule pack now reads each user's
+  home. It used to resolve `~` and `$HOME` from the agent's own environment, so it never
+  read any user's config. Other variables in a rule-pack path still come from the
+  agent's environment. (#429)
+
+- When the agent's home and a user's home are two spellings of the same folder, for
+  example through a symlink or `sudo` without `-H`, that home is now read and reported
+  once instead of twice. Findings on a symlinked home now show the resolved path, so
+  each affected reading sends one new event after the upgrade. (#429)
+
+- A corrupt or unsupported shared MCP baseline file no longer stops the Codex MCP
+  assessment for every home. It is treated as absent and logged. (#429)
+
+- `lodeline-proxy` now deletes a local registry entry once the server has acknowledged it
+  and every event that references it, so the local registry no longer grows without
+  limit. While the server is unreachable, queued complete inventory reports are capped at
+  256. Past the cap, the oldest one that is not the latest for its scope is dropped, and
+  the next report restates its baseline. Every dropped report, complete or incomplete, is
+  counted in `registry.discarded_reports` in the proxy status. (#432)
+
+- The agent now notices a rule-pack file that changed or was removed without a file-watcher
+  event. With `--poll`, and on file systems where the watcher only sees whole-second times,
+  a rule-pack file written and then deleted or edited within the same second could leave the
+  old rule pack in force until some other change. The agent now checks the file every 5
+  seconds against the one in force and reloads when they differ. (#433)
 
 ## [0.12.2] - 2026-11-03
 

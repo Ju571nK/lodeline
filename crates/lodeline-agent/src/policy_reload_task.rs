@@ -235,6 +235,19 @@ pub struct ReloadCtx {
     /// The policy text the last finished reload applied, `None` for no file. A retry
     /// compares what it read with this to see if it has anything to apply.
     pub applied_policy: Option<String>,
+    /// The rule-pack file the last load read, as [`rule_packs_on_disk`] gives it. A
+    /// root tick reloads when the disk no longer matches it.
+    pub rule_packs_read: (PathBuf, Option<Vec<u8>>),
+}
+
+/// The rule-pack file in force and its bytes, `None` when it cannot be read. Take it
+/// before the load reads the file, so that a change in between costs one more reload
+/// and is never missed.
+pub(crate) fn rule_packs_on_disk(
+    paths: &crate::runtime::PolicyPaths,
+) -> (PathBuf, Option<Vec<u8>>) {
+    let path = paths.rule_packs.in_force();
+    (path.to_path_buf(), std::fs::read(path).ok())
 }
 
 /// Notes why this reload did not finish. Returns whether `last`, the reasons of the
@@ -271,7 +284,9 @@ pub async fn run(mut ctx: ReloadCtx) {
             }
             _ = root_tick.tick() => {
                 ctx.watcher.reconcile();
-                if !ctx.unfinished.is_empty() {
+                // A poll watcher compares mtimes in whole seconds, so it misses a
+                // change made in the second of its last scan.
+                if !ctx.unfinished.is_empty() || rule_packs_on_disk(&ctx.paths) != ctx.rule_packs_read {
                     reload(&mut ctx, &plat);
                 }
             }
@@ -332,7 +347,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     // Corrupt(파일 존재+파스 실패) → retain last good (transient git-pull state protected).
     // Empty(0바이트/공백, cp 트렁케이트 창) → retain last good (#135, enforcement race 방지).
     // Absent(파일 NotFound) → clear cache (deliberate rm honored).
-    let bundle_path = ctx.paths.rule_packs.in_force();
+    ctx.rule_packs_read = rule_packs_on_disk(&ctx.paths);
+    let bundle_path = ctx.rule_packs_read.0.as_path();
     let bundle_state = read_bundle_state(bundle_path);
     let kept_bundle = match &bundle_state {
         BundleState::Corrupt(reason) => Some(reason.clone()),
@@ -747,10 +763,12 @@ mod tests {
         std::mem::forget(_rptx);
 
         let cache = Arc::new(Mutex::new(HashCache::open(&dir.join("state.db")).unwrap()));
+        let paths = crate::runtime::PolicyPaths::at(policy_yaml_path);
 
         (
             ReloadCtx {
-                paths: crate::runtime::PolicyPaths::at(policy_yaml_path),
+                rule_packs_read: rule_packs_on_disk(&paths),
+                paths,
                 policy_file_loaded: true,
                 policy_version_rx,
                 rule_packs_version_rx,
@@ -809,6 +827,7 @@ mod tests {
         std::mem::forget(_rptx);
 
         let cache = Arc::new(Mutex::new(HashCache::open(&dir.join("state.db")).unwrap()));
+        let paths = crate::runtime::PolicyPaths::at(policy_yaml_path);
 
         let parsers: Arc<
             parking_lot::RwLock<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>,
@@ -818,7 +837,8 @@ mod tests {
 
         (
             ReloadCtx {
-                paths: crate::runtime::PolicyPaths::at(policy_yaml_path),
+                rule_packs_read: rule_packs_on_disk(&paths),
+                paths,
                 policy_file_loaded: true,
                 policy_version_rx,
                 rule_packs_version_rx,
@@ -1085,6 +1105,23 @@ mod tests {
         running.tick().await;
 
         assert!(has_pack(&running.parsers, "new-pack"));
+        assert!(!has_pack(&running.parsers, "old-pack"));
+        running.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bundle_change_no_watcher_reported_loads_on_the_root_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, _trx, _parsers, _state) = build_ctx_with_parsers(dir.path(), yaml);
+        let bundle = ctx.paths.rule_packs.applied.clone();
+        std::fs::write(&bundle, bundle_yaml("old-pack")).unwrap();
+        reload(&mut ctx, &plat);
+        let running = Running::start(ctx);
+
+        std::fs::remove_file(&bundle).unwrap();
+        running.tick().await;
+
         assert!(!has_pack(&running.parsers, "old-pack"));
         running.stop().await;
     }
