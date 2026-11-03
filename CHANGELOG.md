@@ -57,6 +57,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   old rule pack in force until some other change. The agent now checks the file every 5
   seconds against the one in force and reloads when they differ. (#433)
 
+- `lodeline-server` no longer drops a host's other AI Guard readings early when one
+  agent's clock runs ahead. It used to age readings by the agent's own timestamp, so one
+  reading dated days ahead made the 48-hour cleanup remove the host's other readings, and
+  that reading stayed too long. Readings are now aged by the earlier of their timestamp and
+  the time the server received them. The event's own timestamp is unchanged in stored data,
+  SIEM output and the API. (#436)
+
 ## [0.12.2] - 2026-11-03
 
 ### Added
