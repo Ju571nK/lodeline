@@ -192,10 +192,18 @@ pub(crate) fn assess(
         // for the home that wrote it, so its standing drift is not reset.
         let scoped = server_path(&dir.join(&home_hash), server);
         let legacy = server_path(dir, server);
+        // A legacy file that cannot be read is treated as absent (#333), so it
+        // cannot fail the assessment of every home without a scoped file.
         if !scoped.exists() && legacy.exists() {
-            if let Some(reasons) = assess_server(&legacy, &home_hash, &snapshot)? {
-                out.extend(reasons);
-                continue;
+            match assess_server(&legacy, &home_hash, &snapshot) {
+                Ok(Some(reasons)) => {
+                    out.extend(reasons);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(?error, "ignoring unreadable legacy MCP baseline")
+                }
             }
         }
         out.extend(
@@ -424,6 +432,25 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         assert!(assess(&path, other.path(), &drifted).unwrap().is_empty());
         assert!(!assess(&path, dir.path(), &drifted).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bad_legacy_baseline_is_treated_as_absent() {
+        let base = snapshot("x", json!({}));
+        for bad in ["bad", r#"{"version":2,"home_hash":"h","tools":{}}"#] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("baselines");
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(server_path(&path, "server"), bad).unwrap();
+            let home = tempfile::tempdir().unwrap();
+            assert!(assess(&path, home.path(), &base).unwrap().is_empty());
+            let drifted = snapshot("y", json!({}));
+            assert!(!assess(&path, home.path(), &drifted).unwrap().is_empty());
+            assert_eq!(
+                std::fs::read_to_string(server_path(&path, "server")).unwrap(),
+                bad
+            );
+        }
     }
 
     #[test]
