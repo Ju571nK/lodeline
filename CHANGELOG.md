@@ -44,6 +44,12 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - A corrupt or unsupported shared MCP baseline file no longer stops the Codex MCP
   assessment for every home. It is treated as absent and logged. (#429)
 
+- The agent now notices a rule-pack file that changed or was removed without a file-watcher
+  event. With `--poll`, and on file systems where the watcher only sees whole-second times,
+  a rule-pack file written and then deleted or edited within the same second could leave the
+  old rule pack in force until some other change. The agent now checks the file every 5
+  seconds against the one in force and reloads when they differ. (#433)
+
 ## [0.12.2] - 2026-11-03
 
 ### Added
