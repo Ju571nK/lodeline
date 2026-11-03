@@ -122,8 +122,9 @@ wire_struct! {
         /// like `quarantined_entries`.
         #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
         pub poisoned_entries: Option<NonNegativeI64>,
-        /// Inventory reports the proxy gave up on since it started. Optional like
-        /// `quarantined_entries`.
+        /// Inventory reports the proxy gave up on since it started (refused,
+        /// unsendable, or dropped because the local backlog was full). Optional
+        /// like `quarantined_entries`.
         #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
         pub discarded_reports: Option<NonNegativeI64>,
     }

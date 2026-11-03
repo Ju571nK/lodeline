@@ -1433,3 +1433,202 @@ async fn a_conflict_whose_spool_rewrite_failed_keeps_its_mark_and_queues_the_gap
     assert_eq!(g.metadata_ref.as_str(), a);
     assert_eq!(g.event_ids.len(), 2);
 }
+
+// ------------------------------------------------- retention and report backlog
+
+fn retention_spool(d: &std::path::Path) -> lodeline_proxy::spool::Spool {
+    let mut cfg = lodeline_proxy::spool::SpoolConfig::new(
+        d,
+        "px-1",
+        EPOCH,
+        true,
+        &lodeline_proxy::limits::Limits::default(),
+    );
+    // Acknowledged rows go at the next explicit `expire_now`, never on their own.
+    cfg.ack_retention = Duration::ZERO;
+    cfg.maintenance_interval = Duration::from_secs(3600);
+    lodeline_proxy::spool::Spool::open(cfg).unwrap()
+}
+
+fn started_event(n: u32, mref: &str) -> lodeline_proxy_api::ProxyEvent {
+    serde_json::from_value(json!({
+        "schema_version": 1, "event_id": format!("00000000-0000-4000-8000-{n:012x}"),
+        "proxy_id": "px-1", "epoch_id": EPOCH, "sequence": 1,
+        "occurred_at": "2026-10-14T00:00:00Z",
+        "event_type": "invocation.started",
+        "payload": {"invocation_id": format!("00000000-0000-4000-8000-{:012x}", 7000 + n),
+            "upstream_id": "up-1", "route_revision": 1, "protocol_version": "2025-11-25",
+            "method": "tools/call",
+            "actor": {"actor_id": "a1", "actor_kind": "non_human",
+                "authentication_method": "bearer",
+                "evidence_source": "proxy_credential_mapping"},
+            "tool": {"status": "identified", "metadata_ref": mref}}
+    }))
+    .unwrap()
+}
+
+/// README "D-05 metadata registry (N9)", Retention row: an entry stays until it
+/// and every event that references it are ACKed and gone from the spool, and
+/// while a snapshot or a queued report still names it.
+#[tokio::test]
+async fn an_entry_is_deleted_only_after_it_and_its_events_are_acked() {
+    use lodeline_proxy::ingest_client::EventSource;
+    use lodeline_proxy::registry_store::EntryRetention;
+    let mut f = fx();
+    let sd = dir();
+    let mut spool = retention_spool(sd.path());
+    let mut ret = EntryRetention::default();
+    let old = list(&mut f.engine, vec![tool("a", "v1")]).tools[0]
+        .1
+        .clone();
+    spool.append(started_event(1, &old)).unwrap();
+    for _ in 0..2 {
+        assert_eq!(ret.pass(&f.store, &spool).unwrap(), 0, "pending: kept");
+    }
+    drain(&mut f.client).await;
+    assert_eq!(
+        f.store.entry(&old).unwrap().unwrap().state,
+        EntryState::Acked
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            ret.pass(&f.store, &spool).unwrap(),
+            0,
+            "in the snapshot: kept"
+        );
+    }
+
+    // The tool changes: the old ref leaves the snapshot, its event is unsent.
+    let new = list(&mut f.engine, vec![tool("a", "v2")]).tools[0]
+        .1
+        .clone();
+    drain(&mut f.client).await;
+    for _ in 0..3 {
+        assert_eq!(ret.pass(&f.store, &spool).unwrap(), 0, "unsent event: kept");
+    }
+    let sent = spool.next_events(10, &HashSet::new());
+    assert_eq!(sent.len(), 1);
+    spool.acknowledged(&[sent[0].event_id.as_str().to_string()]);
+    assert_eq!(
+        ret.pass(&f.store, &spool).unwrap(),
+        0,
+        "acked event still held: kept"
+    );
+    spool.expire_now().unwrap();
+    assert_eq!(ret.pass(&f.store, &spool).unwrap(), 1);
+    assert!(f.store.entry(&old).unwrap().is_none(), "old entry deleted");
+    assert!(f.store.entry(&new).unwrap().is_some(), "current entry kept");
+
+    // The same definition listed again is minted, stored and uploaded again.
+    list(&mut f.engine, vec![tool("a", "v1")]);
+    assert_eq!(
+        f.store.entry(&old).unwrap().unwrap().state,
+        EntryState::Pending
+    );
+}
+
+#[tokio::test]
+async fn an_entry_named_by_a_queued_report_is_kept() {
+    use lodeline_proxy::registry_store::EntryRetention;
+    let mut f = fx();
+    let sd = dir();
+    let spool = retention_spool(sd.path());
+    let mut ret = EntryRetention::default();
+    let old = list(&mut f.engine, vec![tool("a", "v1")]).tools[0]
+        .1
+        .clone();
+    list(&mut f.engine, vec![tool("a", "v2")]);
+    // Entries ACKed, both reports still queued (the server is unreachable for
+    // inventory); the second names the old ref as `previous_metadata_ref`.
+    f.store.mark_acked(std::slice::from_ref(&old)).unwrap();
+    let queued = f.store.pending_reports(10).unwrap();
+    f.store.report_done(&queued[0].report_id).unwrap();
+    for _ in 0..3 {
+        assert_eq!(ret.pass(&f.store, &spool).unwrap(), 0);
+    }
+    assert!(f.store.entry(&old).unwrap().is_some());
+    f.store.report_done(&queued[1].report_id).unwrap();
+    ret.pass(&f.store, &spool).unwrap();
+    assert_eq!(ret.pass(&f.store, &spool).unwrap(), 1);
+    assert!(f.store.entry(&old).unwrap().is_none());
+}
+
+/// The local report backlog is bounded and every report dropped for space is
+/// counted in the status `registry.discarded_reports`.
+#[tokio::test]
+async fn the_report_backlog_is_bounded_and_drops_are_counted() {
+    use lodeline_proxy::registry_store::{
+        MAX_PENDING_COMPLETE_REPORTS, MAX_PENDING_INCOMPLETE_REPORTS,
+    };
+    let mut f = fx();
+    let probe = f.client.health_probe();
+    let listing = |e: &mut InventoryEngine, upstream: &str, tools: Vec<ToolInput>| {
+        e.observe_page(
+            &ListingKey {
+                session: 1,
+                scope: ScopeKey::live("px-1", upstream, "cs-1"),
+            },
+            PageInput::Tools {
+                request_cursor: None,
+                tools,
+                next_cursor: None,
+            },
+        )
+        .unwrap()
+    };
+    // Incomplete reports (a repeated name is `ambiguous_name`).
+    for _ in 0..MAX_PENDING_INCOMPLETE_REPORTS + 2 {
+        listing(&mut f.engine, "up-1", vec![tool("a", "1"), tool("a", "2")]);
+    }
+    assert_eq!(
+        f.store.pending_reports(1000).unwrap().len(),
+        MAX_PENDING_INCOMPLETE_REPORTS
+    );
+    assert_eq!(probe().unwrap().discarded_reports, 2);
+
+    // One listing of a second scope is the oldest complete report and the latest
+    // snapshot of its scope: it is never the one dropped.
+    let other = listing(&mut f.engine, "up-2", vec![tool("b", "1")]);
+    let ListingProgress::Complete(other) = other else {
+        panic!("{other:?}")
+    };
+    for i in 0..MAX_PENDING_COMPLETE_REPORTS + 2 {
+        listing(&mut f.engine, "up-1", vec![tool("a", &i.to_string())]);
+    }
+    let complete: Vec<lodeline_proxy_api::registry::InventoryReport> = f
+        .store
+        .pending_reports(1000)
+        .unwrap()
+        .iter()
+        .filter(|r| r.complete)
+        .map(|r| lodeline_proxy_api::parse_inventory_report(&r.body).unwrap())
+        .collect();
+    assert_eq!(complete.len(), MAX_PENDING_COMPLETE_REPORTS);
+    assert_eq!(probe().unwrap().discarded_reports, 2 + 3);
+    assert_eq!(f.client.discarded_reports(), 5);
+    assert_eq!(
+        complete[0].inventory_id.as_ref().unwrap().as_str(),
+        other.inventory_id,
+        "the other scope's only report is kept"
+    );
+    // The first kept report of the trimmed chain lost its previous snapshot:
+    // it is an initial baseline now, and the rest still compare in order.
+    assert!(matches!(
+        complete[1].comparison,
+        Some(lodeline_proxy_api::registry::Comparison::InitialBaseline {})
+    ));
+    for w in complete[1..].windows(2) {
+        match &w[1].comparison {
+            Some(lodeline_proxy_api::registry::Comparison::Compared {
+                previous_inventory_id,
+                ..
+            }) => assert_eq!(
+                Some(previous_inventory_id),
+                w[0].inventory_id.as_ref(),
+                "chain intact"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(f.store.latest_snapshot(&scope()).unwrap().is_some());
+}

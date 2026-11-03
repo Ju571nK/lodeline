@@ -353,6 +353,7 @@ enum Cmd {
     PendingGaps(Reply<Result<Vec<GapReport>, SpoolError>>),
     HandedOff(Vec<String>, Reply<Result<(), SpoolError>>),
     RegistryConflict(String, Reply<Result<Vec<String>, SpoolError>>),
+    OldestHeld(Reply<Result<Option<i64>, SpoolError>>),
     Shutdown,
 }
 
@@ -658,6 +659,14 @@ impl Spool {
             .unwrap_or(Err(SpoolError::Unavailable))
     }
 
+    /// Lowest sequence of any row still held (an event of any state, or a
+    /// quarantine row), `None` when the spool holds none. Registry entry
+    /// retention waits for it (`registry_store::EntryRetention`). Blocking.
+    pub fn oldest_held_sequence(&self) -> Result<Option<i64>, SpoolError> {
+        self.call(Cmd::OldestHeld)
+            .unwrap_or(Err(SpoolError::Unavailable))
+    }
+
     /// Test knob: make every append fail as a storage error (ENOSPC-like).
     #[cfg(any(test, feature = "test-util"))]
     pub fn inject_storage_failure(&self, on: bool) {
@@ -952,6 +961,11 @@ const DUE_ACKED: &str = "SELECT sequence, event_id FROM events \
 const OLDEST_UNSENT: &str = "SELECT created_at FROM events INDEXED BY idx_unsent \
      WHERE state = 0 ORDER BY sequence LIMIT 1";
 
+/// Lowest sequence of any event row (any state) or quarantine row. Both are the
+/// rowid, so each `min` is one index lookup.
+const OLDEST_HELD: &str = "SELECT min(s) FROM \
+     (SELECT min(sequence) AS s FROM events UNION ALL SELECT min(sequence) FROM quarantine)";
+
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE seq (id INTEGER PRIMARY KEY CHECK (id = 1), last INTEGER NOT NULL);
@@ -1192,6 +1206,11 @@ impl Writer {
                 Cmd::PendingGaps(r) => r.send(self.pending_gaps()),
                 Cmd::HandedOff(ids, r) => r.send(self.handed_off(&ids)),
                 Cmd::RegistryConflict(r_, r) => r.send(self.registry_conflict(&r_)),
+                Cmd::OldestHeld(r) => r.send(
+                    self.conn
+                        .query_row(OLDEST_HELD, [], |r| r.get(0))
+                        .map_err(|e| SpoolError::Storage(code_name(&e))),
+                ),
                 Cmd::Shutdown => return,
             }
         }
