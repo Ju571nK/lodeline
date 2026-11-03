@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 
 /// The hook groups of every `*.json` in `dir`, merged per event in file-name
 /// order, so a host-wide reason such as `NoSandbox` is counted once.
-fn hooks_in_dir(dir: &Path) -> Result<Value, AssessError> {
+/// A file that does not parse is skipped with a warning, as Cursor's
+/// `hooks.json` is, so it does not hide the other files and the MCP servers.
+fn hooks_in_dir(dir: &Path) -> Value {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
@@ -33,8 +35,13 @@ fn hooks_in_dir(dir: &Path) -> Result<Value, AssessError> {
     files.sort();
     let mut events: Map<String, Value> = Map::new();
     for file in files {
-        let Some(val) = super::read_json_optional(&file)? else {
-            continue;
+        let val = match super::read_json_optional(&file) {
+            Ok(Some(val)) => val,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(path = %file.display(), %error, "grok hook file skipped");
+                continue;
+            }
         };
         let Some(hooks) = val.get("hooks").and_then(Value::as_object) else {
             continue;
@@ -51,7 +58,7 @@ fn hooks_in_dir(dir: &Path) -> Result<Value, AssessError> {
             }
         }
     }
-    Ok(serde_json::json!({ "hooks": events }))
+    serde_json::json!({ "hooks": events })
 }
 
 fn read_config(path: &Path) -> Result<Option<toml::Value>, AssessError> {
@@ -92,7 +99,7 @@ fn emit_mcp_reasons(config: &toml::Value, out: &mut Vec<AiGuardReason>) {
 /// does not load.
 fn assess_dir(grok: &Path, config_hooks: bool) -> Result<Vec<AiGuardReason>, AssessError> {
     let mut out = Vec::new();
-    super::claude_code::emit_hook_reasons(&hooks_in_dir(&grok.join("hooks"))?, &mut out)?;
+    super::claude_code::emit_hook_reasons(&hooks_in_dir(&grok.join("hooks")), &mut out)?;
     if let Some(config) = read_config(&grok.join("config.toml"))? {
         if config_hooks {
             super::codex::emit_hook_reasons(&config, |_, _, _| true, &mut out);
@@ -171,6 +178,23 @@ mod tests {
     const HOOK_FILE: &str = r#"{"hooks": {"PreToolUse": [
         {"matcher": "Bash", "hooks": [{"type": "command", "command": "rm -rf /tmp/a"}]}
     ]}}"#;
+
+    #[test]
+    fn a_bad_hook_file_does_not_hide_the_others_or_the_mcp_servers() {
+        let home = tempdir().unwrap();
+        let grok = home.path().join(".grok");
+        write(&grok.join("hooks").join("a.json"), "{ not json");
+        write(&grok.join("hooks").join("b.json"), HOOK_FILE);
+        write(
+            &grok.join("config.toml"),
+            "[mcp_servers.local]\ncommand = \"node\"\n",
+        );
+        let out = GrokParser.assess(home.path()).unwrap();
+        assert_eq!(destructive(&out), ["rm -rf /tmp/a"], "{out:?}");
+        assert!(out
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::McpServerLocalCommand { .. })));
+    }
 
     #[test]
     fn missing_grok_dir_is_clean() {
