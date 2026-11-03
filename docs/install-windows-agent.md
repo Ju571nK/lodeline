@@ -75,6 +75,10 @@ these Windows-specific default locations:
 | hook IPC | named pipes `\\.\pipe\lodeline-hook` (capture) and `\\.\pipe\lodeline-hook-decide` (enforce) |
 | keystore | `%LOCALAPPDATA%\Lodeline\policy-signing-pubkeys.pem` |
 
+For now, a hook that runs as a different Windows user than the agent, for
+example when the agent runs as a service, may be unable to write to
+`\\.\pipe\lodeline-hook`.
+
 Override any of them on the command line:
 
 ```powershell

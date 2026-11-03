@@ -12,7 +12,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - On Windows, `lodeline-hook` in its default capture mode now sends hook events to the
   agent. Before, it recorded nothing on Windows, and drift reports from
   `lodeline-hook verify` were not delivered either. The agent listens on a named pipe for
-  them and refuses to start the hook pipe if another process already uses the name. (#445)
+  them. If another process already uses the pipe name, the agent does not open the hook
+  pipe and keeps running. (#445)
 
 ## [0.12.4] - 2026-11-03
 
