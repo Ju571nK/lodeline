@@ -83,16 +83,17 @@ pub struct PersistEvent<'a> {
 }
 
 /// Append the given events for `host_id` to today's JSONL segment, skipping
-/// any whose `sequence` is `<= high_water.get(host_id)`. Returns how many
-/// were actually written. Updates `high_water` in memory but does NOT
-/// persist it — the caller does that once per batch.
-pub fn append_events(
+/// any whose `sequence` is `<= high_water.get(host_id)`. Returns the events
+/// actually written, the same set a boot rebuild of the JSONL will see.
+/// Updates `high_water` in memory but does NOT persist it — the caller does
+/// that once per batch.
+pub fn append_events<'e, 'p>(
     events_out_dir: &Path,
     host_id: &str,
-    events: &[PersistEvent<'_>],
+    events: &'e [PersistEvent<'p>],
     high_water: &mut HighWater,
     now: OffsetDateTime,
-) -> Result<usize, PersistError> {
+) -> Result<Vec<&'e PersistEvent<'p>>, PersistError> {
     let host_dir = events_out_dir.join(host_id);
     std::fs::create_dir_all(&host_dir).map_err(|source| PersistError::Io {
         path: host_dir.clone(),
@@ -109,7 +110,7 @@ pub fn append_events(
     let cur = high_water.get(host_id);
     let to_write: Vec<&PersistEvent<'_>> = events.iter().filter(|e| e.sequence > cur).collect();
     if to_write.is_empty() {
-        return Ok(0);
+        return Ok(to_write);
     }
 
     let mut f = std::fs::OpenOptions::new()
@@ -137,7 +138,7 @@ pub fn append_events(
         source,
     })?;
     high_water.set(host_id, max_seq);
-    Ok(to_write.len())
+    Ok(to_write)
 }
 
 #[cfg(test)]
@@ -164,12 +165,16 @@ mod tests {
                 payload: &p2,
             },
         ];
-        let n = append_events(dir.path(), "h1", &evs, &mut hw, now).unwrap();
+        let n = append_events(dir.path(), "h1", &evs, &mut hw, now)
+            .unwrap()
+            .len();
         assert_eq!(n, 2);
         assert_eq!(hw.get("h1"), 2);
 
         // Resend the same batch — nothing new written.
-        let n = append_events(dir.path(), "h1", &evs, &mut hw, now).unwrap();
+        let n = append_events(dir.path(), "h1", &evs, &mut hw, now)
+            .unwrap()
+            .len();
         assert_eq!(n, 0);
 
         // Partial overlap: seq 2 (dup) + seq 3 (new) → 1 written.
@@ -184,7 +189,9 @@ mod tests {
                 payload: &p3,
             },
         ];
-        let n = append_events(dir.path(), "h1", &evs2, &mut hw, now).unwrap();
+        let n = append_events(dir.path(), "h1", &evs2, &mut hw, now)
+            .unwrap()
+            .len();
         assert_eq!(n, 1);
         assert_eq!(hw.get("h1"), 3);
 
