@@ -47,6 +47,7 @@ pub fn request_verdict(
 ) -> Option<HookVerdict> {
     use lodeline_core::hook_proto::HookDecisionResponse;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::sync::mpsc;
 
     let pipe = pipe.to_path_buf();
@@ -57,10 +58,10 @@ pub fn request_verdict(
     std::thread::spawn(move || {
         let verdict = (|| -> Option<HookVerdict> {
             // A tokio `ServerOptions` pipe is a duplex byte stream; opening it
-            // read+write connects this process as the client.
+            // read+write connects this process as the client. The agent's pipe
+            // grants other users only this mask, not GENERIC_WRITE.
             let mut f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
+                .access_mode(lodeline_core::hook_proto::PIPE_CLIENT_ACCESS)
                 .open(&pipe)
                 .ok()?;
             f.write_all(line.as_bytes()).ok()?;
