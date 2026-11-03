@@ -31,13 +31,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   so those findings were duplicates. A home folder that is a repository is handled the
   same way. The project's `AGENTS.md` is still scanned. (#427)
 
-- On Windows, `lodeline-hook install` now writes a hook command the agent can run. It
-  used to write the path with a `\\?\` prefix, which the agent's shell could not run, and
-  it did not quote a path with a space. Claude Code and Cursor get forward slashes. Codex
-  gets backslashes. This matches how each agent runs hooks on Windows. Reinstalling over
-  an existing entry replaces it. One known limit is that an install path with a space
-  still does not run under PowerShell, which Claude Code uses when Git Bash is not
-  installed, and Cursor. If you installed hooks on Windows, rerun
+- On Windows, `lodeline-hook install` now writes a hook command that Claude Code and
+  Codex can run. It used to write a `\\?\C:\...` path with backslashes. Claude Code runs
+  hooks in Git Bash, which drops the backslashes, so the command failed and the hook did
+  nothing. The path now uses forward slashes for every agent. A path with a space is
+  quoted. That runs under Git Bash, but not under PowerShell, which Codex uses on
+  Windows, as does Claude Code without Git Bash. Install prints a warning in that case.
+  Keep `lodeline-hook.exe` in a folder whose path has no spaces. Reinstalling over an
+  existing entry replaces it. If you installed hooks on Windows, rerun
   `lodeline-hook install --write` for each agent after you upgrade. (#428)
 
 - On a host where the agent runs as root, a user-global rule pack now reads each user's

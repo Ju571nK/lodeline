@@ -57,6 +57,12 @@ mod tests {
         assert!(is_own_hook_command(
             r#""C:/Program Files/Lodeline/lodeline-hook.exe" claude-code --capture redacted"#
         ));
+        assert!(is_own_hook_command(
+            r"\\?\C:\bin\lodeline-hook.exe claude-code --capture redacted"
+        ));
+        assert!(is_own_hook_command(
+            "C:/bin/lodeline-hook.exe codex --capture redacted"
+        ));
         assert!(!is_own_hook_command("/usr/bin/sigil-hook"));
         assert!(!is_own_hook_command("/tmp/evil.sh --capture raw"));
         assert!(!is_own_hook_command("sh -c 'sigil-hook --capture raw'"));

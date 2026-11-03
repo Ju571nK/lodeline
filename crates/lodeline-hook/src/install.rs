@@ -56,22 +56,19 @@ fn command_string_enforce(exe: &str, agent: &str, capture: &str, on_failure: &st
     format!("{exe} {agent} --enforce --on-failure {on_failure} --capture {capture}")
 }
 
-/// The binary path as written into a hook command for `agent`'s shell.
+/// The binary path as written into a hook command.
 ///
-/// On Windows, Claude Code runs the command in Git Bash (PowerShell without it)
-/// and Cursor in PowerShell, where `\` is an escape or fine respectively, so we
-/// write `/`. Codex runs it through `cmd.exe /C`, which can read an unquoted `/`
-/// as a switch, so it keeps `\`. A path with whitespace is double-quoted, the
-/// form Codex's own cmd test uses and Git Bash accepts.
-/// shortcut: a quoted path does not start a program in PowerShell (it needs
-/// `&`), so a spaced install path fails under Claude Code without Git Bash and
-/// under Cursor; upgrade to Claude Code's exec form (`args`) if that matters.
-pub(crate) fn hook_exe(path: &str, windows: bool, agent: &str) -> String {
-    let p = if windows && agent != "codex" {
+/// On Windows, `/` is the one separator that runs under Git Bash (Claude Code),
+/// PowerShell (Codex) and `cmd /C`; Git Bash drops an unquoted `\`.
+pub(crate) fn hook_exe(path: &str, windows: bool) -> String {
+    let p = if windows {
         path.replace('\\', "/")
     } else {
         path.to_string()
     };
+    // Quoted runs under Git Bash and cmd but not PowerShell, which needs `& "..."`
+    // that the other two reject; no Windows API crate here for an 8.3 short path,
+    // and release zips unpack anywhere, so install warns instead (see main.rs).
     if p.contains(char::is_whitespace) {
         format!("\"{p}\"")
     } else {
@@ -661,27 +658,57 @@ mod tests {
         r"\\?\C:\Users\테스터\x\lodeline-hook.exe claude-code --capture redacted";
 
     #[test]
-    fn hook_exe_per_platform_and_shell() {
+    fn hook_exe_per_platform() {
         assert_eq!(
-            hook_exe("/usr/local/bin/lodeline-hook", false, "claude-code"),
+            hook_exe("/usr/local/bin/lodeline-hook", false),
             "/usr/local/bin/lodeline-hook"
         );
         assert_eq!(
-            hook_exe("/Users/a b/lodeline-hook", false, "codex"),
+            hook_exe("/Users/a b/lodeline-hook", false),
             r#""/Users/a b/lodeline-hook""#
         );
-        let win = r"C:\Users\테스터\lodeline-test\x\lodeline-hook.exe";
         assert_eq!(
-            hook_exe(win, true, "claude-code"),
+            hook_exe(r"C:\Users\테스터\lodeline-test\x\lodeline-hook.exe", true),
             "C:/Users/테스터/lodeline-test/x/lodeline-hook.exe"
         );
-        assert_eq!(hook_exe(win, true, "codex"), win);
-        let spaced = r"C:\Program Files\Lodeline 한글\lodeline-hook.exe";
         assert_eq!(
-            hook_exe(spaced, true, "cursor"),
+            hook_exe(r"C:\Program Files\Lodeline 한글\lodeline-hook.exe", true),
             r#""C:/Program Files/Lodeline 한글/lodeline-hook.exe""#
         );
-        assert_eq!(hook_exe(spaced, true, "codex"), format!("\"{spaced}\""));
+    }
+
+    #[test]
+    fn windows_commands_use_forward_slashes_for_every_agent() {
+        let exe = hook_exe(r"C:\Users\테스터\x\lodeline-hook.exe", true);
+        for agent in ["claude-code", "codex"] {
+            let mut v = json!({});
+            assert!(merge_into(&mut v, &exe, agent, "redacted"));
+            assert_eq!(
+                pretooluse_commands(&v),
+                [format!(
+                    "C:/Users/테스터/x/lodeline-hook.exe {agent} --capture redacted"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn codex_upgrade_replaces_old_backslash_registration() {
+        let exe = hook_exe(r"C:\Users\테스터\x\lodeline-hook.exe", true);
+        for old in [
+            r"C:\Users\테스터\x\lodeline-hook.exe codex --capture redacted",
+            r"\\?\C:\Users\테스터\x\lodeline-hook.exe codex --capture redacted",
+        ] {
+            let mut v = json!({"hooks":{"PreToolUse":[
+                {"matcher":"*","hooks":[{"type":"command","command":old}]}
+            ]}});
+            assert_eq!(count_lodeline_entries(&v, &exe, "codex"), 1, "{old}");
+            assert!(merge_into(&mut v, &exe, "codex", "redacted"));
+            assert_eq!(
+                pretooluse_commands(&v),
+                ["C:/Users/테스터/x/lodeline-hook.exe codex --capture redacted"]
+            );
+        }
     }
 
     #[test]
@@ -741,14 +768,14 @@ mod tests {
     #[test]
     fn upgrade_replaces_old_unquoted_path_with_spaces() {
         let old = r"C:\Program Files\Lodeline\lodeline-hook.exe codex --capture redacted";
-        let exe = r#""C:\Program Files\Lodeline\lodeline-hook.exe""#;
+        let exe = r#""C:/Program Files/Lodeline/lodeline-hook.exe""#;
         let mut v = json!({"hooks":{"PreToolUse":[
             {"matcher":"*","hooks":[{"type":"command","command":old}]}
         ]}});
         assert!(merge_into(&mut v, exe, "codex", "redacted"));
         assert_eq!(
             pretooluse_commands(&v),
-            [r#""C:\Program Files\Lodeline\lodeline-hook.exe" codex --capture redacted"#]
+            [r#""C:/Program Files/Lodeline/lodeline-hook.exe" codex --capture redacted"#]
         );
     }
 
