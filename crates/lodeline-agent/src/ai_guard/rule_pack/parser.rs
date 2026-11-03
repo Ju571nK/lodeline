@@ -60,6 +60,10 @@ impl RulePackParser {
 
     /// UserGlobal: expand the raw path with `~` / `$HOME` as the assessed
     /// `home` (#333). Project: join the raw (relative) path under repo_root.
+    // shortcut: other variables (`%APPDATA%`, `$XDG_CONFIG_HOME`) still come from
+    // the agent's env, so another user's reading would read the agent's file.
+    // Harmless while only Unix fans out and its packs use `~`; derive them per
+    // home before Windows fans out to users (#333).
     fn resolve(&self, raw: &str, home: &Path) -> Option<PathBuf> {
         use lodeline_core::policy::expand::{expand, EnvLookup, PerUserLookup};
         match &self.repo_root {
