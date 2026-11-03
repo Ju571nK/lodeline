@@ -17,6 +17,7 @@ pub type SharedEvaluator = std::sync::Arc<parking_lot::RwLock<std::sync::Arc<Den
 pub struct DenyEvaluator {
     rules: Vec<CompiledRule>,
     needs_norm: bool,
+    needs_match_form: bool,
 }
 
 struct CompiledRule {
@@ -27,7 +28,10 @@ struct CompiledRule {
 enum CompiledMatch {
     Bash(FieldMatch),
     BashIndirection(FieldMatch),
-    FileEdit(FieldMatch),
+    FileEdit {
+        in_match_form: FieldMatch,
+        as_written: Option<FieldMatch>,
+    },
     McpCall {
         server: FieldMatch,
         tool: FieldMatch,
@@ -78,9 +82,15 @@ impl DenyEvaluator {
                 HookActionMatch::BashIndirection { indirection } => {
                     CompiledMatch::BashIndirection(FieldMatch::compile(indirection)?)
                 }
-                HookActionMatch::FileEdit { path } => {
-                    CompiledMatch::FileEdit(FieldMatch::compile(&path_matcher_in_match_form(path))?)
-                }
+                HookActionMatch::FileEdit { path } => CompiledMatch::FileEdit {
+                    in_match_form: FieldMatch::compile(&path_matcher_in_match_form(path))?,
+                    as_written: match path {
+                        Matcher::Regex { .. } if cfg!(target_os = "macos") => {
+                            Some(FieldMatch::compile(path)?)
+                        }
+                        _ => None,
+                    },
+                },
                 HookActionMatch::McpCall { server, tool } => CompiledMatch::McpCall {
                     server: FieldMatch::compile(server)?,
                     tool: FieldMatch::compile(tool)?,
@@ -96,9 +106,15 @@ impl DenyEvaluator {
             });
         }
         let needs_norm = Self::needs_normalization(&out);
+        // Off macOS `match_form` is the identity, so the action is used as sent.
+        let needs_match_form = cfg!(target_os = "macos")
+            && out
+                .iter()
+                .any(|r| matches!(r.matcher, CompiledMatch::FileEdit { .. }));
         Ok(DenyEvaluator {
             rules: out,
             needs_norm,
+            needs_match_form,
         })
     }
 
@@ -131,26 +147,24 @@ impl DenyEvaluator {
             } if self.needs_norm => Some(shell_norm::normalize(preview)),
             _ => None,
         };
-        let edit;
-        let action = match action {
+        let edit = match action {
             HookAction::FileEdit {
                 path_hash,
                 path_preview,
                 edit_hash,
                 paths,
-            } => {
-                edit = HookAction::FileEdit {
-                    path_hash: path_hash.clone(),
-                    path_preview: path_preview.as_deref().map(match_form),
-                    edit_hash: edit_hash.clone(),
-                    paths: paths.iter().map(|p| match_form(p)).collect(),
-                };
-                &edit
-            }
-            _ => action,
+            } if self.needs_match_form => Some(HookAction::FileEdit {
+                path_hash: path_hash.clone(),
+                path_preview: path_preview.as_deref().map(match_form),
+                edit_hash: edit_hash.clone(),
+                paths: paths.iter().map(|p| match_form(p)).collect(),
+            }),
+            _ => None,
         };
+        let in_match_form = edit.as_ref().unwrap_or(action);
         for r in &self.rules {
-            if let Some(via) = rule_matches(&r.matcher, action, normalized.as_ref()) {
+            if let Some(via) = rule_matches(&r.matcher, action, in_match_form, normalized.as_ref())
+            {
                 return Some((r.id.clone(), format!("matched deny rule {}{}", r.id, via)));
             }
         }
@@ -186,10 +200,9 @@ fn match_form(s: &str) -> String {
         .into_owned()
 }
 
-/// A file-edit path matcher with its text in [`match_form`]. A regex is
-/// normalized as text: right for literal Unicode, but an escape such as
-/// `\u{301}` stays as written, and a literal combining mark composes with the
-/// character before it even inside `[...]`.
+/// A file-edit path matcher with its text in [`match_form`], tested against
+/// paths in that form. A Regex rule also runs as written on the paths as sent,
+/// so it still matches everything it matched before #388.
 fn path_matcher_in_match_form(m: &Matcher) -> Matcher {
     match m {
         Matcher::Exists => Matcher::Exists,
@@ -211,9 +224,24 @@ fn via_suffix(text: &str) -> String {
     format!(" ({text})")
 }
 
+/// Does `f` hold for any target path? Falls back to the preview when a hook
+/// older than the `paths` field sent none.
+fn file_edit_holds(f: &FieldMatch, action: &HookAction) -> bool {
+    match action {
+        HookAction::FileEdit {
+            path_preview,
+            paths,
+            ..
+        } if paths.is_empty() => f.holds(path_preview.as_deref()),
+        HookAction::FileEdit { paths, .. } => paths.iter().any(|p| f.holds(Some(p.as_str()))),
+        _ => false,
+    }
+}
+
 fn rule_matches(
     m: &CompiledMatch,
     action: &HookAction,
+    in_match_form: &HookAction,
     normalized: Option<&NormalizedCommand>,
 ) -> Option<String> {
     let hit = |b: bool| if b { Some(String::new()) } else { None };
@@ -251,16 +279,15 @@ fn rule_matches(
                 .map(|ind| via_suffix(ind.as_str()))
         }
         (
-            CompiledMatch::FileEdit(f),
-            HookAction::FileEdit {
-                path_preview,
-                paths,
-                ..
+            CompiledMatch::FileEdit {
+                in_match_form: f,
+                as_written,
             },
-        ) if paths.is_empty() => hit(f.holds(path_preview.as_deref())),
-        (CompiledMatch::FileEdit(f), HookAction::FileEdit { paths, .. }) => {
-            hit(paths.iter().any(|p| f.holds(Some(p.as_str()))))
-        }
+            HookAction::FileEdit { .. },
+        ) => hit(file_edit_holds(f, in_match_form)
+            || as_written
+                .as_ref()
+                .is_some_and(|raw| file_edit_holds(raw, action))),
         // server/tool/label are non-optional in HookAction; wrap in Some to satisfy holds().
         (
             CompiledMatch::McpCall { server, tool },
@@ -830,6 +857,21 @@ mod tests {
             assert!(deny_path(other)
                 .evaluate(&file_edit(path, &[path]))
                 .is_none());
+        }
+    }
+
+    /// A deny rule that matched a path before #388 must still match it.
+    #[test]
+    fn regex_rule_written_for_nfd_still_matches_the_nfd_path() {
+        for pattern in [r"cafe\x{301}/", r"cafe\p{M}/"] {
+            let ev = deny_path(Matcher::Regex {
+                pattern: pattern.into(),
+            });
+            assert!(ev.evaluate(&file_edit(NFD, &[NFD])).is_some(), "{pattern}");
+            assert!(
+                ev.evaluate(&file_edit(NFD, &[])).is_some(),
+                "preview: {pattern}"
+            );
         }
     }
 
