@@ -7,6 +7,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-11-03
+
 ### Fixed
 
 - On Windows, `lodeline-hook` in its default capture mode now sends hook events to the
