@@ -7,6 +7,15 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Fixed
+
+- `lodeline-server` no longer counts a resent batch again in the fleet index. When the
+  sender sent a batch that the server had already stored, the server wrote nothing but
+  still added the batch to the 24h counts, such as `open_event_counts_24h` and
+  `open_alert_count_24h`. The counts then went down after a restart. The fleet index now
+  takes only the events the server writes, so live counts match the counts after a
+  restart. The response to the sender does not change. (#441)
+
 ## [0.12.5] - 2026-11-03
 
 ### Fixed

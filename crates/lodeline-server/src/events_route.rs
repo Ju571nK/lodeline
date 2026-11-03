@@ -142,42 +142,43 @@ pub async fn post_events(
     }
 
     let received = OffsetDateTime::now_utc();
-    {
+    let written = {
         let mut hw = match state.high_water.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(), // poisoned: recover, this is a reference server
         };
-        if let Err(e) = append_events(
+        let written = match append_events(
             &state.events_out_dir,
             &req.envelope.host_id,
             &to_persist,
             &mut hw,
             received,
         ) {
-            tracing::error!(error = ?e, host_id = %req.envelope.host_id, "persist failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "persist_failed"})),
-            )
-                .into_response();
-        }
+            Ok(written) => written,
+            Err(e) => {
+                tracing::error!(error = ?e, host_id = %req.envelope.host_id, "persist failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "persist_failed"})),
+                )
+                    .into_response();
+            }
+        };
         if let Err(e) = hw.store(&state.high_water_path) {
             tracing::warn!(error = ?e, "high_water store failed (non-fatal)");
         }
-    }
+        written
+    };
 
-    // Phase 3b.4 — update in-memory fleet index for each accepted event.
+    // Phase 3b.4 — update in-memory fleet index for each event just written,
+    // so live ingest and boot rebuild count the same stored events (#441).
     // Best-effort: a parse failure here should not roll back the persist,
     // since the JSONL is the source of truth.
-    for entry in &req.events {
-        // Skip rejected entries by id lookup.
-        if !accepted.iter().any(|id| id == &entry.event_id) {
-            continue;
-        }
-        match serde_json::from_value::<lodeline_core::event::Event>(entry.payload.clone()) {
+    for e in written {
+        match serde_json::from_value::<lodeline_core::event::Event>(e.payload.clone()) {
             Ok(event) => state.fleet_index.apply_event(&event, received),
-            Err(e) => {
-                tracing::warn!(error = ?e, event_id = %entry.event_id, "fleet_index apply skipped")
+            Err(err) => {
+                tracing::warn!(error = ?err, sequence = e.sequence, "fleet_index apply skipped")
             }
         }
     }

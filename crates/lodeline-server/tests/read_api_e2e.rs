@@ -138,6 +138,66 @@ async fn controls_survive_ingest_replay_and_scope_replacement() {
 }
 
 #[tokio::test]
+async fn resent_events_count_once_live_and_after_rebuild() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_token(dir.path(), "tok");
+    let app = build_router(state.clone());
+    let host = uuid::Uuid::now_v7().to_string();
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let entries: Vec<serde_json::Value> = (1..=3u64)
+        .map(|seq| {
+            let id = uuid::Uuid::now_v7();
+            json!({"event_id":id, "sequence":seq, "payload":{
+                "schema_version":1, "event_id":id, "ts":ts,
+                "host_id":host, "agent_version":"fixture", "severity":"warn",
+                "source":{"kind":"agent"}, "subject":{"kind":"self"},
+                "evidence":{"kind":"ai_guard_risk_assessed", "tool":"codex",
+                    "scope":{"kind":"user_global"}, "score":0.0, "bucket":"low",
+                    "reasons":[], "is_reattestation":false}
+            }})
+        })
+        .collect();
+    // First send, an exact resend, then a batch that overlaps by one.
+    for batch in [&entries[0..2], &entries[0..2], &entries[1..3]] {
+        let body = json!({"envelope":{"host_id":host,"schema_version":1}, "events":batch});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ack: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ack["accepted"].as_array().unwrap().len(), 2, "{ack}");
+    }
+    let path = format!("/v1/fleet/hosts/{host}");
+    let (_, live) = get(&app, &path, Some("tok")).await;
+    state
+        .fleet_index
+        .replace(lodeline_server::boot_rebuild::rebuild_from_jsonl(dir.path()).unwrap());
+    let (_, rebuilt) = get(&app, &path, Some("tok")).await;
+    assert_eq!(rebuilt["open_event_counts_24h"]["warn"], 3, "{rebuilt}");
+    assert_eq!(
+        live["open_event_counts_24h"], rebuilt["open_event_counts_24h"],
+        "live index must match a rebuild of the same stored events"
+    );
+}
+
+#[tokio::test]
 async fn meta_returns_alerts_default() {
     let dir = tempfile::tempdir().unwrap();
     let app = build_router(state_with_token(dir.path(), "tok"));
