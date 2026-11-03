@@ -427,11 +427,15 @@ pub fn settings_path(agent: &str) -> Option<PathBuf> {
     let p = match agent {
         "claude-code" => home.join(".claude/settings.json"),
         // Codex reads `CODEX_HOME` with `env::var`, so an empty or non-UTF-8
-        // value means `~/.codex` (`find_codex_home`, rust-v0.166.0).
+        // value means `~/.codex` (`find_codex_home`, rust-v0.166.0). Codex
+        // canonicalizes a relative value, so the baseline must store it absolute.
         "codex" => std::env::var("CODEX_HOME")
             .ok()
             .filter(|v| !v.is_empty())
-            .map_or_else(|| home.join(".codex"), PathBuf::from)
+            .map_or_else(
+                || home.join(".codex"),
+                |v| std::path::absolute(&v).unwrap_or_else(|_| v.into()),
+            )
             .join("hooks.json"),
         "cursor" => home.join(".cursor/hooks.json"),
         // #208 — the SHARED hooks file, which agy's own `/hooks` TUI also
