@@ -183,8 +183,11 @@ fn project_parsers_for_dir(dir: &Path) -> Vec<Arc<dyn AiGuardParser>> {
     if has(".codex/config.toml") || has("AGENTS.md") {
         out.push(Arc::new(CodexProjectParser { repo_root: root() }));
     }
-    // Cursor: .cursor/mcp.json | .cursorrules | .cursor/rules/ (directory)
-    if has(".cursor/mcp.json") || has(".cursorrules") || dir.join(".cursor").join("rules").is_dir()
+    // Cursor: .cursor/mcp.json | .cursor/hooks.json | .cursorrules | .cursor/rules/ (directory)
+    if has(".cursor/mcp.json")
+        || has(".cursor/hooks.json")
+        || has(".cursorrules")
+        || dir.join(".cursor").join("rules").is_dir()
     {
         out.push(Arc::new(CursorProjectParser { repo_root: root() }));
     }

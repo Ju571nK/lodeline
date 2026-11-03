@@ -95,12 +95,14 @@ pub fn discover_codex_repos(roots: &[String]) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
-/// #146 — Cursor repos by `.cursor/mcp.json` OR `.cursorrules` (files) OR a
-/// `.cursor/rules` directory. Union, deduped by canonical path.
+/// #146 — Cursor repos by `.cursor/mcp.json`, `.cursor/hooks.json` (#203) OR
+/// `.cursorrules` (files) OR a `.cursor/rules` directory. Union, deduped by
+/// canonical path.
 pub fn discover_cursor_repos(roots: &[String]) -> Vec<PathBuf> {
     let mut set: std::collections::BTreeSet<PathBuf> = discover_per_repo(roots, ".cursor/mcp.json")
         .into_iter()
         .collect();
+    set.extend(discover_per_repo(roots, ".cursor/hooks.json"));
     set.extend(discover_per_repo(roots, ".cursorrules"));
     set.extend(discover_per_repo_dir(roots, ".cursor/rules"));
     set.into_iter().collect()
@@ -313,10 +315,14 @@ mod tests {
         std::fs::write(r1.join(".cursorrules"), "x").unwrap();
         let r2 = root.path().join("b");
         std::fs::create_dir_all(r2.join(".cursor").join("rules")).unwrap();
+        let r3 = root.path().join("c");
+        std::fs::create_dir_all(r3.join(".cursor")).unwrap();
+        std::fs::write(r3.join(".cursor").join("hooks.json"), "{}").unwrap();
         let roots = vec![root.path().to_string_lossy().to_string()];
         let found = discover_cursor_repos(&roots);
         assert!(found.contains(&dunce::canonicalize(&r1).unwrap()));
         assert!(found.contains(&dunce::canonicalize(&r2).unwrap()));
+        assert!(found.contains(&dunce::canonicalize(&r3).unwrap()));
     }
 
     #[test]
