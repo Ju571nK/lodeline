@@ -129,9 +129,11 @@ pub fn expand_per_user(
         .collect()
 }
 
-struct PerUserLookup<'a, V: VarLookup> {
-    user_home: PathBuf,
-    inner: &'a V,
+/// Resolves `~`, `$HOME` and `%USERPROFILE%` to `user_home` and every other
+/// variable through `inner`.
+pub struct PerUserLookup<'a, V: VarLookup> {
+    pub user_home: PathBuf,
+    pub inner: &'a V,
 }
 
 impl<'a, V: VarLookup> VarLookup for PerUserLookup<'a, V> {
