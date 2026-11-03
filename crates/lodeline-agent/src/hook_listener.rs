@@ -1,4 +1,4 @@
-//! Hook IPC listener (`hook.sock`). One-way: the agent reads `HookEnvelope`
+//! Hook IPC listener (`hook.sock` on Unix, a named pipe on Windows). One-way: the agent reads `HookEnvelope`
 //! JSON lines from AI hook emitters (lodeline-hook) and converts them to
 //! `CommittableEvent` entries in the event sink. The emitter never reads a
 //! response — `hook.sock` is write-only from the client's perspective.
@@ -23,6 +23,7 @@ use lodeline_core::hook_proto::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Semaphore};
 
@@ -122,74 +123,87 @@ pub async fn serve_until(
         connections.spawn(async move {
             // Permit is held for the lifetime of this task.
             let _permit = permit;
-
-            let mut line = String::new();
-            // Limit bytes read to guard against a misbehaving / malicious sender
-            // filling memory. `take` wraps the raw stream; BufReader sits on top.
-            let mut rd = BufReader::new(stream.take(MAX_LINE));
-            if rd.read_line(&mut line).await.is_err() {
-                return;
-            }
-
-            let line = line.trim();
-            let kind = serde_json::from_str::<MsgTypeHeader>(line)
-                .ok()
-                .map(|h| h.msg_type);
-            let committable = match kind {
-                Some(HookMsgType::DriftReport) => {
-                    match serde_json::from_str::<HookDriftEnvelope>(line) {
-                        Ok(env) => CommittableEvent {
-                            event: to_drift_event(env, peer_uid, &host_id),
-                            new_hash: None,
-                            path_for_db: PathBuf::new(),
-                            target_id: String::new(),
-                        },
-                        Err(e) => {
-                            tracing::debug!(error = ?e, "hook: malformed drift report; dropping");
-                            return;
-                        }
-                    }
-                }
-                Some(HookMsgType::HookInvocation) | None => {
-                    // observe (hook_invocation), and legacy senders with no msg_type field — existing path, unchanged.
-                    let env: HookEnvelope = match serde_json::from_str(line) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            tracing::debug!(error = ?e, "hook: malformed envelope; dropping");
-                            return;
-                        }
-                    };
-                    // D6: record BEFORE try_send so a dropped-on-backpressure
-                    // observation never becomes false silence.
-                    crate::hook_silence::record_hook_event(
-                        &activity_map,
-                        env.payload.agent,
-                        peer_uid,
-                        time::OffsetDateTime::now_utc(),
-                    );
-                    CommittableEvent {
-                        event: to_event(env, peer_uid, &host_id),
-                        new_hash: None,
-                        path_for_db: PathBuf::new(),
-                        target_id: String::new(),
-                    }
-                }
-                Some(other) => {
-                    // DecisionRequest/DecisionResponse belong on hook-decide.sock, not here; any other type is unhandled on the observe socket.
-                    tracing::debug!(?other, "hook: unhandled msg_type on hook.sock; dropping");
-                    return;
-                }
-            };
-
-            // try_send: if the channel is full (sink backpressure) we drop rather
-            // than block. The listener must remain responsive to new connections.
-            if tx.try_send(committable).is_err() {
-                tracing::debug!("hook: event channel full; dropping hook event");
-            }
+            handle_hook_conn(stream, peer_uid, tx, host_id, activity_map).await;
         });
     }
     drop(listener);
     connections.drain().await
+}
+
+/// Transport-independent per-connection handler shared by the Unix-socket and
+/// Windows-named-pipe listeners: read one bounded envelope line, record hook
+/// activity, and queue the event. `peer_uid` is the caller's uid on Unix,
+/// `u32::MAX` where the transport carries no peer credential.
+async fn handle_hook_conn<S>(
+    stream: S,
+    peer_uid: u32,
+    tx: mpsc::Sender<CommittableEvent>,
+    host_id: String,
+    activity_map: crate::hook_silence::ActivityMap,
+) where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut line = String::new();
+    // Limit bytes read to guard against a misbehaving / malicious sender
+    // filling memory. `take` wraps the raw stream; BufReader sits on top.
+    let mut rd = BufReader::new(stream.take(MAX_LINE));
+    if rd.read_line(&mut line).await.is_err() {
+        return;
+    }
+
+    let line = line.trim();
+    let kind = serde_json::from_str::<MsgTypeHeader>(line)
+        .ok()
+        .map(|h| h.msg_type);
+    let committable = match kind {
+        Some(HookMsgType::DriftReport) => match serde_json::from_str::<HookDriftEnvelope>(line) {
+            Ok(env) => CommittableEvent {
+                event: to_drift_event(env, peer_uid, &host_id),
+                new_hash: None,
+                path_for_db: PathBuf::new(),
+                target_id: String::new(),
+            },
+            Err(e) => {
+                tracing::debug!(error = ?e, "hook: malformed drift report; dropping");
+                return;
+            }
+        },
+        Some(HookMsgType::HookInvocation) | None => {
+            // observe (hook_invocation), and legacy senders with no msg_type field — existing path, unchanged.
+            let env: HookEnvelope = match serde_json::from_str(line) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::debug!(error = ?e, "hook: malformed envelope; dropping");
+                    return;
+                }
+            };
+            // D6: record BEFORE try_send so a dropped-on-backpressure
+            // observation never becomes false silence.
+            crate::hook_silence::record_hook_event(
+                &activity_map,
+                env.payload.agent,
+                peer_uid,
+                time::OffsetDateTime::now_utc(),
+            );
+            CommittableEvent {
+                event: to_event(env, peer_uid, &host_id),
+                new_hash: None,
+                path_for_db: PathBuf::new(),
+                target_id: String::new(),
+            }
+        }
+        Some(other) => {
+            // DecisionRequest/DecisionResponse belong on hook-decide.sock, not here; any other type is unhandled on the observe socket.
+            tracing::debug!(?other, "hook: unhandled msg_type on hook.sock; dropping");
+            return;
+        }
+    };
+
+    // try_send: if the channel is full (sink backpressure) we drop rather
+    // than block. The listener must remain responsive to new connections.
+    if tx.try_send(committable).is_err() {
+        tracing::debug!("hook: event channel full; dropping hook event");
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -232,6 +246,51 @@ pub(crate) fn to_drift_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn handler_records_an_invocation_line_from_any_stream() {
+        use lodeline_core::event::AiTool;
+        use lodeline_core::hook_proto::{
+            CaptureLevel, CaptureStatus, HookAction, HookInvocation, HOOK_PROTOCOL_VERSION,
+        };
+        let env = HookEnvelope {
+            protocol_version: HOOK_PROTOCOL_VERSION,
+            msg_type: HookMsgType::HookInvocation,
+            request_id: uuid::Uuid::now_v7(),
+            sent_at_unix_ms: 0,
+            payload: HookInvocation {
+                agent: AiTool::ClaudeCode,
+                agent_session_id: None,
+                tool_use_id: None,
+                action: HookAction::Bash {
+                    command_hash: "ab".repeat(32),
+                    command_preview: Some("git status".into()),
+                },
+                capture_level: CaptureLevel::Redacted,
+                capture_status: CaptureStatus::Ok,
+                cwd: None,
+            },
+        };
+        let line = format!("{}\n", serde_json::to_string(&env).unwrap());
+        let (tx, mut rx) = mpsc::channel(4);
+        let map = crate::hook_silence::new_map();
+
+        handle_hook_conn(line.as_bytes(), 77, tx, "host-x".into(), map.clone()).await;
+
+        let ev = rx.try_recv().expect("one event queued").event;
+        assert_eq!(ev.host_id, "host-x");
+        match ev.evidence {
+            Evidence::HookInvocation(h) => {
+                assert_eq!(h.peer_uid, 77);
+                assert_eq!(h.action_kind, "bash");
+            }
+            other => panic!("expected HookInvocation, got {other:?}"),
+        }
+        assert!(
+            map.lock().contains_key(&(AiTool::ClaudeCode, 77)),
+            "silence tracking saw the hook"
+        );
+    }
 
     #[test]
     fn drift_report_becomes_hook_config_drift_event() {
