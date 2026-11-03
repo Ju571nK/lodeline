@@ -7,6 +7,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-11-03
+
 ### Fixed
 
 - `lodeline-hook install --write` from a new release folder now replaces the entry
