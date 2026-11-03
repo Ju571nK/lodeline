@@ -1397,10 +1397,27 @@ impl AiGuardParser for CodexProjectParser {
             self.repo_root.join("AGENTS.md"),
             // #200 — trusting or disabling a repo hook writes the user config.
             home_dir.join(".codex").join("config.toml"),
+            // An `approval_policy` there decides whether the project's reviewer is routed.
+            super::policy_controls::codex_system_dir().join("config.toml"),
         ]
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+        self.assess_layers(&super::policy_controls::codex_system_dir(), home_dir)
+    }
+
+    fn collect_external_script_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
+        CodexLayer::read_lenient(&self.repo_root.join(".codex")).external_script_paths()
+    }
+}
+
+impl CodexProjectParser {
+    fn assess_layers(
+        &self,
+        system_dir: &Path,
+        home_dir: &Path,
+    ) -> Result<Vec<AiGuardReason>, AssessError> {
+        let system = CodexLayer::read_lenient(system_dir);
         let both = [
             CodexLayer::read_lenient(&home_dir.join(".codex")),
             CodexLayer::read(&self.repo_root.join(".codex"))?,
@@ -1428,8 +1445,11 @@ impl AiGuardParser for CodexProjectParser {
             .and_then(|c| c.get("sandbox_workspace_write"));
         emit_workspace_write_reasons(&both, workspace_write, true, &mut out);
         if let Some(val) = &layer.config {
-            let user_policy = user.config.as_ref().and_then(|c| c.get("approval_policy"));
-            emit_approval_policy_reasons(val, user_policy, &mut out);
+            let inherited_policy = [&user.config, &system.config]
+                .into_iter()
+                .flatten()
+                .find_map(|c| c.get("approval_policy"));
+            emit_approval_policy_reasons(val, inherited_policy, &mut out);
             emit_shell_environment_reasons(val, &mut out);
         }
         layer.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
@@ -1455,10 +1475,6 @@ impl AiGuardParser for CodexProjectParser {
         // #146 — AGENTS.md is Codex's first-class instruction file.
         super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
         Ok(out)
-    }
-
-    fn collect_external_script_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
-        CodexLayer::read_lenient(&self.repo_root.join(".codex")).external_script_paths()
     }
 }
 
@@ -3771,6 +3787,20 @@ base_url = "https://llm.corp.example/v1"
         write_config(dir.path(), "approval_policy = \"never\"");
         let reasons = project.assess(dir.path()).unwrap();
         assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn project_auto_review_follows_the_system_approval_policy_under_the_user() {
+        let (dir, project) = project_with("approvals_reviewer = \"auto_review\"");
+        let system = dir.path().join("etc-codex");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(system.join("config.toml"), "approval_policy = \"never\"").unwrap();
+        let reasons = project.assess_layers(&system, dir.path()).unwrap();
+        assert!(reasons.is_empty(), "system never: {reasons:?}");
+
+        write_config(dir.path(), "approval_policy = \"on-request\"");
+        let reasons = project.assess_layers(&system, dir.path()).unwrap();
+        assert!(auto_review(&reasons), "user overrides system: {reasons:?}");
     }
 
     #[test]
