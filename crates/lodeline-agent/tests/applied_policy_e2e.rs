@@ -265,6 +265,33 @@ fn a_rule_pack_change_reloads_the_file_in_force() {
     rt.shutdown_timeout(STOP_DEADLINE);
 }
 
+#[test]
+fn deleting_a_bundle_in_the_second_it_was_applied_brings_back_the_local_file() {
+    let host = Host::new("version: 1\n");
+    std::fs::write(host.path("rule-packs.yaml"), policy("local-pack")).unwrap();
+    // A poll watcher compares mtimes in whole seconds, so it sees no change when the
+    // apply and the delete fall in the second of its last scan.
+    let into_second = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    std::thread::sleep(Duration::from_nanos(u64::from(1_000_000_000 - into_second)));
+    let rt = host.boot_layered().expect("boot");
+    assert!(host.denies("local-pack"));
+
+    assert_accepted(&host.apply_rule_packs(1, &policy("signed-pack")), 1);
+    wait_for(&host, "signed pack live", RELOAD_DEADLINE, |h| {
+        h.denies("signed-pack")
+    });
+    std::fs::remove_file(host.path("applied/rule-packs.yaml")).unwrap();
+
+    wait_for(&host, "local pack back in force", RELOAD_DEADLINE, |h| {
+        h.denies("local-pack")
+    });
+    assert!(!host.denies("signed-pack"));
+    rt.shutdown_timeout(STOP_DEADLINE);
+}
+
 fn a_bundle_goes_live_with_no_restart_on_a_host_with_no_policy_file(
     boot: fn(&Host) -> Result<Runtime, String>,
 ) {
