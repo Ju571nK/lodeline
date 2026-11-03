@@ -51,6 +51,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   the next report restates its baseline. Every dropped report, complete or incomplete, is
   counted in `registry.discarded_reports` in the proxy status. (#432)
 
+- The `lodeline scan` table now lines up when a scope path has non-ASCII characters,
+  such as a Korean user folder or an accented name. Column widths used to count bytes,
+  so the columns after such a path were out of line. The JSON output is unchanged.
+  (#434)
+
 - The agent now notices a rule-pack file that changed or was removed without a file-watcher
   event. With `--poll`, and on file systems where the watcher only sees whole-second times,
   a rule-pack file written and then deleted or edited within the same second could leave the
