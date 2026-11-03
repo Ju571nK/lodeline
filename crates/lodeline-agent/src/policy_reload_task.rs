@@ -450,7 +450,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             Cursor => new_cursor.iter().cloned().collect(),
             Antigravity => new_antigravity.iter().cloned().collect(),
             ClaudeDesktop => Vec::new(),
-            Grok => Vec::new(), // #203: no grok_workspaces policy key yet
+            Grok => Vec::new(), // #110: no Grok project parser/workspace yet
             Other => Vec::new(),
         }
     };
@@ -673,7 +673,7 @@ mod tests {
     use std::time::Duration;
 
     /// Verify the repos_for_tool closure (as defined in reload()) returns an
-    /// empty Vec for AiTool::Grok — no workspace policy key yet (#203).
+    /// empty Vec for AiTool::Grok — no project parser/workspace registered yet (#110).
     #[test]
     fn repos_for_tool_grok_is_empty() {
         // Mirror the closure shape from reload(): all empty BTreeSets.
@@ -688,7 +688,7 @@ mod tests {
                 Cursor => empty.iter().cloned().collect(),
                 Antigravity => empty.iter().cloned().collect(),
                 ClaudeDesktop => Vec::new(),
-                Grok => Vec::new(), // #203: no grok_workspaces policy key yet
+                Grok => Vec::new(), // #110: no Grok project parser/workspace yet
                 Other => Vec::new(),
             }
         };
