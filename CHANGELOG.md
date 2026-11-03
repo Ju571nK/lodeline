@@ -347,6 +347,14 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   SMB, NFS, or exFAT, opening the NFC form of an NFD name can fail, so the hash for such
   a file can fail. (#419)
 
+- On macOS, `lodeline-hook` file-edit deny rules now match a path whether the rule and
+  the tool call spell an accented name in composed (NFC) or decomposed (NFD) form. A
+  rule for a name such as `café` used to miss a tool call that spelled the same name the
+  other way. Regex rules written for the decomposed form keep matching. A `not_equals`
+  rule now treats two Unicode spellings of one name as the same path. A rule whose regex
+  would become invalid after normalization stays loaded as written. Other platforms
+  compare paths as before. (#423)
+
 - `lodeline-proxy` no longer restarts its quarantine allowance each time it restarts.
   After a run of server refusals it stops sending and quarantines at most one event per
   `max_backoff`, but it kept the count of that run in memory. Under the packaged
