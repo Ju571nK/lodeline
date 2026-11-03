@@ -3,7 +3,7 @@
 //! built map for swap-in to FleetIndex.
 
 use crate::fleet_index::HostSummary;
-use crate::fleet_index_update::apply_event;
+use crate::fleet_index_update::apply_event_received_between;
 use lodeline_core::event::Event;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -59,17 +59,22 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
     files.sort_by_key(|(_, name)| name.clone());
 
     for (path, name) in files {
-        // shortcut: JSONL keeps no per-line receive time, so replay caps an
-        // event's time at the end of its file's receive day (up to a day late);
-        // persist a receive time per line if that slack ever matters.
-        let received = name
+        // shortcut: JSONL keeps no per-line receive time, only the UTC receive
+        // day in the file name, so replay prunes by the day's start and ages by
+        // its end. A reading can then outlive 48h by up to two days until the
+        // host's next live reading, and by up to one day after it. Persist a
+        // receive time per line if that slack ever matters.
+        let day = name
             .get("received-".len()..)
             .and_then(|d| d.strip_suffix(".jsonl"))
             .and_then(|d| {
                 time::Date::parse(d, time::macros::format_description!("[year]-[month]-[day]")).ok()
-            })
-            .and_then(|d| d.next_day())
-            .map_or_else(OffsetDateTime::now_utc, |d| d.midnight().assume_utc());
+            });
+        // A name with no day bounds nothing, so its events prune nothing.
+        let (earliest, latest) = match day.and_then(|d| Some((d, d.next_day()?))) {
+            Some((d, next)) => (d.midnight().assume_utc(), next.midnight().assume_utc()),
+            None => (OffsetDateTime::UNIX_EPOCH, OffsetDateTime::now_utc()),
+        };
         let f = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
@@ -97,7 +102,7 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
                     let entry = out
                         .entry(event.host_id.clone())
                         .or_insert_with(|| HostSummary::new(event.host_id.clone()));
-                    apply_event(entry, &event, received);
+                    apply_event_received_between(entry, &event, earliest, latest);
                 }
                 Err(e) => {
                     tracing::warn!(?path, error = ?e, bytes = n, "skip corrupt jsonl line");

@@ -44,8 +44,10 @@ Two more facts shape the options:
 
 - The server persists the raw payload (`crates/lodeline-server/src/persist.rs:125`),
   so an accepted event keeps its unknown kind and unknown fields in the server
-  JSONL. The fleet index ignores `Evidence::Unknown`
-  (`crates/lodeline-server/src/fleet_index_update.rs:182`).
+  JSONL. The fleet index has no handling of its own for `Evidence::Unknown`
+  (`crates/lodeline-server/src/fleet_index_update.rs:194`). It still updates the
+  host's `agent_version`, `last_seen_ts` and 24h severity counts, as for every
+  event.
 - The SIEM runbook ingests the agent's own JSONL
   (`docs/runbook/siem-rules.md:8`), which no server ever filters. A SIEM on that
   path sees every new kind, field and reason as soon as the agent upgrades.
@@ -201,10 +203,15 @@ Server behavior:
 Compatibility:
 
 - **Older servers.** Every release since v0.3.0 accepts the event as
-  `Evidence::Unknown`, writes the raw event to its JSONL and leaves the fleet
-  index alone. Because a new agent stops re-sending the stale reading, a v0.12
-  server drops the failing source after 48h instead of showing the frozen
-  reading. A pre-v0.12 server keeps the last reading forever, as it does today.
+  `Evidence::Unknown` and writes the raw event to its JSONL. The fleet index
+  still updates the host's `agent_version`, `last_seen_ts` and 24h counts. Each
+  failure and each heartbeat re-send adds one to the host's
+  `open_event_counts_24h.warn`
+  (`crates/lodeline-server/src/routes/fleet_hosts.rs:223`). The event is not an
+  alert, and `current_risk` does not change. Because a new agent stops re-sending
+  the stale reading, a v0.12 server drops the failing source after 48h instead of
+  showing the frozen reading. A pre-v0.12 server keeps the last reading forever,
+  as it does today.
 - **Older agents.** They never send the kind. A new server behaves exactly as
   today for them.
 - **Upgrade order.** Either side can go first without lost events. Upgrade the
@@ -258,7 +265,7 @@ gap.
 
 Since #329 the server keeps one reading per `(tool, scope, user, rule_pack_id)`
 in `risk_sources` and folds them into `current_risk`, the riskiest reading per
-tool (`fleet_index_update.rs:57-109`). `RiskEntry`
+tool (`fleet_index_update.rs:68-121`). `RiskEntry`
 (`crates/lodeline-server/src/fleet_index.rs:14-25`) keeps `scope` but drops
 `user` and `rule_pack_id`. As a result:
 
@@ -350,9 +357,10 @@ as a later, detail-only addition if the host page needs a per-user table.
    Render the new event kind. The contract update lands in the manager repo
    through an issue.
 5. **Agent: A3 emission.** Emit `ai_guard_assess_failed`, stop re-sending stale
-   readings, and force an emit on recovery. This step is safe against any
-   server since v0.3.0, but it waits for step 3 so that a failing source shows
-   as unassessed and does not disappear after 48h.
+   readings, and force an emit on recovery. Every server since v0.3.0 accepts
+   the new events. On a server without step 3, a failing source drops out of
+   `current_risk` without notice 48h after its last reading. This step waits
+   for step 3 so that the source shows as unassessed instead.
 6. **Docs.** Add the SIEM rule for `ai_guard_assess_failed` to
    `docs/runbook/siem-rules.md` and describe the new fields in the server docs.
 

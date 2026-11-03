@@ -26,8 +26,19 @@ fn is_alert_evidence(ev: &Evidence) -> bool {
 
 /// Apply one event to a HostSummary. Caller (FleetIndex in Task 5 / boot_rebuild
 /// in Task 6) holds the write lock and the `host_id`-keyed entry. `received` is
-/// the server's receive time, or the latest it can be during boot replay.
+/// the server's receive time.
 pub fn apply_event(host: &mut HostSummary, event: &Event, received: OffsetDateTime) {
+    apply_event_received_between(host, event, received, received);
+}
+
+/// `apply_event` for boot replay, which knows only that the server received
+/// the event between `earliest` and `latest`.
+pub fn apply_event_received_between(
+    host: &mut HostSummary,
+    event: &Event,
+    earliest: OffsetDateTime,
+    latest: OffsetDateTime,
+) {
     // Identity bookkeeping — every variant updates these.
     host.agent_version = event.agent_version.clone();
     if host.last_seen_ts.is_none_or(|t| event.ts > t) {
@@ -70,14 +81,15 @@ pub fn apply_event(host: &mut HostSummary, event: &Event, received: OffsetDateTi
             // heartbeats is gone (a removed repo, user or pack) and must not
             // hold the host's risk up. Age is capped at the receive time, so an
             // agent clock running ahead neither moves the cutoff forward nor
-            // keeps its own reading past 48h.
-            let seen = event.ts.min(received);
-            let cutoff = seen - time::Duration::hours(48);
+            // keeps its own reading past 48h. The cutoff takes the earliest
+            // receive time and the stored age the latest, so boot replay never
+            // drops a reading that live ingest would keep.
+            let cutoff = event.ts.min(earliest) - time::Duration::hours(48);
             host.risk_sources.retain(|_, (t, _)| *t >= cutoff);
             host.risk_sources.insert(
                 (*tool, scope.clone(), user.clone(), rule_pack_id.clone()),
                 (
-                    seen,
+                    event.ts.min(latest),
                     RiskEntry {
                         controls: controls.clone(),
                         score: *score,

@@ -140,7 +140,8 @@ pub struct HostSummary {
     pub current_risk: BTreeMap<AiTool, RiskEntry>,
     /// Latest reading per source from the last 48h (#329), with the time the
     /// prune measures it by: its `ts`, capped at when the server received it.
-    /// Rebuilt from JSONL on start, so it is not serialized.
+    /// Rebuilt from JSONL on start, where the cap is the end of the receive
+    /// day, so it is not serialized.
     #[serde(skip)]
     pub risk_sources: std::collections::HashMap<RiskSourceKey, (OffsetDateTime, RiskEntry)>,
 
