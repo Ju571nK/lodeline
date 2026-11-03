@@ -52,7 +52,7 @@ pub struct Verdict {
     pub confidence: Confidence,
 }
 
-/// Pure, wall-clock silence rule. `session_active` is the (weak, spoofable)
+/// Pure, wall-clock silence rule. `session_active` is the (weak, easily faked)
 /// filesystem probe result, supplied by the caller.
 pub fn decide(
     r: &ActivityRecord,
@@ -102,7 +102,7 @@ pub(crate) struct ScanOut {
 /// (counts files visited; dirs are not counted), and `budget` (checked once per
 /// directory dequeue — a secondary backstop, `max_entries` is the hard bound).
 /// Follows symlinks (`metadata`), but the depth+entry caps bound any cycle. A
-/// deliberately weak, spoofable activity oracle; see the spec threat model.
+/// deliberately weak, easily faked activity oracle; see the spec threat model.
 pub(crate) fn newest_mtime_capped(root: &Path, cap: &ProbeCapRt) -> ScanOut {
     let start = std::time::Instant::now();
     let mut seen = 0usize;

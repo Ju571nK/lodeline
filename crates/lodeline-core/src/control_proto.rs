@@ -45,7 +45,7 @@ pub const DEFAULT_HOOK_PIPE: &str = r"\\.\pipe\lodeline-hook";
 
 /// The control socket is trusted only if its peer is root (the system agent) or
 /// the same user as this process (the individual-developer case). Any other
-/// local user owning the socket is treated as a spoofing attempt (#57).
+/// local user owning the socket is treated as a mismatched sender (#57).
 pub fn peer_trusted(peer_euid: u32, self_uid: u32) -> bool {
     peer_euid == 0 || peer_euid == self_uid
 }
