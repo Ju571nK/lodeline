@@ -210,6 +210,33 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   scanner still reports an `mcp_tool` hook that points at a local server. No new reason
   kind is added. (#417)
 
+- The Codex scanner now scores `approvals_reviewer = "auto_review"`, and its older
+  spelling `guardian_subagent`, as an auto-approval at low weight. With this setting a
+  model reviewer can approve a request when no person is involved. The scanner scores it
+  only when the approval policy in effect sends requests to the reviewer. Those policies
+  are `on-request`, its alias `on-failure`, and granular. A project's policy applies, or
+  else the user's. The scanner does not yet read Codex `[profiles.*]`, `requirements.toml`
+  `allowed_approvals_reviewers`, or the system config layer for this check. These
+  findings reuse existing reason kinds, so older servers accept the events. In score
+  breakdowns they appear under the `project_settings_*` names. The score of a host with
+  this setting falls on upgrade. (#422)
+
+- The Codex scanner now reads three more keys in the user's Codex config. It reports
+  `notify` as a command that Codex runs, and names the key only, never the arguments of
+  the program. It reports a non-default `openai_base_url`, or a `base_url` on the selected
+  model provider that Codex honors, as a traffic redirect, and shows the host only. It does
+  not report built-in providers whose `base_url` Codex ignores, such as `ollama` and
+  `lmstudio`. A repository's `.codex/config.toml` cannot set `notify`, `openai_base_url`,
+  or provider settings, so the scanner reads only the user file for them. The scanner also
+  reports `shell_environment_policy.set` in user and project config, and names the
+  variables only, never the values. These findings reuse existing reason kinds, so older
+  servers accept the events. In score breakdowns they appear under the `project_settings_*`
+  names. (#422)
+
+- The scanner now runs the same instruction-file check on the user's
+  `~/.codex/AGENTS.override.md`, or else `~/.codex/AGENTS.md`, that it runs on a
+  repository's `AGENTS.md`. No new reason kind is added. (#422)
+
 ### Fixed
 
 - A Claude Code host whose managed settings set `permissions.deny` rules no longer gets

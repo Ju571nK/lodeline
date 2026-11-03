@@ -39,10 +39,12 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         // that can still refuse. `bypassPermissions` and `acceptEdits` have no
         // such check, so `auto` is a real auto-approval posture but a weaker
         // one, and is scored under its own key rather than folded in at the
-        // same severity.
+        // same severity. #200 — Codex `auto_review` hands escalations to a
+        // model reviewer that can also refuse, so it shares this key.
         AiGuardReason::AutoApprovalEnabled { mode }
             if without_managed_label(mode) == "auto"
-                || mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE =>
+                || mode == crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE
+                || mode == "auto_review" =>
         {
             "auto_approval_enabled_classifier"
         }
@@ -124,7 +126,8 @@ pub const DANGEROUS_TOGGLE_KINDS: &[&str] = &[
     "unattended_loop_prompt",
     "standing_command_approval",
     // #199 — a repository change that runs code or reroutes traffic before
-    // anyone accepts the trust dialog.
+    // anyone accepts the trust dialog. #200 — the same kinds also carry
+    // Codex user-scope keys (`notify`, provider URLs, `shell_environment_policy.set`).
     "project_settings_plugin_enabled",
     "project_settings_helper_command",
     "project_settings_env_override",
@@ -214,6 +217,7 @@ impl Rubric {
         // applies in every session before trust; helpers and `env` apply
         // before trust only in `claude -p`, like a project hook (`no_sandbox`
         // 2.0); interface commands and marketplaces wait for the dialog.
+        // #200 — Codex user-scope findings reuse the helper and env kinds.
         w.insert("project_settings_plugin_enabled", 2.5);
         w.insert("project_settings_helper_command", 2.0);
         w.insert("project_settings_env_override", 2.0);

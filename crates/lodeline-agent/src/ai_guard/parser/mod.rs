@@ -140,7 +140,7 @@ pub(crate) fn read_json_optional(path: &Path) -> Result<Option<Value>, AssessErr
 /// #146 — scan-size cap for instruction files. Regex scanning is linear, so we
 /// keep a generous cap purely as a memory/DoS guard; real instruction files are
 /// KB-sized. A larger file is itself anomalous and only its head is scanned.
-const INSTRUCTION_FILE_SCAN_CAP: usize = 4 * 1024 * 1024;
+pub(super) const INSTRUCTION_FILE_SCAN_CAP: usize = 4 * 1024 * 1024;
 
 /// Read a UTF-8 text file for content scanning. Symmetric with
 /// `read_json_optional`: NotFound or empty/whitespace-only → `Ok(None)`; other
