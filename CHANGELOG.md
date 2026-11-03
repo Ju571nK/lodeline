@@ -7,6 +7,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-11-03
+
 ### Added
 
 - The scanner now reads every Cursor `hooks.json` layer. These are the user file, the

@@ -160,12 +160,12 @@ jobs:
           done
           rpm -e "${all[@]}"
 
-          # Upgrade from the published v0.12.1 packages (proxy is not among
+          # Upgrade from the published v0.12.2 packages (proxy is not among
           # them; it installs fresh afterwards) to the packages built above.
           # systemd supplies the sysusers/tmpfiles the scriptlets call.
           dnf -y install systemd
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          old=0.12.1
+          old=0.12.2
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
           dl=$(mktemp -d)
           curl -fsSL -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
@@ -333,10 +333,10 @@ jobs:
           cmp /usr/lib/tmpfiles.d/lodeline.conf /usr/lib/tmpfiles.d/lodeline-sender.conf
           dpkg -P "${all[@]}"
 
-          # Upgrade from the published v0.12.1 packages (proxy is not among
+          # Upgrade from the published v0.12.2 packages (proxy is not among
           # them; it installs fresh afterwards) to the packages built above.
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          old=0.12.1
+          old=0.12.2
           arch=$(dpkg --print-architecture)
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
           dl=$(mktemp -d)
