@@ -46,7 +46,7 @@ async fn ingested_host_meta_appears_in_detail_block() {
         },
         target_id: None,
     };
-    idx.apply_event(&ev);
+    idx.apply_event(&ev, ev.ts);
 
     let state = Arc::new(AppState {
         events_out_dir: dir.path().to_path_buf(),

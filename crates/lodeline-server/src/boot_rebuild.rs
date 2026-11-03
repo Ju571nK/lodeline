@@ -8,6 +8,7 @@ use lodeline_core::event::Event;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use time::OffsetDateTime;
 
 /// Walk all per-host JSONL files under `events_out_dir`, apply each line to
 /// a HostSummary, return the built map. Corrupt lines are skipped with a
@@ -57,7 +58,18 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
     // Sort by file basename (the YYYY-MM-DD prefix makes this chronological).
     files.sort_by_key(|(_, name)| name.clone());
 
-    for (path, _name) in files {
+    for (path, name) in files {
+        // shortcut: JSONL keeps no per-line receive time, so replay caps an
+        // event's time at the end of its file's receive day (up to a day late);
+        // persist a receive time per line if that slack ever matters.
+        let received = name
+            .get("received-".len()..)
+            .and_then(|d| d.strip_suffix(".jsonl"))
+            .and_then(|d| {
+                time::Date::parse(d, time::macros::format_description!("[year]-[month]-[day]")).ok()
+            })
+            .and_then(|d| d.next_day())
+            .map_or_else(OffsetDateTime::now_utc, |d| d.midnight().assume_utc());
         let f = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
@@ -85,7 +97,7 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
                     let entry = out
                         .entry(event.host_id.clone())
                         .or_insert_with(|| HostSummary::new(event.host_id.clone()));
-                    apply_event(entry, &event);
+                    apply_event(entry, &event, received);
                 }
                 Err(e) => {
                     tracing::warn!(?path, error = ?e, bytes = n, "skip corrupt jsonl line");
@@ -188,6 +200,50 @@ mod tests {
         let map = rebuild_from_jsonl(dir.path()).unwrap();
         // newer overrides older
         assert_eq!(map.get(HID).unwrap().hostname(), Some("new-name"));
+    }
+
+    #[test]
+    fn rebuild_caps_a_future_dated_reading_at_its_receive_day() {
+        let reading = |tool: &str, user: &str, ts: &str| {
+            json!({
+                "schema_version": 1,
+                "event_id": uuid::Uuid::now_v7().to_string(),
+                "ts": ts,
+                "host_id": HID,
+                "agent_version": "0.5.0",
+                "severity": "warn",
+                "source": {"kind": "agent"},
+                "subject": {"kind": "self"},
+                "evidence": {
+                    "kind": "ai_guard_risk_assessed",
+                    "tool": tool,
+                    "scope": {"kind": "user_global"},
+                    "score": 7.0,
+                    "bucket": "critical",
+                    "reasons": [],
+                    "is_reattestation": false,
+                    "user": user
+                },
+                "target_id": null
+            })
+        };
+        let dir = tempdir().unwrap();
+        let host_dir = dir.path().join(HID);
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let file = host_dir.join("received-2026-05-17.jsonl");
+        write_line(&file, &reading("codex", "alice", "2026-05-17T12:00:00Z"));
+        write_line(
+            &file,
+            &reading("claude_code", "bob", "2026-05-20T12:00:00Z"),
+        );
+        let map = rebuild_from_jsonl(dir.path()).unwrap();
+        let h = map.get(HID).unwrap();
+        assert!(
+            h.current_risk
+                .contains_key(&lodeline_core::event::AiTool::Codex),
+            "a future-dated reading pruned the host's other readings on replay"
+        );
+        assert_eq!(h.current_risk.len(), 2);
     }
 
     #[test]
