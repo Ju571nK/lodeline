@@ -46,3 +46,5 @@ pub mod status_cli;
 pub mod supervisor;
 pub mod test_support;
 pub mod watcher;
+#[cfg(windows)]
+mod win_pipe;
