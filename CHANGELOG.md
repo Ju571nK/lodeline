@@ -7,6 +7,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Fixed
+
+- Running `lodeline scan` from the home folder no longer scores your Codex config a
+  second time as a project. Codex does not load its own home folder as a project layer,
+  so those findings were duplicates. A home folder that is a repository is handled the
+  same way. The project's `AGENTS.md` is still scanned. (#427)
+
 ## [0.12.2] - 2026-11-03
 
 ### Added
