@@ -367,6 +367,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   downgrade during a run, wait for a 200 first or remove `single_quarantines` from
   `gap_queue.json` while the proxy is stopped. (#420)
 
+- `lodeline-mcp` no longer includes the fleet read token in its config's debug output.
+  The debug output shows the server URL without credentials, path, or query. No caller
+  printed it before. This keeps a future one from doing so. (#424)
+
 ## [0.12.1] - 2026-11-02
 
 ### Added
