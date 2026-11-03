@@ -7,6 +7,23 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Added
+
+- The scanner now reads every Cursor `hooks.json` layer. These are the user file, the
+  enterprise file (macOS, Linux and Windows paths), and the project file. Command hooks
+  are scored like other hook commands. Prompt hooks are not scored. A `hooks.json` that
+  does not parse is skipped with a warning. The daemon now watches a Cursor project's
+  `hooks.json`. (#430)
+
+- A new Grok Build parser reads user and project hook files, user `[hooks]` in
+  `~/.grok/config.toml`, and MCP servers in the user and project `config.toml`.
+  `lodeline scan` picks up a Grok project by `.grok/hooks/` or `.grok/config.toml`. The
+  daemon does not yet discover Grok projects. (#430)
+
+- Lodeline's own Grok hook now adds a small score for its broad matcher, the same way
+  Lodeline's own Claude Code hook already does. Hosts with it installed may see a
+  slightly higher score. (#430)
+
 ### Fixed
 
 - Running `lodeline scan` from the home folder no longer scores your Codex config a
