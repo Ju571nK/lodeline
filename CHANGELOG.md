@@ -7,6 +7,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Fixed
+
+- `lodeline-hook install --write` from a new release folder now replaces the entry
+  that an older version wrote from another folder. Before, the old entry stayed beside
+  the new one. On Windows that old entry used the `\\?\` path form, which fails on every
+  tool call under Git Bash. `uninstall` now removes Lodeline's entries at any path.
+  `verify` now reports `command_drift` when more than one Lodeline entry is present, or
+  when the entry points at another binary. A wrapper such as `cmd.exe /c` or `bash -c`
+  is still left alone. (#443)
+
 ## [0.12.3] - 2026-11-03
 
 ### Added
