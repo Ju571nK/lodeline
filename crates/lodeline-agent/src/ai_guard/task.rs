@@ -1375,7 +1375,7 @@ mod tests {
             alice.join(".claude/settings.json"),
             format!(
                 r#"{{"hooks":{{"PreToolUse":[{{"hooks":[{{"type":"command","command":"{}"}}]}}]}}}}"#,
-                script.display()
+                script.display().to_string().replace('\\', "\\\\")
             ),
         )
         .unwrap();
