@@ -56,9 +56,53 @@ fn command_string_enforce(exe: &str, agent: &str, capture: &str, on_failure: &st
     format!("{exe} {agent} --enforce --on-failure {on_failure} --capture {capture}")
 }
 
-/// First whitespace token of a command string (= the binary path).
-pub(crate) fn first_token(cmd: &str) -> &str {
-    cmd.split_whitespace().next().unwrap_or("")
+/// The binary path as written into a hook command for `agent`'s shell.
+///
+/// On Windows, Claude Code runs the command in Git Bash (PowerShell without it)
+/// and Cursor in PowerShell, where `\` is an escape or fine respectively, so we
+/// write `/`. Codex runs it through `cmd.exe /C`, which can read an unquoted `/`
+/// as a switch, so it keeps `\`. A path with whitespace is double-quoted, the
+/// form Codex's own cmd test uses and Git Bash accepts.
+/// shortcut: a quoted path does not start a program in PowerShell (it needs
+/// `&`), so a spaced install path fails under Claude Code without Git Bash and
+/// under Cursor; upgrade to Claude Code's exec form (`args`) if that matters.
+pub(crate) fn hook_exe(path: &str, windows: bool, agent: &str) -> String {
+    let p = if windows && agent != "codex" {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    };
+    if p.contains(char::is_whitespace) {
+        format!("\"{p}\"")
+    } else {
+        p
+    }
+}
+
+/// The binary path at the start of a hook command: a leading double-quoted
+/// string, else the first whitespace token.
+pub(crate) fn command_exe(cmd: &str) -> &str {
+    let cmd = cmd.trim_start();
+    match cmd.strip_prefix('"').and_then(|rest| rest.find('"')) {
+        Some(end) => &cmd[..end + 2],
+        None => cmd.split_whitespace().next().unwrap_or(""),
+    }
+}
+
+/// Whether `cmd` runs `exe`, comparing in a form that ignores quoting, `\` vs
+/// `/`, and the `\\?\` prefix lodeline-hook <= 0.12.2 wrote on Windows. Matching
+/// a prefix rather than the first token also catches an old unquoted path that
+/// contains a space.
+fn invokes_exe(cmd: &str, exe: &str) -> bool {
+    let key = |s: &str| {
+        let s = s.trim_start().replace('"', "");
+        s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/")
+    };
+    let (cmd, exe) = (key(cmd), key(exe));
+    !exe.is_empty()
+        && cmd
+            .strip_prefix(&exe)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
 }
 
 // --- Claude-style entry helpers ---
@@ -85,8 +129,7 @@ pub(crate) fn claude_entry_is_ours(entry: &Value, exe: &str) -> bool {
             hooks.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| first_token(c) == exe)
-                    .unwrap_or(false)
+                    .is_some_and(|c| invokes_exe(c, exe))
             })
         })
         .unwrap_or(false)
@@ -163,8 +206,7 @@ pub(crate) fn cursor_entry_is_ours(entry: &Value, exe: &str) -> bool {
     entry
         .get("command")
         .and_then(|c| c.as_str())
-        .map(|c| first_token(c) == exe)
-        .unwrap_or(false)
+        .is_some_and(|c| invokes_exe(c, exe))
 }
 
 /// The `command` string of a Cursor settings entry, if present.
@@ -197,7 +239,7 @@ fn cursor_enforce_entry(cmd: &str, on_failure: &str) -> Value {
     }
 }
 
-/// Upsert our prebuilt entry on BOTH Cursor gate events, keyed by exe first-token.
+/// Upsert our prebuilt entry on BOTH Cursor gate events, keyed by exe.
 /// Replaces the whole entry object on change (so a stale `failClosed` from a prior
 /// closed install is dropped on a later open install). Returns true if changed.
 fn upsert_cursor_entry(root: &mut Value, exe: &str, entry: &Value) -> bool {
@@ -617,6 +659,46 @@ mod tests {
     // Registered by lodeline-hook <= 0.12.2 on Windows: canonicalize() kept the `\\?\` prefix.
     const VERBATIM_OLD: &str =
         r"\\?\C:\Users\테스터\x\lodeline-hook.exe claude-code --capture redacted";
+
+    #[test]
+    fn hook_exe_per_platform_and_shell() {
+        assert_eq!(
+            hook_exe("/usr/local/bin/lodeline-hook", false, "claude-code"),
+            "/usr/local/bin/lodeline-hook"
+        );
+        assert_eq!(
+            hook_exe("/Users/a b/lodeline-hook", false, "codex"),
+            r#""/Users/a b/lodeline-hook""#
+        );
+        let win = r"C:\Users\테스터\lodeline-test\x\lodeline-hook.exe";
+        assert_eq!(
+            hook_exe(win, true, "claude-code"),
+            "C:/Users/테스터/lodeline-test/x/lodeline-hook.exe"
+        );
+        assert_eq!(hook_exe(win, true, "codex"), win);
+        let spaced = r"C:\Program Files\Lodeline 한글\lodeline-hook.exe";
+        assert_eq!(
+            hook_exe(spaced, true, "cursor"),
+            r#""C:/Program Files/Lodeline 한글/lodeline-hook.exe""#
+        );
+        assert_eq!(hook_exe(spaced, true, "codex"), format!("\"{spaced}\""));
+    }
+
+    #[test]
+    fn command_exe_reads_quoted_and_bare_paths() {
+        assert_eq!(
+            command_exe(r#""C:/Program Files/x.exe" claude-code --capture redacted"#),
+            r#""C:/Program Files/x.exe""#
+        );
+        assert_eq!(
+            command_exe("/usr/bin/lodeline-hook claude-code --capture redacted"),
+            "/usr/bin/lodeline-hook"
+        );
+        assert!(!invokes_exe(
+            "/usr/bin/lodeline-hook.bak claude-code",
+            "/usr/bin/lodeline-hook"
+        ));
+    }
 
     #[test]
     fn upgrade_replaces_verbatim_windows_registration() {

@@ -488,11 +488,13 @@ fn main() {
     }
 }
 
-fn exe_path() -> String {
+/// This binary's path as written into `agent`'s hook command. `dunce` stops
+/// `canonicalize` from returning a `\\?\` verbatim path on Windows.
+fn exe_path(agent: &str) -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.canonicalize().ok())
-        .map(|p| p.to_string_lossy().into_owned())
+        .and_then(|p| dunce::canonicalize(p).ok())
+        .map(|p| install::hook_exe(&p.to_string_lossy(), cfg!(windows), agent))
         .unwrap_or_else(|| "lodeline-hook".to_string())
 }
 
@@ -513,7 +515,7 @@ fn cmd_install(
         OnFailureArg::Open => "open",
         OnFailureArg::Closed => "closed",
     };
-    let exe = exe_path();
+    let exe = exe_path(agent);
 
     // #208 — Antigravity now installs through the ordinary settings-merge path
     // (`~/.gemini/config/hooks.json`), which is the mechanism #202 verified on
@@ -684,7 +686,7 @@ fn cmd_install(
 }
 
 fn cmd_uninstall(agent: &str, write: bool) {
-    let exe = exe_path();
+    let exe = exe_path(agent);
 
     // #208 — remove the plugin bundle too, so an operator who installed the
     // legacy way before this change is still cleaned up. The settings-file

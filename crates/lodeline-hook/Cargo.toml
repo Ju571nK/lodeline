@@ -19,6 +19,7 @@ clap = { workspace = true }
 blake3 = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
+dunce = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

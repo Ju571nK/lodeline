@@ -2040,6 +2040,7 @@ version = "0.12.2"
 dependencies = [
  "blake3",
  "clap",
+ "dunce",
  "libc",
  "lodeline-core",
  "regex",
