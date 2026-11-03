@@ -21,6 +21,14 @@ use tokio::sync::{mpsc, Semaphore};
 const MAX_INFLIGHT: usize = 16;
 const MAX_LINE: u64 = 1024 * 1024;
 
+// The previous agent's drain lasts up to 5 s, so the retries span about that long.
+#[cfg(windows)]
+const NAME_IN_USE_TRIES: u32 = 10;
+#[cfg(all(windows, not(test)))]
+const NAME_IN_USE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+#[cfg(all(windows, test))]
+const NAME_IN_USE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 #[cfg(unix)]
 pub async fn serve(
     socket: PathBuf,
@@ -131,20 +139,40 @@ pub async fn serve_pipe_until(
     activity_map: crate::hook_silence::ActivityMap,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
-    use tokio::net::windows::named_pipe::ServerOptions;
+    let mut tries = 0;
+    let mut listening = loop {
+        match crate::win_pipe::first_instance(&pipe_name) {
+            Ok(server) => break server,
+            Err(e) if crate::win_pipe::name_in_use(&e) => {
+                tries += 1;
+                if tries == NAME_IN_USE_TRIES {
+                    tracing::error!(
+                        pipe = %pipe_name,
+                        error = %e,
+                        "hook-decide pipe name is already in use by another process; \
+                         not serving enforce verdicts, hooks follow --on-failure"
+                    );
+                    return Ok(());
+                }
+                // A restarted agent can overlap the previous one while it drains.
+                tokio::select! {
+                    _ = shutdown.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(NAME_IN_USE_WAIT) => {}
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     tracing::info!(pipe = %pipe_name, "hook-decide IPC listening");
     let mut connections = crate::ipc_lifecycle::Connections::default();
     loop {
-        let server = ServerOptions::new()
-            .first_pipe_instance(false)
-            .access_inbound(true)
-            .access_outbound(true)
-            .create(&pipe_name)?;
-        let Some(connected) = connections.accept(server.connect(), &shutdown).await else {
+        let Some(connected) = connections.accept(listening.connect(), &shutdown).await else {
             break;
         };
         connected?;
+        // Open the next instance before handing this one off, so the name never lapses.
+        let server = std::mem::replace(&mut listening, crate::win_pipe::next_instance(&pipe_name)?);
         // Overload: drop the connection. The hook treats no-answer-within-deadline
         // as the no-verdict case and applies its local on_failure (fail-open default).
         let permit = match sem.clone().try_acquire_owned() {
@@ -433,5 +461,145 @@ mod tests {
         // ALLOW
         let r = round_trip(&socket, &req("ls -la")).await;
         assert!(matches!(r.verdict.decision, Decision::Allow));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod win_tests {
+    use super::*;
+    use crate::hook_deny::DenyEvaluator;
+    use lodeline_core::hook_proto::{
+        CaptureLevel, CaptureStatus, HookInvocation, PIPE_CLIENT_ACCESS,
+    };
+    use lodeline_core::policy::{DenyRule, HookActionMatch, Matcher};
+    use std::io::{BufRead, Write};
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::Duration;
+
+    fn unique_name() -> String {
+        format!(r"\\.\pipe\lodeline-test-decide-{}", uuid::Uuid::now_v7())
+    }
+
+    fn evaluator() -> crate::hook_deny::SharedEvaluator {
+        std::sync::Arc::new(parking_lot::RwLock::new(std::sync::Arc::new(
+            DenyEvaluator::new(&[DenyRule {
+                id: "no-rm".into(),
+                match_: HookActionMatch::Bash {
+                    command: Matcher::Regex {
+                        pattern: r"rm\s+-rf".into(),
+                    },
+                },
+            }])
+            .unwrap(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn name_held_by_another_process_is_not_served() {
+        let name = unique_name();
+        let _other = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let served = tokio::time::timeout(
+            Duration::from_secs(5),
+            serve_pipe(
+                name,
+                tx,
+                "host-x".into(),
+                evaluator(),
+                crate::hook_silence::new_map(),
+            ),
+        )
+        .await;
+        assert!(matches!(served, Ok(Ok(()))), "listener stops: {served:?}");
+    }
+
+    fn open_as_hook(name: &str) -> std::fs::File {
+        (0..500)
+            .find_map(|_| {
+                let opened = std::fs::OpenOptions::new()
+                    .access_mode(PIPE_CLIENT_ACCESS)
+                    .open(name);
+                if opened.is_err() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                opened.ok()
+            })
+            .expect("hook opens the decide pipe")
+    }
+
+    #[tokio::test]
+    async fn name_freed_during_retries_is_served() {
+        let name = unique_name();
+        let other = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let listener = tokio::spawn(serve_pipe(
+            name.clone(),
+            tx,
+            "host-x".into(),
+            evaluator(),
+            crate::hook_silence::new_map(),
+        ));
+        tokio::time::sleep(NAME_IN_USE_WAIT).await;
+        drop(other);
+        tokio::task::spawn_blocking(move || open_as_hook(&name))
+            .await
+            .unwrap();
+        assert!(
+            !listener.is_finished(),
+            "listener serves after the name frees"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_access_mask_gets_a_verdict() {
+        let name = unique_name();
+        let (tx, _rx) = mpsc::channel(16);
+        tokio::spawn(serve_pipe(
+            name.clone(),
+            tx,
+            "host-x".into(),
+            evaluator(),
+            crate::hook_silence::new_map(),
+        ));
+        let request = HookDecisionRequest {
+            protocol_version: HOOK_PROTOCOL_VERSION,
+            request_id: uuid::Uuid::now_v7(),
+            sent_at_unix_ms: 0,
+            invocation: HookInvocation {
+                agent: lodeline_core::event::AiTool::ClaudeCode,
+                agent_session_id: None,
+                tool_use_id: None,
+                action: HookAction::Bash {
+                    command_hash: "ab".repeat(32),
+                    command_preview: Some("rm -rf /".into()),
+                },
+                capture_level: CaptureLevel::Redacted,
+                capture_status: CaptureStatus::Ok,
+                cwd: None,
+            },
+            deadline_ms: 250,
+        };
+        let mut line = serde_json::to_string(&request).unwrap();
+        line.push('\n');
+        let resp = tokio::task::spawn_blocking(move || {
+            let mut pipe = open_as_hook(&name);
+            pipe.write_all(line.as_bytes()).unwrap();
+            let mut resp = String::new();
+            std::io::BufReader::new(pipe).read_line(&mut resp).unwrap();
+            resp
+        })
+        .await
+        .unwrap();
+        let resp: HookDecisionResponse = serde_json::from_str(resp.trim()).unwrap();
+        match resp.verdict.decision {
+            Decision::Deny { rule_id, .. } => assert_eq!(rule_id, "no-rm"),
+            other => panic!("expected deny, got {other:?}"),
+        }
     }
 }
