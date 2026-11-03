@@ -79,7 +79,7 @@ impl DenyEvaluator {
                     CompiledMatch::BashIndirection(FieldMatch::compile(indirection)?)
                 }
                 HookActionMatch::FileEdit { path } => {
-                    CompiledMatch::FileEdit(FieldMatch::compile(path)?)
+                    CompiledMatch::FileEdit(FieldMatch::compile(&path_matcher_in_match_form(path))?)
                 }
                 HookActionMatch::McpCall { server, tool } => CompiledMatch::McpCall {
                     server: FieldMatch::compile(server)?,
@@ -131,6 +131,24 @@ impl DenyEvaluator {
             } if self.needs_norm => Some(shell_norm::normalize(preview)),
             _ => None,
         };
+        let edit;
+        let action = match action {
+            HookAction::FileEdit {
+                path_hash,
+                path_preview,
+                edit_hash,
+                paths,
+            } => {
+                edit = HookAction::FileEdit {
+                    path_hash: path_hash.clone(),
+                    path_preview: path_preview.as_deref().map(match_form),
+                    edit_hash: edit_hash.clone(),
+                    paths: paths.iter().map(|p| match_form(p)).collect(),
+                };
+                &edit
+            }
+            _ => action,
+        };
         for r in &self.rules {
             if let Some(via) = rule_matches(&r.matcher, action, normalized.as_ref()) {
                 return Some((r.id.clone(), format!("matched deny rule {}{}", r.id, via)));
@@ -157,6 +175,33 @@ impl DenyEvaluator {
             command_preview: Some(preview.to_string()),
         };
         self.evaluate(&action)
+    }
+}
+
+/// A path in [`crate::normalizer::match_form`], the form event and policy
+/// paths use (#388). Hook paths arrive as JSON strings, so always UTF-8.
+fn match_form(s: &str) -> String {
+    crate::normalizer::match_form(s.into())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// A file-edit path matcher with its text in [`match_form`]. A regex is
+/// normalized as text: right for literal Unicode, but an escape such as
+/// `\u{301}` stays as written, and a literal combining mark composes with the
+/// character before it even inside `[...]`.
+fn path_matcher_in_match_form(m: &Matcher) -> Matcher {
+    match m {
+        Matcher::Exists => Matcher::Exists,
+        Matcher::Equals { value } => Matcher::Equals {
+            value: match_form(value),
+        },
+        Matcher::NotEquals { value } => Matcher::NotEquals {
+            value: match_form(value),
+        },
+        Matcher::Regex { pattern } => Matcher::Regex {
+            pattern: match_form(pattern),
+        },
     }
 }
 
@@ -743,5 +788,56 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(no_etc().evaluate(&act).unwrap().0, "no-etc");
+    }
+
+    const NFC: &str = "/Users/u/caf\u{e9}/secret";
+    const NFD: &str = "/Users/u/cafe\u{301}/secret";
+
+    fn deny_path(path: Matcher) -> DenyEvaluator {
+        DenyEvaluator::new(&[DenyRule {
+            id: "no-cafe".into(),
+            match_: HookActionMatch::FileEdit { path },
+        }])
+        .unwrap()
+    }
+
+    fn literal(p: &str) -> Matcher {
+        Matcher::Regex {
+            pattern: format!("^{}$", regex::escape(p)),
+        }
+    }
+
+    /// #388: APFS opens either spelling as the same file, so a rule written in
+    /// one form holds for a tool call that names the other.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn file_edit_rule_matches_either_unicode_form_on_macos() {
+        for (rule, path) in [(NFC, NFD), (NFD, NFC)] {
+            for m in [literal(rule), Matcher::Equals { value: rule.into() }] {
+                let ev = deny_path(m.clone());
+                assert!(ev.evaluate(&file_edit(path, &[path])).is_some(), "{m:?}");
+                assert!(
+                    ev.evaluate(&file_edit("/tmp/a", &["/tmp/a", path]))
+                        .is_some(),
+                    "any target path: {m:?}"
+                );
+                assert!(
+                    ev.evaluate(&file_edit(path, &[])).is_some(),
+                    "preview: {m:?}"
+                );
+            }
+            let other = Matcher::NotEquals { value: rule.into() };
+            assert!(deny_path(other)
+                .evaluate(&file_edit(path, &[path]))
+                .is_none());
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn file_edit_rule_compares_unicode_as_given_off_macos() {
+        let ev = deny_path(literal(NFC));
+        assert!(ev.evaluate(&file_edit(NFD, &[NFD])).is_none());
+        assert!(ev.evaluate(&file_edit(NFC, &[NFC])).is_some());
     }
 }
