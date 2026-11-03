@@ -58,8 +58,8 @@ pub fn request_verdict(
     std::thread::spawn(move || {
         let verdict = (|| -> Option<HookVerdict> {
             // A tokio `ServerOptions` pipe is a duplex byte stream; opening it
-            // read+write connects this process as the client. The agent's pipe
-            // grants other users only this mask, not GENERIC_WRITE.
+            // read+write connects this process as the client. Request only the
+            // client access the agent grants other users.
             let mut f = std::fs::OpenOptions::new()
                 .access_mode(lodeline_core::hook_proto::PIPE_CLIENT_ACCESS)
                 .open(&pipe)

@@ -11,7 +11,7 @@ pub const HOOK_PROTOCOL_VERSION: u16 = 2;
 
 /// Access a hook requests on a Windows hook pipe, and all the agent grants other
 /// users: FILE_GENERIC_READ | FILE_GENERIC_WRITE minus FILE_CREATE_PIPE_INSTANCE
-/// (0x4). A plain read+write open asks for GENERIC_WRITE, which includes 0x4.
+/// (0x4), so the hook asks only for the access a client needs.
 pub const PIPE_CLIENT_ACCESS: u32 = 0x0012_019b;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

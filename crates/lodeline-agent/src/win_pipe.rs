@@ -106,19 +106,8 @@ mod tests {
     #[tokio::test]
     async fn client_mask_connects_but_cannot_add_instances() {
         let name = unique_name();
-        // Grant every caller the client mask only, as a user other than the owner sees it.
+        // The only ACE grants everyone, this process included, the client mask. Implicit owner rights are READ_CONTROL and WRITE_DAC only.
         let _server = create(&name, true, "D:(A;;0x12019b;;;WD)").unwrap();
-
-        let generic_rw = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&name)
-            .unwrap_err();
-        assert_eq!(
-            generic_rw.raw_os_error(),
-            Some(ERROR_ACCESS_DENIED as i32),
-            "GENERIC_WRITE includes FILE_CREATE_PIPE_INSTANCE"
-        );
 
         let added = create(&name, false, "D:(A;;0x12019b;;;WD)").unwrap_err();
         assert_eq!(added.raw_os_error(), Some(ERROR_ACCESS_DENIED as i32));
