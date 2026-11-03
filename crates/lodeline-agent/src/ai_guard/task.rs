@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 /// Shared state map keyed by `(tool, scope, pack_id, user)`. Persists between
 /// calls so `eval_and_maybe_emit` can deduplicate identical reason sets across
@@ -38,10 +38,16 @@ pub type StateKey = (AiTool, AiGuardScope, Option<String>, Option<String>);
 
 /// A home a home-relative parser is assessed against. `user: None` is the
 /// agent's own home (`TaskCtx::home_dir`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AssessHome {
     pub user: Option<String>,
     pub dir: PathBuf,
+}
+
+/// #333 — one spelling per home (`/home -> /var/home`), so a home is assessed,
+/// and its external scripts attributed, under one path.
+pub(crate) fn canonical_home(dir: &std::path::Path) -> PathBuf {
+    dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// One parser's last emitted state, kept in `StateMap` for change-detection
@@ -80,6 +86,8 @@ pub struct TaskCtx {
     /// #329 — other users' homes a root agent also assesses. Empty when the
     /// agent runs as a normal user, which then sees only `home_dir`.
     pub user_homes: Vec<AssessHome>,
+    /// #333 — the re-enumerated user set. Each new value replaces `user_homes`.
+    pub users_rx: watch::Receiver<Vec<AssessHome>>,
     pub host_id: String,
     /// Phase 3b.3 — shared registry of external hook-script paths per parser
     /// (tool, scope). Populated by runtime/reload; read by the dispatch loop
@@ -94,13 +102,13 @@ pub struct TaskCtx {
 /// Main task loop. Boots, then selects between file-change broadcasts and
 /// the heartbeat tick until the broadcast sender is dropped (shutdown).
 pub async fn run(mut ctx: TaskCtx) {
-    // #333 — one spelling per home (`/home -> /var/home`), so `homes_for` does
-    // not assess the agent's own home a second time under a user's name.
-    let canonical = |dir: &PathBuf| dunce::canonicalize(dir).unwrap_or_else(|_| dir.clone());
-    ctx.home_dir = canonical(&ctx.home_dir);
+    // #333 — so `homes_for` does not assess the agent's own home a second time
+    // under a user's name.
+    ctx.home_dir = canonical_home(&ctx.home_dir);
     for home in &mut ctx.user_homes {
-        home.dir = canonical(&home.dir);
+        home.dir = canonical_home(&home.dir);
     }
+    let mut users_open = true;
     // 1. Initial scan on boot. Snapshot-clone the parsers vec before any
     //    `.await` so the parking_lot RwLockReadGuard is dropped — guards are
     //    NOT Send across an await. Cloning a `Vec<Arc<dyn>>` just bumps each
@@ -161,6 +169,37 @@ pub async fn run(mut ctx: TaskCtx) {
                         eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
                     }
                 }
+            }
+            changed = ctx.users_rx.changed(), if users_open => {
+                if changed.is_err() {
+                    users_open = false;
+                    continue;
+                }
+                let next = ctx.users_rx.borrow_and_update().clone();
+                set_user_homes(&mut ctx, next).await;
+            }
+        }
+    }
+}
+
+/// #333 — swap in a re-enumerated user set. A removed user's readings leave the
+/// state map, so no heartbeat re-sends them and the server's copy expires. An
+/// added user is assessed now, not at the next heartbeat.
+async fn set_user_homes(ctx: &mut TaskCtx, mut next: Vec<AssessHome>) {
+    for home in &mut next {
+        home.dir = canonical_home(&home.dir);
+    }
+    let old = std::mem::replace(&mut ctx.user_homes, next);
+    ctx.state.write().retain(|key, _| {
+        key.3
+            .as_ref()
+            .is_none_or(|user| ctx.user_homes.iter().any(|h| h.user.as_ref() == Some(user)))
+    });
+    let snapshot: Vec<Arc<dyn AiGuardParser>> = ctx.parsers.read().clone();
+    for parser in &snapshot {
+        for home in homes_for(parser.as_ref(), ctx) {
+            if !old.contains(&home) && home.user.is_some() {
+                eval_and_maybe_emit(parser.as_ref(), ctx, &home, true).await;
             }
         }
     }
@@ -470,6 +509,7 @@ mod tests {
                 heartbeat_interval: hb,
                 home_dir: PathBuf::from("/tmp/test-home"),
                 user_homes: Vec::new(),
+                users_rx: watch::channel(Vec::new()).1,
                 host_id: "test-host".into(),
                 ext_scripts: crate::ai_guard::empty_ext_script_registry(),
                 rubric: crate::ai_guard::default_rubric_handle(),
@@ -980,6 +1020,7 @@ mod tests {
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp"),
             user_homes: Vec::new(),
+            users_rx: watch::channel(Vec::new()).1,
             host_id: "h".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -1040,6 +1081,7 @@ mod tests {
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp/test-home"),
             user_homes: Vec::new(),
+            users_rx: watch::channel(Vec::new()).1,
             host_id: "test-host".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -1072,6 +1114,7 @@ mod tests {
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp/test-home"),
             user_homes: Vec::new(),
+            users_rx: watch::channel(Vec::new()).1,
             host_id: "test-host".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -1131,6 +1174,7 @@ mod tests {
             heartbeat_interval: Duration::from_secs(24 * 3600),
             home_dir: PathBuf::from("/tmp/test-home"),
             user_homes: Vec::new(),
+            users_rx: watch::channel(Vec::new()).1,
             host_id: "test-host".into(),
             ext_scripts: crate::ai_guard::empty_ext_script_registry(),
             rubric: crate::ai_guard::default_rubric_handle(),
@@ -1241,6 +1285,82 @@ mod tests {
             Evidence::AiGuardRiskAssessed { ref reasons, .. }
                 if reasons.iter().any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
         ));
+        h.abort();
+    }
+
+    async fn next_users(
+        events: &mut mpsc::Receiver<CommittableEvent>,
+        n: usize,
+    ) -> Vec<Option<String>> {
+        let mut users = Vec::new();
+        for _ in 0..n {
+            let ev = tokio::time::timeout(Duration::from_secs(5), recv_next_risk_assessed(events))
+                .await
+                .expect("a reading");
+            let Evidence::AiGuardRiskAssessed { user, .. } = ev.event.evidence else {
+                unreachable!()
+            };
+            users.push(user);
+        }
+        users.sort();
+        users
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refreshed_user_set_assesses_added_users_and_drops_removed_ones() {
+        let homes = tempfile::tempdir().unwrap();
+        let home = |name: &str| {
+            let dir = homes.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            AssessHome {
+                user: Some(name.into()),
+                dir,
+            }
+        };
+        let (alice, bob) = (home("alice"), home("bob"));
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(
+            crate::ai_guard::parser::claude_code::ClaudeCodeParser::default(),
+            fc_rx,
+            Duration::from_secs(3600),
+        );
+        ctx.home_dir = homes.path().join("root");
+        ctx.user_homes = vec![alice];
+        let (users_tx, users_rx) = watch::channel(ctx.user_homes.clone());
+        ctx.users_rx = users_rx;
+        let state = ctx.state.clone();
+        let h = tokio::spawn(run(ctx));
+        assert_eq!(
+            next_users(&mut events, 2).await,
+            vec![None, Some("alice".into())]
+        );
+
+        users_tx.send(vec![bob]).unwrap();
+        assert_eq!(
+            next_users(&mut events, 1).await,
+            vec![Some("bob".into())],
+            "a user added after boot is assessed at the refresh"
+        );
+        let mut held: Vec<_> = state.read().keys().map(|k| k.3.clone()).collect();
+        held.sort();
+        assert_eq!(
+            held,
+            vec![None, Some("bob".into())],
+            "alice's reading is dropped"
+        );
+
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert_eq!(
+            next_users(&mut events, 2).await,
+            vec![None, Some("bob".into())],
+            "the heartbeat re-sends only the current users"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .is_err(),
+            "nothing more for alice"
+        );
         h.abort();
     }
 

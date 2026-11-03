@@ -659,6 +659,44 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // Phase 3b.6.1 — `parsers` is shared with `policy_reload_task` via an
     // `Arc<RwLock<..>>` so hot-reload can mutate the live parser set.
     {
+        let user_homes = other_user_homes(&plat);
+        let (users_tx, users_rx) = watch::channel(user_homes.clone());
+        // #333 — accounts come and go while the agent runs, and directory
+        // (LDAP, SSSD) users never touch /etc/passwd, so re-list them. A new set
+        // goes to ai_guard and triggers a policy reload, which re-expands the
+        // per-user watch paths and re-registers each home's external scripts.
+        sup.track(
+            "user_refresh",
+            tokio::spawn({
+                let policy_version_tx = policy_version_tx.clone();
+                let shutdown = cancel.clone();
+                async move {
+                    let mut tick = tokio::time::interval(USER_REFRESH_INTERVAL);
+                    tick.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            _ = tick.tick() => {}
+                        }
+                        let Ok(homes) =
+                            tokio::task::spawn_blocking(
+                                || other_user_homes(&ActivePlatform::new()),
+                            )
+                            .await
+                        else {
+                            continue;
+                        };
+                        if users_tx.send_if_modified(|cur| {
+                            let changed = *cur != homes;
+                            *cur = homes;
+                            changed
+                        }) {
+                            policy_version_tx.send_modify(|_| {});
+                        }
+                    }
+                }
+            }),
+        );
         let ctx = crate::ai_guard::TaskCtx {
             parsers: ai_guard_parsers,
             fc_rx: ai_guard_fc_tx.subscribe(),
@@ -666,18 +704,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             state: ai_guard_state.clone(),
             heartbeat_interval: std::time::Duration::from_secs(24 * 3600),
             home_dir: home_dir.clone(),
-            // #329 — a root agent reads every user's configs, not just root's.
-            user_homes: if crate::control::is_root() {
-                UserEnumerator::list(&plat)
-                    .into_iter()
-                    .map(|u| crate::ai_guard::task::AssessHome {
-                        user: Some(u.name),
-                        dir: u.home,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            },
+            user_homes,
+            users_rx,
             host_id: host_id.clone(),
             // Phase 3b.3 Task 6 — registry populated from parser configs at
             // boot above. Task 7 will share the same handle with
@@ -1024,6 +1052,27 @@ fn glob_root_dir(p: &Path) -> PathBuf {
         }
         None => p.to_path_buf(),
     }
+}
+
+/// How often a running agent re-lists the host's users (#333).
+const USER_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// #329 — the other users' homes a root agent assesses, sorted so that two
+/// listings of the same users compare equal. Empty for a normal user, who can
+/// read only its own home.
+pub(crate) fn other_user_homes(plat: &ActivePlatform) -> Vec<crate::ai_guard::task::AssessHome> {
+    if !crate::control::is_root() {
+        return Vec::new();
+    }
+    let mut homes: Vec<_> = UserEnumerator::list(plat)
+        .into_iter()
+        .map(|u| crate::ai_guard::task::AssessHome {
+            user: Some(u.name),
+            dir: u.home,
+        })
+        .collect();
+    homes.sort();
+    homes
 }
 
 /// Expand a policy's per-user path templates into concrete watch paths and the
