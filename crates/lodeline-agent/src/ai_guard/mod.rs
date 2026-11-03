@@ -21,7 +21,7 @@ pub mod workspace_discovery;
 pub use parser::antigravity::{AntigravityParser, AntigravityProjectParser};
 pub use parser::claude_code::{ClaudeCodeParser, ClaudeCodeProjectParser};
 pub use parser::claude_desktop::ClaudeDesktopParser;
-pub use parser::codex::{CodexParser, CodexProjectParser};
+pub use parser::codex::{CodexHomeProjectParser, CodexParser, CodexProjectParser};
 pub use parser::codex_tool_cache::CodexToolCacheParser;
 pub use parser::continue_dev::{ContinueDevParser, ContinueDevProjectParser};
 pub use parser::cursor::{CursorParser, CursorProjectParser};
@@ -72,24 +72,27 @@ pub fn default_rubric_handle() -> RubricHandle {
 /// `Application{app:"codex-mcp-tools"}`, so it renders as its own scan row
 /// distinct from `CodexParser`'s user-global row (scan groups by (tool,scope)).
 ///
-/// `claude_config_dir` is the scanned user's `CLAUDE_CONFIG_DIR`, or `None`
-/// for the default `~/.claude` layout.
+/// `claude_config_dir` and `codex_home` are the scanned user's
+/// `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, or `None` for the default
+/// `~/.claude` and `~/.codex` layouts.
 pub fn user_global_parsers(
     claude_config_dir: Option<std::path::PathBuf>,
+    codex_home: Option<std::path::PathBuf>,
 ) -> Vec<std::sync::Arc<dyn parser::AiGuardParser>> {
-    user_global_parsers_with_baseline(None, claude_config_dir)
+    user_global_parsers_with_baseline(None, claude_config_dir, codex_home)
 }
 
 pub(crate) fn user_global_parsers_with_baseline(
     baseline: Option<std::path::PathBuf>,
     claude_config_dir: Option<std::path::PathBuf>,
+    codex_home: Option<std::path::PathBuf>,
 ) -> Vec<std::sync::Arc<dyn parser::AiGuardParser>> {
     vec![
         std::sync::Arc::new(ClaudeCodeParser::with_config_dir(claude_config_dir)),
-        std::sync::Arc::new(CodexParser),
-        std::sync::Arc::new(match baseline {
-            Some(path) => CodexToolCacheParser::with_baseline(path),
-            None => CodexToolCacheParser::default(),
+        std::sync::Arc::new(CodexParser::with_codex_home(codex_home.clone())),
+        std::sync::Arc::new(CodexToolCacheParser {
+            baseline_path: baseline,
+            codex_home,
         }),
         std::sync::Arc::new(ClaudeDesktopParser),
         std::sync::Arc::new(ContinueDevParser),
