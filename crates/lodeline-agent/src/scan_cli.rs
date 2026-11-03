@@ -287,6 +287,42 @@ fn headline(report: &Report) -> (AiGuardBucket, f32, usize, usize) {
     (worst.0, worst.1, report.rows.len(), findings)
 }
 
+/// Terminal columns `s` occupies: 0 for combining/conjoining marks and
+/// zero-width format characters, 2 for East Asian wide and fullwidth, else 1.
+// shortcut: hand-written ranges, not the full Unicode East Asian Width table
+// (ambiguous-width and rarer wide blocks count as 1); swap in `unicode-width`
+// if a column ever misaligns for a script outside these ranges.
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| match c as u32 {
+            0x0300..=0x036F
+            | 0x1160..=0x11FF
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x200B..=0x200F
+            | 0x20D0..=0x20FF
+            | 0xFE00..=0xFE0F
+            | 0xFE20..=0xFE2F => 0,
+            0x1100..=0x115F
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x1F900..=0x1F9FF
+            | 0x20000..=0x3FFFD => 2,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// `s` left-aligned in `width` terminal columns (`{:<w$}` counts chars).
+fn pad_right(s: &str, width: usize) -> String {
+    format!("{s}{}", " ".repeat(width.saturating_sub(display_width(s))))
+}
+
 fn render_human(report: &Report) -> String {
     use std::fmt::Write;
     let (hb, hs, tools, findings) = headline(report);
@@ -301,32 +337,35 @@ fn render_human(report: &Report) -> String {
     let _ = writeln!(out, "{tools} tools assessed · {findings} findings\n");
 
     if !report.rows.is_empty() {
-        // Column widths sized to content for clean alignment.
+        // Column widths sized to content, in terminal columns, for clean alignment.
         let tcol = report
             .rows
             .iter()
-            .map(|r| tool_cli_label(r.tool).len())
+            .map(|r| display_width(tool_cli_label(r.tool)))
             .chain(std::iter::once("TOOL".len()))
             .max()
             .unwrap_or(4);
         let scol = report
             .rows
             .iter()
-            .map(|r| scope_str(&r.scope).len())
+            .map(|r| display_width(&scope_str(&r.scope)))
             .chain(std::iter::once("SCOPE".len()))
             .max()
             .unwrap_or(5);
         let _ = writeln!(
             out,
-            "{:<tcol$}  {:<scol$}  {:>5}  {:<8}  TOP FINDINGS",
-            "TOOL", "SCOPE", "SCORE", "BUCKET"
+            "{}  {}  {:>5}  {:<8}  TOP FINDINGS",
+            pad_right("TOOL", tcol),
+            pad_right("SCOPE", scol),
+            "SCORE",
+            "BUCKET"
         );
         for r in &report.rows {
             let _ = writeln!(
                 out,
-                "{:<tcol$}  {:<scol$}  {:>5.1}  {:<8}  {}",
-                tool_cli_label(r.tool),
-                scope_str(&r.scope),
+                "{}  {}  {:>5.1}  {:<8}  {}",
+                pad_right(tool_cli_label(r.tool), tcol),
+                pad_right(&scope_str(&r.scope), scol),
                 round1(r.score),
                 bucket_wire(r.bucket),
                 reasons_summary(&r.reasons),
@@ -396,10 +435,14 @@ fn render_human(report: &Report) -> String {
             }
         }
         if !seen.is_empty() {
-            let kcol = seen.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+            let kcol = seen
+                .iter()
+                .map(|(k, _)| display_width(k))
+                .max()
+                .unwrap_or(0);
             let _ = writeln!(out, "\nHow to reduce");
             for (kind, hint) in &seen {
-                let _ = writeln!(out, "  {kind:<kcol$}  {hint}");
+                let _ = writeln!(out, "  {}  {hint}", pad_right(kind, kcol));
             }
         }
         let _ = writeln!(out, "\nRun `lodeline scan --json` for full detail.");
@@ -572,5 +615,61 @@ mod controls_tests {
                 build_report_with_parsers(Path::new("/unused"), &[Arc::new(Fixture(controls))]);
             assert!(!render_human(&empty).contains("Observed controls"));
         }
+    }
+}
+
+#[cfg(test)]
+mod table_width_tests {
+    use super::*;
+
+    #[test]
+    fn display_width_counts_terminal_columns() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("테스터"), 6);
+        assert_eq!(display_width("日本語"), 6);
+        assert_eq!(display_width("é"), 1);
+        assert_eq!(display_width("e\u{301}"), 1);
+        // NFD Hangul: leading consonant is wide, vowel and trailing consonant add nothing.
+        assert_eq!(display_width("\u{1112}\u{1161}\u{11AB}"), 2);
+    }
+
+    #[test]
+    fn score_column_lines_up_for_ascii_cjk_and_accented_scopes() {
+        let row = |path: &str, score: f32| Row {
+            controls: None,
+            tool: AiTool::Codex,
+            scope: AiGuardScope::Project { path: path.into() },
+            score,
+            bucket: AiGuardBucket::Low,
+            reasons: vec![],
+        };
+        let report = Report {
+            rows: vec![
+                row("C:\\Users\\tester", 11.0),
+                row("C:\\Users\\테스터", 22.0),
+                row("/home/cafe\u{301}", 33.0),
+                row("/home/café", 44.0),
+            ],
+            not_configured: vec![],
+            errors: vec![],
+        };
+        let text = render_human(&report);
+        let end_of = |line: &str, token: &str| {
+            let at = line.find(token).expect(token);
+            display_width(&line[..at + token.len()])
+        };
+        let mut ends = vec![];
+        for line in text
+            .lines()
+            .filter(|l| l.starts_with("codex") || l.starts_with("TOOL"))
+        {
+            let token = ["SCORE", "11.0", "22.0", "33.0", "44.0"]
+                .into_iter()
+                .find(|t| line.contains(t))
+                .unwrap();
+            ends.push(end_of(line, token));
+        }
+        assert_eq!(ends.len(), 5, "{text}");
+        assert!(ends.iter().all(|e| *e == ends[0]), "{ends:?}\n{text}");
     }
 }
