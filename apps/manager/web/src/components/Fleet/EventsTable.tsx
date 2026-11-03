@@ -1,0 +1,94 @@
+import { Link } from '@tanstack/react-router';
+import { type EventWithTriage, extractAiGuard, extractHook, extractToggleDrift } from '@/api/fleet';
+import { SkeletonRows } from '@/components/Fleet/SkeletonRows';
+import { humanKind, humanTool } from '@/lib/labels';
+import { relativeAge } from '@/lib/time';
+import { cn } from '@/lib/utils';
+
+interface Props {
+  rows: EventWithTriage[];
+  isPending: boolean;
+  onSelect: (event: EventWithTriage) => void;
+}
+
+/** Fleet-wide event timeline (UI/UX §5.2 Events tab). No triage columns. */
+export function EventsTable({ rows, isPending, onSelect }: Props) {
+  if (isPending) {
+    return <SkeletonRows count={6} />;
+  }
+  if (rows.length === 0) {
+    return (
+      <div className="px-4 py-8 text-center text-sm text-text-muted">
+        No events in the selected range.
+      </div>
+    );
+  }
+  return (
+    <table className="w-full text-xs">
+      <thead className="text-text-subtle">
+        <tr className="border-b border-border-subtle text-left">
+          <th className="px-3 py-2 font-medium">Sev</th>
+          <th className="px-3 py-2 font-medium">Age</th>
+          <th className="px-3 py-2 font-medium">Kind</th>
+          <th className="px-3 py-2 font-medium">Host</th>
+          <th className="px-3 py-2 font-medium">Tool</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((ev) => {
+          const ag = extractAiGuard(ev);
+          const hook = extractHook(ev);
+          const drift = extractToggleDrift(ev);
+          const tool = ag
+            ? humanTool(ag.tool, ag.tool_label)
+            : hook
+              ? humanTool(
+                  hook.agent,
+                  hook.kind === 'hook_invocation' ? hook.other_label : undefined,
+                )
+              : drift
+                ? humanTool(drift.tool, drift.tool_label)
+                : '—';
+          return (
+            <tr key={`${ev.host_id}:${ev.event_id}`} className="border-b border-border-subtle">
+              <td className="px-3 py-2">
+                {/* Contract treats unknown/future severities as warn, not info
+                    (api/fleet.ts) — so only an explicit "info" is the low dot. */}
+                <span
+                  role="img"
+                  title={ev.severity === 'info' ? 'Info' : 'Warning'}
+                  aria-label={ev.severity === 'info' ? 'Info' : 'Warning'}
+                  className={cn(
+                    'inline-block h-2 w-2 rounded-full',
+                    ev.severity === 'info' ? 'bg-sev-info' : 'bg-sev-medium',
+                  )}
+                />
+              </td>
+              <td className="px-3 py-2 font-mono text-text-muted">{relativeAge(ev.ts)}</td>
+              <td className="px-3 py-2 text-text-primary">
+                <button
+                  type="button"
+                  onClick={() => onSelect(ev)}
+                  className="text-left text-accent hover:underline"
+                  aria-label={`Inspect ${humanKind(ev.evidence?.kind ?? '')} ${ev.event_id}`}
+                >
+                  {humanKind(ev.evidence?.kind ?? '')}
+                </button>
+              </td>
+              <td className="px-3 py-2 font-mono text-text-muted" title={ev.host_id}>
+                <Link
+                  to="/hosts/$hostId"
+                  params={{ hostId: ev.host_id }}
+                  className="hover:text-accent hover:underline"
+                >
+                  {ev.host_id.split('-')[0]}
+                </Link>
+              </td>
+              <td className="px-3 py-2 text-text-muted">{tool}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
