@@ -287,7 +287,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             Cursor => &cursor_repos,
             Antigravity => &antigravity_repos,
             ClaudeDesktop => &[],
-            Grok => &[], // #110: no Grok project parser/workspace yet
+            Grok => &[], // #203: no grok_workspaces policy key; `lodeline scan` reads Grok projects
             Other => &[],
         }
     };

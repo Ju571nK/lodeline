@@ -26,6 +26,7 @@ pub use parser::codex_tool_cache::CodexToolCacheParser;
 pub use parser::continue_dev::{ContinueDevParser, ContinueDevProjectParser};
 pub use parser::cursor::{CursorParser, CursorProjectParser};
 pub use parser::gemini::{GeminiParser, GeminiProjectParser};
+pub use parser::grok::{GrokParser, GrokProjectParser};
 pub use rule_pack::parser::RulePackParser;
 pub use task::{run, CachedAssessment, StateMap, TaskCtx};
 
@@ -95,6 +96,7 @@ pub(crate) fn user_global_parsers_with_baseline(
         std::sync::Arc::new(GeminiParser),
         std::sync::Arc::new(CursorParser),
         std::sync::Arc::new(AntigravityParser),
+        std::sync::Arc::new(GrokParser),
     ]
 }
 
