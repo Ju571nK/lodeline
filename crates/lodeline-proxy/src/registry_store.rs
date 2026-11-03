@@ -12,8 +12,14 @@
 //! * `snapshots` / `snapshot_members`: the latest complete inventory per scope
 //!   key (refs only).
 //! * `reports`: inventory reports not yet acknowledged (the exact bytes sent, so
-//!   a retry is byte-identical).
+//!   a retry is byte-identical). Bounded: see [`MAX_PENDING_INCOMPLETE_REPORTS`]
+//!   and [`MAX_PENDING_COMPLETE_REPORTS`]; every report dropped for space is
+//!   counted in [`RegistryStore::discarded_reports`].
 //! * `rotations`: declared key rotations (`key_id` of the new key).
+//!
+//! Retention (README "D-05 metadata registry (N9)", Retention row): an entry is
+//! deleted only by [`EntryRetention`], once the server ACKed it, no snapshot or
+//! queued report names it, and the spool holds no event that could reference it.
 //!
 //! Durability rule (README "Sync ordering"): [`RegistryStore::commit_complete`]
 //! returns only after the entries and the snapshot are committed, so a start
@@ -22,16 +28,18 @@
 //! The API is synchronous and blocking (SQLite, fsync). Async callers use
 //! `spawn_blocking`. [`RegistryStore`] is a cheap clonable handle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use lodeline_proxy_api::registry::{Comparison, InventoryReport};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::json;
 
 use crate::jcs::{self, JcsError};
 use crate::registry_key::{sha256_hex, Key, ScopeKey, CANON_V1};
+use crate::spool::Spool;
 
 /// SQLite file inside the state directory.
 pub const REGISTRY_DB_FILE: &str = "registry.sqlite3";
@@ -43,8 +51,16 @@ const SCHEMA_VERSION: &str = "1";
 /// client re-checks the serialized entry before sending.
 pub const MAX_DEFINITION_BYTES: usize = 250 * 1024;
 /// Unsent incomplete reports kept; the oldest ones are dropped beyond this.
-/// A complete report is never dropped for space.
 pub const MAX_PENDING_INCOMPLETE_REPORTS: usize = 64;
+/// Unsent complete reports kept (P1 initial test value, equal to the server's
+/// per-proxy `pending_previous` budget, registry.md R7). Beyond it the oldest
+/// report whose snapshot is no longer the latest of its scope key is discarded
+/// like a refused one: the next report of its chain becomes an
+/// `initial_baseline`. The latest snapshot of a scope key is never dropped, so
+/// the backlog is bounded by this plus the number of scope keys.
+pub const MAX_PENDING_COMPLETE_REPORTS: usize = 256;
+/// Entries examined per retention pass.
+const RETENTION_BATCH: i64 = 500;
 
 /// A registry failure. Never carries content (names, definitions, key bytes,
 /// paths).
@@ -270,6 +286,14 @@ pub(crate) struct Inner {
     dir: PathBuf,
     key: Key,
     proxy_id: String,
+    /// Reports given up on since this process opened the store.
+    discarded: u64,
+    /// Refs named by a snapshot committed since [`EntryRetention`] last took
+    /// them: an event appended after their mark may name them.
+    listed: HashSet<String>,
+    /// The client is between reading a report and settling it
+    /// ([`RegistryStore::sending`]); the backlog trim waits.
+    sending: bool,
 }
 
 /// Handle to the local registry. Clones share one connection.
@@ -328,6 +352,14 @@ CREATE TABLE reports(
 );
 CREATE TABLE rotations(key_id TEXT PRIMARY KEY, reason TEXT NOT NULL) WITHOUT ROWID;
 ";
+
+/// An entry the server ACKed whose conflict handling is not pending, that no
+/// snapshot names (so no new event can resolve to it) and that no queued report
+/// mentions (a 424 on the report re-uploads its refs). The ref is a fixed-form
+/// token, so a bytewise mention is exact enough; a false match only keeps it.
+const UNREFERENCED_ACKED: &str = "entries.state = 'acked' AND entries.gap_pending = 0 \
+AND entries.metadata_ref NOT IN (SELECT metadata_ref FROM snapshot_members) \
+AND NOT EXISTS (SELECT 1 FROM reports WHERE instr(reports.body, entries.metadata_ref) > 0)";
 
 const ENTRY_COLS: &str = "metadata_ref, proxy_id, upstream_id, credential_scope_id, \
 protocol_version, observation_source, canon, key_id, fingerprint, observed_at, tool_name, \
@@ -467,6 +499,9 @@ impl RegistryStore {
             dir: dir.to_path_buf(),
             key,
             proxy_id: proxy_id.to_string(),
+            discarded: 0,
+            listed: HashSet::new(),
+            sending: false,
         };
         Ok((RegistryStore(Arc::new(Mutex::new(inner))), kind))
     }
@@ -732,39 +767,52 @@ impl RegistryStore {
         Ok(())
     }
 
-    /// Drop the latest snapshot of `scope` if it is `inventory_id`: the server
-    /// never saw it, so the next complete listing must be an `initial_baseline`.
-    pub fn forget_snapshot(
+    /// Give up on a queued report and count it (see [`Inner::discard_report`]).
+    pub fn discard_report(
         &self,
-        scope: &ScopeKey,
-        inventory_id: &str,
+        report_id: &str,
+        parsed: Option<&InventoryReport>,
     ) -> Result<(), RegistryError> {
-        let g = self.lock();
-        if g.latest_snapshot(scope)?
-            .is_some_and(|s| s.inventory_id == inventory_id)
-        {
-            let tx = g.conn.unchecked_transaction()?;
-            tx.execute(
-                "DELETE FROM snapshot_members WHERE inventory_id = ?1",
-                [inventory_id],
-            )?;
-            tx.execute(
-                "DELETE FROM snapshots WHERE inventory_id = ?1",
-                [inventory_id],
-            )?;
-            tx.commit()?;
-        }
-        Ok(())
+        self.lock().discard_report(report_id, parsed)
     }
 
-    /// Replace the bytes of a queued report (used to turn a report whose
-    /// previous snapshot was discarded into an `initial_baseline`).
-    pub fn replace_report_body(&self, report_id: &str, body: &[u8]) -> Result<(), RegistryError> {
-        self.lock().conn.execute(
-            "UPDATE reports SET body = ?2 WHERE report_id = ?1",
-            params![report_id, body],
-        )?;
-        Ok(())
+    /// Reports given up on since the store was opened: refused by the server,
+    /// unsendable, or dropped because the local backlog was full.
+    pub fn discarded_reports(&self) -> u64 {
+        self.lock().discarded
+    }
+
+    /// Acknowledged entries that no snapshot and no queued report names, oldest
+    /// first. Only these may be deleted ([`EntryRetention`]).
+    pub fn unreferenced_acked_entries(&self) -> Result<Vec<String>, RegistryError> {
+        let g = self.lock();
+        let mut st = g.conn.prepare(&format!(
+            "SELECT metadata_ref FROM entries WHERE {UNREFERENCED_ACKED} ORDER BY seq LIMIT ?1"
+        ))?;
+        let rows = st.query_map([RETENTION_BATCH], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Take the refs listed since the last call (see [`EntryRetention`]).
+    pub fn take_listed(&self) -> HashSet<String> {
+        std::mem::take(&mut self.lock().listed)
+    }
+
+    /// Delete these entries if they are still acknowledged and unreferenced and
+    /// were not listed again since [`Self::take_listed`]. Returns how many were
+    /// deleted.
+    pub fn delete_unreferenced(&self, refs: &[String]) -> Result<usize, RegistryError> {
+        let g = self.lock();
+        let tx = g.conn.unchecked_transaction()?;
+        let mut n = 0;
+        for r in refs.iter().filter(|r| !g.listed.contains(*r)) {
+            n += tx.execute(
+                &format!("DELETE FROM entries WHERE metadata_ref = ?1 AND {UNREFERENCED_ACKED}"),
+                [r],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Count a refusal (a 422 on the entry). An entry that reaches `poison_at`
@@ -793,6 +841,14 @@ impl RegistryStore {
         }
         tx.commit()?;
         Ok(poisoned)
+    }
+
+    /// Held by the client from reading a report to settling it, so the backlog
+    /// trim of a concurrent listing neither drops the report on the wire nor
+    /// rewrites a report built on it. The trim runs again at the next listing.
+    pub fn sending(&self) -> Sending {
+        self.lock().sending = true;
+        Sending(self.clone())
     }
 
     pub fn report_done(&self, report_id: &str) -> Result<(), RegistryError> {
@@ -853,6 +909,15 @@ pub enum ToolLookup {
     /// cannot be found here: a listing with a repeated name never completes
     /// (`ambiguous_name`).
     NoCompleteInventory,
+}
+
+/// Returned by [`RegistryStore::sending`]; the trim may run again once dropped.
+pub struct Sending(RegistryStore);
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        self.0.lock().sending = false;
+    }
 }
 
 impl Inner {
@@ -1038,7 +1103,9 @@ impl Inner {
             "INSERT INTO reports(report_id, complete, body) VALUES (?1, 1, ?2)",
             params![c.report.report_id, c.report.body],
         )?;
-        Ok(tx.commit()?)
+        tx.commit()?;
+        self.listed.extend(s.members.iter().map(|(r, _)| r.clone()));
+        self.trim_complete_reports()
     }
 
     pub(crate) fn commit_incomplete(&mut self, r: &StoredReport) -> Result<(), RegistryError> {
@@ -1049,12 +1116,191 @@ impl Inner {
             "INSERT INTO reports(report_id, complete, body) VALUES (?1, 0, ?2)",
             params![r.report_id, r.body],
         )?;
-        tx.execute(
+        let dropped = tx.execute(
             "DELETE FROM reports WHERE complete = 0 AND seq NOT IN \
              (SELECT seq FROM reports WHERE complete = 0 ORDER BY seq DESC LIMIT ?1)",
             [MAX_PENDING_INCOMPLETE_REPORTS as i64],
         )?;
-        Ok(tx.commit()?)
+        tx.commit()?;
+        self.discarded += dropped as u64;
+        Ok(())
+    }
+
+    /// Enforce [`MAX_PENDING_COMPLETE_REPORTS`]: discard the oldest complete
+    /// reports whose snapshot is no longer the latest of its scope key. Runs after
+    /// the commit, so a crash in between only leaves one report too many until
+    /// the next complete listing. Skipped while the client is sending
+    /// ([`RegistryStore::sending`]); the next listing trims the excess.
+    fn trim_complete_reports(&mut self) -> Result<(), RegistryError> {
+        if self.sending {
+            return Ok(());
+        }
+        let count: i64 =
+            self.conn
+                .query_row("SELECT count(*) FROM reports WHERE complete = 1", [], |r| {
+                    r.get(0)
+                })?;
+        let over = (count as usize).saturating_sub(MAX_PENDING_COMPLETE_REPORTS);
+        if over == 0 {
+            return Ok(());
+        }
+        let victims: Vec<(String, Option<InventoryReport>)> = {
+            let mut st = self.conn.prepare(
+                "SELECT report_id, body FROM reports WHERE complete = 1 \
+                 AND NOT EXISTS (SELECT 1 FROM snapshots s WHERE instr(reports.body, s.inventory_id) > 0) \
+                 ORDER BY seq LIMIT ?1",
+            )?;
+            let rows = st.query_map([over as i64], |r| {
+                let body: Vec<u8> = r.get(1)?;
+                Ok((
+                    r.get(0)?,
+                    lodeline_proxy_api::parse_inventory_report(&body).ok(),
+                ))
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (id, parsed) in victims {
+            self.discard_report(&id, parsed.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// Give up on a queued report and count it, in one transaction. A discarded
+    /// COMPLETE report breaks the server's chain for its scope key (the server
+    /// never saw that snapshot), so:
+    ///
+    /// * the local latest snapshot is forgotten if it is that one, making the
+    ///   next complete listing an `initial_baseline`;
+    /// * queued reports that name it as their previous snapshot are rewritten to
+    ///   `initial_baseline` (their own members and snapshot stay valid).
+    pub(crate) fn discard_report(
+        &mut self,
+        report_id: &str,
+        parsed: Option<&InventoryReport>,
+    ) -> Result<(), RegistryError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM reports WHERE report_id = ?1", [report_id])?;
+        // An incomplete report is not part of the chain.
+        if let Some((p, inv)) = parsed.and_then(|p| Some((p, p.inventory_id.as_ref()?.as_str()))) {
+            let scope = ScopeKey {
+                proxy_id: p.proxy_id.as_str().to_string(),
+                upstream_id: p.scope.upstream_id.as_str().to_string(),
+                credential_scope_id: p.scope.credential_scope_id.as_str().to_string(),
+                protocol_version: "2025-11-25".to_string(),
+                observation_source: "proxy_live".to_string(),
+            };
+            if self
+                .latest_snapshot(&scope)?
+                .is_some_and(|s| s.inventory_id == inv)
+            {
+                tx.execute(
+                    "DELETE FROM snapshot_members WHERE inventory_id = ?1",
+                    [inv],
+                )?;
+                tx.execute("DELETE FROM snapshots WHERE inventory_id = ?1", [inv])?;
+            }
+            let queued: Vec<(String, Vec<u8>)> = {
+                let mut st =
+                    tx.prepare("SELECT report_id, body FROM reports WHERE complete = 1")?;
+                let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<Result<_, _>>()?
+            };
+            for (id, body) in queued {
+                let Ok(mut q) = lodeline_proxy_api::parse_inventory_report(&body) else {
+                    continue;
+                };
+                let names_it = match &q.comparison {
+                    Some(Comparison::Compared {
+                        previous_inventory_id,
+                        ..
+                    })
+                    | Some(Comparison::Rebaseline {
+                        previous_inventory_id,
+                        ..
+                    }) => previous_inventory_id.as_str() == inv,
+                    _ => false,
+                };
+                if names_it {
+                    q.comparison = Some(Comparison::InitialBaseline {});
+                    if let Ok(body) = serde_json::to_vec(&q) {
+                        tx.execute(
+                            "UPDATE reports SET body = ?2 WHERE report_id = ?1",
+                            params![id, body],
+                        )?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        self.discarded += 1;
+        Ok(())
+    }
+}
+
+/// Local entry retention (README "D-05 metadata registry (N9)", Retention row:
+/// locally an entry is kept until the events that reference it and the entry
+/// itself have been centrally ACKed, and at least as long as those events).
+///
+/// An entry is deletable once [`RegistryStore::unreferenced_acked_entries`]
+/// lists it: the server ACKed it, and no snapshot names it, so no new start can
+/// resolve to it. Every event that can reference it was therefore appended
+/// before this pass first saw it unreferenced. The pass remembers the spool's
+/// `last_assigned_sequence` at that moment and deletes the entry on a later pass
+/// once the spool holds no row (unsent, acknowledged but retained, or
+/// quarantined) at or below that sequence. A ref a snapshot named again since
+/// the previous pass ([`RegistryStore::take_listed`]) loses its mark and is
+/// marked on the next pass, since a start may have resolved to it in between.
+/// The server retention E is not checked. It matters only through quarantine
+/// rows, which go after Q = E, so while E is unknown an entry that a quarantine
+/// row may reference is kept.
+///
+/// The marks live in memory: a restart marks again with a higher sequence,
+/// which only keeps entries longer. A start whose lookup ran just before the
+/// listing that dropped its ref, and whose append lands after the mark, can
+/// still name a deleted entry. The pre-send check then finds no local entry and
+/// the event goes unchanged, as README "Not-yet-synced refs" specifies; the
+/// server holds the entry because it ACKed it.
+#[derive(Default)]
+pub struct EntryRetention {
+    marks: HashMap<String, i64>,
+}
+
+impl EntryRetention {
+    /// One pass. Blocking (SQLite on both files). Returns how many entries were
+    /// deleted.
+    pub fn pass(&mut self, store: &RegistryStore, spool: &Spool) -> Result<usize, RegistryError> {
+        let unreferenced = store.unreferenced_acked_entries()?;
+        // Taken after the query, so a listing between the two is seen here.
+        let listed = store.take_listed();
+        let candidates: Vec<String> = unreferenced
+            .into_iter()
+            .filter(|r| !listed.contains(r))
+            .collect();
+        let known: HashSet<&String> = candidates.iter().collect();
+        self.marks.retain(|r, _| known.contains(r));
+        // Read after the candidates: an event appended later cannot name them.
+        let last = spool.snapshot().last_assigned_sequence;
+        let oldest = spool
+            .oldest_held_sequence()
+            .map_err(|_| RegistryError::Storage)?;
+        let mut due = Vec::new();
+        for r in candidates {
+            match self.marks.get(&r) {
+                None => {
+                    self.marks.insert(r, last);
+                }
+                Some(&mark) if oldest.is_none_or(|o| o > mark) => due.push(r),
+                Some(_) => {}
+            }
+        }
+        if due.is_empty() {
+            return Ok(0);
+        }
+        let n = store.delete_unreferenced(&due)?;
+        for r in &due {
+            self.marks.remove(r);
+        }
+        Ok(n)
     }
 }
 

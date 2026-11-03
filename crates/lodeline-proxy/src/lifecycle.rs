@@ -467,6 +467,8 @@ struct Pacing {
 
 /// How often the spool's own gaps (R expiry) are handed to the gap queue.
 const SPOOL_GAP_PUMP_INTERVAL: Duration = Duration::from_secs(5);
+/// Registry entry retention pass, as often as the spool's maintenance.
+const ENTRY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 
 async fn run_inner(
     b: &Bootstrap,
@@ -533,6 +535,7 @@ async fn run_inner(
     let mut pump_task = None;
     let mut retention_task = None;
     let mut registry_task = None;
+    let mut entry_retention_task = None;
     // The inventory: the relay's observation sink and the worker behind it.
     let mut inventory_sink: Option<std::sync::Arc<crate::inventory_sink::InventorySink>> = None;
     let mut inventory_handle: Option<crate::inventory_sink::InventoryHandle> = None;
@@ -643,6 +646,14 @@ async fn run_inner(
                         spool.clone(),
                     )),
                 );
+                let (ret_store, ret_spool, mut ret_stop) =
+                    (store.clone(), spool.clone(), stop_rx.clone());
+                entry_retention_task = Some(tokio::spawn(async move {
+                    run_entry_retention(ret_store, ret_spool, async move {
+                        let _ = ret_stop.wait_for(|v| *v).await;
+                    })
+                    .await;
+                }));
                 let rclient = crate::registry_client::RegistryClient::new(
                     store,
                     transport,
@@ -819,9 +830,15 @@ async fn run_inner(
     if let Some(t) = report_task {
         let _ = t.await;
     }
-    for t in [ingest_task, pump_task, retention_task, registry_task]
-        .into_iter()
-        .flatten()
+    for t in [
+        ingest_task,
+        pump_task,
+        retention_task,
+        registry_task,
+        entry_retention_task,
+    ]
+    .into_iter()
+    .flatten()
     {
         let _ = t.await;
     }
@@ -878,6 +895,39 @@ async fn follow_retention(
                     return;
                 }
             }
+        }
+    }
+}
+
+/// Registry entry retention (`registry_store::EntryRetention`), one pass per
+/// interval like the spool's maintenance. A failed pass deletes nothing and is
+/// retried at the next interval.
+async fn run_entry_retention(
+    store: crate::registry_store::RegistryStore,
+    spool: crate::spool::Spool,
+    shutdown: impl Future<Output = ()>,
+) {
+    tokio::pin!(shutdown);
+    let mut retention = crate::registry_store::EntryRetention::default();
+    loop {
+        let (st, sp, mut r) = (store.clone(), spool.clone(), std::mem::take(&mut retention));
+        // A panicked pass loses only its marks, which starts the marking over.
+        if let Ok((r, res)) = tokio::task::spawn_blocking(move || {
+            let res = r.pass(&st, &sp);
+            (r, res)
+        })
+        .await
+        {
+            retention = r;
+            match res {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(count = n, "registry entries purged after retention"),
+                Err(e) => tracing::warn!(error = %e, "registry entry retention failed"),
+            }
+        }
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = tokio::time::sleep(ENTRY_RETENTION_INTERVAL) => {}
         }
     }
 }
