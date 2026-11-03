@@ -169,7 +169,7 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
 fn project_parsers_for_dir(dir: &Path) -> Vec<Arc<dyn AiGuardParser>> {
     use crate::ai_guard::{
         AntigravityProjectParser, ClaudeCodeProjectParser, CodexProjectParser,
-        ContinueDevProjectParser, CursorProjectParser, GeminiProjectParser,
+        ContinueDevProjectParser, CursorProjectParser, GeminiProjectParser, GrokProjectParser,
     };
     let mut out: Vec<Arc<dyn AiGuardParser>> = Vec::new();
     let has = |rel: &str| dir.join(rel).exists();
@@ -183,8 +183,11 @@ fn project_parsers_for_dir(dir: &Path) -> Vec<Arc<dyn AiGuardParser>> {
     if has(".codex/config.toml") || has("AGENTS.md") {
         out.push(Arc::new(CodexProjectParser { repo_root: root() }));
     }
-    // Cursor: .cursor/mcp.json | .cursorrules | .cursor/rules/ (directory)
-    if has(".cursor/mcp.json") || has(".cursorrules") || dir.join(".cursor").join("rules").is_dir()
+    // Cursor: .cursor/mcp.json | .cursor/hooks.json | .cursorrules | .cursor/rules/ (directory)
+    if has(".cursor/mcp.json")
+        || has(".cursor/hooks.json")
+        || has(".cursorrules")
+        || dir.join(".cursor").join("rules").is_dir()
     {
         out.push(Arc::new(CursorProjectParser { repo_root: root() }));
     }
@@ -199,6 +202,10 @@ fn project_parsers_for_dir(dir: &Path) -> Vec<Arc<dyn AiGuardParser>> {
     // Antigravity: .antigravity/settings.json
     if has(".antigravity/settings.json") {
         out.push(Arc::new(AntigravityProjectParser { repo_root: root() }));
+    }
+    // Grok: .grok/hooks/ (directory) | .grok/config.toml
+    if dir.join(".grok").join("hooks").is_dir() || has(".grok/config.toml") {
+        out.push(Arc::new(GrokProjectParser { repo_root: root() }));
     }
     out
 }

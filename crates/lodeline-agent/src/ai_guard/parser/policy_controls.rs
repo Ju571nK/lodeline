@@ -102,6 +102,24 @@ pub(super) fn claude_policy_dir() -> PathBuf {
     }
 }
 
+/// Cursor's enterprise (system-wide) `hooks.json`. Cursor hardcodes these
+/// paths, `C:\ProgramData` included, rather than reading `%ProgramData%`
+/// (cursor-agent 2026.10.22 hooks loader).
+pub(super) fn cursor_enterprise_hooks_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Library/Application Support/Cursor/hooks.json")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PathBuf::from(r"C:\ProgramData\Cursor\hooks.json")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        PathBuf::from("/etc/cursor/hooks.json")
+    }
+}
+
 pub(super) fn claude_paths(dir: &Path) -> Vec<PathBuf> {
     vec![
         dir.join("managed-settings.json"),

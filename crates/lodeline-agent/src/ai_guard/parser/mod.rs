@@ -12,6 +12,7 @@ pub mod codex_tool_cache;
 pub mod continue_dev;
 pub mod cursor;
 pub mod gemini;
+pub mod grok;
 pub(crate) mod instruction_scan;
 pub mod mcp_scan;
 pub(crate) mod policy_controls;
