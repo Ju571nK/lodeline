@@ -45,10 +45,18 @@ struct Report {
 
 /// CLI entry. Resolves home + cwd, builds the report, prints it, returns 0.
 pub fn run(args: ScanArgs) -> i32 {
-    let claude_dir = claude_config_dir(
+    let claude_dir = invoking_user_dir(
         args.home_override.as_deref(),
         std::env::var_os("CLAUDE_CONFIG_DIR"),
     );
+    // Codex reads `CODEX_HOME` with `env::var`, so a non-UTF-8 value means
+    // `~/.codex`, and canonicalizes it; a missing folder stops Codex, so its
+    // config reads as absent (`find_codex_home`, rust-v0.166.0).
+    let codex_home = invoking_user_dir(
+        args.home_override.as_deref(),
+        std::env::var("CODEX_HOME").ok().map(OsString::from),
+    )
+    .map(|dir| dunce::canonicalize(&dir).unwrap_or(dir));
     let home = match args.home_override.or_else(default_home) {
         Some(h) => h,
         None => {
@@ -59,7 +67,7 @@ pub fn run(args: ScanArgs) -> i32 {
     let cwd = args.cwd_override.or_else(|| std::env::current_dir().ok());
 
     if args.json {
-        let v = report_json(&build_report(&home, claude_dir, cwd.as_deref()));
+        let v = report_json(&build_report(&home, claude_dir, codex_home, cwd.as_deref()));
         println!(
             "{}",
             serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into())
@@ -67,7 +75,7 @@ pub fn run(args: ScanArgs) -> i32 {
     } else {
         print!(
             "{}",
-            render_human(&build_report(&home, claude_dir, cwd.as_deref()))
+            render_human(&build_report(&home, claude_dir, codex_home, cwd.as_deref()))
         );
     }
     0
@@ -76,12 +84,12 @@ pub fn run(args: ScanArgs) -> i32 {
 /// Test seam — assemble the JSON report for a given home + optional project dir
 /// without going through `current_dir()` or printing. Used by integration tests.
 pub fn report_json_for(home: &Path, cwd: Option<&Path>) -> serde_json::Value {
-    report_json(&build_report(home, None, cwd))
+    report_json(&build_report(home, None, None, cwd))
 }
 
 /// Test seam — the human-rendered report as a string.
 pub fn render_human_for(home: &Path, cwd: Option<&Path>) -> String {
-    render_human(&build_report(home, None, cwd))
+    render_human(&build_report(home, None, None, cwd))
 }
 
 fn default_home() -> Option<PathBuf> {
@@ -91,19 +99,24 @@ fn default_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// `CLAUDE_CONFIG_DIR` belongs to the user running the scan, so it applies
-/// only when the home came from `$HOME`, not from an override.
-fn claude_config_dir(home_override: Option<&Path>, env: Option<OsString>) -> Option<PathBuf> {
+/// `CLAUDE_CONFIG_DIR` and `CODEX_HOME` belong to the user running the scan,
+/// so they apply only when the home came from `$HOME`, not from an override.
+fn invoking_user_dir(home_override: Option<&Path>, env: Option<OsString>) -> Option<PathBuf> {
     match home_override {
         Some(_) => None,
         None => env.filter(|v| !v.is_empty()).map(PathBuf::from),
     }
 }
 
-fn build_report(home: &Path, claude_config_dir: Option<PathBuf>, cwd: Option<&Path>) -> Report {
-    let mut parsers = user_global_parsers(claude_config_dir);
+fn build_report(
+    home: &Path,
+    claude_config_dir: Option<PathBuf>,
+    codex_home: Option<PathBuf>,
+    cwd: Option<&Path>,
+) -> Report {
+    let mut parsers = user_global_parsers(claude_config_dir, codex_home.clone());
     if let Some(dir) = cwd {
-        parsers.extend(project_parsers_for_dir(dir));
+        parsers.extend(project_parsers_for_dir(dir, codex_home));
     }
 
     build_report_with_parsers(home, &parsers)
@@ -166,10 +179,11 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
 /// tool's project markers. Mirrors the per-repo discovery markers used by the
 /// daemon (`workspace_discovery`), but applied to `dir` directly rather than to
 /// its subdirectories.
-fn project_parsers_for_dir(dir: &Path) -> Vec<Arc<dyn AiGuardParser>> {
+fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<dyn AiGuardParser>> {
     use crate::ai_guard::{
-        AntigravityProjectParser, ClaudeCodeProjectParser, CodexProjectParser,
-        ContinueDevProjectParser, CursorProjectParser, GeminiProjectParser, GrokProjectParser,
+        AntigravityProjectParser, ClaudeCodeProjectParser, CodexHomeProjectParser,
+        CodexProjectParser, ContinueDevProjectParser, CursorProjectParser, GeminiProjectParser,
+        GrokProjectParser,
     };
     let mut out: Vec<Arc<dyn AiGuardParser>> = Vec::new();
     let has = |rel: &str| dir.join(rel).exists();
@@ -181,7 +195,10 @@ fn project_parsers_for_dir(dir: &Path) -> Vec<Arc<dyn AiGuardParser>> {
     }
     // Codex: .codex/config.toml | AGENTS.md
     if has(".codex/config.toml") || has("AGENTS.md") {
-        out.push(Arc::new(CodexProjectParser { repo_root: root() }));
+        out.push(Arc::new(CodexHomeProjectParser {
+            project: CodexProjectParser { repo_root: root() },
+            codex_home,
+        }));
     }
     // Cursor: .cursor/mcp.json | .cursor/hooks.json | .cursorrules | .cursor/rules/ (directory)
     if has(".cursor/mcp.json")
@@ -497,17 +514,17 @@ fn report_json(report: &Report) -> serde_json::Value {
 }
 
 #[cfg(test)]
-mod claude_config_dir_tests {
-    use super::claude_config_dir;
+mod invoking_user_dir_tests {
+    use super::invoking_user_dir;
     use std::path::{Path, PathBuf};
 
     #[test]
     fn applies_only_to_the_invoking_users_home() {
         let set = || Some("/cfg".into());
-        assert_eq!(claude_config_dir(None, set()), Some(PathBuf::from("/cfg")));
-        assert_eq!(claude_config_dir(Some(Path::new("/home/bob")), set()), None);
-        assert_eq!(claude_config_dir(None, Some("".into())), None);
-        assert_eq!(claude_config_dir(None, None), None);
+        assert_eq!(invoking_user_dir(None, set()), Some(PathBuf::from("/cfg")));
+        assert_eq!(invoking_user_dir(Some(Path::new("/home/bob")), set()), None);
+        assert_eq!(invoking_user_dir(None, Some("".into())), None);
+        assert_eq!(invoking_user_dir(None, None), None);
     }
 }
 
