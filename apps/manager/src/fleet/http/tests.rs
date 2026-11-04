@@ -463,6 +463,45 @@ async fn a_refused_connection_or_a_bad_body_is_a_transport_error() {
     }
 }
 
+/// A body is read only up to its limit: past it, a page is refused and an error answer's body
+/// is dropped.
+#[tokio::test]
+async fn bodies_are_read_up_to_a_limit() {
+    let page = |len: usize| format!(r#"{{"events":[],"pad":"{}"}}"#, "x".repeat(len - 22));
+    for (len, ok) in [(1024, true), (1025, false)] {
+        let (mut c, _) = stub(move |_| Answer {
+            body: page(len),
+            ..json_answer(200, Value::Null)
+        })
+        .await;
+        c.body_limit = 1024;
+        let res = c.get(Request::Events(EventsParams::default())).await;
+        match res {
+            Ok(_) => assert!(ok, "{len} bytes read"),
+            Err(FleetError::Transport(msg)) => {
+                assert!(!ok, "{len}: {msg}");
+                assert!(msg.ends_with("body over 1024 bytes"), "{msg}");
+            }
+            Err(e) => panic!("{len}: {e}"),
+        }
+    }
+
+    for (len, message) in [(ERROR_BODY_LIMIT, "x"), (ERROR_BODY_LIMIT + 1, "")] {
+        let (c, _) = stub(move |_| Answer {
+            body: format!("x{}", " ".repeat(len - 1)),
+            ..json_answer(500, Value::Null)
+        })
+        .await;
+        let err = c.get(Request::Meta).await.unwrap_err();
+        let want = FleetError::Api {
+            status: 500,
+            code: "unknown".into(),
+            message: message.into(),
+        };
+        assert_eq!(err, want, "{len} bytes");
+    }
+}
+
 #[tokio::test]
 async fn ids_are_path_escaped() {
     let (c, calls) = stub(|_| json_answer(404, Value::Null)).await;

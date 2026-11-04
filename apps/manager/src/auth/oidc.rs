@@ -105,7 +105,11 @@ impl Oidc {
         if res.status() != reqwest::StatusCode::OK {
             return Err(failed());
         }
-        let body = read_body(res).await.ok_or_else(failed)?;
+        let body = read_capped(res, BODY_LIMIT)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(failed)?;
         let d = discovery(&body).ok_or_else(failed)?;
         if d.issuer != c.issuer {
             return Err(failed());
@@ -314,7 +318,7 @@ impl Oidc {
                     .trim()
                     .to_ascii_lowercase()
             });
-        let body = read_body(res).await?;
+        let body = read_capped(res, BODY_LIMIT).await.ok().flatten()?;
         let token = match media_type.as_deref() {
             Some("application/x-www-form-urlencoded" | "text/plain") => {
                 let vals = parse_form(&String::from_utf8_lossy(&body))?;
@@ -411,7 +415,7 @@ async fn fetch_keys(http: &reqwest::Client, url: &str) -> Option<Vec<Key>> {
     if res.status() != reqwest::StatusCode::OK {
         return None;
     }
-    let body = read_body(res).await?;
+    let body = read_capped(res, BODY_LIMIT).await.ok().flatten()?;
     let mut raw_keys = Vec::new();
     for (key, value) in go_fields(&body)? {
         if go_fold(&key) == "keys" {
@@ -501,16 +505,19 @@ fn https(raw: &str) -> Option<reqwest::Url> {
     reqwest::Url::parse(raw).ok()
 }
 
-/// The whole body, or `None` past `BODY_LIMIT` bytes without reading the rest.
-async fn read_body(mut res: reqwest::Response) -> Option<Vec<u8>> {
+/// The whole body, or `None` past `limit` bytes without reading the rest.
+pub(crate) async fn read_capped(
+    mut res: reqwest::Response,
+    limit: usize,
+) -> reqwest::Result<Option<Vec<u8>>> {
     let mut body = Vec::new();
-    while let Some(chunk) = res.chunk().await.ok()? {
-        if body.len() + chunk.len() > BODY_LIMIT {
-            return None;
+    while let Some(chunk) = res.chunk().await? {
+        if body.len() + chunk.len() > limit {
+            return Ok(None);
         }
         body.extend_from_slice(&chunk);
     }
-    Some(body)
+    Ok(Some(body))
 }
 
 async fn get(http: &reqwest::Client, raw: &str, no_cache: bool) -> Option<reqwest::Response> {

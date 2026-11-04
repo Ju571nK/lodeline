@@ -9,10 +9,18 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{go_decode, path_escape, BoxFuture, Client, FleetError, Reply, Request, Response};
+use crate::auth::oidc::read_capped;
 use crate::config::ServerTls;
 
 /// The whole exchange, body included, as Go's `http.Client.Timeout`.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The largest 200 body read. `lodeline-server` answers at most 1000 items a page and takes at
+/// most 2 MiB a request (axum's default body limit), so a stored event is under 2 MiB and a page
+/// under 2,000 MiB, plus what re-encoding adds.
+const BODY_LIMIT: usize = 2 << 30;
+/// The largest error body read: the server's own are a short JSON object.
+const ERROR_BODY_LIMIT: usize = 64 << 10;
 
 /// The `Retry-After` wait when a 503 has none, or one that is not whole seconds.
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(5);
@@ -21,6 +29,7 @@ pub struct HttpClient {
     base_url: String,
     token: String,
     http: reqwest::Client,
+    body_limit: usize,
 }
 
 impl HttpClient {
@@ -51,6 +60,7 @@ impl HttpClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token: token.to_owned(),
             http: builder.build()?,
+            body_limit: BODY_LIMIT,
         })
     }
 
@@ -82,7 +92,13 @@ impl HttpClient {
         let status = resp.status().as_u16();
         match status {
             200 => {
-                let body = resp.bytes().await.map_err(transport)?;
+                let limit = self.body_limit;
+                let body = read_capped(resp, limit)
+                    .await
+                    .map_err(transport)?
+                    .ok_or_else(|| {
+                        FleetError::Transport(format!("GET {path}: body over {limit} bytes"))
+                    })?;
                 decode(&req, &body)
                     .map(Arc::new)
                     .map_err(|e| FleetError::Transport(format!("decode {path}: {e}")))
@@ -95,7 +111,11 @@ impl HttpClient {
                 retry_after: parse_retry_after(resp.headers().get(RETRY_AFTER)),
             }),
             _ => {
-                let body = resp.bytes().await.unwrap_or_default();
+                let body = read_capped(resp, ERROR_BODY_LIMIT)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
                 Err(api_error(status, &body))
             }
         }
