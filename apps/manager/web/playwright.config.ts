@@ -18,7 +18,10 @@ import { defineConfig, devices } from '@playwright/test';
  * The console allows 10 login attempts a minute per client address, and
  * every test connects from 127.0.0.1. So the `setup` project signs in once
  * and saves the session cookie to `AUTH_STATE`, which every test starts
- * with. Tests of the login page itself start without it.
+ * with. Tests of the login page itself start without it. A run makes 5
+ * logins from 127.0.0.1 (setup, the organization sign-in spec's local
+ * sign-in, and the login spec's valid, wrong password and logout tests).
+ * Adding more than 5 login attempts would hit the limit.
  */
 
 export const AUTH_STATE = fileURLToPath(new URL('.playwright/auth.json', import.meta.url));

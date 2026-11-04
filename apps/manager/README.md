@@ -45,7 +45,10 @@ SIGTERM it stops accepting connections and waits up to 5 seconds for requests in
 Login and the two OIDC routes allow 10 attempts a minute per client address. No address is
 exempt, loopback included. An IPv6 client is counted by its /64 network. The limiter tracks at
 most 65,536 addresses. While that many windows are open, attempts from other addresses share
-one extra window with the same limit, and no open window is dropped early.
+one extra window with the same limit, and no open window is dropped early. So a sustained flood
+of new addresses can hold sign-ins from every address without an open window to 10 a minute
+between them, for as long as the flood lasts. Addresses with an open window and existing
+sessions are unaffected. An address seen before whose window has reset counts as new.
 
 By default the client address is the connection's peer, and forwarding headers are ignored.
 Behind a reverse proxy, every client then shares the proxy's 10 attempts. To count each client
