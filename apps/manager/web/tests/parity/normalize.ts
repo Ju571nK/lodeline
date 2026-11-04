@@ -232,3 +232,63 @@ export function dropNullAt(value: unknown, path: string[]): void {
     }
   }
 }
+
+/**
+ * The text of the value at a dot path (object keys and array indexes) in a JSON document, as the
+ * document spells it: number spelling, string escapes and inner whitespace kept. `undefined`
+ * when the path is missing. `text` must be valid JSON.
+ */
+export function rawJsonAt(text: string, path: string): string | undefined {
+  let i = 0;
+  const space = () => {
+    while (i < text.length && ' \t\n\r'.includes(text[i])) i++;
+  };
+  const close = (open: string) => (open === '{' ? '}' : ']');
+  // Moves past the value at i and returns where it starts and ends.
+  const value = (): [number, number] => {
+    space();
+    const start = i;
+    const open = text[i];
+    if (open === '"') {
+      for (i++; text[i] !== '"'; i++) if (text[i] === '\\') i++;
+      i++;
+    } else if (open === '{' || open === '[') {
+      for (i++, space(); text[i] !== close(open); space()) {
+        if (open === '{') {
+          value();
+          space();
+          i++;
+        }
+        value();
+        space();
+        if (text[i] === ',') i++;
+      }
+      i++;
+    } else {
+      while (i < text.length && !',]} \t\n\r'.includes(text[i])) i++;
+    }
+    return [start, i];
+  };
+  for (const key of path.split('.')) {
+    space();
+    const open = text[i];
+    if (open !== '{' && open !== '[') return undefined;
+    let index = 0;
+    for (i++, space(); ; space()) {
+      if (text[i] === close(open)) return undefined;
+      let name = String(index++);
+      if (open === '{') {
+        const [s, e] = value();
+        name = JSON.parse(text.slice(s, e));
+        space();
+        i++;
+      }
+      if (name === key) break;
+      value();
+      space();
+      if (text[i] === ',') i++;
+    }
+  }
+  const [s, e] = value();
+  return text.slice(s, e);
+}

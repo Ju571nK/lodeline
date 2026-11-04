@@ -7,6 +7,7 @@ import {
   type NormalizeContext,
   normalizeJson,
   parseSetCookie,
+  rawJsonAt,
 } from './normalize.ts';
 
 // An address outside the documentation ranges, as the Go mock uses; built from parts so the
@@ -174,5 +175,19 @@ describe('dropNullAt', () => {
     const v = { body: { a: null, b: { x: { c: null }, y: { c: [] } } } };
     dropNullAt(v, ['body', 'b', '*', 'c']);
     expect(v).toEqual({ body: { a: null, b: { x: {}, y: { c: [] } } } });
+  });
+});
+
+describe('rawJsonAt', () => {
+  it('returns the value text as spelled', () => {
+    const text = '{ "a" : { "b\\"c" : 1, "n" : [ 1.0 , {"x":"\\u003c,]}"} ] }, "e": 1e2 }';
+    expect(rawJsonAt(text, 'a.n')).toBe('[ 1.0 , {"x":"\\u003c,]}"} ]');
+    expect(rawJsonAt(text, 'a.n.1.x')).toBe('"\\u003c,]}"');
+    expect(rawJsonAt(text, 'a.n.0')).toBe('1.0');
+    expect(rawJsonAt(text, 'e')).toBe('1e2');
+    expect(rawJsonAt(text, 'a.b"c')).toBe('1');
+    expect(rawJsonAt(text, 'a.missing')).toBeUndefined();
+    expect(rawJsonAt(text, 'e.x')).toBeUndefined();
+    expect(rawJsonAt('{}', 'a')).toBeUndefined();
   });
 });

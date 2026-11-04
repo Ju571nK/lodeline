@@ -5,7 +5,7 @@ each normalized response with a golden file. The goldens were recorded from the 
 at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
 the port answers differently.
 
-The table has 219 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 222 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
@@ -25,9 +25,9 @@ catch-all. The suite prints the count per route on every run.
 | 8 | `GET /api/v1/fleet/compliance` |
 | 11 | `GET /api/v1/fleet/hosts` |
 | 14 | `GET /api/v1/fleet/hosts/{host_id}` |
-| 11 | `POST /api/v1/triage/upsert` |
+| 13 | `POST /api/v1/triage/upsert` |
 | 11 | `POST /api/v1/triage/note` |
-| 5 | `GET /api/v1/triage/{host_id}/{event_id}` |
+| 6 | `GET /api/v1/triage/{host_id}/{event_id}` |
 | 20 | `GET /*` (SPA and unrouted paths) |
 
 Every route has a success case and an error case, except the two OIDC routes. Their success path
@@ -107,6 +107,11 @@ Bodies are compared as parsed JSON with sorted keys, so byte-level differences s
 trailing newline, its escaping of `<`, `>` and `&`, and number spelling (`1.0` against `1`) do not
 count. Each rule below hides only the
 part of a value that changes from run to run.
+
+Where the spelling is the behavior, a case names dot paths in `rawText`, and the record also holds
+the text of the value at each path exactly as the server wrote it. The triage snapshot cases use
+it: Go stores the client's JSON text and writes it back compacted, with number spelling and string
+escapes kept and `<`, `>`, `&`, U+2028 and U+2029 escaped.
 
 The recorder notes when each request ran: from just before it sends to the last body byte. A time
 "from a request" lies in that bracket, allowing 2 ms for clock rounding and the value's own
