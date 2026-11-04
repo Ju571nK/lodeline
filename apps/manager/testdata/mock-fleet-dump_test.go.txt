@@ -1,0 +1,93 @@
+package fleet
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+)
+
+// A positive seed, so the mock sorts its IDs as at any real start time.
+var dumpSeed = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+var dottedQuad = regexp.MustCompile(`\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b`)
+
+// Times become second offsets from the seed, dotted IPv4 addresses become ipv4:<hex>.
+func dumpWalk(v any, key string) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			x[k] = dumpWalk(e, k)
+		}
+		return x
+	case []any:
+		for i, e := range x {
+			x[i] = dumpWalk(e, key)
+		}
+		return x
+	case string:
+		if key == "ts" || strings.HasSuffix(key, "_ts") {
+			if t, err := time.Parse(time.RFC3339, x); err == nil {
+				return t.Unix() - dumpSeed.Unix()
+			}
+		}
+		return dottedQuad.ReplaceAllStringFunc(x, func(s string) string {
+			var a, b, c, d uint8
+			fmt.Sscanf(s, "%d.%d.%d.%d", &a, &b, &c, &d)
+			return fmt.Sprintf("ipv4:%02x%02x%02x%02x", a, b, c, d)
+		})
+	}
+	return v
+}
+
+func asAny(t *testing.T, v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	return dumpWalk(out, "")
+}
+
+func TestDumpMock(t *testing.T) {
+	m := NewMock(dumpSeed)
+	hosts := []any{}
+	for _, h := range m.hosts {
+		d := m.hostDetails[h.HostID]
+		if m.versionDrift[h.HostID] != m.policyMeta.PolicyVersion-d.PolicyState.LastAppliedPolicyVersion {
+			t.Fatalf("version drift of %s is not policy_version - last_applied", h.HostID)
+		}
+		hosts = append(hosts, map[string]any{
+			"detail":                 asAny(t, d),
+			"signature_failures_24h": m.sigFailures[h.HostID],
+		})
+	}
+	events := []any{}
+	for i, e := range m.events {
+		if e.EventID != uuidv7At(e.TS.UnixMilli(), uint64(len(m.events)-i)) {
+			t.Fatalf("event %d id is not uuidv7At(ts, n-i)", i)
+		}
+		ev := asAny(t, e).(map[string]any)
+		delete(ev, "event_id")
+		events = append(events, ev)
+	}
+	out := map[string]any{
+		"meta":           asAny(t, m.meta),
+		"policy_version": m.policyMeta.PolicyVersion,
+		"hosts":          hosts,
+		"events":         events,
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(os.Getenv("MOCK_DUMP_PATH"), append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

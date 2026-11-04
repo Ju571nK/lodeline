@@ -8,6 +8,7 @@ const SECRET: &str = "0123456789abcdefghijklmnopqrstuv";
 fn app() -> Router {
     router(AppState {
         signer: Arc::new(Signer::new(SECRET.as_bytes())),
+        fleet: Arc::new(fleet::Mock::new(1_767_225_600)),
     })
 }
 
@@ -92,6 +93,15 @@ async fn other_methods_get_chi_405_before_auth() {
     }
 }
 
+/// What a valid session gets: the mock fleet's answer, or 501 where no handler is ported yet.
+fn authorized_status(uri: &str) -> u16 {
+    match uri {
+        "/api/v1/fleet/events/e1" | "/api/v1/fleet/hosts/h1" => 404,
+        u if u.starts_with("/api/v1/fleet/") => 200,
+        _ => 501,
+    }
+}
+
 #[tokio::test]
 async fn session_routes_answer_401_forms() {
     let future = session(4_000_000_000);
@@ -123,7 +133,7 @@ async fn session_routes_answer_401_forms() {
                 401,
                 Some(("session_expired", "session expired, please log in again")),
             ),
-            (Some(future.as_str()), 501, None),
+            (Some(future.as_str()), authorized_status(&uri), None),
         ] {
             let (res, body) = send(method.clone(), &uri, cookie).await;
             assert_eq!(res.status().as_u16(), status, "{uri} {cookie:?}");

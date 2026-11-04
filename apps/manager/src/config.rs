@@ -13,7 +13,6 @@ pub struct Config {
     /// `LODELINE_SERVER_BASE_URL`, required unless `mock_fleet`.
     pub server_base_url: String,
     /// `LODELINE_SERVER_READ_TOKEN`, required unless `mock_fleet`.
-    #[allow(dead_code, reason = "the fleet client reads it")]
     pub server_read_token: String,
     /// Set when `LODELINE_SERVER_CA_PATH` or the client certificate pair is set (never in mock mode).
     pub server_tls: Option<ServerTls>,
@@ -37,7 +36,6 @@ pub struct Config {
 }
 
 /// The CA and client certificate for an mTLS `lodeline-server`.
-#[allow(dead_code, reason = "the fleet client reads it")]
 pub struct ServerTls {
     pub roots: Vec<reqwest::Certificate>,
     pub identity: Option<reqwest::Identity>,

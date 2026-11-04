@@ -1,9 +1,11 @@
 //! `lodeline-manager`: the fleet web console. Configuration comes from the environment (see
 //! `.env.example`); the process refuses to start when a required variable is missing.
 
+mod api;
 mod auth;
 mod config;
 mod conn;
+mod fleet;
 mod server;
 mod spa;
 
@@ -31,6 +33,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = server::router(server::AppState {
         signer: Arc::new(auth::Signer::new(cfg.jwt_secret.as_bytes())),
+        fleet: fleet::from_config(&cfg)?,
     });
     let listener = conn::bind(&cfg.listen_addr).await?;
     let mode = if cfg.mock_fleet {
