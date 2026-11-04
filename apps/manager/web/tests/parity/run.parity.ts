@@ -24,6 +24,7 @@ import {
   type NormalizeContext,
   normalizeJson,
   parseSetCookie,
+  rawJsonAt,
 } from './normalize.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -397,6 +398,13 @@ async function recordCase(c: Case): Promise<Record<string, unknown>> {
     cookies: headerValues(reply, 'set-cookie').map((h) => parseSetCookie(h, ctx)),
     body: recordBody(c, reply, ctx),
   };
+  if (c.rawText) {
+    const text = reply.body.toString('utf8');
+    const parsed = typeof record.body === 'object' && !('unparsed' in (record.body ?? {}));
+    record.rawText = Object.fromEntries(
+      c.rawText.map((p) => [p, (parsed ? rawJsonAt(text, p) : undefined) ?? null]),
+    );
+  }
   const body = record.body as Record<string, unknown>;
   // The build stamps its own version string into /api/health; an empty one stays raw.
   if (c.route === 'GET /api/health' && typeof body?.version === 'string' && body.version !== '')

@@ -35,7 +35,6 @@ pub struct Signer {
 
 /// The subject `require_auth` established, for the handlers behind it.
 #[derive(Clone, Debug)]
-#[allow(dead_code, reason = "the triage handlers read it")]
 pub struct Subject(pub String);
 
 impl Signer {
@@ -62,7 +61,7 @@ impl Signer {
         validation.validate_nbf = false;
         validation.validate_aud = false;
         validation.required_spec_claims.clear();
-        let raw = jsonwebtoken::decode::<RawClaims>(token, &self.key, &validation)
+        let raw = jsonwebtoken::decode::<Members<Value>>(token, &self.key, &validation)
             .map_err(|_| VerifyError::Invalid)?
             .claims;
         // Go's encoding/json matches keys case-insensitively and the last one wins, so a key that
@@ -102,32 +101,33 @@ impl Signer {
     }
 }
 
-/// The claims object with every key in order and repeats kept.
-struct RawClaims(Vec<(String, Value)>);
+/// A JSON object with every key in order and repeats kept, for Go's rules on keys: a value for
+/// any other JSON type fails to decode.
+pub struct Members<V>(pub Vec<(String, V)>);
 
-impl<'de> Deserialize<'de> for RawClaims {
+impl<'de, V: Deserialize<'de>> Deserialize<'de> for Members<V> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Entries;
-        impl<'de> Visitor<'de> for Entries {
-            type Value = RawClaims;
+        struct Entries<V>(std::marker::PhantomData<V>);
+        impl<'de, V: Deserialize<'de>> Visitor<'de> for Entries<V> {
+            type Value = Members<V>;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a JSON object")
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawClaims, A::Error> {
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Members<V>, A::Error> {
                 let mut entries = Vec::new();
                 while let Some(entry) = map.next_entry()? {
                     entries.push(entry);
                 }
-                Ok(RawClaims(entries))
+                Ok(Members(entries))
             }
         }
-        d.deserialize_map(Entries)
+        d.deserialize_map(Entries(std::marker::PhantomData))
     }
 }
 
 /// Lowercases `key` the way Go's case-insensitive field match folds it onto ASCII: ASCII letters,
 /// U+017F (long s) and U+212A (Kelvin sign) are the only runes that fold to ASCII.
-fn go_fold(key: &str) -> String {
+pub fn go_fold(key: &str) -> String {
     key.chars()
         .map(|c| match c {
             '\u{17f}' => 's',

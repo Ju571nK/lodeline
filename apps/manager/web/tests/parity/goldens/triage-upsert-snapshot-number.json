@@ -1,0 +1,28 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/triage/upsert",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "assignee": null,
+    "created_at": "<now#1 .9Z>",
+    "event_id": "snapshot-number",
+    "evidence_snapshot": -150,
+    "host_id": "5a7c3e91-aaaa-bbbb-cccc-444444444444",
+    "status": "open",
+    "updated_at": "<now#1 .9Z>"
+  },
+  "rawText": {
+    "evidence_snapshot": "-1.50E+02"
+  }
+}

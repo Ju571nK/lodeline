@@ -106,6 +106,11 @@ export interface Case {
   maxMs?: number;
   /** The body is a directory listing; see recordListing in run.parity.ts. */
   listing?: boolean;
+  /**
+   * Dot paths into the JSON body whose text is also recorded as the server spelled it, for raw
+   * JSON that the server passes through and the parsed comparison cannot see.
+   */
+  rawText?: string[];
 }
 
 /** `count` requests (default 1) with the case's auth; each must answer `status`. */
@@ -1193,6 +1198,42 @@ export const CASES: Case[] = [
     outcome: 'ok',
     method: 'GET',
     path: `/api/v1/triage/${H_BOB}/{event:6}`,
+  },
+
+  // Snapshots keep the client's JSON text: Go stores it as sent and writes it compacted, with
+  // `<`, `>`, `&`, U+2028 and U+2029 escaped. The rows are new, so the cases above see none of them.
+  {
+    name: 'triage-upsert-snapshot-text',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    headers: { 'Content-Type': 'application/json' },
+    raw: `{"host_id":"${H_DAVE}","event_id":"snapshot-text","evidence_snapshot": {
+      "float" : 1.0, "exp": 1e2, "upper": -1.50E+02,
+      "big": 123456789012345678901234567890, "long": 0.1000000000000000000001,
+      "html": "<b>&amp;</b>", "escapes": "\\u0041\\/\\"\\\\\\n\\t",
+      "unicode": "\u00e9\\u00e9", "separators": "\u2028\u2029\\u2028",
+      "nested": [ 1 , { "x" : null } , [ ] , { } ], "spaces": "  kept  " } }`,
+    rawText: ['evidence_snapshot'],
+  },
+  {
+    name: 'triage-upsert-snapshot-number',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    headers: { 'Content-Type': 'application/json' },
+    raw: `{"host_id":"${H_DAVE}","event_id":"snapshot-number","evidence_snapshot":  -1.50E+02  }`,
+    rawText: ['evidence_snapshot'],
+  },
+  {
+    name: 'triage-get-snapshot-text',
+    route: 'GET /api/v1/triage/{host_id}/{event_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/triage/${H_DAVE}/snapshot-text`,
+    rawText: ['row.evidence_snapshot'],
   },
 
   // Live mode: the manager reads the stub upstream.

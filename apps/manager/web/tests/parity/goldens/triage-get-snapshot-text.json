@@ -1,0 +1,59 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/triage/5a7c3e91-aaaa-bbbb-cccc-444444444444/snapshot-text",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "log": [
+      {
+        "actor": "admin",
+        "at": "<now@triage-upsert-snapshot-text .9Z>",
+        "from_status": null,
+        "id": 5,
+        "to_status": "open"
+      }
+    ],
+    "notes": [],
+    "row": {
+      "assignee": null,
+      "created_at": "<now@triage-upsert-snapshot-text .9Z>",
+      "event_id": "snapshot-text",
+      "evidence_snapshot": {
+        "big": 1.2345678901234568e+29,
+        "escapes": "A/\"\\\n\t",
+        "exp": 100,
+        "float": 1,
+        "html": "<b>&amp;</b>",
+        "long": 0.1,
+        "nested": [
+          1,
+          {
+            "x": null
+          },
+          [],
+          {}
+        ],
+        "separators": "   ",
+        "spaces": "  kept  ",
+        "unicode": "éé",
+        "upper": -150
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-444444444444",
+      "status": "open",
+      "updated_at": "<now@triage-upsert-snapshot-text .9Z>"
+    }
+  },
+  "rawText": {
+    "row.evidence_snapshot": "{\"float\":1.0,\"exp\":1e2,\"upper\":-1.50E+02,\"big\":123456789012345678901234567890,\"long\":0.1000000000000000000001,\"html\":\"\\u003cb\\u003e\\u0026amp;\\u003c/b\\u003e\",\"escapes\":\"\\u0041\\/\\\"\\\\\\n\\t\",\"unicode\":\"é\\u00e9\",\"separators\":\"\\u2028\\u2029\\u2028\",\"nested\":[1,{\"x\":null},[],{}],\"spaces\":\"  kept  \"}"
+  }
+}
