@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&booting, \"/v1/meta\", Some(\"tok\"), &r).await"
+---
+503
+{"error":{"code":"rebuilding","message":"fleet index rebuilding; retry shortly"}}

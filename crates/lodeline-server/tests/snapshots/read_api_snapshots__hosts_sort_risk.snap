@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, path, Some(\"tok\"), &r).await"
+---
+200
+{"hosts":[{"agent_version":"fixture-agent","current_risk":{"by_tool":{"claude_code":{"assessed_ts":"[now-1m]","bucket":"critical","score":7.300000190734863},"codex":{"assessed_ts":"[now-1m]","bucket":"medium","score":2.0999999046325684}},"max_bucket":"critical","max_score":7.300000190734863},"host_id":"0190b8a0-0000-7000-8000-00000000000a","hostname":"alice","last_seen_ts":"[now-1m]","open_event_counts_24h":{"info":3,"warn":5},"status":"healthy"},{"agent_version":"fixture-agent","current_risk":{"by_tool":{"continue_dev":{"assessed_ts":"[now-180m]","bucket":"medium","score":1.2999999523162842}},"max_bucket":"medium","max_score":1.2999999523162842},"host_id":"0190b8a0-0000-7000-8000-00000000000c","hostname":null,"last_seen_ts":"[now-180m]","open_event_counts_24h":{"info":1,"warn":0},"status":"disconnected"},{"agent_version":"fixture-agent","current_risk":null,"host_id":"0190b8a0-0000-7000-8000-00000000000b","hostname":null,"last_seen_ts":"[now-30m]","open_event_counts_24h":{"info":0,"warn":1},"status":"stale"}],"next_cursor":null,"total_estimated":3}

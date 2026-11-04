@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, path, Some(\"tok\"), &r).await"
+---
+200
+{"policy_version":4,"signed_at":"2026-10-01T00:00:00Z","signing_pubkey_id":"k1","valid_until":"2026-12-01T00:00:00Z"}

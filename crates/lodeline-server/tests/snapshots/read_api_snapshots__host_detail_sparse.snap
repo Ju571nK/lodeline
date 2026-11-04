@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, path, Some(\"tok\"), &r).await"
+---
+200
+{"agent_health":{"hash_p99_ms_latest":null,"jsonl_above_soft_floor_latest":null,"last_heartbeat_ts":null,"recent_channel_stalls_24h":0,"recent_sender_lag_critical_24h":0,"recent_watcher_degraded_24h":0},"agent_version":"fixture-agent","ai_guard":{"by_tool":{}},"current_risk":null,"host_id":"0190b8a0-0000-7000-8000-00000000000b","host_meta":null,"hostname":null,"last_seen_ts":"[now-30m]","open_event_counts_24h":{"info":0,"warn":1},"policy_state":{"last_applied_policy_version":0,"last_policy_reload_ts":null,"policy_expired_active":false},"status":"stale"}

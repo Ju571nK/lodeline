@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&hidden, \"/v1/fleet/risk\", Some(\"tok\"), &r).await"
+---
+404
+{"error":{"code":"not_found","message":"endpoint not found"}}

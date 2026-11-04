@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, path, Some(\"tok\"), &r).await"
+---
+200
+{"next_cursor":null,"rows":[{"host_id":"0190b8a0-0000-7000-8000-00000000000c","hostname":null,"last_applied_policy_version":0,"last_policy_reload_ts":null,"policy_expired_active":false,"server_current_policy_version":4,"signature_failures_24h":0,"version_drift":4}]}

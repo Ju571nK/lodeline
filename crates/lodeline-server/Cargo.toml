@@ -62,6 +62,7 @@ test-support = []
 [dev-dependencies]
 lodeline-server = { path = ".", features = ["test-support"] }
 http = { workspace = true }
+insta = { workspace = true }
 
 # -- OS packages -------------------------------------------------------------
 # Build with `packaging/build.sh server`. See packaging/README.md.

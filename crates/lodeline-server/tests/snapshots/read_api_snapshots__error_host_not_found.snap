@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, path, token, &r).await"
+---
+404
+{"error":{"code":"not_found","message":"host_id not in index"}}

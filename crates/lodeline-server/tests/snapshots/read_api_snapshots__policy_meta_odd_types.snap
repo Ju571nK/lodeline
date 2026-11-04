@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, \"/v1/policy/meta\", Some(\"tok\"), &r).await"
+---
+200
+{"policy_version":"2","signed_at":7,"signing_pubkey_id":null,"valid_until":{"a":1}}

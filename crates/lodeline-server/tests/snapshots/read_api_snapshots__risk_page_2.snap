@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, path, Some(\"tok\"), &r).await"
+---
+200
+{"next_cursor":null,"rows":[{"assessed_ts":"[now-180m]","bucket":"medium","host_id":"0190b8a0-0000-7000-8000-00000000000c","hostname":null,"open_alert_count_24h":0,"reasons_count":0,"score":1.2999999523162842,"top_tool":"continue_dev"}]}

@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, \"/v1/meta\", Some(\"tok\"), &Redactions(vec![])).await"
+---
+200
+{"alerts_definition_default":{"additional_kinds":["ai_guard_toggle_drift","policy_signature_invalid","tls_failure","host_id_fingerprint_drift","agent_dying","sender_lag_critical"],"ai_guard_buckets":["high","critical"],"evidence_kinds":["ai_guard_risk_assessed"]},"audit_head":{"hash":"fixture-hash","pubkey_id":"key-1","seq":42,"sig":"fixture-sig"},"fleet":{"active_host_count":0,"active_window_days":7},"schema_version":1,"server_version":"[server version]","ts":"[request time]"}
