@@ -524,3 +524,193 @@ async fn risk_query_builds_its_filters() {
         "limit=25&min_bucket=high&tool=claude_code%2Ccodex"
     );
 }
+
+/// Go's `factory_test.go`: the client built from the config reaches an mTLS server with the
+/// configured CA and client certificate, and the server refuses it without the certificate.
+mod mtls {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Arc;
+
+    use crate::config::Config;
+    use crate::fleet::{self, Request, Response};
+
+    struct Pki {
+        dir: PathBuf,
+    }
+
+    impl Drop for Pki {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl Pki {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "lodeline-manager-mtls-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let pki = Self { dir };
+            pki.key("ca");
+            pki.openssl(
+                &["req", "-x509", "-new", "-key", "ca.key", "-days", "1"],
+                &[
+                    "-subj",
+                    "/CN=test-ca",
+                    "-addext",
+                    "basicConstraints=critical,CA:TRUE",
+                    "-out",
+                    "ca.crt",
+                ],
+            );
+            pki.leaf(
+                "server",
+                "subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n",
+            );
+            pki.leaf("client", "extendedKeyUsage=clientAuth\n");
+            pki
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.dir.join(name)
+        }
+
+        fn openssl(&self, args: &[&str], more: &[&str]) {
+            let openssl = lodeline_server::enroll::sign::resolve_openssl().expect("openssl");
+            let out = Command::new(openssl)
+                .args(args)
+                .args(more)
+                .current_dir(&self.dir)
+                .output()
+                .unwrap();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "openssl {args:?}: {err}");
+        }
+
+        /// RSA, which ring reads from every openssl and LibreSSL PKCS#8 output.
+        fn key(&self, name: &str) {
+            let out = format!("{name}.key");
+            self.openssl(
+                &["genpkey", "-algorithm", "RSA"],
+                &["-pkeyopt", "rsa_keygen_bits:2048", "-out", &out],
+            );
+        }
+
+        fn leaf(&self, name: &str, ext: &str) {
+            self.key(name);
+            std::fs::write(self.path(&format!("{name}.ext")), ext).unwrap();
+            let (key, csr, crt) = (
+                format!("{name}.key"),
+                format!("{name}.csr"),
+                format!("{name}.crt"),
+            );
+            self.openssl(
+                &["req", "-new", "-key", &key, "-subj"],
+                &[&format!("/CN={name}"), "-out", &csr],
+            );
+            let serial = if name == "server" { "0x1001" } else { "0x1002" };
+            self.openssl(
+                &[
+                    "x509", "-req", "-in", &csr, "-CA", "ca.crt", "-CAkey", "ca.key",
+                ],
+                &[
+                    "-set_serial",
+                    serial,
+                    "-days",
+                    "1",
+                    "-extfile",
+                    &format!("{name}.ext"),
+                    "-out",
+                    &crt,
+                ],
+            );
+        }
+    }
+
+    fn pem_certs(path: &Path) -> Vec<rustls::pki_types::CertificateDer<'static>> {
+        let pem = std::fs::read(path).unwrap();
+        rustls_pemfile::certs(&mut pem.as_slice())
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// An HTTPS server that requires a client certificate signed by the test CA.
+    async fn serve(pki: &Pki) -> String {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut roots = rustls::RootCertStore::empty();
+        for c in pem_certs(&pki.path("ca.crt")) {
+            roots.add(c).unwrap();
+        }
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .unwrap();
+        let key_pem = std::fs::read(pki.path("server.key")).unwrap();
+        let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+            .unwrap()
+            .unwrap();
+        let tls = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(pem_certs(&pki.path("server.crt")), key)
+            .unwrap();
+        let app = axum::Router::new().route(
+            "/v1/healthz",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"status": "ok", "ts": "2026-10-30T00:00:00Z"}))
+            }),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, config)
+                .serve(app.into_make_service())
+                .await
+                .unwrap()
+        });
+        url
+    }
+
+    fn config(url: &str, pki: &Pki, with_client_cert: bool) -> Config {
+        let path = |n: &str| pki.path(n).to_string_lossy().into_owned();
+        let mut env = vec![
+            ("LODELINE_SERVER_BASE_URL", url.to_owned()),
+            ("LODELINE_SERVER_READ_TOKEN", "token".into()),
+            ("ADMIN_USERNAME", "admin".into()),
+            (
+                "ADMIN_PASSWORD_BCRYPT",
+                "$2a$04$abcdefghijklmnopqrstuuFooBarBazQuuxCorgePloghTes12tHashXY".into(),
+            ),
+            ("JWT_SECRET", "abcdefghijklmnopqrstuvwxyzABCDEF".into()),
+            ("FLEET_CACHE_DISABLED", "1".into()),
+            ("LODELINE_SERVER_CA_PATH", path("ca.crt")),
+        ];
+        if with_client_cert {
+            env.push(("LODELINE_SERVER_CLIENT_CERT_PATH", path("client.crt")));
+            env.push(("LODELINE_SERVER_CLIENT_KEY_PATH", path("client.key")));
+        }
+        Config::load(|k| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn reaches_an_mtls_server_with_the_client_certificate() {
+        let pki = Pki::new("ok");
+        let url = serve(&pki).await;
+        let client = fleet::from_config(&config(&url, &pki, true)).unwrap();
+        let reply = client.get(Request::Healthz).await.unwrap();
+        let Response::Healthz(h) = &*reply else {
+            panic!("not healthz")
+        };
+        assert_eq!(h.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn an_mtls_server_refuses_the_console_without_a_client_certificate() {
+        let pki = Pki::new("refused");
+        let url = serve(&pki).await;
+        let client = fleet::from_config(&config(&url, &pki, false)).unwrap();
+        assert!(client.get(Request::Healthz).await.is_err());
+    }
+}

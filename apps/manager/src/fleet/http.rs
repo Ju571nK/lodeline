@@ -103,7 +103,7 @@ impl Client for HttpClient {
 }
 
 /// Decodes the first JSON value of `body`, as Go's `json.Decoder` does, into the endpoint's type.
-fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response> {
+pub(super) fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response> {
     let v = serde_json::Deserializer::from_slice(body)
         .into_iter::<Value>()
         .next()

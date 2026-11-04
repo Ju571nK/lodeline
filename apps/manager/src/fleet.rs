@@ -341,3 +341,6 @@ fn escape(s: &str, keep: impl Fn(u8) -> bool, space_as_plus: bool) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests;
