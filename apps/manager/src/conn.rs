@@ -16,12 +16,14 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const READ_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Go's listener default for both the keep-alive idle time and the probe interval.
+const KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// Go's `:port` listens on every interface, IPv4 and IPv6 alike. A `[::]` socket accepts IPv4
 /// too only with `IPV6_V6ONLY` off, which Windows does not default to.
@@ -53,8 +55,8 @@ pub async fn serve(listener: TcpListener, app: Router, shutdown: impl Future<Out
     let mut shutdown = pin!(shutdown);
     loop {
         let stream = tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => stream,
+            accepted = accept(&listener) => match accepted {
+                Ok(stream) => stream,
                 Err(e) => {
                     eprintln!("lodeline-manager: accept: {e}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -90,6 +92,18 @@ pub async fn serve(listener: TcpListener, app: Router, shutdown: impl Future<Out
     {
         eprintln!("lodeline-manager: shutdown error: drain timed out");
     }
+}
+
+/// Turns on TCP keep-alive and `TCP_NODELAY` as Go's listener does, so a peer that vanishes
+/// without a FIN does not hold an idle connection open forever. Go ignores these errors too.
+async fn accept(listener: &TcpListener) -> io::Result<TcpStream> {
+    let (stream, _) = listener.accept().await?;
+    let _ = stream.set_nodelay(true);
+    let keepalive = TcpKeepalive::new()
+        .with_time(KEEPALIVE)
+        .with_interval(KEEPALIVE);
+    let _ = SockRef::from(&stream).set_tcp_keepalive(&keepalive);
+    Ok(stream)
 }
 
 /// hyper starts its header read timeout as soon as it waits for a request head, which closes an

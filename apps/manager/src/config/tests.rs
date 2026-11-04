@@ -46,10 +46,26 @@ fn set(env: &mut Env, key: &'static str, value: impl Into<String>) {
     env.insert(key, value.into());
 }
 
-fn temp_dir(name: &str) -> std::path::PathBuf {
+/// A directory under the system temp dir, removed on drop.
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn temp_dir(name: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!("lodeline-manager-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    TempDir(dir)
 }
 
 fn path_str(p: &Path) -> String {
@@ -310,7 +326,8 @@ fn load_server_tls_errors() {
 
 #[test]
 fn load_server_tls_needs_https() {
-    let ca = path_str(&temp_dir("tls-https").join("ca.crt"));
+    let dir = temp_dir("tls-https");
+    let ca = path_str(&dir.join("ca.crt"));
     std::fs::write(&ca, TEST_CA_PEM).unwrap();
     let mut env = full_valid_env();
     set(&mut env, "LODELINE_SERVER_CA_PATH", ca);
@@ -338,13 +355,14 @@ fn load_server_tls_needs_https() {
 
 #[test]
 fn load_mock_fleet_ignores_server_tls() {
+    let dir = temp_dir("tls-mock");
     let mut env = full_valid_env();
     set(&mut env, "MOCK_FLEET", "1");
     set(&mut env, "LODELINE_SERVER_BASE_URL", "");
     set(
         &mut env,
         "LODELINE_SERVER_CA_PATH",
-        path_str(&temp_dir("tls-mock").join("absent.crt")),
+        path_str(&dir.join("absent.crt")),
     );
     assert!(load(&env).unwrap().server_tls.is_none());
 }

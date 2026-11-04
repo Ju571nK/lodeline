@@ -64,3 +64,14 @@ async fn a_port_alone_listens_on_ipv4_and_ipv6() {
             .unwrap_or_else(|e| panic!("{host}: {e}"));
     }
 }
+
+#[tokio::test]
+async fn accepted_connections_have_keepalive_and_nodelay() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let stream = accept(&listener).await.unwrap();
+    assert!(SockRef::from(&stream).keepalive().unwrap());
+    assert!(stream.nodelay().unwrap());
+}
