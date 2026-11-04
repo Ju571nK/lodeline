@@ -236,6 +236,14 @@ export const CASES: Case[] = [
     method: 'POST',
     path: '/api/health',
   },
+  // chi registers GET alone, so HEAD gets 405 too.
+  {
+    name: 'health-head',
+    route: 'GET /api/health',
+    outcome: 'error',
+    method: 'HEAD',
+    path: '/api/health',
+  },
   { name: 'spa-root', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/' },
   { name: 'spa-deep-link', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/alerts/abc' },
   { name: 'spa-asset', route: 'GET /*', outcome: 'ok', method: 'GET', path: '{asset:js}' },
@@ -291,6 +299,8 @@ export const CASES: Case[] = [
     path: '/api/v1/fleet/meta/',
   },
   { name: 'spa-post-root', route: 'GET /*', outcome: 'ok', method: 'POST', path: '/' },
+  // Go's server refuses a malformed escape before any handler runs.
+  { name: 'spa-bad-escape', route: 'GET /*', outcome: 'error', method: 'GET', path: '/%zz' },
   { name: 'spa-unknown-api', route: 'GET /*', outcome: 'error', method: 'GET', path: '/api/x' },
   {
     name: 'spa-unknown-api-v1',
@@ -669,6 +679,13 @@ export const CASES: Case[] = [
     path: '/api/v1/fleet/meta',
   },
   noSession('GET /api/v1/fleet/meta', 'GET', '/api/v1/fleet/meta', 'fleet-meta-no-session'),
+  // The method check runs before the session check.
+  noSession(
+    'GET /api/v1/fleet/meta',
+    'POST',
+    '/api/v1/fleet/meta',
+    'fleet-meta-wrong-method-no-session',
+  ),
   {
     name: 'fleet-healthz',
     route: 'GET /api/v1/fleet/healthz',

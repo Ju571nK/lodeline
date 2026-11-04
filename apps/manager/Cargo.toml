@@ -28,5 +28,16 @@ openidconnect = "4.1"
 subtle = "2.6"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Correctly rounded float parsing, as Go's strconv, so claim times compare the same.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# axum::serve has no header read timeout and also speaks h2c; Go's server does neither.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-graceful", "service", "http1"] }
+# Go's `:port` listener is dual-stack; std and tokio cannot turn IPV6_V6ONLY off.
+socket2 = "0.6"
+tower-http = { version = "0.6", features = ["catch-panic"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 

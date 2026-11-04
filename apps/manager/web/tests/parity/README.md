@@ -5,19 +5,19 @@ each normalized response with a golden file. The goldens were recorded from the 
 at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
 the port answers differently.
 
-The table has 206 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 209 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
 |---:|---|
-| 3 | `GET /api/health` |
+| 4 | `GET /api/health` |
 | 28 | `POST /api/v1/auth/login` |
 | 2 | `GET /api/v1/auth/methods` |
 | 3 | `GET /api/v1/auth/oidc/start` |
 | 2 | `GET /api/v1/auth/oidc/callback` |
 | 3 | `POST /api/v1/auth/logout` |
 | 26 | `GET /api/v1/auth/me` |
-| 5 | `GET /api/v1/fleet/meta` |
+| 6 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
 | 37 | `GET /api/v1/fleet/events` |
 | 10 | `GET /api/v1/fleet/events/{event_id}` |
@@ -28,13 +28,16 @@ catch-all. The suite prints the count per route on every run.
 | 11 | `POST /api/v1/triage/upsert` |
 | 11 | `POST /api/v1/triage/note` |
 | 5 | `GET /api/v1/triage/{host_id}/{event_id}` |
-| 19 | `GET /*` (SPA and unrouted paths) |
+| 20 | `GET /*` (SPA and unrouted paths) |
 
 Every route has a success case and an error case, except the two OIDC routes. Their success path
 needs an HTTPS OIDC provider, so the Rust port carries over the Go OIDC unit tests instead
 (`NO_SUCCESS_CASE` in `cases.ts`).
 
-CI does not run this suite yet, because the Rust binary does not exist yet.
+CI does not run this suite yet. The Rust binary serves `/api/health`, the SPA and the session check
+so far; every other route answers 501 after its method and session checks, so its cases fail
+until the port reaches it. When login or `fleet/healthz` answers 501, the run takes the session
+that Go issued (`testdata/session-token.txt`) and the run start as the mock seed, and says so.
 
 ## Files
 
@@ -152,17 +155,27 @@ Besides the golden comparison, a run fails when:
 ## Allowlist
 
 `allowlist.json` lists the differences that a comparison accepts. Each entry names the cases it
-applies to, a dot path into the record (`*` matches any key or index), a rule, and the reason. The
-only rule is `null-or-absent`: at that path, `null` and a missing key compare equal. Use it only
-where the SPA type accepts both forms, and list only the cases whose bodies carry the field. No
-header difference is accepted today, so there is no header rule; add one with its first entry.
+applies to, a rule, and the reason. There are two rules:
 
-| Cases | Path | Reason |
+- `null-or-absent`, with a dot path into the record (`*` matches any key or index): at that path,
+  `null` and a missing key compare equal. Use it only where the SPA type accepts both forms, and
+  list only the cases whose bodies carry the field.
+- `alternative`, with a partial `record` of `status`, `headers`, `cookies` or `body`: a response
+  whose record equals every one of those values exactly compares as the golden. A response that
+  matches only some of them still fails, so the golden and the stated alternative both pass and
+  nothing in between does. Use it only for an intended difference from Go.
+
+| Cases | Rule | Reason |
 |---|---|---|
-| `fleet-meta`, `live-meta-fleet`, `live-meta-legacy-license` | `body.audit_head` | Go omits it when missing; the SPA type is `audit_head?: AuditHead \| null`. |
-| `fleet-host`, `fleet-host-no-meta`, `live-host` | `body.ai_guard.by_tool.*.controls` | Go omits unreported controls; the SPA type is `controls?: AiGuardControl[] \| null`. |
+| `fleet-meta`, `live-meta-fleet`, `live-meta-legacy-license` | `null-or-absent` at `body.audit_head` | Go omits it when missing; the SPA type is `audit_head?: AuditHead \| null`. |
+| `fleet-host`, `fleet-host-no-meta`, `live-host` | `null-or-absent` at `body.ai_guard.by_tool.*.controls` | Go omits unreported controls; the SPA type is `controls?: AiGuardControl[] \| null`. |
+| `spa-index-html` | `alternative`: 200 with `index.html` | Intended. Go answers 301 to `./`; the Rust port serves the page. |
+| `spa-assets-dir` | `alternative`: 200 with `index.html` | Intended. Go lists the directory; the Rust port gives the SPA fallback. |
 
 A later phase that accepts another difference adds an entry here with its reason.
+
+Besides the record comparison, each case checks the four security headers on their own, so a run
+shows them even for a response whose record differs.
 
 ## Not covered
 

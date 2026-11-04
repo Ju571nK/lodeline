@@ -1354,6 +1354,9 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "bcrypt",
+ "chrono",
+ "hyper",
+ "hyper-util",
  "jsonwebtoken",
  "lodeline-fleet-api",
  "openidconnect",
@@ -1362,8 +1365,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "socket2",
  "subtle",
  "tokio",
+ "tower",
+ "tower-http",
 ]
 
 [[package]]
@@ -2544,10 +2550,12 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 
