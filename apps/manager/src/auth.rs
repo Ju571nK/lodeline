@@ -9,12 +9,17 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value};
 
 use crate::server::error_response;
 
 pub const COOKIE_NAME: &str = "lodeline_session";
 const ISSUER: &str = "lodeline-manager";
+/// The claims golang-jwt's RegisteredClaims decodes.
+const REGISTERED: [&str; 7] = ["iss", "sub", "aud", "exp", "nbf", "iat", "jti"];
+/// Seconds from year 1 to 1970: Go's `time.Unix` adds them and wraps past `i64::MAX`.
+const UNIX_TO_INTERNAL: i64 = 62_135_596_800;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum VerifyError {
@@ -57,9 +62,20 @@ impl Signer {
         validation.validate_nbf = false;
         validation.validate_aud = false;
         validation.required_spec_claims.clear();
-        let claims = jsonwebtoken::decode::<Map<String, Value>>(token, &self.key, &validation)
+        let raw = jsonwebtoken::decode::<RawClaims>(token, &self.key, &validation)
             .map_err(|_| VerifyError::Invalid)?
             .claims;
+        // Go's encoding/json matches keys case-insensitively and the last one wins, so a key that
+        // differs from a registered claim only by case, or a repeated one, is refused here.
+        let mut claims = Map::new();
+        for (key, value) in raw.0 {
+            let folded = go_fold(&key);
+            if let Some(name) = REGISTERED.iter().find(|name| **name == folded) {
+                if key != *name || claims.insert(key, value).is_some() {
+                    return Err(VerifyError::Invalid);
+                }
+            }
+        }
 
         // Decoding into golang-jwt's RegisteredClaims fails on a mistyped claim.
         let exp = numeric_date(claims.get("exp"))?;
@@ -73,7 +89,9 @@ impl Signer {
         // Claims are whole seconds, so comparing whole seconds of `now` is exact.
         let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as f64;
         // golang-jwt joins every claim error, and callers test for expiry first.
-        if exp.is_some_and(|exp| now >= exp) {
+        // Past Go's time range the expiry wraps into the past: `as` saturates, the add overflows.
+        let past_go_range = |exp: f64| (exp as i64).checked_add(UNIX_TO_INTERNAL).is_none();
+        if exp.is_some_and(|exp| now >= exp || past_go_range(exp)) {
             return Err(VerifyError::Expired);
         }
         // iat is not checked: golang-jwt v5 skips it unless asked. A missing exp or nbf passes.
@@ -82,6 +100,41 @@ impl Signer {
         }
         Ok(sub.to_owned())
     }
+}
+
+/// The claims object with every key in order and repeats kept.
+struct RawClaims(Vec<(String, Value)>);
+
+impl<'de> Deserialize<'de> for RawClaims {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Entries;
+        impl<'de> Visitor<'de> for Entries {
+            type Value = RawClaims;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawClaims, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    entries.push(entry);
+                }
+                Ok(RawClaims(entries))
+            }
+        }
+        d.deserialize_map(Entries)
+    }
+}
+
+/// Lowercases `key` the way Go's case-insensitive field match folds it onto ASCII: ASCII letters,
+/// U+017F (long s) and U+212A (Kelvin sign) are the only runes that fold to ASCII.
+fn go_fold(key: &str) -> String {
+    key.chars()
+        .map(|c| match c {
+            '\u{17f}' => 's',
+            '\u{212a}' => 'k',
+            c => c.to_ascii_lowercase(),
+        })
+        .collect()
 }
 
 /// golang-jwt's NumericDate: a JSON number, or a string holding one, floored to the second.

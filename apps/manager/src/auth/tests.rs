@@ -147,6 +147,75 @@ fn session_forms_match_go() {
     }
 }
 
+fn signed_raw(claims: &str) -> String {
+    let message = format!("{}.{}", b64(r#"{"alg":"HS256","typ":"JWT"}"#), b64(claims));
+    let key = EncodingKey::from_secret(SECRET.as_bytes());
+    let signature = jsonwebtoken::crypto::sign(message.as_bytes(), &key, Algorithm::HS256).unwrap();
+    format!("{message}.{signature}")
+}
+
+#[test]
+fn refuses_claim_keys_that_differ_only_by_case_and_repeated_claims() {
+    let (exp, past) = (NOW + 60, NOW - 60);
+    let cases = [
+        (
+            "upper-case issuer",
+            format!(r#"{{"ISS":"{ISSUER}","sub":"admin","exp":{exp}}}"#),
+        ),
+        (
+            "subject, then a mixed-case subject",
+            format!(r#"{{"iss":"{ISSUER}","sub":"admin","Sub":"","exp":{exp}}}"#),
+        ),
+        (
+            "long s folds to s",
+            format!(r#"{{"iss":"{ISSUER}","sub":"admin","ſub":"","exp":{exp}}}"#),
+        ),
+        (
+            "mistyped upper-case audience",
+            format!(r#"{{"iss":"{ISSUER}","sub":"admin","AUD":5,"exp":{exp}}}"#),
+        ),
+        (
+            "exp twice",
+            format!(r#"{{"iss":"{ISSUER}","sub":"admin","exp":{past},"exp":{exp}}}"#),
+        ),
+    ];
+    for (name, claims) in cases {
+        assert_eq!(
+            verify(&signed_raw(&claims), NOW),
+            Err(VerifyError::Invalid),
+            "{name}"
+        );
+    }
+    let other_keys = format!(r#"{{"iss":"{ISSUER}","sub":"admin","exp":{exp},"x":1,"X":2,"x":3}}"#);
+    assert_eq!(
+        verify(&signed_raw(&other_keys), NOW),
+        Ok("admin".to_owned())
+    );
+}
+
+// Go's time.Unix wraps past its range, so such an expiry lies in the past.
+#[test]
+fn an_expiry_past_gos_time_range_is_expired() {
+    let last_go_second = 9_223_371_974_719_178_752.0; // the largest f64 at or below i64::MAX - 62135596800
+    for exp in [json!(last_go_second), json!(9.2e18)] {
+        let t = token(Algorithm::HS256, &with(json!({ "exp": exp })), SECRET);
+        assert_eq!(verify(&t, NOW), Ok("admin".to_owned()), "{exp}");
+    }
+    for exp in [
+        json!(9_223_371_974_719_179_776.0),
+        json!(9.3e18),
+        json!(2f64.powi(63)),
+        json!(u64::MAX),
+        json!(1e30),
+        json!("1e30"),
+    ] {
+        let t = token(Algorithm::HS256, &with(json!({ "exp": exp })), SECRET);
+        assert_eq!(verify(&t, NOW), Err(VerifyError::Expired), "{exp}");
+    }
+    let big = format!(r#"{{"iss":"{ISSUER}","sub":"admin","exp":99999999999999999999999}}"#);
+    assert_eq!(verify(&signed_raw(&big), NOW), Err(VerifyError::Expired));
+}
+
 // Go limits the subject length when signing, not when verifying.
 #[test]
 fn accepts_a_long_subject() {
