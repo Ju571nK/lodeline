@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 
 /**
@@ -13,7 +14,14 @@ import { defineConfig, devices } from '@playwright/test';
  *
  * Tests share one server instance; we put the per-test triage DB under a
  * temp dir so each `npx playwright test` run starts clean.
+ *
+ * The console allows 10 login attempts a minute per client address, and
+ * every test connects from 127.0.0.1. So the `setup` project signs in once
+ * and saves the session cookie to `AUTH_STATE`, which every test starts
+ * with. Tests of the login page itself start without it.
  */
+
+export const AUTH_STATE = fileURLToPath(new URL('.playwright/auth.json', import.meta.url));
 
 const PORT = process.env.PORT ?? '18181';
 const BASE_URL = `http://localhost:${PORT}`;
@@ -54,9 +62,11 @@ export default defineConfig({
   },
 
   projects: [
+    { name: 'setup', testMatch: /auth\.setup\.ts/ },
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...devices['Desktop Chrome'], storageState: AUTH_STATE },
+      dependencies: ['setup'],
     },
   ],
 });

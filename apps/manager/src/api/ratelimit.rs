@@ -1,13 +1,15 @@
 //! The login limiter: a fixed window per client address, shared by login and the two OIDC
-//! routes, with loopback exempt.
+//! routes. No address is exempt, loopback included: a reverse proxy on the same host is a
+//! loopback peer.
 //!
 //! The client address is the connection's peer. Only when the peer is a trusted proxy
 //! (`TRUSTED_PROXIES`) does `X-Forwarded-For` count, and then the client is the rightmost hop
 //! that is not a trusted proxy: the hops a client writes itself sit to the left of the ones its
-//! proxies append, so it cannot pick its own key.
+//! proxies append, so it cannot pick its own key. An IPv6 client is keyed by its /64, the
+//! smallest block a host is usually given, so it cannot step through addresses of its own.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -19,9 +21,9 @@ use ipnet::IpNet;
 
 use crate::server::error_response;
 
-/// The most addresses with an open window. Past it the oldest window is dropped: it is the one
-/// closest to its reset, and dropping a window can only let an address try again early, never
-/// lock one out.
+/// The most addresses with a window of their own. While the table is full of open windows, new
+/// addresses share one overflow window with the same limit, so no open window is ever dropped
+/// early.
 const MAX_KEYS: usize = 1 << 16;
 
 pub struct RateLimiter {
@@ -38,11 +40,23 @@ struct Hits {
     /// Each window's key and reset, oldest first. Every window has the same length, so this is
     /// also the order they reset in.
     order: VecDeque<(IpAddr, Instant)>,
+    overflow: Option<Window>,
 }
 
+#[derive(Clone, Copy)]
 struct Window {
     count: u32,
     reset: Instant,
+}
+
+impl Window {
+    fn take(&mut self, max: u32, now: Instant) -> Result<(), Duration> {
+        if self.count >= max {
+            return Err(self.reset - now);
+        }
+        self.count += 1;
+        Ok(())
+    }
 }
 
 impl RateLimiter {
@@ -61,14 +75,10 @@ impl RateLimiter {
         let mut hits = self.hits.lock().unwrap_or_else(PoisonError::into_inner);
         let now = (self.now)();
         if let Some(w) = hits.windows.get_mut(&key).filter(|w| now <= w.reset) {
-            if w.count >= self.max {
-                return Err(w.reset - now);
-            }
-            w.count += 1;
-            return Ok(());
+            return w.take(self.max, now);
         }
         while let Some(&(old, reset)) = hits.order.front() {
-            if now <= reset && hits.windows.len() < MAX_KEYS {
+            if now <= reset {
                 break;
             }
             hits.order.pop_front();
@@ -76,9 +86,18 @@ impl RateLimiter {
                 hits.windows.remove(&old);
             }
         }
-        let reset = now + self.window;
-        hits.windows.insert(key, Window { count: 1, reset });
-        hits.order.push_back((key, reset));
+        let fresh = Window {
+            count: 0,
+            reset: now + self.window,
+        };
+        if hits.windows.len() >= MAX_KEYS {
+            let mut w = hits.overflow.filter(|w| now <= w.reset).unwrap_or(fresh);
+            let taken = w.take(self.max, now);
+            hits.overflow = Some(w);
+            return taken;
+        }
+        hits.windows.insert(key, Window { count: 1, ..fresh });
+        hits.order.push_back((key, fresh.reset));
         Ok(())
     }
 
@@ -114,19 +133,24 @@ fn parse_hop(hop: &str) -> Option<IpAddr> {
     Some(ip.to_canonical())
 }
 
-/// Answers 429 with `Retry-After` (whole seconds left, plus one) once a remote address is over
+/// The limiter key for a client address: an IPv4 address itself, an IPv6 address its /64.
+fn key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => Ipv6Addr::from(u128::from(v6) & !(u64::MAX as u128)).into(),
+        v4 => v4,
+    }
+}
+
+/// Answers 429 with `Retry-After` (whole seconds left, plus one) once a client address is over
 /// its limit. Successful attempts count too.
 pub async fn limit(State(limiter): State<Arc<RateLimiter>>, req: Request, next: Next) -> Response {
-    let Some(&ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>() else {
-        return next.run(req).await;
-    };
-    let peer = peer.ip().to_canonical();
+    // `conn.rs` sets the peer on every connection; without one, every such request shares a key.
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or(Ipv4Addr::UNSPECIFIED.into(), |c| c.0.ip().to_canonical());
     let ip = limiter.client_ip(peer, req.headers());
-    // Loopback is exempt only on a loopback connection, so a header cannot claim it.
-    if peer.is_loopback() && ip.is_loopback() {
-        return next.run(req).await;
-    }
-    match limiter.allow(ip) {
+    match limiter.allow(key(ip)) {
         Ok(()) => next.run(req).await,
         Err(retry) => {
             let mut res = error_response(

@@ -1,23 +1,14 @@
 import { expect, type Page, test } from '@playwright/test';
 
-const ADMIN = 'admin';
-const PASSWORD = 'test-password';
-
-async function login(page: Page) {
-  await page.goto('/login');
-  await page.getByLabel('Username').fill(ADMIN);
-  await page.getByLabel('Password').fill(PASSWORD);
-  await page.getByRole('button', { name: /^Sign in$/ }).click();
+/** Each test starts signed in (playwright.config.ts); `/` opens the alerts queue. */
+async function openAlerts(page: Page) {
+  await page.goto('/');
   await expect(page).toHaveURL(/\/alerts/);
 }
 
 test.describe('fleet pages', () => {
-  test.beforeEach(async ({ context }) => {
-    await context.clearCookies();
-  });
-
   test('Fleet nav lands on /fleet/risk via redirect', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.getByRole('link', { name: /^Fleet$/ }).click();
     await expect(page).toHaveURL(/\/fleet\/risk/);
     // Risk table paints rows from the mock. NOTE: hostnames are plain-text
@@ -29,20 +20,20 @@ test.describe('fleet pages', () => {
   });
 
   test('fleet header shows the active host count from /v1/meta', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/fleet');
     // Mock /v1/meta reports fleet { active_host_count: 5, active_window_days: 30 }.
     await expect(page.getByText('5 active hosts · last 30 days')).toBeVisible({ timeout: 5_000 });
   });
 
   test('bare /fleet redirects to /fleet/risk', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/fleet');
     await expect(page).toHaveURL(/\/fleet\/risk/);
   });
 
   test('tab switching changes URL and content', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/fleet/risk');
 
     await page.getByRole('link', { name: /^Compliance$/ }).click();
@@ -59,7 +50,7 @@ test.describe('fleet pages', () => {
   });
 
   test('risk min_bucket chip narrows the row set', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/fleet/risk');
     // Default min_bucket=low lists all 4 risk-bearing hosts (dave has no risk).
     await expect(page.locator('tbody tr')).toHaveCount(4, { timeout: 5_000 });
@@ -73,7 +64,7 @@ test.describe('fleet pages', () => {
   });
 
   test('events tab AI Guard chip narrows the timeline', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/fleet/events');
     await expect(page.locator('tbody tr').first()).toBeVisible({ timeout: 5_000 });
     const before = await page.locator('tbody tr').count();
@@ -90,7 +81,7 @@ test.describe('fleet pages', () => {
   });
 
   test('clicking a hostname opens the host detail page', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/fleet/risk');
     // alice-mbp is a risk row; its hostname cell is now a link.
     await page.getByRole('link', { name: /alice/ }).first().click();
@@ -104,7 +95,7 @@ test.describe('fleet pages', () => {
   });
 
   test('host detail shows metadata + per-host events', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/hosts/5a7c3e91-aaaa-bbbb-cccc-111111111111');
     await expect(page.getByText(/Host metadata/i)).toBeVisible({ timeout: 5_000 });
     await expect(page.getByText(/Policy & agent health/i)).toBeVisible();
@@ -112,13 +103,13 @@ test.describe('fleet pages', () => {
   });
 
   test('unknown host id shows the not-found panel', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     await page.goto('/hosts/00000000-0000-0000-0000-000000000000');
     await expect(page.getByText(/Host not found/i)).toBeVisible({ timeout: 5_000 });
   });
 
   test('a disconnected null-heavy host renders without crashing', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     // dave-vm: hostname null, no host_meta / ai_guard / agent_health — the
     // null-tolerance path (this is where the null-reasons crash first hid).
     await page.goto('/hosts/5a7c3e91-aaaa-bbbb-cccc-444444444444');
@@ -130,7 +121,7 @@ test.describe('fleet pages', () => {
 test('observed controls survive the host API and remain inspectable at low risk', async ({
   page,
 }) => {
-  await login(page);
+  await openAlerts(page);
   const path = '/api/v1/fleet/hosts/5a7c3e91-aaaa-bbbb-cccc-222222222222';
   const response = await page.request.get(path);
   expect(response.ok()).toBeTruthy();

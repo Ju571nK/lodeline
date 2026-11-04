@@ -236,8 +236,20 @@ interface Send {
   raw?: string;
 }
 
+/**
+ * The managers trust the recorder as a proxy (TRUSTED_PROXIES), so a request that names no
+ * client gets its case's own address, a /64 per case, and the login limiter counts each case
+ * apart. Every request would otherwise count for 127.0.0.1 and pass the limit within the table.
+ */
+function caseClient(c: Case): string {
+  return `2001:db8:1:${CASES.indexOf(c).toString(16)}::1`;
+}
+
 function send(c: Case, s: Send): Promise<Reply> {
   const headers: Headers = { ...BASE_HEADERS, ...s.headers };
+  if (!c.direct && !Object.keys(headers).some((k) => k.toLowerCase() === 'x-forwarded-for')) {
+    headers['X-Forwarded-For'] = caseClient(c);
+  }
   let body: Buffer | undefined;
   if (s.json !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -460,7 +472,8 @@ test.beforeAll(async () => {
   const startMs = Date.now();
   const login = await fetch(`${env.MOCK_URL}/api/v1/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    // A client of its own, so no case's limiter window holds this login.
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '2001:db8:2::1' },
     body: JSON.stringify({ username: env.ADMIN_USERNAME, password: env.ADMIN_PASSWORD }),
   });
   saveBracket({ label: 'recorder-login', startMs, endMs: Date.now() });

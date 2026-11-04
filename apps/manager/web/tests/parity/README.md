@@ -6,13 +6,13 @@ at `Ju571nK/lodeline-manager@e4fb077`, except the ones listed under "Goldens rec
 Rust build" below. The Rust port does not have to match Go; the suite is a regression check, so a
 run shows every place where the port answers differently from the recorded behavior.
 
-The table has 229 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 226 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
 |---:|---|
 | 4 | `GET /api/health` |
-| 29 | `POST /api/v1/auth/login` |
+| 26 | `POST /api/v1/auth/login` |
 | 2 | `GET /api/v1/auth/methods` |
 | 3 | `GET /api/v1/auth/oidc/start` |
 | 2 | `GET /api/v1/auth/oidc/callback` |
@@ -98,12 +98,20 @@ difference in the PR. These goldens hold Rust behavior:
 | Golden | Difference from Go |
 |---|---|
 | `login-rate-limited-multi-hop` | The limiter keys on the rightmost `X-Forwarded-For` hop that is not a trusted proxy, not the first: the prelude's attempts count for `198.51.100.7`, so `203.0.113.20` is not limited. |
-| `login-rate-limited-real-ip` | `X-Real-IP` is not read, so the request counts for its loopback peer, which is exempt. |
+| `login-rate-limited-real-ip` | `X-Real-IP` is not read: the prelude's attempts count for its `X-Forwarded-For` address, and the request for the case's own. |
 | `login-rate-limited-true-client-ip` | `True-Client-IP` is not read, as above. |
-| `login-rate-limited-header-precedence` | Only `X-Forwarded-For` counts: the prelude's attempts go to `203.0.113.25`, and the `True-Client-IP` request is a loopback peer's. |
+| `login-rate-limited-header-precedence` | Only `X-Forwarded-For` counts: the prelude's attempts go to `203.0.113.25`, and the `True-Client-IP` request counts for the case's own address. |
+| `login-loopback-limited` | Loopback is limited. Go never limits it. The recorder's own address, `127.0.0.1` named in `X-Forwarded-For`, `::ffff:127.0.0.1`, and a hop that is not an address all count for `127.0.0.1`. |
+| `login-forwarded-loopback-127-0-0-2-limited` | Loopback is limited, as above. |
+| `login-forwarded-loopback-ipv6-limited` | Loopback is limited, as above. |
 
 The parity managers run with `TRUSTED_PROXIES=127.0.0.1`, so the recorder is a trusted proxy and
-the other limiter cases name their client in `X-Forwarded-For`. The Go reference ignores it.
+the limiter cases name their client in `X-Forwarded-For`. The Go reference ignores the variable.
+The limiter exempts no address, so every request that names no client gets its case's own
+address, `2001:db8:1:<case index in hex>::1`, and the recorder's login gets `2001:db8:2::1`.
+Each case then has its own limiter window, as it would against a fresh server. A case marked
+`direct` sends no address and counts for `127.0.0.1`. Go reads the address too, with the same
+effect.
 
 ### Build the Go reference
 
@@ -220,8 +228,8 @@ A passing run says nothing about the following. Each needs its own test in the p
 - `Content-Length` of a non-empty `GET` response, and whether a response is chunked.
 - Percent-encoded path parameters in mock mode. The live cases show what Go sends upstream.
 - Limiter behavior that needs time to pass or many addresses: window reset after 60 s, dropping
-  windows that have reset, and the 65,536-address cap. `src/api/ratelimit/tests.rs` covers them
-  with an injected clock.
+  windows that have reset, the 65,536-address cap with its shared window, and IPv6 clients
+  counted by their /64. `src/api/ratelimit/tests.rs` covers them with an injected clock.
 - Connections from client addresses other than 127.0.0.1. The servers listen on 127.0.0.1 only,
   and the test host has no other loopback address, so the other 127/8 address, `::1` and
   `::ffff:127.0.0.1` reach the limiter only through `X-Forwarded-For`. An untrusted peer's

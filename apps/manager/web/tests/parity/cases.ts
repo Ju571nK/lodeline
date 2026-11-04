@@ -101,6 +101,12 @@ export interface Case {
   upstream?: UpstreamReply;
   /** Requests sent first and not recorded, for example to fill a rate-limit window. */
   prelude?: PreludeStep[];
+  /**
+   * Send no `X-Forwarded-For` unless the request names one, so the limiter counts the request
+   * for the recorder's own 127.0.0.1. Without it, a request that names none gets the case's own
+   * client address (see `send` in run.parity.ts).
+   */
+  direct?: boolean;
   /** The response must take at least, or at most, this long. */
   minMs?: number;
   maxMs?: number;
@@ -490,14 +496,29 @@ export const CASES: Case[] = [
   // Go reads the address from True-Client-IP, X-Real-IP, then the first X-Forwarded-For hop
   // (chi RealIP) and never limits loopback. The Rust port reads only X-Forwarded-For, and only
   // from a trusted proxy (the recorder, through TRUSTED_PROXIES), taking the rightmost hop that
-  // is not one. The multi-hop, X-Real-IP, True-Client-IP and precedence goldens were recorded
-  // from the Rust build for that difference. Each case uses its own documentation address.
+  // is not one, and limits loopback too. The multi-hop, X-Real-IP, True-Client-IP, precedence
+  // and loopback goldens were recorded from the Rust build for those differences. Each case
+  // uses its own documentation address.
   limited('login-rate-limited', { 'X-Forwarded-For': '203.0.113.7' }),
   limited('login-rate-limited-multi-hop', { 'X-Forwarded-For': '203.0.113.20' }, [
     { count: 10, status: 400, headers: { 'X-Forwarded-For': '203.0.113.20, 198.51.100.7' } },
   ]),
-  limited('login-rate-limited-real-ip', { 'X-Real-IP': '203.0.113.21' }),
-  limited('login-rate-limited-true-client-ip', { 'True-Client-IP': '203.0.113.22' }),
+  // The prelude names another client in X-Forwarded-For, so only a header that is read would
+  // carry its attempts over to the last request.
+  limited('login-rate-limited-real-ip', { 'X-Real-IP': '203.0.113.21' }, [
+    {
+      count: 10,
+      status: 400,
+      headers: { 'X-Real-IP': '203.0.113.21', 'X-Forwarded-For': '198.51.100.21' },
+    },
+  ]),
+  limited('login-rate-limited-true-client-ip', { 'True-Client-IP': '203.0.113.22' }, [
+    {
+      count: 10,
+      status: 400,
+      headers: { 'True-Client-IP': '203.0.113.22', 'X-Forwarded-For': '198.51.100.22' },
+    },
+  ]),
   limited('login-rate-limited-header-precedence', { 'True-Client-IP': '203.0.113.23' }, [
     {
       count: 10,
@@ -512,60 +533,24 @@ export const CASES: Case[] = [
     // Go: 400, since True-Client-IP took the ten attempts. Rust: X-Forwarded-For did.
     { status: 429, headers: { 'X-Forwarded-For': '203.0.113.25' } },
   ]),
+  // No address is exempt. Every loopback form, and an X-Forwarded-For hop that is not an
+  // address, counts for the recorder's own 127.0.0.1.
   {
-    name: 'login-loopback-not-limited',
-    route: 'POST /api/v1/auth/login',
-    outcome: 'error',
-    method: 'POST',
-    path: '/api/v1/auth/login',
-    auth: 'none',
-    raw: '{',
-    prelude: [{ count: 11, status: 400, raw: '{' }],
-  },
-  {
-    name: 'login-forwarded-loopback-not-limited',
-    route: 'POST /api/v1/auth/login',
-    outcome: 'error',
-    method: 'POST',
-    path: '/api/v1/auth/login',
-    auth: 'none',
-    headers: { 'X-Forwarded-For': '127.0.0.1' },
-    raw: '{',
-    prelude: [{ count: 11, status: 400, headers: { 'X-Forwarded-For': '127.0.0.1' }, raw: '{' }],
-  },
-  {
-    name: 'login-forwarded-invalid-not-limited',
-    route: 'POST /api/v1/auth/login',
-    outcome: 'error',
-    method: 'POST',
-    path: '/api/v1/auth/login',
-    auth: 'none',
-    headers: { 'X-Forwarded-For': 'not-an-address' },
-    raw: '{',
-    prelude: [
-      { count: 11, status: 400, headers: { 'X-Forwarded-For': 'not-an-address' }, raw: '{' },
-    ],
+    ...limited('login-loopback-limited', {}, [
+      { count: 4, status: 400 },
+      { count: 3, status: 400, headers: { 'X-Forwarded-For': '127.0.0.1' } },
+      { count: 2, status: 400, headers: { 'X-Forwarded-For': '::ffff:127.0.0.1' } },
+      { count: 1, status: 400, headers: { 'X-Forwarded-For': 'not-an-address' } },
+    ]),
+    direct: true,
   },
   // The test host has only 127.0.0.1 on its loopback interface, so these send the other
-  // loopback forms through X-Forwarded-For.
-  ...[
-    // Built from parts so the source holds only 127.0.0.1 as a literal address.
-    ['127-0-0-2', [127, 0, 0, 2].join('.')],
-    ['ipv6', '::1'],
-    ['ipv4-mapped', '::ffff:127.0.0.1'],
-  ].map(
-    ([label, ip]): Case => ({
-      name: `login-forwarded-loopback-${label}-not-limited`,
-      route: 'POST /api/v1/auth/login',
-      outcome: 'error',
-      method: 'POST',
-      path: '/api/v1/auth/login',
-      auth: 'none',
-      headers: { 'X-Forwarded-For': ip },
-      raw: '{',
-      prelude: [{ count: 11, status: 400, headers: { 'X-Forwarded-For': ip }, raw: '{' }],
-    }),
-  ),
+  // loopback forms through X-Forwarded-For. Built from parts so the source holds only
+  // 127.0.0.1 as a literal address.
+  limited('login-forwarded-loopback-127-0-0-2-limited', {
+    'X-Forwarded-For': [127, 0, 0, 2].join('.'),
+  }),
+  limited('login-forwarded-loopback-ipv6-limited', { 'X-Forwarded-For': '::1' }),
   {
     // Successful logins count toward the limit too.
     name: 'login-rate-limited-after-successes',

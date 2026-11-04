@@ -4,11 +4,9 @@ const ADMIN = 'admin';
 const PASSWORD = 'test-password';
 
 test.describe('login flow', () => {
-  test.beforeEach(async ({ context }) => {
-    // Start each test with no cookies so we always exercise the
-    // unauthed → /login redirect.
-    await context.clearCookies();
-  });
+  // Start each test with no cookies so we always exercise the
+  // unauthed → /login redirect.
+  test.use({ storageState: { cookies: [], origins: [] } });
 
   test('unauthed visit to / lands on /login', async ({ page }) => {
     await page.goto('/');

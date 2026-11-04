@@ -80,30 +80,43 @@ fn windows_that_have_reset_are_dropped() {
     assert_eq!(hits.order.len(), 2);
 }
 
-/// Past `MAX_KEYS` addresses the oldest window goes. A new address is never refused for room,
-/// and a blocked address stays blocked until its window is the oldest.
+/// Past `MAX_KEYS` open windows, new addresses share one overflow window with the same limit:
+/// a flood of new addresses neither resets an open window nor grows the table.
 #[test]
-fn the_table_is_capped_by_dropping_the_oldest_window() {
-    let (rl, clock) = limiter(1);
-    rl.allow(IP).unwrap();
-    assert!(rl.allow(IP).is_err());
-    for i in 1..MAX_KEYS {
-        advance(&clock, Duration::from_nanos(1));
-        assert!(rl.allow(addr(i)).is_ok(), "address {i}");
+fn a_flood_of_new_addresses_shares_one_window() {
+    let (rl, clock) = limiter(10);
+    for _ in 0..10 {
+        rl.allow(IP).unwrap();
     }
-    assert!(rl.allow(IP).is_err(), "still blocked with the table full");
+    assert!(rl.allow(IP).is_err());
+    let allowed = (1..=200_000)
+        .filter(|&i| {
+            advance(&clock, Duration::from_nanos(1));
+            rl.allow(addr(i)).is_ok()
+        })
+        .count();
+    assert_eq!(allowed, MAX_KEYS - 1 + 10, "own windows, then ten shared");
+    assert!(rl.allow(IP).is_err(), "still blocked after the flood");
     assert!(
-        rl.allow(addr(MAX_KEYS)).is_ok(),
-        "a new address past the cap"
+        rl.allow(addr(300_000)).is_err(),
+        "the shared window is full"
     );
-    assert_eq!(rl.hits.lock().unwrap().windows.len(), MAX_KEYS);
-    assert!(rl.allow(IP).is_ok(), "the oldest window was dropped");
     assert!(
         rl.allow(addr(1)).is_ok(),
-        "so was the next oldest, for IP's new window"
+        "an own window still counts alone"
+    );
+    {
+        let hits = rl.hits.lock().unwrap();
+        assert_eq!((hits.windows.len(), hits.order.len()), (MAX_KEYS, MAX_KEYS));
+    }
+    advance(&clock, Duration::from_secs(60));
+    assert!(rl.allow(IP).is_ok(), "every window has reset");
+    assert!(
+        rl.allow(addr(300_000)).is_ok(),
+        "with room, a window of its own"
     );
     let hits = rl.hits.lock().unwrap();
-    assert_eq!((hits.windows.len(), hits.order.len()), (MAX_KEYS, MAX_KEYS));
+    assert_eq!((hits.windows.len(), hits.order.len()), (2, 2));
 }
 
 async fn send(
@@ -132,22 +145,37 @@ fn peer(ip: Ipv4Addr) -> Option<SocketAddr> {
     Some(SocketAddr::from((ip, 54321)))
 }
 
+/// Loopback is limited like any peer, in each of its forms.
 #[tokio::test]
-async fn loopback_is_never_limited() {
-    let app = app(limiter(1).0);
+async fn loopback_is_limited() {
     let mapped: SocketAddr = "[::ffff:127.0.0.1]:1".parse().unwrap();
     for addr in [
         peer(Ipv4Addr::LOCALHOST),
         peer(Ipv4Addr::new(127, 0, 0, 2)),
         Some("[::1]:1".parse().unwrap()),
-        Some(mapped),
-        None,
     ] {
-        for i in 0..5 {
-            let res = send(&app, addr, &[]).await;
-            assert_eq!(res.status(), StatusCode::OK, "{addr:?} attempt {i}");
-        }
+        let app = app(limiter(1).0);
+        assert_eq!(send(&app, addr, &[]).await.status(), StatusCode::OK);
+        let res = send(&app, addr, &[]).await;
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "{addr:?}");
     }
+    let app = app(limiter(1).0);
+    assert_eq!(send(&app, Some(mapped), &[]).await.status(), StatusCode::OK);
+    let res = send(&app, peer(Ipv4Addr::LOCALHOST), &[]).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "mapped is IPv4"
+    );
+}
+
+/// A request without a peer address is limited, all such requests under one key.
+#[tokio::test]
+async fn a_request_without_a_peer_is_limited() {
+    let app = app(limiter(1).0);
+    assert_eq!(send(&app, None, &[]).await.status(), StatusCode::OK);
+    let res = send(&app, None, &[]).await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
@@ -211,50 +239,74 @@ fn the_key_is_the_peer_or_the_hop_before_the_trusted_proxies() {
     }
 }
 
-/// Loopback named in a header is exempt only on a loopback connection: from a remote proxy,
-/// trusted or not, it counts.
+/// A reverse proxy on the same host is a loopback peer. Unlisted, its `X-Forwarded-For` is
+/// ignored and its clients share its window. Listed, each client has its own window, and a
+/// request it forwards without the header counts for the proxy.
 #[tokio::test]
-async fn forwarded_loopback_is_exempt_only_from_a_loopback_peer() {
-    let trusted = nets(&["127.0.0.1", "192.0.2.1"]);
-    let app = app(RateLimiter::new(1, Duration::from_secs(60), trusted));
-    let via = |ip: [u8; 4]| peer(Ipv4Addr::from(ip));
-    for _ in 0..3 {
-        let res = send(&app, via([127, 0, 0, 1]), &[("x-forwarded-for", "::1")]).await;
-        assert_eq!(res.status(), StatusCode::OK);
-    }
+async fn a_proxy_on_the_same_host_is_limited() {
+    let local = peer(Ipv4Addr::LOCALHOST);
+    let xff = |ip| [("x-forwarded-for", ip)];
+    let app1 = app(limiter(1).0);
     assert_eq!(
-        send(
-            &app,
-            via([127, 0, 0, 1]),
-            &[("x-forwarded-for", "198.51.100.7")]
-        )
-        .await
-        .status(),
+        send(&app1, local, &xff("198.51.100.7")).await.status(),
         StatusCode::OK
     );
+    let res = send(&app1, local, &xff("198.51.100.8")).await;
     assert_eq!(
-        send(
-            &app,
-            via([127, 0, 0, 1]),
-            &[("x-forwarded-for", "198.51.100.7")]
-        )
-        .await
-        .status(),
+        res.status(),
         StatusCode::TOO_MANY_REQUESTS,
-        "a local proxy's clients are limited"
+        "unlisted proxy"
     );
-    for (ip, xff) in [
-        ([192, 0, 2, 1], "127.0.0.1"),
-        ([203, 0, 113, 5], "127.0.0.1"),
+
+    let trusted = nets(&["127.0.0.1"]);
+    let app2 = app(RateLimiter::new(1, Duration::from_secs(60), trusted));
+    for (headers, want) in [
+        (&xff("198.51.100.7")[..], StatusCode::OK),
+        (&xff("198.51.100.7")[..], StatusCode::TOO_MANY_REQUESTS),
+        (&xff("198.51.100.8")[..], StatusCode::OK),
+        (&xff("::1")[..], StatusCode::OK),
+        (&xff("::1")[..], StatusCode::TOO_MANY_REQUESTS),
+        (&[][..], StatusCode::OK),
+        (&[][..], StatusCode::TOO_MANY_REQUESTS),
     ] {
         assert_eq!(
-            send(&app, via(ip), &[("x-forwarded-for", xff)])
-                .await
-                .status(),
-            StatusCode::OK
+            send(&app2, local, headers).await.status(),
+            want,
+            "{headers:?}"
         );
-        let res = send(&app, via(ip), &[("x-forwarded-for", xff)]).await;
-        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "{ip:?}");
+    }
+}
+
+/// An IPv6 client is keyed by its /64, whether it is the peer or named by a trusted proxy. An
+/// IPv4-mapped address is its IPv4 address.
+#[tokio::test]
+async fn an_ipv6_client_is_keyed_by_its_64() {
+    let app = app(RateLimiter::new(
+        2,
+        Duration::from_secs(60),
+        nets(&["192.0.2.1"]),
+    ));
+    let proxy = peer(Ipv4Addr::new(192, 0, 2, 1));
+    for (hop, want) in [
+        ("2001:db8:1:2::1", StatusCode::OK),
+        ("2001:db8:1:2:ffff:ffff:ffff:fffe", StatusCode::OK),
+        ("2001:db8:1:2::abcd", StatusCode::TOO_MANY_REQUESTS),
+        ("2001:db8:1:3::1", StatusCode::OK),
+        ("::ffff:198.51.100.7", StatusCode::OK),
+        ("198.51.100.7", StatusCode::OK),
+        ("::ffff:198.51.100.7", StatusCode::TOO_MANY_REQUESTS),
+        ("198.51.100.8", StatusCode::OK),
+    ] {
+        let res = send(&app, proxy, &[("x-forwarded-for", hop)]).await;
+        assert_eq!(res.status(), want, "{hop}");
+    }
+    for (ip, want) in [
+        ("[2001:db8:5::1]:1", StatusCode::OK),
+        ("[2001:db8:5::2]:2", StatusCode::OK),
+        ("[2001:db8:5:0:1::3]:3", StatusCode::TOO_MANY_REQUESTS),
+    ] {
+        let res = send(&app, Some(ip.parse().unwrap()), &[]).await;
+        assert_eq!(res.status(), want, "{ip}");
     }
 }
 
