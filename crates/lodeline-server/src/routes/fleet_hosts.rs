@@ -205,8 +205,11 @@ fn render_host_summary_list(h: &HostSummary, now: OffsetDateTime) -> api::HostLi
     }
 }
 
-// The conversions below name every field with no `..`, so a field added to
-// the source type fails to compile here until the wire type decides on it.
+// `render_host_meta` and `render_assessment` (and `get_fleet_host_by_id` for
+// `PolicyState` and `AgentHealth`) destructure their source type with no `..`,
+// so a field added to it fails to compile there until the wire type decides on
+// it. `HostSummary`, the other `RiskEntry` reads and `HourlyBuckets` are read
+// field by field and get no such check.
 
 fn render_host_meta(m: &HostMetaSnapshot) -> api::HostMeta {
     let HostMetaSnapshot {

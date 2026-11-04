@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Every error response: `{"error": {"code", "message"}}`.
+/// The error body the routes return: `{"error": {"code", "message"}}`.
+///
+/// A rejected query string is the exception. It gets axum's plain-text 400, so
+/// a client that cannot parse this body must fall back to the raw response text.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: ErrorDetail,
