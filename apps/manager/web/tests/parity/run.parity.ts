@@ -464,36 +464,20 @@ test.beforeAll(async () => {
     body: JSON.stringify({ username: env.ADMIN_USERNAME, password: env.ADMIN_PASSWORD }),
   });
   saveBracket({ label: 'recorder-login', startMs, endMs: Date.now() });
-  // A port that does not serve login yet answers 501. Its run takes the session that Go issued
-  // (testdata/), which verifies with the same secret, so the routes behind the session check
-  // still run; the cases of the missing routes fail.
-  let session: string | undefined;
-  if (login.status === 501) {
-    console.warn('parity: login answers 501; using the Go-minted session in testdata/');
-    session = readFileSync(join(TESTDATA, 'session-token.txt'), 'utf8').trim();
-  } else {
-    expect(login.status, 'recorder login').toBe(200);
-    session = /^lodeline_session=([^;]+)/.exec(login.headers.getSetCookie()[0] ?? '')?.[1];
-  }
+  expect(login.status, 'recorder login').toBe(200);
+  const session = /^lodeline_session=([^;]+)/.exec(login.headers.getSetCookie()[0] ?? '')?.[1];
   expect(session, 'session cookie').toBeTruthy();
   const healthz = await fetch(`${env.MOCK_URL}/api/v1/fleet/healthz`, {
     headers: { Cookie: `lodeline_session=${session}` },
   });
-  let seedMs: number;
-  // Likewise a port without the mock fleet: the run start stands in for the seed.
-  if (healthz.status === 501) {
-    console.warn('parity: fleet/healthz answers 501; the mock seed is unknown');
-    seedMs = Math.floor(env.RUN_START_MS / 1000) * 1000;
-  } else {
-    const ts = ((await healthz.json()) as { ts: string }).ts;
-    // Go anchors the mock at process start, truncated to the second.
-    expect(ts, 'mock seed is a whole second').toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
-    seedMs = Date.parse(ts);
-    expect(seedMs, 'mock seed not before the run').toBeGreaterThanOrEqual(
-      Math.floor(env.RUN_START_MS / 1000) * 1000,
-    );
-    expect(seedMs, 'mock seed not in the future').toBeLessThanOrEqual(Date.now());
-  }
+  const ts = ((await healthz.json()) as { ts: string }).ts;
+  // Go anchors the mock at process start, truncated to the second.
+  expect(ts, 'mock seed is a whole second').toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  const seedMs = Date.parse(ts);
+  expect(seedMs, 'mock seed not before the run').toBeGreaterThanOrEqual(
+    Math.floor(env.RUN_START_MS / 1000) * 1000,
+  );
+  expect(seedMs, 'mock seed not in the future').toBeLessThanOrEqual(Date.now());
 
   const distByHash = new Map<string, string>();
   for (const f of walkFiles(DIST)) distByHash.set(sha256(readFileSync(f)), relative(DIST, f));

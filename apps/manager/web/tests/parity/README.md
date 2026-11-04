@@ -5,25 +5,25 @@ each normalized response with a golden file. The goldens were recorded from the 
 at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
 the port answers differently.
 
-The table has 222 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 229 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
 |---:|---|
 | 4 | `GET /api/health` |
-| 28 | `POST /api/v1/auth/login` |
+| 29 | `POST /api/v1/auth/login` |
 | 2 | `GET /api/v1/auth/methods` |
 | 3 | `GET /api/v1/auth/oidc/start` |
 | 2 | `GET /api/v1/auth/oidc/callback` |
-| 3 | `POST /api/v1/auth/logout` |
-| 26 | `GET /api/v1/auth/me` |
+| 4 | `POST /api/v1/auth/logout` |
+| 27 | `GET /api/v1/auth/me` |
 | 6 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
 | 38 | `GET /api/v1/fleet/events` |
-| 13 | `GET /api/v1/fleet/events/{event_id}` |
-| 10 | `GET /api/v1/fleet/risk` |
-| 8 | `GET /api/v1/fleet/compliance` |
-| 11 | `GET /api/v1/fleet/hosts` |
+| 14 | `GET /api/v1/fleet/events/{event_id}` |
+| 11 | `GET /api/v1/fleet/risk` |
+| 9 | `GET /api/v1/fleet/compliance` |
+| 12 | `GET /api/v1/fleet/hosts` |
 | 14 | `GET /api/v1/fleet/hosts/{host_id}` |
 | 13 | `POST /api/v1/triage/upsert` |
 | 11 | `POST /api/v1/triage/note` |
@@ -34,10 +34,8 @@ Every route has a success case and an error case, except the two OIDC routes. Th
 needs an HTTPS OIDC provider, so the Rust port carries over the Go OIDC unit tests instead
 (`NO_SUCCESS_CASE` in `cases.ts`).
 
-CI does not run this suite yet. The Rust binary serves every route except the auth routes (login,
-logout, `me`, `methods` and OIDC) so far; those answer 501 after their method and session checks,
-so their cases fail until the port reaches them. When login or `fleet/healthz` answers 501, the run takes the session
-that Go issued (`testdata/session-token.txt`) and the run start as the mock seed, and says so.
+CI does not run this suite yet. The Rust binary serves every route, and a run against it must pass
+every case.
 
 ## Files
 
@@ -197,11 +195,13 @@ A passing run says nothing about the following. Each needs its own test in the p
   retried.
 - The 250 ms login failure delay is checked only as a minimum on the three wrong-credential cases.
   Whether other failure paths wait, or how long the slowest wait is, is not checked.
-- `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id` and
-  `fleet-events-duplicate-key`.
+- `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id`,
+  `fleet-events-duplicate-key` and the `limit` cases of risk, compliance and hosts.
 - `Content-Length` of a non-empty `GET` response, and whether a response is chunked.
 - Percent-encoded path parameters in mock mode. The live cases show what Go sends upstream.
 - Limiter behavior that needs time to pass: window reset after 60 s, and pruning above 1024 keys.
+  Go's own `TestRateLimiter_WindowResets` covers the reset with an injected clock; the Rust port
+  carries it over with the pruning case in `src/api/ratelimit/tests.rs`.
 - Connections from client addresses other than 127.0.0.1. The servers listen on 127.0.0.1 only,
   and the test host has no other loopback address, so the other 127/8 address, `::1` and
   `::ffff:127.0.0.1` reach the limiter only through `X-Forwarded-For`.

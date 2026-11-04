@@ -455,6 +455,15 @@ export const CASES: Case[] = [
     path: '/api/v1/auth/login',
     auth: 'none',
   },
+  // chi registers POST alone, so HEAD gets 405 and never reaches the limiter.
+  {
+    name: 'login-head',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'HEAD',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+  },
   body(
     'login-text-plain',
     'POST /api/v1/auth/login',
@@ -624,6 +633,8 @@ export const CASES: Case[] = [
     path: '/api/v1/auth/me',
   },
   noSession('GET /api/v1/auth/me', 'GET', '/api/v1/auth/me', 'me-no-session'),
+  // The method check runs before the session check, HEAD included.
+  noSession('GET /api/v1/auth/me', 'HEAD', '/api/v1/auth/me', 'me-head-no-session'),
   sessionForm('empty'),
   sessionForm('garbage'),
   sessionForm('expired'),
@@ -656,6 +667,12 @@ export const CASES: Case[] = [
     path: '/api/v1/auth/logout',
   },
   noSession('POST /api/v1/auth/logout', 'POST', '/api/v1/auth/logout', 'logout-no-session'),
+  noSession(
+    'POST /api/v1/auth/logout',
+    'GET',
+    '/api/v1/auth/logout',
+    'logout-wrong-method-no-session',
+  ),
   {
     name: 'live-login-secure-cookie',
     route: 'POST /api/v1/auth/login',
@@ -837,6 +854,14 @@ export const CASES: Case[] = [
     method: 'GET',
     path: `/api/v1/fleet/events/${EVT_MISSING}`,
   },
+  // Go's server refuses a malformed escape before routing, session or not.
+  {
+    name: 'fleet-event-bad-escape',
+    route: 'GET /api/v1/fleet/events/{event_id}',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/events/%zz',
+  },
   noSession(
     'GET /api/v1/fleet/events/{event_id}',
     'GET',
@@ -885,6 +910,14 @@ export const CASES: Case[] = [
     method: 'GET',
     path: '/api/v1/fleet/risk?limit=',
   },
+  // Go drops a query pair holding `;`, and reads the first of repeated keys.
+  {
+    name: 'fleet-risk-semicolon-pair',
+    route: 'GET /api/v1/fleet/risk',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/risk?limit=x;y&limit=1',
+  },
   noSession('GET /api/v1/fleet/risk', 'GET', '/api/v1/fleet/risk', 'fleet-risk-no-session'),
   {
     name: 'fleet-compliance',
@@ -920,6 +953,13 @@ export const CASES: Case[] = [
     outcome: 'error',
     method: 'GET',
     path: '/api/v1/fleet/compliance?limit=%20',
+  },
+  {
+    name: 'fleet-compliance-duplicate-limit',
+    route: 'GET /api/v1/fleet/compliance',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/compliance?limit=x&limit=1',
   },
   noSession(
     'GET /api/v1/fleet/compliance',
@@ -968,6 +1008,13 @@ export const CASES: Case[] = [
     outcome: 'ok',
     method: 'GET',
     path: '/api/v1/fleet/hosts?limit=',
+  },
+  {
+    name: 'fleet-hosts-duplicate-limit',
+    route: 'GET /api/v1/fleet/hosts',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/hosts?limit=1&limit=x',
   },
   noSession('GET /api/v1/fleet/hosts', 'GET', '/api/v1/fleet/hosts', 'fleet-hosts-no-session'),
   {
