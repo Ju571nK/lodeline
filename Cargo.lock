@@ -2197,6 +2197,7 @@ dependencies = [
  "insta",
  "libc",
  "lodeline-core",
+ "lodeline-fleet-api",
  "lodeline-proxy-api",
  "lodeline-server",
  "parking_lot",

@@ -445,3 +445,34 @@ async fn error_bodies() {
         call(&booting, "/v1/meta", Some("tok"), &r).await
     );
 }
+
+/// Each body decodes into its `lodeline-fleet-api` type and encodes back to
+/// the same bytes, so a consumer reading these types loses nothing.
+fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(response: &str) {
+    let body = response.split_once('\n').unwrap().1;
+    let typed: T = serde_json::from_str(body).expect(body);
+    assert_eq!(serde_json::to_string(&typed).unwrap(), body);
+}
+
+#[tokio::test]
+async fn bodies_round_trip_through_the_wire_types() {
+    use lodeline_fleet_api as api;
+    let dir = tempfile::tempdir().unwrap();
+    let (app, r) = populated(dir.path()).await;
+    let tok = Some("tok");
+    round_trip::<api::Healthz>(&call(&app, "/v1/healthz", None, &r).await);
+    round_trip::<api::Meta>(&call(&app, "/v1/meta", tok, &r).await);
+    round_trip::<api::PolicyMeta>(&call(&app, "/v1/policy/meta", tok, &r).await);
+    round_trip::<api::HostsPage>(&call(&app, "/v1/fleet/hosts?limit=1", tok, &r).await);
+    for host in [HA, HB, HC] {
+        let path = format!("/v1/fleet/hosts/{host}");
+        round_trip::<api::HostDetail>(&call(&app, &path, tok, &r).await);
+    }
+    round_trip::<api::RowsPage<api::RiskRow>>(&call(&app, "/v1/fleet/risk", tok, &r).await);
+    round_trip::<api::RowsPage<api::ComplianceRow>>(
+        &call(&app, "/v1/fleet/compliance?limit=1", tok, &r).await,
+    );
+    let path = format!("/v1/events?limit=3&host_id={HA}");
+    round_trip::<api::EventsPage>(&call(&app, &path, tok, &r).await);
+    round_trip::<api::ErrorBody>(&call(&app, "/v1/fleet/hosts/no-such", tok, &r).await);
+}

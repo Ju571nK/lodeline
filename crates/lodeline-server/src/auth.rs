@@ -8,7 +8,6 @@ use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
 
 /// Configured token. `None` ⇒ read API disabled (every protected route 404s).
 #[derive(Clone, Debug)]
@@ -84,7 +83,10 @@ pub async fn require_bearer(
 fn unauthorized_response() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(json!({"error": {"code": "unauthorized", "message": "missing or invalid bearer token"}})),
+        Json(lodeline_fleet_api::ErrorBody::new(
+            "unauthorized",
+            "missing or invalid bearer token",
+        )),
     )
         .into_response()
 }
@@ -92,7 +94,10 @@ fn unauthorized_response() -> Response {
 fn not_found_response() -> Response {
     (
         StatusCode::NOT_FOUND,
-        Json(json!({"error": {"code": "not_found", "message": "endpoint not found"}})),
+        Json(lodeline_fleet_api::ErrorBody::new(
+            "not_found",
+            "endpoint not found",
+        )),
     )
         .into_response()
 }

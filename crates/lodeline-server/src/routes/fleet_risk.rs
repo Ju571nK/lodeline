@@ -6,16 +6,7 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use lodeline_core::event::AiGuardBucket;
-use serde::Deserialize;
-use serde_json::{json, Value};
-
-#[derive(Debug, Deserialize)]
-pub struct RiskQuery {
-    pub cursor: Option<String>,
-    pub limit: Option<u32>,
-    pub tool: Option<String>,
-    pub min_bucket: Option<String>,
-}
+use lodeline_fleet_api::{RiskQuery, RiskRow, RowsPage};
 
 fn clamp_limit(req: Option<u32>) -> usize {
     req.unwrap_or(100).clamp(1, 1000) as usize
@@ -61,11 +52,7 @@ pub async fn get_fleet_risk(
         let mut top: Option<(lodeline_core::event::AiTool, crate::fleet_index::RiskEntry)> = None;
         for (tool, entry) in &h.current_risk {
             if let Some(tf) = &tool_filter {
-                let tstr = serde_json::to_value(tool)
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_string();
+                let tstr = super::wire_str(tool);
                 if !tf.iter().any(|t| t == &tstr) {
                     continue;
                 }
@@ -104,24 +91,26 @@ pub async fn get_fleet_risk(
             .unwrap_or(rows.len()),
     };
     let end = (start + limit).min(rows.len());
-    let page: Vec<Value> = rows[start..end].iter().map(|(h, tool, entry)| {
-        json!({
-            "host_id": h.host_id,
-            "hostname": h.hostname(),
-            "score": entry.score,
-            "bucket": entry.bucket,
-            "top_tool": tool,
-            "reasons_count": entry.reasons.len(),
-            "assessed_ts": entry.assessed_ts.format(&time::format_description::well_known::Rfc3339).unwrap(),
-            "open_alert_count_24h": h.counts_24h.sum_alerts(),
+    let page: Vec<RiskRow> = rows[start..end]
+        .iter()
+        .map(|(h, tool, entry)| RiskRow {
+            host_id: h.host_id.clone(),
+            hostname: h.hostname().map(str::to_string),
+            score: f64::from(entry.score),
+            bucket: super::wire_str(&entry.bucket),
+            top_tool: super::wire_str(tool),
+            reasons_count: entry.reasons.len() as u64,
+            assessed_ts: super::rfc3339(entry.assessed_ts),
+            open_alert_count_24h: h.counts_24h.sum_alerts(),
         })
-    }).collect();
+        .collect();
     let next_cursor = if end < rows.len() {
-        rows.get(end - 1)
-            .map(|(h, _, _)| Value::String(h.host_id.clone()))
-            .unwrap_or(Value::Null)
+        rows.get(end - 1).map(|(h, _, _)| h.host_id.clone())
     } else {
-        Value::Null
+        None
     };
-    Json(json!({ "rows": page, "next_cursor": next_cursor }))
+    Json(RowsPage {
+        next_cursor,
+        rows: page,
+    })
 }

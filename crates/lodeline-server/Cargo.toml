@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 lodeline-core = { path = "../lodeline-core" }
+lodeline-fleet-api = { path = "../lodeline-fleet-api" }
 # T-11 — fixed ApiError bodies for the proxy routes (404 proxy_unknown etc.).
 lodeline-proxy-api = { path = "../lodeline-proxy-api" }
 serde = { workspace = true }

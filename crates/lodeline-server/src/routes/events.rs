@@ -1,32 +1,15 @@
 //! GET /v1/events — list (paged JSONL scan)
 //! GET /v1/events/{event_id} — single event lookup via UUIDv7 timestamp
 
+use super::error_response;
 use crate::app::SharedState;
 use crate::jsonl_scan::{find_by_id, scan, ScanFilters};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use lodeline_fleet_api::{EventsPage, EventsQuery};
 use uuid::Uuid;
-
-#[derive(Debug, Deserialize)]
-pub struct EventsQuery {
-    pub cursor: Option<String>,
-    pub limit: Option<u32>,
-    // Comma-separated, like the other multi-value filters below (evidence_kind,
-    // severity, source). A `Vec<String>` here can't be deserialized by axum's
-    // serde_urlencoded `Query` extractor (it reports "expected a sequence" even
-    // for a single value), which is what broke the MCP `query_events` tool (#73).
-    pub host_id: Option<String>,
-    pub since: Option<String>,
-    pub until: Option<String>,
-    pub evidence_kind: Option<String>,
-    pub severity: Option<String>,
-    pub source: Option<String>,
-    pub min_ai_guard_bucket: Option<String>,
-}
 
 fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
@@ -46,37 +29,31 @@ pub async fn get_events(
         Some(c) => match Uuid::parse_str(c) {
             Ok(u) => Some(u),
             Err(_) => {
-                return (
+                return error_response(
                     StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": {"code": "invalid_query", "message": "cursor must be a UUID"}
-                    })),
+                    "invalid_query",
+                    "cursor must be a UUID",
                 )
-                    .into_response()
             }
         },
     };
     let since = match q.since.as_deref().map(parse_rfc3339) {
         Some(None) => {
-            return (
+            return error_response(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {"code": "invalid_query", "message": "since must be RFC 3339"}
-                })),
+                "invalid_query",
+                "since must be RFC 3339",
             )
-                .into_response()
         }
         x => x.flatten(),
     };
     let until = match q.until.as_deref().map(parse_rfc3339) {
         Some(None) => {
-            return (
+            return error_response(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {"code": "invalid_query", "message": "until must be RFC 3339"}
-                })),
+                "invalid_query",
+                "until must be RFC 3339",
             )
-                .into_response()
         }
         x => x.flatten(),
     };
@@ -97,19 +74,13 @@ pub async fn get_events(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "scan failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {"code": "internal", "message": "scan failed"}
-                })),
-            )
-                .into_response();
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", "scan failed");
         }
     };
-    Json(json!({
-        "events": r.events,
-        "next_cursor": r.next_cursor.map(|u| u.to_string()).map(Value::String).unwrap_or(Value::Null),
-    }))
+    Json(EventsPage {
+        events: r.events,
+        next_cursor: r.next_cursor.map(|u| u.to_string()),
+    })
     .into_response()
 }
 
@@ -120,33 +91,23 @@ pub async fn get_event_by_id(
     let uid = match Uuid::parse_str(&event_id) {
         Ok(u) => u,
         Err(_) => {
-            return (
+            return error_response(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {"code": "invalid_query", "message": "event_id must be a UUID"}
-                })),
+                "invalid_query",
+                "event_id must be a UUID",
             )
-                .into_response()
         }
     };
     match find_by_id(&state.events_out_dir, uid) {
         Ok(Some(v)) => Json(v).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": {"code": "not_found", "message": "event_id not found"}
-            })),
-        )
-            .into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "not_found", "event_id not found"),
         Err(e) => {
             tracing::error!(error = ?e, "find_by_id failed");
-            (
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {"code": "internal", "message": "lookup failed"}
-                })),
+                "internal",
+                "lookup failed",
             )
-                .into_response()
         }
     }
 }
