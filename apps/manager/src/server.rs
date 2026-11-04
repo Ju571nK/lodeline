@@ -33,6 +33,8 @@ pub struct AppState {
     pub oidc: Option<Arc<Oidc>>,
     pub fleet: Arc<dyn fleet::Client>,
     pub triage: Arc<triage::Store>,
+    /// The login limiter's trusted proxies (`TRUSTED_PROXIES`).
+    pub trusted_proxies: Arc<[ipnet::IpNet]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,6 +61,7 @@ impl AppState {
             oidc: None,
             fleet,
             triage: Arc::new(triage::Store::open(":memory:").unwrap()),
+            trusted_proxies: Arc::new([]),
         }
     }
 }
@@ -102,7 +105,11 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; st
 
 pub fn router(state: AppState) -> Router {
     // One limiter per router, shared by login and the two OIDC routes: 10 a minute.
-    let limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let limiter = Arc::new(RateLimiter::new(
+        10,
+        Duration::from_secs(60),
+        state.trusted_proxies.clone(),
+    ));
     let mut router = Router::new();
     for (method, path, _) in ROUTES {
         let axum_path = path.replace('{', ":").replace('}', "");

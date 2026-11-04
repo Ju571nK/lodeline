@@ -1,4 +1,4 @@
-//! Go's `ratelimit_test.go`, plus chi `RealIP` precedence, pruning and `Retry-After`.
+//! The limiter's window, its storage cap, and how it picks the client address.
 
 use std::net::Ipv4Addr;
 
@@ -10,12 +10,18 @@ use tower::ServiceExt;
 
 use super::*;
 
-const IP: &str = "203.0.113.7";
+const IP: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+
+fn nets(list: &[&str]) -> Arc<[IpNet]> {
+    crate::config::trusted_proxies(&list.join(","))
+        .unwrap()
+        .into()
+}
 
 /// A limiter whose clock the test moves.
 fn limiter(max: u32) -> (RateLimiter, Arc<Mutex<Instant>>) {
     let clock = Arc::new(Mutex::new(Instant::now()));
-    let mut rl = RateLimiter::new(max, Duration::from_secs(60));
+    let mut rl = RateLimiter::new(max, Duration::from_secs(60), nets(&[]));
     let c = clock.clone();
     rl.now = Box::new(move || *c.lock().unwrap());
     (rl, clock)
@@ -25,9 +31,14 @@ fn advance(clock: &Mutex<Instant>, d: Duration) {
     *clock.lock().unwrap() += d;
 }
 
+/// A distinct address for each `i`.
+fn addr(i: usize) -> IpAddr {
+    IpAddr::V6((0x2001_0db8_u128 << 96 | i as u128).into())
+}
+
 #[test]
 fn allows_up_to_max_then_blocks() {
-    let rl = RateLimiter::new(3, Duration::from_secs(60));
+    let (rl, _) = limiter(3);
     for i in 1..=3 {
         assert!(rl.allow(IP).is_ok(), "attempt {i}");
     }
@@ -39,7 +50,7 @@ fn the_window_resets_after_it_has_passed() {
     let (rl, clock) = limiter(1);
     assert!(rl.allow(IP).is_ok());
     assert_eq!(rl.allow(IP), Err(Duration::from_secs(60)));
-    // Go's window is closed at both ends: the reset instant itself is still inside it.
+    // The window is closed at both ends: the reset instant itself is still inside it.
     advance(&clock, Duration::from_secs(60));
     assert_eq!(rl.allow(IP), Err(Duration::ZERO));
     advance(&clock, Duration::from_nanos(1));
@@ -49,34 +60,50 @@ fn the_window_resets_after_it_has_passed() {
 
 #[test]
 fn each_address_has_its_own_window() {
-    let rl = RateLimiter::new(1, Duration::from_secs(60));
-    assert!(rl.allow("203.0.113.1").is_ok());
-    assert!(rl.allow("203.0.113.2").is_ok());
+    let (rl, _) = limiter(1);
+    assert!(rl.allow(addr(1)).is_ok());
+    assert!(rl.allow(addr(2)).is_ok());
 }
 
 #[test]
-fn expired_windows_are_pruned_only_above_1024_keys() {
+fn windows_that_have_reset_are_dropped() {
     let (rl, clock) = limiter(10);
-    let key = |i: usize| format!("k{i}");
-    for i in 0..=PRUNE_ABOVE {
-        rl.allow(&key(i)).unwrap();
+    for i in 0..100 {
+        rl.allow(addr(i)).unwrap();
     }
-    advance(&clock, Duration::from_secs(61));
-    let len = || rl.hits.lock().unwrap().len();
-    assert_eq!(len(), PRUNE_ABOVE + 1);
-    rl.allow("new").unwrap();
-    assert_eq!(len(), 1);
-    let (rl, clock) = limiter(10);
-    for i in 0..PRUNE_ABOVE {
-        rl.allow(&key(i)).unwrap();
+    advance(&clock, Duration::from_secs(30));
+    rl.allow(addr(100)).unwrap();
+    advance(&clock, Duration::from_secs(31));
+    rl.allow(addr(101)).unwrap();
+    let hits = rl.hits.lock().unwrap();
+    assert_eq!(hits.windows.len(), 2);
+    assert_eq!(hits.order.len(), 2);
+}
+
+/// Past `MAX_KEYS` addresses the oldest window goes. A new address is never refused for room,
+/// and a blocked address stays blocked until its window is the oldest.
+#[test]
+fn the_table_is_capped_by_dropping_the_oldest_window() {
+    let (rl, clock) = limiter(1);
+    rl.allow(IP).unwrap();
+    assert!(rl.allow(IP).is_err());
+    for i in 1..MAX_KEYS {
+        advance(&clock, Duration::from_nanos(1));
+        assert!(rl.allow(addr(i)).is_ok(), "address {i}");
     }
-    advance(&clock, Duration::from_secs(61));
-    rl.allow("new").unwrap();
-    assert_eq!(
-        rl.hits.lock().unwrap().len(),
-        PRUNE_ABOVE + 1,
-        "1024 keys is not above"
+    assert!(rl.allow(IP).is_err(), "still blocked with the table full");
+    assert!(
+        rl.allow(addr(MAX_KEYS)).is_ok(),
+        "a new address past the cap"
     );
+    assert_eq!(rl.hits.lock().unwrap().windows.len(), MAX_KEYS);
+    assert!(rl.allow(IP).is_ok(), "the oldest window was dropped");
+    assert!(
+        rl.allow(addr(1)).is_ok(),
+        "so was the next oldest, for IP's new window"
+    );
+    let hits = rl.hits.lock().unwrap();
+    assert_eq!((hits.windows.len(), hits.order.len()), (MAX_KEYS, MAX_KEYS));
 }
 
 async fn send(
@@ -107,7 +134,7 @@ fn peer(ip: Ipv4Addr) -> Option<SocketAddr> {
 
 #[tokio::test]
 async fn loopback_is_never_limited() {
-    let app = app(RateLimiter::new(1, Duration::from_secs(60)));
+    let app = app(limiter(1).0);
     let mapped: SocketAddr = "[::ffff:127.0.0.1]:1".parse().unwrap();
     for addr in [
         peer(Ipv4Addr::LOCALHOST),
@@ -132,7 +159,7 @@ async fn a_remote_address_over_the_limit_gets_429() {
     advance(&clock, Duration::from_millis(500));
     let blocked = send(&app, remote, &[]).await;
     assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
-    // 59.5 s left: Go's int(Seconds()) + 1.
+    // 59.5 s left: whole seconds plus one.
     assert_eq!(blocked.headers()[header::RETRY_AFTER], "60");
     let body = axum::body::to_bytes(blocked.into_body(), usize::MAX)
         .await
@@ -143,67 +170,140 @@ async fn a_remote_address_over_the_limit_gets_429() {
     );
 }
 
-/// chi `RealIP`: `True-Client-IP`, then `X-Real-IP`, then the first `X-Forwarded-For` hop; the
-/// first header present decides, and a value that is not an IP address falls back to the peer.
+/// The peer is the client unless it is a trusted proxy; then `X-Forwarded-For` is walked from
+/// the right while the address so far is trusted.
 #[test]
-fn the_key_follows_chi_real_ip() {
-    let key = |headers: &[(&'static str, &str)]| {
-        let mut req = Request::new(Body::empty());
-        req.extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 40000))));
-        for (name, value) in headers {
-            req.headers_mut()
-                .append(*name, HeaderValue::from_bytes(value.as_bytes()).unwrap());
+fn the_key_is_the_peer_or_the_hop_before_the_trusted_proxies() {
+    let trusted = ["192.0.2.0/24", "2001:db8::1", "203.0.113.128/25"];
+    let rl = RateLimiter::new(10, Duration::from_secs(60), nets(&trusted));
+    let key = |peer: &str, xff: &[&str]| {
+        let mut headers = HeaderMap::new();
+        for v in xff {
+            headers.append("x-forwarded-for", HeaderValue::from_str(v).unwrap());
         }
-        client_ip(&req)
+        rl.client_ip(peer.parse().unwrap(), &headers).to_string()
     };
-    let cases: [(&[(&str, &str)], &str); 11] = [
-        (&[], "192.0.2.1"),
+    let cases: [(&str, &[&str], &str); 13] = [
+        ("203.0.113.9", &[], "203.0.113.9"),
+        ("203.0.113.9", &["198.51.100.7"], "203.0.113.9"),
+        ("192.0.2.1", &[], "192.0.2.1"),
+        ("192.0.2.1", &["198.51.100.7"], "198.51.100.7"),
+        ("192.0.2.1", &["127.0.0.1, 198.51.100.7"], "198.51.100.7"),
         (
-            &[("x-forwarded-for", "203.0.113.20, 198.51.100.7")],
-            "203.0.113.20",
-        ),
-        (&[("x-forwarded-for", " 203.0.113.20")], "192.0.2.1"),
-        (&[("x-real-ip", "203.0.113.21")], "203.0.113.21"),
-        (&[("true-client-ip", "203.0.113.22")], "203.0.113.22"),
-        (
-            &[
-                ("true-client-ip", "203.0.113.23"),
-                ("x-real-ip", "203.0.113.24"),
-                ("x-forwarded-for", "203.0.113.25"),
-            ],
-            "203.0.113.23",
-        ),
-        // An invalid first header is not passed over for the next one.
-        (
-            &[("true-client-ip", "nope"), ("x-real-ip", "203.0.113.24")],
             "192.0.2.1",
+            &["198.51.100.1, 198.51.100.7, 192.0.2.9"],
+            "198.51.100.7",
         ),
-        (&[("x-forwarded-for", "not-an-address")], "192.0.2.1"),
-        (&[("x-forwarded-for", "::1")], "::1"),
         (
-            &[("x-real-ip", "203.0.113.1"), ("x-real-ip", "203.0.113.2")],
-            "203.0.113.1",
+            "192.0.2.1",
+            &["198.51.100.1", "198.51.100.7"],
+            "198.51.100.7",
         ),
-        (&[("x-forwarded-for", "2001:DB8::1")], "2001:DB8::1"),
+        ("192.0.2.1", &["203.0.113.200,192.0.2.9"], "203.0.113.200"),
+        ("192.0.2.1", &["198.51.100.7, not-an-address"], "192.0.2.1"),
+        ("192.0.2.1", &["198.51.100.7:4711"], "198.51.100.7"),
+        ("192.0.2.1", &["[2001:db8::7]:4711"], "2001:db8::7"),
+        ("2001:db8::1", &["::ffff:198.51.100.7"], "198.51.100.7"),
+        ("2001:db8::2", &["198.51.100.7"], "2001:db8::2"),
     ];
-    for (headers, want) in cases {
-        assert_eq!(key(headers), want, "{headers:?}");
+    for (peer, xff, want) in cases {
+        assert_eq!(key(peer, xff), want, "{peer} {xff:?}");
     }
-    let mut req = Request::new(Body::empty());
-    req.extensions_mut().insert(ConnectInfo(
-        "[::ffff:192.0.2.5]:1".parse::<SocketAddr>().unwrap(),
-    ));
-    assert_eq!(client_ip(&req), "192.0.2.5");
 }
 
-/// The forwarding headers can name loopback, which is exempt: Go's defect, kept for parity.
+/// Loopback named in a header is exempt only on a loopback connection: from a remote proxy,
+/// trusted or not, it counts.
 #[tokio::test]
-async fn a_forwarded_loopback_address_is_exempt() {
-    let app = app(RateLimiter::new(1, Duration::from_secs(60)));
-    let remote = peer(Ipv4Addr::new(203, 0, 113, 9));
+async fn forwarded_loopback_is_exempt_only_from_a_loopback_peer() {
+    let trusted = nets(&["127.0.0.1", "192.0.2.1"]);
+    let app = app(RateLimiter::new(1, Duration::from_secs(60), trusted));
+    let via = |ip: [u8; 4]| peer(Ipv4Addr::from(ip));
     for _ in 0..3 {
-        let res = send(&app, remote, &[("x-forwarded-for", "::ffff:127.0.0.1")]).await;
+        let res = send(&app, via([127, 0, 0, 1]), &[("x-forwarded-for", "::1")]).await;
         assert_eq!(res.status(), StatusCode::OK);
     }
+    assert_eq!(
+        send(
+            &app,
+            via([127, 0, 0, 1]),
+            &[("x-forwarded-for", "198.51.100.7")]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(
+            &app,
+            via([127, 0, 0, 1]),
+            &[("x-forwarded-for", "198.51.100.7")]
+        )
+        .await
+        .status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a local proxy's clients are limited"
+    );
+    for (ip, xff) in [
+        ([192, 0, 2, 1], "127.0.0.1"),
+        ([203, 0, 113, 5], "127.0.0.1"),
+    ] {
+        assert_eq!(
+            send(&app, via(ip), &[("x-forwarded-for", xff)])
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let res = send(&app, via(ip), &[("x-forwarded-for", xff)]).await;
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "{ip:?}");
+    }
+}
+
+async fn login_from(app: &Router, peer: &str, headers: &[(&'static str, &str)]) -> StatusCode {
+    let mut req = axum::http::Request::post("/api/v1/auth/login")
+        .header(header::HOST, "console.example")
+        .body(Body::from("{"))
+        .unwrap();
+    req.extensions_mut()
+        .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+    for (name, value) in headers {
+        req.headers_mut()
+            .insert(*name, HeaderValue::from_str(value).unwrap());
+    }
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+fn console() -> Router {
+    crate::server::router(crate::server::AppState::for_tests(
+        "0123456789abcdefghijklmnopqrstuv",
+        Arc::new(crate::fleet::Mock::new(1_779_192_000)),
+    ))
+}
+
+/// A remote client cannot claim loopback, or any other address, through a forwarding header
+/// when no proxy is trusted: every attempt counts against its own address.
+#[tokio::test]
+async fn forwarding_headers_from_an_untrusted_peer_are_ignored() {
+    let names = ["true-client-ip", "x-real-ip", "x-forwarded-for"];
+    for name in names {
+        let app = console();
+        for i in 0..10 {
+            let status = login_from(&app, "203.0.113.9:4000", &[(name, "127.0.0.1")]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name} attempt {i}");
+        }
+        let status = login_from(&app, "203.0.113.9:4000", &[(name, "127.0.0.1")]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{name}");
+    }
+    let app = console();
+    for i in 0..10 {
+        let ip = format!("198.51.100.{i}");
+        let status = login_from(&app, "203.0.113.9:4000", &[("x-forwarded-for", &ip)]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "attempt {i}");
+    }
+    let status = login_from(
+        &app,
+        "203.0.113.9:4000",
+        &[("x-forwarded-for", "198.51.100.99")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "rotating addresses");
 }

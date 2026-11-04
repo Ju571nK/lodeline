@@ -2,8 +2,9 @@
 
 The parity suite sends a fixed table of HTTP requests to a `lodeline-manager` binary and compares
 each normalized response with a golden file. The goldens were recorded from the Go implementation
-at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
-the port answers differently.
+at `Ju571nK/lodeline-manager@e4fb077`, except the ones listed under "Goldens recorded from the
+Rust build" below. The Rust port does not have to match Go; the suite is a regression check, so a
+run shows every place where the port answers differently from the recorded behavior.
 
 The table has 229 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
@@ -71,7 +72,7 @@ the server sees each path exactly as the table writes it, `..` and `//` included
 
 ## Update the goldens
 
-Record against the Go build, never against the binary under test:
+Record against the Go build:
 
 ```sh
 PARITY_UPDATE=1 MANAGER_BIN=/path/to/go/lodeline-manager npm run parity
@@ -86,6 +87,25 @@ starts with `e4fb077`. `PARITY_ALLOW_ANY_REFERENCE=1` skips that check and print
 it only to record from a deliberately changed reference. CI must never set `PARITY_UPDATE`,
 `PARITY_TESTDATA` or `PARITY_ALLOW_ANY_REFERENCE`: a CI run compares and writes nothing. The
 suite stops at load when `CI` is set together with any of them.
+
+### Goldens recorded from the Rust build
+
+When a Rust change intentionally answers differently from a Go golden, record from the Rust
+build with `PARITY_UPDATE=1 PARITY_ALLOW_ANY_REFERENCE=1`, then restore every golden that the
+change does not concern (`git checkout -- <file>`), list it in this table, and state the
+difference in the PR. These goldens hold Rust behavior:
+
+| Golden | Difference from Go |
+|---|---|
+| `login-rate-limited-multi-hop` | The limiter keys on the rightmost `X-Forwarded-For` hop that is not a trusted proxy, not the first: the prelude's attempts count for `198.51.100.7`, so `203.0.113.20` is not limited. |
+| `login-rate-limited-real-ip` | `X-Real-IP` is not read, so the request counts for its loopback peer, which is exempt. |
+| `login-rate-limited-true-client-ip` | `True-Client-IP` is not read, as above. |
+| `login-rate-limited-header-precedence` | Only `X-Forwarded-For` counts: the prelude's attempts go to `203.0.113.25`, and the `True-Client-IP` request is a loopback peer's. |
+
+The parity managers run with `TRUSTED_PROXIES=127.0.0.1`, so the recorder is a trusted proxy and
+the other limiter cases name their client in `X-Forwarded-For`. The Go reference ignores it.
+
+### Build the Go reference
 
 Build the Go binary from `e4fb077` with this `web/dist` copied to `internal/server/dist`, as
 its Makefile `build` target does with its own `web/dist`. The `-ldflags` value stamps the version
@@ -199,10 +219,13 @@ A passing run says nothing about the following. Each needs its own test in the p
   `fleet-events-duplicate-key` and the `limit` cases of risk, compliance and hosts.
 - `Content-Length` of a non-empty `GET` response, and whether a response is chunked.
 - Percent-encoded path parameters in mock mode. The live cases show what Go sends upstream.
-- Limiter behavior that needs time to pass: window reset after 60 s, and pruning above 1024 keys.
-  Go's own `TestRateLimiter_WindowResets` covers the reset with an injected clock; the Rust port
-  carries it over with the pruning case in `src/api/ratelimit/tests.rs`.
+- Limiter behavior that needs time to pass or many addresses: window reset after 60 s, dropping
+  windows that have reset, and the 65,536-address cap. `src/api/ratelimit/tests.rs` covers them
+  with an injected clock.
 - Connections from client addresses other than 127.0.0.1. The servers listen on 127.0.0.1 only,
   and the test host has no other loopback address, so the other 127/8 address, `::1` and
-  `::ffff:127.0.0.1` reach the limiter only through `X-Forwarded-For`.
-- Request bodies larger than a few hundred bytes.
+  `::ffff:127.0.0.1` reach the limiter only through `X-Forwarded-For`. An untrusted peer's
+  forwarding headers are covered in `src/api/ratelimit/tests.rs`.
+- Request bodies larger than a few hundred bytes, including the 64 KiB and 4 MiB body limits
+  and the 30 s body read timeout. `src/api/auth/tests.rs` and `src/api/triage/tests.rs` cover
+  them.

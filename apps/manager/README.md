@@ -40,6 +40,19 @@ JWT_SECRET="$(openssl rand -hex 32)" \
 The process stops with an error that names every missing or invalid variable. On SIGINT or
 SIGTERM it stops accepting connections and waits up to 5 seconds for requests in flight.
 
+### Behind a reverse proxy
+
+Login and the two OIDC routes allow 10 attempts a minute per client address. Loopback
+connections are exempt. The limiter tracks at most 65,536 addresses and drops the oldest
+window past that. By default the client address is the connection's peer, and forwarding
+headers are ignored. Behind a reverse proxy, set `TRUSTED_PROXIES` to the proxy's addresses or
+networks (see `.env.example`). The limiter then reads `X-Forwarded-For` from those peers only,
+and takes the rightmost hop that is not a trusted proxy. `True-Client-IP` and `X-Real-IP` are
+not read.
+
+Request bodies are read to at most 64 KiB for login and 4 MiB for the triage routes. A larger
+body gets 413. A body that has not fully arrived within 30 seconds gets 408.
+
 ## Test
 
 ```sh

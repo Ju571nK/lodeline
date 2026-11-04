@@ -488,7 +488,10 @@ export const CASES: Case[] = [
 
   // Login limiter: 10 per minute per client address, shared by login and the two OIDC routes.
   // Go reads the address from True-Client-IP, X-Real-IP, then the first X-Forwarded-For hop
-  // (chi RealIP) and never limits loopback. Each case uses its own documentation address.
+  // (chi RealIP) and never limits loopback. The Rust port reads only X-Forwarded-For, and only
+  // from a trusted proxy (the recorder, through TRUSTED_PROXIES), taking the rightmost hop that
+  // is not one. The multi-hop, X-Real-IP, True-Client-IP and precedence goldens were recorded
+  // from the Rust build for that difference. Each case uses its own documentation address.
   limited('login-rate-limited', { 'X-Forwarded-For': '203.0.113.7' }),
   limited('login-rate-limited-multi-hop', { 'X-Forwarded-For': '203.0.113.20' }, [
     { count: 10, status: 400, headers: { 'X-Forwarded-For': '203.0.113.20, 198.51.100.7' } },
@@ -506,7 +509,8 @@ export const CASES: Case[] = [
       },
     },
     { status: 400, headers: { 'X-Real-IP': '203.0.113.24' } },
-    { status: 400, headers: { 'X-Forwarded-For': '203.0.113.25' } },
+    // Go: 400, since True-Client-IP took the ten attempts. Rust: X-Forwarded-For did.
+    { status: 429, headers: { 'X-Forwarded-For': '203.0.113.25' } },
   ]),
   {
     name: 'login-loopback-not-limited',

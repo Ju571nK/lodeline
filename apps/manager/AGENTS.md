@@ -44,14 +44,15 @@ The parity recorder (`npm run parity` in `web/`) compares the binary's HTTP resp
 recorded from the Go implementation. See [`web/tests/parity/README.md`](web/tests/parity/README.md).
 
 `src/server.rs` holds the route table, which must match `ROUTES` in
-`web/tests/parity/cases.ts` (a unit test checks it). Each behavior must match the Go goldens; an
-intended difference needs an `allowlist.json` entry with its reason. Never record goldens from
-the Rust binary.
+`web/tests/parity/cases.ts` (a unit test checks it). The Rust port does not have to match Go.
+The goldens are a regression check: when a change intentionally differs from a Go golden,
+record that golden from the Rust build, leave every other golden as it is, and list the
+difference in the PR. The parity README says how.
 
 `src/auth.rs` signs and checks the session token, `src/auth/oidc.rs` is the OIDC login, and
-`src/api/auth.rs` and `src/api/ratelimit.rs` are the auth routes and the login limiter. They keep
-Go's behavior, including the limiter's trust in forwarding headers, until a separate change
-fixes it. Sessions are stateless: logout clears the cookie and does not revoke the token.
+`src/api/auth.rs` and `src/api/ratelimit.rs` are the auth routes and the login limiter. The
+limiter keys on the connection's peer and reads `X-Forwarded-For` only from `TRUSTED_PROXIES`
+(README.md, "Behind a reverse proxy"). Sessions are stateless: logout clears the cookie and does not revoke the token.
 
 `src/fleet/` reads the server's API. `src/fleet/wire.rs` holds the bodies in the shape the SPA
 gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in process and its

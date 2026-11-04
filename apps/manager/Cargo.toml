@@ -30,6 +30,8 @@ bcrypt = "0.19"
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 # The OIDC state, nonce and PKCE verifier bytes; already in the graph through jsonwebtoken.
 getrandom = "0.2"
+# TRUSTED_PROXIES networks; already in the graph through hyper-util.
+ipnet = "2"
 subtle = "2.6"
 sha2 = "0.10"
 # go-jose's key set checks (auth/oidc/jwk.rs): certificates, curve points and SHA-1

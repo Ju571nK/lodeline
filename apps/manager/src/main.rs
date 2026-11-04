@@ -54,6 +54,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         oidc,
         fleet: fleet::from_config(&cfg)?,
         triage: store,
+        trusted_proxies: cfg.trusted_proxies.clone().into(),
     });
     let listener = conn::bind(&cfg.listen_addr).await?;
     let mode = if cfg.mock_fleet {
