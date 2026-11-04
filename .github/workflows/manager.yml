@@ -58,6 +58,19 @@ jobs:
       - name: check (MSRV)
         run: cargo +1.88 check --locked
 
+  # A `[::]` socket is IPv6-only by default on Windows, so `:port` must turn that off itself.
+  windows:
+    name: windows listener
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/manager -> target
+      - name: listener and connection tests
+        run: cargo test conn::
+
   web:
     name: web
     runs-on: ubuntu-22.04
