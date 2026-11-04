@@ -1,0 +1,211 @@
+package auth
+
+// Writes jose-cases.json: ID token headers and key sets, each with whether go-oidc v3.21.0 and
+// go-jose v4.1.4 accept the token. See README.md.
+
+import (
+	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/coreos/go-oidc/v3/oidc"
+)
+
+type joseCase struct {
+	Name string `json:"name"`
+	// A token or a key set; the top-level token and jwks stand in for the one left out.
+	Token string `json:"token,omitempty"`
+	JWKS  string `json:"jwks,omitempty"`
+	OK    bool   `json:"ok"`
+}
+
+func TestDumpJoseCases(t *testing.T) {
+	out := os.Getenv("JOSE_CASES_PATH")
+	if out == "" {
+		t.Skip("JOSE_CASES_PATH not set")
+	}
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	other, _ := rsa.GenerateKey(rand.Reader, 2048)
+	b64 := base64.RawURLEncoding.EncodeToString
+	cert := func(k crypto.Signer) []byte {
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "signing"}, NotBefore: time.Unix(1779192000, 0), NotAfter: time.Unix(1779192000+86400, 0)}
+		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, k.Public(), k)
+		return der
+	}
+	leaf, wrongLeaf := cert(key), cert(other)
+	sha1Leaf, sha256Leaf := sha1.Sum(leaf), sha256.Sum256(leaf)
+	sign := func(header, payload string) string {
+		input := b64([]byte(header)) + "." + b64([]byte(payload))
+		digest := sha256.Sum256([]byte(input))
+		sig, _ := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+		return input + "." + b64(sig)
+	}
+	const payload = `{"iss":"https://id.example","sub":"employee-1"}`
+	plain := sign(`{"alg":"RS256","kid":"k1"}`, payload)
+	n := b64(key.PublicKey.N.Bytes())
+	good := `"kty":"RSA","kid":"k1","alg":"RS256","use":"sig","n":"` + n + `","e":"AQAB"`
+	std := base64.StdEncoding.EncodeToString
+	zeros := b64(make([]byte, 32))
+	ecJWK := func(k *ecdsa.PrivateKey, more string) string {
+		size := (k.Curve.Params().BitSize + 7) / 8
+		return `{"kty":"EC","crv":"` + k.Curve.Params().Name + `","x":"` + b64(k.X.FillBytes(make([]byte, size))) + `","y":"` + b64(k.Y.FillBytes(make([]byte, size))) + `"` + more + `}`
+	}
+	ecKey := func(c elliptic.Curve) string {
+		k, _ := ecdsa.GenerateKey(c, rand.Reader)
+		return ecJWK(k, "")
+	}
+	ec1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ec2, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	ed, edPriv, _ := ed25519.GenerateKey(rand.Reader)
+
+	var cases []joseCase
+	header := func(name, header string) {
+		cases = append(cases, joseCase{Name: name, Token: sign(header, payload)})
+	}
+	header("plain", `{"alg":"RS256","kid":"k1"}`)
+	header("crit naming an unknown header", `{"alg":"RS256","kid":"k1","crit":["example"],"example":true}`)
+	header("crit empty", `{"alg":"RS256","kid":"k1","crit":[]}`)
+	header("crit null", `{"alg":"RS256","kid":"k1","crit":null}`)
+	header("crit b64", `{"alg":"RS256","kid":"k1","crit":["b64"]}`)
+	header("crit b64 and another", `{"alg":"RS256","kid":"k1","crit":["b64","example"]}`)
+	header("crit a string", `{"alg":"RS256","kid":"k1","crit":"b64"}`)
+	header("crit with null", `{"alg":"RS256","kid":"k1","crit":["b64",null]}`)
+	header("crit in other case", `{"alg":"RS256","kid":"k1","Crit":["example"]}`)
+	header("crit repeated, last unknown", `{"alg":"RS256","kid":"k1","crit":null,"crit":["example"]}`)
+	header("crit repeated, last null", `{"alg":"RS256","kid":"k1","crit":["example"],"crit":null}`)
+	header("b64 false", `{"alg":"RS256","kid":"k1","b64":false}`)
+	header("b64 false and crit b64", `{"alg":"RS256","kid":"k1","b64":false,"crit":["b64"]}`)
+	header("b64 true", `{"alg":"RS256","kid":"k1","b64":true}`)
+	header("b64 a string", `{"alg":"RS256","kid":"k1","b64":"false"}`)
+	header("b64 null", `{"alg":"RS256","kid":"k1","b64":null}`)
+	header("b64 in other case", `{"alg":"RS256","kid":"k1","B64":false}`)
+	header("an unknown member repeated", `{"alg":"RS256","kid":"k1","x":1,"x":2}`)
+	// Signed over the raw payload as RFC 7797 says; the Rust port refuses it.
+	rawInput := b64([]byte(`{"alg":"RS256","kid":"k1","b64":false,"crit":["b64"]}`)) + "." + payload
+	rawDigest := sha256.Sum256([]byte(rawInput))
+	rawSig, _ := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, rawDigest[:])
+	cases = append(cases, joseCase{Name: "b64 false signed over the raw payload", Token: b64([]byte(`{"alg":"RS256","kid":"k1","b64":false,"crit":["b64"]}`)) + "." + b64([]byte(payload)) + "." + b64(rawSig)})
+
+	set := func(name, body string) {
+		cases = append(cases, joseCase{Name: name, JWKS: body})
+	}
+	extra := func(name, key string) {
+		set(name, `{"keys":[{`+good+`},`+key+`]}`)
+	}
+	set("good key", `{"keys":[{`+good+`}]}`)
+	set("keys null", `{"keys":null}`)
+	set("a null key", `{"keys":[null]}`)
+	set("a numeric key", `{"keys":[5]}`)
+	set("keys in other case", `{"KEYS":[{`+good+`}]}`)
+	set("keys an object", `{"keys":{}}`)
+	set("body not an object", `[]`)
+	extra("missing e", `{"kty":"RSA","alg":"RS256","n":"AQAB"}`)
+	extra("e null", `{"kty":"RSA","n":"AQAB","e":null}`)
+	extra("e empty", `{"kty":"RSA","n":"AQAB","e":""}`)
+	extra("missing n", `{"kty":"RSA","e":"AQAB"}`)
+	extra("n a number", `{"kty":"RSA","n":5,"e":"AQAB"}`)
+	extra("n bad base64", `{"kty":"RSA","n":"!!","e":"AQAB"}`)
+	extra("n padded", `{"kty":"RSA","n":"AQAB==","e":"AQAB"}`)
+	extra("n standard alphabet", `{"kty":"RSA","n":"++//","e":"AQAB"}`)
+	extra("RSA private", `{"kty":"RSA","n":"`+n+`","e":"AQAB","d":"AQAB"}`)
+	extra("unknown kty", `{"kty":"XYZ"}`)
+	extra("kty in lower case", `{"kty":"rsa","n":"AQAB"}`)
+	extra("no kty", `{"n":"AQAB","e":"AQAB"}`)
+	extra("kty a number", `{"kty":5}`)
+	extra("folded member names", `{"KTY":"RSA","N":"AQAB"}`)
+	extra("repeated member", `{"kty":"XYZ","kid":"a","kid":"b"}`)
+	extra("alg folded and unknown", `{"ALG":"RS1","kty":"RSA"}`)
+	extra("unknown kty with bad n", `{"kty":"XYZ","n":"!!"}`)
+	extra("unknown kty with a numeric kid", `{"kty":"XYZ","kid":5}`)
+	extra("unknown kty with bad x5c", `{"kty":"XYZ","x5c":["!!"]}`)
+	extra("unknown kty with another key's x5c", `{"kty":"XYZ","x5c":["`+std(wrongLeaf)+`"]}`)
+	extra("unknown kty with bad x5t", `{"kty":"XYZ","x5t":"!!"}`)
+	extra("Ed448", `{"kty":"OKP","crv":"Ed448","x":"AA"}`)
+	extra("OKP without crv", `{"kty":"OKP","x":"AA"}`)
+	extra("Ed25519 without x", `{"kty":"OKP","crv":"Ed25519"}`)
+	extra("Ed25519 short x", `{"kty":"OKP","crv":"Ed25519","x":"AA"}`)
+	extra("Ed25519 long x", `{"kty":"OKP","crv":"Ed25519","x":"`+b64(make([]byte, 40))+`"}`)
+	extra("Ed25519 private", `{"kty":"OKP","crv":"Ed25519","x":"`+zeros+`","d":"AA"}`)
+	extra("EC short coordinates", `{"kty":"EC","crv":"P-256","x":"AA","y":"AA"}`)
+	extra("EC off the curve", `{"kty":"EC","crv":"P-256","x":"`+zeros+`","y":"`+zeros+`"}`)
+	extra("EC without y", `{"kty":"EC","crv":"P-256","x":"`+zeros+`"}`)
+	extra("EC unknown curve", `{"kty":"EC","crv":"secp256k1","x":"`+zeros+`","y":"`+zeros+`"}`)
+	extra("EC P-256 point", ecKey(elliptic.P256()))
+	extra("EC P-521 point", ecKey(elliptic.P521()))
+	extra("EC key with its x5c", ecJWK(ec1, `,"x5c":["`+std(cert(ec1))+`"]`))
+	extra("P-384 key with its x5c", ecJWK(ec2, `,"x5c":["`+std(cert(ec2))+`"]`))
+	extra("EC key with another curve's x5c", ecJWK(ec1, `,"x5c":["`+std(cert(ec2))+`"]`))
+	extra("EC key with an RSA x5c", ecJWK(ec1, `,"x5c":["`+std(leaf)+`"]`))
+	extra("Ed25519 key with its x5c", `{"kty":"OKP","crv":"Ed25519","x":"`+b64(ed)+`","x5c":["`+std(cert(edPriv))+`"]}`)
+	extra("Ed25519 key with an RSA x5c", `{"kty":"OKP","crv":"Ed25519","x":"`+b64(ed)+`","x5c":["`+std(leaf)+`"]}`)
+	extra("ES256K skipped by alg", `{"kty":"EC","crv":"secp256k1","alg":"ES256K"}`)
+	extra("unknown alg skipped", `{"kty":"RSA","alg":"RS1"}`)
+	extra("alg a number", `{"kty":"RSA","alg":5}`)
+	extra("alg null", `{"kty":"RSA","alg":null,"n":"AQAB"}`)
+	extra("oct", `{"kty":"oct","k":"AAAA"}`)
+	extra("oct without k", `{"kty":"oct"}`)
+	extra("oct with x5c", `{"kty":"oct","k":"AAAA","x5c":["`+std(leaf)+`"]}`)
+	extra("x5u not a URL", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5u":"%zz"}`)
+	extra("x5u relative", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5u":"keys/1"}`)
+	extra("x5t bad base64", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5t":"!!"}`)
+	extra("x5t wrong size", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5t":"AAAA"}`)
+	extra("x5t as hex", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5t":"`+b64([]byte(strings.Repeat("ab", 20)))+`"}`)
+	extra("x5t as bad hex", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5t":"`+b64([]byte(strings.Repeat("zz", 20)))+`"}`)
+	extra("x5t#S256 wrong size", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5t#S256":"AAAA"}`)
+	extra("x5t#S256 as hex", `{"kty":"RSA","n":"AQAB","e":"AQAB","x5t#S256":"`+b64([]byte(strings.Repeat("ab", 32)))+`"}`)
+	set("good key with its x5c and thumbprints", `{"keys":[{`+good+`,"x5c":["`+std(leaf)+`"],"x5t":"`+b64(sha1Leaf[:])+`","x5t#S256":"`+b64(sha256Leaf[:])+`"}]}`)
+	set("good key with hex thumbprints", `{"keys":[{`+good+`,"x5c":["`+std(leaf)+`"],"x5t":"`+b64([]byte(hex.EncodeToString(sha1Leaf[:])))+`"}]}`)
+	set("good key with a chain", `{"keys":[{`+good+`,"x5c":["`+std(leaf)+`","`+std(wrongLeaf)+`"]}]}`)
+	set("good key with another key's x5c", `{"keys":[{`+good+`,"x5c":["`+std(wrongLeaf)+`"]}]}`)
+	set("good key with a wrong x5t", `{"keys":[{`+good+`,"x5c":["`+std(leaf)+`"],"x5t":"`+b64(make([]byte, 20))+`"}]}`)
+	set("good key with a wrong x5t#S256", `{"keys":[{`+good+`,"x5c":["`+std(leaf)+`"],"x5t#S256":"`+zeros+`"}]}`)
+	set("good key with x5c in URL alphabet", `{"keys":[{`+good+`,"x5c":["`+b64(leaf)+`"]}]}`)
+	set("good key with x5c not a certificate", `{"keys":[{`+good+`,"x5c":["AAAA"]}]}`)
+	set("good key with x5c and trailing bytes", `{"keys":[{`+good+`,"x5c":["`+std(append(append([]byte{}, leaf...), 0))+`"]}]}`)
+	set("good key with use enc", `{"keys":[{"kty":"RSA","kid":"k1","alg":"RS256","use":"enc","n":"`+n+`","e":"AQAB"}]}`)
+	set("good key with RS384 alg", `{"keys":[{"kty":"RSA","kid":"k1","alg":"RS384","n":"`+n+`","e":"AQAB"}]}`)
+
+	plainJWKS := `{"keys":[{` + good + `}]}`
+	ctx := context.Background()
+	for i, c := range cases {
+		token, body := plain, plainJWKS
+		if c.Token != "" {
+			token = c.Token
+		}
+		if c.JWKS != "" {
+			body = c.JWKS
+		}
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		cctx := oidc.ClientContext(ctx, srv.Client())
+		keys := oidc.NewRemoteKeySet(cctx, srv.URL)
+		v := oidc.NewVerifier("https://id.example", keys, &oidc.Config{SkipClientIDCheck: true, SkipExpiryCheck: true, SupportedSigningAlgs: []string{"RS256"}})
+		_, err := v.Verify(cctx, token)
+		cases[i].OK = err == nil
+		srv.Close()
+	}
+	doc, _ := json.MarshalIndent(map[string]any{"token": plain, "jwks": plainJWKS, "cases": cases}, "", "  ")
+	if err := os.WriteFile(out, append(doc, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

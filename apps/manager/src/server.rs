@@ -216,8 +216,8 @@ async fn fallback(req: Request) -> Response {
 }
 
 fn json_response(status: StatusCode, body: &serde_json::Value) -> Response {
-    // Go's json.Encoder ends the body with a newline.
-    let body = format!("{body}\n");
+    // Go's json.Encoder escapes HTML characters and ends the body with a newline.
+    let body = format!("{}\n", triage::go_compact(&body.to_string()));
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 

@@ -165,6 +165,8 @@ struct Settings {
     discovery: Option<Mutate>,
     /// Refuses the client secret in a basic auth header, as a `client_secret_post` client.
     form_auth_only: bool,
+    /// Served as the key set in place of the signing key's.
+    keys: Option<String>,
 }
 
 struct Fixture {
@@ -175,6 +177,7 @@ struct Fixture {
     modulus: String,
     settings: Mutex<Settings>,
     token_requests: std::sync::atomic::AtomicUsize,
+    key_requests: std::sync::atomic::AtomicUsize,
     codes: Mutex<HashMap<String, HashMap<&'static str, String>>>,
 }
 
@@ -202,6 +205,7 @@ impl OidcProvider {
             modulus,
             settings: Mutex::default(),
             token_requests: Default::default(),
+            key_requests: Default::default(),
             codes: Mutex::default(),
         });
         let app = Router::new()
@@ -245,6 +249,17 @@ impl OidcProvider {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn serve_keys(&self, body: Option<String>) {
+        self.fixture.settings.lock().unwrap().keys = body;
+    }
+
+    /// Key set requests so far.
+    pub fn key_requests(&self) -> usize {
+        self.fixture
+            .key_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// A client that trusts the provider, built as the console builds its own.
     pub fn client(&self) -> reqwest::Client {
         crate::auth::oidc::http_client(std::slice::from_ref(&self.ca)).unwrap()
@@ -271,10 +286,16 @@ async fn discovery(State(f): State<Arc<Fixture>>) -> Json<Value> {
     Json(doc)
 }
 
-async fn keys(State(f): State<Arc<Fixture>>) -> Json<Value> {
+async fn keys(State(f): State<Arc<Fixture>>) -> Response {
+    f.key_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(body) = f.settings.lock().unwrap().keys.clone() {
+        return ([(header::CONTENT_TYPE, "application/json")], body).into_response();
+    }
     Json(json!({"keys": [{
         "kty": "RSA", "kid": "test-key", "alg": "RS256", "use": "sig", "n": f.modulus, "e": "AQAB",
     }]}))
+    .into_response()
 }
 
 async fn authorize(

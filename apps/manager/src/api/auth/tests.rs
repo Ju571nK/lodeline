@@ -188,16 +188,23 @@ async fn login_bodies_decode_as_go_does() {
 }
 
 /// bcrypt and the failure delay run off the async runtime: on a single-threaded runtime, other
-/// requests keep being answered within a few milliseconds while a failing login takes 250 ms
-/// or more.
+/// requests keep being answered while a failing login runs. The limit is half of the shorter
+/// of one bcrypt check and the delay, either of which would stall the runtime if run on it.
 #[test]
 fn a_failing_login_does_not_hold_the_runtime() {
+    let s = state();
+    let started = Instant::now();
+    assert!(!crate::auth::password_matches(
+        "wrong",
+        &s.auth.admin_password_bcrypt
+    ));
+    let limit = started.elapsed().min(LOGIN_FAIL_DELAY) / 2;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        let app = router(state());
+        let app = router(s);
         let failing = tokio::spawn({
             let app = app.clone();
             async move { login(&app, "admin", "wrong").await.status }
@@ -213,8 +220,28 @@ fn a_failing_login_does_not_hold_the_runtime() {
         }
         assert_eq!(failing.await.unwrap(), 401);
         assert!(rounds >= 10, "{rounds}");
-        assert!(worst < Duration::from_millis(150), "{worst:?}");
+        assert!(worst < limit, "{worst:?} against {limit:?}");
     });
+}
+
+/// Go's JSON encoder escapes `<`, `>`, `&`, U+2028 and U+2029 in every body.
+#[tokio::test]
+async fn bodies_escape_html_characters_as_go_does() {
+    let mut s = state();
+    let username = "a<&>b\u{2028}\u{2029}";
+    s.auth = Arc::new(AuthConfig {
+        admin_username: username.into(),
+        admin_password_bcrypt: s.auth.admin_password_bcrypt.clone(),
+        cookie_secure: false,
+    });
+    let app = router(s);
+    let r = login(&app, username, "test-password").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let want = r#"{"username":"a\u003c\u0026\u003eb\u2028\u2029","expires_at":""#;
+    assert!(r.body.starts_with(want), "{}", r.body);
+    let session = r.cookies()[0].split(';').next().unwrap().to_owned();
+    let r = call(&app, Method::GET, "/api/v1/auth/me", Some(&session), "").await;
+    assert!(r.body.starts_with(want), "{}", r.body);
 }
 
 #[tokio::test]

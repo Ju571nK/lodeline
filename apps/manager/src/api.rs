@@ -17,12 +17,13 @@ use serde_json::value::RawValue;
 
 use crate::auth::Members;
 use crate::config;
+use crate::triage::go_compact;
 
-/// Go's `httputil.WriteJSON` with status 200. Go writes the status and `Content-Type` before it
+/// Go's `httputil.WriteJSON` with status 200, escaped as Go's encoder escapes. Go writes the status and `Content-Type` before it
 /// encodes, so a body it cannot encode leaves an empty 200.
 pub fn write_json<T: Serialize + ?Sized>(body: &T) -> Response {
     let body = serde_json::to_string(body)
-        .map(|s| s + "\n")
+        .map(|s| go_compact(&s) + "\n")
         .unwrap_or_default();
     (
         StatusCode::OK,

@@ -32,6 +32,13 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 getrandom = "0.2"
 subtle = "2.6"
 sha2 = "0.10"
+# go-jose's key set checks (auth/oidc/jwk.rs): certificates, curve points and SHA-1
+# thumbprints. All four are already in the graph through lodeline-server, jsonwebtoken and
+# rustls.
+x509-parser = "0.18"
+p256 = "0.13"
+p384 = "0.13"
+ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: correctly rounded float parsing, as Go's strconv, so claim times compare the
 # same. raw_value: triage evidence snapshots keep the client's JSON text, as Go's RawMessage.

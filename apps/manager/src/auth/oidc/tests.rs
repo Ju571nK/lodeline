@@ -235,6 +235,9 @@ async fn rejects_an_invalid_signature() {
 fn rejects_cleartext_and_credentialed_endpoints() {
     assert!(https("http://identity.example/keys").is_none());
     assert!(https("https://user:pass@identity.example/keys").is_none());
+    // Go's url.Parse keeps an empty user, which Go's transport refuses.
+    assert!(https("https://@identity.example/keys").is_none());
+    assert!(https("https:identity.example/keys").is_none());
     assert!(https("https://identity.example/keys").is_some());
 }
 
@@ -516,4 +519,98 @@ async fn rejects_an_hmac_id_token() {
         .unwrap();
         assert!(o.verify_signature(&token).await.is_none());
     }
+}
+
+/// A `jwks_uri` with an empty user is never fetched, as Go's transport refuses it.
+#[tokio::test]
+async fn a_key_set_url_with_an_empty_user_is_not_fetched() {
+    let p = OidcProvider::start(false).await;
+    p.mutate_discovery(Some(|d| {
+        let url = d["jwks_uri"]
+            .as_str()
+            .unwrap()
+            .replace("https://", "https://@");
+        d.insert("jwks_uri".into(), json!(url));
+    }));
+    let o = Oidc::discover(&config(&p), p.client()).await.unwrap();
+    let (state, binding, code) = start_login(&o, &p).await;
+    assert!(o.complete(&state, &binding, &code).await.is_none());
+    assert_eq!(p.key_requests(), 0);
+}
+
+#[derive(serde::Deserialize)]
+struct JoseCases {
+    token: String,
+    jwks: String,
+    cases: Vec<JoseCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct JoseCase {
+    name: String,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    jwks: String,
+    ok: bool,
+}
+
+fn jose_cases() -> JoseCases {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/jose-cases.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// ID token headers and key sets that go-oidc and go-jose accept or refuse, recorded from Go
+/// (testdata/README.md). The listed cases succeed in Go and fail here (Known differences).
+#[tokio::test]
+async fn id_token_headers_and_key_sets_match_go() {
+    const REFUSED_HERE: [&str; 3] = [
+        "b64 false signed over the raw payload",
+        "Ed25519 private",
+        "EC P-521 point",
+    ];
+    let doc = jose_cases();
+    let p = OidcProvider::start(false).await;
+    let mut mismatches = Vec::new();
+    for c in &doc.cases {
+        let token = if c.token.is_empty() {
+            &doc.token
+        } else {
+            &c.token
+        };
+        let jwks = if c.jwks.is_empty() {
+            &doc.jwks
+        } else {
+            &c.jwks
+        };
+        p.serve_keys(Some(jwks.clone()));
+        let o = Oidc::discover(&config(&p), p.client()).await.unwrap();
+        let want = c.ok && !REFUSED_HERE.contains(&c.name.as_str());
+        if o.verify_signature(token).await.is_some() != want {
+            mismatches.push(c.name.as_str());
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:?}");
+}
+
+/// Concurrent checks that miss the cache share one key set fetch, as go-oidc's do.
+#[tokio::test]
+async fn concurrent_checks_share_one_key_set_fetch() {
+    let doc = jose_cases();
+    let p = OidcProvider::start(false).await;
+    p.serve_keys(Some(doc.jwks.clone()));
+    let o = Oidc::discover(&config(&p), p.client()).await.unwrap();
+    let check = || o.verify_signature(&doc.token);
+    let got = tokio::join!(check(), check(), check(), check());
+    assert!(got.0.is_some() && got.1.is_some() && got.2.is_some() && got.3.is_some());
+    assert_eq!(p.key_requests(), 1);
+    // A failed fetch is shared too, and the next miss fetches again.
+    p.serve_keys(Some("{".into()));
+    let o = Oidc::discover(&config(&p), p.client()).await.unwrap();
+    let check = || o.verify_signature(&doc.token);
+    let got = tokio::join!(check(), check(), check());
+    assert!(got.0.is_none() && got.1.is_none() && got.2.is_none());
+    assert_eq!(p.key_requests(), 2);
+    assert!(check().await.is_none());
+    assert_eq!(p.key_requests(), 3);
 }

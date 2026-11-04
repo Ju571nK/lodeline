@@ -450,3 +450,73 @@ fn rejects_an_rs256_header_over_an_hmac_signature() {
         Err(VerifyError::Invalid)
     );
 }
+
+/// Tokens Go's `SignUntil` printed for these subjects at `NOW` + 0.4 s with a 12 h TTL: Go
+/// escapes `<`, `>`, `&`, U+2028 and U+2029 in the claims and sorts the header keys.
+#[test]
+fn sign_writes_the_token_go_writes() {
+    let go = [
+        (
+            "a<&>b",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJsb2RlbGluZS1tYW5hZ2VyIiwic3ViIjoiYVx1MDAzY1x1MDAyNlx1MDAzZWIiLCJleHAiOjE3NzkyMzUyMDAsIm5iZiI6MTc3OTE5MjAwMCwiaWF0IjoxNzc5MTkyMDAwfQ.y7i5mV9sfAFpSI5O_hI2z15vbcG-hrA2fXcYVuvBqr0",
+        ),
+        (
+            "a<&>b\u{2028}\u{2029}é",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJsb2RlbGluZS1tYW5hZ2VyIiwic3ViIjoiYVx1MDAzY1x1MDAyNlx1MDAzZWJcdTIwMjhcdTIwMjnDqSIsImV4cCI6MTc3OTIzNTIwMCwibmJmIjoxNzc5MTkyMDAwLCJpYXQiOjE3NzkxOTIwMDB9.rW1KQuRVSPobMc_A8ZWDs0WRlAyiGfrbdtOQoqoO3S0",
+        ),
+    ];
+    for (subject, want) in go {
+        let (token, _) = signer()
+            .sign_at(subject, None, at(NOW) + Duration::from_millis(400))
+            .unwrap();
+        assert_eq!(token, want, "{subject}");
+        assert_eq!(verify(&token, NOW), Ok(subject.to_owned()));
+    }
+}
+
+/// Go answered these `nbf` values at `NOW`: past its time range `time.Unix` wraps into the past,
+/// so the token is already valid.
+#[test]
+fn a_not_before_past_gos_time_range_has_passed() {
+    let go = [
+        ("1779192060", false),
+        ("9223371974719178752", false),
+        ("9223371974719179776", true),
+        ("9223372036854775807", true),
+        ("1e19", true),
+        ("1e300", true),
+        ("\"1e300\"", true),
+        ("-1e300", true),
+    ];
+    for (nbf, valid) in go {
+        let t = signed_raw(&format!(
+            r#"{{"iss":"{ISSUER}","sub":"admin","nbf":{nbf}}}"#
+        ));
+        let want = if valid {
+            Ok("admin".to_owned())
+        } else {
+            Err(VerifyError::Invalid)
+        };
+        assert_eq!(verify(&t, NOW), want, "{nbf}");
+    }
+}
+
+#[test]
+fn go_base64_decodes_as_go_does() {
+    let std = |s| go_base64(s, false);
+    let url = |s| go_base64(s, true);
+    assert_eq!(std("QUJD"), Some(b"ABC".to_vec()));
+    assert_eq!(std("QQ=="), Some(b"A".to_vec()));
+    assert_eq!(std("QUI="), Some(b"AB".to_vec()));
+    assert_eq!(std("QU\r\nI="), Some(b"AB".to_vec()));
+    assert_eq!(std(""), Some(Vec::new()));
+    for bad in ["QQ", "QQ=", "Q===", "====", "QQ==QQ==", "QQ-_", "QUI=\0"] {
+        assert_eq!(std(bad), None, "{bad:?}");
+    }
+    assert_eq!(url("QQ"), Some(b"A".to_vec()));
+    assert_eq!(url("QR"), Some(b"A".to_vec())); // Go ignores the unused bits
+    assert_eq!(url("-_8"), Some(vec![0xfb, 0xff]));
+    for bad in ["QQ==", "Q", "+/", "Q Q"] {
+        assert_eq!(url(bad), None, "{bad:?}");
+    }
+}

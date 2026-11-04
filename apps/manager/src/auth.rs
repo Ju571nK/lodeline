@@ -10,12 +10,13 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation};
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::server::error_response;
+use crate::triage::go_compact;
 
 pub const COOKIE_NAME: &str = "lodeline_session";
 const ISSUER: &str = "lodeline-manager";
@@ -115,8 +116,16 @@ impl Signer {
             nbf: secs(now),
             iat: secs(now),
         };
-        let token = jsonwebtoken::encode(&Header::new(Algorithm::HS256), &claims, &self.signing);
-        Some((token.ok()?, exp))
+        // golang-jwt's bytes: the header keys sorted, the claims as Go's json.Marshal writes them.
+        let claims = go_compact(&serde_json::to_string(&claims).ok()?);
+        let message = format!(
+            "{}.{}",
+            base64url(br#"{"alg":"HS256","typ":"JWT"}"#),
+            base64url(claims.as_bytes())
+        );
+        let signature =
+            jsonwebtoken::crypto::sign(message.as_bytes(), &self.signing, Algorithm::HS256).ok()?;
+        Some((format!("{message}.{signature}"), exp))
     }
 
     /// Returns the session subject.
@@ -172,13 +181,14 @@ impl Signer {
         // Claims are whole seconds, so comparing whole seconds of `now` is exact.
         let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as f64;
         // golang-jwt joins every claim error, and callers test for expiry first.
-        // Past Go's time range the expiry wraps into the past: `as` saturates, the add overflows.
-        let past_go_range = |exp: f64| (exp as i64).checked_add(UNIX_TO_INTERNAL).is_none();
+        // Past Go's time range a time wraps into the past: `as` saturates, the add overflows.
+        let past_go_range = |t: f64| (t as i64).checked_add(UNIX_TO_INTERNAL).is_none();
         if exp.is_some_and(|exp| now >= exp || past_go_range(exp)) {
             return Err(VerifyError::Expired);
         }
         // iat is not checked: golang-jwt v5 skips it unless asked. A missing exp or nbf passes.
-        if nbf.is_some_and(|nbf| now < nbf) || iss != ISSUER || sub.is_empty() {
+        let early = nbf.is_some_and(|nbf| now < nbf && !past_go_range(nbf));
+        if early || iss != ISSUER || sub.is_empty() {
             return Err(VerifyError::Invalid);
         }
         Ok((sub.to_owned(), exp.map(|exp| exp as i64)))
@@ -325,6 +335,41 @@ pub fn base64url(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// Go's `base64.RawURLEncoding` (`url`) or `StdEncoding` decoding: `\r` and `\n` are skipped,
+/// and unused low bits of the last character are ignored.
+pub fn go_base64(s: &str, url: bool) -> Option<Vec<u8>> {
+    let mut chars: Vec<u8> = s.bytes().filter(|b| !matches!(b, b'\r' | b'\n')).collect();
+    if !url {
+        let pad = chars.iter().rev().take_while(|&&b| b == b'=').count();
+        if !chars.len().is_multiple_of(4) || pad > 2 {
+            return None;
+        }
+        chars.truncate(chars.len() - pad);
+    }
+    if chars.len() % 4 == 1 {
+        return None;
+    }
+    let (c62, c63) = if url { (b'-', b'_') } else { (b'+', b'/') };
+    let (mut out, mut acc, mut bits) = (Vec::with_capacity(chars.len() * 3 / 4), 0u32, 0);
+    for c in chars {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            _ if c == c62 => 62,
+            _ if c == c63 => 63,
+            _ => return None,
+        };
+        acc = (acc << 6 | u32::from(v)) & 0xfff;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

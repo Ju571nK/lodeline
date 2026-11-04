@@ -45,3 +45,16 @@ The file differs from Go's encoded bodies in three ways, which `src/fleet/mock.r
   position, with the same function as Go.
 - IPv4 addresses are hex, `ipv4:` and eight digits, so the file holds no dotted addresses. The
   binary writes them dotted again, and the parity goldens compare the dotted form.
+
+## jose-cases.json
+
+ID token headers and key sets, each with whether go-oidc v3.21.0 and go-jose v4.1.4 accept the
+token, written by `jose-cases_test.go.txt`. `src/auth/oidc/tests.rs` serves each key set from the
+fake provider and checks that the Rust port gives the same answer, except for the few cases it
+lists as refused here. The RSA, EC and Ed25519 keys and certificates in it are made fresh on each
+run and protect nothing. To write it again, copy that file into `internal/auth/` of a
+`lodeline-manager` checkout at `e4fb077` as `zz_jose_cases_test.go`, then run:
+
+```sh
+JOSE_CASES_PATH=$PWD/jose-cases.json go test -run TestDumpJoseCases -count=1 ./internal/auth
+```

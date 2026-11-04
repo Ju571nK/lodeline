@@ -11,8 +11,9 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use subtle::ConstantTimeEq;
+use tokio::sync::watch;
 
-use super::{base64url, go_fold, Members};
+use super::{base64url, go_base64, go_fold, Members};
 use crate::config::{self, OidcConfig};
 use crate::fleet::env_proxy;
 use crate::triage::go_compact;
@@ -42,6 +43,16 @@ struct Key {
     key: DecodingKey,
 }
 
+/// A key set fetch's answer: `None` when it failed.
+type Answer = Option<Arc<Vec<Key>>>;
+
+#[derive(Default)]
+struct KeyCache {
+    keys: Arc<Vec<Key>>,
+    /// The fetch under way, whose answer every cache miss meanwhile waits for.
+    fetch: Option<watch::Receiver<Option<Answer>>>,
+}
+
 /// x/oauth2's two ways to send the client secret. It tries the header first and remembers the
 /// first that works.
 #[derive(Clone, Copy)]
@@ -63,7 +74,7 @@ pub struct Oidc {
     jwks_url: String,
     algorithms: Vec<String>,
     http: reqwest::Client,
-    keys: Mutex<Arc<Vec<Key>>>,
+    keys: Arc<Mutex<KeyCache>>,
     auth_style: Mutex<Option<AuthStyle>>,
     attempts: Mutex<HashMap<String, Attempt>>,
     now: Box<dyn Fn() -> Instant + Send + Sync>,
@@ -128,7 +139,7 @@ impl Oidc {
             jwks_url: d.jwks_url,
             algorithms,
             http,
-            keys: Mutex::default(),
+            keys: Arc::default(),
             auth_style: Mutex::default(),
             attempts: Mutex::default(),
             now: Box::new(Instant::now),
@@ -338,6 +349,7 @@ impl Oidc {
     /// key with the token's `kid` (any key without one) must verify it. Keys come from the
     /// cache first, then from a fresh fetch of the key set.
     async fn verify_signature(&self, raw: &str) -> Option<(Algorithm, Box<RawValue>)> {
+        protected_header(raw)?;
         let header = jsonwebtoken::decode_header(raw).ok()?;
         if !self.algorithms.contains(&format!("{:?}", header.alg)) {
             return None;
@@ -357,52 +369,104 @@ impl Oidc {
             .keys
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .keys
             .clone();
         if let Some(t) = verify(&cached) {
             return Some((header.alg, t.claims));
         }
-        let fresh = Arc::new(self.fetch_keys().await?);
-        *self.keys.lock().unwrap_or_else(PoisonError::into_inner) = fresh.clone();
-        verify(&fresh).map(|t| (header.alg, t.claims))
+        verify(&self.fetch_shared().await?).map(|t| (header.alg, t.claims))
     }
 
-    async fn fetch_keys(&self) -> Option<Vec<Key>> {
-        let res = get(&self.http, &self.jwks_url, true).await?;
-        if res.status() != reqwest::StatusCode::OK {
-            return None;
-        }
-        let body = res.bytes().await.ok()?;
-        let mut raw_keys = Vec::new();
-        for (key, value) in go_fields(&body)? {
-            if go_fold(&key) == "keys" {
-                raw_keys = serde_json::from_str::<Option<Vec<Box<RawValue>>>>(value.get())
-                    .ok()?
-                    .unwrap_or_default();
-            }
-        }
-        let mut keys = Vec::new();
-        for raw in raw_keys {
-            let mut alg = String::new();
-            for (key, value) in go_fields(raw.get().as_bytes())? {
-                if go_fold(&key) == "alg" {
-                    string(&mut alg, &value)?;
+    /// go-oidc's `keysFromRemote`: one fetch at a time, and every cache miss while it runs gets
+    /// its answer. The fetch runs as its own task, so it finishes even when its callers have
+    /// gone, and a success replaces the cache.
+    async fn fetch_shared(&self) -> Answer {
+        let mut rx = {
+            let mut cache = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
+            match &cache.fetch {
+                // A closed channel is a fetch that panicked; start another.
+                Some(rx) if rx.has_changed().is_ok() => rx.clone(),
+                _ => {
+                    let (tx, rx) = watch::channel(None);
+                    cache.fetch = Some(rx.clone());
+                    let (http, url) = (self.http.clone(), self.jwks_url.clone());
+                    let shared = self.keys.clone();
+                    tokio::spawn(async move {
+                        let answer = fetch_keys(&http, &url).await.map(Arc::new);
+                        let mut cache = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                        if let Some(keys) = &answer {
+                            cache.keys = keys.clone();
+                        }
+                        cache.fetch = None;
+                        drop(cache);
+                        tx.send_replace(Some(answer));
+                    });
+                    rx
                 }
             }
-            if !alg.is_empty() && !SUPPORTED_ALGS.contains(&alg.as_str()) {
-                continue;
-            }
-            // shortcut: a key jsonwebtoken cannot read is skipped; go-jose refuses the whole set
-            // for a malformed key of a type it supports. Match it if a provider relies on that.
-            let Ok(jwk) = serde_json::from_str::<Jwk>(raw.get()) else {
-                continue;
-            };
-            if let Ok(key) = DecodingKey::from_jwk(&jwk) {
-                let kid = jwk.common.key_id.unwrap_or_default();
-                keys.push(Key { kid, key });
+        };
+        let answer = rx.wait_for(Option::is_some).await.ok()?.clone();
+        answer.flatten()
+    }
+}
+
+/// go-oidc's key set: a key whose `alg` go-oidc does not support is skipped, and each other one
+/// must pass go-jose's checks (see `jwk`). jsonwebtoken may still be unable to use a key Go
+/// keeps; that key is left out.
+async fn fetch_keys(http: &reqwest::Client, url: &str) -> Option<Vec<Key>> {
+    let res = get(http, url, true).await?;
+    if res.status() != reqwest::StatusCode::OK {
+        return None;
+    }
+    let body = res.bytes().await.ok()?;
+    let mut raw_keys = Vec::new();
+    for (key, value) in go_fields(&body)? {
+        if go_fold(&key) == "keys" {
+            raw_keys = serde_json::from_str::<Option<Vec<Box<RawValue>>>>(value.get())
+                .ok()?
+                .unwrap_or_default();
+        }
+    }
+    let mut keys = Vec::new();
+    for raw in raw_keys {
+        let mut alg = String::new();
+        for (key, value) in go_fields(raw.get().as_bytes())? {
+            if go_fold(&key) == "alg" {
+                string(&mut alg, &value)?;
             }
         }
-        Some(keys)
+        if (!alg.is_empty() && !SUPPORTED_ALGS.contains(&alg.as_str())) || !jwk::check(&raw)? {
+            continue;
+        }
+        let Ok(jwk) = serde_json::from_str::<Jwk>(raw.get()) else {
+            continue;
+        };
+        if let Ok(key) = DecodingKey::from_jwk(&jwk) {
+            let kid = jwk.common.key_id.unwrap_or_default();
+            keys.push(Key { kid, key });
+        }
     }
+    Some(keys)
+}
+
+/// go-jose's protected header rules that jsonwebtoken does not apply: a repeated member fails,
+/// `crit` may name only `b64`, and `b64: false` means the raw payload was signed, which this
+/// port refuses.
+fn protected_header(token: &str) -> Option<()> {
+    let json = go_base64(token.split('.').next()?, true)?;
+    let members: Members<Box<RawValue>> = serde_json::from_slice(&json).ok()?;
+    let mut seen = HashSet::new();
+    for (key, value) in &members.0 {
+        let refused = match key.as_str() {
+            "crit" => strings(value)?.iter().any(|name| name != "b64"),
+            "b64" => value.get() == "false",
+            _ => false,
+        };
+        if refused || !seen.insert(key) {
+            return None;
+        }
+    }
+    Some(())
 }
 
 /// `oidc:` and the hex SHA-256 of Go's `json.Marshal([]string{iss, sub})`, so a person keeps the
@@ -434,11 +498,14 @@ fn at_hash(alg: Algorithm, access_token: &str) -> Option<String> {
     Some(base64url(&digest[..digest.len() / 2]))
 }
 
-/// Go's `httpsTransport`: a provider URL must be HTTPS and carry no credentials.
+/// Go's `httpsTransport`: a provider URL must be HTTPS and carry no user part, even an empty
+/// one, as Go's parser reads it. Go cannot send to a URL without a host.
 fn https(raw: &str) -> Option<reqwest::Url> {
-    let url = reqwest::Url::parse(raw).ok()?;
-    (url.scheme() == "https" && url.username().is_empty() && url.password().is_none())
-        .then_some(url)
+    let go = config::go_url(raw)?;
+    if go.scheme != "https" || go.has_user || go.host.is_empty() {
+        return None;
+    }
+    reqwest::Url::parse(raw).ok()
 }
 
 async fn get(http: &reqwest::Client, raw: &str, no_cache: bool) -> Option<reqwest::Response> {
@@ -685,5 +752,6 @@ fn audience(value: &RawValue) -> Option<Vec<String>> {
     }
 }
 
+mod jwk;
 #[cfg(test)]
 mod tests;
