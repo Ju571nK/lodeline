@@ -20,6 +20,9 @@ function managerEnv(port: number, extra: Record<string, string>): Record<string,
     ADMIN_PASSWORD_BCRYPT: env.ADMIN_PASSWORD_BCRYPT,
     JWT_SECRET: env.JWT_SECRET,
     JWT_TTL_HOURS: String(env.JWT_TTL_HOURS),
+    // The recorder connects from 127.0.0.1, so trusting it lets the limiter cases name client
+    // addresses in X-Forwarded-For. The Go reference ignores this variable.
+    TRUSTED_PROXIES: '127.0.0.1',
     OIDC_ISSUER_URL: '',
     OIDC_CLIENT_ID: '',
     OIDC_CLIENT_SECRET: '',

@@ -1,21 +1,27 @@
-//! Session verification, matching Go's `auth.Signer.Verify` (golang-jwt v5) and the
-//! `RequireAuth` middleware. Login, logout and signing come later with the rest of auth.
+//! The local admin session, matching Go's `internal/auth` (golang-jwt v5 and x/crypto bcrypt) and
+//! the `RequireAuth` middleware. `oidc` holds the external login.
+
+pub mod oidc;
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation};
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::server::error_response;
+use crate::triage::go_compact;
 
 pub const COOKIE_NAME: &str = "lodeline_session";
 const ISSUER: &str = "lodeline-manager";
+const MIN_SECRET_BYTES: usize = 32;
+const SUBJECT_MAX_LENGTH: usize = 256;
 /// The claims golang-jwt's RegisteredClaims decodes.
 const REGISTERED: [&str; 7] = ["iss", "sub", "aud", "exp", "nbf", "iat", "jti"];
 /// Seconds from year 1 to 1970: Go's `time.Unix` adds them and wraps past `i64::MAX`.
@@ -29,27 +35,114 @@ pub enum VerifyError {
     Expired,
 }
 
+/// Issues and checks the HS256 session token.
 pub struct Signer {
+    signing: EncodingKey,
     key: DecodingKey,
+    ttl: Duration,
 }
 
 /// The subject `require_auth` established, for the handlers behind it.
 #[derive(Clone, Debug)]
 pub struct Subject(pub String);
 
+/// golang-jwt's RegisteredClaims, in its field order.
+#[derive(Serialize)]
+struct Claims<'a> {
+    iss: &'a str,
+    sub: &'a str,
+    exp: u64,
+    nbf: u64,
+    iat: u64,
+}
+
 impl Signer {
-    pub fn new(secret: &[u8]) -> Self {
-        Self {
-            key: DecodingKey::from_secret(secret),
+    /// Go's `NewSigner`. Config loading has already enforced both limits.
+    pub fn new(secret: &[u8], ttl: Duration) -> Result<Self, String> {
+        if secret.len() < MIN_SECRET_BYTES {
+            return Err(format!(
+                "auth: jwt secret must be >= {MIN_SECRET_BYTES} bytes (got {})",
+                secret.len()
+            ));
         }
+        if ttl.is_zero() {
+            return Err("auth: jwt ttl must be positive (got 0s)".to_owned());
+        }
+        Ok(Self {
+            signing: EncodingKey::from_secret(secret),
+            key: DecodingKey::from_secret(secret),
+            ttl,
+        })
+    }
+
+    /// The session lifetime, which the login cookie's `Max-Age` states.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Go's `SignUntil`: a token for `subject` that ends after the TTL or at `deadline`, whichever
+    /// comes first, and its exact end. `None` for an empty subject, one over 256 bytes, or a
+    /// deadline already passed.
+    pub fn sign_until(
+        &self,
+        subject: &str,
+        deadline: Option<SystemTime>,
+    ) -> Option<(String, SystemTime)> {
+        self.sign_at(subject, deadline, SystemTime::now())
+    }
+
+    fn sign_at(
+        &self,
+        subject: &str,
+        deadline: Option<SystemTime>,
+        now: SystemTime,
+    ) -> Option<(String, SystemTime)> {
+        if subject.is_empty() || subject.len() > SUBJECT_MAX_LENGTH {
+            return None;
+        }
+        let mut exp = now + self.ttl;
+        if let Some(deadline) = deadline {
+            exp = exp.min(deadline);
+        }
+        if exp <= now {
+            return None;
+        }
+        // NumericDate truncates to the second.
+        let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let claims = Claims {
+            iss: ISSUER,
+            sub: subject,
+            exp: secs(exp),
+            nbf: secs(now),
+            iat: secs(now),
+        };
+        // golang-jwt's bytes: the header keys sorted, the claims as Go's json.Marshal writes them.
+        let claims = go_compact(&serde_json::to_string(&claims).ok()?);
+        let message = format!(
+            "{}.{}",
+            base64url(br#"{"alg":"HS256","typ":"JWT"}"#),
+            base64url(claims.as_bytes())
+        );
+        let signature =
+            jsonwebtoken::crypto::sign(message.as_bytes(), &self.signing, Algorithm::HS256).ok()?;
+        Some((format!("{message}.{signature}"), exp))
     }
 
     /// Returns the session subject.
     pub fn verify(&self, token: &str) -> Result<String, VerifyError> {
+        self.verify_with_exp(token).map(|(subject, _)| subject)
+    }
+
+    /// Go's `VerifyWithExp`: the subject and the `exp` claim in whole seconds, if it has one.
+    pub fn verify_with_exp(&self, token: &str) -> Result<(String, Option<i64>), VerifyError> {
         self.verify_at(token, SystemTime::now())
     }
 
-    fn verify_at(&self, token: &str, now: SystemTime) -> Result<String, VerifyError> {
+    fn verify_at(
+        &self,
+        token: &str,
+        now: SystemTime,
+    ) -> Result<(String, Option<i64>), VerifyError> {
         if token.is_empty() {
             return Err(VerifyError::Invalid);
         }
@@ -88,16 +181,17 @@ impl Signer {
         // Claims are whole seconds, so comparing whole seconds of `now` is exact.
         let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as f64;
         // golang-jwt joins every claim error, and callers test for expiry first.
-        // Past Go's time range the expiry wraps into the past: `as` saturates, the add overflows.
-        let past_go_range = |exp: f64| (exp as i64).checked_add(UNIX_TO_INTERNAL).is_none();
+        // Past Go's time range a time wraps into the past: `as` saturates, the add overflows.
+        let past_go_range = |t: f64| (t as i64).checked_add(UNIX_TO_INTERNAL).is_none();
         if exp.is_some_and(|exp| now >= exp || past_go_range(exp)) {
             return Err(VerifyError::Expired);
         }
         // iat is not checked: golang-jwt v5 skips it unless asked. A missing exp or nbf passes.
-        if nbf.is_some_and(|nbf| now < nbf) || iss != ISSUER || sub.is_empty() {
+        let early = nbf.is_some_and(|nbf| now < nbf && !past_go_range(nbf));
+        if early || iss != ISSUER || sub.is_empty() {
             return Err(VerifyError::Invalid);
         }
-        Ok(sub.to_owned())
+        Ok((sub.to_owned(), exp.map(|exp| exp as i64)))
     }
 }
 
@@ -167,20 +261,20 @@ fn audience(v: Option<&Value>) -> Result<(), VerifyError> {
     }
 }
 
-/// The first `lodeline_session` cookie across all `Cookie` lines, parsed as Go's
-/// `Request.Cookie` does: pairs with invalid value bytes are skipped.
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+/// The first cookie named `name` across all `Cookie` lines, parsed as Go's `Request.Cookie`
+/// does: pairs with invalid value bytes are skipped.
+pub fn request_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(header::COOKIE)
         .iter()
         .flat_map(|line| line.as_bytes().split(|&b| b == b';'))
         .filter_map(|part| {
             let part = part.trim_ascii();
-            let (name, value) = match part.iter().position(|&b| b == b'=') {
+            let (key, value) = match part.iter().position(|&b| b == b'=') {
                 Some(i) => (&part[..i], &part[i + 1..]),
                 None => (part, &b""[..]),
             };
-            if name.trim_ascii() != COOKIE_NAME.as_bytes() {
+            if key.trim_ascii() != name.as_bytes() {
                 return None;
             }
             let value = match value {
@@ -205,7 +299,7 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     let unauthorized = |code, message| error_response(StatusCode::UNAUTHORIZED, code, message);
-    let token = match session_cookie(req.headers()) {
+    let token = match request_cookie(req.headers(), COOKIE_NAME) {
         Some(token) if !token.is_empty() => token,
         _ => return unauthorized("unauthorized", "session cookie missing"),
     };
@@ -219,6 +313,63 @@ pub async fn require_auth(
         }
         Err(VerifyError::Invalid) => unauthorized("unauthorized", "invalid session"),
     }
+}
+
+/// Go's `auth.Verify`: an empty password or hash never matches, and a malformed hash fails.
+/// bcrypt takes tens of milliseconds, so callers run this off the async runtime.
+pub fn password_matches(plaintext: &str, hash: &str) -> bool {
+    !plaintext.is_empty() && !hash.is_empty() && bcrypt::verify(plaintext, hash).unwrap_or(false)
+}
+
+/// Go's `base64.RawURLEncoding`: the URL-safe alphabet without padding.
+pub fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..=chunk.len() {
+            out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+        }
+    }
+    out
+}
+
+/// Go's `base64.RawURLEncoding` (`url`) or `StdEncoding` decoding: `\r` and `\n` are skipped,
+/// and unused low bits of the last character are ignored.
+pub fn go_base64(s: &str, url: bool) -> Option<Vec<u8>> {
+    let mut chars: Vec<u8> = s.bytes().filter(|b| !matches!(b, b'\r' | b'\n')).collect();
+    if !url {
+        let pad = chars.iter().rev().take_while(|&&b| b == b'=').count();
+        if !chars.len().is_multiple_of(4) || pad > 2 {
+            return None;
+        }
+        chars.truncate(chars.len() - pad);
+    }
+    if chars.len() % 4 == 1 {
+        return None;
+    }
+    let (c62, c63) = if url { (b'-', b'_') } else { (b'+', b'/') };
+    let (mut out, mut acc, mut bits) = (Vec::with_capacity(chars.len() * 3 / 4), 0u32, 0);
+    for c in chars {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            _ if c == c62 => 62,
+            _ if c == c63 => 63,
+            _ => return None,
+        };
+        acc = (acc << 6 | u32::from(v)) & 0xfff;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

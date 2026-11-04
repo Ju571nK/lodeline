@@ -66,12 +66,13 @@ async fn a_port_alone_listens_on_ipv4_and_ipv6() {
 }
 
 #[tokio::test]
-async fn accepted_connections_have_keepalive_and_nodelay() {
+async fn accepted_connections_have_keepalive_nodelay_and_their_peer() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let _client = TcpStream::connect(listener.local_addr().unwrap())
+    let client = TcpStream::connect(listener.local_addr().unwrap())
         .await
         .unwrap();
-    let stream = accept(&listener).await.unwrap();
+    let (stream, peer) = accept(&listener).await.unwrap();
+    assert_eq!(peer, client.local_addr().unwrap());
     assert!(SockRef::from(&stream).keepalive().unwrap());
     assert!(stream.nodelay().unwrap());
 }

@@ -2,28 +2,29 @@
 
 The parity suite sends a fixed table of HTTP requests to a `lodeline-manager` binary and compares
 each normalized response with a golden file. The goldens were recorded from the Go implementation
-at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
-the port answers differently.
+at `Ju571nK/lodeline-manager@e4fb077`, except the ones listed under "Goldens recorded from the
+Rust build" below. The Rust port does not have to match Go; the suite is a regression check, so a
+run shows every place where the port answers differently from the recorded behavior.
 
-The table has 222 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 226 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
 |---:|---|
 | 4 | `GET /api/health` |
-| 28 | `POST /api/v1/auth/login` |
+| 26 | `POST /api/v1/auth/login` |
 | 2 | `GET /api/v1/auth/methods` |
 | 3 | `GET /api/v1/auth/oidc/start` |
 | 2 | `GET /api/v1/auth/oidc/callback` |
-| 3 | `POST /api/v1/auth/logout` |
-| 26 | `GET /api/v1/auth/me` |
+| 4 | `POST /api/v1/auth/logout` |
+| 27 | `GET /api/v1/auth/me` |
 | 6 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
 | 38 | `GET /api/v1/fleet/events` |
-| 13 | `GET /api/v1/fleet/events/{event_id}` |
-| 10 | `GET /api/v1/fleet/risk` |
-| 8 | `GET /api/v1/fleet/compliance` |
-| 11 | `GET /api/v1/fleet/hosts` |
+| 14 | `GET /api/v1/fleet/events/{event_id}` |
+| 11 | `GET /api/v1/fleet/risk` |
+| 9 | `GET /api/v1/fleet/compliance` |
+| 12 | `GET /api/v1/fleet/hosts` |
 | 14 | `GET /api/v1/fleet/hosts/{host_id}` |
 | 13 | `POST /api/v1/triage/upsert` |
 | 11 | `POST /api/v1/triage/note` |
@@ -34,10 +35,8 @@ Every route has a success case and an error case, except the two OIDC routes. Th
 needs an HTTPS OIDC provider, so the Rust port carries over the Go OIDC unit tests instead
 (`NO_SUCCESS_CASE` in `cases.ts`).
 
-CI does not run this suite yet. The Rust binary serves every route except the auth routes (login,
-logout, `me`, `methods` and OIDC) so far; those answer 501 after their method and session checks,
-so their cases fail until the port reaches them. When login or `fleet/healthz` answers 501, the run takes the session
-that Go issued (`testdata/session-token.txt`) and the run start as the mock seed, and says so.
+CI does not run this suite yet. The Rust binary serves every route, and a run against it must pass
+every case.
 
 ## Files
 
@@ -73,7 +72,7 @@ the server sees each path exactly as the table writes it, `..` and `//` included
 
 ## Update the goldens
 
-Record against the Go build, never against the binary under test:
+Record against the Go build:
 
 ```sh
 PARITY_UPDATE=1 MANAGER_BIN=/path/to/go/lodeline-manager npm run parity
@@ -88,6 +87,33 @@ starts with `e4fb077`. `PARITY_ALLOW_ANY_REFERENCE=1` skips that check and print
 it only to record from a deliberately changed reference. CI must never set `PARITY_UPDATE`,
 `PARITY_TESTDATA` or `PARITY_ALLOW_ANY_REFERENCE`: a CI run compares and writes nothing. The
 suite stops at load when `CI` is set together with any of them.
+
+### Goldens recorded from the Rust build
+
+When a Rust change intentionally answers differently from a Go golden, record from the Rust
+build with `PARITY_UPDATE=1 PARITY_ALLOW_ANY_REFERENCE=1`, then restore every golden that the
+change does not concern (`git checkout -- <file>`), list it in this table, and state the
+difference in the PR. These goldens hold Rust behavior:
+
+| Golden | Difference from Go |
+|---|---|
+| `login-rate-limited-multi-hop` | The limiter keys on the rightmost `X-Forwarded-For` hop that is not a trusted proxy, not the first: the prelude's attempts count for `198.51.100.7`, so `203.0.113.20` is not limited. |
+| `login-rate-limited-real-ip` | `X-Real-IP` is not read: the prelude's attempts count for its `X-Forwarded-For` address, and the request for the case's own. |
+| `login-rate-limited-true-client-ip` | `True-Client-IP` is not read, as above. |
+| `login-rate-limited-header-precedence` | Only `X-Forwarded-For` counts: the prelude's attempts go to `203.0.113.25`, and the `True-Client-IP` request counts for the case's own address. |
+| `login-loopback-limited` | Loopback is limited. Go never limits it. The recorder's own address, `127.0.0.1` named in `X-Forwarded-For`, `::ffff:127.0.0.1`, and a hop that is not an address all count for `127.0.0.1`. |
+| `login-forwarded-loopback-127-0-0-2-limited` | Loopback is limited, as above. |
+| `login-forwarded-loopback-ipv6-limited` | Loopback is limited, as above. |
+
+The parity managers run with `TRUSTED_PROXIES=127.0.0.1`, so the recorder is a trusted proxy and
+the limiter cases name their client in `X-Forwarded-For`. The Go reference ignores the variable.
+The limiter exempts no address, so every request that names no client gets its case's own
+address, `2001:db8:1:<case index in hex>::1`, and the recorder's login gets `2001:db8:2::1`.
+Each case then has its own limiter window, as it would against a fresh server. A case marked
+`direct` sends no address and counts for `127.0.0.1`. Go reads the address too, with the same
+effect.
+
+### Build the Go reference
 
 Build the Go binary from `e4fb077` with this `web/dist` copied to `internal/server/dist`, as
 its Makefile `build` target does with its own `web/dist`. The `-ldflags` value stamps the version
@@ -197,12 +223,17 @@ A passing run says nothing about the following. Each needs its own test in the p
   retried.
 - The 250 ms login failure delay is checked only as a minimum on the three wrong-credential cases.
   Whether other failure paths wait, or how long the slowest wait is, is not checked.
-- `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id` and
-  `fleet-events-duplicate-key`.
+- `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id`,
+  `fleet-events-duplicate-key` and the `limit` cases of risk, compliance and hosts.
 - `Content-Length` of a non-empty `GET` response, and whether a response is chunked.
 - Percent-encoded path parameters in mock mode. The live cases show what Go sends upstream.
-- Limiter behavior that needs time to pass: window reset after 60 s, and pruning above 1024 keys.
+- Limiter behavior that needs time to pass or many addresses: window reset after 60 s, dropping
+  windows that have reset, the 65,536-address cap with its shared window, and IPv6 clients
+  counted by their /64. `src/api/ratelimit/tests.rs` covers them with an injected clock.
 - Connections from client addresses other than 127.0.0.1. The servers listen on 127.0.0.1 only,
   and the test host has no other loopback address, so the other 127/8 address, `::1` and
-  `::ffff:127.0.0.1` reach the limiter only through `X-Forwarded-For`.
-- Request bodies larger than a few hundred bytes.
+  `::ffff:127.0.0.1` reach the limiter only through `X-Forwarded-For`. An untrusted peer's
+  forwarding headers are covered in `src/api/ratelimit/tests.rs`.
+- Request bodies larger than a few hundred bytes, including the 64 KiB and 4 MiB body limits
+  and the 30 s body read timeout. `src/api/auth/tests.rs` and `src/api/triage/tests.rs` cover
+  them.

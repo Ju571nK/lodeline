@@ -1,5 +1,8 @@
 import { expect, test } from '@playwright/test';
 
+// The login page sends a signed-in browser on to /alerts.
+test.use({ storageState: { cookies: [], origins: [] } });
+
 test('organization sign-in is optional and errors retain local recovery', async ({ page }, testInfo) => {
   await page.route('**/api/v1/auth/methods', route => route.fulfill({ json: { local: true, oidc: true } }));
   await page.route('**/api/v1/auth/oidc/start', route => route.fulfill({ status: 302, headers: { Location: '/login?oidc_error=1' } }));

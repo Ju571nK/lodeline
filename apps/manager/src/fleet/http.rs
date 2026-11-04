@@ -14,6 +14,14 @@ use crate::config::ServerTls;
 /// The whole exchange, body included, as Go's `http.Client.Timeout`.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The largest 200 body read; a larger one is a transport error. The console's own list calls ask
+/// for 100 items a page, and `lodeline-server` takes at most 2 MiB a request (axum's default body
+/// limit), so such a page is under 200 MiB plus what re-encoding adds. The API passes any limit
+/// an authenticated caller sends, and a larger page can exceed this.
+const BODY_LIMIT: usize = 256 << 20;
+/// The largest error body read: the server's own are a short JSON object.
+const ERROR_BODY_LIMIT: usize = 64 << 10;
+
 /// The `Retry-After` wait when a 503 has none, or one that is not whole seconds.
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(5);
 
@@ -21,6 +29,7 @@ pub struct HttpClient {
     base_url: String,
     token: String,
     http: reqwest::Client,
+    body_limit: usize,
 }
 
 impl HttpClient {
@@ -51,6 +60,7 @@ impl HttpClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token: token.to_owned(),
             http: builder.build()?,
+            body_limit: BODY_LIMIT,
         })
     }
 
@@ -82,7 +92,13 @@ impl HttpClient {
         let status = resp.status().as_u16();
         match status {
             200 => {
-                let body = resp.bytes().await.map_err(transport)?;
+                let limit = self.body_limit;
+                let body = read_capped(resp, limit)
+                    .await
+                    .map_err(transport)?
+                    .ok_or_else(|| {
+                        FleetError::Transport(format!("GET {path}: body over {limit} bytes"))
+                    })?;
                 decode(&req, &body)
                     .map(Arc::new)
                     .map_err(|e| FleetError::Transport(format!("decode {path}: {e}")))
@@ -95,7 +111,11 @@ impl HttpClient {
                 retry_after: parse_retry_after(resp.headers().get(RETRY_AFTER)),
             }),
             _ => {
-                let body = resp.bytes().await.unwrap_or_default();
+                let body = read_capped(resp, ERROR_BODY_LIMIT)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
                 Err(api_error(status, &body))
             }
         }
@@ -111,7 +131,7 @@ impl Client for HttpClient {
 /// Go's `http.ProxyFromEnvironment`: `HTTPS_PROXY` for https and `HTTP_PROXY` for http, each
 /// name read upper case first, hosts in `NO_PROXY` exempt, and never a proxy for `localhost` or a
 /// loopback address.
-fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
+pub fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
     let var = |name: &str| {
         [name.to_owned(), name.to_lowercase()]
             .into_iter()
@@ -142,6 +162,21 @@ fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
             http.clone()
         })
     })
+}
+
+/// The whole body, or `None` past `limit` bytes without reading the rest.
+pub async fn read_capped(
+    mut res: reqwest::Response,
+    limit: usize,
+) -> reqwest::Result<Option<Vec<u8>>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = res.chunk().await? {
+        if body.len() + chunk.len() > limit {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
 }
 
 /// The error and each cause under it, as Go's wrapped errors print.

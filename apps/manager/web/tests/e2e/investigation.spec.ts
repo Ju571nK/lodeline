@@ -1,10 +1,8 @@
 import { expect, type Page, test } from '@playwright/test';
 
-async function login(page: Page) {
-  await page.goto('/login');
-  await page.getByLabel('Username').fill('admin');
-  await page.getByLabel('Password').fill('test-password');
-  await page.getByRole('button', { name: /^Sign in$/ }).click();
+/** Each test starts signed in (playwright.config.ts); `/` opens the alerts queue. */
+async function openAlerts(page: Page) {
+  await page.goto('/');
   await expect(page).toHaveURL(/\/alerts/);
 }
 const alice = '5a7c3e91-aaaa-bbbb-cccc-111111111111';
@@ -41,7 +39,7 @@ const eventsPattern = /\/api\/v1\/fleet\/events(?:\?|$)/;
 test('Hook investigation opens from Fleet and Host, survives reload, and handles missing events', async ({
   page,
 }, testInfo) => {
-  await login(page);
+  await openAlerts(page);
   await page.route(eventsPattern, (route) =>
     route.fulfill({ json: { events: [hook], next_cursor: null } }),
   );
@@ -77,7 +75,7 @@ test('Hook investigation opens from Fleet and Host, survives reload, and handles
 });
 
 test('Fleet events load 101 rows, apply tool/time filters, and reset paging', async ({ page }) => {
-  await login(page);
+  await openAlerts(page);
   const requests: URL[] = [];
   await page.route(eventsPattern, (route) => {
     const url = new URL(route.request().url());
@@ -108,7 +106,7 @@ test('Fleet events load 101 rows, apply tool/time filters, and reset paging', as
 });
 
 test('Alerts can search beyond the first page without claiming no alerts', async ({ page }) => {
-  await login(page);
+  await openAlerts(page);
   const riskEvent = {
     ...hook,
     evidence: {
@@ -146,7 +144,7 @@ test('Alerts can search beyond the first page without claiming no alerts', async
 });
 
 test('risk/compliance paging and host policy lookup reach row 101', async ({ page }) => {
-  await login(page);
+  await openAlerts(page);
   const risk = {
     host_id: alice,
     hostname: 'target-101',
@@ -215,7 +213,7 @@ for (const scenario of [
         json: { error: { code: scenario.code, message: 'upstream failed' } },
       }),
     );
-    await login(page);
+    await openAlerts(page);
     await page.goto('/settings');
     await expect(page.getByText('Reachable', { exact: true })).toBeVisible();
     await expect(page.locator('header').getByText('Read API error', { exact: true })).toBeVisible();
@@ -231,7 +229,7 @@ for (const scenario of [
 test('Settings labels stale cached metadata and recovers with Retry', async ({
   page,
 }, testInfo) => {
-  await login(page);
+  await openAlerts(page);
   await page.goto('/settings');
   await expect(page.getByText('Connected (authenticated)', { exact: true })).toBeVisible();
   await page.route('**/api/v1/fleet/meta', (route) =>
@@ -264,7 +262,7 @@ test('Settings distinguishes successful legacy metadata from missing signed head
     },
   };
   await page.route('**/api/v1/fleet/meta', (route) => route.fulfill({ json: meta }));
-  await login(page);
+  await openAlerts(page);
   await page.goto('/settings');
   await expect(page.getByText('Not reported by this server', { exact: true })).toBeVisible();
   await expect(page.getByText('not reported by this server', { exact: true })).toBeVisible();

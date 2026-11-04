@@ -1,10 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('Devices includes unassessed hosts, pages, compares versions and filters at server', async ({ page }, testInfo) => {
-  await page.goto('/login');
-  await page.getByLabel('Username').fill('admin');
-  await page.getByLabel('Password').fill('test-password');
-  await page.getByRole('button', { name: /^Sign in$/ }).click();
+  await page.goto('/');
   await expect(page).toHaveURL(/\/alerts/);
   const host = {
     host_id: '5a7c3e91-aaaa-bbbb-cccc-111111111111', hostname: 'Unassessed laptop',

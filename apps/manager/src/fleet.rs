@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-pub use http::HttpClient;
+pub use http::{env_proxy, read_capped, HttpClient};
 pub use mock::Mock;
 pub use wire::*;
 

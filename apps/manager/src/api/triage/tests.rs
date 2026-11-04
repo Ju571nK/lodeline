@@ -10,18 +10,17 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use super::*;
-use crate::auth::Signer;
+use crate::api::BodyError;
 use crate::fleet;
 use crate::server::router;
 
 const SECRET: &str = "0123456789abcdefghijklmnopqrstuv";
 
 fn app() -> Router {
-    router(AppState {
-        signer: Arc::new(Signer::new(SECRET.as_bytes())),
-        fleet: Arc::new(fleet::Mock::new(1_779_192_000)),
-        triage: Arc::new(Store::open(":memory:").unwrap()),
-    })
+    router(AppState::for_tests(
+        SECRET,
+        Arc::new(fleet::Mock::new(1_779_192_000)),
+    ))
 }
 
 fn cookie(subject: &str) -> String {
@@ -375,7 +374,7 @@ impl axum::body::HttpBody for Frames {
 async fn body_is_read_to_the_end_of_its_first_value() {
     let read = |frames: &[&'static str]| {
         let body = Body::new(Frames(frames.iter().copied().collect()));
-        read_body(Request::new(body))
+        read_body(Request::new(body), TRIAGE_BODY_LIMIT)
     };
     for (frames, want) in [
         (&[r#"{"host_id":"a"}"#][..], r#"{"host_id":"a"}"#),
@@ -389,7 +388,7 @@ async fn body_is_read_to_the_end_of_its_first_value() {
         (&["n", "u", "l", "l", "x", "}"], "null"),
         (&["\u{feff}{}"], "\u{feff}{}"),
     ] {
-        let got = read(frames).await;
+        let got = read(frames).await.unwrap();
         let text = got.clone().map(String::from_utf8);
         assert_eq!(text, Some(Ok(want.to_owned())), "{frames:?}");
         if want == "null" {
@@ -398,7 +397,32 @@ async fn body_is_read_to_the_end_of_its_first_value() {
             assert_eq!((b.host_id.as_str(), b.event_id.as_str()), ("", ""));
         }
     }
-    assert_eq!(read(&[r#"{"host_id":"a""#]).await, None, "fails mid-value");
+    assert_eq!(
+        read(&[r#"{"host_id":"a""#]).await.unwrap(),
+        None,
+        "fails mid-value"
+    );
+}
+
+/// The limit counts the first value only: bytes after it in the same frame do not count.
+#[tokio::test]
+async fn the_body_limit_applies_to_the_first_value() {
+    let read = |frames: &[&'static str]| {
+        let body = Body::new(Frames(frames.iter().copied().collect()));
+        read_body(Request::new(body), 16)
+    };
+    let fits = read(&[r#"{"host_id":"ab"} and more"#]).await.unwrap();
+    assert_eq!(fits.as_deref(), Some(&br#"{"host_id":"ab"}"#[..]));
+    let fits = read(&[r#"{"host_id":"#, r#""ab"} and more"#])
+        .await
+        .unwrap();
+    assert_eq!(fits.as_deref(), Some(&br#"{"host_id":"ab"}"#[..]));
+    for frames in [
+        &[r#"{"host_id":"abc"}"#][..],
+        &[r#"{"host_id":"ab"#, r#"c"}"#],
+    ] {
+        assert_eq!(read(frames).await, Err(BodyError::TooLarge), "{frames:?}");
+    }
 }
 
 /// The actor and author are the session subject as is, so an OIDC subject (`oidc:` and a
@@ -489,4 +513,34 @@ fn path_params_read_as_chi_gives_them() {
         let (h, e) = path_params(raw);
         assert_eq!((h.as_str(), e.as_str()), want, "{raw}");
     }
+}
+
+/// Triage bodies may be up to 4 MiB, room for any event `lodeline-server` accepts (2 MiB a
+/// request); a larger one gets 413.
+#[tokio::test]
+async fn triage_bodies_are_capped_at_4_mib() {
+    let app = app();
+    let upsert = |len: usize| {
+        json!({"host_id": "h", "event_id": "e-big", "status": "open",
+               "evidence_snapshot": {"blob": "x".repeat(len)}})
+    };
+    let (code, _) = call(
+        &app,
+        Method::POST,
+        "/api/v1/triage/upsert",
+        Some(upsert(4 << 20)),
+    )
+    .await;
+    assert_eq!(code, 413);
+    let (code, _) = call(
+        &app,
+        Method::POST,
+        "/api/v1/triage/upsert",
+        Some(upsert(3 << 20)),
+    )
+    .await;
+    assert_eq!(code, 200);
+    let note = json!({"host_id": "h", "event_id": "e-big", "body": "n".repeat(4 << 20)});
+    let (code, _) = call(&app, Method::POST, "/api/v1/triage/note", Some(note)).await;
+    assert_eq!(code, 413);
 }

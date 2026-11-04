@@ -463,6 +463,45 @@ async fn a_refused_connection_or_a_bad_body_is_a_transport_error() {
     }
 }
 
+/// A body is read only up to its limit: past it, a page is refused and an error answer's body
+/// is dropped.
+#[tokio::test]
+async fn bodies_are_read_up_to_a_limit() {
+    let page = |len: usize| format!(r#"{{"events":[],"pad":"{}"}}"#, "x".repeat(len - 22));
+    for (len, ok) in [(1024, true), (1025, false)] {
+        let (mut c, _) = stub(move |_| Answer {
+            body: page(len),
+            ..json_answer(200, Value::Null)
+        })
+        .await;
+        c.body_limit = 1024;
+        let res = c.get(Request::Events(EventsParams::default())).await;
+        match res {
+            Ok(_) => assert!(ok, "{len} bytes read"),
+            Err(FleetError::Transport(msg)) => {
+                assert!(!ok, "{len}: {msg}");
+                assert!(msg.ends_with("body over 1024 bytes"), "{msg}");
+            }
+            Err(e) => panic!("{len}: {e}"),
+        }
+    }
+
+    for (len, message) in [(ERROR_BODY_LIMIT, "x"), (ERROR_BODY_LIMIT + 1, "")] {
+        let (c, _) = stub(move |_| Answer {
+            body: format!("x{}", " ".repeat(len - 1)),
+            ..json_answer(500, Value::Null)
+        })
+        .await;
+        let err = c.get(Request::Meta).await.unwrap_err();
+        let want = FleetError::Api {
+            status: 500,
+            code: "unknown".into(),
+            message: message.into(),
+        };
+        assert_eq!(err, want, "{len} bytes");
+    }
+}
+
 #[tokio::test]
 async fn ids_are_path_escaped() {
     let (c, calls) = stub(|_| json_answer(404, Value::Null)).await;
@@ -600,114 +639,11 @@ async fn a_star_no_proxy_skips_the_proxy_for_ip_literals() {
 /// Go's `factory_test.go`: the client built from the config reaches an mTLS server with the
 /// configured CA and client certificate, and the server refuses it without the certificate.
 mod mtls {
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::sync::Arc;
 
     use crate::config::Config;
     use crate::fleet::{self, Request, Response};
-
-    struct Pki {
-        dir: PathBuf,
-    }
-
-    impl Drop for Pki {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    impl Pki {
-        fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "lodeline-manager-mtls-{name}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let pki = Self { dir };
-            pki.key("ca");
-            pki.openssl(
-                &["req", "-x509", "-new", "-key", "ca.key", "-days", "1"],
-                &[
-                    "-subj",
-                    &format!("/CN=test-ca-{name}"),
-                    "-addext",
-                    "basicConstraints=critical,CA:TRUE",
-                    "-out",
-                    "ca.crt",
-                ],
-            );
-            pki.leaf(
-                "server",
-                "subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n",
-            );
-            pki.leaf("client", "extendedKeyUsage=clientAuth\n");
-            pki
-        }
-
-        fn path(&self, name: &str) -> PathBuf {
-            self.dir.join(name)
-        }
-
-        fn openssl(&self, args: &[&str], more: &[&str]) {
-            let openssl = lodeline_server::enroll::sign::resolve_openssl().expect("openssl");
-            let out = Command::new(openssl)
-                .args(args)
-                .args(more)
-                .current_dir(&self.dir)
-                .output()
-                .unwrap();
-            let err = String::from_utf8_lossy(&out.stderr);
-            assert!(out.status.success(), "openssl {args:?}: {err}");
-        }
-
-        /// RSA, which ring reads from every openssl and LibreSSL PKCS#8 output.
-        fn key(&self, name: &str) {
-            let out = format!("{name}.key");
-            self.openssl(
-                &["genpkey", "-algorithm", "RSA"],
-                &["-pkeyopt", "rsa_keygen_bits:2048", "-out", &out],
-            );
-        }
-
-        fn leaf(&self, name: &str, ext: &str) {
-            self.key(name);
-            std::fs::write(self.path(&format!("{name}.ext")), ext).unwrap();
-            let (key, csr, crt) = (
-                format!("{name}.key"),
-                format!("{name}.csr"),
-                format!("{name}.crt"),
-            );
-            self.openssl(
-                &["req", "-new", "-key", &key, "-subj"],
-                &[&format!("/CN={name}"), "-out", &csr],
-            );
-            let serial = if name == "server" { "0x1001" } else { "0x1002" };
-            self.openssl(
-                &[
-                    "x509", "-req", "-in", &csr, "-CA", "ca.crt", "-CAkey", "ca.key",
-                ],
-                &[
-                    "-set_serial",
-                    serial,
-                    "-days",
-                    "1",
-                    "-extfile",
-                    &format!("{name}.ext"),
-                    "-out",
-                    &crt,
-                ],
-            );
-        }
-    }
-
-    fn pem_certs(path: &Path) -> Vec<rustls::pki_types::CertificateDer<'static>> {
-        let pem = std::fs::read(path).unwrap();
-        rustls_pemfile::certs(&mut pem.as_slice())
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
+    use crate::testutil::{pem_certs, Pki};
 
     /// An HTTPS server that requires a client certificate signed by the test CA.
     async fn serve(pki: &Pki) -> String {

@@ -5,6 +5,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
@@ -18,20 +19,51 @@ use hyper::body::Frame;
 use hyper::ext::ReasonPhrase;
 use tower_http::catch_panic::CatchPanicLayer;
 
+use crate::api::auth::AuthConfig;
+use crate::api::ratelimit::{self, RateLimiter};
+use crate::auth::oidc::Oidc;
 use crate::auth::{require_auth, Signer};
 use crate::{api, config, fleet, spa, triage};
 
 #[derive(Clone)]
 pub struct AppState {
     pub signer: Arc<Signer>,
+    pub auth: Arc<AuthConfig>,
+    /// `None` when OIDC is not configured.
+    pub oidc: Option<Arc<Oidc>>,
     pub fleet: Arc<dyn fleet::Client>,
     pub triage: Arc<triage::Store>,
+    /// The login limiter's trusted proxies (`TRUSTED_PROXIES`).
+    pub trusted_proxies: Arc<[ipnet::IpNet]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Access {
     Public,
     Session,
+}
+
+#[cfg(test)]
+impl AppState {
+    /// Go's handler test harness: admin `admin` with password `test-password`, a 12 hour
+    /// session, cookies without `Secure`, OIDC off and an empty in-memory triage store.
+    pub fn for_tests(secret: &str, fleet: Arc<dyn fleet::Client>) -> Self {
+        Self {
+            signer: Arc::new(
+                Signer::new(secret.as_bytes(), Duration::from_secs(12 * 3600)).unwrap(),
+            ),
+            auth: Arc::new(AuthConfig {
+                admin_username: "admin".into(),
+                admin_password_bcrypt:
+                    "$2a$10$wfv94g2jgl.5WmoEZHXfw.WMQSDL6HzwEq0avcAT1QmtrqBWUf7wu".into(),
+                cookie_secure: false,
+            }),
+            oidc: None,
+            fleet,
+            triage: Arc::new(triage::Store::open(":memory:").unwrap()),
+            trusted_proxies: Arc::new([]),
+        }
+    }
 }
 
 /// Every API route of the Go router, in chi pattern syntax. Session routes sit behind
@@ -72,10 +104,16 @@ pub const ROUTES: [(Method, &str, Access); 18] = [
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'";
 
 pub fn router(state: AppState) -> Router {
+    // One limiter per router, shared by login and the two OIDC routes: 10 a minute.
+    let limiter = Arc::new(RateLimiter::new(
+        10,
+        Duration::from_secs(60),
+        state.trusted_proxies.clone(),
+    ));
     let mut router = Router::new();
-    for (method, path, access) in ROUTES {
+    for (method, path, _) in ROUTES {
         let axum_path = path.replace('{', ":").replace('}', "");
-        router = router.route(&axum_path, endpoint(method, path, access, &state));
+        router = router.route(&axum_path, endpoint(method, path, &state, &limiter));
     }
     with_middleware(router.fallback(fallback).with_state(state))
 }
@@ -95,25 +133,31 @@ fn with_middleware(router: Router) -> Router {
 fn endpoint(
     method: Method,
     path: &str,
-    access: Access,
     state: &AppState,
+    limiter: &Arc<RateLimiter>,
 ) -> MethodRouter<AppState> {
     let auth = middleware::from_fn_with_state(state.signer.clone(), require_auth);
-    match (path, access) {
-        ("/api/health", _) => only(method, health),
-        ("/api/v1/fleet/meta", _) => only(method, api::fleet::meta.layer(auth)),
-        ("/api/v1/fleet/healthz", _) => only(method, api::fleet::healthz.layer(auth)),
-        ("/api/v1/fleet/events", _) => only(method, api::fleet::events.layer(auth)),
-        ("/api/v1/fleet/events/{event_id}", _) => only(method, api::fleet::event.layer(auth)),
-        ("/api/v1/fleet/risk", _) => only(method, api::fleet::risk.layer(auth)),
-        ("/api/v1/fleet/compliance", _) => only(method, api::fleet::compliance.layer(auth)),
-        ("/api/v1/fleet/hosts", _) => only(method, api::fleet::hosts.layer(auth)),
-        ("/api/v1/fleet/hosts/{host_id}", _) => only(method, api::fleet::host.layer(auth)),
-        ("/api/v1/triage/upsert", _) => only(method, api::triage::upsert.layer(auth)),
-        ("/api/v1/triage/note", _) => only(method, api::triage::note.layer(auth)),
-        ("/api/v1/triage/{host_id}/{event_id}", _) => only(method, api::triage::get.layer(auth)),
-        (_, Access::Public) => only(method, not_implemented),
-        (_, Access::Session) => only(method, not_implemented.layer(auth)),
+    let limit = middleware::from_fn_with_state(limiter.clone(), ratelimit::limit);
+    match path {
+        "/api/health" => only(method, health),
+        "/api/v1/auth/login" => only(method, api::auth::login.layer(limit)),
+        "/api/v1/auth/methods" => only(method, api::auth::methods),
+        "/api/v1/auth/oidc/start" => only(method, api::auth::oidc_start.layer(limit)),
+        "/api/v1/auth/oidc/callback" => only(method, api::auth::oidc_callback.layer(limit)),
+        "/api/v1/auth/logout" => only(method, api::auth::logout.layer(auth)),
+        "/api/v1/auth/me" => only(method, api::auth::me.layer(auth)),
+        "/api/v1/fleet/meta" => only(method, api::fleet::meta.layer(auth)),
+        "/api/v1/fleet/healthz" => only(method, api::fleet::healthz.layer(auth)),
+        "/api/v1/fleet/events" => only(method, api::fleet::events.layer(auth)),
+        "/api/v1/fleet/events/{event_id}" => only(method, api::fleet::event.layer(auth)),
+        "/api/v1/fleet/risk" => only(method, api::fleet::risk.layer(auth)),
+        "/api/v1/fleet/compliance" => only(method, api::fleet::compliance.layer(auth)),
+        "/api/v1/fleet/hosts" => only(method, api::fleet::hosts.layer(auth)),
+        "/api/v1/fleet/hosts/{host_id}" => only(method, api::fleet::host.layer(auth)),
+        "/api/v1/triage/upsert" => only(method, api::triage::upsert.layer(auth)),
+        "/api/v1/triage/note" => only(method, api::triage::note.layer(auth)),
+        "/api/v1/triage/{host_id}/{event_id}" => only(method, api::triage::get.layer(auth)),
+        _ => unreachable!("no handler for {path}"),
     }
 }
 
@@ -168,16 +212,6 @@ async fn health() -> Response {
     json_response(StatusCode::OK, &body)
 }
 
-// Routes whose handlers are not ported yet still sit behind their auth, so the 401 and 405
-// forms already match.
-async fn not_implemented() -> Response {
-    error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "not implemented yet",
-    )
-}
-
 /// chi sends `/api` and everything under it that no route matches to its 404 text, and every
 /// other path to the SPA.
 async fn fallback(req: Request) -> Response {
@@ -189,8 +223,8 @@ async fn fallback(req: Request) -> Response {
 }
 
 fn json_response(status: StatusCode, body: &serde_json::Value) -> Response {
-    // Go's json.Encoder ends the body with a newline.
-    let body = format!("{body}\n");
+    // Go's json.Encoder escapes HTML characters and ends the body with a newline.
+    let body = format!("{}\n", triage::go_compact(&body.to_string()));
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 

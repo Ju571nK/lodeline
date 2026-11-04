@@ -6,7 +6,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use serde::Serialize;
 
-use crate::api::write_json;
+use crate::api::{write_json, Query};
 use crate::fleet::{
     self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams, Reply, Request,
     RiskParams,
@@ -214,51 +214,6 @@ fn events_params(q: &Query) -> Result<EventsParams, &'static str> {
         p.host_ids = hosts.into_iter().flat_map(split_comma).collect();
     }
     Ok(p)
-}
-
-/// A query string as Go's `url.ParseQuery` reads it: pairs split at `&`, a pair holding `;` or
-/// a bad escape dropped, `+` read as a space.
-struct Query(Vec<(String, String)>);
-
-impl Query {
-    fn parse(raw: Option<&str>) -> Self {
-        let unescape = |s: &str| {
-            config::unescape(&s.replace('+', " ")).map(|b| String::from_utf8_lossy(&b).into_owned())
-        };
-        let pairs = raw
-            .unwrap_or_default()
-            .split('&')
-            .filter(|kv| !kv.is_empty() && !kv.contains(';'))
-            .filter_map(|kv| {
-                let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-                Some((unescape(k)?, unescape(v)?))
-            })
-            .collect();
-        Self(pairs)
-    }
-
-    fn all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> {
-        self.0
-            .iter()
-            .filter(move |(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-
-    /// The first value, or `""`.
-    fn get(&self, key: &str) -> &str {
-        self.0
-            .iter()
-            .find(|(k, _)| k == key)
-            .map_or("", |(_, v)| v.as_str())
-    }
-
-    /// Go's `strconv.Atoi`; 0 when unset.
-    fn limit(&self) -> Result<i64, &'static str> {
-        match self.get("limit") {
-            "" => Ok(0),
-            v => v.parse().map_err(|_| "limit must be an integer"),
-        }
-    }
 }
 
 fn split_comma(v: &str) -> Vec<String> {

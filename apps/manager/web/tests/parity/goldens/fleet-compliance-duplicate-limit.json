@@ -1,7 +1,7 @@
 {
   "request": {
-    "method": "POST",
-    "path": "/api/v1/auth/login",
+    "method": "GET",
+    "path": "/api/v1/fleet/compliance?limit=x&limit=1",
     "server": "mock"
   },
   "status": 400,
@@ -16,7 +16,7 @@
   "body": {
     "error": {
       "code": "invalid_query",
-      "message": "malformed JSON body"
+      "message": "limit must be an integer"
     }
   }
 }

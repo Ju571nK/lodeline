@@ -19,7 +19,6 @@ pub struct Config {
     /// `TRIAGE_DB_PATH`, default `./var/triage.sqlite`.
     pub triage_db_path: String,
     pub admin_username: String,
-    #[allow(dead_code, reason = "the login handler reads it")]
     pub admin_password_bcrypt: String,
     /// `JWT_SECRET`, at least 32 bytes after trimming.
     pub jwt_secret: String,
@@ -33,6 +32,9 @@ pub struct Config {
     pub fleet_cache_max_entries: i64,
     /// `None` when every `OIDC_*` variable is unset.
     pub oidc: Option<OidcConfig>,
+    /// `TRUSTED_PROXIES`: the peers whose `X-Forwarded-For` the login limiter reads. Empty by
+    /// default.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 /// The CA and client certificate for an mTLS `lodeline-server`.
@@ -166,6 +168,7 @@ impl Config {
         let jwt_ttl = positive_duration("JWT_TTL_HOURS", ttl_hours, 3600)?;
         let fleet_poll_interval =
             positive_duration("FLEET_POLL_INTERVAL_SECONDS", poll_seconds, 1)?;
+        let trusted_proxies = trusted_proxies(&raw("TRUSTED_PROXIES"))?;
 
         Ok(Self {
             listen_addr: or_default("LISTEN_ADDR", ":8080"),
@@ -182,6 +185,7 @@ impl Config {
             fleet_cache_disabled: raw("FLEET_CACHE_DISABLED") == "1",
             fleet_cache_max_entries,
             oidc,
+            trusted_proxies,
         })
     }
 }
@@ -200,6 +204,23 @@ fn positive_duration(key: &str, n: i64, unit_secs: i64) -> Result<Duration, Conf
         }
         _ => Err(invalid(format!("config: {key} must be positive (got {n})"))),
     }
+}
+
+/// A comma-separated list of addresses and CIDR networks.
+pub fn trusted_proxies(raw: &str) -> Result<Vec<ipnet::IpNet>, ConfigError> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            item.parse::<ipnet::IpNet>()
+                .or_else(|_| item.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| {
+                    invalid(format!(
+                        "config: TRUSTED_PROXIES: {item:?} is not an IP address or CIDR network"
+                    ))
+                })
+        })
+        .collect()
 }
 
 // Shape check only, as in Go: `$2a$`, `$2b$` or `$2y$` and at least 60 bytes.
@@ -308,19 +329,19 @@ impl OidcConfig {
 }
 
 /// The parts of Go's `url.Parse` result that validation reads.
-struct GoUrl {
-    scheme: String,
-    has_user: bool,
-    host: String,
+pub struct GoUrl {
+    pub scheme: String,
+    pub has_user: bool,
+    pub host: String,
     /// Percent-decoded, as Go's `URL.Path`.
     path: Vec<u8>,
     has_query: bool,
-    has_fragment: bool,
+    pub has_fragment: bool,
 }
 
 /// Go's `url.Parse` for absolute URLs, `None` where Go returns an error. A relative or opaque URL
 /// comes back with an empty host, which every caller refuses.
-fn go_url(raw: &str) -> Option<GoUrl> {
+pub fn go_url(raw: &str) -> Option<GoUrl> {
     if raw.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return None;
     }
@@ -487,6 +508,7 @@ impl fmt::Debug for Config {
             .field("fleet_cache_disabled", &self.fleet_cache_disabled)
             .field("fleet_cache_max_entries", &self.fleet_cache_max_entries)
             .field("oidc", &self.oidc)
+            .field("trusted_proxies", &self.trusted_proxies)
             .finish()
     }
 }

@@ -1,0 +1,13 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events/%zz",
+    "server": "mock"
+  },
+  "status": 400,
+  "headers": {
+    "content-type": "text/plain; charset=utf-8"
+  },
+  "cookies": [],
+  "body": "400 Bad Request"
+}

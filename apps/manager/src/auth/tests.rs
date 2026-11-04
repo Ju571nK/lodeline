@@ -37,24 +37,18 @@ fn with(changes: Value) -> Value {
     claims
 }
 
+fn signer() -> Signer {
+    Signer::new(SECRET.as_bytes(), Duration::from_secs(12 * 3600)).unwrap()
+}
+
 fn verify(token: &str, now: u64) -> Result<String, VerifyError> {
-    Signer::new(SECRET.as_bytes()).verify_at(token, at(now))
+    signer()
+        .verify_at(token, at(now))
+        .map(|(subject, _)| subject)
 }
 
 fn b64(s: &str) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let bytes = s.as_bytes();
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
-        for i in 0..=chunk.len() {
-            out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
-        }
-    }
-    out
+    base64url(s.as_bytes())
 }
 
 #[test]
@@ -285,7 +279,7 @@ fn accepts_the_go_minted_session_token() {
     let secret = "parity-jwt-29d7b42591a19bb0ac7e84f4b0b4169b38028f60";
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/session-token.txt");
     let token = std::fs::read_to_string(path).unwrap();
-    let signer = Signer::new(secret.as_bytes());
+    let signer = Signer::new(secret.as_bytes(), Duration::from_secs(3600)).unwrap();
     assert_eq!(signer.verify(token.trim()), Ok("admin".to_owned()));
 }
 
@@ -296,7 +290,7 @@ fn reads_the_session_cookie_as_go_does() {
         for line in lines {
             headers.append(header::COOKIE, line.parse().unwrap());
         }
-        session_cookie(&headers).map(str::to_owned)
+        request_cookie(&headers, COOKIE_NAME).map(str::to_owned)
     };
     let cases: [(&[&str], Option<&str>); 9] = [
         (&[], None),
@@ -320,5 +314,209 @@ fn reads_the_session_cookie_as_go_does() {
     ];
     for (lines, want) in cases {
         assert_eq!(cookie(lines).as_deref(), want, "{lines:?}");
+    }
+}
+
+// Go's jwt_test.go constructor and Sign cases, and oidc_test.go's TestSignUntilCapsSession.
+#[test]
+fn new_signer_checks_secret_and_ttl() {
+    let err = Signer::new(b"tooshort", Duration::from_secs(3600))
+        .err()
+        .unwrap();
+    assert!(err.contains("32 bytes"), "{err}");
+    assert!(Signer::new(SECRET.as_bytes(), Duration::ZERO).is_err());
+    assert!(Signer::new(SECRET.as_bytes(), Duration::from_secs(3600)).is_ok());
+}
+
+#[test]
+fn sign_round_trips_the_subject_with_golang_jwt_claims() {
+    let s = signer();
+    let now = at(NOW) + Duration::from_millis(400);
+    let (token, exp) = s.sign_at("admin", None, now).unwrap();
+    assert_eq!(exp, now + Duration::from_secs(12 * 3600));
+    assert_eq!(
+        s.verify_at(&token, at(NOW)),
+        Ok(("admin".to_owned(), Some((NOW + 12 * 3600) as i64)))
+    );
+    let payload = token.split('.').nth(1).unwrap();
+    assert_eq!(
+        payload,
+        b64(&format!(
+            r#"{{"iss":"lodeline-manager","sub":"admin","exp":{},"nbf":{NOW},"iat":{NOW}}}"#,
+            NOW + 12 * 3600
+        ))
+    );
+}
+
+#[test]
+fn sign_refuses_empty_and_long_subjects() {
+    let s = signer();
+    assert!(s.sign_at("", None, at(NOW)).is_none());
+    assert!(s.sign_at(&"a".repeat(257), None, at(NOW)).is_none());
+    assert!(s.sign_at(&"a".repeat(256), None, at(NOW)).is_some());
+}
+
+#[test]
+fn sign_until_caps_the_session() {
+    let s = signer();
+    let deadline = at(NOW + 60);
+    let (token, exp) = s.sign_at("oidc:subject", Some(deadline), at(NOW)).unwrap();
+    assert_eq!(exp, deadline);
+    assert_eq!(
+        s.verify_at(&token, at(NOW)),
+        Ok(("oidc:subject".to_owned(), Some((NOW + 60) as i64)))
+    );
+    assert!(s
+        .sign_at("oidc:subject", Some(at(NOW - 1)), at(NOW))
+        .is_none());
+    assert!(s.sign_at("oidc:subject", Some(at(NOW)), at(NOW)).is_none());
+}
+
+// Go's password_test.go.
+#[test]
+fn password_matches_as_go_does() {
+    let (password, hash) = (
+        "change-me-on-first-boot",
+        "$2a$10$55LlvKwbVdEZOVEdFBFshuFyd1fqHDSKTTXgK5L890cxNNZxATtg2",
+    );
+    assert!(password_matches(password, hash));
+    for (p, h) in [
+        ("wrong-password", hash),
+        ("change-me-on-first-bootx", hash),
+        ("", hash),
+        (password, ""),
+        ("", ""),
+        (password, "not-a-bcrypt-hash"),
+        (password, "$2a$10$tooshort"),
+    ] {
+        assert!(!password_matches(p, h), "{p} {h}");
+    }
+    let fresh = bcrypt::hash("a-fresh-password", 4).unwrap();
+    assert!(password_matches("a-fresh-password", &fresh));
+    assert!(!password_matches("not-the-password", &fresh));
+}
+
+/// The same password under each prefix Go and the config accept; the parity suite's `$2y$` hash.
+#[test]
+fn password_matches_every_accepted_prefix() {
+    let hash = bcrypt::hash("pw", 4).unwrap();
+    for prefix in ["$2a$", "$2b$", "$2y$"] {
+        assert!(
+            password_matches("pw", &format!("{prefix}{}", &hash[4..])),
+            "{prefix}"
+        );
+    }
+    let parity = "$2y$10$qZuItXlc/MfSA/5vLEKM9uK1tXFuGeLTf6QTheNacl.CkQHYW.AbK";
+    assert!(password_matches("parity-9866c8cb59b2029c", parity));
+}
+
+/// bcrypt reads 72 bytes, NUL bytes included, as Go's x/crypto does.
+#[test]
+fn password_bytes_past_72_are_ignored() {
+    let long = "x".repeat(72);
+    let hash = bcrypt::hash(&long, 4).unwrap();
+    assert!(password_matches(&format!("{long}tail"), &hash));
+    let with_nul = bcrypt::hash("a\0b", 4).unwrap();
+    assert!(password_matches("a\0b", &with_nul));
+    assert!(!password_matches("a\0c", &with_nul));
+}
+
+#[test]
+fn base64url_matches_go_raw_url_encoding() {
+    for (input, want) in [
+        (&b""[..], ""),
+        (b"f", "Zg"),
+        (b"fo", "Zm8"),
+        (b"foo", "Zm9v"),
+        (&[0xfb, 0xff], "-_8"),
+    ] {
+        assert_eq!(base64url(input), want);
+    }
+}
+
+/// The algorithm comes from the verifier, never from the token: an RS256 header over an HMAC
+/// made with the session secret is refused.
+#[test]
+fn rejects_an_rs256_header_over_an_hmac_signature() {
+    let message = format!(
+        "{}.{}",
+        b64(r#"{"alg":"RS256","typ":"JWT"}"#),
+        b64(&valid_claims().to_string())
+    );
+    let key = EncodingKey::from_secret(SECRET.as_bytes());
+    let signature = jsonwebtoken::crypto::sign(message.as_bytes(), &key, Algorithm::HS256).unwrap();
+    assert_eq!(
+        verify(&format!("{message}.{signature}"), NOW),
+        Err(VerifyError::Invalid)
+    );
+}
+
+/// Tokens Go's `SignUntil` printed for these subjects at `NOW` + 0.4 s with a 12 h TTL: Go
+/// escapes `<`, `>`, `&`, U+2028 and U+2029 in the claims and sorts the header keys.
+#[test]
+fn sign_writes_the_token_go_writes() {
+    let go = [
+        (
+            "a<&>b",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJsb2RlbGluZS1tYW5hZ2VyIiwic3ViIjoiYVx1MDAzY1x1MDAyNlx1MDAzZWIiLCJleHAiOjE3NzkyMzUyMDAsIm5iZiI6MTc3OTE5MjAwMCwiaWF0IjoxNzc5MTkyMDAwfQ.y7i5mV9sfAFpSI5O_hI2z15vbcG-hrA2fXcYVuvBqr0",
+        ),
+        (
+            "a<&>b\u{2028}\u{2029}é",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJsb2RlbGluZS1tYW5hZ2VyIiwic3ViIjoiYVx1MDAzY1x1MDAyNlx1MDAzZWJcdTIwMjhcdTIwMjnDqSIsImV4cCI6MTc3OTIzNTIwMCwibmJmIjoxNzc5MTkyMDAwLCJpYXQiOjE3NzkxOTIwMDB9.rW1KQuRVSPobMc_A8ZWDs0WRlAyiGfrbdtOQoqoO3S0",
+        ),
+    ];
+    for (subject, want) in go {
+        let (token, _) = signer()
+            .sign_at(subject, None, at(NOW) + Duration::from_millis(400))
+            .unwrap();
+        assert_eq!(token, want, "{subject}");
+        assert_eq!(verify(&token, NOW), Ok(subject.to_owned()));
+    }
+}
+
+/// Go answered these `nbf` values at `NOW`: past its time range `time.Unix` wraps into the past,
+/// so the token is already valid.
+#[test]
+fn a_not_before_past_gos_time_range_has_passed() {
+    let go = [
+        ("1779192060", false),
+        ("9223371974719178752", false),
+        ("9223371974719179776", true),
+        ("9223372036854775807", true),
+        ("1e19", true),
+        ("1e300", true),
+        ("\"1e300\"", true),
+        ("-1e300", true),
+    ];
+    for (nbf, valid) in go {
+        let t = signed_raw(&format!(
+            r#"{{"iss":"{ISSUER}","sub":"admin","nbf":{nbf}}}"#
+        ));
+        let want = if valid {
+            Ok("admin".to_owned())
+        } else {
+            Err(VerifyError::Invalid)
+        };
+        assert_eq!(verify(&t, NOW), want, "{nbf}");
+    }
+}
+
+#[test]
+fn go_base64_decodes_as_go_does() {
+    let std = |s| go_base64(s, false);
+    let url = |s| go_base64(s, true);
+    assert_eq!(std("QUJD"), Some(b"ABC".to_vec()));
+    assert_eq!(std("QQ=="), Some(b"A".to_vec()));
+    assert_eq!(std("QUI="), Some(b"AB".to_vec()));
+    assert_eq!(std("QU\r\nI="), Some(b"AB".to_vec()));
+    assert_eq!(std(""), Some(Vec::new()));
+    for bad in ["QQ", "QQ=", "Q===", "====", "QQ==QQ==", "QQ-_", "QUI=\0"] {
+        assert_eq!(std(bad), None, "{bad:?}");
+    }
+    assert_eq!(url("QQ"), Some(b"A".to_vec()));
+    assert_eq!(url("QR"), Some(b"A".to_vec())); // Go ignores the unused bits
+    assert_eq!(url("-_8"), Some(vec![0xfb, 0xff]));
+    for bad in ["QQ==", "Q", "+/", "Q Q"] {
+        assert_eq!(url(bad), None, "{bad:?}");
     }
 }

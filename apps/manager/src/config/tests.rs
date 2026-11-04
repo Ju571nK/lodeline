@@ -530,3 +530,30 @@ fn debug_redacts_secrets() {
     assert!(shown.contains("https://lodeline.example:8443"), "{shown}");
     assert!(shown.contains("admin"), "{shown}");
 }
+
+#[test]
+fn trusted_proxies_are_addresses_and_networks() {
+    let mut env = full_valid_env();
+    assert!(load(&env).unwrap().trusted_proxies.is_empty());
+    set(
+        &mut env,
+        "TRUSTED_PROXIES",
+        " 192.0.2.1, 198.51.100.0/24 ,,2001:db8::/32",
+    );
+    let nets: Vec<String> = load(&env)
+        .unwrap()
+        .trusted_proxies
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(nets, ["192.0.2.1/32", "198.51.100.0/24", "2001:db8::/32"]);
+    for bad in ["proxy.example", "198.51.100.0/33", "192.0.2.1:80"] {
+        set(&mut env, "TRUSTED_PROXIES", bad);
+        assert_eq!(
+            load_err(&env),
+            ConfigError::Invalid(format!(
+                "config: TRUSTED_PROXIES: {bad:?} is not an IP address or CIDR network"
+            ))
+        );
+    }
+}

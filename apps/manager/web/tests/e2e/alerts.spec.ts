@@ -1,23 +1,14 @@
 import { expect, type Page, test } from '@playwright/test';
 
-const ADMIN = 'admin';
-const PASSWORD = 'test-password';
-
-async function login(page: Page) {
-  await page.goto('/login');
-  await page.getByLabel('Username').fill(ADMIN);
-  await page.getByLabel('Password').fill(PASSWORD);
-  await page.getByRole('button', { name: /^Sign in$/ }).click();
+/** Each test starts signed in (playwright.config.ts); `/` opens the alerts queue. */
+async function openAlerts(page: Page) {
+  await page.goto('/');
   await expect(page).toHaveURL(/\/alerts/);
 }
 
 test.describe('alerts queue + triage', () => {
-  test.beforeEach(async ({ context }) => {
-    await context.clearCookies();
-  });
-
   test('queue renders at least a few rows from the Mock fixture', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
     // The Mock fixture seeds >= 5 high/critical AI Guard events.
     const rows = page.getByRole('button', { pressed: false }).filter({ hasText: /critical|high/i });
     // Wait for the table to actually paint (poll-driven render).
@@ -25,7 +16,7 @@ test.describe('alerts queue + triage', () => {
   });
 
   test('opening a row reveals the slide-over with the FactGrid', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
 
     // Click the first row that mentions AI Guard.
     const firstRow = page.locator('button:has-text("AI Guard")').first();
@@ -38,7 +29,7 @@ test.describe('alerts queue + triage', () => {
   });
 
   test('hook-script reason renders the 3b.3.1 source_chain breadcrumb', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
 
     // The Mock fixture's bob/codex event carries a destructive_in_hook_script
     // reason with a populated source_chain (contract §14.8). Its row title is
@@ -57,7 +48,7 @@ test.describe('alerts queue + triage', () => {
   });
 
   test('gemini mcp_server_local_command reason surfaces server + command', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
 
     // bob/gemini event (3b.7) carries an mcp_server_local_command reason.
     const row = page.locator('button:has-text("Gemini")').first();
@@ -74,7 +65,7 @@ test.describe('alerts queue + triage', () => {
   });
 
   test('assign + acknowledge persists across reload and updates queue', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
 
     const firstRow = page.locator('button:has-text("AI Guard")').first();
     await firstRow.click();
@@ -102,7 +93,7 @@ test.describe('alerts queue + triage', () => {
   });
 
   test('severity filter "Critical" reduces the visible count', async ({ page }) => {
-    await login(page);
+    await openAlerts(page);
 
     // Wait for the queue to actually paint — the polling fetch happens
     // after first mount, so initial DOM is empty.
@@ -123,9 +114,8 @@ test.describe('alerts queue + triage', () => {
   });
 
   test('"?" opens the keyboard shortcut cheatsheet', async ({ page }) => {
-    await login(page);
-    // Make sure focus is off any input so the global handler fires.
-    await page.locator('body').click();
+    await openAlerts(page);
+    await expect(page.getByRole('heading', { name: 'Alerts', exact: true })).toBeVisible();
     await page.keyboard.press('?');
 
     await expect(page.getByRole('heading', { name: /keyboard shortcuts/i })).toBeVisible();
@@ -141,7 +131,7 @@ async function countAiGuardRows(page: Page): Promise<number> {
 }
 
 test('AI Guard event detail displays observation context and values', async ({ page }) => {
-  await login(page);
+  await openAlerts(page);
   await page.locator('button:has-text("Destructive In Hook Script")').first().click();
   const settings = page.getByRole('region', { name: 'Observed security settings' });
   await expect(settings.getByText('false', { exact: true })).toBeVisible();
