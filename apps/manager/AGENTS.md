@@ -36,6 +36,9 @@ LODELINE_MANAGER_REQUIRE_DIST=1 cargo build --release
 Playwright e2e (`npm run e2e` in `web/`) starts the binary at `MANAGER_BIN`, or
 `../target/release/lodeline-manager` when it is unset.
 
+The parity recorder (`npm run parity` in `web/`) compares the binary's HTTP responses with goldens
+recorded from the Go implementation. See [`web/tests/parity/README.md`](web/tests/parity/README.md).
+
 Until the Rust port lands, the imported specs in `docs/specs/` and some comments still describe
 the Go implementation, and the Playwright e2e suite does not run yet because it needs the Rust
 binary.

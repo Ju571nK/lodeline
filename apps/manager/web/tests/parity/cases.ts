@@ -1,0 +1,959 @@
+/**
+ * The parity table. Rows run top to bottom against one server process, so
+ * the triage rows are a sequence: later rows see the writes of earlier ones.
+ *
+ * Path placeholders, filled from the run before the request is sent:
+ *   {event:N}   mock event ID for recipe index N (EVT#N in goldens)
+ *   {seed-6h}   mock seed shifted by a duration, as RFC3339 seconds
+ *   {asset:js}  the entry script that dist/index.html references
+ */
+
+/** Every route in the Go router at e4fb077: 18 API routes plus the SPA catch-all. */
+export const ROUTES = [
+  'GET /api/health',
+  'POST /api/v1/auth/login',
+  'GET /api/v1/auth/methods',
+  'GET /api/v1/auth/oidc/start',
+  'GET /api/v1/auth/oidc/callback',
+  'POST /api/v1/auth/logout',
+  'GET /api/v1/auth/me',
+  'GET /api/v1/fleet/meta',
+  'GET /api/v1/fleet/healthz',
+  'GET /api/v1/fleet/events',
+  'GET /api/v1/fleet/events/{event_id}',
+  'GET /api/v1/fleet/risk',
+  'GET /api/v1/fleet/compliance',
+  'GET /api/v1/fleet/hosts',
+  'GET /api/v1/fleet/hosts/{host_id}',
+  'POST /api/v1/triage/upsert',
+  'POST /api/v1/triage/note',
+  'GET /api/v1/triage/{host_id}/{event_id}',
+  'GET /*',
+] as const;
+
+export type Route = (typeof ROUTES)[number];
+
+/** Routes that have no success case here, and why. */
+export const NO_SUCCESS_CASE: Partial<Record<Route, string>> = {
+  'GET /api/v1/auth/oidc/start':
+    'needs an HTTPS OIDC provider; the Rust port carries over the Go OIDC unit tests instead',
+  'GET /api/v1/auth/oidc/callback':
+    'needs an HTTPS OIDC provider; the Rust port carries over the Go OIDC unit tests instead',
+};
+
+/** Session cookie a case sends. Crafted forms are signed by the recorder with the test secret. */
+export type Auth =
+  | 'session'
+  | 'none'
+  | 'empty'
+  | 'garbage'
+  | 'expired'
+  | 'expired-wrong-issuer'
+  | 'tampered-payload'
+  | 'wrong-key'
+  | 'alg-none'
+  | 'alg-hs512'
+  | 'wrong-issuer'
+  | 'empty-subject'
+  | 'not-yet-valid'
+  | 'recorder-minted';
+
+/** What the stub upstream answers for the next request from the live-mode manager. */
+export interface UpstreamReply {
+  status: number;
+  headers?: Record<string, string>;
+  json?: unknown;
+  text?: string;
+}
+
+export interface Case {
+  name: string;
+  route: Route;
+  /** `ok` cases succeed; `error` cases exercise a failure path of the same route. */
+  outcome: 'ok' | 'error';
+  method: string;
+  path: string;
+  /** `live` talks to the manager wired to the stub upstream instead of the mock fleet. */
+  server?: 'mock' | 'live';
+  auth?: Auth;
+  headers?: Record<string, string>;
+  /** Sent as JSON with `Content-Type: application/json`. */
+  json?: unknown;
+  /** Sent verbatim with no `Content-Type` header. */
+  raw?: string;
+  upstream?: UpstreamReply;
+  /** Requests sent first and not recorded, for example to fill a rate-limit window. */
+  prelude?: { count: number; headers?: Record<string, string>; raw?: string };
+  /** The response must take at least this long. */
+  minMs?: number;
+  /** Reason the body is not recorded. */
+  skipBody?: string;
+}
+
+const H_ALICE = '5a7c3e91-aaaa-bbbb-cccc-111111111111';
+const H_BOB = '5a7c3e91-aaaa-bbbb-cccc-222222222222';
+const H_DAVE = '5a7c3e91-aaaa-bbbb-cccc-444444444444';
+const H_MISSING = '5a7c3e91-aaaa-bbbb-cccc-999999999999';
+const EVT_MISSING = '00000000-0000-7000-8000-000000000000';
+const SNAPSHOT = { kind: 'ai_guard_risk_assessed', tool: 'claude_code', score: 7.2 };
+
+const LIVE_TS = '2026-01-02T03:04:05Z';
+const LIVE_EVENT_ID = '01900000-0000-7000-8000-000000000001';
+const LIVE_EVENT = {
+  schema_version: 1,
+  event_id: LIVE_EVENT_ID,
+  ts: LIVE_TS,
+  host_id: H_ALICE,
+  agent_version: '0.12.4',
+  severity: 'warn',
+  source: { kind: 'file_system' },
+  subject: { kind: 'path', path: '/home/user/.claude/settings.json' },
+  evidence: { kind: 'future_variant', payload: { nested: [1, 2, 3] } },
+  target_id: null,
+  added_later: 'kept or dropped',
+};
+const LIVE_ALERTS = {
+  evidence_kinds: ['ai_guard_risk_assessed'],
+  ai_guard_buckets: ['high', 'critical'],
+  additional_kinds: [],
+};
+
+/** One `<route> without a session` row per authenticated route. */
+function noSession(route: Route, method: string, path: string, name: string): Case {
+  return { name, route, outcome: 'error', method, path, auth: 'none' };
+}
+
+function sessionForm(auth: Auth): Case {
+  return {
+    name: `session-${auth}`,
+    route: 'GET /api/v1/auth/me',
+    outcome: auth === 'recorder-minted' ? 'ok' : 'error',
+    method: 'GET',
+    path: '/api/v1/auth/me',
+    auth,
+  };
+}
+
+function upstream(
+  name: string,
+  route: Route,
+  path: string,
+  reply: UpstreamReply,
+  outcome: 'ok' | 'error' = 'error',
+): Case {
+  return { name, route, outcome, method: 'GET', path, server: 'live', upstream: reply };
+}
+
+export const CASES: Case[] = [
+  // Health and SPA.
+  { name: 'health', route: 'GET /api/health', outcome: 'ok', method: 'GET', path: '/api/health' },
+  {
+    name: 'health-wrong-method',
+    route: 'GET /api/health',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/health',
+  },
+  { name: 'spa-root', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/' },
+  { name: 'spa-deep-link', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/alerts/abc' },
+  { name: 'spa-asset', route: 'GET /*', outcome: 'ok', method: 'GET', path: '{asset:js}' },
+  { name: 'spa-favicon', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/favicon.svg' },
+  { name: 'spa-index-html', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/index.html' },
+  {
+    name: 'spa-assets-dir',
+    route: 'GET /*',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/assets/',
+    skipBody: 'the listing names every hashed asset file, so it changes with each SPA build',
+  },
+  { name: 'spa-post-root', route: 'GET /*', outcome: 'ok', method: 'POST', path: '/' },
+  { name: 'spa-unknown-api', route: 'GET /*', outcome: 'error', method: 'GET', path: '/api/x' },
+  {
+    name: 'spa-unknown-api-v1',
+    route: 'GET /*',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/nope',
+  },
+
+  // Auth.
+  {
+    name: 'auth-methods-oidc-off',
+    route: 'GET /api/v1/auth/methods',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/auth/methods',
+    auth: 'none',
+  },
+  {
+    name: 'auth-methods-wrong-method',
+    route: 'GET /api/v1/auth/methods',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/methods',
+    auth: 'none',
+  },
+  {
+    name: 'oidc-start-oidc-off',
+    route: 'GET /api/v1/auth/oidc/start',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/auth/oidc/start',
+    auth: 'none',
+  },
+  {
+    name: 'oidc-start-wrong-method',
+    route: 'GET /api/v1/auth/oidc/start',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/oidc/start',
+    auth: 'none',
+  },
+  {
+    name: 'oidc-callback-oidc-off',
+    route: 'GET /api/v1/auth/oidc/callback',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/auth/oidc/callback?code=c&state=s',
+    auth: 'none',
+  },
+  {
+    name: 'login-ok',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    json: { username: '{admin}', password: '{password}' },
+  },
+  {
+    name: 'login-wrong-password',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    json: { username: '{admin}', password: 'not-the-password' },
+    minMs: 250,
+  },
+  {
+    name: 'login-wrong-username',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    json: { username: 'someone-else', password: '{password}' },
+    minMs: 250,
+  },
+  {
+    name: 'login-empty-credentials',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    json: {},
+    minMs: 250,
+  },
+  {
+    name: 'login-malformed-json',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    raw: '{"username":',
+  },
+  {
+    name: 'login-no-body',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    raw: '',
+  },
+  {
+    name: 'login-wrong-method',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+  },
+  {
+    // Go takes the client address from X-Forwarded-For (chi RealIP), so a
+    // documentation address puts these requests in a non-loopback window.
+    name: 'login-rate-limited',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    headers: { 'X-Forwarded-For': '203.0.113.7' },
+    raw: '{',
+    prelude: { count: 10, headers: { 'X-Forwarded-For': '203.0.113.7' }, raw: '{' },
+  },
+  {
+    name: 'me-ok',
+    route: 'GET /api/v1/auth/me',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/auth/me',
+  },
+  noSession('GET /api/v1/auth/me', 'GET', '/api/v1/auth/me', 'me-no-session'),
+  sessionForm('empty'),
+  sessionForm('garbage'),
+  sessionForm('expired'),
+  sessionForm('expired-wrong-issuer'),
+  sessionForm('tampered-payload'),
+  sessionForm('wrong-key'),
+  sessionForm('alg-none'),
+  sessionForm('alg-hs512'),
+  sessionForm('wrong-issuer'),
+  sessionForm('empty-subject'),
+  sessionForm('not-yet-valid'),
+  sessionForm('recorder-minted'),
+  {
+    name: 'logout-ok',
+    route: 'POST /api/v1/auth/logout',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/auth/logout',
+  },
+  noSession('POST /api/v1/auth/logout', 'POST', '/api/v1/auth/logout', 'logout-no-session'),
+  {
+    name: 'live-login-secure-cookie',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    server: 'live',
+    auth: 'none',
+    json: { username: '{admin}', password: '{password}' },
+  },
+  {
+    name: 'live-logout-secure-cookie',
+    route: 'POST /api/v1/auth/logout',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/auth/logout',
+    server: 'live',
+  },
+  {
+    name: 'me-after-logout',
+    route: 'GET /api/v1/auth/me',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/auth/me',
+  },
+
+  // Fleet reads against the mock.
+  {
+    name: 'fleet-meta',
+    route: 'GET /api/v1/fleet/meta',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/meta',
+  },
+  noSession('GET /api/v1/fleet/meta', 'GET', '/api/v1/fleet/meta', 'fleet-meta-no-session'),
+  {
+    name: 'fleet-healthz',
+    route: 'GET /api/v1/fleet/healthz',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/healthz',
+  },
+  noSession(
+    'GET /api/v1/fleet/healthz',
+    'GET',
+    '/api/v1/fleet/healthz',
+    'fleet-healthz-no-session',
+  ),
+  {
+    name: 'fleet-events',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events',
+  },
+  {
+    name: 'fleet-events-page',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events?limit=3&cursor={event:4}',
+  },
+  {
+    name: 'fleet-events-filters',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/events?host_id=${H_ALICE}&host_id=${H_BOB}&severity=warn&since={seed-12h}&min_ai_guard_bucket=high`,
+  },
+  {
+    name: 'fleet-events-until-comma-hosts',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/events?host_id=${H_ALICE},${H_DAVE}&until={seed-6h}&limit=500`,
+  },
+  {
+    name: 'fleet-events-bad-limit',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/events?limit=ten',
+  },
+  {
+    name: 'fleet-events-bad-since',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/events?since=yesterday',
+  },
+  {
+    name: 'fleet-events-bad-until',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/events?until=2026-01-01',
+  },
+  noSession('GET /api/v1/fleet/events', 'GET', '/api/v1/fleet/events', 'fleet-events-no-session'),
+  {
+    name: 'fleet-event',
+    route: 'GET /api/v1/fleet/events/{event_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events/{event:3}',
+  },
+  {
+    name: 'fleet-event-not-found',
+    route: 'GET /api/v1/fleet/events/{event_id}',
+    outcome: 'error',
+    method: 'GET',
+    path: `/api/v1/fleet/events/${EVT_MISSING}`,
+  },
+  noSession(
+    'GET /api/v1/fleet/events/{event_id}',
+    'GET',
+    '/api/v1/fleet/events/{event:3}',
+    'fleet-event-no-session',
+  ),
+  {
+    name: 'fleet-risk',
+    route: 'GET /api/v1/fleet/risk',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/risk',
+  },
+  {
+    name: 'fleet-risk-filters',
+    route: 'GET /api/v1/fleet/risk',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/risk?min_bucket=high&tool=claude_code,continue_dev',
+  },
+  {
+    name: 'fleet-risk-page',
+    route: 'GET /api/v1/fleet/risk',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/risk?limit=1&cursor=${H_ALICE}`,
+  },
+  {
+    name: 'fleet-risk-bad-limit',
+    route: 'GET /api/v1/fleet/risk',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/risk?limit=1.5',
+  },
+  noSession('GET /api/v1/fleet/risk', 'GET', '/api/v1/fleet/risk', 'fleet-risk-no-session'),
+  {
+    name: 'fleet-compliance',
+    route: 'GET /api/v1/fleet/compliance',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/compliance',
+  },
+  {
+    name: 'fleet-compliance-page',
+    route: 'GET /api/v1/fleet/compliance',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/compliance?limit=2',
+  },
+  {
+    name: 'fleet-compliance-bad-limit',
+    route: 'GET /api/v1/fleet/compliance',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/compliance?limit=x',
+  },
+  noSession(
+    'GET /api/v1/fleet/compliance',
+    'GET',
+    '/api/v1/fleet/compliance',
+    'fleet-compliance-no-session',
+  ),
+  {
+    name: 'fleet-hosts',
+    route: 'GET /api/v1/fleet/hosts',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/hosts',
+  },
+  {
+    name: 'fleet-hosts-filters',
+    route: 'GET /api/v1/fleet/hosts',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/hosts?status=healthy,stale&sort=risk&limit=2',
+  },
+  {
+    name: 'fleet-hosts-cursor-past-end',
+    route: 'GET /api/v1/fleet/hosts',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/hosts?cursor=5a7c3e91-aaaa-bbbb-cccc-555555555555`,
+  },
+  {
+    name: 'fleet-hosts-bad-limit',
+    route: 'GET /api/v1/fleet/hosts',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/hosts?limit=-',
+  },
+  noSession('GET /api/v1/fleet/hosts', 'GET', '/api/v1/fleet/hosts', 'fleet-hosts-no-session'),
+  {
+    name: 'fleet-host',
+    route: 'GET /api/v1/fleet/hosts/{host_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/hosts/${H_ALICE}`,
+  },
+  {
+    name: 'fleet-host-no-meta',
+    route: 'GET /api/v1/fleet/hosts/{host_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/hosts/${H_DAVE}`,
+  },
+  {
+    name: 'fleet-host-not-found',
+    route: 'GET /api/v1/fleet/hosts/{host_id}',
+    outcome: 'error',
+    method: 'GET',
+    path: `/api/v1/fleet/hosts/${H_MISSING}`,
+  },
+  noSession(
+    'GET /api/v1/fleet/hosts/{host_id}',
+    'GET',
+    `/api/v1/fleet/hosts/${H_ALICE}`,
+    'fleet-host-no-session',
+  ),
+
+  // Triage write sequence on EVT#3 (an alice-mbp event in the mock), then reads.
+  {
+    name: 'triage-get-before-insert',
+    route: 'GET /api/v1/triage/{host_id}/{event_id}',
+    outcome: 'error',
+    method: 'GET',
+    path: `/api/v1/triage/${H_ALICE}/{event:3}`,
+  },
+  {
+    name: 'triage-note-missing-row',
+    route: 'POST /api/v1/triage/note',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/triage/note',
+    json: { host_id: H_ALICE, event_id: '{event:3}', body: 'first look' },
+  },
+  {
+    name: 'triage-upsert-insert-without-snapshot',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_ALICE, event_id: '{event:3}', status: 'open' },
+  },
+  {
+    name: 'triage-upsert-insert',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_ALICE, event_id: '{event:3}', status: 'open', evidence_snapshot: SNAPSHOT },
+  },
+  {
+    name: 'triage-upsert-status',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_ALICE, event_id: '{event:3}', status: 'acknowledged' },
+  },
+  {
+    name: 'triage-upsert-assign',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_ALICE, event_id: '{event:3}', assignee: 'analyst-1' },
+  },
+  {
+    name: 'triage-upsert-clear-assignee',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_ALICE, event_id: '{event:3}', clear_assignee: true },
+  },
+  {
+    name: 'triage-upsert-no-content-type',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    raw: `{"host_id":"${H_ALICE}","event_id":"{event:3}","status":"investigating"}`,
+  },
+  {
+    name: 'triage-upsert-invalid-status',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_ALICE, event_id: '{event:3}', status: 'closed' },
+  },
+  {
+    name: 'triage-upsert-missing-fields',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_ALICE, status: 'open' },
+  },
+  {
+    name: 'triage-upsert-malformed-json',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    raw: '{"host_id":',
+  },
+  noSession(
+    'POST /api/v1/triage/upsert',
+    'POST',
+    '/api/v1/triage/upsert',
+    'triage-upsert-no-session',
+  ),
+  {
+    name: 'triage-note',
+    route: 'POST /api/v1/triage/note',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/note',
+    json: { host_id: H_ALICE, event_id: '{event:3}', body: 'Checked the hook <script> & "quotes"' },
+  },
+  {
+    name: 'triage-note-second',
+    route: 'POST /api/v1/triage/note',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/note',
+    json: { host_id: H_ALICE, event_id: '{event:3}', body: 'Second note' },
+  },
+  {
+    name: 'triage-note-missing-fields',
+    route: 'POST /api/v1/triage/note',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/triage/note',
+    json: { host_id: H_ALICE, event_id: '{event:3}' },
+  },
+  {
+    name: 'triage-note-malformed-json',
+    route: 'POST /api/v1/triage/note',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/triage/note',
+    raw: 'not json',
+  },
+  noSession('POST /api/v1/triage/note', 'POST', '/api/v1/triage/note', 'triage-note-no-session'),
+  {
+    name: 'triage-get',
+    route: 'GET /api/v1/triage/{host_id}/{event_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/triage/${H_ALICE}/{event:3}`,
+  },
+  {
+    name: 'triage-get-wrong-host',
+    route: 'GET /api/v1/triage/{host_id}/{event_id}',
+    outcome: 'error',
+    method: 'GET',
+    path: `/api/v1/triage/${H_BOB}/{event:3}`,
+  },
+  noSession(
+    'GET /api/v1/triage/{host_id}/{event_id}',
+    'GET',
+    `/api/v1/triage/${H_ALICE}/{event:3}`,
+    'triage-get-no-session',
+  ),
+  {
+    name: 'fleet-events-with-triage',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/events?host_id=${H_ALICE}`,
+  },
+  {
+    name: 'fleet-event-with-triage',
+    route: 'GET /api/v1/fleet/events/{event_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events/{event:3}',
+  },
+
+  // Live mode: the manager reads the stub upstream.
+  upstream(
+    'live-meta-legacy-license',
+    'GET /api/v1/fleet/meta',
+    '/api/v1/fleet/meta',
+    {
+      status: 200,
+      json: {
+        server_version: '0.8.3',
+        schema_version: 1,
+        ts: LIVE_TS,
+        alerts_definition_default: LIVE_ALERTS,
+        license: { current_host_count: 7, active_window_days: 30, tier: 'oss' },
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-meta-fleet',
+    'GET /api/v1/fleet/meta',
+    '/api/v1/fleet/meta',
+    {
+      status: 200,
+      json: {
+        server_version: '0.12.4',
+        schema_version: 1,
+        ts: LIVE_TS,
+        alerts_definition_default: LIVE_ALERTS,
+        fleet: { active_host_count: 3, active_window_days: 14 },
+        audit_head: { seq: 9, hash: 'h', sig: 's', pubkey_id: 'k1', pubkey: 'ed25519:AAAA' },
+        license: { current_host_count: 99, active_window_days: 1 },
+        added_later: true,
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-healthz',
+    'GET /api/v1/fleet/healthz',
+    '/api/v1/fleet/healthz',
+    { status: 200, json: { status: 'ok', ts: LIVE_TS } },
+    'ok',
+  ),
+  upstream(
+    'live-events-query',
+    'GET /api/v1/fleet/events',
+    `/api/v1/fleet/events?limit=5&cursor=c1&host_id=${H_ALICE}&host_id=${H_BOB}&since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00%2B09:00&evidence_kind=a,b&severity=warn&source=agent&min_ai_guard_bucket=high&unknown=1`,
+    { status: 200, json: { events: [LIVE_EVENT], next_cursor: LIVE_EVENT_ID } },
+    'ok',
+  ),
+  upstream(
+    'live-event',
+    'GET /api/v1/fleet/events/{event_id}',
+    `/api/v1/fleet/events/${LIVE_EVENT_ID}`,
+    { status: 200, json: LIVE_EVENT },
+    'ok',
+  ),
+  upstream(
+    'live-risk-query',
+    'GET /api/v1/fleet/risk',
+    '/api/v1/fleet/risk?limit=2&cursor=c2&tool=codex,gemini&min_bucket=medium',
+    {
+      status: 200,
+      json: {
+        rows: [
+          {
+            host_id: H_ALICE,
+            hostname: null,
+            score: 8,
+            bucket: 'critical',
+            top_tool: 'codex',
+            reasons_count: 2,
+            assessed_ts: LIVE_TS,
+            open_alert_count_24h: 1,
+          },
+        ],
+        next_cursor: null,
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-compliance-query',
+    'GET /api/v1/fleet/compliance',
+    '/api/v1/fleet/compliance?limit=7&cursor=c3',
+    {
+      status: 200,
+      json: {
+        rows: [
+          {
+            host_id: H_ALICE,
+            hostname: 'alice-mbp',
+            last_applied_policy_version: 4,
+            server_current_policy_version: 5,
+            version_drift: 1,
+            policy_expired_active: false,
+            last_policy_reload_ts: null,
+            signature_failures_24h: 0,
+          },
+        ],
+        next_cursor: 'c4',
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-hosts-query',
+    'GET /api/v1/fleet/hosts',
+    '/api/v1/fleet/hosts?limit=3&cursor=c5&status=stale&bucket=high,critical&sort=host_id',
+    {
+      status: 200,
+      json: {
+        hosts: [
+          {
+            host_id: H_ALICE,
+            hostname: null,
+            agent_version: '0.12.4',
+            last_seen_ts: LIVE_TS,
+            status: 'stale',
+            current_risk: null,
+            open_event_counts_24h: {},
+          },
+        ],
+        next_cursor: null,
+        total_estimated: 1,
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-hosts-missing-fields',
+    'GET /api/v1/fleet/hosts',
+    '/api/v1/fleet/hosts',
+    { status: 200, json: { hosts: [{ host_id: H_ALICE }] } },
+    'ok',
+  ),
+  upstream(
+    'live-host',
+    'GET /api/v1/fleet/hosts/{host_id}',
+    `/api/v1/fleet/hosts/${H_ALICE}`,
+    {
+      status: 200,
+      json: {
+        host_id: H_ALICE,
+        hostname: 'alice-mbp',
+        agent_version: '0.12.4',
+        last_seen_ts: LIVE_TS,
+        status: 'healthy',
+        current_risk: {
+          max_score: 4.5,
+          max_bucket: 'medium',
+          by_tool: { codex: { score: 4.5, bucket: 'medium', assessed_ts: LIVE_TS } },
+        },
+        open_event_counts_24h: { warn: 2 },
+        host_meta: null,
+        policy_state: {
+          last_applied_policy_version: 3,
+          policy_expired_active: true,
+          last_policy_reload_ts: LIVE_TS,
+        },
+        agent_health: {
+          recent_channel_stalls_24h: 0,
+          recent_watcher_degraded_24h: 1,
+          recent_sender_lag_critical_24h: 0,
+          last_heartbeat_ts: null,
+          hash_p99_ms_latest: 12,
+          jsonl_above_soft_floor_latest: null,
+        },
+        ai_guard: {
+          by_tool: {
+            codex: {
+              score: 4.5,
+              bucket: 'medium',
+              assessed_ts: LIVE_TS,
+              is_reattestation: false,
+              scope: { kind: 'user_global' },
+              reasons: [{ kind: 'k' }],
+            },
+            gemini: {
+              controls: [],
+              score: 1,
+              bucket: 'low',
+              assessed_ts: LIVE_TS,
+              is_reattestation: true,
+              scope: { kind: 'project', path: '/p' },
+              reasons: [],
+            },
+          },
+        },
+        added_later: 1,
+      },
+    },
+    'ok',
+  ),
+  upstream('upstream-401', 'GET /api/v1/fleet/events', '/api/v1/fleet/events', {
+    status: 401,
+    json: { error: { code: 'unauthorized', message: 'bad token' } },
+  }),
+  upstream('upstream-404-list', 'GET /api/v1/fleet/risk', '/api/v1/fleet/risk', {
+    status: 404,
+    text: 'not found',
+  }),
+  upstream(
+    'upstream-404-event',
+    'GET /api/v1/fleet/events/{event_id}',
+    `/api/v1/fleet/events/${LIVE_EVENT_ID}`,
+    { status: 404, json: { error: { code: 'not_found', message: 'no such event' } } },
+  ),
+  upstream(
+    'upstream-404-host',
+    'GET /api/v1/fleet/hosts/{host_id}',
+    `/api/v1/fleet/hosts/${H_ALICE}`,
+    {
+      status: 404,
+      text: '',
+    },
+  ),
+  upstream('upstream-503-healthz', 'GET /api/v1/fleet/healthz', '/api/v1/fleet/healthz', {
+    status: 503,
+    headers: { 'Retry-After': '7' },
+    json: { error: { code: 'service_unavailable', message: 'rebuilding' } },
+  }),
+  upstream('upstream-503-retried', 'GET /api/v1/fleet/compliance', '/api/v1/fleet/compliance', {
+    status: 503,
+    headers: { 'Retry-After': '1' },
+    json: { error: { code: 'service_unavailable', message: 'rebuilding' } },
+  }),
+  upstream('upstream-500-json', 'GET /api/v1/fleet/hosts', '/api/v1/fleet/hosts', {
+    status: 500,
+    json: { error: { code: 'internal', message: 'upstream detail stays upstream' } },
+  }),
+  upstream('upstream-500-text', 'GET /api/v1/fleet/meta', '/api/v1/fleet/meta', {
+    status: 500,
+    text: 'panic at http://upstream.invalid/v1/meta',
+  }),
+  upstream('upstream-bad-json', 'GET /api/v1/fleet/events', '/api/v1/fleet/events', {
+    status: 200,
+    text: '{"events": [',
+  }),
+];
