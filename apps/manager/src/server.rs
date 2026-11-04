@@ -9,12 +9,14 @@ use std::task::{Context, Poll};
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::handler::Handler;
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, MethodRouter};
 use axum::Router;
 use hyper::body::Frame;
+use hyper::ext::ReasonPhrase;
+use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::auth::{require_auth, Signer};
 use crate::{config, spa};
@@ -73,12 +75,19 @@ pub fn router(state: AppState) -> Router {
         let axum_path = path.replace('{', ":").replace('}', "");
         router = router.route(&axum_path, endpoint(method, path, access, &state));
     }
+    with_middleware(router.fallback(fallback).with_state(state))
+}
+
+/// Go's middleware order: the server's own 400 answers, then the access log, chi's `Recoverer`
+/// and the security headers.
+fn with_middleware(router: Router) -> Router {
     router
-        .fallback(fallback)
-        .with_state(state)
+        .layer(CatchPanicLayer::custom(|_| {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }))
         .layer(middleware::map_response(security_headers))
         .layer(middleware::from_fn(access_log))
-        .layer(middleware::from_fn(reject_bad_escapes))
+        .layer(middleware::from_fn(reject_bad_requests))
 }
 
 fn endpoint(
@@ -217,21 +226,40 @@ async fn access_log(req: Request, next: Next) -> Response {
     res
 }
 
-/// Go's HTTP server refuses a path with a malformed percent escape before any handler runs,
-/// so this answer has no security headers and is not logged.
-async fn reject_bad_escapes(req: Request, next: Next) -> Response {
-    if config::unescape(req.uri().path()).is_some() {
+/// Requests Go's HTTP server refuses before any handler runs, so these answers have no security
+/// headers and are not logged: a path with a malformed percent escape, more than one `Host`, no
+/// `Host` on HTTP/1.1, and a malformed `Host`.
+async fn reject_bad_requests(req: Request, next: Next) -> Response {
+    let hosts: Vec<_> = req.headers().get_all(header::HOST).iter().collect();
+    let host_byte = |b: &u8| b.is_ascii_alphanumeric() || b"!$%&'()*+,-.:;=[]_~".contains(b);
+    let reason = if config::unescape(req.uri().path()).is_none() || hosts.len() > 1 {
+        "Bad Request"
+    } else if hosts.is_empty()
+        && req.version() == Version::HTTP_11
+        && req.method() != Method::CONNECT
+    {
+        "Bad Request: missing required Host header"
+    } else if hosts
+        .first()
+        .is_some_and(|h| !h.as_bytes().iter().all(host_byte))
+    {
+        "Bad Request: malformed Host header"
+    } else {
         return next.run(req).await;
-    }
-    (
+    };
+    let mut res = (
         StatusCode::BAD_REQUEST,
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
             (header::CONNECTION, "close"),
         ],
-        "400 Bad Request",
+        format!("400 {reason}"),
     )
-        .into_response()
+        .into_response();
+    // Go puts the whole reason in the status line too.
+    res.extensions_mut()
+        .insert(ReasonPhrase::from_static(reason.as_bytes()));
+    res
 }
 
 #[cfg(test)]

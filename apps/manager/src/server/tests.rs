@@ -23,14 +23,18 @@ fn session(exp: i64) -> String {
 }
 
 async fn send(method: Method, uri: &str, cookie: Option<&str>) -> (Response, String) {
-    let mut req = Request::builder().method(method).uri(uri);
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::HOST, "console.example");
     if let Some(cookie) = cookie {
         req = req.header(header::COOKIE, cookie);
     }
-    let res = app()
-        .oneshot(req.body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    call(app(), req.body(Body::empty()).unwrap()).await
+}
+
+async fn call(app: Router, req: Request) -> (Response, String) {
+    let res = app.oneshot(req).await.unwrap();
     let (parts, body) = res.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
     (
@@ -170,6 +174,72 @@ async fn a_bad_percent_escape_is_refused_before_routing() {
         assert_eq!(body, "400 Bad Request");
         assert!(!res.headers().contains_key(header::CONTENT_SECURITY_POLICY));
     }
+}
+
+#[tokio::test]
+async fn host_headers_are_checked_before_routing_as_go_does() {
+    let cases: [(Version, &[&str], &str); 5] = [
+        (
+            Version::HTTP_11,
+            &[],
+            "400 Bad Request: missing required Host header",
+        ),
+        (Version::HTTP_11, &["a", "b"], "400 Bad Request"),
+        (Version::HTTP_10, &["a", "b"], "400 Bad Request"),
+        (
+            Version::HTTP_11,
+            &["a b"],
+            "400 Bad Request: malformed Host header",
+        ),
+        (
+            Version::HTTP_10,
+            &["a/b"],
+            "400 Bad Request: malformed Host header",
+        ),
+    ];
+    for (version, hosts, want) in cases {
+        let mut req = Request::builder().uri("/api/health").version(version);
+        for host in hosts {
+            req = req.header(header::HOST, *host);
+        }
+        let (res, body) = call(app(), req.body(Body::empty()).unwrap()).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "{version:?} {hosts:?}"
+        );
+        assert_eq!(body, want, "{version:?} {hosts:?}");
+        assert!(!res.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+    }
+    for (version, host) in [
+        (Version::HTTP_10, None),
+        (Version::HTTP_11, Some("[::1]:8080")),
+    ] {
+        let mut req = Request::builder().uri("/api/health").version(version);
+        if let Some(host) = host {
+            req = req.header(header::HOST, host);
+        }
+        let (res, _) = call(app(), req.body(Body::empty()).unwrap()).await;
+        assert_eq!(res.status(), StatusCode::OK, "{version:?} {host:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_handler_gets_chi_recoverer_500_with_security_headers() {
+    let boom = Router::new().route(
+        "/boom",
+        axum::routing::get(|| async { panic!("handler panicked on purpose") as Response }),
+    );
+    let req = Request::builder()
+        .uri("/boom")
+        .header(header::HOST, "console.example")
+        .body(Body::empty())
+        .unwrap();
+    let (res, body) = call(with_middleware(boom), req).await;
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, "");
+    assert!(!res.headers().contains_key(header::CONTENT_TYPE));
+    assert_security_headers(&res, "panic");
 }
 
 /// Every route in the router has a row in the parity table, and the other way round.

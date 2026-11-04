@@ -36,6 +36,7 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-graceful", "service", "http1"] }
 # Go's `:port` listener is dual-stack; std and tokio cannot turn IPV6_V6ONLY off.
 socket2 = "0.6"
+tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
