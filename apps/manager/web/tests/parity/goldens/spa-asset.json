@@ -6,12 +6,13 @@
   },
   "status": 200,
   "headers": {
-    "content-type": "text/javascript; charset=utf-8",
+    "accept-ranges": "bytes",
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
-    "x-frame-options": "DENY",
+    "content-type": "text/javascript; charset=utf-8",
+    "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer"
+    "x-frame-options": "DENY"
   },
   "cookies": [],
-  "body": "<dist:assets/index-<hash>.js>"
+  "body": "<dist:{asset:js}>"
 }

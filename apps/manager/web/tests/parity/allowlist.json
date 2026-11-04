@@ -1,12 +1,12 @@
 [
   {
-    "case": "*",
+    "cases": ["fleet-meta", "live-meta-fleet", "live-meta-legacy-license"],
     "path": "body.audit_head",
     "rule": "null-or-absent",
     "reason": "Go omits a missing audit head (omitempty); the SPA type is `audit_head?: AuditHead | null` (src/api/fleet.ts), so null and absent render the same."
   },
   {
-    "case": "*",
+    "cases": ["fleet-host", "fleet-host-no-meta", "live-host"],
     "path": "body.ai_guard.by_tool.*.controls",
     "rule": "null-or-absent",
     "reason": "Go omits unreported controls (omitempty); the SPA type is `controls?: AiGuardControl[] | null` and documents absent and null as unreported (src/api/fleet.ts)."

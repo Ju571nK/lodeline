@@ -4,7 +4,7 @@
  *
  * Path placeholders, filled from the run before the request is sent:
  *   {event:N}   mock event ID for recipe index N (EVT#N in goldens)
- *   {seed-6h}   mock seed shifted by a duration, as RFC3339 seconds
+ *   {seed-6h}   mock seed shifted back by hours (h) or minutes (m), as RFC3339 seconds
  *   {asset:js}  the entry script that dist/index.html references
  */
 
@@ -56,7 +56,11 @@ export type Auth =
   | 'wrong-issuer'
   | 'empty-subject'
   | 'not-yet-valid'
-  | 'recorder-minted';
+  | 'recorder-minted'
+  | 'no-exp'
+  | 'expired-5s'
+  | 'not-yet-valid-5s'
+  | 'issued-in-5s';
 
 /** What the stub upstream answers for the next request from the live-mode manager. */
 export interface UpstreamReply {
@@ -79,15 +83,26 @@ export interface Case {
   headers?: Record<string, string>;
   /** Sent as JSON with `Content-Type: application/json`. */
   json?: unknown;
-  /** Sent verbatim with no `Content-Type` header. */
+  /** Sent verbatim, with a `Content-Type` header only when `headers` names one. */
   raw?: string;
   upstream?: UpstreamReply;
   /** Requests sent first and not recorded, for example to fill a rate-limit window. */
-  prelude?: { count: number; headers?: Record<string, string>; raw?: string };
-  /** The response must take at least this long. */
+  prelude?: PreludeStep[];
+  /** The response must take at least, or at most, this long. */
   minMs?: number;
-  /** Reason the body is not recorded. */
-  skipBody?: string;
+  maxMs?: number;
+  /** The body is a directory listing; see recordListing in run.parity.ts. */
+  listing?: boolean;
+}
+
+/** `count` requests (default 1) with the case's auth; each must answer `status`. */
+export interface PreludeStep {
+  count?: number;
+  status: number;
+  method?: string;
+  path?: string;
+  headers?: Record<string, string>;
+  raw?: string;
 }
 
 const H_ALICE = '5a7c3e91-aaaa-bbbb-cccc-111111111111';
@@ -134,6 +149,25 @@ function sessionForm(auth: Auth): Case {
   };
 }
 
+/** Ten attempts that the limiter lets through, then one it refuses. */
+function limited(
+  name: string,
+  headers: Record<string, string>,
+  prelude: PreludeStep[] = [{ count: 10, status: 400, headers }],
+): Case {
+  return {
+    name,
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    headers,
+    raw: '{',
+    prelude: prelude.map((p) => ({ raw: '{', ...p })),
+  };
+}
+
 function upstream(
   name: string,
   route: Route,
@@ -165,7 +199,33 @@ export const CASES: Case[] = [
     outcome: 'ok',
     method: 'GET',
     path: '/assets/',
-    skipBody: 'the listing names every hashed asset file, so it changes with each SPA build',
+    listing: true,
+  },
+  { name: 'spa-assets-no-slash', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/assets' },
+  { name: 'spa-head-root', route: 'GET /*', outcome: 'ok', method: 'HEAD', path: '/' },
+  { name: 'spa-head-asset', route: 'GET /*', outcome: 'ok', method: 'HEAD', path: '{asset:js}' },
+  {
+    name: 'spa-asset-range',
+    route: 'GET /*',
+    outcome: 'ok',
+    method: 'GET',
+    path: '{asset:js}',
+    headers: { Range: 'bytes=0-99' },
+  },
+  {
+    name: 'spa-dot-segment',
+    route: 'GET /*',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/assets/../favicon.svg',
+  },
+  { name: 'spa-double-slash', route: 'GET /*', outcome: 'ok', method: 'GET', path: '//api/health' },
+  {
+    name: 'api-trailing-slash',
+    route: 'GET /*',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/meta/',
   },
   { name: 'spa-post-root', route: 'GET /*', outcome: 'ok', method: 'POST', path: '/' },
   { name: 'spa-unknown-api', route: 'GET /*', outcome: 'error', method: 'GET', path: '/api/x' },
@@ -284,17 +344,132 @@ export const CASES: Case[] = [
     auth: 'none',
   },
   {
-    // Go takes the client address from X-Forwarded-For (chi RealIP), so a
-    // documentation address puts these requests in a non-loopback window.
-    name: 'login-rate-limited',
+    name: 'login-trailing-data',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    headers: { 'Content-Type': 'application/json' },
+    raw: '{"username":"{admin}","password":"{password}"} {"username":"x"} trailing',
+  },
+  {
+    name: 'login-key-case',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    json: { USERNAME: '{admin}', Password: '{password}' },
+  },
+  {
+    name: 'login-options',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'OPTIONS',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+  },
+
+  // Login limiter: 10 per minute per client address, shared by login and the two OIDC routes.
+  // Go reads the address from True-Client-IP, X-Real-IP, then the first X-Forwarded-For hop
+  // (chi RealIP) and never limits loopback. Each case uses its own documentation address.
+  limited('login-rate-limited', { 'X-Forwarded-For': '203.0.113.7' }),
+  limited('login-rate-limited-multi-hop', { 'X-Forwarded-For': '203.0.113.20' }, [
+    { count: 10, status: 400, headers: { 'X-Forwarded-For': '203.0.113.20, 198.51.100.7' } },
+  ]),
+  limited('login-rate-limited-real-ip', { 'X-Real-IP': '203.0.113.21' }),
+  limited('login-rate-limited-true-client-ip', { 'True-Client-IP': '203.0.113.22' }),
+  limited('login-rate-limited-header-precedence', { 'True-Client-IP': '203.0.113.23' }, [
+    {
+      count: 10,
+      status: 400,
+      headers: {
+        'True-Client-IP': '203.0.113.23',
+        'X-Real-IP': '203.0.113.24',
+        'X-Forwarded-For': '203.0.113.25',
+      },
+    },
+    { status: 400, headers: { 'X-Real-IP': '203.0.113.24' } },
+    { status: 400, headers: { 'X-Forwarded-For': '203.0.113.25' } },
+  ]),
+  {
+    name: 'login-loopback-not-limited',
     route: 'POST /api/v1/auth/login',
     outcome: 'error',
     method: 'POST',
     path: '/api/v1/auth/login',
     auth: 'none',
-    headers: { 'X-Forwarded-For': '203.0.113.7' },
     raw: '{',
-    prelude: { count: 10, headers: { 'X-Forwarded-For': '203.0.113.7' }, raw: '{' },
+    prelude: [{ count: 11, status: 400, raw: '{' }],
+  },
+  {
+    name: 'login-forwarded-loopback-not-limited',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    headers: { 'X-Forwarded-For': '127.0.0.1' },
+    raw: '{',
+    prelude: [{ count: 11, status: 400, headers: { 'X-Forwarded-For': '127.0.0.1' }, raw: '{' }],
+  },
+  {
+    name: 'login-forwarded-invalid-not-limited',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    headers: { 'X-Forwarded-For': 'not-an-address' },
+    raw: '{',
+    prelude: [
+      { count: 11, status: 400, headers: { 'X-Forwarded-For': 'not-an-address' }, raw: '{' },
+    ],
+  },
+  {
+    name: 'oidc-callback-rate-limited-shared',
+    route: 'GET /api/v1/auth/oidc/callback',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/auth/oidc/callback?code=c&state=s',
+    auth: 'none',
+    headers: { 'X-Forwarded-For': '203.0.113.26' },
+    prelude: [
+      {
+        count: 5,
+        status: 400,
+        method: 'POST',
+        path: '/api/v1/auth/login',
+        headers: { 'X-Forwarded-For': '203.0.113.26' },
+        raw: '{',
+      },
+      {
+        count: 4,
+        status: 404,
+        path: '/api/v1/auth/oidc/start',
+        headers: { 'X-Forwarded-For': '203.0.113.26' },
+      },
+      { status: 200, path: '/api/v1/auth/methods', headers: { 'X-Forwarded-For': '203.0.113.26' } },
+      { status: 404, headers: { 'X-Forwarded-For': '203.0.113.26' } },
+    ],
+  },
+  {
+    name: 'oidc-start-rate-limited-shared',
+    route: 'GET /api/v1/auth/oidc/start',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/auth/oidc/start',
+    auth: 'none',
+    headers: { 'X-Forwarded-For': '203.0.113.27' },
+    prelude: [
+      {
+        count: 10,
+        status: 404,
+        path: '/api/v1/auth/oidc/callback',
+        headers: { 'X-Forwarded-For': '203.0.113.27' },
+      },
+    ],
   },
   {
     name: 'me-ok',
@@ -316,6 +491,10 @@ export const CASES: Case[] = [
   sessionForm('empty-subject'),
   sessionForm('not-yet-valid'),
   sessionForm('recorder-minted'),
+  sessionForm('no-exp'),
+  sessionForm('expired-5s'),
+  sessionForm('not-yet-valid-5s'),
+  sessionForm('issued-in-5s'),
   {
     name: 'logout-ok',
     route: 'POST /api/v1/auth/logout',
@@ -421,6 +600,43 @@ export const CASES: Case[] = [
     method: 'GET',
     path: '/api/v1/fleet/events?until=2026-01-01',
   },
+  {
+    name: 'fleet-events-limit-plus-encoded',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events?limit=%2B3',
+  },
+  {
+    // A raw `+` in a query decodes to a space.
+    name: 'fleet-events-limit-plus-raw',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/events?limit=+3',
+  },
+  {
+    name: 'fleet-events-comma-spaces',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events?severity=%20warn%20,,high',
+  },
+  {
+    name: 'fleet-events-duplicate-key',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events?severity=info&severity=warn',
+  },
+  {
+    // Mock events sit 44 minutes apart from the seed: since is inclusive, until exclusive.
+    name: 'fleet-events-since-until-boundary',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events?since={seed-88m}&until={seed-44m}',
+  },
   noSession('GET /api/v1/fleet/events', 'GET', '/api/v1/fleet/events', 'fleet-events-no-session'),
   {
     name: 'fleet-event',
@@ -470,6 +686,13 @@ export const CASES: Case[] = [
     method: 'GET',
     path: '/api/v1/fleet/risk?limit=1.5',
   },
+  {
+    name: 'fleet-risk-limit-zero',
+    route: 'GET /api/v1/fleet/risk',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/risk?limit=0',
+  },
   noSession('GET /api/v1/fleet/risk', 'GET', '/api/v1/fleet/risk', 'fleet-risk-no-session'),
   {
     name: 'fleet-compliance',
@@ -491,6 +714,13 @@ export const CASES: Case[] = [
     outcome: 'error',
     method: 'GET',
     path: '/api/v1/fleet/compliance?limit=x',
+  },
+  {
+    name: 'fleet-compliance-limit-over-max',
+    route: 'GET /api/v1/fleet/compliance',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/compliance?limit=2000',
   },
   noSession(
     'GET /api/v1/fleet/compliance',
@@ -525,6 +755,13 @@ export const CASES: Case[] = [
     outcome: 'error',
     method: 'GET',
     path: '/api/v1/fleet/hosts?limit=-',
+  },
+  {
+    name: 'fleet-hosts-limit-negative',
+    route: 'GET /api/v1/fleet/hosts',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/hosts?limit=-1',
   },
   noSession('GET /api/v1/fleet/hosts', 'GET', '/api/v1/fleet/hosts', 'fleet-hosts-no-session'),
   {
@@ -642,6 +879,15 @@ export const CASES: Case[] = [
     method: 'POST',
     path: '/api/v1/triage/upsert',
     raw: '{"host_id":',
+  },
+  {
+    // A separate row, so the EVT#3 sequence above stays as it is.
+    name: 'triage-upsert-null-snapshot',
+    route: 'POST /api/v1/triage/upsert',
+    outcome: 'ok',
+    method: 'POST',
+    path: '/api/v1/triage/upsert',
+    json: { host_id: H_BOB, event_id: '{event:6}', status: 'open', evidence_snapshot: null },
   },
   noSession(
     'POST /api/v1/triage/upsert',
@@ -939,11 +1185,21 @@ export const CASES: Case[] = [
     headers: { 'Retry-After': '7' },
     json: { error: { code: 'service_unavailable', message: 'rebuilding' } },
   }),
-  upstream('upstream-503-retried', 'GET /api/v1/fleet/compliance', '/api/v1/fleet/compliance', {
-    status: 503,
-    headers: { 'Retry-After': '1' },
-    json: { error: { code: 'service_unavailable', message: 'rebuilding' } },
-  }),
+  {
+    // Three attempts with the upstream's 1 s Retry-After between them.
+    ...upstream(
+      'upstream-503-retried',
+      'GET /api/v1/fleet/compliance',
+      '/api/v1/fleet/compliance',
+      {
+        status: 503,
+        headers: { 'Retry-After': '1' },
+        json: { error: { code: 'service_unavailable', message: 'rebuilding' } },
+      },
+    ),
+    minMs: 2000,
+    maxMs: 3000,
+  },
   upstream('upstream-500-json', 'GET /api/v1/fleet/hosts', '/api/v1/fleet/hosts', {
     status: 500,
     json: { error: { code: 'internal', message: 'upstream detail stays upstream' } },
@@ -956,4 +1212,13 @@ export const CASES: Case[] = [
     status: 200,
     text: '{"events": [',
   }),
+
+  // Last, seconds after the first health case, so a cached timestamp shows.
+  {
+    name: 'health-end-of-run',
+    route: 'GET /api/health',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/health',
+  },
 ];

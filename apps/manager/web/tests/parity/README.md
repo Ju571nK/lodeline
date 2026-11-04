@@ -5,30 +5,30 @@ each normalized response with a golden file. The goldens were recorded from the 
 at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
 the port answers differently.
 
-The table has 117 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 150 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
 |---:|---|
-| 2 | `GET /api/health` |
-| 9 | `POST /api/v1/auth/login` |
+| 3 | `GET /api/health` |
+| 19 | `POST /api/v1/auth/login` |
 | 2 | `GET /api/v1/auth/methods` |
-| 2 | `GET /api/v1/auth/oidc/start` |
-| 1 | `GET /api/v1/auth/oidc/callback` |
+| 3 | `GET /api/v1/auth/oidc/start` |
+| 2 | `GET /api/v1/auth/oidc/callback` |
 | 3 | `POST /api/v1/auth/logout` |
-| 15 | `GET /api/v1/auth/me` |
+| 19 | `GET /api/v1/auth/me` |
 | 5 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
-| 12 | `GET /api/v1/fleet/events` |
+| 17 | `GET /api/v1/fleet/events` |
 | 6 | `GET /api/v1/fleet/events/{event_id}` |
-| 7 | `GET /api/v1/fleet/risk` |
-| 6 | `GET /api/v1/fleet/compliance` |
-| 8 | `GET /api/v1/fleet/hosts` |
+| 8 | `GET /api/v1/fleet/risk` |
+| 7 | `GET /api/v1/fleet/compliance` |
+| 9 | `GET /api/v1/fleet/hosts` |
 | 6 | `GET /api/v1/fleet/hosts/{host_id}` |
-| 10 | `POST /api/v1/triage/upsert` |
+| 11 | `POST /api/v1/triage/upsert` |
 | 6 | `POST /api/v1/triage/note` |
 | 4 | `GET /api/v1/triage/{host_id}/{event_id}` |
-| 9 | `GET /*` (SPA) |
+| 16 | `GET /*` (SPA and unrouted paths) |
 
 Every route has a success case and an error case, except the two OIDC routes. Their success path
 needs an HTTPS OIDC provider, so the Rust port carries over the Go OIDC unit tests instead
@@ -39,7 +39,8 @@ CI does not run this suite yet, because the Rust binary does not exist yet.
 ## Files
 
 - `cases.ts`: the table. Rows run in order against one server process, so the triage rows form a
-  write sequence.
+  write sequence. A row can send unrecorded prelude requests first, each with the status it must
+  get, for example to fill the login limiter's window.
 - `run.parity.ts`: sends each case, records it, and compares it with `goldens/<case>.json`.
 - `normalize.ts`: the normalization rules below. `normalize.test.ts` tests them under Vitest.
 - `stub-upstream.mjs`: a stand-in for the `lodeline-server` read API, used by the live-mode cases.
@@ -61,7 +62,8 @@ MANAGER_BIN=/path/to/lodeline-manager npm run parity
 `playwright.parity.config.ts` starts three processes: the stub upstream, a manager on the mock
 fleet, and a manager that reads the stub. They listen on `127.0.0.1` ports 18281 to 18283. Set
 `PARITY_PORT` to move the first port. The suite always starts fresh processes and a fresh triage
-database, so run the whole table, not a filtered subset.
+database, so run the whole table, not a filtered subset. Requests go out over raw `node:http`, so
+the server sees each path exactly as the table writes it, `..` and `//` included.
 
 `npx playwright test` with the default config runs only the e2e suite.
 
@@ -77,13 +79,21 @@ PARITY_UPDATE=1 MANAGER_BIN=/path/to/go/lodeline-manager npm run parity
 names. Add `PARITY_TESTDATA=1` to also rewrite `apps/manager/testdata/` (see its README). That
 step needs the `sqlite3` command.
 
+With either variable set, the suite first reads `version` from `/api/health` and stops unless it
+starts with `e4fb077`. `PARITY_ALLOW_ANY_REFERENCE=1` skips that check and prints a warning; use
+it only to record from a deliberately changed reference. CI must never set `PARITY_UPDATE`,
+`PARITY_TESTDATA` or `PARITY_ALLOW_ANY_REFERENCE`: a CI run compares and writes nothing.
+
 Build the Go binary from `e4fb077` with this `web/dist` copied to `internal/server/dist`, as
-its Makefile `build` target does with its own `web/dist`:
+its Makefile `build` target does with its own `web/dist`. The `-ldflags` value stamps the version
+that the check reads:
 
 ```sh
 git -C <lodeline-manager clone> worktree add --detach <dir> e4fb077
 rm -rf <dir>/internal/server/dist && cp -r dist <dir>/internal/server/dist
-cd <dir> && go build -o <out>/lodeline-manager ./cmd/lodeline-manager
+cd <dir> && go build \
+  -ldflags "-X github.com/Ju571nK/lodeline-manager/internal/api.Version=$(git describe --always --dirty)" \
+  -o <out>/lodeline-manager ./cmd/lodeline-manager
 ```
 
 ## Normalization
@@ -92,37 +102,77 @@ Bodies are compared as parsed JSON with sorted keys, so byte-level differences s
 trailing newline and its escaping of `<`, `>` and `&` do not count. Each rule below hides only the
 part of a value that changes from run to run.
 
+The recorder notes when each request ran: from just before it sends to the last body byte. A time
+"from a request" lies in that bracket, allowing 2 ms for clock rounding and the value's own
+precision (a whole-second value covers its whole second). The recorder waits a few milliseconds
+between requests so that no two brackets overlap, and pauses after its own login so that no later
+request shares that second.
+
 | Rule | Applies to | Reason |
 |---|---|---|
 | Mock event IDs become `EVT#<n>` | strings equal to an ID the Go mock derives from the seed | Go builds mock IDs from the seed, which is the process start time. `<n>` is the recipe index, computed by the recorder, not read from the response. |
 | Times become `<seed±offset layout>` | RFC 3339 strings in mock-mode bodies, except the keys below | The mock anchors every time at the seed, read from `/api/v1/fleet/healthz` `ts`. |
-| Times become `<now#<rank> layout>` | keys `created_at`, `updated_at`, `at`, `timestamp`, when the value lies inside the run | These come from the request clock. Equal instants share a rank within a case. |
+| Times become `<now#<rank> layout>` | keys `created_at`, `updated_at`, `at`, `timestamp`, from this request | These come from the request clock. Equal instants share a rank within a case. |
+| Times become `<now@<case> layout>` | the same keys, from an earlier recorded request | For example, `triage-get` returns the times the upsert and note cases wrote. |
 | `.9` layout required | the same keys in `/api/v1/triage/*` bodies | Go writes triage times in a fixed-width layout, and the database sorts on it. A trimmed value stays raw and fails. |
-| `expires_at` and cookie `Expires` become `<now+87600h layout>` | values equal to a request time inside the run plus the TTL | Session expiry follows the request clock. Other values stay raw. |
-| `version` becomes `<version>` | `/api/health` | The build stamps its own version string. |
+| `expires_at` and cookie `Expires` become `<now+87600h layout>` or `<now@<case>+87600h layout>` | values equal to a request's time plus the TTL | Session expiry follows the clock of the request that issued the session. For `/api/v1/auth/me` that is `recorder-login`, the suite's own login. Other values stay raw. |
+| `version` becomes `<version>` | `/api/health`, when non-empty | The build stamps its own version string. An empty one stays raw and fails. |
 | IPv4 addresses become `<ipv4 hash>` | strings in bodies, except 127.0.0.1 and the documentation ranges | Keeps mock addresses out of the tree. The hash still changes when the address changes. |
-| `Retry-After` becomes `<1..61>` | 429 responses | The wait counts down from the first request in the limiter window. |
+| `Retry-After` becomes `<59..61>` | 429 responses | Go sends the seconds left in the 60 s window plus one, rounded down: 60 for back-to-back requests. Any other value stays raw. |
 | Upstream query pairs are decoded and sorted | requests the stub records | `lodeline-server` reads the query as a map, so order and percent-encoding are not part of the contract. |
-| SPA bodies become `<dist:<file>>` with the content hash dropped from asset names | bodies equal to a file in `web/dist` | Asset names change with every SPA edit. Other non-JSON bodies are kept as text, or as a hash when longer than 4 KiB. |
+| SPA bodies become `<dist:<name>>` | bodies equal to a file in `web/dist` | `<name>` is the placeholder the case requested (`{asset:js}`) or the path of an unhashed file, so goldens survive SPA edits while still naming the exact file. A hashed file no case asked for shows as `unrequested <path>`. |
+| Partial bodies become `<dist:<name> bytes a-b>`, and the `Content-Range` total becomes `<size of <name>>` | 206 responses that match the requested file | Same reason. |
+| Listing entries become `<every file in dist/assets, sorted>` | the `spa-assets-dir` body | Only when the entries are exactly the files in `web/dist/assets`, in order. Otherwise they are kept with hashes dropped, sorted, so the diff shows them. |
+| Other non-JSON bodies are kept as text, or as a hash above 4 KiB | everything else | |
 | Cookie values become `<set>` | `Set-Cookie` | Session tokens change on every login. Name and attributes are kept. |
+
+Every response header is recorded, sorted by name, except `Date`, `Content-Length`,
+`Transfer-Encoding`, `Connection` and `Keep-Alive`. `Set-Cookie` is recorded parsed, as above. A
+header sent more than once is recorded as a list. Each request carries `Accept: */*` and
+`Accept-Encoding: gzip, deflate, br`, as a browser does, so a server that compresses shows it.
 
 Live-mode cases keep their times raw, because the stub answers with fixed values. The servers
 run with `TZ=UTC`, because Go's `/api/v1/auth/me` formats the token expiry in the process time
 zone.
 
-The `spa-assets-dir` case records no body, because Go's directory listing names every hashed
-asset file.
+Besides the golden comparison, a run fails when:
+
+- the mock seed is not a whole second between the run start and now (Go takes it from the process
+  start, truncated to the second);
+- a prelude request gets a status other than the one its row names;
+- a case with `minMs` or `maxMs` takes longer or shorter (the login failure delay, and the
+  upstream retries with a 1 s `Retry-After`);
+- a golden has no case, or a case has no golden.
 
 ## Allowlist
 
-`allowlist.json` lists the differences that a comparison accepts. Each entry names a case (`*`
-for all), a dot path into the record (`*` matches any key or index), a rule, and the reason. The
+`allowlist.json` lists the differences that a comparison accepts. Each entry names the cases it
+applies to, a dot path into the record (`*` matches any key or index), a rule, and the reason. The
 only rule is `null-or-absent`: at that path, `null` and a missing key compare equal. Use it only
-where the SPA type accepts both forms.
+where the SPA type accepts both forms, and list only the cases whose bodies carry the field. No
+header difference is accepted today, so there is no header rule; add one with its first entry.
 
-| Path | Reason |
-|---|---|
-| `body.audit_head` | Go omits it when missing; the SPA type is `audit_head?: AuditHead \| null`. |
-| `body.ai_guard.by_tool.*.controls` | Go omits unreported controls; the SPA type is `controls?: AiGuardControl[] \| null`. |
+| Cases | Path | Reason |
+|---|---|---|
+| `fleet-meta`, `live-meta-fleet`, `live-meta-legacy-license` | `body.audit_head` | Go omits it when missing; the SPA type is `audit_head?: AuditHead \| null`. |
+| `fleet-host`, `fleet-host-no-meta`, `live-host` | `body.ai_guard.by_tool.*.controls` | Go omits unreported controls; the SPA type is `controls?: AiGuardControl[] \| null`. |
 
 A later phase that accepts another difference adds an entry here with its reason.
+
+## Not covered
+
+A passing run says nothing about the following. Each needs its own test in the phase that ports it.
+
+- The fleet cache. The mock-mode server has no cache, and the live server runs with
+  `FLEET_CACHE_DISABLED=1`, so stale-while-revalidate, single flight and eviction are untested here.
+- Startup and config validation: missing or short secrets, bad env values, the 5 s drain. Every
+  process here starts with one valid config.
+- OIDC-enabled flows. Both servers run with OIDC off; see `NO_SUCCESS_CASE`.
+- The timing of upstream retries other than `upstream-503-retried`'s total time: the jittered
+  200 ms backoff for timeouts, the 5 s cap, and the gap between single attempts.
+- The 250 ms login failure delay is checked only as a minimum on the three wrong-credential cases.
+  Whether other failure paths wait, or how long the slowest wait is, is not checked.
+- `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id` and
+  `fleet-events-duplicate-key`.
+- Limiter behavior that needs time to pass: window reset after 60 s, and pruning above 1024 keys.
+- IPv6 client addresses, and request bodies larger than a few hundred bytes.

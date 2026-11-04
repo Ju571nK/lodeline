@@ -1,10 +1,10 @@
 {
-  "mock_seed": "2026-11-04T00:14:24Z",
+  "mock_seed": "2026-11-04T00:45:03Z",
   "admin_username": "admin",
   "jwt_ttl_hours": 87600,
   "triage_row": {
     "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
-    "event_id": "01a1a36f-5180-701d-8000-000000000000",
+    "event_id": "01a1a38b-6118-701d-8000-000000000000",
     "golden": "triage-get"
   }
 }

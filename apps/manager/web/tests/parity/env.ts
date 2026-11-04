@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,12 +25,18 @@ export const MOCK_URL = `http://127.0.0.1:${MOCK_PORT}`;
 export const LIVE_URL = `http://127.0.0.1:${LIVE_PORT}`;
 export const STUB_URL = `http://127.0.0.1:${STUB_PORT}`;
 
+// Write goldens or testdata. Only for recording against the Go reference; CI never sets these.
 export const UPDATE = process.env.PARITY_UPDATE === '1';
 export const WRITE_TESTDATA = process.env.PARITY_TESTDATA === '1';
+export const ALLOW_ANY_REFERENCE = process.env.PARITY_ALLOW_ANY_REFERENCE === '1';
 
 // The config process sets these first; test workers inherit them, so every
 // process agrees on one run directory and one run start.
-process.env.PARITY_RUN_DIR ??= mkdtempSync(join(tmpdir(), 'lodeline-parity-'));
+if (process.env.PARITY_RUN_DIR === undefined) {
+  const dir = mkdtempSync(join(tmpdir(), 'lodeline-parity-'));
+  process.env.PARITY_RUN_DIR = dir;
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
+}
 process.env.PARITY_RUN_START ??= String(Date.now());
 export const RUN_DIR = process.env.PARITY_RUN_DIR;
 export const RUN_START_MS = Number(process.env.PARITY_RUN_START);

@@ -8,9 +8,9 @@
   "headers": {
     "allow": "GET",
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
-    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer"
+    "x-frame-options": "DENY"
   },
   "cookies": [],
   "body": ""

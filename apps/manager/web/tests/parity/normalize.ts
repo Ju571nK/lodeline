@@ -6,12 +6,20 @@ import { createHash } from 'node:crypto';
  * you add one here.
  */
 
+/** When one recorded request ran, by the recorder's clock: [startMs, endMs] from send to last byte. */
+export interface Bracket {
+  label: string;
+  startMs: number;
+  endMs: number;
+}
+
 export interface NormalizeContext {
   /** Mock fleet seed in ms (from /api/v1/fleet/healthz `ts`), or null for live-mode cases. */
   seedMs: number | null;
-  /** Earliest and latest instant a request-clock value may carry in this run. */
-  windowStartMs: number;
-  windowEndMs: number;
+  /** The request this response answers. */
+  current: Bracket;
+  /** Requests recorded before this one, oldest first; a body can carry times they wrote. */
+  earlier: readonly Bracket[];
   /** Session lifetime the server was started with. */
   ttlHours: number;
   /** Mock event IDs computed from the seed, mapped to `EVT#<recipe index>`. */
@@ -24,7 +32,9 @@ const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.(\d{1,9}))?(Z|[+-]\d{2}:
 
 /** Keys whose timestamps come from the server's clock while handling a request. */
 const REQUEST_CLOCK_KEYS = new Set(['created_at', 'updated_at', 'at', 'timestamp']);
-const CLOCK_SLACK_MS = 2_000;
+// Covers the millisecond rounding of Date.now(); the recorder leaves a wider gap between requests.
+const CLOCK_SLACK_NS = 2_000_000n;
+const MS = 1_000_000n;
 const IPV4 = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
 const DOC_IPV4 = /^(127\.0\.0\.1|0\.0\.0\.0|192\.0\.2\.\d+|198\.51\.100\.\d+|203\.0\.113\.\d+)$/;
 
@@ -69,8 +79,22 @@ function offsetLabel(deltaMs: number): string {
   return `${sign}${abs}ms`;
 }
 
-function inWindow(ms: number, ctx: NormalizeContext): boolean {
-  return ms >= ctx.windowStartMs - CLOCK_SLACK_MS && ms <= ctx.windowEndMs + CLOCK_SLACK_MS;
+/** Nanoseconds one unit of the value's last digit spans: a value truncated to it covers [ns, ns + unit). */
+function unitNs(m: RegExpExecArray): bigint {
+  return 10n ** BigInt(9 - (m[2]?.length ?? 0));
+}
+
+function within(ns: bigint, unit: bigint, b: Bracket): boolean {
+  return (
+    ns + unit > BigInt(b.startMs) * MS - CLOCK_SLACK_NS &&
+    ns < BigInt(b.endMs + 1) * MS + CLOCK_SLACK_NS
+  );
+}
+
+/** The request whose clock produced this instant: the current one, an earlier one, or none. */
+function clockSource(ns: bigint, unit: bigint, ctx: NormalizeContext): Bracket | undefined {
+  if (within(ns, unit, ctx.current)) return ctx.current;
+  return ctx.earlier.find((b) => within(ns, unit, b));
 }
 
 function ipToken(ip: string): string {
@@ -79,14 +103,16 @@ function ipToken(ip: string): string {
 }
 
 /** Collects request-clock timestamps so equal instants share a rank within a case. */
-function collectClock(value: unknown, key: string, out: bigint[]): void {
+function collectClock(value: unknown, key: string, ctx: NormalizeContext, out: bigint[]): void {
   if (typeof value === 'string') {
     const m = RFC3339.exec(value);
-    if (m && REQUEST_CLOCK_KEYS.has(key)) out.push(toNs(value, m));
+    if (!m || !REQUEST_CLOCK_KEYS.has(key)) return;
+    const ns = toNs(value, m);
+    if (within(ns, unitNs(m), ctx.current)) out.push(ns);
   } else if (Array.isArray(value)) {
-    for (const v of value) collectClock(v, key, out);
+    for (const v of value) collectClock(v, key, ctx, out);
   } else if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) collectClock(v, k, out);
+    for (const [k, v] of Object.entries(value)) collectClock(v, k, ctx, out);
   }
 }
 
@@ -105,22 +131,32 @@ function normalizeTimestamp(
   ctx: NormalizeContext,
   ranks: bigint[],
 ): string {
-  const ms = Date.parse(s);
+  const ns = toNs(s, m);
   if (REQUEST_CLOCK_KEYS.has(key)) {
     if (ctx.fixedWidthTimestamps && m[2]?.length !== 9) return s;
-    if (!inWindow(ms, ctx)) return s;
-    const rank = ranks.indexOf(toNs(s, m)) + 1;
-    return `<now#${rank} ${layoutTag(m, ctx.fixedWidthTimestamps)}>`;
+    const layout = layoutTag(m, ctx.fixedWidthTimestamps);
+    const src = clockSource(ns, unitNs(m), ctx);
+    if (src === ctx.current) return `<now#${ranks.indexOf(ns) + 1} ${layout}>`;
+    return src ? `<now@${src.label} ${layout}>` : s;
   }
-  if (key === 'expires_at') return expiryToken(ms, layoutTag(m, false), ctx) ?? s;
+  if (key === 'expires_at') return expiryToken(ns, unitNs(m), layoutTag(m, false), ctx) ?? s;
   if (ctx.seedMs === null) return s;
-  return `<seed${offsetLabel(ms - ctx.seedMs)} ${layoutTag(m, false)}>`;
+  return `<seed${offsetLabel(Date.parse(s) - ctx.seedMs)} ${layoutTag(m, false)}>`;
 }
 
-/** A session expiry is `request time + TTL`; anything else stays raw so it shows in the diff. */
-export function expiryToken(ms: number, layout: string, ctx: NormalizeContext): string | null {
-  const issuedMs = ms - ctx.ttlHours * 3_600_000;
-  return inWindow(issuedMs, ctx) ? `<now+${ctx.ttlHours}h ${layout}>` : null;
+/**
+ * A session expiry is `issuing request time + TTL`, where the issuing request is this one or an
+ * earlier one (the recorder's login for /auth/me). Anything else stays raw so it shows in the diff.
+ */
+export function expiryToken(
+  ns: bigint,
+  unit: bigint,
+  layout: string,
+  ctx: NormalizeContext,
+): string | null {
+  const src = clockSource(ns - BigInt(ctx.ttlHours) * 3_600_000n * MS, unit, ctx);
+  if (!src) return null;
+  return `<now${src === ctx.current ? '' : `@${src.label}`}+${ctx.ttlHours}h ${layout}>`;
 }
 
 function walk(value: unknown, key: string, ctx: NormalizeContext, ranks: bigint[]): unknown {
@@ -139,7 +175,7 @@ function walk(value: unknown, key: string, ctx: NormalizeContext, ranks: bigint[
 /** Normalizes a parsed JSON body. Object keys come back sorted so goldens diff cleanly. */
 export function normalizeJson(value: unknown, ctx: NormalizeContext): unknown {
   const found: bigint[] = [];
-  collectClock(value, '', found);
+  collectClock(value, '', ctx, found);
   const ranks = [...new Set(found)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   return walk(value, '', ctx, ranks);
 }
@@ -159,8 +195,8 @@ export function parseSetCookie(header: string, ctx: NormalizeContext): ParsedCoo
     const i = a.indexOf('=');
     const name = (i < 0 ? a : a.slice(0, i)).toLowerCase();
     let v: string | true = i < 0 ? true : a.slice(i + 1);
-    if (name === 'expires' && typeof v === 'string')
-      v = expiryToken(Date.parse(v), 'http-date', ctx) ?? v;
+    const t = name === 'expires' && typeof v === 'string' ? Date.parse(v) : Number.NaN;
+    if (!Number.isNaN(t)) v = expiryToken(BigInt(t) * MS, 1000n * MS, 'http-date', ctx) ?? v;
     attributes[name] = v;
   }
   return {

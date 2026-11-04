@@ -14,8 +14,18 @@ const MOCK_ADDR = [10, 0, 5, 21].join('.');
 const SEED = Date.parse('2026-11-04T00:00:00Z');
 const ctx: NormalizeContext = {
   seedMs: SEED,
-  windowStartMs: Date.parse('2026-11-04T10:00:00Z'),
-  windowEndMs: Date.parse('2026-11-04T10:01:00Z'),
+  current: {
+    label: 'this',
+    startMs: Date.parse('2026-11-04T10:00:00.250Z'),
+    endMs: Date.parse('2026-11-04T10:00:03Z'),
+  },
+  earlier: [
+    {
+      label: 'login',
+      startMs: Date.parse('2026-11-04T09:00:00.100Z'),
+      endMs: Date.parse('2026-11-04T09:00:00.200Z'),
+    },
+  ],
   ttlHours: 12,
   eventIds: mockEventIds(SEED, 32),
   fixedWidthTimestamps: false,
@@ -74,18 +84,42 @@ describe('normalizeJson', () => {
     });
   });
 
-  it('keeps a request-clock time outside the run window raw', () => {
-    expect(normalizeJson({ updated_at: '2026-11-04T11:00:00Z' }, ctx)).toEqual({
-      updated_at: '2026-11-04T11:00:00Z',
+  it('names the earlier request a time came from, and keeps other times raw', () => {
+    expect(
+      normalizeJson(
+        {
+          created_at: '2026-11-04T09:00:00.150Z',
+          updated_at: '2026-11-04T09:00:00.300Z',
+          at: '2026-11-04T10:00:03.500Z',
+        },
+        ctx,
+      ),
+    ).toEqual({
+      created_at: '<now@login .fZ>',
+      updated_at: '2026-11-04T09:00:00.300Z',
+      at: '2026-11-04T10:00:03.500Z',
     });
   });
 
-  it('accepts an expiry only at request time plus the TTL', () => {
-    expect(normalizeJson({ expires_at: '2026-11-04T22:00:30Z' }, ctx)).toEqual({
-      expires_at: '<now+12h Z>',
+  it('accepts a whole-second time only when its second overlaps the request', () => {
+    // 10:00:00 covers [10:00:00, 10:00:01), which overlaps a request sent at 10:00:00.250.
+    expect(normalizeJson({ timestamp: '2026-11-04T10:00:00Z' }, ctx)).toEqual({
+      timestamp: '<now#1 Z>',
     });
-    expect(normalizeJson({ expires_at: '2026-11-04T23:00:30Z' }, ctx)).toEqual({
-      expires_at: '2026-11-04T23:00:30Z',
+    expect(normalizeJson({ timestamp: '2026-11-04T09:59:59Z' }, ctx)).toEqual({
+      timestamp: '2026-11-04T09:59:59Z',
+    });
+  });
+
+  it('accepts an expiry only at a request time plus the TTL', () => {
+    expect(normalizeJson({ expires_at: '2026-11-04T22:00:01.5Z' }, ctx)).toEqual({
+      expires_at: '<now+12h .fZ>',
+    });
+    expect(normalizeJson({ expires_at: '2026-11-04T21:00:00Z' }, ctx)).toEqual({
+      expires_at: '<now@login+12h Z>',
+    });
+    expect(normalizeJson({ expires_at: '2026-11-04T22:00:05Z' }, ctx)).toEqual({
+      expires_at: '2026-11-04T22:00:05Z',
     });
   });
 
@@ -99,7 +133,7 @@ describe('normalizeJson', () => {
 describe('parseSetCookie', () => {
   it('records attributes and hides the value', () => {
     const c = parseSetCookie(
-      'lodeline_session=abc; Path=/; Expires=Wed, 04 Nov 2026 22:00:30 GMT; Max-Age=43200; HttpOnly; SameSite=Lax',
+      'lodeline_session=abc; Path=/; Expires=Wed, 04 Nov 2026 22:00:02 GMT; Max-Age=43200; HttpOnly; SameSite=Lax',
       ctx,
     );
     expect(c).toEqual({

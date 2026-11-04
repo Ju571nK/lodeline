@@ -1,0 +1,435 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events?severity=info&severity=warn",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "events": [
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#8",
+        "evidence": {
+          "architecture": "arm64",
+          "default_gateway_v4": "<ipv4 c5eb5a4c>",
+          "default_gateway_v6": null,
+          "dns_servers": [
+            "<ipv4 f1412386>",
+            "<ipv4 838c4c25>"
+          ],
+          "interfaces": [
+            {
+              "ipv4": [
+                "<ipv4 84b48121>/24"
+              ],
+              "ipv6": [
+                "fe80::1/64"
+              ],
+              "mac": "00:1b:44:11:3a:b7",
+              "name": "en0"
+            }
+          ],
+          "kernel_version": "23.5.0",
+          "kind": "host_meta_snapshot",
+          "os_name": "macOS",
+          "os_version": "14.5"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-352m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#9",
+        "evidence": {
+          "architecture": "x86_64",
+          "default_gateway_v4": "<ipv4 f883d5fa>",
+          "default_gateway_v6": null,
+          "dns_servers": [
+            "<ipv4 f883d5fa>"
+          ],
+          "interfaces": [
+            {
+              "ipv4": [
+                "<ipv4 229e6871>/24"
+              ],
+              "ipv6": [],
+              "mac": "00:1b:44:22:bb:c1",
+              "name": "eth0"
+            }
+          ],
+          "kernel_version": "6.8.0-31-generic",
+          "kind": "host_meta_snapshot",
+          "os_name": "Linux",
+          "os_version": "Ubuntu 24.04"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-396m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#10",
+        "evidence": {
+          "architecture": "x86_64",
+          "default_gateway_v4": "<ipv4 f9863b6f>",
+          "default_gateway_v6": null,
+          "dns_servers": [
+            "<ipv4 838c4c25>",
+            "<ipv4 842b949c>"
+          ],
+          "interfaces": [
+            {
+              "ipv4": [
+                "<ipv4 579248b9>/16"
+              ],
+              "ipv6": [],
+              "mac": "00:1b:44:33:ee:42",
+              "name": "Ethernet0"
+            }
+          ],
+          "kernel_version": "10.0.22631",
+          "kind": "host_meta_snapshot",
+          "os_name": "Windows",
+          "os_version": "11 23H2"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-440m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#11",
+        "evidence": {
+          "hash_p99_ms": 4,
+          "jsonl_above_soft_floor": false,
+          "kind": "heartbeat"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-484m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#12",
+        "evidence": {
+          "hash_p99_ms": 3,
+          "jsonl_above_soft_floor": false,
+          "kind": "heartbeat"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-528m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#13",
+        "evidence": {
+          "hash_p99_ms": 7,
+          "jsonl_above_soft_floor": false,
+          "kind": "heartbeat"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-572m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#14",
+        "evidence": {
+          "hash_p99_ms": 5,
+          "jsonl_above_soft_floor": false,
+          "kind": "heartbeat"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-616m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#15",
+        "evidence": {
+          "kind": "policy_reloaded",
+          "policy_version": 18
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-11h Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#16",
+        "evidence": {
+          "kind": "policy_reloaded",
+          "policy_version": 17
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-704m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#21",
+        "evidence": {
+          "bucket": "critical",
+          "controls": [
+            {
+              "id": "claude_code.configured.allowManagedHooksOnly",
+              "setting": "allowManagedHooksOnly",
+              "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+              "value": true
+            }
+          ],
+          "is_reattestation": true,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 7.2,
+          "tool": "claude_code"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/.claude/settings.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-924m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#22",
+        "evidence": {
+          "bucket": "critical",
+          "controls": [],
+          "is_reattestation": true,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 8.4,
+          "tool": "continue_dev"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/eve/.continue/config.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-968m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#23",
+        "evidence": {
+          "kind": "file_change",
+          "op": "modify",
+          "sha256": "deadbeef"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/code/work-repo/AGENTS.md"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-1012m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#24",
+        "evidence": {
+          "kind": "file_change",
+          "op": "create",
+          "sha256": "cafef00d"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/home/carol/.local/share/config.yaml"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-1056m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#29",
+        "evidence": {
+          "hash_p99_ms": 3,
+          "jsonl_above_soft_floor": false,
+          "kind": "heartbeat"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-1276m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#30",
+        "evidence": {
+          "kind": "file_change",
+          "op": "modify",
+          "sha256": "01020304"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/etc/hosts"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-22h Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#31",
+        "evidence": {
+          "kind": "policy_reloaded",
+          "policy_version": 18
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-1364m Z>"
+      }
+    ],
+    "next_cursor": null
+  }
+}

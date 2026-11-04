@@ -1,12 +1,23 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
-import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import http from 'node:http';
 import { dirname, join, relative } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { type Auth, CASES, type Case, NO_SUCCESS_CASE, ROUTES } from './cases.ts';
 import * as env from './env.ts';
 import {
+  type Bracket,
   dropNullAt,
   mockEventIds,
   type NormalizeContext,
@@ -18,21 +29,29 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const GOLDENS = join(HERE, 'goldens');
 const DIST = join(HERE, '..', '..', 'dist');
 const TESTDATA = join(HERE, '..', '..', '..', 'testdata');
+const BRACKETS = join(env.RUN_DIR, 'brackets.jsonl');
 const MOCK_EVENT_COUNT = 32;
-const RECORDED_HEADERS = [
-  'content-type',
-  'cache-control',
-  'location',
-  'retry-after',
-  'allow',
-  'content-security-policy',
-  'x-frame-options',
-  'x-content-type-options',
-  'referrer-policy',
-];
+/** Goldens are recorded only from the Go build at this commit (its /api/health version prefix). */
+const GO_REFERENCE = 'e4fb077';
+/** Response headers left out of the record: framing, or set per response by the HTTP layer. */
+const UNRECORDED_HEADERS = new Set([
+  'date',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'set-cookie',
+]);
+/** Sent on every request, as a browser does, so a server that compresses shows it. */
+const BASE_HEADERS = { Accept: '*/*', 'Accept-Encoding': 'gzip, deflate, br' };
+// Wider than twice the clock slack in normalize.ts, so two requests' brackets never overlap.
+const GAP_MS = 6;
+// Go truncates the session `exp` to the second; later requests must not share the login's second.
+const LOGIN_PAUSE_MS = 1_100;
+const HASHED = /-[\w-]{8}(\.\w+)$/;
 
 interface AllowEntry {
-  case: string;
+  cases: string[];
   path: string;
   rule: 'null-or-absent';
   reason: string;
@@ -44,9 +63,18 @@ interface Run {
   seedMs: number;
   eventIds: Map<string, string>;
   distByHash: Map<string, string>;
+  /** dist paths the table names by placeholder, mapped to that placeholder. */
+  distNames: Map<string, string>;
+  assetFiles: string[];
   entryScript: string;
 }
 let run: Run;
+
+interface Reply {
+  status: number;
+  rawHeaders: string[];
+  body: Buffer;
+}
 
 function b64url(v: string | Buffer): string {
   return Buffer.from(v).toString('base64url');
@@ -70,6 +98,8 @@ function craftedToken(auth: Exclude<Auth, 'session' | 'none' | 'empty' | 'garbag
     nbf: PAST,
     exp: FUTURE,
   };
+  // Tokens a few seconds off the request time: Go allows no leeway.
+  const now = Math.floor(Date.now() / 1000);
   switch (auth) {
     case 'expired':
       return jwt(hs256, { ...claims, exp: PAST + 3600 });
@@ -93,6 +123,16 @@ function craftedToken(auth: Exclude<Auth, 'session' | 'none' | 'empty' | 'garbag
       return jwt(hs256, { ...claims, nbf: FUTURE - 3600 });
     case 'recorder-minted':
       return jwt(hs256, claims);
+    case 'no-exp': {
+      const { exp: _, ...rest } = claims;
+      return jwt(hs256, rest);
+    }
+    case 'expired-5s':
+      return jwt(hs256, { ...claims, exp: now - 5 });
+    case 'not-yet-valid-5s':
+      return jwt(hs256, { ...claims, nbf: now + 5 });
+    case 'issued-in-5s':
+      return jwt(hs256, { ...claims, iat: now + 5 });
   }
 }
 
@@ -119,7 +159,9 @@ function rfc3339Seconds(ms: number): string {
 function fill(s: string): string {
   return s
     .replace(/\{event:(\d+)\}/g, (_, i) => [...run.eventIds.keys()][Number(i)])
-    .replace(/\{seed-(\d+)h\}/g, (_, h) => rfc3339Seconds(run.seedMs - Number(h) * 3_600_000))
+    .replace(/\{seed-(\d+)([hm])\}/g, (_, n, unit) =>
+      rfc3339Seconds(run.seedMs - Number(n) * (unit === 'h' ? 3_600_000 : 60_000)),
+    )
     .replace('{asset:js}', run.entryScript)
     .replace(/\{admin\}/g, env.ADMIN_USERNAME)
     .replace(/\{password\}/g, env.ADMIN_PASSWORD);
@@ -135,11 +177,115 @@ function sha256(b: Buffer): string {
   return createHash('sha256').update(b).digest('hex');
 }
 
+/** Raw HTTP, so the server sees the exact path (fetch would resolve `..` and `//`). */
+function request(
+  port: number,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body?: Buffer,
+): Promise<Reply> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path, headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () =>
+        resolve({
+          status: res.statusCode ?? 0,
+          rawHeaders: res.rawHeaders,
+          body: Buffer.concat(chunks),
+        }),
+      );
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+interface Send {
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  json?: unknown;
+  raw?: string;
+}
+
+function send(c: Case, s: Send): Promise<Reply> {
+  const headers: Record<string, string> = { ...BASE_HEADERS, ...s.headers };
+  let body: Buffer | undefined;
+  if (s.json !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    body = Buffer.from(fill(JSON.stringify(s.json)));
+  } else if (s.raw !== undefined) {
+    body = Buffer.from(fill(s.raw));
+  }
+  if (body) headers['Content-Length'] = String(body.length);
+  const cookie = cookieValue(c.auth ?? 'session');
+  if (cookie !== null) headers.Cookie = `lodeline_session=${cookie}`;
+  const port = c.server === 'live' ? env.LIVE_PORT : env.MOCK_PORT;
+  return request(port, s.method, fill(s.path), headers, body);
+}
+
+function headerValues(reply: Reply, name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < reply.rawHeaders.length; i += 2) {
+    if (reply.rawHeaders[i].toLowerCase() === name) out.push(reply.rawHeaders[i + 1]);
+  }
+  return out;
+}
+
+/** The dist file the case asked for, if its path names one. */
+function requestedFile(c: Case): string | null {
+  const pathname = decodeURIComponent(fill(c.path).split('?')[0]);
+  const file = join(DIST, pathname);
+  return existsSync(file) && statSync(file).isFile() ? file : null;
+}
+
+/** A dist file by the name the table uses for it: its placeholder, or its path when unhashed. */
+function distName(rel: string): string {
+  return run.distNames.get(rel) ?? rel;
+}
+
+function recordHeaders(c: Case, reply: Reply): Record<string, string | string[]> {
+  const grouped = new Map<string, string[]>();
+  for (let i = 0; i < reply.rawHeaders.length; i += 2) {
+    const name = reply.rawHeaders[i].toLowerCase();
+    if (UNRECORDED_HEADERS.has(name)) continue;
+    let v = reply.rawHeaders[i + 1];
+    // Go answers 429 with the seconds left in a 60 s window, plus 1, so a full window is 60 or 61.
+    if (name === 'retry-after' && reply.status === 429 && /^(59|60|61)$/.test(v)) v = '<59..61>';
+    const range = name === 'content-range' ? /^bytes (\d+-\d+)\/(\d+)$/.exec(v) : null;
+    const file = range ? requestedFile(c) : null;
+    if (range && file && readFileSync(file).length === Number(range[2])) {
+      v = `bytes ${range[1]}/<size of ${distName(relative(DIST, file))}>`;
+    }
+    grouped.set(name, [...(grouped.get(name) ?? []), v]);
+  }
+  const out: Record<string, string | string[]> = {};
+  for (const name of [...grouped.keys()].sort()) {
+    const vs = grouped.get(name) ?? [];
+    out[name] = vs.length === 1 ? vs[0] : vs;
+  }
+  return out;
+}
+
+/** Go's directory listing: the entries become one token when they are exactly dist/assets. */
+function recordListing(text: string): string {
+  const entries = text.match(/^<a href=".*<\/a>$/gm) ?? [];
+  const block = entries.join('\n');
+  const expected = run.assetFiles.map((n) => `<a href="${n}">${n}</a>`).join('\n');
+  if (block === expected) return text.replace(block, '<every file in dist/assets, sorted>');
+  const stripped = entries.map((e) => e.replace(/-[\w-]{8}(\.\w+)(?=["<])/g, '-<hash>$1')).sort();
+  return text.replace(block, stripped.join('\n'));
+}
+
 /** JSON is compared parsed; SPA files by identity with web/dist; other bodies as short text or a hash. */
-function recordBody(contentType: string, bytes: Buffer, ctx: NormalizeContext): unknown {
+function recordBody(c: Case, reply: Reply, ctx: NormalizeContext): unknown {
+  const bytes = reply.body;
   if (bytes.length === 0) return '';
   const text = bytes.toString('utf8');
-  if (contentType.includes('json')) {
+  if ((headerValues(reply, 'content-type')[0] ?? '').includes('json')) {
     try {
       return normalizeJson(JSON.parse(text), ctx);
     } catch {
@@ -147,108 +293,134 @@ function recordBody(contentType: string, bytes: Buffer, ctx: NormalizeContext): 
     }
   }
   const dist = run.distByHash.get(sha256(bytes));
-  // Vite names assets by content hash; the name is dropped so goldens survive SPA edits.
-  if (dist) return `<dist:${dist.replace(/-[\w-]{8}(\.\w+)$/, '-<hash>$1')}>`;
+  if (dist) return `<dist:${distName(dist)}>`;
+  const range = /^bytes (\d+)-(\d+)\//.exec(headerValues(reply, 'content-range')[0] ?? '');
+  const file = range ? requestedFile(c) : null;
+  if (range && file) {
+    const slice = readFileSync(file).subarray(Number(range[1]), Number(range[2]) + 1);
+    if (slice.equals(bytes))
+      return `<dist:${distName(relative(DIST, file))} bytes ${range[1]}-${range[2]}>`;
+  }
+  if (c.listing) return recordListing(text);
   if (bytes.length <= 4096) return text;
   return `<sha256:${sha256(bytes)} ${bytes.length} bytes>`;
 }
 
-function recordHeaders(res: Response): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const name of RECORDED_HEADERS) {
-    let v = res.headers.get(name);
-    if (v === null) continue;
-    // The 429 wait counts down from the first request in the window.
-    if (name === 'retry-after' && res.status === 429 && /^\d+$/.test(v) && +v >= 1 && +v <= 61) {
-      v = '<1..61>';
-    }
-    out[name] = v;
+function readBrackets(): Bracket[] {
+  if (!existsSync(BRACKETS)) return [];
+  const byLabel = new Map<string, Bracket>();
+  for (const line of readFileSync(BRACKETS, 'utf8').split('\n').filter(Boolean)) {
+    const b = JSON.parse(line) as Bracket;
+    byLabel.delete(b.label);
+    byLabel.set(b.label, b);
   }
-  return out;
+  return [...byLabel.values()];
 }
 
-async function send(c: Case, base: string, raw?: string, extra?: Record<string, string>) {
-  const headers: Record<string, string> = { ...extra };
-  let body: Buffer | string | undefined;
-  if (c.json !== undefined) {
-    headers['Content-Type'] = 'application/json';
-    body = fill(JSON.stringify(c.json));
-  } else if (raw !== undefined) {
-    // A Buffer body makes fetch send no Content-Type at all.
-    body = Buffer.from(fill(raw));
-  }
-  const cookie = cookieValue(c.auth ?? 'session');
-  if (cookie !== null) headers.Cookie = `lodeline_session=${cookie}`;
-  return fetch(base + fill(c.path), { method: c.method, headers, body, redirect: 'manual' });
+function saveBracket(b: Bracket): void {
+  appendFileSync(BRACKETS, `${JSON.stringify(b)}\n`);
 }
 
 async function recordCase(c: Case): Promise<Record<string, unknown>> {
-  const base = c.server === 'live' ? env.LIVE_URL : env.MOCK_URL;
   if (c.upstream) {
     await fetch(`${env.STUB_URL}/__stub/reply`, {
       method: 'POST',
       body: JSON.stringify(c.upstream),
     });
   }
-  for (let i = 0; i < (c.prelude?.count ?? 0); i++) {
-    await (await send(c, base, c.prelude?.raw, c.prelude?.headers)).arrayBuffer();
+  for (const [i, step] of (c.prelude ?? []).entries()) {
+    for (let n = 0; n < (step.count ?? 1); n++) {
+      const reply = await send(c, { method: c.method, path: c.path, ...step });
+      expect(reply.status, `${c.name} prelude step ${i} request ${n + 1}`).toBe(step.status);
+    }
   }
-  const started = performance.now();
-  const res = await send(c, base, c.raw, c.headers);
-  const bytes = Buffer.from(await res.arrayBuffer());
-  const elapsed = performance.now() - started;
+  const startMs = Date.now();
+  const reply = await send(c, c);
+  const endMs = Date.now();
+  const elapsed = endMs - startMs;
   if (c.minMs !== undefined) {
     expect(elapsed, `${c.name} must take at least ${c.minMs} ms`).toBeGreaterThanOrEqual(c.minMs);
   }
+  if (c.maxMs !== undefined) {
+    expect(elapsed, `${c.name} must take at most ${c.maxMs} ms`).toBeLessThanOrEqual(c.maxMs);
+  }
+  const current: Bracket = { label: c.name, startMs, endMs };
   const ctx: NormalizeContext = {
     seedMs: c.server === 'live' ? null : run.seedMs,
-    windowStartMs: env.RUN_START_MS,
-    windowEndMs: Date.now(),
+    current,
+    earlier: readBrackets(),
     ttlHours: env.JWT_TTL_HOURS,
     eventIds: run.eventIds,
     fixedWidthTimestamps: c.path.startsWith('/api/v1/triage/'),
   };
   const record: Record<string, unknown> = {
     request: { method: c.method, path: c.path, server: c.server ?? 'mock' },
-    status: res.status,
-    headers: recordHeaders(res),
-    cookies: res.headers.getSetCookie().map((h) => parseSetCookie(h, ctx)),
-    body: c.skipBody
-      ? `<not recorded: ${c.skipBody}>`
-      : recordBody(res.headers.get('content-type') ?? '', bytes, ctx),
+    status: reply.status,
+    headers: recordHeaders(c, reply),
+    cookies: headerValues(reply, 'set-cookie').map((h) => parseSetCookie(h, ctx)),
+    body: recordBody(c, reply, ctx),
   };
   const body = record.body as Record<string, unknown>;
-  // The build stamps its own version string into /api/health.
-  if (c.route === 'GET /api/health' && typeof body?.version === 'string')
+  // The build stamps its own version string into /api/health; an empty one stays raw.
+  if (c.route === 'GET /api/health' && typeof body?.version === 'string' && body.version !== '')
     body.version = '<version>';
   if (c.upstream) {
     record.upstream = await (await fetch(`${env.STUB_URL}/__stub/calls`)).json();
   }
+  saveBracket(current);
+  await sleep(GAP_MS);
   return record;
 }
 
 function allowlisted(name: string, record: Record<string, unknown>): Record<string, unknown> {
   const copy = structuredClone(record);
   for (const e of ALLOWLIST) {
-    if (e.case === '*' || e.case === name) dropNullAt(copy, e.path.split('.'));
+    if (e.cases.includes(name)) dropNullAt(copy, e.path.split('.'));
   }
   return copy;
 }
 
+/** Refuses to write goldens or testdata from anything but the Go reference build. */
+async function checkReference(): Promise<void> {
+  if (!env.UPDATE && !env.WRITE_TESTDATA) return;
+  const { version } = (await (await fetch(`${env.MOCK_URL}/api/health`)).json()) as {
+    version: string;
+  };
+  if (String(version).startsWith(GO_REFERENCE)) return;
+  const msg = `MANAGER_BIN reports version "${version}", not the Go reference ${GO_REFERENCE}`;
+  if (!env.ALLOW_ANY_REFERENCE) {
+    throw new Error(`${msg}. Refusing to write goldens; see tests/parity/README.md.`);
+  }
+  console.warn(
+    `\n!!! PARITY_ALLOW_ANY_REFERENCE=1: ${msg}. Goldens written now are not Go's. !!!\n`,
+  );
+}
+
 test.beforeAll(async () => {
+  await checkReference();
+  // A worker restarted after a failure logs in again; keep that login's second to itself too.
+  if (readBrackets().length > 0) await sleep(LOGIN_PAUSE_MS);
+  const startMs = Date.now();
   const login = await fetch(`${env.MOCK_URL}/api/v1/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: env.ADMIN_USERNAME, password: env.ADMIN_PASSWORD }),
   });
+  saveBracket({ label: 'recorder-login', startMs, endMs: Date.now() });
   expect(login.status, 'recorder login').toBe(200);
   const session = /^lodeline_session=([^;]+)/.exec(login.headers.getSetCookie()[0] ?? '')?.[1];
   expect(session, 'session cookie').toBeTruthy();
   const healthz = await fetch(`${env.MOCK_URL}/api/v1/fleet/healthz`, {
     headers: { Cookie: `lodeline_session=${session}` },
   });
-  const seedMs = Date.parse(((await healthz.json()) as { ts: string }).ts);
-  expect(Number.isNaN(seedMs), 'mock seed from fleet/healthz ts').toBe(false);
+  const ts = ((await healthz.json()) as { ts: string }).ts;
+  // Go anchors the mock at process start, truncated to the second.
+  expect(ts, 'mock seed is a whole second').toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  const seedMs = Date.parse(ts);
+  expect(seedMs, 'mock seed not before the run').toBeGreaterThanOrEqual(
+    Math.floor(env.RUN_START_MS / 1000) * 1000,
+  );
+  expect(seedMs, 'mock seed not in the future').toBeLessThanOrEqual(Date.now());
 
   const distByHash = new Map<string, string>();
   for (const f of walkFiles(DIST)) distByHash.set(sha256(readFileSync(f)), relative(DIST, f));
@@ -256,14 +428,21 @@ test.beforeAll(async () => {
     readFileSync(join(DIST, 'index.html'), 'utf8'),
   )?.[1];
   expect(entryScript, 'entry script in dist/index.html').toBeTruthy();
+  const distNames = new Map([[entryScript!.slice(1), '{asset:js}']]);
+  for (const rel of distByHash.values()) {
+    if (HASHED.test(rel) && !distNames.has(rel)) distNames.set(rel, `unrequested ${rel}`);
+  }
 
   run = {
     session: session!,
     seedMs,
     eventIds: mockEventIds(seedMs, MOCK_EVENT_COUNT),
     distByHash,
+    distNames,
+    assetFiles: readdirSync(join(DIST, 'assets')).sort(),
     entryScript: entryScript!,
   };
+  await sleep(LOGIN_PAUSE_MS);
 });
 
 test('the table covers every route with a success and an error case', () => {
@@ -278,11 +457,17 @@ test('the table covers every route with a success and an error case', () => {
   console.log(`parity: ${CASES.length} cases over ${ROUTES.length} routes\n${lines.join('\n')}`);
 });
 
-test('every allowlist entry names a reason and a known case', () => {
+test('every allowlist entry names a reason and known cases', () => {
   for (const e of ALLOWLIST) {
     expect(e.reason.trim().length, `reason for ${e.path}`).toBeGreaterThan(0);
     expect(e.rule).toBe('null-or-absent');
-    expect(e.case === '*' || CASES.some((c) => c.name === e.case), `case ${e.case}`).toBe(true);
+    expect(e.cases.length, `cases for ${e.path}`).toBeGreaterThan(0);
+    for (const name of e.cases) {
+      expect(
+        CASES.some((c) => c.name === name),
+        `case ${name}`,
+      ).toBe(true);
+    }
   }
 });
 
