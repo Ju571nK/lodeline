@@ -1,7 +1,6 @@
 /**
- * Wraps the `/api/v1/fleet/*` handlers. Types mirror the Go server's wire
- * shape exactly (`internal/api/v1/fleet.go` + `internal/fleet/client.go`).
- * Plan 02 needs healthz, meta, events listing, and single-event lookup.
+ * Wraps the `/api/v1/fleet/*` handlers. Types mirror the server's wire shape
+ * (`src/fleet/wire.rs`).
  */
 
 import { api } from './client';
@@ -60,8 +59,8 @@ export function fleetMeta(): Promise<MetaResponse> {
 // -----------------------------------------------------------------------------
 
 /**
- * One row of the on-the-wire Event JSON. Mirrors `fleet.Event` in
- * internal/fleet/client.go — most fields are surfaced raw; the SPA
+ * One row of the on-the-wire Event JSON. Mirrors `Event` in
+ * src/fleet/wire.rs — most fields are surfaced raw; the SPA
  * decodes `evidence` further via [`extractAiGuard`].
  */
 export interface Event {

@@ -35,8 +35,8 @@ Every route has a success case and an error case, except the two OIDC routes. Th
 needs an HTTPS OIDC provider, so the Rust port carries over the Go OIDC unit tests instead
 (`NO_SUCCESS_CASE` in `cases.ts`).
 
-CI does not run this suite yet. The Rust binary serves every route, and a run against it must pass
-every case.
+CI runs this suite against the release binary on every change to `apps/manager` (the `e2e and
+parity` job in `.github/workflows/manager.yml`). A run must pass every case.
 
 ## Files
 
