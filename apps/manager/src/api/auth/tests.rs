@@ -496,3 +496,55 @@ async fn oidc_start_answers_503_while_1024_logins_are_pending() {
     assert_eq!(r.headers[header::CACHE_CONTROL], "no-store");
     assert!(r.cookies().is_empty());
 }
+
+fn trickle(total: usize, stall: bool) -> (Request<Body>, Arc<std::sync::atomic::AtomicUsize>) {
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let body = crate::testutil::Trickle {
+        prefix: br#"{"username":"admin","password":""#,
+        filler: b'A',
+        total,
+        stall,
+        sent: sent.clone(),
+    };
+    let req = Request::post("/api/v1/auth/login")
+        .header(header::HOST, "console.example")
+        .header(header::TRANSFER_ENCODING, "chunked")
+        .body(Body::new(body))
+        .unwrap();
+    (req, sent)
+}
+
+/// A login body is read only up to 64 KiB: a longer one gets 413 without the rest being read.
+#[tokio::test]
+async fn a_login_body_over_64_kib_gets_413() {
+    let (req, sent) = trickle(8 << 20, false);
+    let res = router(state()).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 413);
+    let read = sent.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(read <= (64 << 10) + (16 << 10), "read {read} bytes");
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"error": {"code": "body_too_large", "message": "request body is too large"}})
+    );
+    // 64 KiB exactly is still read and checked.
+    let password = "A".repeat((64 << 10) - r#"{"username":"admin","password":""}"#.len());
+    let r = login(&router(state()), "admin", &password).await;
+    assert_eq!(r.status, 401);
+}
+
+/// A body that stops arriving gets 408 after 30 s instead of holding the request open.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_login_body_gets_408() {
+    let (req, _) = trickle(100, true);
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        router(state()).oneshot(req),
+    )
+    .await
+    .expect("the request finishes")
+    .unwrap();
+    assert_eq!(res.status(), 408);
+}

@@ -6,6 +6,7 @@ pub mod ratelimit;
 pub mod triage;
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use axum::body::HttpBody;
 use axum::extract::Request;
@@ -17,6 +18,7 @@ use serde_json::value::RawValue;
 
 use crate::auth::Members;
 use crate::config;
+use crate::server::error_response;
 use crate::triage::go_compact;
 
 /// Go's `httputil.WriteJSON` with status 200, escaped as Go's encoder escapes. Go writes the status and `Content-Type` before it
@@ -81,20 +83,66 @@ impl Query {
 /// Go's `maxNestingDepth`: a body may nest arrays and objects 10000 deep, and no deeper.
 const MAX_DEPTH: usize = 10_000;
 
-/// The body a frame at a time up to the end of its first JSON value, as Go's decoder reads it,
-/// with no size limit. `None` when a read fails before the value ends or the value nests deeper
-/// than Go allows.
-pub async fn read_body(req: Request) -> Option<Vec<u8>> {
-    let mut body = req.into_body();
-    let (mut buf, mut scan) = (Vec::new(), Scan::default());
-    while !scan.feed(&buf)? {
-        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
-        let Some(frame) = frame else { break };
-        if let Ok(data) = frame.ok()?.into_data() {
-            buf.extend_from_slice(&data);
+/// A login body: a username and a password.
+pub const LOGIN_BODY_LIMIT: usize = 64 << 10;
+/// A triage body: an event's evidence snapshot or a note. `lodeline-server` takes at most 2 MiB a
+/// request, so any event it holds fits.
+pub const TRIAGE_BODY_LIMIT: usize = 4 << 20;
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why a body was not read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BodyError {
+    TooLarge,
+    TimedOut,
+}
+
+impl IntoResponse for BodyError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::TooLarge => error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body_too_large",
+                "request body is too large",
+            ),
+            Self::TimedOut => error_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "request_timeout",
+                "request body took too long",
+            ),
         }
     }
-    Some(buf)
+}
+
+/// The body a frame at a time up to the end of its first JSON value, as Go's decoder reads it.
+/// `Ok(None)` when a read fails before the value ends or the value nests deeper than Go allows.
+/// An error once the value runs past `limit` bytes, which are all that is held, or when the body
+/// has not arrived within 30 s.
+pub async fn read_body(req: Request, limit: usize) -> Result<Option<Vec<u8>>, BodyError> {
+    let read = async {
+        let mut body = req.into_body();
+        let (mut buf, mut scan, mut over) = (Vec::new(), Scan::default(), false);
+        loop {
+            match scan.feed(&buf) {
+                None => return Ok(None),
+                Some(true) => break,
+                Some(false) if over => return Err(BodyError::TooLarge),
+                Some(false) => {}
+            }
+            let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
+            let Some(frame) = frame else { break };
+            let Ok(frame) = frame else { return Ok(None) };
+            if let Ok(data) = frame.into_data() {
+                let room = limit - buf.len();
+                over = data.len() > room;
+                buf.extend_from_slice(&data[..data.len().min(room)]);
+            }
+        }
+        Ok(Some(buf))
+    };
+    tokio::time::timeout(BODY_READ_TIMEOUT, read)
+        .await
+        .unwrap_or(Err(BodyError::TimedOut))
 }
 
 /// How much of a body's first JSON value has been read.

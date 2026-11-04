@@ -13,7 +13,7 @@ use chrono::{DateTime, Local, Offset, TimeZone, Utc};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 
-use crate::api::{go_object, read_body, set, write_json, Query};
+use crate::api::{go_object, read_body, set, write_json, Query, LOGIN_BODY_LIMIT};
 use crate::auth::{self, go_fold, request_cookie, COOKIE_NAME};
 use crate::fleet::GoTime;
 use crate::server::{error_response, text_response, AppState};
@@ -46,7 +46,11 @@ struct LoginBody {
 
 /// Go's `handleLogin`. The body is read as Go's decoder reads it, whatever its `Content-Type`.
 pub async fn login(State(s): State<AppState>, req: Request) -> Response {
-    let Some(body) = read_body(req).await.and_then(|b| login_body(&b)) else {
+    let body = match read_body(req, LOGIN_BODY_LIMIT).await {
+        Ok(body) => body.and_then(|b| login_body(&b)),
+        Err(e) => return e.into_response(),
+    };
+    let Some(body) = body else {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_query",

@@ -55,6 +55,8 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [dev-dependencies]
+# start_paused: the body read timeout test (src/api/auth/tests.rs).
+tokio = { version = "1", features = ["test-util"] }
 # The contract test runs the real server in process (src/fleet/tests.rs).
 lodeline-server = { path = "../../crates/lodeline-server" }
 # An mTLS stand-in server for the client certificate tests (src/fleet/http/tests.rs).

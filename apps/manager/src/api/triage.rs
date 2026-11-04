@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, Uri};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::Extension;
 
-use crate::api::{field, go_object, read_body, set, write_json};
+use crate::api::{field, go_object, read_body, set, write_json, TRIAGE_BODY_LIMIT};
 use crate::auth::{go_fold, Subject};
 use crate::server::{error_response, AppState};
 use crate::triage::{self, Error, Store, Upsert};
@@ -18,7 +18,11 @@ pub async fn upsert(
     Extension(Subject(actor)): Extension<Subject>,
     req: Request,
 ) -> Response {
-    let Some(body) = read_body(req).await.and_then(|b| upsert_body(&b)) else {
+    let body = match read_body(req, TRIAGE_BODY_LIMIT).await {
+        Ok(body) => body.and_then(|b| upsert_body(&b)),
+        Err(e) => return e.into_response(),
+    };
+    let Some(body) = body else {
         return malformed();
     };
     if body.host_id.is_empty() || body.event_id.is_empty() {
@@ -36,7 +40,11 @@ pub async fn note(
     Extension(Subject(author)): Extension<Subject>,
     req: Request,
 ) -> Response {
-    let Some(body) = read_body(req).await.and_then(|b| note_body(&b)) else {
+    let body = match read_body(req, TRIAGE_BODY_LIMIT).await {
+        Ok(body) => body.and_then(|b| note_body(&b)),
+        Err(e) => return e.into_response(),
+    };
+    let Some(body) = body else {
         return malformed();
     };
     if body.host_id.is_empty() || body.event_id.is_empty() || body.body.is_empty() {

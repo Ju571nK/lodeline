@@ -367,3 +367,41 @@ pub async fn authorize_redirect(client: &reqwest::Client, location: &str) -> req
     let to = res.headers()[header::LOCATION].to_str().unwrap();
     reqwest::Url::parse(to).unwrap()
 }
+
+/// A request body that sends `prefix`, then `filler` bytes 16 KiB a frame until `total` bytes
+/// have gone out, then either ends or, with `stall`, stops sending without ending. `sent` counts
+/// the bytes handed to the reader.
+pub struct Trickle {
+    pub prefix: &'static [u8],
+    pub filler: u8,
+    pub total: usize,
+    pub stall: bool,
+    pub sent: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl axum::body::HttpBody for Trickle {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let sent = self.sent.load(Relaxed);
+        if sent >= self.total {
+            return if self.stall {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(None)
+            };
+        }
+        let chunk = if sent == 0 {
+            self.prefix.to_vec()
+        } else {
+            vec![self.filler; (self.total - sent).min(16 * 1024)]
+        };
+        self.sent.fetch_add(chunk.len(), Relaxed);
+        std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk.into()))))
+    }
+}
