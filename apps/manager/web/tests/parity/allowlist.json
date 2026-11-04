@@ -10,5 +10,39 @@
     "path": "body.ai_guard.by_tool.*.controls",
     "rule": "null-or-absent",
     "reason": "Go omits unreported controls (omitempty); the SPA type is `controls?: AiGuardControl[] | null` and documents absent and null as unreported (src/api/fleet.ts)."
+  },
+  {
+    "cases": ["spa-index-html"],
+    "rule": "alternative",
+    "record": {
+      "status": 200,
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+        "content-type": "text/html; charset=utf-8",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY"
+      },
+      "body": "<dist:index.html>"
+    },
+    "reason": "Intended: the Rust port serves /index.html as the page itself. Go's http.FileServer answers 301 to ./ for any path ending in /index.html, and the SPA loads the same page either way."
+  },
+  {
+    "cases": ["spa-assets-dir"],
+    "rule": "alternative",
+    "record": {
+      "status": 200,
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+        "content-type": "text/html; charset=utf-8",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY"
+      },
+      "body": "<dist:index.html>"
+    },
+    "reason": "Intended: the Rust port answers a directory path with the index.html fallback instead of Go's directory listing, so /assets/ does not list the build's files."
   }
 ]

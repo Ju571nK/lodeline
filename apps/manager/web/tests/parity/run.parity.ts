@@ -13,6 +13,7 @@ import http from 'node:http';
 import { dirname, join, relative } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { expect, test } from '@playwright/test';
 import { type Auth, CASES, type Case, NO_SUCCESS_CASE, ROUTES } from './cases.ts';
 import * as env from './env.ts';
@@ -50,12 +51,18 @@ const GAP_MS = 6;
 const LOGIN_PAUSE_MS = 1_100;
 const HASHED = /-[\w-]{8}(\.\w+)$/;
 
-interface AllowEntry {
-  cases: string[];
-  path: string;
-  rule: 'null-or-absent';
-  reason: string;
-}
+type Rec = Record<string, unknown>;
+type AllowEntry = { cases: string[]; reason: string } & (
+  | { rule: 'null-or-absent'; path: string }
+  | { rule: 'alternative'; record: Rec }
+);
+const RECORD_KEYS = ['status', 'headers', 'cookies', 'body'];
+const SECURITY_HEADERS = [
+  'content-security-policy',
+  'referrer-policy',
+  'x-content-type-options',
+  'x-frame-options',
+];
 const ALLOWLIST: AllowEntry[] = JSON.parse(readFileSync(join(HERE, 'allowlist.json'), 'utf8'));
 
 interface Run {
@@ -400,12 +407,24 @@ async function recordCase(c: Case): Promise<Record<string, unknown>> {
   return record;
 }
 
-function allowlisted(name: string, record: Record<string, unknown>): Record<string, unknown> {
-  const copy = structuredClone(record);
+/** The record and the golden with the case's allowlist entries applied. */
+function allowlisted(name: string, record: Rec, golden: Rec): [Rec, Rec] {
+  const [r, g] = [structuredClone(record), structuredClone(golden)];
   for (const e of ALLOWLIST) {
-    if (e.cases.includes(name)) dropNullAt(copy, e.path.split('.'));
+    if (!e.cases.includes(name)) continue;
+    if (e.rule === 'null-or-absent') {
+      for (const v of [r, g]) dropNullAt(v, e.path.split('.'));
+    } else if (Object.entries(e.record).every(([k, v]) => isDeepStrictEqual(r[k], v))) {
+      // A record that is exactly the stated alternative compares as the golden.
+      for (const k of Object.keys(e.record)) r[k] = g[k];
+    }
   }
-  return copy;
+  return [r, g];
+}
+
+function securityHeaders(record: Rec): Rec {
+  const headers = record.headers as Rec;
+  return Object.fromEntries(SECURITY_HEADERS.map((h) => [h, headers[h]]));
 }
 
 /** Refuses to write goldens or testdata from anything but the Go reference build. */
@@ -435,20 +454,36 @@ test.beforeAll(async () => {
     body: JSON.stringify({ username: env.ADMIN_USERNAME, password: env.ADMIN_PASSWORD }),
   });
   saveBracket({ label: 'recorder-login', startMs, endMs: Date.now() });
-  expect(login.status, 'recorder login').toBe(200);
-  const session = /^lodeline_session=([^;]+)/.exec(login.headers.getSetCookie()[0] ?? '')?.[1];
+  // A port that does not serve login yet answers 501. Its run takes the session that Go issued
+  // (testdata/), which verifies with the same secret, so the routes behind the session check
+  // still run; the cases of the missing routes fail.
+  let session: string | undefined;
+  if (login.status === 501) {
+    console.warn('parity: login answers 501; using the Go-minted session in testdata/');
+    session = readFileSync(join(TESTDATA, 'session-token.txt'), 'utf8').trim();
+  } else {
+    expect(login.status, 'recorder login').toBe(200);
+    session = /^lodeline_session=([^;]+)/.exec(login.headers.getSetCookie()[0] ?? '')?.[1];
+  }
   expect(session, 'session cookie').toBeTruthy();
   const healthz = await fetch(`${env.MOCK_URL}/api/v1/fleet/healthz`, {
     headers: { Cookie: `lodeline_session=${session}` },
   });
-  const ts = ((await healthz.json()) as { ts: string }).ts;
-  // Go anchors the mock at process start, truncated to the second.
-  expect(ts, 'mock seed is a whole second').toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
-  const seedMs = Date.parse(ts);
-  expect(seedMs, 'mock seed not before the run').toBeGreaterThanOrEqual(
-    Math.floor(env.RUN_START_MS / 1000) * 1000,
-  );
-  expect(seedMs, 'mock seed not in the future').toBeLessThanOrEqual(Date.now());
+  let seedMs: number;
+  // Likewise a port without the mock fleet: the run start stands in for the seed.
+  if (healthz.status === 501) {
+    console.warn('parity: fleet/healthz answers 501; the mock seed is unknown');
+    seedMs = Math.floor(env.RUN_START_MS / 1000) * 1000;
+  } else {
+    const ts = ((await healthz.json()) as { ts: string }).ts;
+    // Go anchors the mock at process start, truncated to the second.
+    expect(ts, 'mock seed is a whole second').toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    seedMs = Date.parse(ts);
+    expect(seedMs, 'mock seed not before the run').toBeGreaterThanOrEqual(
+      Math.floor(env.RUN_START_MS / 1000) * 1000,
+    );
+    expect(seedMs, 'mock seed not in the future').toBeLessThanOrEqual(Date.now());
+  }
 
   const distByHash = new Map<string, string>();
   for (const f of walkFiles(DIST)) distByHash.set(sha256(readFileSync(f)), relative(DIST, f));
@@ -495,9 +530,14 @@ test('the table covers every route with a success and an error case', () => {
 
 test('every allowlist entry names a reason and known cases', () => {
   for (const e of ALLOWLIST) {
-    expect(e.reason.trim().length, `reason for ${e.path}`).toBeGreaterThan(0);
-    expect(e.rule).toBe('null-or-absent');
-    expect(e.cases.length, `cases for ${e.path}`).toBeGreaterThan(0);
+    const what = e.rule === 'null-or-absent' ? e.path : `alternative for ${e.cases}`;
+    expect(e.reason.trim().length, `reason for ${what}`).toBeGreaterThan(0);
+    expect(['null-or-absent', 'alternative']).toContain(e.rule);
+    if (e.rule === 'alternative') {
+      expect(Object.keys(e.record).length, what).toBeGreaterThan(0);
+      for (const k of Object.keys(e.record)) expect(RECORD_KEYS, what).toContain(k);
+    }
+    expect(e.cases.length, `cases for ${what}`).toBeGreaterThan(0);
     for (const name of e.cases) {
       expect(
         CASES.some((c) => c.name === name),
@@ -516,7 +556,10 @@ for (const c of CASES) {
       return;
     }
     const golden = JSON.parse(readFileSync(file, 'utf8'));
-    expect(allowlisted(c.name, record)).toEqual(allowlisted(c.name, golden));
+    // Checked on its own first, so a run shows them even where the rest of the record differs.
+    expect(securityHeaders(record), 'security headers').toEqual(securityHeaders(golden));
+    const [r, g] = allowlisted(c.name, record, golden);
+    expect(r).toEqual(g);
   });
 }
 
