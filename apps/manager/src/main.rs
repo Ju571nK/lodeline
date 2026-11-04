@@ -8,6 +8,8 @@ mod conn;
 mod fleet;
 mod server;
 mod spa;
+#[cfg(test)]
+mod testutil;
 mod triage;
 
 use std::sync::Arc;
@@ -33,8 +35,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let store = Arc::new(triage::Store::open(&cfg.triage_db_path)?);
+    let signer = Arc::new(auth::Signer::new(cfg.jwt_secret.as_bytes(), cfg.jwt_ttl)?);
+    let oidc = match &cfg.oidc {
+        Some(c) => {
+            let http = auth::oidc::http_client(&[])?;
+            Some(Arc::new(auth::oidc::Oidc::discover(c, http).await?))
+        }
+        None => None,
+    };
     let app = server::router(server::AppState {
-        signer: Arc::new(auth::Signer::new(cfg.jwt_secret.as_bytes())),
+        signer,
+        auth: Arc::new(api::auth::AuthConfig {
+            admin_username: cfg.admin_username.clone(),
+            admin_password_bcrypt: cfg.admin_password_bcrypt.clone(),
+            // A TLS terminator fronts the binary in production; only exactly "1" turns Secure off.
+            cookie_secure: std::env::var("LODELINE_INSECURE_COOKIE").as_deref() != Ok("1"),
+        }),
+        oidc,
         fleet: fleet::from_config(&cfg)?,
         triage: store,
     });

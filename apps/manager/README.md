@@ -1,10 +1,8 @@
 # lodeline-manager
 
 Read-only web console for a `lodeline-server` fleet. This folder holds the Rust port of
-[lodeline-manager](https://github.com/Ju571nK/lodeline-manager). The port is in progress: the
-binary reads its configuration, serves the web UI and `/api/health`, and checks the session
-cookie. The other API routes answer `501 Not Implemented` after their method and session
-checks, so the console does not work end to end yet.
+[lodeline-manager](https://github.com/Ju571nK/lodeline-manager). Every route of the Go console is
+ported, including local and OIDC login. The port is not released yet.
 
 This is its own Cargo workspace. The root workspace does not build it, and
 `.github/workflows/manager.yml` tests it.

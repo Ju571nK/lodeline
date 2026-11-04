@@ -18,8 +18,8 @@ publish = false
 lodeline-fleet-api = { path = "../../crates/lodeline-fleet-api" }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
-# rustls-tls-native-roots: the OS trust store, which Go uses. openidconnect turns rustls-tls on
-# anyway; fleet/http.rs turns its built-in web roots off.
+# rustls-tls-native-roots: the OS trust store, which Go uses. fleet/http.rs and auth/oidc.rs turn
+# the built-in web roots off.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
 # reqwest's TLS stack; config.rs parses the CA bundle with it.
 rustls = { version = "0.23", default-features = false, features = ["std"] }
@@ -28,7 +28,8 @@ rustls = { version = "0.23", default-features = false, features = ["std"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 bcrypt = "0.19"
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
-openidconnect = "4.1"
+# The OIDC state, nonce and PKCE verifier bytes; already in the graph through jsonwebtoken.
+getrandom = "0.2"
 subtle = "2.6"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -42,10 +43,11 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-graceful", "service", "http1", "client-proxy"] }
 # Go's `:port` listener is dual-stack; std and tokio cannot turn IPV6_V6ONLY off.
 socket2 = "0.6"
+# Puts the client address on each request (conn.rs).
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 # The contract test runs the real server in process (src/fleet/tests.rs).
 lodeline-server = { path = "../../crates/lodeline-server" }
 # An mTLS stand-in server for the client certificate tests (src/fleet/http/tests.rs).

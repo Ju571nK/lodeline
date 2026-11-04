@@ -10,18 +10,16 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use super::*;
-use crate::auth::Signer;
 use crate::fleet;
 use crate::server::router;
 
 const SECRET: &str = "0123456789abcdefghijklmnopqrstuv";
 
 fn app() -> Router {
-    router(AppState {
-        signer: Arc::new(Signer::new(SECRET.as_bytes())),
-        fleet: Arc::new(fleet::Mock::new(1_779_192_000)),
-        triage: Arc::new(Store::open(":memory:").unwrap()),
-    })
+    router(AppState::for_tests(
+        SECRET,
+        Arc::new(fleet::Mock::new(1_779_192_000)),
+    ))
 }
 
 fn cookie(subject: &str) -> String {

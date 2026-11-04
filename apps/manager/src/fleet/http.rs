@@ -111,7 +111,7 @@ impl Client for HttpClient {
 /// Go's `http.ProxyFromEnvironment`: `HTTPS_PROXY` for https and `HTTP_PROXY` for http, each
 /// name read upper case first, hosts in `NO_PROXY` exempt, and never a proxy for `localhost` or a
 /// loopback address.
-fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
+pub fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
     let var = |name: &str| {
         [name.to_owned(), name.to_lowercase()]
             .into_iter()

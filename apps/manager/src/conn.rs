@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::Router;
+use axum::extract::ConnectInfo;
+use axum::{Extension, Router};
 use hyper::rt::{Sleep, Timer};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -19,6 +20,7 @@ use hyper_util::service::TowerToHyperService;
 use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+use tower::Layer;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const READ_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -54,9 +56,9 @@ pub async fn serve(listener: TcpListener, app: Router, shutdown: impl Future<Out
     let graceful = GracefulShutdown::new();
     let mut shutdown = pin!(shutdown);
     loop {
-        let stream = tokio::select! {
+        let (stream, peer) = tokio::select! {
             accepted = accept(&listener) => match accepted {
-                Ok(stream) => stream,
+                Ok(accepted) => accepted,
                 Err(e) => {
                     eprintln!("lodeline-manager: accept: {e}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -70,13 +72,15 @@ pub async fn serve(listener: TcpListener, app: Router, shutdown: impl Future<Out
             reads: reads.clone(),
             armed: AtomicBool::new(false),
         };
+        // Go's `Request.RemoteAddr`, which the login limiter keys on.
+        let app = Extension(ConnectInfo(peer)).layer(app.clone());
         // HTTP/1.1 only, as Go's server on a plain listener.
         let conn = http1::Builder::new()
             .timer(timer)
             .header_read_timeout(READ_HEADER_TIMEOUT)
             .serve_connection(
                 TokioIo::new(CountReads { stream, reads }),
-                TowerToHyperService::new(app.clone()),
+                TowerToHyperService::new(app),
             );
         let conn = graceful.watch(conn);
         tokio::spawn(async move {
@@ -96,14 +100,14 @@ pub async fn serve(listener: TcpListener, app: Router, shutdown: impl Future<Out
 
 /// Turns on TCP keep-alive and `TCP_NODELAY` as Go's listener does, so a peer that vanishes
 /// without a FIN does not hold an idle connection open forever. Go ignores these errors too.
-async fn accept(listener: &TcpListener) -> io::Result<TcpStream> {
-    let (stream, _) = listener.accept().await?;
+async fn accept(listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
+    let (stream, peer) = listener.accept().await?;
     let _ = stream.set_nodelay(true);
     let keepalive = TcpKeepalive::new()
         .with_time(KEEPALIVE)
         .with_interval(KEEPALIVE);
     let _ = SockRef::from(&stream).set_tcp_keepalive(&keepalive);
-    Ok(stream)
+    Ok((stream, peer))
 }
 
 /// hyper starts its header read timeout as soon as it waits for a request head, which closes an

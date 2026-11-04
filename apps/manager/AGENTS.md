@@ -43,11 +43,15 @@ Playwright e2e (`npm run e2e` in `web/`) starts the binary at `MANAGER_BIN`, or
 The parity recorder (`npm run parity` in `web/`) compares the binary's HTTP responses with goldens
 recorded from the Go implementation. See [`web/tests/parity/README.md`](web/tests/parity/README.md).
 
-The port is in progress. `src/server.rs` holds the route table, which must match `ROUTES` in
-`web/tests/parity/cases.ts` (a unit test checks it). Routes whose handlers are not ported yet
-answer 501 after their method and session checks. Each ported behavior must match the Go
-goldens; an intended difference needs an `allowlist.json` entry with its reason. Never record
-goldens from the Rust binary.
+`src/server.rs` holds the route table, which must match `ROUTES` in
+`web/tests/parity/cases.ts` (a unit test checks it). Each behavior must match the Go goldens; an
+intended difference needs an `allowlist.json` entry with its reason. Never record goldens from
+the Rust binary.
+
+`src/auth.rs` signs and checks the session token, `src/auth/oidc.rs` is the OIDC login, and
+`src/api/auth.rs` and `src/api/ratelimit.rs` are the auth routes and the login limiter. They keep
+Go's behavior, including the limiter's trust in forwarding headers, until a separate change
+fixes it. Sessions are stateless: logout clears the cookie and does not revoke the token.
 
 `src/fleet/` reads the server's API. `src/fleet/wire.rs` holds the bodies in the shape the SPA
 gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in process and its
@@ -58,5 +62,4 @@ here. The mock fleet is `testdata/mock-fleet.json` (see `testdata/README.md`).
 Go build's: keep the schema text, the pragmas and the fixed-width timestamp layout as they are.
 Its tests open the Go-written `testdata/triage.sqlite` through a copy.
 
-Until the port lands, the imported specs in `docs/specs/` and some comments still describe the
-Go implementation, and the Playwright e2e suite does not pass yet.
+The imported specs in `docs/specs/` and some comments still describe the Go implementation.

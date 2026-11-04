@@ -243,10 +243,15 @@ impl GoTime {
     /// Go's `MarshalJSON`: RFC 3339 with trailing fraction zeros dropped, in the offset the time
     /// was written with. Go refuses a year outside 0 to 9999 and an offset of 24 hours or more.
     fn marshal(&self) -> Result<String, &'static str> {
-        let t = self.civil(self.offset);
+        let err = "Time.MarshalJSON: time outside the range RFC 3339 can write";
+        // Past chrono's range is past year 9999 too.
+        let t =
+            DateTime::from_timestamp(self.unix.saturating_add(i64::from(self.offset)), self.nanos)
+                .ok_or(err)?
+                .naive_utc();
         let minutes = self.offset / 60;
         if !(0..=9999).contains(&t.year()) || minutes.abs() / 60 >= 24 {
-            return Err("Time.MarshalJSON: time outside the range RFC 3339 can write");
+            return Err(err);
         }
         let mut s = format!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",

@@ -19,7 +19,6 @@ pub struct Config {
     /// `TRIAGE_DB_PATH`, default `./var/triage.sqlite`.
     pub triage_db_path: String,
     pub admin_username: String,
-    #[allow(dead_code, reason = "the login handler reads it")]
     pub admin_password_bcrypt: String,
     /// `JWT_SECRET`, at least 32 bytes after trimming.
     pub jwt_secret: String,
@@ -308,19 +307,19 @@ impl OidcConfig {
 }
 
 /// The parts of Go's `url.Parse` result that validation reads.
-struct GoUrl {
-    scheme: String,
-    has_user: bool,
-    host: String,
+pub struct GoUrl {
+    pub scheme: String,
+    pub has_user: bool,
+    pub host: String,
     /// Percent-decoded, as Go's `URL.Path`.
     path: Vec<u8>,
     has_query: bool,
-    has_fragment: bool,
+    pub has_fragment: bool,
 }
 
 /// Go's `url.Parse` for absolute URLs, `None` where Go returns an error. A relative or opaque URL
 /// comes back with an empty host, which every caller refuses.
-fn go_url(raw: &str) -> Option<GoUrl> {
+pub fn go_url(raw: &str) -> Option<GoUrl> {
     if raw.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return None;
     }
