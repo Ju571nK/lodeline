@@ -1,0 +1,40 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/hosts",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "hosts": [
+      {
+        "agent_version": "",
+        "current_risk": null,
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "hostname": null,
+        "last_seen_ts": "0001-01-01T00:00:00Z",
+        "open_event_counts_24h": null,
+        "status": ""
+      }
+    ],
+    "next_cursor": null,
+    "total_estimated": 0
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/fleet/hosts",
+      "query": [],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

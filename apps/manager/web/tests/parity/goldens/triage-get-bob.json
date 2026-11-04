@@ -1,0 +1,54 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/triage/5a7c3e91-aaaa-bbbb-cccc-222222222222/{event:6}",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "log": [
+      {
+        "actor": "admin",
+        "at": "<now@triage-upsert-null-snapshot .9Z>",
+        "from_status": null,
+        "id": 4,
+        "to_status": "open"
+      }
+    ],
+    "notes": [
+      {
+        "author": "admin",
+        "body": "sent as text/plain",
+        "created_at": "<now@triage-note-text-plain .9Z>",
+        "event_id": "EVT#6",
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "id": 3
+      },
+      {
+        "author": "admin",
+        "body": "extra fields",
+        "created_at": "<now@triage-note-extra-fields .9Z>",
+        "event_id": "EVT#6",
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "id": 4
+      }
+    ],
+    "row": {
+      "assignee": null,
+      "created_at": "<now@triage-upsert-null-snapshot .9Z>",
+      "event_id": "EVT#6",
+      "evidence_snapshot": null,
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+      "status": "open",
+      "updated_at": "<now@triage-upsert-null-snapshot .9Z>"
+    }
+  }
+}

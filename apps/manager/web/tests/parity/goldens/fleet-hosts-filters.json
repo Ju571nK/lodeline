@@ -1,0 +1,66 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/hosts?status=healthy,stale&sort=risk&limit=2",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "hosts": [
+      {
+        "agent_version": "0.4.0",
+        "current_risk": {
+          "by_tool": {
+            "claude_code": {
+              "assessed_ts": "<seed-2m Z>",
+              "bucket": "critical",
+              "score": 7.2
+            }
+          },
+          "max_bucket": "critical",
+          "max_score": 7.2
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "hostname": "alice-mbp",
+        "last_seen_ts": "<seed-1m Z>",
+        "open_event_counts_24h": {
+          "info": 1402,
+          "warn": 14
+        },
+        "status": "healthy"
+      },
+      {
+        "agent_version": "0.4.0",
+        "current_risk": {
+          "by_tool": {
+            "codex": {
+              "assessed_ts": "<seed-15m Z>",
+              "bucket": "medium",
+              "score": 4.5
+            }
+          },
+          "max_bucket": "medium",
+          "max_score": 4.5
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "hostname": "bob-laptop",
+        "last_seen_ts": "<seed-3m Z>",
+        "open_event_counts_24h": {
+          "info": 250,
+          "warn": 3
+        },
+        "status": "healthy"
+      }
+    ],
+    "next_cursor": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+    "total_estimated": 5
+  }
+}

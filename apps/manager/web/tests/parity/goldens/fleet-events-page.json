@@ -1,0 +1,124 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events?limit=3&cursor={event:4}",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "events": [
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#5",
+        "evidence": {
+          "bucket": "high",
+          "controls": [],
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "hook_event": "mcp_command",
+              "kind": "mcp_server_remote"
+            }
+          ],
+          "scope": {
+            "kind": "project",
+            "path": "/Users/eve/code/billing"
+          },
+          "score": 7.4,
+          "tool": "continue_dev"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/eve/code/billing/.continue/config.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-220m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#6",
+        "evidence": {
+          "bucket": "high",
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "command": "npx -y @modelcontextprotocol/server-filesystem /",
+              "kind": "mcp_server_local_command",
+              "server_name": "local-fs"
+            }
+          ],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 6.4,
+          "tool": "gemini"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/bob/.config/gemini-cli/config.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-264m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#7",
+        "evidence": {
+          "bucket": "high",
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "executor": "mcp_command",
+              "kind": "no_sandbox"
+            }
+          ],
+          "scope": {
+            "app": "cursor",
+            "kind": "application"
+          },
+          "score": 6.2,
+          "tool": "cursor"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/home/carol/.cursor/settings.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-308m Z>"
+      }
+    ],
+    "next_cursor": "EVT#7"
+  }
+}

@@ -1,0 +1,198 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events?host_id=5a7c3e91-aaaa-bbbb-cccc-111111111111&host_id=5a7c3e91-aaaa-bbbb-cccc-222222222222&severity=warn&since={seed-12h}&min_ai_guard_bucket=high",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "events": [
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#0",
+        "evidence": {
+          "bucket": "critical",
+          "controls": [
+            {
+              "id": "claude_code.configured.allowManagedHooksOnly",
+              "setting": "allowManagedHooksOnly",
+              "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+              "value": true
+            }
+          ],
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "hook_event": "PreToolUse",
+              "kind": "destructive_in_inline_command",
+              "pattern": "rm -rf",
+              "snippet": "rm -rf /"
+            }
+          ],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 7.2,
+          "tool": "claude_code"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/.claude/settings.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed+0h Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#3",
+        "evidence": {
+          "bucket": "high",
+          "controls": [
+            {
+              "id": "claude_code.configured.allowManagedHooksOnly",
+              "setting": "allowManagedHooksOnly",
+              "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+              "value": true
+            }
+          ],
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "kind": "external_script_unscanned",
+              "pattern": "hooks/preflight.sh"
+            }
+          ],
+          "scope": {
+            "kind": "project",
+            "path": "/Users/alice/code/work-repo"
+          },
+          "score": 6.1,
+          "tool": "claude_code"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/code/work-repo/.claude/settings.local.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-132m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#4",
+        "evidence": {
+          "bucket": "high",
+          "controls": [
+            {
+              "id": "codex.configured.allow_remote_control",
+              "setting": "allow_remote_control",
+              "source_path": "/etc/codex/requirements.toml",
+              "value": false
+            },
+            {
+              "id": "codex.configured.allowed_sandbox_modes",
+              "setting": "allowed_sandbox_modes",
+              "source_path": "/etc/codex/requirements.toml",
+              "value": [
+                "read-only",
+                "workspace-write"
+              ]
+            }
+          ],
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "hook_event": "PreToolUse",
+              "kind": "destructive_in_hook_script",
+              "pattern": "sudo rm",
+              "script_path": "/Users/bob/code/api/.codex/hooks/preflight.sh",
+              "snippet": "sudo rm -rf $TMP",
+              "source_chain": [
+                "/Users/bob/code/api/.codex/hooks/preflight.sh",
+                "/Users/bob/code/api/.codex/hooks/lib/clean.sh"
+              ]
+            }
+          ],
+          "scope": {
+            "kind": "project",
+            "path": "/Users/bob/code/api"
+          },
+          "score": 6.6,
+          "tool": "codex"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/bob/code/api/.codex/config.toml"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-176m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#6",
+        "evidence": {
+          "bucket": "high",
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "command": "npx -y @modelcontextprotocol/server-filesystem /",
+              "kind": "mcp_server_local_command",
+              "server_name": "local-fs"
+            }
+          ],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 6.4,
+          "tool": "gemini"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/bob/.config/gemini-cli/config.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-264m Z>"
+      }
+    ],
+    "next_cursor": null
+  }
+}

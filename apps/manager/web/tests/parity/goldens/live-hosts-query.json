@@ -1,0 +1,61 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/hosts?limit=3&cursor=c5&status=stale&bucket=high,critical&sort=host_id",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "hosts": [
+      {
+        "agent_version": "0.12.4",
+        "current_risk": null,
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "hostname": null,
+        "last_seen_ts": "2026-01-02T03:04:05Z",
+        "open_event_counts_24h": {},
+        "status": "stale"
+      }
+    ],
+    "next_cursor": null,
+    "total_estimated": 1
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/fleet/hosts",
+      "query": [
+        [
+          "bucket",
+          "high,critical"
+        ],
+        [
+          "cursor",
+          "c5"
+        ],
+        [
+          "limit",
+          "3"
+        ],
+        [
+          "sort",
+          "host_id"
+        ],
+        [
+          "status",
+          "stale"
+        ]
+      ],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events?limit=1&since=2026-01-01T00:00:00%2B24:00",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "events": [
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#0",
+        "evidence": {
+          "bucket": "critical",
+          "controls": [
+            {
+              "id": "claude_code.configured.allowManagedHooksOnly",
+              "setting": "allowManagedHooksOnly",
+              "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+              "value": true
+            }
+          ],
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "hook_event": "PreToolUse",
+              "kind": "destructive_in_inline_command",
+              "pattern": "rm -rf",
+              "snippet": "rm -rf /"
+            }
+          ],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 7.2,
+          "tool": "claude_code"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/.claude/settings.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed+0h Z>"
+      }
+    ],
+    "next_cursor": "EVT#0"
+  }
+}

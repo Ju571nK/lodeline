@@ -1,0 +1,55 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events?since={seed-88m}&until={seed-44m}",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "events": [
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#2",
+        "evidence": {
+          "bucket": "high",
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "executor": "mcp_command",
+              "kind": "no_sandbox"
+            }
+          ],
+          "scope": {
+            "app": "claude_desktop",
+            "kind": "application"
+          },
+          "score": 6.8,
+          "tool": "claude_desktop"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/home/carol/.config/Claude/claude_desktop_config.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-88m Z>"
+      }
+    ],
+    "next_cursor": null
+  }
+}

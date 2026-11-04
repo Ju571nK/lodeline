@@ -1,0 +1,72 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/triage/5a7c3e91-aaaa-bbbb-cccc-111111111111/{event:3}",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "log": [
+      {
+        "actor": "admin",
+        "at": "<now@triage-upsert-insert .9Z>",
+        "from_status": null,
+        "id": 1,
+        "to_status": "open"
+      },
+      {
+        "actor": "admin",
+        "at": "<now@triage-upsert-status .9Z>",
+        "from_status": "open",
+        "id": 2,
+        "to_status": "acknowledged"
+      },
+      {
+        "actor": "admin",
+        "at": "<now@triage-upsert-no-content-type .9Z>",
+        "from_status": "acknowledged",
+        "id": 3,
+        "to_status": "investigating"
+      }
+    ],
+    "notes": [
+      {
+        "author": "admin",
+        "body": "Checked the hook <script> & \"quotes\"",
+        "created_at": "<now@triage-note .9Z>",
+        "event_id": "EVT#3",
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "id": 1
+      },
+      {
+        "author": "admin",
+        "body": "Second note",
+        "created_at": "<now@triage-note-second .9Z>",
+        "event_id": "EVT#3",
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "id": 2
+      }
+    ],
+    "row": {
+      "assignee": null,
+      "created_at": "<now@triage-upsert-insert .9Z>",
+      "event_id": "EVT#3",
+      "evidence_snapshot": {
+        "kind": "ai_guard_risk_assessed",
+        "score": 7.2,
+        "tool": "claude_code"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "status": "investigating",
+      "updated_at": "<now@triage-upsert-no-content-type .9Z>"
+    }
+  }
+}

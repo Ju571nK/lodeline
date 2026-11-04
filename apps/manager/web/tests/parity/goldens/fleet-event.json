@@ -1,0 +1,58 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events/{event:3}",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "agent_version": "0.4.0",
+    "event_id": "EVT#3",
+    "evidence": {
+      "bucket": "high",
+      "controls": [
+        {
+          "id": "claude_code.configured.allowManagedHooksOnly",
+          "setting": "allowManagedHooksOnly",
+          "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+          "value": true
+        }
+      ],
+      "is_reattestation": false,
+      "kind": "ai_guard_risk_assessed",
+      "reasons": [
+        {
+          "kind": "external_script_unscanned",
+          "pattern": "hooks/preflight.sh"
+        }
+      ],
+      "scope": {
+        "kind": "project",
+        "path": "/Users/alice/code/work-repo"
+      },
+      "score": 6.1,
+      "tool": "claude_code"
+    },
+    "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+    "schema_version": 1,
+    "severity": "warn",
+    "source": {
+      "kind": "file_system"
+    },
+    "subject": {
+      "kind": "path",
+      "value": "/Users/alice/code/work-repo/.claude/settings.local.json"
+    },
+    "target_id": null,
+    "triage": null,
+    "ts": "<seed-132m Z>"
+  }
+}
