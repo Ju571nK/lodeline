@@ -69,7 +69,7 @@ jobs:
         with:
           workspaces: apps/manager -> target
       - name: listener and connection tests
-        run: cargo test conn::
+        run: cargo test 'conn::'
 
   web:
     name: web
