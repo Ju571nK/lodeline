@@ -124,7 +124,7 @@ keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 # Use the DNS name agents resolve, OR the literal IP if they dial by address:
 subjectAltName = DNS:lodeline.example.com
-# subjectAltName = IP:192.168.0.50
+# subjectAltName = IP:192.0.2.50
 EOF
 openssl req -new -newkey rsa:2048 -nodes -keyout server.key -out server.csr \
   -subj "/CN=lodeline.example.com"
@@ -149,7 +149,7 @@ Ship `ca.crt` + the host's `client-hostA.{crt,key}` to that agent host (the
 sender's `server_ca_path` / `client_cert_path` / `client_key_path`). Keep
 `ca.key` offline/secured.
 
-> **SAN is the #1 mTLS gotcha.** If agents dial `https://192.168.0.50:8443` but
+> **SAN is the #1 mTLS gotcha.** If agents dial `https://192.0.2.50:8443` but
 > the cert SAN only has a DNS name, the TLS handshake fails. Put the literal
 > `IP:` in the SAN, or give agents a resolvable DNS name.
 
@@ -294,6 +294,9 @@ sudo systemctl edit lodeline-server
 # [Service]
 # Environment=LODELINE_SERVER_READ_TOKEN=<long-random-token>
 ```
+
+The `lodeline-manager` web console reads the fleet through these routes with the
+same token. To run it, see [`apps/manager/README.md`](../apps/manager/README.md).
 
 ### 5.1 Serve agent artifacts (air-gapped / PMS install)
 

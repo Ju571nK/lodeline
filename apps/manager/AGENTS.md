@@ -22,7 +22,7 @@ cd ..
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo +1.88 check --locked   # MSRV
+cargo +1.88 check --all-targets --locked   # MSRV
 ```
 
 `build.rs` embeds `web/dist` into the binary, and a placeholder page when `web/dist` is
@@ -38,13 +38,19 @@ The release binary is `target/release/lodeline-manager`. It reads only environme
 
 Playwright e2e (`npm run e2e` in `web/`) starts the binary at `MANAGER_BIN`, or
 `../target/release/lodeline-manager` when it is unset. With `CARGO_TARGET_DIR` set, pass
-`MANAGER_BIN` explicitly.
+`MANAGER_BIN` explicitly. Each run gets its own triage database in a temp dir, or
+`E2E_TRIAGE_DB_PATH`.
 
-The parity recorder (`npm run parity` in `web/`) compares the binary's HTTP responses with goldens
-recorded from the Go implementation. See [`web/tests/parity/README.md`](web/tests/parity/README.md).
+The parity recorder (`npm run parity` in `web/`) compares the binary's HTTP responses with
+goldens, most recorded from the Go console it replaced. See
+[`web/tests/parity/README.md`](web/tests/parity/README.md). The `e2e and parity` job in
+`manager.yml` runs both suites against a release binary with the SPA embedded.
+
+To drive the console in a browser and capture evidence, use the verify skill in
+[`.claude/skills/verify/`](.claude/skills/verify/SKILL.md).
 
 `src/server.rs` holds the route table, which must match `ROUTES` in
-`web/tests/parity/cases.ts` (a unit test checks it). The Rust port does not have to match Go.
+`web/tests/parity/cases.ts` (a unit test checks it). The console does not have to match Go.
 The goldens are a regression check: when a change intentionally differs from a Go golden,
 record that golden from the Rust build, leave every other golden as it is, and list the
 difference in the PR. The parity README says how.
@@ -52,7 +58,11 @@ difference in the PR. The parity README says how.
 `src/auth.rs` signs and checks the session token, `src/auth/oidc.rs` is the OIDC login, and
 `src/api/auth.rs` and `src/api/ratelimit.rs` are the auth routes and the login limiter. The
 limiter keys on the connection's peer and reads `X-Forwarded-For` only from `TRUSTED_PROXIES`
-(README.md, "Behind a reverse proxy"). Sessions are stateless: logout clears the cookie and does not revoke the token.
+(README.md, "Behind a reverse proxy"). Sessions are stateless: logout clears the cookie and does
+not revoke the token. Two things must stay compatible with the Go console: a session token it
+signed must keep verifying under the same `JWT_SECRET`, and an OIDC user's identity, `oidc:`
+plus the SHA-256 of the JSON pair `[issuer, subject]`, must not change, because triage rows
+record it. `src/auth/tests.rs` and `src/auth/oidc/tests.rs` check both.
 
 `src/fleet/` reads the server's API. `src/fleet/wire.rs` holds the bodies in the shape the SPA
 gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in process and its
@@ -63,4 +73,6 @@ here. The mock fleet is `testdata/mock-fleet.json` (see `testdata/README.md`).
 Go build's: keep the schema text, the pragmas and the fixed-width timestamp layout as they are.
 Its tests open the Go-written `testdata/triage.sqlite` through a copy.
 
-The imported specs in `docs/specs/` and some comments still describe the Go implementation.
+`docs/specs/` holds the design specs written for the Go console. They record the design
+decisions, and the file paths they name are the Go layout. Comments that say "as in Go" give
+the reason for a behavior that keeps the Go console's answer.

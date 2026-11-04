@@ -25,4 +25,4 @@ For Lodeline Proxy work, read [the specification entry point](docs/specs/lodelin
 - Assign one writer per file; link assignments and results to requirement and acceptance IDs.
 - Preserve compatibility gates and distinguish implementation, review, and hardware verification.
 - Maintain execution status and report integrated results to the user.
-- Read lodeline-manager's own repository instructions before assigning work there.
+- Read [`apps/manager/AGENTS.md`](apps/manager/AGENTS.md) and [`apps/manager/README.md`](apps/manager/README.md) before assigning work on the fleet console.

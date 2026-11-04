@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && tsc -b",
-    "lint": "biome check src/ tests/parity/ playwright.parity.config.ts",
+    "lint": "biome check src/ tests/ playwright.config.ts playwright.parity.config.ts",
     "preview": "vite preview",
     "test": "vitest",
     "e2e": "playwright test",

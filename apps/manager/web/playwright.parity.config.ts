@@ -35,6 +35,8 @@ function managerEnv(port: number, extra: Record<string, string>): Record<string,
 export default defineConfig({
   testDir: './tests/parity',
   testMatch: 'run.parity.ts',
+  // Apart from the e2e output, which a run here would otherwise clear.
+  outputDir: 'test-results/parity',
   fullyParallel: false,
   workers: 1,
   retries: 0,

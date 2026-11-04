@@ -191,8 +191,8 @@ where
 }
 
 /// The client `cfg` selects: the mock fleet or the HTTP client, behind the read cache unless
-/// `FLEET_CACHE_DISABLED=1`. The cache keeps data for the SPA's poll interval and serves it
-/// stale for 12 times as long while it refreshes.
+/// `FLEET_CACHE_DISABLED=1`. The cache keeps data fresh for `FLEET_POLL_INTERVAL_SECONDS` and
+/// serves it stale for 12 times as long while it refreshes.
 pub fn from_config(cfg: &Config) -> Result<Arc<dyn Client>, String> {
     let base: Arc<dyn Client> = if cfg.mock_fleet {
         let now = std::time::SystemTime::now()

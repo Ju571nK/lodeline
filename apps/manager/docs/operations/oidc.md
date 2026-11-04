@@ -12,7 +12,7 @@ Register a confidential web application with Authorization Code flow, PKCE S256
 and query-mode callbacks. Register this exact callback at the provider:
 `https://<manager-host>/api/v1/auth/oidc/callback`.
 
-Set all five variables on the Go server:
+Set all five variables in the console's environment:
 
 | Variable | Value |
 | --- | --- |
@@ -57,7 +57,7 @@ non-HTTPS endpoints and implicit/form-post flows are not implemented. Vendor
 names are examples, not a guarantee of compatibility. LDAP is not an OIDC
 provider; a broker remains independently deployed infrastructure.
 
-References: [OIDC library verification](https://pkg.go.dev/github.com/coreos/go-oidc/v3/oidc),
+References: [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html),
 [Okta web application configuration](https://help.okta.com/en-us/Content/Topics/Apps/Apps_App_Integration_Wizard_OIDC.htm),
 [Entra OIDC](https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc),
 [Keycloak federation](https://www.keycloak.org/docs/latest/server_admin/#_user-storage-federation).
