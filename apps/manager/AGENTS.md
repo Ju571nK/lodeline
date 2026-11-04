@@ -49,5 +49,10 @@ answer 501 after their method and session checks. Each ported behavior must matc
 goldens; an intended difference needs an `allowlist.json` entry with its reason. Never record
 goldens from the Rust binary.
 
+`src/fleet/` reads the server's API. `src/fleet/wire.rs` holds the bodies in the shape the SPA
+gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in process and its
+`lodeline-fleet-api` types, so a change to a server route or that crate can fail `cargo test`
+here. The mock fleet is `testdata/mock-fleet.json` (see `testdata/README.md`).
+
 Until the port lands, the imported specs in `docs/specs/` and some comments still describe the
 Go implementation, and the Playwright e2e suite does not pass yet.

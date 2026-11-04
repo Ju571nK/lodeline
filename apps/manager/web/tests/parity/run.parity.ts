@@ -194,6 +194,8 @@ function sha256(b: Buffer): string {
 
 type Headers = Record<string, string | string[]>;
 
+const PORTS = { mock: env.MOCK_PORT, live: env.LIVE_PORT, down: env.DOWN_PORT };
+
 /**
  * Raw HTTP, so the server sees the exact path (fetch would resolve `..` and `//`). Headers go
  * out as a raw list, so a list value is sent as repeated lines; Node then adds no Host itself.
@@ -251,7 +253,7 @@ function send(c: Case, s: Send): Promise<Reply> {
       .join('; '),
   );
   if (lines.some(Boolean)) headers.Cookie = lines;
-  const port = c.server === 'live' ? env.LIVE_PORT : env.MOCK_PORT;
+  const port = PORTS[c.server ?? 'mock'];
   return request(port, s.method, fill(s.path), headers, body);
 }
 
@@ -381,7 +383,7 @@ async function recordCase(c: Case): Promise<Record<string, unknown>> {
   }
   const current: Bracket = { label: c.name, startMs, endMs };
   const ctx: NormalizeContext = {
-    seedMs: c.server === 'live' ? null : run.seedMs,
+    seedMs: (c.server ?? 'mock') === 'mock' ? run.seedMs : null,
     current,
     earlier: readBrackets(),
     ttlHours: env.JWT_TTL_HOURS,

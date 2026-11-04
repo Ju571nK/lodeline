@@ -5,7 +5,7 @@ each normalized response with a golden file. The goldens were recorded from the 
 at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
 the port answers differently.
 
-The table has 209 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 219 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
@@ -19,12 +19,12 @@ catch-all. The suite prints the count per route on every run.
 | 26 | `GET /api/v1/auth/me` |
 | 6 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
-| 37 | `GET /api/v1/fleet/events` |
-| 10 | `GET /api/v1/fleet/events/{event_id}` |
-| 9 | `GET /api/v1/fleet/risk` |
+| 38 | `GET /api/v1/fleet/events` |
+| 13 | `GET /api/v1/fleet/events/{event_id}` |
+| 10 | `GET /api/v1/fleet/risk` |
 | 8 | `GET /api/v1/fleet/compliance` |
-| 10 | `GET /api/v1/fleet/hosts` |
-| 10 | `GET /api/v1/fleet/hosts/{host_id}` |
+| 11 | `GET /api/v1/fleet/hosts` |
+| 14 | `GET /api/v1/fleet/hosts/{host_id}` |
 | 11 | `POST /api/v1/triage/upsert` |
 | 11 | `POST /api/v1/triage/note` |
 | 5 | `GET /api/v1/triage/{host_id}/{event_id}` |
@@ -62,9 +62,10 @@ MANAGER_BIN=/path/to/lodeline-manager npm run parity
 ```
 
 `MANAGER_BIN` defaults to `../target/release/lodeline-manager`, the same as the e2e config.
-`playwright.parity.config.ts` starts three processes: the stub upstream, a manager on the mock
-fleet, and a manager that reads the stub. They listen on `127.0.0.1` ports 18281 to 18283. Set
-`PARITY_PORT` to move the first port. The suite always starts fresh processes and a fresh triage
+`playwright.parity.config.ts` starts four processes: the stub upstream, a manager on the mock
+fleet, a manager that reads the stub, and a manager whose upstream port has no listener. They
+listen on `127.0.0.1` ports 18281 to 18284, and port 18285 must stay free. Set `PARITY_PORT` to
+move the first port. The suite always starts fresh processes and a fresh triage
 database, so run the whole table, not a filtered subset. Requests go out over raw `node:http`, so
 the server sees each path exactly as the table writes it, `..` and `//` included.
 
@@ -148,8 +149,8 @@ Besides the golden comparison, a run fails when:
 - the mock seed is not a whole second between the run start and now (Go takes it from the process
   start, truncated to the second);
 - a prelude request gets a status other than the one its row names;
-- a case with `minMs` or `maxMs` takes longer or shorter (the login failure delay, and the
-  upstream retries with a 1 s `Retry-After`);
+- a case with `minMs` or `maxMs` takes longer or shorter (the login failure delay, the 5 s
+  upstream timeout, and the upstream retries with a 1 s `Retry-After`);
 - a golden has no case, or a case has no golden.
 
 ## Allowlist
@@ -181,13 +182,14 @@ shows them even for a response whose record differs.
 
 A passing run says nothing about the following. Each needs its own test in the phase that ports it.
 
-- The fleet cache. The mock-mode server has no cache, and the live server runs with
+- The fleet cache. The mock data never changes, and the live servers run with
   `FLEET_CACHE_DISABLED=1`, so stale-while-revalidate, single flight and eviction are untested here.
 - Startup and config validation: missing or short secrets, bad env values, the 5 s drain. Every
   process here starts with one valid config.
-- OIDC-enabled flows. Both servers run with OIDC off; see `NO_SUCCESS_CASE`.
-- The timing of upstream retries other than `upstream-503-retried`'s total time: the jittered
-  200 ms backoff for timeouts, the 5 s cap, and the gap between single attempts.
+- OIDC-enabled flows. Every manager runs with OIDC off; see `NO_SUCCESS_CASE`.
+- The timing of upstream retries other than `upstream-503-retried`'s total time: the 5 s cap and
+  the gap between single attempts. `upstream-timeout` shows that a timed-out request is not
+  retried.
 - The 250 ms login failure delay is checked only as a minimum on the three wrong-credential cases.
   Whether other failure paths wait, or how long the slowest wait is, is not checked.
 - `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id` and

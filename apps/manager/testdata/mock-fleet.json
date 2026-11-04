@@ -1,0 +1,1251 @@
+{
+  "events": [
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "critical",
+        "controls": [
+          {
+            "id": "claude_code.configured.allowManagedHooksOnly",
+            "setting": "allowManagedHooksOnly",
+            "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+            "value": true
+          }
+        ],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "hook_event": "PreToolUse",
+            "kind": "destructive_in_inline_command",
+            "pattern": "rm -rf",
+            "snippet": "rm -rf /"
+          }
+        ],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 7.2,
+        "tool": "claude_code"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/alice/.claude/settings.json"
+      },
+      "target_id": null,
+      "ts": 0
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "critical",
+        "controls": [],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "kind": "mcp_server_remote",
+            "server_name": "acme-tools",
+            "url": "https://mcp.acme.example/sse"
+          }
+        ],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 8.4,
+        "tool": "continue_dev"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/eve/.continue/config.json"
+      },
+      "target_id": null,
+      "ts": -2640
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "executor": "mcp_command",
+            "kind": "no_sandbox"
+          }
+        ],
+        "scope": {
+          "app": "claude_desktop",
+          "kind": "application"
+        },
+        "score": 6.8,
+        "tool": "claude_desktop"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/home/carol/.config/Claude/claude_desktop_config.json"
+      },
+      "target_id": null,
+      "ts": -5280
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "controls": [
+          {
+            "id": "claude_code.configured.allowManagedHooksOnly",
+            "setting": "allowManagedHooksOnly",
+            "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+            "value": true
+          }
+        ],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "kind": "external_script_unscanned",
+            "pattern": "hooks/preflight.sh"
+          }
+        ],
+        "scope": {
+          "kind": "project",
+          "path": "/Users/alice/code/work-repo"
+        },
+        "score": 6.1,
+        "tool": "claude_code"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/alice/code/work-repo/.claude/settings.local.json"
+      },
+      "target_id": null,
+      "ts": -7920
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "controls": [
+          {
+            "id": "codex.configured.allow_remote_control",
+            "setting": "allow_remote_control",
+            "source_path": "/etc/codex/requirements.toml",
+            "value": false
+          },
+          {
+            "id": "codex.configured.allowed_sandbox_modes",
+            "setting": "allowed_sandbox_modes",
+            "source_path": "/etc/codex/requirements.toml",
+            "value": [
+              "read-only",
+              "workspace-write"
+            ]
+          }
+        ],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "hook_event": "PreToolUse",
+            "kind": "destructive_in_hook_script",
+            "pattern": "sudo rm",
+            "script_path": "/Users/bob/code/api/.codex/hooks/preflight.sh",
+            "snippet": "sudo rm -rf $TMP",
+            "source_chain": [
+              "/Users/bob/code/api/.codex/hooks/preflight.sh",
+              "/Users/bob/code/api/.codex/hooks/lib/clean.sh"
+            ]
+          }
+        ],
+        "scope": {
+          "kind": "project",
+          "path": "/Users/bob/code/api"
+        },
+        "score": 6.6,
+        "tool": "codex"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/bob/code/api/.codex/config.toml"
+      },
+      "target_id": null,
+      "ts": -10560
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "controls": [],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "hook_event": "mcp_command",
+            "kind": "mcp_server_remote"
+          }
+        ],
+        "scope": {
+          "kind": "project",
+          "path": "/Users/eve/code/billing"
+        },
+        "score": 7.4,
+        "tool": "continue_dev"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/eve/code/billing/.continue/config.json"
+      },
+      "target_id": null,
+      "ts": -13200
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "command": "npx -y @modelcontextprotocol/server-filesystem /",
+            "kind": "mcp_server_local_command",
+            "server_name": "local-fs"
+          }
+        ],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 6.4,
+        "tool": "gemini"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/bob/.config/gemini-cli/config.json"
+      },
+      "target_id": null,
+      "ts": -15840
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "executor": "mcp_command",
+            "kind": "no_sandbox"
+          }
+        ],
+        "scope": {
+          "app": "cursor",
+          "kind": "application"
+        },
+        "score": 6.2,
+        "tool": "cursor"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/home/carol/.cursor/settings.json"
+      },
+      "target_id": null,
+      "ts": -18480
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "architecture": "arm64",
+        "default_gateway_v4": "ipv4:c0a80101",
+        "default_gateway_v6": null,
+        "dns_servers": [
+          "ipv4:01010101",
+          "ipv4:08080808"
+        ],
+        "interfaces": [
+          {
+            "ipv4": [
+              "ipv4:c0a8012a/24"
+            ],
+            "ipv6": [
+              "fe80::1/64"
+            ],
+            "mac": "00:1b:44:11:3a:b7",
+            "name": "en0"
+          }
+        ],
+        "kernel_version": "23.5.0",
+        "kind": "host_meta_snapshot",
+        "os_name": "macOS",
+        "os_version": "14.5"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -21120
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "architecture": "x86_64",
+        "default_gateway_v4": "ipv4:0a000501",
+        "default_gateway_v6": null,
+        "dns_servers": [
+          "ipv4:0a000501"
+        ],
+        "interfaces": [
+          {
+            "ipv4": [
+              "ipv4:0a000515/24"
+            ],
+            "ipv6": [],
+            "mac": "00:1b:44:22:bb:c1",
+            "name": "eth0"
+          }
+        ],
+        "kernel_version": "6.8.0-31-generic",
+        "kind": "host_meta_snapshot",
+        "os_name": "Linux",
+        "os_version": "Ubuntu 24.04"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -23760
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "architecture": "x86_64",
+        "default_gateway_v4": "ipv4:ac100001",
+        "default_gateway_v6": null,
+        "dns_servers": [
+          "ipv4:08080808",
+          "ipv4:08080404"
+        ],
+        "interfaces": [
+          {
+            "ipv4": [
+              "ipv4:ac100412/16"
+            ],
+            "ipv6": [],
+            "mac": "00:1b:44:33:ee:42",
+            "name": "Ethernet0"
+          }
+        ],
+        "kernel_version": "10.0.22631",
+        "kind": "host_meta_snapshot",
+        "os_name": "Windows",
+        "os_version": "11 23H2"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -26400
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "hash_p99_ms": 4,
+        "jsonl_above_soft_floor": false,
+        "kind": "heartbeat"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -29040
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "hash_p99_ms": 3,
+        "jsonl_above_soft_floor": false,
+        "kind": "heartbeat"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -31680
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "hash_p99_ms": 7,
+        "jsonl_above_soft_floor": false,
+        "kind": "heartbeat"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -34320
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "hash_p99_ms": 5,
+        "jsonl_above_soft_floor": false,
+        "kind": "heartbeat"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -36960
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "policy_reloaded",
+        "policy_version": 18
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -39600
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "policy_reloaded",
+        "policy_version": 17
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -42240
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "sender_lag_critical",
+        "queue_depth": 1532
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -44880
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "agent_dying",
+        "reason": "oom"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -47520
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "tls_failure",
+        "peer": "lodeline-server"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -50160
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "host_id_fingerprint_drift",
+        "new": "def",
+        "old": "abc"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -52800
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "critical",
+        "controls": [
+          {
+            "id": "claude_code.configured.allowManagedHooksOnly",
+            "setting": "allowManagedHooksOnly",
+            "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+            "value": true
+          }
+        ],
+        "is_reattestation": true,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 7.2,
+        "tool": "claude_code"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/alice/.claude/settings.json"
+      },
+      "target_id": null,
+      "ts": -55440
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "critical",
+        "controls": [],
+        "is_reattestation": true,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 8.4,
+        "tool": "continue_dev"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/eve/.continue/config.json"
+      },
+      "target_id": null,
+      "ts": -58080
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "file_change",
+        "op": "modify",
+        "sha256": "deadbeef"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/alice/code/work-repo/AGENTS.md"
+      },
+      "target_id": null,
+      "ts": -60720
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "file_change",
+        "op": "create",
+        "sha256": "cafef00d"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/home/carol/.local/share/config.yaml"
+      },
+      "target_id": null,
+      "ts": -63360
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "medium",
+        "controls": [
+          {
+            "id": "codex.configured.allow_remote_control",
+            "setting": "allow_remote_control",
+            "source_path": "/etc/codex/requirements.toml",
+            "value": false
+          },
+          {
+            "id": "codex.configured.allowed_sandbox_modes",
+            "setting": "allowed_sandbox_modes",
+            "source_path": "/etc/codex/requirements.toml",
+            "value": [
+              "read-only",
+              "workspace-write"
+            ]
+          }
+        ],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 3.1,
+        "tool": "codex"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/bob/.codex/config.toml"
+      },
+      "target_id": null,
+      "ts": -66000
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "executor": "mcp_command",
+            "kind": "no_sandbox"
+          }
+        ],
+        "scope": {
+          "app": "claude_desktop",
+          "kind": "application"
+        },
+        "score": 5.6,
+        "tool": "claude_desktop"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/home/carol/.config/Claude/claude_desktop_config.json"
+      },
+      "target_id": null,
+      "ts": -68640
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "high",
+        "controls": [
+          {
+            "id": "claude_code.configured.allowManagedHooksOnly",
+            "setting": "allowManagedHooksOnly",
+            "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+            "value": true
+          }
+        ],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [
+          {
+            "kind": "external_script_unscanned"
+          }
+        ],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 6.5,
+        "tool": "claude_code"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/alice/.claude/hooks/preflight.sh"
+      },
+      "target_id": null,
+      "ts": -71280
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "bucket": "critical",
+        "controls": [],
+        "is_reattestation": false,
+        "kind": "ai_guard_risk_assessed",
+        "reasons": [],
+        "scope": {
+          "kind": "user_global"
+        },
+        "score": 7.9,
+        "tool": "continue_dev"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "warn",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/Users/eve/.continue/config.json"
+      },
+      "target_id": null,
+      "ts": -73920
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "hash_p99_ms": 3,
+        "jsonl_above_soft_floor": false,
+        "kind": "heartbeat"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -76560
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "file_change",
+        "op": "modify",
+        "sha256": "01020304"
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "file_system"
+      },
+      "subject": {
+        "kind": "path",
+        "value": "/etc/hosts"
+      },
+      "target_id": null,
+      "ts": -79200
+    },
+    {
+      "agent_version": "0.4.0",
+      "evidence": {
+        "kind": "policy_reloaded",
+        "policy_version": 18
+      },
+      "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+      "schema_version": 1,
+      "severity": "info",
+      "source": {
+        "kind": "agent"
+      },
+      "subject": {
+        "kind": "agent"
+      },
+      "target_id": null,
+      "ts": -81840
+    }
+  ],
+  "hosts": [
+    {
+      "detail": {
+        "agent_health": {
+          "hash_p99_ms_latest": 4,
+          "jsonl_above_soft_floor_latest": false,
+          "last_heartbeat_ts": -60,
+          "recent_channel_stalls_24h": 0,
+          "recent_sender_lag_critical_24h": 0,
+          "recent_watcher_degraded_24h": 0
+        },
+        "agent_version": "0.4.0",
+        "ai_guard": {
+          "by_tool": {
+            "claude_code": {
+              "assessed_ts": -120,
+              "bucket": "critical",
+              "controls": [
+                {
+                  "id": "claude_code.configured.allowManagedHooksOnly",
+                  "setting": "allowManagedHooksOnly",
+                  "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+                  "value": true
+                }
+              ],
+              "is_reattestation": false,
+              "reasons": null,
+              "scope": {
+                "kind": "user_global"
+              },
+              "score": 7.2
+            }
+          }
+        },
+        "current_risk": {
+          "by_tool": {
+            "claude_code": {
+              "assessed_ts": -120,
+              "bucket": "critical",
+              "score": 7.2
+            }
+          },
+          "max_bucket": "critical",
+          "max_score": 7.2
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "host_meta": {
+          "architecture": "arm64",
+          "default_gateway_v4": "ipv4:c0a80101",
+          "default_gateway_v6": null,
+          "dns_servers": [
+            "ipv4:01010101",
+            "ipv4:08080808"
+          ],
+          "interfaces": [
+            {
+              "ipv4": [
+                "ipv4:c0a8012a/24"
+              ],
+              "ipv6": [
+                "fe80::1/64"
+              ],
+              "mac": "00:1b:44:11:3a:b7",
+              "name": "en0"
+            }
+          ],
+          "kernel_version": "23.5.0",
+          "os_name": "macOS",
+          "os_version": "14.5"
+        },
+        "hostname": "alice-mbp",
+        "last_seen_ts": -60,
+        "open_event_counts_24h": {
+          "info": 1402,
+          "warn": 14
+        },
+        "policy_state": {
+          "last_applied_policy_version": 18,
+          "last_policy_reload_ts": -14400,
+          "policy_expired_active": false
+        },
+        "status": "healthy"
+      },
+      "signature_failures_24h": 0
+    },
+    {
+      "detail": {
+        "agent_health": {
+          "hash_p99_ms_latest": 4,
+          "jsonl_above_soft_floor_latest": false,
+          "last_heartbeat_ts": -60,
+          "recent_channel_stalls_24h": 0,
+          "recent_sender_lag_critical_24h": 0,
+          "recent_watcher_degraded_24h": 0
+        },
+        "agent_version": "0.4.0",
+        "ai_guard": {
+          "by_tool": {
+            "codex": {
+              "assessed_ts": -900,
+              "bucket": "medium",
+              "controls": [
+                {
+                  "id": "codex.configured.allow_remote_control",
+                  "setting": "allow_remote_control",
+                  "source_path": "/etc/codex/requirements.toml",
+                  "value": false
+                },
+                {
+                  "id": "codex.configured.allowed_sandbox_modes",
+                  "setting": "allowed_sandbox_modes",
+                  "source_path": "/etc/codex/requirements.toml",
+                  "value": [
+                    "read-only",
+                    "workspace-write"
+                  ]
+                }
+              ],
+              "is_reattestation": false,
+              "reasons": null,
+              "scope": {
+                "kind": "user_global"
+              },
+              "score": 4.5
+            }
+          }
+        },
+        "current_risk": {
+          "by_tool": {
+            "codex": {
+              "assessed_ts": -900,
+              "bucket": "medium",
+              "score": 4.5
+            }
+          },
+          "max_bucket": "medium",
+          "max_score": 4.5
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "host_meta": null,
+        "hostname": "bob-laptop",
+        "last_seen_ts": -180,
+        "open_event_counts_24h": {
+          "info": 250,
+          "warn": 3
+        },
+        "policy_state": {
+          "last_applied_policy_version": 17,
+          "last_policy_reload_ts": -14400,
+          "policy_expired_active": false
+        },
+        "status": "healthy"
+      },
+      "signature_failures_24h": 0
+    },
+    {
+      "detail": {
+        "agent_health": {
+          "hash_p99_ms_latest": 4,
+          "jsonl_above_soft_floor_latest": false,
+          "last_heartbeat_ts": -60,
+          "recent_channel_stalls_24h": 0,
+          "recent_sender_lag_critical_24h": 0,
+          "recent_watcher_degraded_24h": 0
+        },
+        "agent_version": "0.4.0",
+        "ai_guard": {
+          "by_tool": {
+            "claude_desktop": {
+              "assessed_ts": -3600,
+              "bucket": "high",
+              "is_reattestation": false,
+              "reasons": null,
+              "scope": {
+                "kind": "user_global"
+              },
+              "score": 6.8
+            }
+          }
+        },
+        "current_risk": {
+          "by_tool": {
+            "claude_desktop": {
+              "assessed_ts": -3600,
+              "bucket": "high",
+              "score": 6.8
+            }
+          },
+          "max_bucket": "high",
+          "max_score": 6.8
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "host_meta": {
+          "architecture": "x86_64",
+          "default_gateway_v4": "ipv4:0a000501",
+          "default_gateway_v6": null,
+          "dns_servers": [
+            "ipv4:0a000501"
+          ],
+          "interfaces": [
+            {
+              "ipv4": [
+                "ipv4:0a000515/24"
+              ],
+              "ipv6": [],
+              "mac": "00:1b:44:22:bb:c1",
+              "name": "eth0"
+            }
+          ],
+          "kernel_version": "6.8.0-31-generic",
+          "os_name": "Linux",
+          "os_version": "Ubuntu 24.04"
+        },
+        "hostname": "carol-dev",
+        "last_seen_ts": -1800,
+        "open_event_counts_24h": {
+          "info": 410,
+          "warn": 8
+        },
+        "policy_state": {
+          "last_applied_policy_version": 16,
+          "last_policy_reload_ts": -14400,
+          "policy_expired_active": false
+        },
+        "status": "stale"
+      },
+      "signature_failures_24h": 3
+    },
+    {
+      "detail": {
+        "agent_health": null,
+        "agent_version": "0.4.0",
+        "ai_guard": null,
+        "current_risk": null,
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-444444444444",
+        "host_meta": null,
+        "hostname": null,
+        "last_seen_ts": -10800,
+        "open_event_counts_24h": {
+          "info": 0,
+          "warn": 0
+        },
+        "policy_state": {
+          "last_applied_policy_version": 12,
+          "last_policy_reload_ts": -14400,
+          "policy_expired_active": true
+        },
+        "status": "disconnected"
+      },
+      "signature_failures_24h": 0
+    },
+    {
+      "detail": {
+        "agent_health": {
+          "hash_p99_ms_latest": 4,
+          "jsonl_above_soft_floor_latest": false,
+          "last_heartbeat_ts": -60,
+          "recent_channel_stalls_24h": 0,
+          "recent_sender_lag_critical_24h": 0,
+          "recent_watcher_degraded_24h": 0
+        },
+        "agent_version": "0.4.0",
+        "ai_guard": {
+          "by_tool": {
+            "continue_dev": {
+              "assessed_ts": -300,
+              "bucket": "critical",
+              "controls": [],
+              "is_reattestation": false,
+              "reasons": null,
+              "scope": {
+                "kind": "user_global"
+              },
+              "score": 8.4
+            }
+          }
+        },
+        "current_risk": {
+          "by_tool": {
+            "continue_dev": {
+              "assessed_ts": -300,
+              "bucket": "critical",
+              "score": 8.4
+            }
+          },
+          "max_bucket": "critical",
+          "max_score": 8.4
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+        "host_meta": {
+          "architecture": "x86_64",
+          "default_gateway_v4": "ipv4:ac100001",
+          "default_gateway_v6": null,
+          "dns_servers": [
+            "ipv4:08080808",
+            "ipv4:08080404"
+          ],
+          "interfaces": [
+            {
+              "ipv4": [
+                "ipv4:ac100412/16"
+              ],
+              "ipv6": [],
+              "mac": "00:1b:44:33:ee:42",
+              "name": "Ethernet0"
+            }
+          ],
+          "kernel_version": "10.0.22631",
+          "os_name": "Windows",
+          "os_version": "11 23H2"
+        },
+        "hostname": "eve-workstation",
+        "last_seen_ts": -120,
+        "open_event_counts_24h": {
+          "info": 980,
+          "warn": 21
+        },
+        "policy_state": {
+          "last_applied_policy_version": 18,
+          "last_policy_reload_ts": -14400,
+          "policy_expired_active": false
+        },
+        "status": "healthy"
+      },
+      "signature_failures_24h": 0
+    }
+  ],
+  "meta": {
+    "alerts_definition_default": {
+      "additional_kinds": [
+        "policy_signature_invalid",
+        "tls_failure",
+        "host_id_fingerprint_drift",
+        "agent_dying",
+        "sender_lag_critical"
+      ],
+      "ai_guard_buckets": [
+        "high",
+        "critical"
+      ],
+      "evidence_kinds": [
+        "ai_guard_risk_assessed"
+      ]
+    },
+    "fleet": {
+      "active_host_count": 5,
+      "active_window_days": 30
+    },
+    "schema_version": 1,
+    "server_version": "0.5.0-mock",
+    "ts": 0
+  },
+  "policy_version": 18
+}

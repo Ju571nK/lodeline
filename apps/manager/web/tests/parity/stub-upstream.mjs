@@ -1,5 +1,9 @@
 // Stand-in for lodeline-server's read API. The recorder sets the next reply
 // with POST /__stub/reply and reads what the manager sent with GET /__stub/calls.
+// A reply can wait `delayMs` before answering, or `close` the connection
+// without answering. Every answer closes its connection, so each request from
+// the manager opens a new one and no case runs on a connection an earlier case
+// left open.
 import http from 'node:http';
 
 let reply = { status: 503, text: 'no reply set' };
@@ -35,12 +39,22 @@ http
         authorization: req.headers.authorization ?? null,
         accept: req.headers.accept ?? null,
       });
-      const json = reply.json !== undefined;
-      send(
-        res,
-        reply.status,
-        { 'Content-Type': json ? 'application/json' : 'text/plain', ...reply.headers },
-        json ? JSON.stringify(reply.json) : (reply.text ?? ''),
+      const r = reply;
+      if (r.close) return req.socket.destroy();
+      const json = r.json !== undefined;
+      setTimeout(
+        () =>
+          send(
+            res,
+            r.status,
+            {
+              'Content-Type': json ? 'application/json' : 'text/plain',
+              Connection: 'close',
+              ...r.headers,
+            },
+            json ? JSON.stringify(r.json) : (r.text ?? ''),
+          ),
+        r.delayMs ?? 0,
       );
     });
   })

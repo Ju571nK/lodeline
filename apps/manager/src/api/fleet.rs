@@ -1,0 +1,302 @@
+//! The `/api/v1/fleet/*` handlers (Go's `internal/api/v1/fleet.go`): thin relays of the fleet
+//! client, with Go's query parsing and error mapping. The SPA never sees `lodeline-server` URLs.
+
+use axum::extract::State;
+use axum::http::{header, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+
+use crate::config;
+use crate::fleet::{
+    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams, Reply, Request,
+    RiskParams,
+};
+use crate::server::{error_response, AppState};
+
+pub async fn meta(State(s): State<AppState>) -> Response {
+    relay(s.fleet.get(Request::Meta).await)
+}
+
+/// Not retried: the connection indicator must show a down upstream at once.
+pub async fn healthz(State(s): State<AppState>) -> Response {
+    relay(s.fleet.get(Request::Healthz).await)
+}
+
+pub async fn events(State(s): State<AppState>, uri: Uri) -> Response {
+    match events_params(&Query::parse(uri.query())) {
+        Ok(p) => relay(retried(&s, Request::Events(p)).await),
+        Err(msg) => invalid_query(msg),
+    }
+}
+
+pub async fn event(State(s): State<AppState>, uri: Uri) -> Response {
+    relay(retried(&s, Request::EventById(path_param(uri.path()))).await)
+}
+
+pub async fn risk(State(s): State<AppState>, uri: Uri) -> Response {
+    let q = Query::parse(uri.query());
+    match q.limit() {
+        Ok(limit) => {
+            let p = RiskParams {
+                cursor: q.get("cursor").into(),
+                limit,
+                tool: split_comma(q.get("tool")),
+                min_bucket: q.get("min_bucket").into(),
+            };
+            relay(retried(&s, Request::Risk(p)).await)
+        }
+        Err(msg) => invalid_query(msg),
+    }
+}
+
+pub async fn compliance(State(s): State<AppState>, uri: Uri) -> Response {
+    let q = Query::parse(uri.query());
+    match q.limit() {
+        Ok(limit) => {
+            let p = ComplianceParams {
+                cursor: q.get("cursor").into(),
+                limit,
+            };
+            relay(retried(&s, Request::Compliance(p)).await)
+        }
+        Err(msg) => invalid_query(msg),
+    }
+}
+
+pub async fn hosts(State(s): State<AppState>, uri: Uri) -> Response {
+    let q = Query::parse(uri.query());
+    match q.limit() {
+        Ok(limit) => {
+            let p = HostsParams {
+                cursor: q.get("cursor").into(),
+                limit,
+                status: split_comma(q.get("status")),
+                bucket: split_comma(q.get("bucket")),
+                sort: q.get("sort").into(),
+            };
+            relay(retried(&s, Request::Hosts(p)).await)
+        }
+        Err(msg) => invalid_query(msg),
+    }
+}
+
+pub async fn host(State(s): State<AppState>, uri: Uri) -> Response {
+    relay(retried(&s, Request::HostById(path_param(uri.path()))).await)
+}
+
+async fn retried(s: &AppState, req: Request) -> Reply {
+    fleet::retry(fleet::DEFAULT_RETRY, || s.fleet.get(req.clone())).await
+}
+
+/// An event as the alerts queue reads it: the event plus its triage state. No triage rows are
+/// read yet, so `triage` is `null`, as Go shows an event nobody has triaged.
+#[derive(Serialize)]
+struct WithTriage<'a> {
+    #[serde(flatten)]
+    event: &'a Event,
+    triage: Option<()>,
+}
+
+fn with_triage(event: &Event) -> WithTriage<'_> {
+    WithTriage {
+        event,
+        triage: None,
+    }
+}
+
+fn relay(reply: Reply) -> Response {
+    let body = match reply.as_deref() {
+        Err(e) => return map_err(e),
+        Ok(fleet::Response::Events(page)) => {
+            #[derive(Serialize)]
+            struct Page<'a> {
+                events: Vec<WithTriage<'a>>,
+                next_cursor: &'a Option<String>,
+            }
+            let events = page.events.iter().flatten().map(with_triage).collect();
+            serde_json::to_string(&Page {
+                events,
+                next_cursor: &page.next_cursor,
+            })
+        }
+        Ok(fleet::Response::Event(e)) => serde_json::to_string(&with_triage(e)),
+        Ok(other) => serde_json::to_string(other),
+    };
+    // Go writes the status and Content-Type before it encodes, so a body it cannot encode, such
+    // as a time with a 24 h offset, leaves an empty 200.
+    let body = body.map(|s| s + "\n").unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
+/// Go's `mapFleetErr`. Upstream details are logged, never sent: a transport error names the
+/// server URL, and an error body is the server's text.
+fn map_err(e: &FleetError) -> Response {
+    match e {
+        FleetError::NotFound => error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "event or host not found",
+        ),
+        FleetError::ReadApiDisabled => error_response(
+            StatusCode::BAD_GATEWAY,
+            "read_api_disabled",
+            "lodeline-server has the read API disabled \u{2014} set LODELINE_SERVER_READ_TOKEN there",
+        ),
+        FleetError::Unauthorized => error_response(
+            StatusCode::BAD_GATEWAY,
+            "upstream_unauthorized",
+            "lodeline-server rejected our token \u{2014} check LODELINE_SERVER_READ_TOKEN",
+        ),
+        FleetError::ServiceUnavailable { .. } => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            "lodeline-server is rebuilding its index, retry shortly",
+        ),
+        FleetError::Api { code, .. } => {
+            eprintln!("fleet: upstream request failed: {e}");
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                &format!("lodeline-server returned an error ({code})"),
+            )
+        }
+        FleetError::Transport(_) => {
+            eprintln!("fleet: upstream request failed: {e}");
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "request to lodeline-server failed",
+            )
+        }
+    }
+}
+
+fn invalid_query(msg: &str) -> Response {
+    error_response(StatusCode::BAD_REQUEST, "invalid_query", msg)
+}
+
+fn events_params(q: &Query) -> Result<EventsParams, &'static str> {
+    let time = |key, msg| match q.get(key) {
+        "" => Ok(GoTime::default()),
+        v => GoTime::parse(v).ok_or(msg),
+    };
+    let mut p = EventsParams {
+        cursor: q.get("cursor").into(),
+        limit: q.limit()?,
+        host_ids: split_comma(q.get("host_id")),
+        since: time("since", "since must be RFC3339")?,
+        until: time("until", "until must be RFC3339")?,
+        evidence_kinds: split_comma(q.get("evidence_kind")),
+        severity: split_comma(q.get("severity")),
+        source: split_comma(q.get("source")),
+        min_ai_guard_bucket: q.get("min_ai_guard_bucket").into(),
+    };
+    // `host_id` is the one repeatable filter: `?host_id=a&host_id=b,c` names all three.
+    let hosts: Vec<&str> = q.all("host_id").collect();
+    if hosts.len() > 1 {
+        p.host_ids = hosts.into_iter().flat_map(split_comma).collect();
+    }
+    Ok(p)
+}
+
+/// A query string as Go's `url.ParseQuery` reads it: pairs split at `&`, a pair holding `;` or
+/// a bad escape dropped, `+` read as a space.
+struct Query(Vec<(String, String)>);
+
+impl Query {
+    fn parse(raw: Option<&str>) -> Self {
+        let unescape = |s: &str| {
+            config::unescape(&s.replace('+', " ")).map(|b| String::from_utf8_lossy(&b).into_owned())
+        };
+        let pairs = raw
+            .unwrap_or_default()
+            .split('&')
+            .filter(|kv| !kv.is_empty() && !kv.contains(';'))
+            .filter_map(|kv| {
+                let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+                Some((unescape(k)?, unescape(v)?))
+            })
+            .collect();
+        Self(pairs)
+    }
+
+    fn all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> {
+        self.0
+            .iter()
+            .filter(move |(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The first value, or `""`.
+    fn get(&self, key: &str) -> &str {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or("", |(_, v)| v.as_str())
+    }
+
+    /// Go's `strconv.Atoi`; 0 when unset.
+    fn limit(&self) -> Result<i64, &'static str> {
+        match self.get("limit") {
+            "" => Ok(0),
+            v => v.parse().map_err(|_| "limit must be an integer"),
+        }
+    }
+}
+
+fn split_comma(v: &str) -> Vec<String> {
+    v.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// The last path segment as chi gives it: decoded, unless the path's escaping differs from Go's
+/// own, in which case Go keeps the raw path and chi matches on it, escapes included.
+///
+/// shortcut: a decoded ID that is not UTF-8 is read lossily, where Go keeps the bytes.
+fn path_param(raw: &str) -> String {
+    let decoded = String::from_utf8_lossy(&config::unescape(raw).unwrap_or_default()).into_owned();
+    let path = if fleet::escape_path(&decoded) == raw {
+        decoded
+    } else {
+        raw.to_owned()
+    };
+    path.rsplit('/').next().unwrap_or_default().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_and_path_params_read_as_go_does() {
+        let q = Query::parse(Some(
+            "limit=%2B3&a;b=1&x=%zz&severity=+warn+,,high&host_id=a",
+        ));
+        assert_eq!(q.limit(), Ok(3));
+        assert_eq!(q.get("x"), "");
+        assert_eq!(split_comma(q.get("severity")), ["warn", "high"]);
+        assert_eq!(
+            Query::parse(Some("limit=+3")).limit(),
+            Err("limit must be an integer")
+        );
+        for (raw, want) in [
+            ("/api/v1/fleet/events/a%20b", "a b"),
+            ("/api/v1/fleet/events/a%2Bb", "a%2Bb"),
+            ("/api/v1/fleet/events/a%2Fb", "a%2Fb"),
+            ("/api/v1/fleet/events/%41bc", "%41bc"),
+            ("/api/v1/fleet/events/abc", "abc"),
+            ("/api/v1/fleet/events/%2A", "*"),
+            ("/api/v1/fleet/events/a*b%20c", "a*b%20c"),
+        ] {
+            assert_eq!(path_param(raw), want, "{raw}");
+        }
+    }
+}

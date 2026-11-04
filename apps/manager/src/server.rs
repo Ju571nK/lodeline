@@ -19,11 +19,12 @@ use hyper::ext::ReasonPhrase;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::auth::{require_auth, Signer};
-use crate::{config, spa};
+use crate::{api, config, fleet, spa};
 
 #[derive(Clone)]
 pub struct AppState {
     pub signer: Arc<Signer>,
+    pub fleet: Arc<dyn fleet::Client>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,6 +100,14 @@ fn endpoint(
     let auth = middleware::from_fn_with_state(state.signer.clone(), require_auth);
     match (path, access) {
         ("/api/health", _) => only(method, health),
+        ("/api/v1/fleet/meta", _) => only(method, api::fleet::meta.layer(auth)),
+        ("/api/v1/fleet/healthz", _) => only(method, api::fleet::healthz.layer(auth)),
+        ("/api/v1/fleet/events", _) => only(method, api::fleet::events.layer(auth)),
+        ("/api/v1/fleet/events/{event_id}", _) => only(method, api::fleet::event.layer(auth)),
+        ("/api/v1/fleet/risk", _) => only(method, api::fleet::risk.layer(auth)),
+        ("/api/v1/fleet/compliance", _) => only(method, api::fleet::compliance.layer(auth)),
+        ("/api/v1/fleet/hosts", _) => only(method, api::fleet::hosts.layer(auth)),
+        ("/api/v1/fleet/hosts/{host_id}", _) => only(method, api::fleet::host.layer(auth)),
         (_, Access::Public) => only(method, not_implemented),
         (_, Access::Session) => only(method, not_implemented.layer(auth)),
     }

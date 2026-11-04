@@ -353,6 +353,38 @@ fn load_server_tls_needs_https() {
     }
 }
 
+/// Go's `AppendCertsFromPEM` skips a block it cannot read and keeps the rest; it fails only
+/// when no certificate parses. The error names the variable and the path, never the contents.
+#[test]
+fn load_server_tls_skips_unreadable_ca_entries() {
+    let dir = temp_dir("tls-bundle");
+    let bad_der = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    let bad_base64 = "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
+    let crl = "-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n";
+    let mut env = full_valid_env();
+    set(
+        &mut env,
+        "LODELINE_SERVER_BASE_URL",
+        "https://lodeline.example:8443",
+    );
+
+    let ca = path_str(&dir.join("mixed.crt"));
+    std::fs::write(&ca, format!("{bad_der}{TEST_CA_PEM}{bad_base64}{crl}")).unwrap();
+    set(&mut env, "LODELINE_SERVER_CA_PATH", &ca);
+    let cfg = load(&env).unwrap();
+    assert_eq!(cfg.server_tls.as_ref().unwrap().roots.len(), 1);
+    assert!(crate::fleet::from_config(&cfg).is_ok());
+
+    let ca = path_str(&dir.join("bad.crt"));
+    std::fs::write(&ca, format!("{bad_der}{bad_base64}{crl}")).unwrap();
+    set(&mut env, "LODELINE_SERVER_CA_PATH", &ca);
+    let err = load_err(&env).to_string();
+    assert_eq!(
+        err,
+        format!("config: LODELINE_SERVER_CA_PATH: no PEM certificate in {ca}")
+    );
+}
+
 #[test]
 fn load_mock_fleet_ignores_server_tls() {
     let dir = temp_dir("tls-mock");

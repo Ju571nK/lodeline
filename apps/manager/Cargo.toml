@@ -18,7 +18,11 @@ publish = false
 lodeline-fleet-api = { path = "../../crates/lodeline-fleet-api" }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# rustls-tls-native-roots: the OS trust store, which Go uses. openidconnect turns rustls-tls on
+# anyway; fleet/http.rs turns its built-in web roots off.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
+# reqwest's TLS stack; config.rs parses the CA bundle with it.
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 # Same as the root workspace: Cargo allows one libsqlite3-sys per graph, and
 # lodeline-server will join this graph as a dev-dependency.
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -33,11 +37,18 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # axum::serve has no header read timeout and also speaks h2c; Go's server does neither.
 hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-graceful", "service", "http1"] }
+# client-proxy: the env proxy matcher reqwest uses, for the loopback exemption in fleet/http.rs.
+hyper-util = { version = "0.1", features = ["tokio", "server-graceful", "service", "http1", "client-proxy"] }
 # Go's `:port` listener is dual-stack; std and tokio cannot turn IPV6_V6ONLY off.
 socket2 = "0.6"
 tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# The contract test runs the real server in process (src/fleet/tests.rs).
+lodeline-server = { path = "../../crates/lodeline-server" }
+# An mTLS stand-in server for the client certificate tests (src/fleet/http/tests.rs).
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
 

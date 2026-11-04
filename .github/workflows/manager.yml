@@ -1,8 +1,9 @@
 name: Manager
 
 # apps/manager is its own Cargo workspace, which ci.yml ignores. It also runs
-# when the shared fleet API types or the server and core crates behind them
-# change, so a shape change breaks the manager build in the same PR.
+# when the shared fleet API types, lodeline-server, or any crate the server
+# depends on by path changes, so a shape change breaks the manager build in the
+# same PR.
 on:
   push:
     branches: [main]
@@ -11,6 +12,8 @@ on:
       - 'crates/lodeline-fleet-api/**'
       - 'crates/lodeline-server/**'
       - 'crates/lodeline-core/**'
+      - 'crates/lodeline-proxy-api/**'
+      - 'crates/lodeline-rules-basic/**'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
       - '.github/workflows/manager.yml'
@@ -20,6 +23,8 @@ on:
       - 'crates/lodeline-fleet-api/**'
       - 'crates/lodeline-server/**'
       - 'crates/lodeline-core/**'
+      - 'crates/lodeline-proxy-api/**'
+      - 'crates/lodeline-rules-basic/**'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
       - '.github/workflows/manager.yml'
