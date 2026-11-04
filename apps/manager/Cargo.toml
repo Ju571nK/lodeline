@@ -32,8 +32,9 @@ openidconnect = "4.1"
 subtle = "2.6"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
-# Correctly rounded float parsing, as Go's strconv, so claim times compare the same.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# float_roundtrip: correctly rounded float parsing, as Go's strconv, so claim times compare the
+# same. raw_value: triage evidence snapshots keep the client's JSON text, as Go's RawMessage.
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # axum::serve has no header read timeout and also speaks h2c; Go's server does neither.
 hyper = { version = "1", features = ["server", "http1"] }

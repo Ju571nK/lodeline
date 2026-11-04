@@ -9,6 +9,7 @@ fn app() -> Router {
     router(AppState {
         signer: Arc::new(Signer::new(SECRET.as_bytes())),
         fleet: Arc::new(fleet::Mock::new(1_767_225_600)),
+        triage: Arc::new(triage::Store::open(":memory:").unwrap()),
     })
 }
 
@@ -93,10 +94,12 @@ async fn other_methods_get_chi_405_before_auth() {
     }
 }
 
-/// What a valid session gets: the mock fleet's answer, or 501 where no handler is ported yet.
+/// What a valid session gets with no body: the mock fleet's answer, an empty triage store's,
+/// or 501 where no handler is ported yet.
 fn authorized_status(uri: &str) -> u16 {
     match uri {
-        "/api/v1/fleet/events/e1" | "/api/v1/fleet/hosts/h1" => 404,
+        "/api/v1/fleet/events/e1" | "/api/v1/fleet/hosts/h1" | "/api/v1/triage/h1/e1" => 404,
+        "/api/v1/triage/upsert" | "/api/v1/triage/note" => 400,
         u if u.starts_with("/api/v1/fleet/") => 200,
         _ => 501,
     }

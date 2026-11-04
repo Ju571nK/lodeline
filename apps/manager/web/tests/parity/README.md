@@ -34,9 +34,9 @@ Every route has a success case and an error case, except the two OIDC routes. Th
 needs an HTTPS OIDC provider, so the Rust port carries over the Go OIDC unit tests instead
 (`NO_SUCCESS_CASE` in `cases.ts`).
 
-CI does not run this suite yet. The Rust binary serves `/api/health`, the SPA and the session check
-so far; every other route answers 501 after its method and session checks, so its cases fail
-until the port reaches it. When login or `fleet/healthz` answers 501, the run takes the session
+CI does not run this suite yet. The Rust binary serves every route except the auth routes (login,
+logout, `me`, `methods` and OIDC) so far; those answer 501 after their method and session checks,
+so their cases fail until the port reaches them. When login or `fleet/healthz` answers 501, the run takes the session
 that Go issued (`testdata/session-token.txt`) and the run start as the mock seed, and says so.
 
 ## Files

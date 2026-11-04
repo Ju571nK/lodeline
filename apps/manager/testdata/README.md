@@ -6,8 +6,9 @@ files come from one parity recorder run against the Go `lodeline-manager` at
 build wrote. They are test-only. The credentials behind them are throwaway values made for the
 parity suite, set in `web/tests/parity/env.ts`, and they protect nothing.
 
-- `triage.sqlite`: the mock-mode triage database after the full parity table ran, all written by
-  Go. It holds two triage rows. The first has three status changes and two notes, and matches the
+- `triage.sqlite`: the mock-mode triage database after the parity table ran, all written by Go.
+  It was recorded before the `triage-*-snapshot-*` cases joined the table, so it holds two triage
+  rows. The first has three status changes and two notes, and matches the
   `triage-get` golden. The second was inserted with `evidence_snapshot: null`, which Go stores as
   the JSON text `null` (`triage-upsert-null-snapshot`), and holds two notes from the note-body
   cases (`triage-get-bob`). The copy uses a rollback journal; Go

@@ -54,5 +54,9 @@ gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in pr
 `lodeline-fleet-api` types, so a change to a server route or that crate can fail `cargo test`
 here. The mock fleet is `testdata/mock-fleet.json` (see `testdata/README.md`).
 
+`src/triage.rs` owns the console's SQLite file. It must stay readable by, and sortable with, the
+Go build's: keep the schema text, the pragmas and the fixed-width timestamp layout as they are.
+Its tests open the Go-written `testdata/triage.sqlite` through a copy.
+
 Until the port lands, the imported specs in `docs/specs/` and some comments still describe the
 Go implementation, and the Playwright e2e suite does not pass yet.

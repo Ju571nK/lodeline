@@ -19,12 +19,13 @@ use hyper::ext::ReasonPhrase;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::auth::{require_auth, Signer};
-use crate::{api, config, fleet, spa};
+use crate::{api, config, fleet, spa, triage};
 
 #[derive(Clone)]
 pub struct AppState {
     pub signer: Arc<Signer>,
     pub fleet: Arc<dyn fleet::Client>,
+    pub triage: Arc<triage::Store>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +109,9 @@ fn endpoint(
         ("/api/v1/fleet/compliance", _) => only(method, api::fleet::compliance.layer(auth)),
         ("/api/v1/fleet/hosts", _) => only(method, api::fleet::hosts.layer(auth)),
         ("/api/v1/fleet/hosts/{host_id}", _) => only(method, api::fleet::host.layer(auth)),
+        ("/api/v1/triage/upsert", _) => only(method, api::triage::upsert.layer(auth)),
+        ("/api/v1/triage/note", _) => only(method, api::triage::note.layer(auth)),
+        ("/api/v1/triage/{host_id}/{event_id}", _) => only(method, api::triage::get.layer(auth)),
         (_, Access::Public) => only(method, not_implemented),
         (_, Access::Session) => only(method, not_implemented.layer(auth)),
     }

@@ -8,6 +8,7 @@ mod conn;
 mod fleet;
 mod server;
 mod spa;
+mod triage;
 
 use std::sync::Arc;
 
@@ -31,9 +32,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("lodeline-manager: WARNING: ignoring renamed SIGIL_* env vars {legacy:?}; see https://github.com/Ju571nK/lodeline/blob/main/docs/migrate-from-sigil.md");
     }
 
+    let store = Arc::new(triage::Store::open(&cfg.triage_db_path)?);
     let app = server::router(server::AppState {
         signer: Arc::new(auth::Signer::new(cfg.jwt_secret.as_bytes())),
         fleet: fleet::from_config(&cfg)?,
+        triage: store,
     });
     let listener = conn::bind(&cfg.listen_addr).await?;
     let mode = if cfg.mock_fleet {
