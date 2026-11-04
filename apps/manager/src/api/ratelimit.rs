@@ -19,11 +19,17 @@ use axum::middleware::Next;
 use axum::response::Response;
 use ipnet::IpNet;
 
+use crate::api::LOGIN_BODY_LIMIT;
 use crate::server::error_response;
+
+/// How long a 429 waits for the rest of the request body, which a client sends right behind
+/// the head.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The most addresses with a window of their own. While the table is full of open windows, new
 /// addresses share one overflow window with the same limit, so no open window is ever dropped
-/// early.
+/// early. Until the overflow window resets, a new address that gets a window of its own starts
+/// with the overflow window's count and reset.
 const MAX_KEYS: usize = 1 << 16;
 
 pub struct RateLimiter {
@@ -86,19 +92,21 @@ impl RateLimiter {
                 hits.windows.remove(&old);
             }
         }
-        let fresh = Window {
+        // While the overflow window is open, a new window starts as a copy of it: the overflow
+        // window does not record which addresses it counted, so this one may be among them.
+        // Its reset is no earlier than any open window's, so `order` stays sorted.
+        let mut w = hits.overflow.filter(|w| now <= w.reset).unwrap_or(Window {
             count: 0,
             reset: now + self.window,
-        };
+        });
+        let taken = w.take(self.max, now);
         if hits.windows.len() >= MAX_KEYS {
-            let mut w = hits.overflow.filter(|w| now <= w.reset).unwrap_or(fresh);
-            let taken = w.take(self.max, now);
             hits.overflow = Some(w);
-            return taken;
+        } else {
+            hits.windows.insert(key, w);
+            hits.order.push_back((key, w.reset));
         }
-        hits.windows.insert(key, Window { count: 1, ..fresh });
-        hits.order.push_back((key, fresh.reset));
-        Ok(())
+        taken
     }
 
     /// The peer, or behind trusted proxies the rightmost `X-Forwarded-For` hop that is not one.
@@ -141,8 +149,8 @@ fn key(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// Answers 429 with `Retry-After` (whole seconds left, plus one) once a client address is over
-/// its limit. Successful attempts count too.
+/// Answers 429 with `Retry-After` (whole seconds left, plus one) and `Connection: close` once a
+/// client address is over its limit. Successful attempts count too.
 pub async fn limit(State(limiter): State<Arc<RateLimiter>>, req: Request, next: Next) -> Response {
     // `conn.rs` sets the peer on every connection; without one, every such request shares a key.
     let peer = req
@@ -153,13 +161,18 @@ pub async fn limit(State(limiter): State<Arc<RateLimiter>>, req: Request, next: 
     match limiter.allow(key(ip)) {
         Ok(()) => next.run(req).await,
         Err(retry) => {
+            // A connection closed with unread input resets, and the client can lose the 429 to
+            // that reset, so read a login-sized body that arrives soon; past that, close anyway.
+            let body = axum::body::to_bytes(req.into_body(), LOGIN_BODY_LIMIT);
+            let _ = tokio::time::timeout(DRAIN_TIMEOUT, body).await;
             let mut res = error_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",
                 "too many login attempts — slow down and try again shortly",
             );
-            res.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from(retry.as_secs() + 1));
+            let headers = res.headers_mut();
+            headers.insert(header::RETRY_AFTER, HeaderValue::from(retry.as_secs() + 1));
+            headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
             res
         }
     }

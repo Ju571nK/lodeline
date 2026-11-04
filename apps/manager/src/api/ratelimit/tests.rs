@@ -119,6 +119,30 @@ fn a_flood_of_new_addresses_shares_one_window() {
     assert_eq!((hits.windows.len(), hits.order.len()), (2, 2));
 }
 
+/// An address the overflow window counted gets no fresh attempts when the windows that filled
+/// the table reset before the overflow window does.
+#[test]
+fn overflow_attempts_carry_into_a_window_of_its_own() {
+    let (rl, clock) = limiter(10);
+    for i in 0..MAX_KEYS {
+        rl.allow(addr(i)).unwrap();
+    }
+    advance(&clock, Duration::from_secs(59));
+    let late = addr(MAX_KEYS);
+    for i in 0..10 {
+        assert!(rl.allow(late).is_ok(), "overflow attempt {i}");
+    }
+    assert!(rl.allow(late).is_err());
+    advance(&clock, Duration::from_secs(1) + Duration::from_nanos(1));
+    assert_eq!(
+        rl.allow(late),
+        Err(Duration::from_secs(59) - Duration::from_nanos(1))
+    );
+    assert!(rl.allow(addr(MAX_KEYS + 1)).is_err(), "a new address too");
+    advance(&clock, Duration::from_secs(59));
+    assert!(rl.allow(late).is_ok(), "the overflow window has reset");
+}
+
 async fn send(
     app: &Router,
     peer: Option<SocketAddr>,
@@ -358,4 +382,33 @@ async fn forwarding_headers_from_an_untrusted_peer_are_ignored() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "rotating addresses");
+}
+
+/// A client that sends its body after the head still reads the whole 429, and is told the
+/// connection closes: the limiter answers before the body is read.
+#[tokio::test]
+async fn a_429_sent_before_the_body_is_read_in_full() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (rl, _) = limiter(1);
+    rl.allow(Ipv4Addr::LOCALHOST.into()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(crate::conn::serve(
+        listener,
+        app(rl),
+        std::future::pending(),
+    ));
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.write_all(b"{}").await.unwrap();
+    let mut res = Vec::new();
+    let read = s.read_to_end(&mut res).await;
+    let res = String::from_utf8_lossy(&res);
+    assert!(read.is_ok(), "{read:?} after {res}");
+    assert!(res.starts_with("HTTP/1.1 429"), "{res}");
+    assert!(res.contains("\r\nconnection: close\r\n"), "{res}");
+    assert!(res.ends_with("try again shortly\"}}\n"), "{res}");
 }
