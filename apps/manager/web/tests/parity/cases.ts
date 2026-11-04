@@ -6,6 +6,7 @@
  *   {event:N}   mock event ID for recipe index N (EVT#N in goldens)
  *   {seed-6h}   mock seed shifted back by hours (h) or minutes (m), as RFC3339 seconds
  *   {asset:js}  the entry script that dist/index.html references
+ *   {asset:css} the stylesheet that dist/index.html references
  */
 
 /** Every route in the Go router at e4fb077: 18 API routes plus the SPA catch-all. */
@@ -60,7 +61,10 @@ export type Auth =
   | 'no-exp'
   | 'expired-5s'
   | 'not-yet-valid-5s'
-  | 'issued-in-5s';
+  | 'issued-in-5s'
+  | 'other-subject'
+  | 'fractional-exp'
+  | 'with-audience';
 
 /** What the stub upstream answers for the next request from the live-mode manager. */
 export interface UpstreamReply {
@@ -80,6 +84,8 @@ export interface Case {
   /** `live` talks to the manager wired to the stub upstream instead of the mock fleet. */
   server?: 'mock' | 'live';
   auth?: Auth;
+  /** Cookie header lines, each holding one `lodeline_session` pair per entry; replaces `auth`. */
+  cookies?: Auth[][];
   headers?: Record<string, string>;
   /** Sent as JSON with `Content-Type: application/json`. */
   json?: unknown;
@@ -168,6 +174,48 @@ function limited(
   };
 }
 
+/** A login or note body sent verbatim with the given Content-Type. */
+function body(
+  name: string,
+  route: 'POST /api/v1/auth/login' | 'POST /api/v1/triage/note',
+  raw: string,
+  outcome: 'ok' | 'error',
+  contentType = 'application/json',
+): Case {
+  return {
+    name,
+    route,
+    outcome,
+    method: 'POST',
+    path: route.slice(5),
+    ...(route === 'POST /api/v1/auth/login' ? { auth: 'none' as const } : {}),
+    headers: { 'Content-Type': contentType },
+    raw,
+  };
+}
+
+/** A mock-mode events query whose `since` the Go parser accepts or rejects. */
+function since(name: string, value: string, outcome: 'ok' | 'error'): Case {
+  return {
+    name: `fleet-events-since-${name}`,
+    route: 'GET /api/v1/fleet/events',
+    outcome,
+    method: 'GET',
+    path: `/api/v1/fleet/events?limit=1&since=${value}`,
+  };
+}
+
+function cookieCase(name: string, cookies: Auth[][], outcome: 'ok' | 'error'): Case {
+  return {
+    name,
+    route: 'GET /api/v1/auth/me',
+    outcome,
+    method: 'GET',
+    path: '/api/v1/auth/me',
+    cookies,
+  };
+}
+
 function upstream(
   name: string,
   route: Route,
@@ -204,6 +252,21 @@ export const CASES: Case[] = [
   { name: 'spa-assets-no-slash', route: 'GET /*', outcome: 'ok', method: 'GET', path: '/assets' },
   { name: 'spa-head-root', route: 'GET /*', outcome: 'ok', method: 'HEAD', path: '/' },
   { name: 'spa-head-asset', route: 'GET /*', outcome: 'ok', method: 'HEAD', path: '{asset:js}' },
+  { name: 'spa-asset-css', route: 'GET /*', outcome: 'ok', method: 'GET', path: '{asset:css}' },
+  {
+    name: 'spa-head-asset-css',
+    route: 'GET /*',
+    outcome: 'ok',
+    method: 'HEAD',
+    path: '{asset:css}',
+  },
+  {
+    name: 'spa-head-deep-link',
+    route: 'GET /*',
+    outcome: 'ok',
+    method: 'HEAD',
+    path: '/alerts/abc',
+  },
   {
     name: 'spa-asset-range',
     route: 'GET /*',
@@ -370,6 +433,27 @@ export const CASES: Case[] = [
     path: '/api/v1/auth/login',
     auth: 'none',
   },
+  body(
+    'login-text-plain',
+    'POST /api/v1/auth/login',
+    '{"username":"{admin}","password":"{password}"}',
+    'ok',
+    'text/plain',
+  ),
+  body(
+    'login-extra-fields',
+    'POST /api/v1/auth/login',
+    '{"username":"{admin}","password":"{password}","remember":true,"username2":"x"}',
+    'ok',
+  ),
+  { ...body('login-null-body', 'POST /api/v1/auth/login', 'null', 'error'), minMs: 250 },
+  body('login-array-body', 'POST /api/v1/auth/login', '[]', 'error'),
+  body(
+    'login-wrong-field-type',
+    'POST /api/v1/auth/login',
+    '{"username":"{admin}","password":12345}',
+    'error',
+  ),
 
   // Login limiter: 10 per minute per client address, shared by login and the two OIDC routes.
   // Go reads the address from True-Client-IP, X-Real-IP, then the first X-Forwarded-For hop
@@ -425,6 +509,45 @@ export const CASES: Case[] = [
     raw: '{',
     prelude: [
       { count: 11, status: 400, headers: { 'X-Forwarded-For': 'not-an-address' }, raw: '{' },
+    ],
+  },
+  // The test host has only 127.0.0.1 on its loopback interface, so these send the other
+  // loopback forms through X-Forwarded-For.
+  ...[
+    // Built from parts so the source holds only 127.0.0.1 as a literal address.
+    ['127-0-0-2', [127, 0, 0, 2].join('.')],
+    ['ipv6', '::1'],
+    ['ipv4-mapped', '::ffff:127.0.0.1'],
+  ].map(
+    ([label, ip]): Case => ({
+      name: `login-forwarded-loopback-${label}-not-limited`,
+      route: 'POST /api/v1/auth/login',
+      outcome: 'error',
+      method: 'POST',
+      path: '/api/v1/auth/login',
+      auth: 'none',
+      headers: { 'X-Forwarded-For': ip },
+      raw: '{',
+      prelude: [{ count: 11, status: 400, headers: { 'X-Forwarded-For': ip }, raw: '{' }],
+    }),
+  ),
+  {
+    // Successful logins count toward the limit too.
+    name: 'login-rate-limited-after-successes',
+    route: 'POST /api/v1/auth/login',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/auth/login',
+    auth: 'none',
+    headers: { 'X-Forwarded-For': '203.0.113.28', 'Content-Type': 'application/json' },
+    raw: '{"username":"{admin}","password":"{password}"}',
+    prelude: [
+      {
+        count: 10,
+        status: 200,
+        headers: { 'X-Forwarded-For': '203.0.113.28', 'Content-Type': 'application/json' },
+        raw: '{"username":"{admin}","password":"{password}"}',
+      },
     ],
   },
   {
@@ -495,6 +618,14 @@ export const CASES: Case[] = [
   sessionForm('expired-5s'),
   sessionForm('not-yet-valid-5s'),
   sessionForm('issued-in-5s'),
+  sessionForm('other-subject'),
+  sessionForm('fractional-exp'),
+  sessionForm('with-audience'),
+  // Go reads the first lodeline_session pair across all Cookie lines.
+  cookieCase('cookie-lines-valid-first', [['session'], ['garbage']], 'ok'),
+  cookieCase('cookie-lines-invalid-first', [['garbage'], ['session']], 'error'),
+  cookieCase('cookie-pairs-valid-first', [['session', 'garbage']], 'ok'),
+  cookieCase('cookie-pairs-invalid-first', [['garbage', 'session']], 'error'),
   {
     name: 'logout-ok',
     route: 'POST /api/v1/auth/logout',
@@ -637,6 +768,31 @@ export const CASES: Case[] = [
     method: 'GET',
     path: '/api/v1/fleet/events?since={seed-88m}&until={seed-44m}',
   },
+  {
+    // An empty value is the same as an absent one.
+    name: 'fleet-events-empty-values',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/events?limit=&since=&until=',
+  },
+  {
+    name: 'fleet-events-limit-space',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/events?limit=%20',
+  },
+  since('lowercase-t', '2026-01-01t00:00:00Z', 'error'),
+  since('lowercase-z', '2026-01-01T00:00:00z', 'error'),
+  since('offset-no-colon', '2026-01-01T00:00:00%2B0900', 'error'),
+  since('space-separator', '2026-01-01%2000:00:00Z', 'error'),
+  since('comma-fraction', '2026-01-01T00:00:00,5Z', 'ok'),
+  since('leap-second', '2026-01-01T23:59:60Z', 'error'),
+  since('unknown-offset', '2026-01-01T00:00:00-00:00', 'ok'),
+  since('offset-24h', '2026-01-01T00:00:00%2B24:00', 'ok'),
+  since('no-seconds', '2026-01-01T00:00Z', 'error'),
+  since('day-out-of-range', '2026-02-30T00:00:00Z', 'error'),
   noSession('GET /api/v1/fleet/events', 'GET', '/api/v1/fleet/events', 'fleet-events-no-session'),
   {
     name: 'fleet-event',
@@ -693,6 +849,13 @@ export const CASES: Case[] = [
     method: 'GET',
     path: '/api/v1/fleet/risk?limit=0',
   },
+  {
+    name: 'fleet-risk-limit-empty',
+    route: 'GET /api/v1/fleet/risk',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/risk?limit=',
+  },
   noSession('GET /api/v1/fleet/risk', 'GET', '/api/v1/fleet/risk', 'fleet-risk-no-session'),
   {
     name: 'fleet-compliance',
@@ -721,6 +884,13 @@ export const CASES: Case[] = [
     outcome: 'ok',
     method: 'GET',
     path: '/api/v1/fleet/compliance?limit=2000',
+  },
+  {
+    name: 'fleet-compliance-limit-space',
+    route: 'GET /api/v1/fleet/compliance',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/compliance?limit=%20',
   },
   noSession(
     'GET /api/v1/fleet/compliance',
@@ -762,6 +932,13 @@ export const CASES: Case[] = [
     outcome: 'ok',
     method: 'GET',
     path: '/api/v1/fleet/hosts?limit=-1',
+  },
+  {
+    name: 'fleet-hosts-limit-empty',
+    route: 'GET /api/v1/fleet/hosts',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/hosts?limit=',
   },
   noSession('GET /api/v1/fleet/hosts', 'GET', '/api/v1/fleet/hosts', 'fleet-hosts-no-session'),
   {
@@ -963,6 +1140,37 @@ export const CASES: Case[] = [
     path: '/api/v1/fleet/events/{event:3}',
   },
 
+  // Note bodies on the H_BOB row that triage-upsert-null-snapshot wrote; triage-get-bob reads
+  // back what they stored.
+  body(
+    'triage-note-text-plain',
+    'POST /api/v1/triage/note',
+    `{"host_id":"${H_BOB}","event_id":"{event:6}","body":"sent as text/plain"}`,
+    'ok',
+    'text/plain',
+  ),
+  body(
+    'triage-note-extra-fields',
+    'POST /api/v1/triage/note',
+    `{"host_id":"${H_BOB}","event_id":"{event:6}","body":"extra fields","author":"someone-else","id":99}`,
+    'ok',
+  ),
+  body('triage-note-null-body', 'POST /api/v1/triage/note', 'null', 'error'),
+  body('triage-note-array-body', 'POST /api/v1/triage/note', '[]', 'error'),
+  body(
+    'triage-note-wrong-field-type',
+    'POST /api/v1/triage/note',
+    `{"host_id":"${H_BOB}","event_id":"{event:6}","body":7}`,
+    'error',
+  ),
+  {
+    name: 'triage-get-bob',
+    route: 'GET /api/v1/triage/{host_id}/{event_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/triage/${H_BOB}/{event:6}`,
+  },
+
   // Live mode: the manager reads the stub upstream.
   upstream(
     'live-meta-legacy-license',
@@ -1157,6 +1365,61 @@ export const CASES: Case[] = [
     },
     'ok',
   ),
+  ...[
+    ['plus3', '%2B3'],
+    ['007', '007'],
+    ['0', '0'],
+    ['minus1', '-1'],
+    ['2000', '2000'],
+  ].map(([label, limit]) =>
+    upstream(
+      `live-events-limit-${label}`,
+      'GET /api/v1/fleet/events',
+      `/api/v1/fleet/events?limit=${limit}`,
+      { status: 200, json: { events: [], next_cursor: null } },
+      'ok',
+    ),
+  ),
+  upstream(
+    'live-events-empty-values',
+    'GET /api/v1/fleet/events',
+    '/api/v1/fleet/events?limit=&cursor=&host_id=&since=&until=&severity=',
+    { status: 200, json: { events: [], next_cursor: null } },
+    'ok',
+  ),
+  upstream(
+    'live-events-limit-space',
+    'GET /api/v1/fleet/events',
+    '/api/v1/fleet/events?limit=%20',
+    { status: 200, json: { events: [], next_cursor: null } },
+  ),
+  upstream(
+    // Go forwards since and until in UTC, whole seconds.
+    'live-events-time-forms',
+    'GET /api/v1/fleet/events',
+    '/api/v1/fleet/events?since=2026-01-01T00:00:00,5%2B24:00&until=2026-01-01T09:00:00.999-00:00',
+    { status: 200, json: { events: [], next_cursor: null } },
+    'ok',
+  ),
+  ...[
+    ['space', 'a%20b'],
+    ['slash', 'a%2Fb'],
+    ['plus', 'a%2Bb'],
+    ['unreserved', '%41bc'],
+  ].flatMap(([label, id]) => [
+    upstream(
+      `live-event-id-${label}`,
+      'GET /api/v1/fleet/events/{event_id}',
+      `/api/v1/fleet/events/${id}`,
+      { status: 404, json: { error: { code: 'not_found', message: 'no such event' } } },
+    ),
+    upstream(
+      `live-host-id-${label}`,
+      'GET /api/v1/fleet/hosts/{host_id}',
+      `/api/v1/fleet/hosts/${id}`,
+      { status: 404, json: { error: { code: 'not_found', message: 'no such host' } } },
+    ),
+  ]),
   upstream('upstream-401', 'GET /api/v1/fleet/events', '/api/v1/fleet/events', {
     status: 401,
     json: { error: { code: 'unauthorized', message: 'bad token' } },

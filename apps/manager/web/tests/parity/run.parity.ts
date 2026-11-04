@@ -67,6 +67,7 @@ interface Run {
   distNames: Map<string, string>;
   assetFiles: string[];
   entryScript: string;
+  entryStyle: string;
 }
 let run: Run;
 
@@ -133,6 +134,12 @@ function craftedToken(auth: Exclude<Auth, 'session' | 'none' | 'empty' | 'garbag
       return jwt(hs256, { ...claims, nbf: now + 5 });
     case 'issued-in-5s':
       return jwt(hs256, { ...claims, iat: now + 5 });
+    case 'other-subject':
+      return jwt(hs256, { ...claims, sub: 'someone-else' });
+    case 'fractional-exp':
+      return jwt(hs256, { ...claims, exp: FUTURE + 0.75 });
+    case 'with-audience':
+      return jwt(hs256, { ...claims, aud: 'some-other-service' });
   }
 }
 
@@ -163,6 +170,7 @@ function fill(s: string): string {
       rfc3339Seconds(run.seedMs - Number(n) * (unit === 'h' ? 3_600_000 : 60_000)),
     )
     .replace('{asset:js}', run.entryScript)
+    .replace('{asset:css}', run.entryStyle)
     .replace(/\{admin\}/g, env.ADMIN_USERNAME)
     .replace(/\{password\}/g, env.ADMIN_PASSWORD);
 }
@@ -177,16 +185,23 @@ function sha256(b: Buffer): string {
   return createHash('sha256').update(b).digest('hex');
 }
 
-/** Raw HTTP, so the server sees the exact path (fetch would resolve `..` and `//`). */
+type Headers = Record<string, string | string[]>;
+
+/**
+ * Raw HTTP, so the server sees the exact path (fetch would resolve `..` and `//`). Headers go
+ * out as a raw list, so a list value is sent as repeated lines; Node then adds no Host itself.
+ */
 function request(
   port: number,
   method: string,
   path: string,
-  headers: Record<string, string>,
+  headers: Headers,
   body?: Buffer,
 ): Promise<Reply> {
+  const raw = ['Host', `127.0.0.1:${port}`];
+  for (const [k, v] of Object.entries(headers)) for (const one of [v].flat()) raw.push(k, one);
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, method, path, headers }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path, headers: raw }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () =>
@@ -206,13 +221,13 @@ function request(
 interface Send {
   method: string;
   path: string;
-  headers?: Record<string, string>;
+  headers?: Headers;
   json?: unknown;
   raw?: string;
 }
 
 function send(c: Case, s: Send): Promise<Reply> {
-  const headers: Record<string, string> = { ...BASE_HEADERS, ...s.headers };
+  const headers: Headers = { ...BASE_HEADERS, ...s.headers };
   let body: Buffer | undefined;
   if (s.json !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -221,8 +236,14 @@ function send(c: Case, s: Send): Promise<Reply> {
     body = Buffer.from(fill(s.raw));
   }
   if (body) headers['Content-Length'] = String(body.length);
-  const cookie = cookieValue(c.auth ?? 'session');
-  if (cookie !== null) headers.Cookie = `lodeline_session=${cookie}`;
+  const lines = (c.cookies ?? [[c.auth ?? 'session']]).map((pairs) =>
+    pairs
+      .map(cookieValue)
+      .filter((v) => v !== null)
+      .map((v) => `lodeline_session=${v}`)
+      .join('; '),
+  );
+  if (lines.some(Boolean)) headers.Cookie = lines;
   const port = c.server === 'live' ? env.LIVE_PORT : env.MOCK_PORT;
   return request(port, s.method, fill(s.path), headers, body);
 }
@@ -235,11 +256,12 @@ function headerValues(reply: Reply, name: string): string[] {
   return out;
 }
 
-/** The dist file the case asked for, if its path names one. */
+/** The dist file the case asked for, if its path names one; index.html for SPA fallbacks. */
 function requestedFile(c: Case): string | null {
   const pathname = decodeURIComponent(fill(c.path).split('?')[0]);
   const file = join(DIST, pathname);
-  return existsSync(file) && statSync(file).isFile() ? file : null;
+  if (existsSync(file) && statSync(file).isFile()) return file;
+  return c.route === 'GET /*' ? join(DIST, 'index.html') : null;
 }
 
 /** A dist file by the name the table uses for it: its placeholder, or its path when unhashed. */
@@ -249,16 +271,22 @@ function distName(rel: string): string {
 
 function recordHeaders(c: Case, reply: Reply): Record<string, string | string[]> {
   const grouped = new Map<string, string[]>();
+  // With no body to frame, Content-Length is the size the server declares, so it is recorded.
+  const declaredLength = c.method === 'HEAD' || reply.body.length === 0;
   for (let i = 0; i < reply.rawHeaders.length; i += 2) {
     const name = reply.rawHeaders[i].toLowerCase();
-    if (UNRECORDED_HEADERS.has(name)) continue;
+    if (UNRECORDED_HEADERS.has(name) && !(name === 'content-length' && declaredLength)) continue;
     let v = reply.rawHeaders[i + 1];
+    const file = name === 'content-length' && v !== '0' ? requestedFile(c) : null;
+    if (file && readFileSync(file).length === Number(v)) {
+      v = `<size of ${distName(relative(DIST, file))}>`;
+    }
     // Go answers 429 with the seconds left in a 60 s window, plus 1, so a full window is 60 or 61.
     if (name === 'retry-after' && reply.status === 429 && /^(59|60|61)$/.test(v)) v = '<59..61>';
     const range = name === 'content-range' ? /^bytes (\d+-\d+)\/(\d+)$/.exec(v) : null;
-    const file = range ? requestedFile(c) : null;
-    if (range && file && readFileSync(file).length === Number(range[2])) {
-      v = `bytes ${range[1]}/<size of ${distName(relative(DIST, file))}>`;
+    const ranged = range ? requestedFile(c) : null;
+    if (range && ranged && readFileSync(ranged).length === Number(range[2])) {
+      v = `bytes ${range[1]}/<size of ${distName(relative(DIST, ranged))}>`;
     }
     grouped.set(name, [...(grouped.get(name) ?? []), v]);
   }
@@ -428,7 +456,14 @@ test.beforeAll(async () => {
     readFileSync(join(DIST, 'index.html'), 'utf8'),
   )?.[1];
   expect(entryScript, 'entry script in dist/index.html').toBeTruthy();
-  const distNames = new Map([[entryScript!.slice(1), '{asset:js}']]);
+  const entryStyle = /href="(\/assets\/index-[^"]+\.css)"/.exec(
+    readFileSync(join(DIST, 'index.html'), 'utf8'),
+  )?.[1];
+  expect(entryStyle, 'entry stylesheet in dist/index.html').toBeTruthy();
+  const distNames = new Map([
+    [entryScript!.slice(1), '{asset:js}'],
+    [entryStyle!.slice(1), '{asset:css}'],
+  ]);
   for (const rel of distByHash.values()) {
     if (HASHED.test(rel) && !distNames.has(rel)) distNames.set(rel, `unrequested ${rel}`);
   }
@@ -441,6 +476,7 @@ test.beforeAll(async () => {
     distNames,
     assetFiles: readdirSync(join(DIST, 'assets')).sort(),
     entryScript: entryScript!,
+    entryStyle: entryStyle!,
   };
   await sleep(LOGIN_PAUSE_MS);
 });

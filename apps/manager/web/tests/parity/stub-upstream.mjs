@@ -29,7 +29,8 @@ http
       }
       calls.push({
         method: req.method,
-        path: url.pathname,
+        // As sent, so percent-encoding in the path shows.
+        path: req.url.split('?')[0],
         query: [...url.searchParams].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
         authorization: req.headers.authorization ?? null,
         accept: req.headers.accept ?? null,

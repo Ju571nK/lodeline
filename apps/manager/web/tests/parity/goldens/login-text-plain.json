@@ -1,0 +1,47 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/auth/login",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [
+    {
+      "name": "lodeline_session",
+      "value": "<set>",
+      "attributes": [
+        [
+          "Path",
+          "/"
+        ],
+        [
+          "Expires",
+          "<now+87600h http-date>"
+        ],
+        [
+          "Max-Age",
+          "315360000"
+        ],
+        [
+          "HttpOnly",
+          true
+        ],
+        [
+          "SameSite",
+          "Lax"
+        ]
+      ]
+    }
+  ],
+  "body": {
+    "expires_at": "<now+87600h .fZ>",
+    "username": "admin"
+  }
+}

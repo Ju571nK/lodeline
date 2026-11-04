@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   dropNullAt,
+  imfFixdate,
   mockEventId,
   mockEventIds,
   type NormalizeContext,
@@ -131,7 +132,7 @@ describe('normalizeJson', () => {
 });
 
 describe('parseSetCookie', () => {
-  it('records attributes and hides the value', () => {
+  it('records attributes in order and case, and hides the value', () => {
     const c = parseSetCookie(
       'lodeline_session=abc; Path=/; Expires=Wed, 04 Nov 2026 22:00:02 GMT; Max-Age=43200; HttpOnly; SameSite=Lax',
       ctx,
@@ -139,15 +140,32 @@ describe('parseSetCookie', () => {
     expect(c).toEqual({
       name: 'lodeline_session',
       value: '<set>',
-      attributes: {
-        path: '/',
-        expires: '<now+12h http-date>',
-        'max-age': '43200',
-        httponly: true,
-        samesite: 'Lax',
-      },
+      attributes: [
+        ['Path', '/'],
+        ['Expires', '<now+12h http-date>'],
+        ['Max-Age', '43200'],
+        ['HttpOnly', true],
+        ['SameSite', 'Lax'],
+      ],
     });
     expect(parseSetCookie('lodeline_session=; Max-Age=0', ctx).value).toBe('');
+    expect(parseSetCookie('a=b; httponly; path=/', ctx).attributes).toEqual([
+      ['httponly', true],
+      ['path', '/'],
+    ]);
+  });
+
+  it('keeps an Expires that is not an IMF-fixdate raw', () => {
+    for (const v of [
+      'Thu, 04 Nov 2026 22:00:02 GMT',
+      'Wednesday, 04-Nov-26 22:00:02 GMT',
+      'Wed, 4 Nov 2026 22:00:02 GMT',
+      'Wed, 04 Nov 2026 22:00:02 +0000',
+    ]) {
+      expect(imfFixdate(v), v).toBeNaN();
+      expect(parseSetCookie(`a=b; Expires=${v}`, ctx).attributes, v).toEqual([['Expires', v]]);
+    }
+    expect(imfFixdate('Thu, 01 Jan 1970 00:00:00 GMT')).toBe(0);
   });
 });
 

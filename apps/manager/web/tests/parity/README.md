@@ -5,30 +5,30 @@ each normalized response with a golden file. The goldens were recorded from the 
 at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
 the port answers differently.
 
-The table has 150 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 206 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
 |---:|---|
 | 3 | `GET /api/health` |
-| 19 | `POST /api/v1/auth/login` |
+| 28 | `POST /api/v1/auth/login` |
 | 2 | `GET /api/v1/auth/methods` |
 | 3 | `GET /api/v1/auth/oidc/start` |
 | 2 | `GET /api/v1/auth/oidc/callback` |
 | 3 | `POST /api/v1/auth/logout` |
-| 19 | `GET /api/v1/auth/me` |
+| 26 | `GET /api/v1/auth/me` |
 | 5 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
-| 17 | `GET /api/v1/fleet/events` |
-| 6 | `GET /api/v1/fleet/events/{event_id}` |
-| 8 | `GET /api/v1/fleet/risk` |
-| 7 | `GET /api/v1/fleet/compliance` |
-| 9 | `GET /api/v1/fleet/hosts` |
-| 6 | `GET /api/v1/fleet/hosts/{host_id}` |
+| 37 | `GET /api/v1/fleet/events` |
+| 10 | `GET /api/v1/fleet/events/{event_id}` |
+| 9 | `GET /api/v1/fleet/risk` |
+| 8 | `GET /api/v1/fleet/compliance` |
+| 10 | `GET /api/v1/fleet/hosts` |
+| 10 | `GET /api/v1/fleet/hosts/{host_id}` |
 | 11 | `POST /api/v1/triage/upsert` |
-| 6 | `POST /api/v1/triage/note` |
-| 4 | `GET /api/v1/triage/{host_id}/{event_id}` |
-| 16 | `GET /*` (SPA and unrouted paths) |
+| 11 | `POST /api/v1/triage/note` |
+| 5 | `GET /api/v1/triage/{host_id}/{event_id}` |
+| 19 | `GET /*` (SPA and unrouted paths) |
 
 Every route has a success case and an error case, except the two OIDC routes. Their success path
 needs an HTTPS OIDC provider, so the Rust port carries over the Go OIDC unit tests instead
@@ -82,7 +82,8 @@ step needs the `sqlite3` command.
 With either variable set, the suite first reads `version` from `/api/health` and stops unless it
 starts with `e4fb077`. `PARITY_ALLOW_ANY_REFERENCE=1` skips that check and prints a warning; use
 it only to record from a deliberately changed reference. CI must never set `PARITY_UPDATE`,
-`PARITY_TESTDATA` or `PARITY_ALLOW_ANY_REFERENCE`: a CI run compares and writes nothing.
+`PARITY_TESTDATA` or `PARITY_ALLOW_ANY_REFERENCE`: a CI run compares and writes nothing. The
+suite stops at load when `CI` is set together with any of them.
 
 Build the Go binary from `e4fb077` with this `web/dist` copied to `internal/server/dist`, as
 its Makefile `build` target does with its own `web/dist`. The `-ldflags` value stamps the version
@@ -99,7 +100,8 @@ cd <dir> && go build \
 ## Normalization
 
 Bodies are compared as parsed JSON with sorted keys, so byte-level differences such as Go's
-trailing newline and its escaping of `<`, `>` and `&` do not count. Each rule below hides only the
+trailing newline, its escaping of `<`, `>` and `&`, and number spelling (`1.0` against `1`) do not
+count. Each rule below hides only the
 part of a value that changes from run to run.
 
 The recorder notes when each request ran: from just before it sends to the last body byte. A time
@@ -119,16 +121,19 @@ request shares that second.
 | `version` becomes `<version>` | `/api/health`, when non-empty | The build stamps its own version string. An empty one stays raw and fails. |
 | IPv4 addresses become `<ipv4 hash>` | strings in bodies, except 127.0.0.1 and the documentation ranges | Keeps mock addresses out of the tree. The hash still changes when the address changes. |
 | `Retry-After` becomes `<59..61>` | 429 responses | Go sends the seconds left in the 60 s window plus one, rounded down: 60 for back-to-back requests. Any other value stays raw. |
-| Upstream query pairs are decoded and sorted | requests the stub records | `lodeline-server` reads the query as a map, so order and percent-encoding are not part of the contract. |
-| SPA bodies become `<dist:<name>>` | bodies equal to a file in `web/dist` | `<name>` is the placeholder the case requested (`{asset:js}`) or the path of an unhashed file, so goldens survive SPA edits while still naming the exact file. A hashed file no case asked for shows as `unrequested <path>`. |
+| Upstream query pairs are decoded and sorted | requests the stub records | `lodeline-server` reads the query as a map, so order and percent-encoding are not part of the contract. The path is kept as sent, percent-encoding included. |
+| SPA bodies become `<dist:<name>>` | bodies equal to a file in `web/dist` | `<name>` is the placeholder the case requested (`{asset:js}`, `{asset:css}`) or the path of an unhashed file, so goldens survive SPA edits while still naming the exact file. A hashed file no case asked for shows as `unrequested <path>`. |
 | Partial bodies become `<dist:<name> bytes a-b>`, and the `Content-Range` total becomes `<size of <name>>` | 206 responses that match the requested file | Same reason. |
+| A recorded `Content-Length` becomes `<size of <name>>` | values equal to the size of the requested file, or of `index.html` for an SPA fallback | Same reason. |
 | Listing entries become `<every file in dist/assets, sorted>` | the `spa-assets-dir` body | Only when the entries are exactly the files in `web/dist/assets`, in order. Otherwise they are kept with hashes dropped, sorted, so the diff shows them. |
 | Other non-JSON bodies are kept as text, or as a hash above 4 KiB | everything else | |
-| Cookie values become `<set>` | `Set-Cookie` | Session tokens change on every login. Name and attributes are kept. |
+| Cookie values become `<set>` | `Set-Cookie` | Session tokens change on every login. The name and the attributes are kept, in the order sent and with names in the case sent. |
+| The `Expires` rule above applies only to an IMF-fixdate | cookie `Expires` | The form must be `Wed, 04 Nov 2026 22:00:02 GMT` with a weekday that matches the date. Any other form stays raw and fails. |
 
 Every response header is recorded, sorted by name, except `Date`, `Content-Length`,
-`Transfer-Encoding`, `Connection` and `Keep-Alive`. `Set-Cookie` is recorded parsed, as above. A
-header sent more than once is recorded as a list. Each request carries `Accept: */*` and
+`Transfer-Encoding`, `Connection` and `Keep-Alive`. `Content-Length` is recorded when the method
+is `HEAD` or the body is empty, because then it states a size rather than framing the body.
+`Set-Cookie` is recorded parsed, as above. A header sent more than once is recorded as a list. Each request carries `Accept: */*` and
 `Accept-Encoding: gzip, deflate, br`, as a browser does, so a server that compresses shows it.
 
 Live-mode cases keep their times raw, because the stub answers with fixed values. The servers
@@ -174,5 +179,10 @@ A passing run says nothing about the following. Each needs its own test in the p
   Whether other failure paths wait, or how long the slowest wait is, is not checked.
 - `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id` and
   `fleet-events-duplicate-key`.
+- `Content-Length` of a non-empty `GET` response, and whether a response is chunked.
+- Percent-encoded path parameters in mock mode. The live cases show what Go sends upstream.
 - Limiter behavior that needs time to pass: window reset after 60 s, and pruning above 1024 keys.
-- IPv6 client addresses, and request bodies larger than a few hundred bytes.
+- Connections from client addresses other than 127.0.0.1. The servers listen on 127.0.0.1 only,
+  and the test host has no other loopback address, so the other 127/8 address, `::1` and
+  `::ffff:127.0.0.1` reach the limiter only through `X-Forwarded-For`.
+- Request bodies larger than a few hundred bytes.

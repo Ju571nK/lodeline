@@ -1,0 +1,38 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events?since=2026-01-01T00:00:00,5%2B24:00&until=2026-01-01T09:00:00.999-00:00",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "events": [],
+    "next_cursor": null
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/events",
+      "query": [
+        [
+          "since",
+          "2025-12-31T00:00:00Z"
+        ],
+        [
+          "until",
+          "2026-01-01T09:00:00Z"
+        ]
+      ],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

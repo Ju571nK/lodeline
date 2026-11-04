@@ -16,13 +16,28 @@
     {
       "name": "lodeline_session",
       "value": "<set>",
-      "attributes": {
-        "path": "/",
-        "expires": "<now+87600h http-date>",
-        "max-age": "315360000",
-        "httponly": true,
-        "samesite": "Lax"
-      }
+      "attributes": [
+        [
+          "Path",
+          "/"
+        ],
+        [
+          "Expires",
+          "<now+87600h http-date>"
+        ],
+        [
+          "Max-Age",
+          "315360000"
+        ],
+        [
+          "HttpOnly",
+          true
+        ],
+        [
+          "SameSite",
+          "Lax"
+        ]
+      ]
     }
   ],
   "body": {

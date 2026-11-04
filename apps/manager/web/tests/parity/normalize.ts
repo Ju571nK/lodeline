@@ -183,22 +183,33 @@ export function normalizeJson(value: unknown, ctx: NormalizeContext): unknown {
 export interface ParsedCookie {
   name: string;
   value: string;
-  attributes: Record<string, string | true>;
+  /** In the order sent, each name in the case sent. */
+  attributes: [string, string | true][];
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const IMF_FIXDATE = /^(\w{3}), \d{2} \w{3} \d{4} \d\d:\d\d:\d\d GMT$/;
+
+/** The instant an IMF-fixdate (RFC 9110) names, or NaN when its shape or weekday is wrong. */
+export function imfFixdate(v: string): number {
+  const m = IMF_FIXDATE.exec(v);
+  const t = m ? Date.parse(v) : Number.NaN;
+  return !Number.isNaN(t) && WEEKDAYS[new Date(t).getUTCDay()] === m?.[1] ? t : Number.NaN;
 }
 
 /** Splits one Set-Cookie header; the value is reduced to `<set>` or empty. */
 export function parseSetCookie(header: string, ctx: NormalizeContext): ParsedCookie {
   const [pair, ...attrs] = header.split(';').map((p) => p.trim());
   const eq = pair.indexOf('=');
-  const attributes: Record<string, string | true> = {};
-  for (const a of attrs) {
+  const attributes: [string, string | true][] = attrs.map((a) => {
     const i = a.indexOf('=');
-    const name = (i < 0 ? a : a.slice(0, i)).toLowerCase();
+    const name = i < 0 ? a : a.slice(0, i);
     let v: string | true = i < 0 ? true : a.slice(i + 1);
-    const t = name === 'expires' && typeof v === 'string' ? Date.parse(v) : Number.NaN;
+    const t =
+      name.toLowerCase() === 'expires' && typeof v === 'string' ? imfFixdate(v) : Number.NaN;
     if (!Number.isNaN(t)) v = expiryToken(BigInt(t) * MS, 1000n * MS, 'http-date', ctx) ?? v;
-    attributes[name] = v;
-  }
+    return [name, v];
+  });
   return {
     name: pair.slice(0, eq),
     value: pair.slice(eq + 1) === '' ? '' : '<set>',

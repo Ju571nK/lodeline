@@ -29,6 +29,11 @@ export const STUB_URL = `http://127.0.0.1:${STUB_PORT}`;
 export const UPDATE = process.env.PARITY_UPDATE === '1';
 export const WRITE_TESTDATA = process.env.PARITY_TESTDATA === '1';
 export const ALLOW_ANY_REFERENCE = process.env.PARITY_ALLOW_ANY_REFERENCE === '1';
+const WRITE_VARS = ['PARITY_UPDATE', 'PARITY_TESTDATA', 'PARITY_ALLOW_ANY_REFERENCE'];
+const setInCi = WRITE_VARS.filter((v) => process.env[v] !== undefined);
+if (process.env.CI !== undefined && setInCi.length > 0) {
+  throw new Error(`CI is set together with ${setInCi.join(', ')}; a CI run only compares.`);
+}
 
 // The config process sets these first; test workers inherit them, so every
 // process agrees on one run directory and one run start.
