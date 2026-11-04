@@ -134,7 +134,10 @@ test('observed controls survive the host API and remain inspectable at low risk'
   await expect(
     settings.getByText('["read-only","workspace-write"]', { exact: true }),
   ).toBeVisible();
-  await page.screenshot({ path: '/tmp/lodeline-manager-observed-controls-host.png', fullPage: true });
+  await page.screenshot({
+    path: test.info().outputPath('observed-controls-host.png'),
+    fullPage: true,
+  });
 
   // Same observation on a quiet tool must remain accessible by keyboard.
   host.ai_guard.by_tool.codex.bucket = 'low';

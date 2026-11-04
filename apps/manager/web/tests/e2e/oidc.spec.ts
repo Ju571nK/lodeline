@@ -3,9 +3,15 @@ import { expect, test } from '@playwright/test';
 // The login page sends a signed-in browser on to /alerts.
 test.use({ storageState: { cookies: [], origins: [] } });
 
-test('organization sign-in is optional and errors retain local recovery', async ({ page }, testInfo) => {
-  await page.route('**/api/v1/auth/methods', route => route.fulfill({ json: { local: true, oidc: true } }));
-  await page.route('**/api/v1/auth/oidc/start', route => route.fulfill({ status: 302, headers: { Location: '/login?oidc_error=1' } }));
+test('organization sign-in is optional and errors retain local recovery', async ({
+  page,
+}, testInfo) => {
+  await page.route('**/api/v1/auth/methods', (route) =>
+    route.fulfill({ json: { local: true, oidc: true } }),
+  );
+  await page.route('**/api/v1/auth/oidc/start', (route) =>
+    route.fulfill({ status: 302, headers: { Location: '/login?oidc_error=1' } }),
+  );
   await page.goto('/login');
   await page.getByRole('link', { name: 'Sign in with your organization' }).click();
   await expect(page.getByRole('alert')).toContainText('Organization sign-in failed');
@@ -25,11 +31,18 @@ test('unconfigured provider leaves local login available', async ({ page }) => {
 
 test('failed method discovery can be retried', async ({ page }) => {
   let unavailable = true;
-  await page.route('**/api/v1/auth/methods', route => unavailable
-    ? route.fulfill({ status: 503, json: { error: { code: 'unavailable', message: 'Unavailable' } } })
-    : route.fulfill({ json: { local: true, oidc: true } }));
+  await page.route('**/api/v1/auth/methods', (route) =>
+    unavailable
+      ? route.fulfill({
+          status: 503,
+          json: { error: { code: 'unavailable', message: 'Unavailable' } },
+        })
+      : route.fulfill({ json: { local: true, oidc: true } }),
+  );
   await page.goto('/login');
-  await expect(page.getByRole('alert')).toContainText('Could not load organization sign-in options');
+  await expect(page.getByRole('alert')).toContainText(
+    'Could not load organization sign-in options',
+  );
   unavailable = false;
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.getByRole('link', { name: 'Sign in with your organization' })).toBeVisible();
