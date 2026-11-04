@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 
@@ -12,8 +15,9 @@ import { defineConfig, devices } from '@playwright/test';
  *   - `MOCK_FLEET=1` so no live lodeline-server is needed,
  *   - the env vars below (which match `.env.example`).
  *
- * Tests share one server instance; we put the per-test triage DB under a
- * temp dir so each `npx playwright test` run starts clean.
+ * Tests share one server instance. Its triage DB is `E2E_TRIAGE_DB_PATH`, or
+ * a file in a temp dir made for this run and removed when it ends, so each
+ * `npx playwright test` run starts clean and parallel runs do not share it.
  *
  * The console allows 10 login attempts a minute per client address, and
  * every test connects from 127.0.0.1. So the `setup` project signs in once
@@ -24,7 +28,17 @@ import { defineConfig, devices } from '@playwright/test';
  * Adding more than 5 login attempts would hit the limit.
  */
 
-export const AUTH_STATE = fileURLToPath(new URL('.playwright/auth.json', import.meta.url));
+function newRunDb(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'lodeline-manager-e2e-'));
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, 'triage.sqlite');
+}
+// Workers load this config again and inherit the variable, so a run makes one dir.
+const TRIAGE_DB_PATH = process.env.E2E_TRIAGE_DB_PATH ?? newRunDb();
+process.env.E2E_TRIAGE_DB_PATH = TRIAGE_DB_PATH;
+
+export const AUTH_STATE =
+  process.env.E2E_AUTH_STATE ?? fileURLToPath(new URL('.playwright/auth.json', import.meta.url));
 
 const PORT = process.env.PORT ?? '18181';
 const BASE_URL = `http://localhost:${PORT}`;
@@ -38,7 +52,7 @@ export default defineConfig({
   workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? [['github'], ['list']] : 'list',
+  reporter: process.env.CI ? [['github'], ['list'], ['html', { open: 'never' }]] : 'list',
 
   use: {
     baseURL: BASE_URL,
@@ -56,7 +70,7 @@ export default defineConfig({
     env: {
       LISTEN_ADDR: `:${PORT}`,
       MOCK_FLEET: '1',
-      TRIAGE_DB_PATH: '/tmp/lodeline-manager-e2e-triage.sqlite',
+      TRIAGE_DB_PATH,
       ADMIN_USERNAME: 'admin',
       ADMIN_PASSWORD_BCRYPT: TEST_ADMIN_HASH,
       JWT_SECRET: '0123456789abcdefghijklmnopqrstuv',

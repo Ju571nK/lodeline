@@ -61,7 +61,7 @@ jobs:
       - name: test
         run: cargo test
       - name: check (MSRV)
-        run: cargo +1.88 check --locked
+        run: cargo +1.88 check --all-targets --locked
 
   # A `[::]` socket is IPv6-only by default on Windows, so `:port` must turn that off itself.
   windows:
@@ -96,3 +96,53 @@ jobs:
         run: npm test -- --run
       - name: vite build
         run: npm run build
+
+  # The merge gate for the console as it ships: the release binary with the SPA embedded, driven
+  # by the Playwright e2e specs and the parity table.
+  e2e:
+    name: e2e and parity
+    runs-on: ubuntu-22.04
+    env:
+      MANAGER_BIN: ${{ github.workspace }}/apps/manager/target/release/lodeline-manager
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/manager -> target
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: apps/manager/web/package-lock.json
+      - name: npm ci
+        working-directory: apps/manager/web
+        run: npm ci
+      - name: install Chromium
+        working-directory: apps/manager/web
+        run: npx playwright install --with-deps chromium
+      - name: build SPA
+        working-directory: apps/manager/web
+        run: npm run build
+      - name: build release binary
+        env:
+          LODELINE_MANAGER_REQUIRE_DIST: '1'
+        run: cargo build --release --locked
+      - name: playwright e2e
+        working-directory: apps/manager/web
+        env:
+          E2E_TRIAGE_DB_PATH: ${{ runner.temp }}/e2e-triage.sqlite
+        run: npm run e2e
+      - name: parity
+        if: ${{ !cancelled() }}
+        working-directory: apps/manager/web
+        run: npm run parity
+      - name: upload Playwright report and traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: manager-playwright
+          path: |
+            apps/manager/web/playwright-report/
+            apps/manager/web/test-results/
+          retention-days: 14
