@@ -118,11 +118,13 @@ fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
             .find_map(|n| get(&n).filter(|v| !v.is_empty()))
             .unwrap_or_default()
     };
-    let (http, https) = (var("HTTP_PROXY"), var("HTTPS_PROXY"));
+    let (http, https, no) = (var("HTTP_PROXY"), var("HTTPS_PROXY"), var("NO_PROXY"));
+    // Go's `*` entry covers IP literals too; hyper-util's applies to domain names only.
+    let all = no.split(',').any(|p| p.trim() == "*");
     let matcher = hyper_util::client::proxy::matcher::Matcher::builder()
         .http(http.clone())
         .https(https.clone())
-        .no(var("NO_PROXY"))
+        .no(no)
         .build();
     reqwest::Proxy::custom(move |url| {
         let host = url.host_str()?;
@@ -130,7 +132,7 @@ fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
         let loopback = ip
             .parse::<IpAddr>()
             .is_ok_and(|ip| ip.to_canonical().is_loopback());
-        if host == "localhost" || loopback {
+        if all || host == "localhost" || loopback {
             return None;
         }
         matcher.intercept(&url.as_str().parse::<hyper::Uri>().ok()?)?;

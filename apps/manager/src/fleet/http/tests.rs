@@ -565,6 +565,38 @@ async fn the_env_proxy_skips_loopback_and_no_proxy_hosts() {
     assert!(err.is_connect(), "{err:?}");
 }
 
+/// Go's `NO_PROXY=*` reaches every host directly, IP literals included.
+#[tokio::test]
+async fn a_star_no_proxy_skips_the_proxy_for_ip_literals() {
+    let proxy = answers("proxy").await;
+    for (no_proxy, proxied) in [("skip.invalid", true), ("*", false)] {
+        let env = [
+            ("HTTP_PROXY", format!("http://{proxy}")),
+            ("no_proxy", no_proxy.to_owned()),
+        ];
+        let client = reqwest::Client::builder()
+            .proxy(env_proxy(|k| {
+                env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+            }))
+            .timeout(Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let body = async {
+            client
+                .get("http://192.0.2.1/v1/meta")
+                .send()
+                .await?
+                .text()
+                .await
+        };
+        assert_eq!(
+            body.await.is_ok_and(|b| b == "proxy"),
+            proxied,
+            "{no_proxy}"
+        );
+    }
+}
+
 /// Go's `factory_test.go`: the client built from the config reaches an mTLS server with the
 /// configured CA and client certificate, and the server refuses it without the certificate.
 mod mtls {
