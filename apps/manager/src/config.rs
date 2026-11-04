@@ -2,6 +2,7 @@
 //! the Go `internal/config` package. `.env.example` lists every variable.
 
 use std::fmt;
+use std::net::Ipv6Addr;
 use std::time::Duration;
 
 pub struct Config {
@@ -324,18 +325,27 @@ fn go_url(raw: &str) -> Option<GoUrl> {
         has_query: !query.is_empty(),
         has_fragment: !fragment.is_empty(),
     };
+    // Go does not unescape an opaque URL's rest.
+    if !url.scheme.is_empty() && !rest.starts_with('/') {
+        return Some(url);
+    }
     let path = match rest.strip_prefix("//") {
         Some(after) if !url.scheme.is_empty() => {
             let (authority, path) = after.find('/').map_or((after, ""), |i| after.split_at(i));
-            let host = match authority.rsplit_once('@') {
-                Some((_, host)) => {
-                    url.has_user = true;
-                    host
-                }
-                None => authority,
+            let (user, host) = match authority.rsplit_once('@') {
+                Some((user, host)) => (Some(user), host),
+                None => (None, authority),
             };
             if !valid_go_host(host) {
                 return None;
+            }
+            if let Some(user) = user {
+                let user_byte =
+                    |b: u8| b.is_ascii_alphanumeric() || b"-._:~!$&'()*+,;=%@".contains(&b);
+                if !user.bytes().all(user_byte) || unescape(user).is_none() {
+                    return None;
+                }
+                url.has_user = true;
             }
             url.host = host.to_owned();
             path
@@ -346,25 +356,74 @@ fn go_url(raw: &str) -> Option<GoUrl> {
     Some(url)
 }
 
-// Go's parseHost: an optional numeric port, and only host-safe ASCII characters.
+/// Go's `parseHost` (Go 1.26).
 fn valid_go_host(host: &str) -> bool {
-    let port = if host.starts_with('[') {
-        match host.rfind(']') {
-            Some(i) => &host[i + 1..],
-            None => return false,
+    match host.rfind('[') {
+        Some(0) => host.rfind(']').is_some_and(|close| {
+            valid_port(&host[close + 1..]) && valid_ip_literal(&host[1..close])
+        }),
+        Some(_) => false,
+        // The port starts at the last colon: Go's urlstrictcolons is off for a `go 1.25` module.
+        None => {
+            valid_port(host.rfind(':').map_or("", |i| &host[i..]))
+                && unescape_host(host, false).is_some()
         }
-    } else {
-        host.rfind(':').map_or("", |i| &host[i..])
-    };
-    let port_ok = port.is_empty()
+    }
+}
+
+fn valid_port(port: &str) -> bool {
+    port.is_empty()
         || port
             .strip_prefix(':')
-            .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit()));
-    port_ok
-        && unescape(host).is_some()
-        && host.bytes().all(|b| {
-            b >= 0x80 || b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:[]<>\"%".contains(&b)
-        })
+            .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The inside of `[...]`: an IPv6 address, optionally with a `%25` zone, as Go's
+/// `netip.ParseAddr` reads it once unescaped. IPv4 is refused.
+fn valid_ip_literal(literal: &str) -> bool {
+    let (addr, zone) = literal.split_at(literal.find("%25").unwrap_or(literal.len()));
+    let Some(mut unescaped) = unescape_host(addr, false) else {
+        return false;
+    };
+    match unescape_host(zone, true) {
+        Some(zone) => unescaped.extend(zone),
+        None => return false,
+    }
+    let Ok(unescaped) = String::from_utf8(unescaped) else {
+        return false;
+    };
+    match unescaped.split_once('%') {
+        Some((addr, zone)) => !zone.is_empty() && addr.parse::<Ipv6Addr>().is_ok(),
+        None => unescaped.parse::<Ipv6Addr>().is_ok(),
+    }
+}
+
+/// Go's `unescape` in host or zone mode: only host characters, and in a host `%XX` only for
+/// non-ASCII bytes or `%25`; in a zone only for bytes a host could hold, or a space.
+fn unescape_host(s: &str, zone: bool) -> Option<Vec<u8>> {
+    let host_byte = |b: u8| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:[]<>\"".contains(&b);
+    let decoded = unescape(s)?;
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let ok = if b[i] == b'%' {
+            let v = u8::from_str_radix(&s[i + 1..i + 3], 16).ok()?;
+            i += 3;
+            &s[i - 3..i] == "%25"
+                || if zone {
+                    v == b' ' || host_byte(v)
+                } else {
+                    v >= 0x80
+                }
+        } else {
+            i += 1;
+            b[i - 1] >= 0x80 || host_byte(b[i - 1])
+        };
+        if !ok {
+            return None;
+        }
+    }
+    Some(decoded)
 }
 
 /// Percent-decodes `s`; `None` on a `%` not followed by two hex digits, as Go rejects.

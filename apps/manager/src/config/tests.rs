@@ -323,6 +323,17 @@ fn load_server_tls_needs_https() {
     );
     let tls = load(&env).unwrap().server_tls.unwrap();
     assert!(!tls.roots.is_empty());
+
+    // Go's url.Parse refuses these, so they are not https URLs either.
+    for bad in [
+        "https://a%41.example",
+        "https://[192.0.2.1]:8443",
+        "https://us er@lodeline.example",
+        "https://us%zzer@lodeline.example",
+    ] {
+        set(&mut env, "LODELINE_SERVER_BASE_URL", bad);
+        assert!(load_err(&env).to_string().contains("https://"), "{bad}");
+    }
 }
 
 #[test]
@@ -407,6 +418,11 @@ fn oidc_urls_follow_go_parsing() {
         "HTTPS://console.example:8443/api/v1/auth/oidc/callback",
         "https://console.example/api/v1/auth/oidc/callback?",
         "https://console.example/api/v1/auth/oidc/callback#",
+        "https://[::1]:8443/api/v1/auth/oidc/callback",
+        "https://[::ffff:192.0.2.1]/api/v1/auth/oidc/callback",
+        "https://[fe80::1%25en0]/api/v1/auth/oidc/callback",
+        "https://b%C3%BCcher.example/api/v1/auth/oidc/callback",
+        "https://console.example:80:443/api/v1/auth/oidc/callback",
     ] {
         assert!(with_redirect(ok).validate().is_ok(), "{ok}");
     }
@@ -419,6 +435,15 @@ fn oidc_urls_follow_go_parsing() {
         "https://console.example:port/api/v1/auth/oidc/callback",
         "https://console.example/api/v1/auth/oidc/%zzallback",
         "https://console example/api/v1/auth/oidc/callback",
+        // Go 1.25+ host rules: escapes of ASCII bytes, and brackets around anything but IPv6.
+        "https://console%2Eexample/api/v1/auth/oidc/callback",
+        "https://ex%20ample/api/v1/auth/oidc/callback",
+        "https://[192.0.2.1]/api/v1/auth/oidc/callback",
+        "https://[console.example]/api/v1/auth/oidc/callback",
+        "https://x[::1]/api/v1/auth/oidc/callback",
+        "https://[fe80::1%25]/api/v1/auth/oidc/callback",
+        "https://[fe80::1%25en%2F0]/api/v1/auth/oidc/callback",
+        "https://[fe80::1%en0]/api/v1/auth/oidc/callback",
     ] {
         assert!(with_redirect(bad).validate().is_err(), "{bad}");
     }
