@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 lodeline-core = { path = "../lodeline-core" }
+lodeline-fleet-api = { path = "../lodeline-fleet-api" }
 # T-11 — fixed ApiError bodies for the proxy routes (404 proxy_unknown etc.).
 lodeline-proxy-api = { path = "../lodeline-proxy-api" }
 serde = { workspace = true }
@@ -62,6 +63,7 @@ test-support = []
 [dev-dependencies]
 lodeline-server = { path = ".", features = ["test-support"] }
 http = { workspace = true }
+insta = { workspace = true }
 
 # -- OS packages -------------------------------------------------------------
 # Build with `packaging/build.sh server`. See packaging/README.md.

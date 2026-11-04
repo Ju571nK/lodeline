@@ -1,50 +1,47 @@
 //! GET /v1/policy/meta — lightweight policy metadata (no full envelope).
 //! Reads policy_bundle_path and extracts version + signing fields without
 //! re-validating the signature. Auth: bearer.
+use super::error_response;
 use crate::app::SharedState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde_json::json;
+use lodeline_fleet_api::PolicyMeta;
+use serde_json::Value;
 
 pub async fn get_policy_meta(State(state): State<SharedState>) -> impl IntoResponse {
     let bytes = match std::fs::read(&state.policy_bundle_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return (
+            return error_response(
                 StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": {"code": "not_found", "message": "no policy bundle on disk"}
-                })),
-            )
-                .into_response();
+                "not_found",
+                "no policy bundle on disk",
+            );
         }
         Err(e) => {
             tracing::error!(error = ?e, "read policy bundle failed");
-            return (
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {"code": "internal", "message": "bundle read failed"}
-                })),
-            )
-                .into_response();
+                "internal",
+                "bundle read failed",
+            );
         }
     };
-    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+    let v: Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(_) => {
-            return (
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {"code": "internal", "message": "bundle parse failed"}
-                })),
-            )
-                .into_response();
+                "internal",
+                "bundle parse failed",
+            );
         }
     };
-    Json(json!({
-        "policy_version": v.get("policy_version").cloned().unwrap_or(json!(null)),
-        "signing_pubkey_id": v.get("signing_pubkey_id").cloned().unwrap_or(json!(null)),
-        "signed_at": v.get("signed_at").cloned().unwrap_or(json!(null)),
-        "valid_until": v.get("valid_until").cloned().unwrap_or(json!(null)),
-    }))
+    let field = |k: &str| v.get(k).cloned().unwrap_or(Value::Null);
+    Json(PolicyMeta {
+        policy_version: field("policy_version"),
+        signed_at: field("signed_at"),
+        signing_pubkey_id: field("signing_pubkey_id"),
+        valid_until: field("valid_until"),
+    })
     .into_response()
 }

@@ -233,8 +233,8 @@ mod tests {
 
         let def = alerts_definition_default();
 
-        for k in def["additional_kinds"].as_array().unwrap() {
-            let kind = k.as_str().unwrap();
+        for kind in &def.additional_kinds {
+            let kind = kind.as_str();
             let ev = match kind {
                 "ai_guard_toggle_drift" => Evidence::AiGuardToggleDrift {
                     tool: AiTool::ClaudeCode,
@@ -276,8 +276,8 @@ mod tests {
             );
         }
 
-        for b in def["ai_guard_buckets"].as_array().unwrap() {
-            let bucket = match b.as_str().unwrap() {
+        for b in &def.ai_guard_buckets {
+            let bucket = match b.as_str() {
                 "high" => AiGuardBucket::High,
                 "critical" => AiGuardBucket::Critical,
                 other => panic!("unexpected ai_guard_bucket `{other}` in meta"),

@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, \"/v1/policy/meta\", Some(\"tok\"), &r).await"
+---
+500
+{"error":{"code":"internal","message":"bundle read failed"}}

@@ -10,7 +10,6 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use axum::{routing::get, routing::post, Router};
-use serde_json::json;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -148,7 +147,10 @@ pub async fn boot_gate(
     (
         StatusCode::SERVICE_UNAVAILABLE,
         [(header::RETRY_AFTER, "5")],
-        Json(json!({"error": {"code": "rebuilding", "message": "fleet index rebuilding; retry shortly"}})),
+        Json(lodeline_fleet_api::ErrorBody::new(
+            "rebuilding",
+            "fleet index rebuilding; retry shortly",
+        )),
     )
         .into_response()
 }

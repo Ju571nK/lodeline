@@ -1,0 +1,6 @@
+---
+source: crates/lodeline-server/tests/read_api_snapshots.rs
+expression: "call(&app, path, Some(\"tok\"), &r).await"
+---
+200
+{"agent_version":"fixture-agent","event_id":"[event-2]","evidence":{"bucket":"critical","controls":[{"id":"fixture.restricted","setting":"restricted","source_path":"/fixture/config","value":true}],"is_reattestation":false,"kind":"ai_guard_risk_assessed","reasons":[{"hook_event":"PreToolUse","kind":"destructive_in_inline_command","pattern":"rm -rf","snippet":"rm -rf /"},{"hook_event":"PostToolUse","kind":"external_script_unscanned","script_path":"/opt/hooks/x.sh"}],"scope":{"kind":"user_global"},"score":7.3,"tool":"claude_code"},"host_id":"0190b8a0-0000-7000-8000-00000000000a","schema_version":1,"severity":"warn","source":{"kind":"agent"},"subject":{"kind":"self"},"target_id":null,"ts":"[now-1m]"}

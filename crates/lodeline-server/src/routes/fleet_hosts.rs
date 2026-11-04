@@ -1,24 +1,16 @@
 //! GET /v1/fleet/hosts — list (paged, filterable, sortable)
 //! GET /v1/fleet/hosts/{host_id} — single host detail (full host_meta block)
 
+use super::{error_response, rfc3339, wire_str};
 use crate::app::SharedState;
-use crate::fleet_index::HostSummary;
+use crate::fleet_index::{HostSummary, RiskEntry};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use lodeline_core::event::{HostMetaSnapshot, NetworkInterface};
+use lodeline_fleet_api as api;
 use time::OffsetDateTime;
-
-#[derive(Debug, Deserialize)]
-pub struct ListQuery {
-    pub cursor: Option<String>,
-    pub limit: Option<u32>,
-    pub status: Option<String>,
-    pub bucket: Option<String>,
-    pub sort: Option<String>,
-}
 
 fn clamp_limit(req: Option<u32>) -> usize {
     req.unwrap_or(100).clamp(1, 1000) as usize
@@ -105,7 +97,7 @@ fn comma_split(s: &Option<String>) -> Option<Vec<String>> {
 
 pub async fn get_fleet_hosts(
     State(state): State<SharedState>,
-    Query(q): Query<ListQuery>,
+    Query(q): Query<api::HostsQuery>,
 ) -> impl IntoResponse {
     let now = OffsetDateTime::now_utc();
     let limit = clamp_limit(q.limit);
@@ -143,25 +135,21 @@ pub async fn get_fleet_hosts(
             .unwrap_or(all.len()),
     };
     let end = (start + limit).min(all.len());
-    let page: Vec<Value> = all[start..end]
+    let hosts: Vec<api::HostListItem> = all[start..end]
         .iter()
         .map(|h| render_host_summary_list(h, now))
         .collect();
     let next_cursor = if end < all.len() {
-        all.get(end - 1)
-            .map(|h| h.host_id.clone())
-            .map(Value::String)
-            .unwrap_or(Value::Null)
+        all.get(end - 1).map(|h| h.host_id.clone())
     } else {
-        Value::Null
+        None
     };
-    let total_estimated = all.len();
 
-    Json(json!({
-        "hosts": page,
-        "next_cursor": next_cursor,
-        "total_estimated": total_estimated,
-    }))
+    Json(api::HostsPage {
+        hosts,
+        next_cursor,
+        total_estimated: all.len() as u64,
+    })
     .into_response()
 }
 
@@ -174,56 +162,138 @@ fn top_bucket(h: &HostSummary) -> lodeline_core::event::AiGuardBucket {
         .unwrap_or(Low)
 }
 
-fn rfc3339(ts: OffsetDateTime) -> String {
-    ts.format(&time::format_description::well_known::Rfc3339)
-        .unwrap()
-}
-
-fn render_risk_block(h: &HostSummary) -> Value {
+fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {
     if h.current_risk.is_empty() {
-        return Value::Null;
+        return None;
     }
-    let by_tool: serde_json::Map<String, Value> = h
+    let by_tool = h
         .current_risk
         .iter()
         .map(|(tool, entry)| {
-            let tool_str = serde_json::to_value(tool).unwrap();
-            (
-                tool_str.as_str().unwrap().to_string(),
-                json!({
-                    "score": entry.score,
-                    "bucket": entry.bucket,
-                    "assessed_ts": rfc3339(entry.assessed_ts),
-                }),
-            )
+            let risk = api::ToolRisk {
+                assessed_ts: rfc3339(entry.assessed_ts),
+                bucket: wire_str(&entry.bucket),
+                score: f64::from(entry.score),
+            };
+            (wire_str(tool), risk)
         })
         .collect();
-    let max = top_bucket(h);
     let max_score = h
         .current_risk
         .values()
         .map(|e| e.score)
         .fold(0f32, f32::max);
-    json!({
-        "max_score": max_score,
-        "max_bucket": max,
-        "by_tool": by_tool,
+    Some(api::CurrentRisk {
+        by_tool,
+        max_bucket: wire_str(&top_bucket(h)),
+        max_score: f64::from(max_score),
     })
 }
 
-fn render_host_summary_list(h: &HostSummary, now: OffsetDateTime) -> Value {
-    json!({
-        "host_id": h.host_id,
-        "hostname": h.hostname(),
-        "agent_version": h.agent_version,
-        "last_seen_ts": h.last_seen_ts.map(rfc3339),
-        "status": classify_status(h.last_seen_ts, now),
-        "current_risk": render_risk_block(h),
-        "open_event_counts_24h": {
-            "warn": h.counts_24h.sum_warn(),
-            "info": h.counts_24h.sum_info(),
-        }
-    })
+fn render_host_summary_list(h: &HostSummary, now: OffsetDateTime) -> api::HostListItem {
+    api::HostListItem {
+        agent_version: h.agent_version.clone(),
+        current_risk: render_risk_block(h),
+        host_id: h.host_id.clone(),
+        hostname: h.hostname().map(str::to_string),
+        last_seen_ts: h.last_seen_ts.map(rfc3339),
+        open_event_counts_24h: api::EventCounts {
+            info: h.counts_24h.sum_info(),
+            warn: h.counts_24h.sum_warn(),
+        },
+        status: classify_status(h.last_seen_ts, now).into(),
+    }
+}
+
+// `render_host_meta` and `render_assessment` (and `get_fleet_host_by_id` for
+// `PolicyState` and `AgentHealth`) destructure their source type with no `..`,
+// so a field added to it fails to compile there until the wire type decides on
+// it. `HostSummary`, the other `RiskEntry` reads and `HourlyBuckets` are read
+// field by field and get no such check.
+
+fn render_host_meta(m: &HostMetaSnapshot) -> api::HostMeta {
+    let HostMetaSnapshot {
+        hostname,
+        os_name,
+        os_version,
+        kernel_version,
+        architecture,
+        interfaces,
+        default_gateway_v4,
+        default_gateway_v6,
+        dns_servers,
+    } = m;
+    let interfaces = interfaces
+        .iter()
+        .map(|i| {
+            let NetworkInterface {
+                name,
+                mac,
+                ipv4,
+                ipv6,
+            } = i;
+            api::NetworkInterface {
+                ipv4: ipv4.clone(),
+                ipv6: ipv6.clone(),
+                mac: mac.clone(),
+                name: name.clone(),
+            }
+        })
+        .collect();
+    api::HostMeta {
+        architecture: architecture.clone(),
+        default_gateway_v4: default_gateway_v4.clone(),
+        default_gateway_v6: default_gateway_v6.clone(),
+        dns_servers: dns_servers.clone(),
+        hostname: hostname.clone(),
+        interfaces,
+        kernel_version: kernel_version.clone(),
+        os_name: os_name.clone(),
+        os_version: os_version.clone(),
+    }
+}
+
+fn render_assessment(entry: &RiskEntry) -> api::AiGuardAssessment {
+    let RiskEntry {
+        controls,
+        score,
+        bucket,
+        assessed_ts,
+        is_reattestation,
+        scope,
+        reasons,
+    } = entry;
+    let controls = controls.as_ref().map(|cs| {
+        cs.iter()
+            .map(|c| {
+                let lodeline_core::event::AiGuardControl {
+                    id,
+                    source_path,
+                    setting,
+                    value,
+                } = c;
+                api::AiGuardControl {
+                    id: id.clone(),
+                    setting: setting.clone(),
+                    // Paths arrive as JSON strings, so they are always UTF-8.
+                    source_path: source_path.to_string_lossy().into_owned(),
+                    value: value.clone(),
+                }
+            })
+            .collect()
+    });
+    api::AiGuardAssessment {
+        assessed_ts: rfc3339(*assessed_ts),
+        bucket: wire_str(bucket),
+        controls,
+        is_reattestation: *is_reattestation,
+        reasons: reasons
+            .iter()
+            .map(|r| serde_json::to_value(r).expect("reason serializes"))
+            .collect(),
+        scope: serde_json::to_value(scope).expect("scope serializes"),
+        score: f64::from(*score),
+    }
 }
 
 pub async fn get_fleet_host_by_id(
@@ -231,64 +301,60 @@ pub async fn get_fleet_host_by_id(
     Path(host_id): Path<String>,
 ) -> impl IntoResponse {
     let now = OffsetDateTime::now_utc();
-    let h = match state.fleet_index.get_host(&host_id) {
-        Some(h) => h,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": {"code": "not_found", "message": "host_id not in index"}
-                })),
-            )
-                .into_response()
-        }
+    let Some(h) = state.fleet_index.get_host(&host_id) else {
+        return error_response(StatusCode::NOT_FOUND, "not_found", "host_id not in index");
     };
 
-    // Build detail response = list shape + extra blocks
-    let mut body = render_host_summary_list(&h, now);
-    let body_obj = body.as_object_mut().unwrap();
+    // Detail = the list row plus the detail blocks.
+    let api::HostListItem {
+        agent_version,
+        current_risk,
+        host_id,
+        hostname,
+        last_seen_ts,
+        open_event_counts_24h,
+        status,
+    } = render_host_summary_list(&h, now);
+    let crate::fleet_index::PolicyState {
+        last_applied_policy_version,
+        policy_expired_active,
+        last_policy_reload_ts,
+    } = &h.policy_state;
+    let crate::fleet_index::AgentHealth {
+        last_heartbeat_ts,
+        hash_p99_ms_latest,
+        jsonl_above_soft_floor_latest,
+    } = &h.agent_health;
 
-    body_obj.insert(
-        "host_meta".into(),
-        h.latest_host_meta
-            .as_ref()
-            .map(|m| serde_json::to_value(m).unwrap())
-            .unwrap_or(Value::Null),
-    );
-
-    body_obj.insert(
-        "policy_state".into(),
-        json!({
-            "last_applied_policy_version": h.policy_state.last_applied_policy_version,
-            "policy_expired_active": h.policy_state.policy_expired_active,
-            "last_policy_reload_ts": h.policy_state.last_policy_reload_ts.map(rfc3339),
-        }),
-    );
-
-    body_obj.insert(
-        "agent_health".into(),
-        json!({
-            "recent_channel_stalls_24h": h.counts_24h.sum_channel_stalls(),
-            "recent_watcher_degraded_24h": h.counts_24h.sum_watcher_degraded(),
-            "recent_sender_lag_critical_24h": h.counts_24h.sum_sender_lag_critical(),
-            "last_heartbeat_ts": h.agent_health.last_heartbeat_ts.map(rfc3339),
-            "hash_p99_ms_latest": h.agent_health.hash_p99_ms_latest,
-            "jsonl_above_soft_floor_latest": h.agent_health.jsonl_above_soft_floor_latest,
-        }),
-    );
-
-    let by_tool: serde_json::Map<String, Value> = h
-        .current_risk
-        .iter()
-        .map(|(tool, entry)| {
-            let tool_str = serde_json::to_value(tool).unwrap();
-            (
-                tool_str.as_str().unwrap().to_string(),
-                serde_json::to_value(entry).expect("risk entry serializes"),
-            )
-        })
-        .collect();
-    body_obj.insert("ai_guard".into(), json!({ "by_tool": by_tool }));
-
-    Json(body).into_response()
+    Json(api::HostDetail {
+        agent_health: api::AgentHealth {
+            hash_p99_ms_latest: *hash_p99_ms_latest,
+            jsonl_above_soft_floor_latest: *jsonl_above_soft_floor_latest,
+            last_heartbeat_ts: last_heartbeat_ts.map(rfc3339),
+            recent_channel_stalls_24h: h.counts_24h.sum_channel_stalls(),
+            recent_sender_lag_critical_24h: h.counts_24h.sum_sender_lag_critical(),
+            recent_watcher_degraded_24h: h.counts_24h.sum_watcher_degraded(),
+        },
+        agent_version,
+        ai_guard: api::AiGuard {
+            by_tool: h
+                .current_risk
+                .iter()
+                .map(|(tool, entry)| (wire_str(tool), render_assessment(entry)))
+                .collect(),
+        },
+        current_risk,
+        host_id,
+        host_meta: h.latest_host_meta.as_ref().map(render_host_meta),
+        hostname,
+        last_seen_ts,
+        open_event_counts_24h,
+        policy_state: api::PolicyState {
+            last_applied_policy_version: *last_applied_policy_version,
+            last_policy_reload_ts: last_policy_reload_ts.map(rfc3339),
+            policy_expired_active: *policy_expired_active,
+        },
+        status,
+    })
+    .into_response()
 }
