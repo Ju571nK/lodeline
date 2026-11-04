@@ -83,7 +83,7 @@ Stops this run's background processes, removes `scratch/`, keeps `evidence/`, an
 
 ## Secondary surfaces
 
-- **Fleet stack.** `lodeline-sign` and `lodeline-server` in plain HTTP on loopback run locally, as [`features/fleet-local.md`](features/fleet-local.md) shows. `lodeline-sender`, mTLS, and enrollment have no recipe here and stay with `cargo test -p lodeline-server` and `cargo test -p lodeline-sender`. The `lodeline-manager` console lives in another repo.
+- **Fleet stack.** `lodeline-sign` and `lodeline-server` in plain HTTP on loopback run locally, as [`features/fleet-local.md`](features/fleet-local.md) shows. `lodeline-sender`, mTLS, and enrollment have no recipe here and stay with `cargo test -p lodeline-server` and `cargo test -p lodeline-sender`. The `lodeline-manager` console has its own verify skill in [`apps/manager/.claude/skills/verify/`](../../../apps/manager/.claude/skills/verify/SKILL.md).
 - **Diagnostic app.** The macOS Tauri app is planned and has no driver yet.
 
 Keep the map current with `/maintain-verification-skill`.
