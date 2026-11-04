@@ -159,10 +159,10 @@ async fn send(
     app.clone().oneshot(req).await.unwrap()
 }
 
-fn app(rl: RateLimiter) -> Router {
+fn app(rl: impl Into<Arc<RateLimiter>>) -> Router {
     Router::new()
         .route("/", post(|| async { StatusCode::OK }))
-        .layer(middleware::from_fn_with_state(Arc::new(rl), limit))
+        .layer(middleware::from_fn_with_state(rl.into(), limit))
 }
 
 fn peer(ip: Ipv4Addr) -> Option<SocketAddr> {
@@ -391,11 +391,12 @@ async fn a_429_sent_before_the_body_is_read_in_full() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (rl, _) = limiter(1);
     rl.allow(Ipv4Addr::LOCALHOST.into()).unwrap();
+    let rl = Arc::new(rl);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(crate::conn::serve(
         listener,
-        app(rl),
+        app(rl.clone()),
         std::future::pending(),
     ));
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -411,6 +412,11 @@ async fn a_429_sent_before_the_body_is_read_in_full() {
     assert!(res.starts_with("HTTP/1.1 429"), "{res}");
     assert!(res.contains("\r\nconnection: close\r\n"), "{res}");
     assert!(res.ends_with("try again shortly\"}}\n"), "{res}");
+    assert_eq!(
+        rl.drains.available_permits(),
+        MAX_DRAINS,
+        "drain permit released"
+    );
 }
 
 /// With every drain permit taken, a 429 answers at once instead of waiting for the body.

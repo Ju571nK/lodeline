@@ -236,10 +236,10 @@ async fn host_headers_are_checked_before_routing_as_go_does() {
 
 #[tokio::test]
 async fn a_panicking_handler_gets_chi_recoverer_500_with_security_headers() {
-    let boom = Router::new().route(
-        "/boom",
-        axum::routing::get(|| async { panic!("handler panicked on purpose") as Response }),
-    );
+    async fn boom() -> Response {
+        panic!("handler panicked on purpose")
+    }
+    let boom = Router::new().route("/boom", axum::routing::get(boom));
     let req = Request::builder()
         .uri("/boom")
         .header(header::HOST, "console.example")
