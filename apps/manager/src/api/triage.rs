@@ -1,8 +1,10 @@
 //! The `/api/v1/triage/*` handlers (Go's `internal/api/v1/triage.go`). The actor and note
 //! author are the session subject, exactly as the session check passed it on.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use axum::body::HttpBody;
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::Response;
@@ -30,7 +32,7 @@ pub async fn upsert(
         return invalid("status must be one of: open, acknowledged, investigating, resolved");
     }
     let input = Upsert { actor, ..body };
-    blocking(s.triage, move |t| t.upsert(input, triage::now())).await
+    blocking(s.triage, move |t| t.upsert(input, triage::now)).await
 }
 
 pub async fn note(
@@ -50,7 +52,7 @@ pub async fn note(
             &body.event_id,
             &author,
             &body.body,
-            triage::now(),
+            triage::now,
         )
     })
     .await
@@ -95,12 +97,78 @@ fn malformed() -> Response {
     invalid("malformed JSON body")
 }
 
-/// The whole body, without axum's size limit: Go's decoder reads as much as the value needs.
+/// Go's `maxNestingDepth`: a body may nest arrays and objects 10000 deep, and no deeper.
+const MAX_DEPTH: usize = 10_000;
+
+/// The body a frame at a time up to the end of its first JSON value, as Go's decoder reads it,
+/// with no size limit. `None` when a read fails before the value ends or the value nests deeper
+/// than Go allows.
 async fn read_body(req: Request) -> Option<Vec<u8>> {
-    axum::body::to_bytes(req.into_body(), usize::MAX)
-        .await
-        .ok()
-        .map(Vec::from)
+    let mut body = req.into_body();
+    let (mut buf, mut scan) = (Vec::new(), Scan::default());
+    while !scan.feed(&buf)? {
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
+        let Some(frame) = frame else { break };
+        if let Ok(data) = frame.ok()?.into_data() {
+            buf.extend_from_slice(&data);
+        }
+    }
+    Some(buf)
+}
+
+/// How much of a body's first JSON value has been read.
+#[derive(Default)]
+struct Scan {
+    scanned: usize,
+    first: Option<usize>,
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+}
+
+impl Scan {
+    /// Scans the bytes added since the last call: `true` once `buf` holds all that `go_object`
+    /// reads, `None` once the value nests deeper than Go allows.
+    fn feed(&mut self, buf: &[u8]) -> Option<bool> {
+        for (i, &b) in buf.iter().enumerate().skip(self.scanned) {
+            self.scanned = i + 1;
+            if self.in_string {
+                match (self.escaped, b) {
+                    (true, _) => self.escaped = false,
+                    (false, b'\\') => self.escaped = true,
+                    (false, b'"') => self.in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            if self.first.is_none() && !json_space(b) {
+                self.first = Some(i);
+            }
+            match (self.first, b) {
+                // Not an object: four bytes tell `null` from a value Go rejects.
+                (Some(f), _) if buf[f] != b'{' => return Some(buf.len() >= f + 4),
+                (_, b'"') => self.in_string = true,
+                (_, b'{' | b'[') => {
+                    self.depth += 1;
+                    if self.depth > MAX_DEPTH {
+                        return None;
+                    }
+                }
+                (_, b'}' | b']') => {
+                    self.depth -= 1;
+                    if self.depth == 0 {
+                        return Some(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(false)
+    }
+}
+
+fn json_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 #[derive(Default)]
@@ -161,7 +229,11 @@ fn set<T: DeserializeOwned>(slot: &mut T, value: &RawValue) -> Option<()> {
 /// when a client sends them.
 fn go_object(raw: &[u8]) -> Option<Vec<(String, Box<RawValue>)>> {
     // Go's scanner ends a top-level literal at its last letter, whatever follows.
-    if raw.trim_ascii_start().starts_with(b"null") {
+    let start = raw
+        .iter()
+        .position(|&b| !json_space(b))
+        .unwrap_or(raw.len());
+    if raw[start..].starts_with(b"null") {
         return Some(Vec::new());
     }
     let mut values =

@@ -204,6 +204,9 @@ impl Store {
             | OpenFlags::SQLITE_OPEN_FULL_MUTEX
             | OpenFlags::SQLITE_OPEN_URI;
         let conn = Connection::open_with_flags(&dsn, flags).map_err(sqlite)?;
+        // rusqlite sets a 5 s busy timeout on open; modernc sets none, leaving it to the DSN.
+        conn.busy_timeout(std::time::Duration::ZERO)
+            .map_err(sqlite)?;
         for pragma in dsn_pragmas(&dsn).map_err(fail)? {
             let mut stmt = conn.prepare(&format!("pragma {pragma}")).map_err(sqlite)?;
             let mut rows = stmt.query([]).map_err(sqlite)?;
@@ -222,7 +225,9 @@ impl Store {
 
     /// Go's `Repo.Upsert`: inserts or updates the row and logs a status change, in one
     /// transaction. `updated_at` moves on every update, also when nothing else changes.
-    pub fn upsert(&self, input: Upsert, now: GoTime) -> Result<Row, Error> {
+    /// `now` is read while the connection is held, as Go reads its clock inside the
+    /// transaction, so times follow commit order.
+    pub fn upsert(&self, input: Upsert, now: impl FnOnce() -> GoTime) -> Result<Row, Error> {
         if input.host_id.is_empty() || input.event_id.is_empty() || input.actor.is_empty() {
             return Err(Error::MissingFields("HostID/EventID/Actor"));
         }
@@ -231,7 +236,9 @@ impl Store {
         }
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db("begin"))?;
-        let row = match get_row(&tx, &input.host_id, &input.event_id)? {
+        let existing = get_row(&tx, &input.host_id, &input.event_id)?;
+        let now = now();
+        let row = match existing {
             None => {
                 let snapshot = input
                     .evidence_snapshot
@@ -306,7 +313,7 @@ impl Store {
         event_id: &str,
         author: &str,
         body: &str,
-        now: GoTime,
+        now: impl FnOnce() -> GoTime,
     ) -> Result<Note, Error> {
         if [host_id, event_id, author, body]
             .iter()
@@ -316,6 +323,7 @@ impl Store {
         }
         let conn = self.lock();
         get_row(&conn, host_id, event_id)?.ok_or(Error::NotFound)?;
+        let now = now();
         conn.execute(
             "INSERT INTO triage_notes (host_id, event_id, author, body, created_at)
              VALUES (?, ?, ?, ?, ?)",

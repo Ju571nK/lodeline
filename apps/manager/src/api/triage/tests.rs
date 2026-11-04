@@ -148,12 +148,233 @@ async fn note_and_get() {
     assert_eq!(got["notes"][0]["body"], "first note");
 }
 
+fn error(code: &str, message: &str) -> Value {
+    json!({"error": {"code": code, "message": message}})
+}
+
 #[tokio::test]
 async fn rejects_bad_status() {
     let body = json!({"host_id": "h3", "event_id": "e3", "status": "bogus", "evidence_snapshot": {"x": 3}});
     let (code, res) = call(&app(), Method::POST, "/api/v1/triage/upsert", Some(body)).await;
     assert_eq!(code, 400);
-    assert_eq!(res["error"]["code"], "invalid_query");
+    assert_eq!(
+        res,
+        error(
+            "invalid_query",
+            "status must be one of: open, acknowledged, investigating, resolved"
+        )
+    );
+}
+
+/// Go's messages and the order its handlers check in: decode, required ids, status, then the
+/// store's own checks.
+#[tokio::test]
+async fn errors_answer_as_go_does() {
+    let app = app();
+    let upsert = "/api/v1/triage/upsert";
+    let note = "/api/v1/triage/note";
+    let required = "host_id and event_id are required";
+    let bad_status = "status must be one of: open, acknowledged, investigating, resolved";
+    let cases = [
+        (
+            upsert,
+            json!([]),
+            400,
+            "invalid_query",
+            "malformed JSON body",
+        ),
+        (
+            upsert,
+            json!({"host_id": "h", "status": "bogus"}),
+            400,
+            "invalid_query",
+            required,
+        ),
+        (
+            upsert,
+            json!({"host_id": "h", "event_id": "e", "status": "bogus"}),
+            400,
+            "invalid_query",
+            bad_status,
+        ),
+        (
+            upsert,
+            json!({"host_id": "h", "event_id": "e"}),
+            400,
+            "invalid_query",
+            "triage: missing required fields: EvidenceSnapshot required on insert",
+        ),
+        (
+            note,
+            json!({"host_id": 1}),
+            400,
+            "invalid_query",
+            "malformed JSON body",
+        ),
+        (
+            note,
+            json!({"host_id": "h", "event_id": "e"}),
+            400,
+            "invalid_query",
+            "host_id, event_id, body are required",
+        ),
+        (
+            note,
+            json!({"host_id": "h", "event_id": "e", "body": "b"}),
+            404,
+            "not_found",
+            "triage row not found",
+        ),
+    ];
+    for (path, body, status, code, message) in cases {
+        let (got, res) = call(&app, Method::POST, path, Some(body.clone())).await;
+        assert_eq!((got, res), (status, error(code, message)), "{path} {body}");
+    }
+    for (path, status, code, message) in [
+        (
+            "/api/v1/triage/h/e",
+            404,
+            "not_found",
+            "triage row not found",
+        ),
+        (
+            "/api/v1/triage//e",
+            400,
+            "invalid_query",
+            "host_id and event_id required",
+        ),
+    ] {
+        let (got, res) = call(&app, Method::GET, path, None).await;
+        assert_eq!((got, res), (status, error(code, message)), "{path}");
+    }
+}
+
+/// Go reads the clock once its transaction holds the connection, so times follow commit
+/// order: each list's times rise with its ids, and the row keeps the newest upsert's time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn times_follow_commit_order() {
+    let app = app();
+    let insert = json!({"host_id": "h", "event_id": "e", "evidence_snapshot": {}});
+    call(&app, Method::POST, "/api/v1/triage/upsert", Some(insert)).await;
+    let workers: Vec<_> = (0..32)
+        .map(|w| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let mut newest = String::new();
+                for i in 0..40 {
+                    let status = ["open", "acknowledged"][(w + i) % 2];
+                    let body = json!({"host_id": "h", "event_id": "e", "status": status});
+                    let (code, row) =
+                        call(&app, Method::POST, "/api/v1/triage/upsert", Some(body)).await;
+                    assert_eq!(code, 200, "{row}");
+                    newest = newest.max(row["updated_at"].as_str().unwrap().to_owned());
+                    let note = json!({"host_id": "h", "event_id": "e", "body": "n"});
+                    let (code, res) =
+                        call(&app, Method::POST, "/api/v1/triage/note", Some(note)).await;
+                    assert_eq!(code, 200, "{res}");
+                }
+                newest
+            })
+        })
+        .collect();
+    let mut newest = String::new();
+    for w in workers {
+        newest = newest.max(w.await.unwrap());
+    }
+    let (_, got) = call(&app, Method::GET, "/api/v1/triage/h/e", None).await;
+    for (list, field) in [("log", "at"), ("notes", "created_at")] {
+        let mut entries: Vec<(i64, &str)> = got[list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["id"].as_i64().unwrap(), e[field].as_str().unwrap()))
+            .collect();
+        entries.sort();
+        let late = entries.windows(2).filter(|w| w[0].1 > w[1].1).count();
+        assert_eq!(
+            late,
+            0,
+            "{list}: {late} of {} out of id order",
+            entries.len()
+        );
+    }
+    assert_eq!(got["row"]["updated_at"], newest);
+    let last_log = got["log"].as_array().unwrap().last().unwrap()["at"]
+        .as_str()
+        .unwrap();
+    assert!(last_log <= newest.as_str(), "{last_log} after {newest}");
+}
+
+/// Go's decoder fails a body that nests arrays and objects more than 10000 deep, in any field.
+#[tokio::test]
+async fn nesting_stops_at_go_depth() {
+    let app = app();
+    let body = |key: &str, depth: usize| {
+        let inner = "[".repeat(depth - 1) + &"]".repeat(depth - 1);
+        format!(
+            r#"{{"host_id":"h","event_id":"{key}{depth}","evidence_snapshot":{{}},"{key}":{inner}}}"#
+        )
+    };
+    for key in ["evidence_snapshot", "unknown"] {
+        for (depth, want) in [(10_000, 200), (10_001, 400)] {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/triage/upsert")
+                .header(header::HOST, "console.example")
+                .header(header::COOKIE, cookie("admin"))
+                .body(Body::from(body(key, depth)))
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            let status = res.status().as_u16();
+            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(status, want, "{key} at depth {depth}");
+            if want == 400 {
+                let res: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(res, error("invalid_query", "malformed JSON body"));
+            }
+        }
+    }
+}
+
+/// A body whose frames come one by one and then fail, as a client that stops sending does.
+struct Frames(std::collections::VecDeque<&'static str>);
+
+impl axum::body::HttpBody for Frames {
+    type Data = axum::body::Bytes;
+    type Error = &'static str;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let frame = self.0.pop_front().ok_or("read after the value");
+        std::task::Poll::Ready(Some(frame.map(|f| hyper::body::Frame::data(f.into()))))
+    }
+}
+
+/// Like Go's decoder, the body is read until its first value is complete and no further: the
+/// frame after the value would fail the read.
+#[tokio::test]
+async fn body_is_read_to_the_end_of_its_first_value() {
+    let read = |frames: &[&'static str]| {
+        let body = Body::new(Frames(frames.iter().copied().collect()));
+        read_body(Request::new(body))
+    };
+    for (frames, want) in [
+        (&[r#"{"host_id":"a"}"#][..], r#"{"host_id":"a"}"#),
+        (
+            &[r#" {"body":"}{"#, r#"\"","x":[{}]} {"#],
+            r#" {"body":"}{\"","x":[{}]} {"#,
+        ),
+        (&["nu", "ll"], "null"),
+        (&["\u{feff}{}"], "\u{feff}{}"),
+    ] {
+        let got = read(frames).await.map(String::from_utf8);
+        assert_eq!(got, Some(Ok(want.to_owned())), "{frames:?}");
+    }
+    assert_eq!(read(&[r#"{"host_id":"a""#]).await, None, "fails mid-value");
 }
 
 /// The actor and author are the session subject as is, so an OIDC subject (`oidc:` and a
@@ -211,25 +432,26 @@ fn bodies_decode_as_go_decodes_them() {
     for raw in ["null", " \n null", "nullx", "null {"] {
         assert_eq!(note(raw), Some(Default::default()), "{raw}");
     }
-    for raw in [
-        "",
-        "  ",
-        "nul",
-        "[]",
-        "5",
-        "\"x\"",
-        "true",
-        "{\"host_id\":",
-        "{\"body\":7}",
-        "{\"host_id\":[]}",
-        "{\"clear_assignee\":\"yes\"}",
-        "{\"assignee\":1}",
-        "\u{feff}{}",
+    // Which decoder rejects each body: a key only one request type has is ignored by the other.
+    for (raw, upsert_rejects, note_rejects) in [
+        ("", true, true),
+        ("  ", true, true),
+        ("\u{c}null", true, true),
+        ("nul", true, true),
+        ("[]", true, true),
+        ("5", true, true),
+        ("\"x\"", true, true),
+        ("true", true, true),
+        ("{\"host_id\":", true, true),
+        ("{\"host_id\":[]}", true, true),
+        ("{\"body\":7}", false, true),
+        ("{\"clear_assignee\":\"yes\"}", true, false),
+        ("{\"assignee\":1}", true, false),
+        ("\u{feff}{}", true, true),
     ] {
-        assert!(upsert(raw).is_none() || note(raw).is_none(), "{raw:?}");
+        assert_eq!(upsert(raw).is_none(), upsert_rejects, "upsert {raw:?}");
+        assert_eq!(note(raw).is_none(), note_rejects, "note {raw:?}");
     }
-    assert!(upsert("{\"clear_assignee\":\"yes\"}").is_none());
-    assert!(note("{\"body\":7}").is_none());
 }
 
 #[test]

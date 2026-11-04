@@ -58,7 +58,7 @@ fn insert(s: &Store, clock: &Clock, host: &str, event: &str, snapshot: String) -
         evidence_snapshot: Some(snapshot),
         ..input(host, event)
     };
-    s.upsert(row, clock.now()).unwrap()
+    s.upsert(row, || clock.now()).unwrap()
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn upsert_requires_identity_and_actor() {
         },
     ] {
         assert_eq!(
-            s.upsert(missing, clock.now()),
+            s.upsert(missing, || clock.now()),
             Err(Error::MissingFields("HostID/EventID/Actor"))
         );
     }
@@ -109,7 +109,7 @@ fn upsert_requires_identity_and_actor() {
 #[test]
 fn upsert_insert_requires_evidence_snapshot() {
     let (s, clock) = (store(), Clock::new());
-    let err = s.upsert(input(HOST1, EV1), clock.now()).unwrap_err();
+    let err = s.upsert(input(HOST1, EV1), || clock.now()).unwrap_err();
     assert_eq!(
         err.to_string(),
         "triage: missing required fields: EvidenceSnapshot required on insert"
@@ -125,7 +125,7 @@ fn upsert_rejects_bad_status() {
         ..input(HOST1, EV1)
     };
     assert_eq!(
-        s.upsert(row, clock.now()),
+        s.upsert(row, || clock.now()),
         Err(Error::InvalidStatus("bogus".into()))
     );
 }
@@ -139,7 +139,7 @@ fn upsert_update_bumps_updated_at_and_appends_log() {
         assignee: Some("alice".into()),
         ..input(HOST1, EV1)
     };
-    let updated = s.upsert(update, clock.now()).unwrap();
+    let updated = s.upsert(update, || clock.now()).unwrap();
     assert_eq!(updated.status, "acknowledged");
     assert_eq!(updated.assignee.as_deref(), Some("alice"));
     assert!(updated.updated_at > created, "updated_at must advance");
@@ -161,7 +161,7 @@ fn upsert_without_status_change_adds_no_log_row() {
         assignee: Some("bob".into()),
         ..input(HOST1, EV1)
     };
-    s.upsert(assign, clock.now()).unwrap();
+    s.upsert(assign, || clock.now()).unwrap();
     assert_eq!(s.get(HOST1, EV1).unwrap().log.len(), 1);
 }
 
@@ -173,12 +173,12 @@ fn upsert_clear_assignee() {
         evidence_snapshot: Some(snap("x")),
         ..input(HOST1, EV1)
     };
-    s.upsert(first, clock.now()).unwrap();
+    s.upsert(first, || clock.now()).unwrap();
     let clear = Upsert {
         clear_assignee: true,
         ..input(HOST1, EV1)
     };
-    s.upsert(clear, clock.now()).unwrap();
+    s.upsert(clear, || clock.now()).unwrap();
     assert_eq!(s.get(HOST1, EV1).unwrap().row.assignee, None);
 }
 
@@ -191,7 +191,7 @@ fn evidence_snapshot_immutable_on_update() {
         evidence_snapshot: Some(snap("second")),
         ..input(HOST1, EV1)
     };
-    s.upsert(update, clock.now()).unwrap();
+    s.upsert(update, || clock.now()).unwrap();
     let row = s.get(HOST1, EV1).unwrap().row;
     assert_eq!(extra(&row.evidence_snapshot), "first");
 }
@@ -205,9 +205,9 @@ fn get_not_found() {
 fn notes_append_and_list_chronological() {
     let (s, clock) = (store(), Clock::new());
     insert(&s, &clock, HOST1, EV1, snap("x"));
-    s.append_note(HOST1, EV1, "alice", "first", clock.now())
+    s.append_note(HOST1, EV1, "alice", "first", || clock.now())
         .unwrap();
-    s.append_note(HOST1, EV1, "bob", "second", clock.now())
+    s.append_note(HOST1, EV1, "bob", "second", || clock.now())
         .unwrap();
     let notes = s.get(HOST1, EV1).unwrap().notes;
     let bodies: Vec<_> = notes.iter().map(|n| n.body.as_str()).collect();
@@ -218,7 +218,7 @@ fn notes_append_and_list_chronological() {
 fn notes_require_existing_triage_row() {
     let (s, clock) = (store(), Clock::new());
     assert_eq!(
-        s.append_note(HOST1, EV1, "alice", "hi", clock.now()),
+        s.append_note(HOST1, EV1, "alice", "hi", || clock.now()),
         Err(Error::NotFound)
     );
 }
@@ -320,6 +320,13 @@ fn open_matches_go_file_handling() {
     // SQLite reads the path as a URI: `%41` is `A`.
     Store::open(dir.join("p%41.sqlite").to_str().unwrap()).unwrap();
     assert!(dir.join("pA.sqlite").exists());
+    // modernc sets no busy timeout of its own, so a `file:` DSN without the pragma has none.
+    let s = Store::open(&format!("file:{}", dir.join("u.sqlite").display())).unwrap();
+    let busy: i64 = s
+        .lock()
+        .query_row("pragma busy_timeout", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(busy, 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -494,10 +501,12 @@ fn go_and_rust_rows_sort_together_by_updated_at() {
         ..input(go_host, go_event)
     };
     let go_notes = s.get(go_host, go_event).unwrap().notes;
-    s.append_note(go_host, go_event, "admin", "rust-first", shifted(-3600, 0))
-        .unwrap();
-    s.upsert(update, shifted(2, 0)).unwrap();
-    s.append_note(go_host, go_event, "admin", "rust-last", shifted(2, 0))
+    s.append_note(go_host, go_event, "admin", "rust-first", || {
+        shifted(-3600, 0)
+    })
+    .unwrap();
+    s.upsert(update, || shifted(2, 0)).unwrap();
+    s.append_note(go_host, go_event, "admin", "rust-last", || shifted(2, 0))
         .unwrap();
 
     let conn = s.lock();
@@ -536,7 +545,7 @@ fn insert_at(s: &Store, host: &str, event: &str, at: GoTime) {
         evidence_snapshot: Some("{}".into()),
         ..input(host, event)
     };
-    s.upsert(row, at).unwrap();
+    s.upsert(row, || at).unwrap();
 }
 
 /// Go's `TestListByStatus_OrderedByUpdatedAtDesc`, on the query the schema's index serves:
