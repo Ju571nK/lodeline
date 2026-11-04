@@ -1,0 +1,17 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/assets/",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": "<not recorded: the listing names every hashed asset file, so it changes with each SPA build>"
+}

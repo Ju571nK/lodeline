@@ -1,0 +1,51 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/meta",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "alerts_definition_default": {
+      "additional_kinds": [],
+      "ai_guard_buckets": [
+        "high",
+        "critical"
+      ],
+      "evidence_kinds": [
+        "ai_guard_risk_assessed"
+      ]
+    },
+    "audit_head": {
+      "hash": "h",
+      "pubkey": "ed25519:AAAA",
+      "pubkey_id": "k1",
+      "seq": 9,
+      "sig": "s"
+    },
+    "fleet": {
+      "active_host_count": 3,
+      "active_window_days": 14
+    },
+    "schema_version": 1,
+    "server_version": "0.12.4",
+    "ts": "2026-01-02T03:04:05Z"
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/meta",
+      "query": [],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

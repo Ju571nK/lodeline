@@ -1,0 +1,71 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/compliance",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "next_cursor": null,
+    "rows": [
+      {
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "hostname": "alice-mbp",
+        "last_applied_policy_version": 18,
+        "last_policy_reload_ts": "<seed-4h Z>",
+        "policy_expired_active": false,
+        "server_current_policy_version": 18,
+        "signature_failures_24h": 0,
+        "version_drift": 0
+      },
+      {
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
+        "hostname": "bob-laptop",
+        "last_applied_policy_version": 17,
+        "last_policy_reload_ts": "<seed-4h Z>",
+        "policy_expired_active": false,
+        "server_current_policy_version": 18,
+        "signature_failures_24h": 0,
+        "version_drift": 1
+      },
+      {
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "hostname": "carol-dev",
+        "last_applied_policy_version": 16,
+        "last_policy_reload_ts": "<seed-4h Z>",
+        "policy_expired_active": false,
+        "server_current_policy_version": 18,
+        "signature_failures_24h": 3,
+        "version_drift": 2
+      },
+      {
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-444444444444",
+        "hostname": null,
+        "last_applied_policy_version": 12,
+        "last_policy_reload_ts": "<seed-4h Z>",
+        "policy_expired_active": true,
+        "server_current_policy_version": 18,
+        "signature_failures_24h": 0,
+        "version_drift": 6
+      },
+      {
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-555555555555",
+        "hostname": "eve-workstation",
+        "last_applied_policy_version": 18,
+        "last_policy_reload_ts": "<seed-4h Z>",
+        "policy_expired_active": false,
+        "server_current_policy_version": 18,
+        "signature_failures_24h": 0,
+        "version_drift": 0
+      }
+    ]
+  }
+}

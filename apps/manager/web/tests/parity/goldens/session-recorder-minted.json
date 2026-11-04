@@ -1,0 +1,20 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/auth/me",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "expires_at": "2096-10-02T07:06:40Z",
+    "username": "admin"
+  }
+}

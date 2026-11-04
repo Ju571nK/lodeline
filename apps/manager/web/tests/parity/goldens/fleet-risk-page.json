@@ -1,0 +1,31 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/risk?limit=1&cursor=5a7c3e91-aaaa-bbbb-cccc-111111111111",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "next_cursor": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+    "rows": [
+      {
+        "assessed_ts": "<seed-1h Z>",
+        "bucket": "high",
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-333333333333",
+        "hostname": "carol-dev",
+        "open_alert_count_24h": 8,
+        "reasons_count": 0,
+        "score": 6.8,
+        "top_tool": "claude_desktop"
+      }
+    ]
+  }
+}

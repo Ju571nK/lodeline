@@ -1,0 +1,201 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/events?host_id=5a7c3e91-aaaa-bbbb-cccc-111111111111,5a7c3e91-aaaa-bbbb-cccc-444444444444&until={seed-6h}&limit=500",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "events": [
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#11",
+        "evidence": {
+          "hash_p99_ms": 4,
+          "jsonl_above_soft_floor": false,
+          "kind": "heartbeat"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-484m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#15",
+        "evidence": {
+          "kind": "policy_reloaded",
+          "policy_version": 18
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-11h Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#17",
+        "evidence": {
+          "kind": "sender_lag_critical",
+          "queue_depth": 1532
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-748m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#20",
+        "evidence": {
+          "kind": "host_id_fingerprint_drift",
+          "new": "def",
+          "old": "abc"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-880m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#21",
+        "evidence": {
+          "bucket": "critical",
+          "controls": [
+            {
+              "id": "claude_code.configured.allowManagedHooksOnly",
+              "setting": "allowManagedHooksOnly",
+              "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+              "value": true
+            }
+          ],
+          "is_reattestation": true,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 7.2,
+          "tool": "claude_code"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/.claude/settings.json"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-924m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#23",
+        "evidence": {
+          "kind": "file_change",
+          "op": "modify",
+          "sha256": "deadbeef"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "info",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/code/work-repo/AGENTS.md"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-1012m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#27",
+        "evidence": {
+          "bucket": "high",
+          "controls": [
+            {
+              "id": "claude_code.configured.allowManagedHooksOnly",
+              "setting": "allowManagedHooksOnly",
+              "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+              "value": true
+            }
+          ],
+          "is_reattestation": false,
+          "kind": "ai_guard_risk_assessed",
+          "reasons": [
+            {
+              "kind": "external_script_unscanned"
+            }
+          ],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 6.5,
+          "tool": "claude_code"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "file_system"
+        },
+        "subject": {
+          "kind": "path",
+          "value": "/Users/alice/.claude/hooks/preflight.sh"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-1188m Z>"
+      }
+    ],
+    "next_cursor": null
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/hosts",
+    "server": "live"
+  },
+  "status": 502,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "error": {
+      "code": "upstream_error",
+      "message": "lodeline-server returned an error (internal)"
+    }
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/fleet/hosts",
+      "query": [],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

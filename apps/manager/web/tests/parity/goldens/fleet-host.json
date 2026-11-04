@@ -1,0 +1,97 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/hosts/5a7c3e91-aaaa-bbbb-cccc-111111111111",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "agent_health": {
+      "hash_p99_ms_latest": 4,
+      "jsonl_above_soft_floor_latest": false,
+      "last_heartbeat_ts": "<seed-1m Z>",
+      "recent_channel_stalls_24h": 0,
+      "recent_sender_lag_critical_24h": 0,
+      "recent_watcher_degraded_24h": 0
+    },
+    "agent_version": "0.4.0",
+    "ai_guard": {
+      "by_tool": {
+        "claude_code": {
+          "assessed_ts": "<seed-2m Z>",
+          "bucket": "critical",
+          "controls": [
+            {
+              "id": "claude_code.configured.allowManagedHooksOnly",
+              "setting": "allowManagedHooksOnly",
+              "source_path": "/Library/Application Support/ClaudeCode/managed-settings.json",
+              "value": true
+            }
+          ],
+          "is_reattestation": false,
+          "reasons": null,
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 7.2
+        }
+      }
+    },
+    "current_risk": {
+      "by_tool": {
+        "claude_code": {
+          "assessed_ts": "<seed-2m Z>",
+          "bucket": "critical",
+          "score": 7.2
+        }
+      },
+      "max_bucket": "critical",
+      "max_score": 7.2
+    },
+    "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+    "host_meta": {
+      "architecture": "arm64",
+      "default_gateway_v4": "<ipv4 c5eb5a4c>",
+      "default_gateway_v6": null,
+      "dns_servers": [
+        "<ipv4 f1412386>",
+        "<ipv4 838c4c25>"
+      ],
+      "interfaces": [
+        {
+          "ipv4": [
+            "<ipv4 84b48121>/24"
+          ],
+          "ipv6": [
+            "fe80::1/64"
+          ],
+          "mac": "00:1b:44:11:3a:b7",
+          "name": "en0"
+        }
+      ],
+      "kernel_version": "23.5.0",
+      "os_name": "macOS",
+      "os_version": "14.5"
+    },
+    "hostname": "alice-mbp",
+    "last_seen_ts": "<seed-1m Z>",
+    "open_event_counts_24h": {
+      "info": 1402,
+      "warn": 14
+    },
+    "policy_state": {
+      "last_applied_policy_version": 18,
+      "last_policy_reload_ts": "<seed-4h Z>",
+      "policy_expired_active": false
+    },
+    "status": "healthy"
+  }
+}

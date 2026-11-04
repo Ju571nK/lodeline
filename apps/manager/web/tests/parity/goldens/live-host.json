@@ -1,0 +1,90 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/hosts/5a7c3e91-aaaa-bbbb-cccc-111111111111",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer"
+  },
+  "cookies": [],
+  "body": {
+    "agent_health": {
+      "hash_p99_ms_latest": 12,
+      "jsonl_above_soft_floor_latest": null,
+      "last_heartbeat_ts": null,
+      "recent_channel_stalls_24h": 0,
+      "recent_sender_lag_critical_24h": 0,
+      "recent_watcher_degraded_24h": 1
+    },
+    "agent_version": "0.12.4",
+    "ai_guard": {
+      "by_tool": {
+        "codex": {
+          "assessed_ts": "2026-01-02T03:04:05Z",
+          "bucket": "medium",
+          "is_reattestation": false,
+          "reasons": [
+            {
+              "kind": "k"
+            }
+          ],
+          "scope": {
+            "kind": "user_global"
+          },
+          "score": 4.5
+        },
+        "gemini": {
+          "assessed_ts": "2026-01-02T03:04:05Z",
+          "bucket": "low",
+          "controls": [],
+          "is_reattestation": true,
+          "reasons": [],
+          "scope": {
+            "kind": "project",
+            "path": "/p"
+          },
+          "score": 1
+        }
+      }
+    },
+    "current_risk": {
+      "by_tool": {
+        "codex": {
+          "assessed_ts": "2026-01-02T03:04:05Z",
+          "bucket": "medium",
+          "score": 4.5
+        }
+      },
+      "max_bucket": "medium",
+      "max_score": 4.5
+    },
+    "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
+    "host_meta": null,
+    "hostname": "alice-mbp",
+    "last_seen_ts": "2026-01-02T03:04:05Z",
+    "open_event_counts_24h": {
+      "warn": 2
+    },
+    "policy_state": {
+      "last_applied_policy_version": 3,
+      "last_policy_reload_ts": "2026-01-02T03:04:05Z",
+      "policy_expired_active": true
+    },
+    "status": "healthy"
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/fleet/hosts/5a7c3e91-aaaa-bbbb-cccc-111111111111",
+      "query": [],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}
