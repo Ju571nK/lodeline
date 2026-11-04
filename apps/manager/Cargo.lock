@@ -1354,6 +1354,9 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "bcrypt",
+ "chrono",
+ "hyper",
+ "hyper-util",
  "jsonwebtoken",
  "lodeline-fleet-api",
  "openidconnect",
@@ -1364,6 +1367,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tokio",
+ "tower",
 ]
 
 [[package]]
