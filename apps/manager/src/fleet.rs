@@ -331,7 +331,7 @@ pub fn path_escape(s: &str) -> String {
 pub fn escape_path(s: &str) -> String {
     escape(
         s,
-        |b| b.is_ascii_alphanumeric() || b"$&*+,-./:;=@_~".contains(&b),
+        |b| b.is_ascii_alphanumeric() || b"$&+,-./:;=@_~".contains(&b),
         false,
     )
 }

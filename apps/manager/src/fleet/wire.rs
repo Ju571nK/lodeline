@@ -22,17 +22,23 @@ pub type Raw = Value;
 /// Keys whose values Go keeps as `json.RawMessage`; their contents are never normalized.
 const RAW_KEYS: [&str; 6] = ["source", "subject", "evidence", "scope", "reasons", "value"];
 
+/// Float fields. Every other number the console decodes is an integer.
+const FLOAT_KEYS: [&str; 2] = ["score", "max_score"];
+
 /// Decodes `v` with Go's rules for typed fields. Go treats `null` and a missing key alike for
 /// every typed field (a pointer stays nil, any other field keeps its zero value), so `null`
-/// members are removed and `#[serde(default)]` fills the rest.
+/// members are removed and `#[serde(default)]` fills the rest. A `null` map entry is kept as the
+/// value type's zero value, as Go stores it. Go reads `-0` into an integer as 0, where serde
+/// reads it as a float, so `-0` outside a float field becomes 0.
 ///
 /// shortcut: a `null` element inside a typed array fails to decode, where Go stores the zero
-/// value; upgrade if a server ever sends one.
+/// value; and `-0.0` or `-0e0` in an integer field decodes as 0, where Go refuses it. Upgrade if
+/// a server ever sends one.
 pub fn go_decode<T: DeserializeOwned>(v: Value) -> serde_json::Result<T> {
-    serde_json::from_value(strip_nulls(v))
+    serde_json::from_value(normalize(v, false))
 }
 
-fn strip_nulls(v: Value) -> Value {
+fn normalize(v: Value, float: bool) -> Value {
     match v {
         Value::Object(m) => Value::Object(
             m.into_iter()
@@ -40,15 +46,49 @@ fn strip_nulls(v: Value) -> Value {
                 .map(|(k, v)| {
                     let v = if RAW_KEYS.contains(&k.as_str()) {
                         v
+                    } else if let Some(zero) = map_zero(&k) {
+                        normalize_map(v, zero)
                     } else {
-                        strip_nulls(v)
+                        normalize(v, FLOAT_KEYS.contains(&k.as_str()))
                     };
                     (k, v)
                 })
                 .collect(),
         ),
-        Value::Array(a) => Value::Array(a.into_iter().map(strip_nulls).collect()),
+        Value::Array(a) => Value::Array(a.into_iter().map(|v| normalize(v, false)).collect()),
+        Value::Number(n)
+            if !float && n.as_f64().is_some_and(|f| f == 0.0 && f.is_sign_negative()) =>
+        {
+            Value::from(0)
+        }
         v => v,
+    }
+}
+
+/// The zero value Go stores for a `null` entry of each map field.
+fn map_zero(key: &str) -> Option<Value> {
+    match key {
+        "open_event_counts_24h" => Some(Value::from(0)),
+        "by_tool" => Some(Value::Object(Default::default())),
+        _ => None,
+    }
+}
+
+fn normalize_map(v: Value, zero: Value) -> Value {
+    match v {
+        Value::Object(m) => Value::Object(
+            m.into_iter()
+                .map(|(k, v)| {
+                    let v = if v.is_null() {
+                        zero.clone()
+                    } else {
+                        normalize(v, false)
+                    };
+                    (k, v)
+                })
+                .collect(),
+        ),
+        v => normalize(v, false),
     }
 }
 
@@ -488,11 +528,15 @@ impl Event {
     }
 }
 
-/// Go's `Evidence.UnmarshalJSON`: an object whose `kind`, if present, is a string.
+/// Go's `Evidence.UnmarshalJSON`: an object whose `kind`, if present, is a string or `null`.
 fn evidence<'de, D: Deserializer<'de>>(d: D) -> Result<Raw, D::Error> {
     let v = Value::deserialize(d)?;
     match &v {
-        Value::Object(m) if matches!(m.get("kind"), None | Some(Value::String(_))) => Ok(v),
+        Value::Object(m)
+            if matches!(m.get("kind"), None | Some(Value::Null | Value::String(_))) =>
+        {
+            Ok(v)
+        }
         _ => Err(D::Error::custom(
             "fleet: evidence: not an object with a string kind",
         )),
@@ -569,6 +613,9 @@ mod tests {
         .unwrap();
         assert_eq!(ev.evidence, serde_json::json!({"kind": "x", "inner": null}));
         assert_eq!(ev.subject, Value::Null);
+        let ev: Event = go_decode(serde_json::json!({"evidence": {"kind": null}})).unwrap();
+        assert_eq!(ev.evidence, serde_json::json!({"kind": null}));
+        assert_eq!(ev.evidence_kind(), "");
         for bad in [
             serde_json::json!({"evidence": "text"}),
             serde_json::json!({"evidence": {"kind": 5}}),
@@ -577,5 +624,42 @@ mod tests {
         ] {
             assert!(go_decode::<Event>(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    /// A `null` map entry is the value type's zero value, and `-0` is 0 in an integer field and
+    /// stays `-0` in a float field, as Go decodes them.
+    #[test]
+    fn decoding_follows_go_for_null_map_entries_and_minus_zero() {
+        let body = r#"{"schema_version": -0, "open_event_counts_24h": {"warn": null, "info": -0},
+            "current_risk": {"max_score": -0, "by_tool": {"codex": null}},
+            "ai_guard": {"by_tool": {"gemini": null}},
+            "agent_health": {"hash_p99_ms_latest": -0, "recent_channel_stalls_24h": -0}}"#;
+        let host: HostDetail = go_decode(serde_json::from_str(body).unwrap()).unwrap();
+        let out = serde_json::to_value(&host).unwrap();
+        assert_eq!(
+            out["open_event_counts_24h"],
+            serde_json::json!({"info": 0, "warn": 0})
+        );
+        let zero_time = "0001-01-01T00:00:00Z";
+        assert_eq!(
+            out["current_risk"]["by_tool"],
+            serde_json::json!({"codex": {"score": 0.0, "bucket": "", "assessed_ts": zero_time}})
+        );
+        assert!(host
+            .summary
+            .current_risk
+            .unwrap()
+            .max_score
+            .is_sign_negative());
+        assert_eq!(
+            out["ai_guard"]["by_tool"],
+            serde_json::json!({"gemini": {"score": 0.0, "bucket": "", "assessed_ts": zero_time,
+                "is_reattestation": false, "scope": null, "reasons": null}})
+        );
+        assert_eq!(out["agent_health"]["hash_p99_ms_latest"], 0);
+        assert_eq!(out["agent_health"]["recent_channel_stalls_24h"], 0);
+        let ev: Event =
+            go_decode(serde_json::from_str(r#"{"schema_version": -0}"#).unwrap()).unwrap();
+        assert_eq!(ev.schema_version, 0);
     }
 }

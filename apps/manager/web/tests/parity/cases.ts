@@ -1389,6 +1389,48 @@ export const CASES: Case[] = [
     },
     'ok',
   ),
+  upstream(
+    // Go stores the zero value for a null map entry.
+    'live-host-null-entries',
+    'GET /api/v1/fleet/hosts/{host_id}',
+    `/api/v1/fleet/hosts/${H_ALICE}`,
+    {
+      status: 200,
+      json: {
+        host_id: H_ALICE,
+        last_seen_ts: LIVE_TS,
+        status: 'healthy',
+        current_risk: { max_score: 1, max_bucket: 'low', by_tool: { codex: null } },
+        open_event_counts_24h: { warn: null, info: 2 },
+        ai_guard: { by_tool: { gemini: null } },
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    // Go reads -0 into an integer field as 0. A float -0 stays -0, which a golden cannot hold.
+    'live-host-minus-zero',
+    'GET /api/v1/fleet/hosts/{host_id}',
+    `/api/v1/fleet/hosts/${H_ALICE}`,
+    {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      text: `{"host_id":"${H_ALICE}","last_seen_ts":"${LIVE_TS}","status":"healthy","current_risk":{"max_score":1,"max_bucket":"low","by_tool":{}},"open_event_counts_24h":{"warn":-0},"policy_state":{"last_applied_policy_version":-0,"policy_expired_active":false},"agent_health":{"recent_channel_stalls_24h":-0,"hash_p99_ms_latest":-0}}`,
+    },
+    'ok',
+  ),
+  upstream(
+    // Go leaves the evidence kind empty for "kind": null and keeps the raw object.
+    'live-event-null-kind',
+    'GET /api/v1/fleet/events/{event_id}',
+    `/api/v1/fleet/events/${LIVE_EVENT_ID}`,
+    {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      text: `{"schema_version":-0,"event_id":"${LIVE_EVENT_ID}","ts":"${LIVE_TS}","host_id":"${H_ALICE}","agent_version":"0.12.4","severity":"warn","source":{"kind":"agent"},"subject":null,"evidence":{"kind":null,"detail":1}}`,
+    },
+    'ok',
+  ),
   ...[
     ['plus3', '%2B3'],
     ['007', '007'],
@@ -1430,6 +1472,9 @@ export const CASES: Case[] = [
     ['slash', 'a%2Fb'],
     ['plus', 'a%2Bb'],
     ['unreserved', '%41bc'],
+    // Go escapes `*` in a path, so `%2A` is read decoded and `a*b%20c` raw.
+    ['star', '%2A'],
+    ['star-space', 'a*b%20c'],
   ].flatMap(([label, id]) => [
     upstream(
       `live-event-id-${label}`,

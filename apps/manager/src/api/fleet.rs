@@ -293,6 +293,8 @@ mod tests {
             ("/api/v1/fleet/events/a%2Fb", "a%2Fb"),
             ("/api/v1/fleet/events/%41bc", "%41bc"),
             ("/api/v1/fleet/events/abc", "abc"),
+            ("/api/v1/fleet/events/%2A", "*"),
+            ("/api/v1/fleet/events/a*b%20c", "a*b%20c"),
         ] {
             assert_eq!(path_param(raw), want, "{raw}");
         }

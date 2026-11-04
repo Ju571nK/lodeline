@@ -5,7 +5,7 @@ each normalized response with a golden file. The goldens were recorded from the 
 at `Ju571nK/lodeline-manager@e4fb077`, so a run against the Rust binary shows every place where
 the port answers differently.
 
-The table has 212 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 219 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
@@ -20,11 +20,11 @@ catch-all. The suite prints the count per route on every run.
 | 6 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
 | 38 | `GET /api/v1/fleet/events` |
-| 10 | `GET /api/v1/fleet/events/{event_id}` |
+| 13 | `GET /api/v1/fleet/events/{event_id}` |
 | 10 | `GET /api/v1/fleet/risk` |
 | 8 | `GET /api/v1/fleet/compliance` |
 | 11 | `GET /api/v1/fleet/hosts` |
-| 10 | `GET /api/v1/fleet/hosts/{host_id}` |
+| 14 | `GET /api/v1/fleet/hosts/{host_id}` |
 | 11 | `POST /api/v1/triage/upsert` |
 | 11 | `POST /api/v1/triage/note` |
 | 5 | `GET /api/v1/triage/{host_id}/{event_id}` |
