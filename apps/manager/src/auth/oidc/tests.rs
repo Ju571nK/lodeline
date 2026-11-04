@@ -614,3 +614,50 @@ async fn concurrent_checks_share_one_key_set_fetch() {
     assert!(check().await.is_none());
     assert_eq!(p.key_requests(), 3);
 }
+
+/// Discovery and key set answers over 1 MiB are refused rather than read whole.
+#[tokio::test]
+async fn provider_answers_over_1_mib_are_refused() {
+    let p = OidcProvider::start(false).await;
+    p.mutate_discovery(Some(|d| {
+        d.insert("padding".into(), json!("x".repeat(1 << 20)));
+    }));
+    let err = Oidc::discover(&config(&p), p.client()).await.err().unwrap();
+    assert!(err.contains("discovery failed"), "{err}");
+    p.mutate_discovery(Some(|d| {
+        d.insert("padding".into(), json!("x".repeat((1 << 20) - 4096)));
+    }));
+    assert!(Oidc::discover(&config(&p), p.client()).await.is_ok());
+
+    let doc = jose_cases();
+    let o = Oidc::discover(&config(&p), p.client()).await.unwrap();
+    let padded = |n: usize| format!("{}{}", doc.jwks, " ".repeat(n));
+    p.serve_keys(Some(padded((1 << 20) - doc.jwks.len() + 1)));
+    assert!(o.verify_signature(&doc.token).await.is_none());
+    let o = Oidc::discover(&config(&p), p.client()).await.unwrap();
+    p.serve_keys(Some(padded((1 << 20) - doc.jwks.len())));
+    assert!(o.verify_signature(&doc.token).await.is_some());
+
+    // The ID token is the token response's bulk; a claim of n bytes adds about 4n/3.
+    p.serve_keys(None);
+    let cases: [(Mutate, bool); 2] = [
+        (
+            |c| {
+                c.insert("pad".into(), json!("x".repeat(700_000)));
+            },
+            true,
+        ),
+        (
+            |c| {
+                c.insert("pad".into(), json!("x".repeat(800_000)));
+            },
+            false,
+        ),
+    ];
+    for (pad, ok) in cases {
+        p.mutate(Some(pad));
+        let o = Oidc::discover(&config(&p), p.client()).await.unwrap();
+        let (state, binding, code) = start_login(&o, &p).await;
+        assert_eq!(o.complete(&state, &binding, &code).await.is_some(), ok);
+    }
+}

@@ -26,8 +26,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const SUPPORTED_ALGS: [&str; 10] = [
     "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA",
 ];
-/// x/oauth2 reads at most this much of a token response.
-const TOKEN_BODY_LIMIT: usize = 1 << 20;
+/// The largest discovery document, key set or token response read.
+const BODY_LIMIT: usize = 1 << 20;
 /// go-oidc's allowance for a provider clock ahead of ours.
 const NBF_LEEWAY: Duration = Duration::from_secs(5 * 60);
 
@@ -105,7 +105,7 @@ impl Oidc {
         if res.status() != reqwest::StatusCode::OK {
             return Err(failed());
         }
-        let body = res.bytes().await.map_err(|_| failed())?;
+        let body = read_body(res).await.ok_or_else(failed)?;
         let d = discovery(&body).ok_or_else(failed)?;
         if d.issuer != c.issuer {
             return Err(failed());
@@ -299,15 +299,7 @@ impl Oidc {
                 Some(query_escape(&self.client_secret)),
             );
         }
-        let mut res = req.send().await.ok()?;
-        let mut body = Vec::new();
-        while body.len() < TOKEN_BODY_LIMIT {
-            match res.chunk().await.ok()? {
-                Some(chunk) => body.extend_from_slice(&chunk),
-                None => break,
-            }
-        }
-        body.truncate(TOKEN_BODY_LIMIT);
+        let res = req.send().await.ok()?;
         if !res.status().is_success() {
             return None;
         }
@@ -322,6 +314,7 @@ impl Oidc {
                     .trim()
                     .to_ascii_lowercase()
             });
+        let body = read_body(res).await?;
         let token = match media_type.as_deref() {
             Some("application/x-www-form-urlencoded" | "text/plain") => {
                 let vals = parse_form(&String::from_utf8_lossy(&body))?;
@@ -418,7 +411,7 @@ async fn fetch_keys(http: &reqwest::Client, url: &str) -> Option<Vec<Key>> {
     if res.status() != reqwest::StatusCode::OK {
         return None;
     }
-    let body = res.bytes().await.ok()?;
+    let body = read_body(res).await?;
     let mut raw_keys = Vec::new();
     for (key, value) in go_fields(&body)? {
         if go_fold(&key) == "keys" {
@@ -506,6 +499,18 @@ fn https(raw: &str) -> Option<reqwest::Url> {
         return None;
     }
     reqwest::Url::parse(raw).ok()
+}
+
+/// The whole body, or `None` past `BODY_LIMIT` bytes without reading the rest.
+async fn read_body(mut res: reqwest::Response) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = res.chunk().await.ok()? {
+        if body.len() + chunk.len() > BODY_LIMIT {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 async fn get(http: &reqwest::Client, raw: &str, no_cache: bool) -> Option<reqwest::Response> {
