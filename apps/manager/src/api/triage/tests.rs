@@ -306,33 +306,47 @@ async fn times_follow_commit_order() {
 }
 
 /// Go's decoder fails a body that nests arrays and objects more than 10000 deep, in any field.
+/// Brackets inside strings do not count.
 #[tokio::test]
 async fn nesting_stops_at_go_depth() {
     let app = app();
-    let body = |key: &str, depth: usize| {
-        let inner = "[".repeat(depth - 1) + &"]".repeat(depth - 1);
-        format!(
-            r#"{{"host_id":"h","event_id":"{key}{depth}","evidence_snapshot":{{}},"{key}":{inner}}}"#
-        )
-    };
-    for key in ["evidence_snapshot", "unknown"] {
-        for (depth, want) in [(10_000, 200), (10_001, 400)] {
-            let req = Request::builder()
-                .method(Method::POST)
-                .uri("/api/v1/triage/upsert")
-                .header(header::HOST, "console.example")
-                .header(header::COOKIE, cookie("admin"))
-                .body(Body::from(body(key, depth)))
-                .unwrap();
-            let res = app.clone().oneshot(req).await.unwrap();
-            let status = res.status().as_u16();
-            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            assert_eq!(status, want, "{key} at depth {depth}");
-            if want == 400 {
-                let res: Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(res, error("invalid_query", "malformed JSON body"));
+    // A level's (open, close), alternating between the two, nested around a `0`.
+    let (array, object) = (("[", "]"), (r#"{"a":"#, "}"));
+    let string = (r#"["[{\"]}[{","#, "]");
+    let shapes = [
+        ("array", [array, array]),
+        ("object", [object, object]),
+        ("mixed", [array, object]),
+        ("string", [string, string]),
+    ];
+    for (shape, pair) in shapes {
+        let body = |key: &str, depth: usize| {
+            let levels: Vec<_> = (0..depth - 1).map(|i| pair[i % 2]).collect();
+            let opens: String = levels.iter().map(|l| l.0).collect();
+            let closes: String = levels.iter().rev().map(|l| l.1).collect();
+            format!(
+                r#"{{"host_id":"h","event_id":"{shape}{key}{depth}","evidence_snapshot":{{}},"{key}":{opens}0{closes}}}"#
+            )
+        };
+        for key in ["evidence_snapshot", "unknown"] {
+            for (depth, want) in [(10_000, 200), (10_001, 400)] {
+                let req = Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/triage/upsert")
+                    .header(header::HOST, "console.example")
+                    .header(header::COOKIE, cookie("admin"))
+                    .body(Body::from(body(key, depth)))
+                    .unwrap();
+                let res = app.clone().oneshot(req).await.unwrap();
+                let status = res.status().as_u16();
+                let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert_eq!(status, want, "{shape} {key} at depth {depth}");
+                if want == 400 {
+                    let res: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(res, error("invalid_query", "malformed JSON body"));
+                }
             }
         }
     }
@@ -355,7 +369,8 @@ impl axum::body::HttpBody for Frames {
 }
 
 /// Like Go's decoder, the body is read until its first value is complete and no further: the
-/// frame after the value would fail the read.
+/// frame after the value would fail the read. After a top-level `null`, Go waits for one more
+/// byte or the end of the body; this read does not.
 #[tokio::test]
 async fn body_is_read_to_the_end_of_its_first_value() {
     let read = |frames: &[&'static str]| {
@@ -369,10 +384,19 @@ async fn body_is_read_to_the_end_of_its_first_value() {
             r#" {"body":"}{\"","x":[{}]} {"#,
         ),
         (&["nu", "ll"], "null"),
+        // A byte a frame: `null` is whole at its fourth byte, and what follows is not read.
+        (&["n", "u", "l", "l"], "null"),
+        (&["n", "u", "l", "l", "x", "}"], "null"),
         (&["\u{feff}{}"], "\u{feff}{}"),
     ] {
-        let got = read(frames).await.map(String::from_utf8);
-        assert_eq!(got, Some(Ok(want.to_owned())), "{frames:?}");
+        let got = read(frames).await;
+        let text = got.clone().map(String::from_utf8);
+        assert_eq!(text, Some(Ok(want.to_owned())), "{frames:?}");
+        if want == "null" {
+            // Go decodes `null`, trailing bytes or not, into an empty request.
+            let b = upsert_body(&got.unwrap()).unwrap();
+            assert_eq!((b.host_id.as_str(), b.event_id.as_str()), ("", ""));
+        }
     }
     assert_eq!(read(&[r#"{"host_id":"a""#]).await, None, "fails mid-value");
 }
