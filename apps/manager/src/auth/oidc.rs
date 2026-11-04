@@ -15,7 +15,7 @@ use tokio::sync::watch;
 
 use super::{base64url, go_base64, go_fold, Members};
 use crate::config::{self, OidcConfig};
-use crate::fleet::env_proxy;
+use crate::fleet::{env_proxy, read_capped};
 use crate::triage::go_compact;
 
 /// How long a started login can be completed.
@@ -503,21 +503,6 @@ fn https(raw: &str) -> Option<reqwest::Url> {
         return None;
     }
     reqwest::Url::parse(raw).ok()
-}
-
-/// The whole body, or `None` past `limit` bytes without reading the rest.
-pub(crate) async fn read_capped(
-    mut res: reqwest::Response,
-    limit: usize,
-) -> reqwest::Result<Option<Vec<u8>>> {
-    let mut body = Vec::new();
-    while let Some(chunk) = res.chunk().await? {
-        if body.len() + chunk.len() > limit {
-            return Ok(None);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(Some(body))
 }
 
 async fn get(http: &reqwest::Client, raw: &str, no_cache: bool) -> Option<reqwest::Response> {

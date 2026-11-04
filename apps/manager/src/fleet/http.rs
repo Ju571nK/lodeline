@@ -9,16 +9,15 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{go_decode, path_escape, BoxFuture, Client, FleetError, Reply, Request, Response};
-use crate::auth::oidc::read_capped;
 use crate::config::ServerTls;
 
 /// The whole exchange, body included, as Go's `http.Client.Timeout`.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The largest 200 body read. `lodeline-server` answers at most 1000 items a page and takes at
-/// most 2 MiB a request (axum's default body limit), so a stored event is under 2 MiB and a page
-/// under 2,000 MiB, plus what re-encoding adds.
-const BODY_LIMIT: usize = 2 << 30;
+/// The largest 200 body read. The console asks for at most 100 items a page, and
+/// `lodeline-server` takes at most 2 MiB a request (axum's default body limit), so a stored event
+/// is under 2 MiB and a page under 200 MiB, plus what re-encoding adds.
+const BODY_LIMIT: usize = 256 << 20;
 /// The largest error body read: the server's own are a short JSON object.
 const ERROR_BODY_LIMIT: usize = 64 << 10;
 
@@ -162,6 +161,21 @@ pub fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
             http.clone()
         })
     })
+}
+
+/// The whole body, or `None` past `limit` bytes without reading the rest.
+pub async fn read_capped(
+    mut res: reqwest::Response,
+    limit: usize,
+) -> reqwest::Result<Option<Vec<u8>>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = res.chunk().await? {
+        if body.len() + chunk.len() > limit {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
 }
 
 /// The error and each cause under it, as Go's wrapped errors print.
