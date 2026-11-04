@@ -23,10 +23,10 @@ Preconditions:
 - Doctor exits 0.
 - For the API steps, log in for the API as [Login and session](./login-session.md) shows.
 
-- **Connected state.** Run `drive.sh e2e "$RUN" settings-browser tests/e2e/investigation.spec.ts -g 'Settings labels stale'`. Exit code `0` with 1 test passed. Only its first step reaches the binary, the one that shows `Connected (authenticated)`. The trace shows that step.
+- **Connected state.** Run `drive.sh e2e "$RUN" settings-browser tests/e2e/investigation.spec.ts -g 'Settings labels stale'`. Exit code `0`, and the runner prints `2 passed`: the `setup` login and this test. Only its first step reaches the binary, the one that shows `Connected (authenticated)`. The trace shows that step.
 - **Metadata.** Run `drive.sh api "$RUN" settings-meta GET /api/v1/fleet/meta`. Status `200` with `server_version` and `alerts_definition_default`.
 - **Liveness.** Run `drive.sh api "$RUN" settings-healthz GET /api/v1/fleet/healthz`. Status `200` with `status` set to `ok`.
-- **Stubbed error states.** Run `drive.sh e2e "$RUN" settings-errors tests/e2e/investigation.spec.ts -g 'Settings'`. Exit code `0` with 6 tests passed. These prove rendering only.
+- **Stubbed error states.** Run `drive.sh e2e "$RUN" settings-errors tests/e2e/investigation.spec.ts -g 'Settings'`. Exit code `0`, and the runner prints `7 passed`: the `setup` login and 6 tests. These prove rendering only.
 
 ## Gotchas
 

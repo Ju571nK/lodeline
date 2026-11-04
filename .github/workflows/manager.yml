@@ -97,11 +97,12 @@ jobs:
       - name: vite build
         run: npm run build
 
-  # The merge gate for the console as it ships: the release binary with the SPA embedded, driven
-  # by the Playwright e2e specs and the parity table.
+  # The console as it ships: the release binary with the SPA embedded, driven by the Playwright
+  # e2e specs and the parity table.
   e2e:
     name: e2e and parity
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     env:
       MANAGER_BIN: ${{ github.workspace }}/apps/manager/target/release/lodeline-manager
     steps:
@@ -125,6 +126,7 @@ jobs:
         working-directory: apps/manager/web
         run: npm run build
       - name: build release binary
+        id: build
         env:
           LODELINE_MANAGER_REQUIRE_DIST: '1'
         run: cargo build --release --locked
@@ -133,8 +135,9 @@ jobs:
         env:
           E2E_TRIAGE_DB_PATH: ${{ runner.temp }}/e2e-triage.sqlite
         run: npm run e2e
+      # Runs after an e2e failure too, but only against a binary that built.
       - name: parity
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: apps/manager/web
         run: npm run parity
       - name: upload Playwright report and traces

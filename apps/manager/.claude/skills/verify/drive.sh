@@ -96,6 +96,8 @@ cmd_new() {
   port="$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
   echo "$port" >"$scratch/port"
 
+  # The caller gets no run id until the end, so any failure from here on stops the server.
+  trap 'stop_server >&2' EXIT
   # env -i keeps a real LODELINE_SERVER_* or OIDC_* variable in the caller's shell away from the binary.
   (
     cd "$scratch"
@@ -115,10 +117,7 @@ cmd_new() {
     fi
     /bin/sleep 0.5
   done
-  if [ "$ready" != 1 ]; then
-    stop_server >&2
-    die "server did not become ready; see $evidence/server.stderr"
-  fi
+  [ "$ready" = 1 ] || die "server did not become ready; see $evidence/server.stderr"
 
   {
     git -C "$repo" rev-parse HEAD
@@ -127,6 +126,7 @@ cmd_new() {
     echo "port $port"
     http "$(url /api/health)"
   } >"$evidence/build.txt"
+  trap - EXIT
   echo "$id"
 }
 

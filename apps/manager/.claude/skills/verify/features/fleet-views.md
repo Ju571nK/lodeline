@@ -25,7 +25,7 @@ Preconditions:
 - Doctor exits 0.
 - For the API steps, log in for the API as [Login and session](./login-session.md) shows.
 
-- **Browser journey.** Run `drive.sh e2e "$RUN" fleet-browser tests/e2e/fleet.spec.ts -g 'redirect|active host count|tab switching|min_bucket|AI Guard chip'`. Exit code `0` with 6 tests passed.
+- **Browser journey.** Run `drive.sh e2e "$RUN" fleet-browser tests/e2e/fleet.spec.ts -g 'redirect|active host count|tab switching|min_bucket|AI Guard chip'`. Exit code `0`, and the runner prints `7 passed`: the `setup` login and 6 tests.
 - **Risk rows.** Run `drive.sh api "$RUN" risk GET /api/v1/fleet/risk`. Status `200` with 4 `rows`.
 - **Risk filter.** Run `drive.sh api "$RUN" risk-critical GET '/api/v1/fleet/risk?min_bucket=critical'`. Status `200` with 2 `rows`, for `eve-workstation` and `alice-mbp`.
 - **Compliance rows.** Run `drive.sh api "$RUN" compliance GET /api/v1/fleet/compliance`. Status `200` with `rows`.

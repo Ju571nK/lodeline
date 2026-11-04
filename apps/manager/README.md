@@ -55,7 +55,7 @@ unset.
 | `JWT_TTL_HOURS` | `12` | Session lifetime in hours. |
 | `LODELINE_INSECURE_COOKIE` | unset | `1` drops `Secure` from the session cookie, so a browser keeps it over plain HTTP. Only for local runs. |
 | `TRUSTED_PROXIES` | empty | Reverse proxies whose `X-Forwarded-For` the login limiter reads. See [Behind a reverse proxy](#behind-a-reverse-proxy). |
-| `FLEET_POLL_INTERVAL_SECONDS` | `5` | How often the SPA polls, and how long a cached fleet read stays fresh. |
+| `FLEET_POLL_INTERVAL_SECONDS` | `5` | How long a cached fleet read stays fresh. After that the cache still answers with the old read, up to 12 times this age, while it refreshes in the background. Fleet metadata and single events stay fresh 12 times longer than other reads. It does not set how often the SPA polls; the SPA's intervals are fixed. |
 | `FLEET_CACHE_DISABLED` | `0` | `1` sends every fleet read to `lodeline-server`. |
 | `FLEET_CACHE_MAX_ENTRIES` | `512` | Most cached fleet reads kept. |
 | `OIDC_*` | unset | Optional organization login. See [docs/operations/oidc.md](docs/operations/oidc.md). |
@@ -159,10 +159,14 @@ binary. Keep `JWT_SECRET`: sessions the Go console issued stay valid until they 
 migration. OIDC users keep their identity, so triage actions they recorded under Go stay
 theirs.
 
-Some answers differ from Go's on purpose. Loopback is no longer exempt from the login limit,
-the limiter reads only `X-Forwarded-For` and only from `TRUSTED_PROXIES`, and `/index.html`
-and `/assets/` serve the SPA instead of a redirect and a directory listing. The parity README
-lists every such difference.
+`TRUSTED_PROXIES` is new. If the console runs behind a reverse proxy, set it as in
+[Behind a reverse proxy](#behind-a-reverse-proxy). Otherwise every client shares the proxy's 10
+logins a minute. Loopback is no longer exempt from the login limit, so a proxy on the same host
+is limited like any other client.
+
+Some answers differ from Go's on purpose. The limiter reads only `X-Forwarded-For` and only
+from `TRUSTED_PROXIES`, and `/index.html` and `/assets/` serve the SPA instead of a redirect
+and a directory listing. The parity README lists every such difference.
 
 ## Test
 

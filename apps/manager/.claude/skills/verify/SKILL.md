@@ -152,7 +152,7 @@ Stops this run's server, removes `scratch/`, keeps `evidence/`, and lists what s
 - Decoding of real responses, real paging cursors, real filter behavior, and real retention.
 - Fixture accuracy. The fixtures are a copy of the Go console's mock, written against the contract in `docs/specs/fleet-api/contract.md` at the repo root.
 
-The fleet read cache stays in the path, so a read can be up to `FLEET_POLL_INTERVAL_SECONDS` old.
+The fleet read cache stays in the path. `FLEET_POLL_INTERVAL_SECONDS` (unset here, so 5) is how long a cached read stays fresh, not how often the SPA polls. Past that the cache still answers with the old read, up to 12 times that age, while it refreshes, and fleet metadata and single events stay fresh 12 times longer than other reads. So a read can be older than the SPA's poll interval suggests.
 
 Other settings also differ from production:
 

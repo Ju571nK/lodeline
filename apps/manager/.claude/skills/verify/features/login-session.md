@@ -24,8 +24,8 @@ Preconditions:
 
 - Doctor exits 0.
 
-- **Browser journey.** Run `drive.sh e2e "$RUN" login-browser tests/e2e/login.spec.ts`. Exit code `0` with 4 tests passed, one for each of `login-redirect`, `login-success`, `login-wrong-password`, and `logout`.
-- **Local sign-in only.** Run `drive.sh e2e "$RUN" login-local tests/e2e/oidc.spec.ts -g 'unconfigured provider'`. Exit code `0` with 1 test passed.
+- **Browser journey.** Run `drive.sh e2e "$RUN" login-browser tests/e2e/login.spec.ts`. Exit code `0`, and the runner prints `5 passed`: the `setup` login and one test for each of `login-redirect`, `login-success`, `login-wrong-password`, and `logout`.
+- **Local sign-in only.** Run `drive.sh e2e "$RUN" login-local tests/e2e/oidc.spec.ts -g 'unconfigured provider'`. Exit code `0`, and the runner prints `2 passed`: the `setup` login and this test.
 - **Anonymous read.** Run `drive.sh api "$RUN" me-anon GET /api/v1/auth/me`. Status `401` with code `unauthorized`.
 - **Sign-in methods.** Run `drive.sh api "$RUN" methods GET /api/v1/auth/methods`. Status `200` with `{"local":true,"oidc":false}`.
 - **Wrong password.** Run `drive.sh api "$RUN" login-bad POST /api/v1/auth/login '{"username":"admin","password":"wrong"}'`. Status `401` with code `invalid_credentials`.
