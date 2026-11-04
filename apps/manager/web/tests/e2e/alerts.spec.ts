@@ -115,8 +115,7 @@ test.describe('alerts queue + triage', () => {
 
   test('"?" opens the keyboard shortcut cheatsheet', async ({ page }) => {
     await openAlerts(page);
-    // Make sure focus is off any input so the global handler fires.
-    await page.locator('body').click();
+    await expect(page.getByRole('heading', { name: 'Alerts', exact: true })).toBeVisible();
     await page.keyboard.press('?');
 
     await expect(page.getByRole('heading', { name: /keyboard shortcuts/i })).toBeVisible();

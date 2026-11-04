@@ -14,9 +14,10 @@ use crate::config::ServerTls;
 /// The whole exchange, body included, as Go's `http.Client.Timeout`.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The largest 200 body read. The console asks for at most 100 items a page, and
-/// `lodeline-server` takes at most 2 MiB a request (axum's default body limit), so a stored event
-/// is under 2 MiB and a page under 200 MiB, plus what re-encoding adds.
+/// The largest 200 body read; a larger one is a transport error. The console's own list calls ask
+/// for 100 items a page, and `lodeline-server` takes at most 2 MiB a request (axum's default body
+/// limit), so such a page is under 200 MiB plus what re-encoding adds. The API passes any limit
+/// an authenticated caller sends, and a larger page can exceed this.
 const BODY_LIMIT: usize = 256 << 20;
 /// The largest error body read: the server's own are a short JSON object.
 const ERROR_BODY_LIMIT: usize = 64 << 10;

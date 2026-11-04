@@ -412,3 +412,33 @@ async fn a_429_sent_before_the_body_is_read_in_full() {
     assert!(res.contains("\r\nconnection: close\r\n"), "{res}");
     assert!(res.ends_with("try again shortly\"}}\n"), "{res}");
 }
+
+/// With every drain permit taken, a 429 answers at once instead of waiting for the body.
+#[tokio::test]
+async fn a_429_without_a_drain_permit_answers_at_once() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (rl, _) = limiter(1);
+    rl.allow(Ipv4Addr::LOCALHOST.into()).unwrap();
+    rl.drains
+        .try_acquire_many(MAX_DRAINS as u32)
+        .unwrap()
+        .forget();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(crate::conn::serve(
+        listener,
+        app(rl),
+        std::future::pending(),
+    ));
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n")
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut res = Vec::new();
+    s.read_to_end(&mut res).await.unwrap();
+    let res = String::from_utf8_lossy(&res);
+    assert!(res.starts_with("HTTP/1.1 429"), "{res}");
+    assert!(res.contains("\r\nconnection: close\r\n"), "{res}");
+    assert!(start.elapsed() < DRAIN_TIMEOUT / 2, "{:?}", start.elapsed());
+}
