@@ -525,6 +525,46 @@ async fn risk_query_builds_its_filters() {
     );
 }
 
+/// A server that answers every request with `body`.
+async fn answers(body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(move || async move { body });
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("127.0.0.1:{}", addr.port())
+}
+
+/// Go's `ProxyFromEnvironment`: a loopback upstream is reached directly, any other host through
+/// the proxy, and a `NO_PROXY` host directly.
+#[tokio::test]
+async fn the_env_proxy_skips_loopback_and_no_proxy_hosts() {
+    let proxy = answers("proxy").await;
+    let direct = answers("direct").await;
+    let port = direct.rsplit(':').next().unwrap().to_owned();
+    let env = [
+        ("http_proxy", format!("http://{proxy}")),
+        ("NO_PROXY", "skip.invalid".to_owned()),
+    ];
+    let client = reqwest::Client::builder()
+        .proxy(env_proxy(|k| {
+            env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+        }))
+        .build()
+        .unwrap();
+    let get = |url: String| {
+        let client = client.clone();
+        async move { client.get(url).send().await?.text().await }
+    };
+    for host in ["127.0.0.1", "localhost"] {
+        let body = get(format!("http://{host}:{port}/v1/meta")).await;
+        assert_eq!(body.unwrap(), "direct", "{host}");
+    }
+    let body = get("http://fleet.invalid/v1/meta".into()).await;
+    assert_eq!(body.unwrap(), "proxy");
+    let err = get("http://skip.invalid/v1/meta".into()).await.unwrap_err();
+    assert!(err.is_connect(), "{err:?}");
+}
+
 /// Go's `factory_test.go`: the client built from the config reaches an mTLS server with the
 /// configured CA and client certificate, and the server refuses it without the certificate.
 mod mtls {
@@ -559,7 +599,7 @@ mod mtls {
                 &["req", "-x509", "-new", "-key", "ca.key", "-days", "1"],
                 &[
                     "-subj",
-                    "/CN=test-ca",
+                    &format!("/CN=test-ca-{name}"),
                     "-addext",
                     "basicConstraints=critical,CA:TRUE",
                     "-out",
@@ -673,8 +713,9 @@ mod mtls {
         url
     }
 
-    fn config(url: &str, pki: &Pki, with_client_cert: bool) -> Config {
-        let path = |n: &str| pki.path(n).to_string_lossy().into_owned();
+    /// The config for `url`, trusting `ca`'s CA and presenting `pki`'s client certificate.
+    fn config(url: &str, pki: &Pki, ca: &Pki, with_client_cert: bool) -> Config {
+        let path = |p: &Pki, n: &str| p.path(n).to_string_lossy().into_owned();
         let mut env = vec![
             ("LODELINE_SERVER_BASE_URL", url.to_owned()),
             ("LODELINE_SERVER_READ_TOKEN", "token".into()),
@@ -685,20 +726,25 @@ mod mtls {
             ),
             ("JWT_SECRET", "abcdefghijklmnopqrstuvwxyzABCDEF".into()),
             ("FLEET_CACHE_DISABLED", "1".into()),
-            ("LODELINE_SERVER_CA_PATH", path("ca.crt")),
+            ("LODELINE_SERVER_CA_PATH", path(ca, "ca.crt")),
         ];
         if with_client_cert {
-            env.push(("LODELINE_SERVER_CLIENT_CERT_PATH", path("client.crt")));
-            env.push(("LODELINE_SERVER_CLIENT_KEY_PATH", path("client.key")));
+            env.push(("LODELINE_SERVER_CLIENT_CERT_PATH", path(pki, "client.crt")));
+            env.push(("LODELINE_SERVER_CLIENT_KEY_PATH", path(pki, "client.key")));
         }
         Config::load(|k| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())).unwrap()
+    }
+
+    async fn healthz_error(cfg: &Config) -> String {
+        let client = fleet::from_config(cfg).unwrap();
+        client.get(Request::Healthz).await.unwrap_err().to_string()
     }
 
     #[tokio::test]
     async fn reaches_an_mtls_server_with_the_client_certificate() {
         let pki = Pki::new("ok");
         let url = serve(&pki).await;
-        let client = fleet::from_config(&config(&url, &pki, true)).unwrap();
+        let client = fleet::from_config(&config(&url, &pki, &pki, true)).unwrap();
         let reply = client.get(Request::Healthz).await.unwrap();
         let Response::Healthz(h) = &*reply else {
             panic!("not healthz")
@@ -706,11 +752,30 @@ mod mtls {
         assert_eq!(h.status, "ok");
     }
 
+    /// The server's alert shows that the console trusted the server and then sent no certificate.
     #[tokio::test]
     async fn an_mtls_server_refuses_the_console_without_a_client_certificate() {
         let pki = Pki::new("refused");
         let url = serve(&pki).await;
-        let client = fleet::from_config(&config(&url, &pki, false)).unwrap();
-        assert!(client.get(Request::Healthz).await.is_err());
+        let err = healthz_error(&config(&url, &pki, &pki, false)).await;
+        assert!(err.contains("CertificateRequired"), "{err}");
+    }
+
+    /// A set CA replaces every other root: a server signed by another CA is refused.
+    #[tokio::test]
+    async fn the_configured_ca_is_the_only_one_trusted() {
+        let (pki, other) = (Pki::new("signer"), Pki::new("other-ca"));
+        let url = serve(&pki).await;
+        let err = healthz_error(&config(&url, &pki, &other, true)).await;
+        assert!(err.contains("UnknownIssuer"), "{err}");
+    }
+
+    /// The server certificate names 127.0.0.1 only, so `localhost` does not match it.
+    #[tokio::test]
+    async fn a_server_certificate_for_another_name_is_refused() {
+        let pki = Pki::new("hostname");
+        let url = serve(&pki).await.replace("127.0.0.1", "localhost");
+        let err = healthz_error(&config(&url, &pki, &pki, true)).await;
+        assert!(err.contains(r#"not valid for name "localhost""#), "{err}");
     }
 }

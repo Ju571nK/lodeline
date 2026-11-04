@@ -221,7 +221,7 @@ fn load_server_tls(trimmed: &dyn Fn(&str) -> String) -> Result<Option<ServerTls>
     if !ca_path.is_empty() {
         let pem = std::fs::read(&ca_path)
             .map_err(|e| invalid(format!("config: LODELINE_SERVER_CA_PATH: {e}")))?;
-        roots = reqwest::Certificate::from_pem_bundle(&pem).unwrap_or_default();
+        roots = ca_bundle(&pem);
         if roots.is_empty() {
             return Err(invalid(format!(
                 "config: LODELINE_SERVER_CA_PATH: no PEM certificate in {ca_path}"
@@ -241,6 +241,29 @@ fn load_server_tls(trimmed: &dyn Fn(&str) -> String) -> Result<Option<ServerTls>
         identity = Some(reqwest::Identity::from_pem(&pem).map_err(|e| pair_err(&e))?);
     }
     Ok(Some(ServerTls { roots, identity }))
+}
+
+/// Go's `AppendCertsFromPEM`: every `CERTIFICATE` block that parses, skipping any block that
+/// does not, so one bad entry does not cost the rest of the bundle.
+fn ca_bundle(pem: &[u8]) -> Vec<reqwest::Certificate> {
+    use rustls::pki_types::pem::{self, SectionKind};
+    let mut rest = pem;
+    let mut roots = Vec::new();
+    loop {
+        match pem::from_buf(&mut rest) {
+            Ok(None) => return roots,
+            Ok(Some((SectionKind::Certificate, der))) => {
+                let parses = rustls::RootCertStore::empty()
+                    .add(der.clone().into())
+                    .is_ok();
+                if parses {
+                    roots.extend(reqwest::Certificate::from_der(&der).ok());
+                }
+            }
+            // Every error is raised after its block's lines are read, so the loop moves on.
+            Ok(Some(_)) | Err(_) => {}
+        }
+    }
 }
 
 impl OidcConfig {

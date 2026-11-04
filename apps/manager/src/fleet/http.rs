@@ -1,5 +1,6 @@
 //! The fleet client for a real `lodeline-server` (Go's `internal/fleet/http.go`).
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,14 +24,18 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
-    /// `tls` adds the mTLS client certificate, and a CA that replaces the built-in roots.
+    /// The client trusts the OS store, as Go does. `tls` adds the mTLS client certificate, and a
+    /// CA that replaces the OS store.
     pub fn new(
         base_url: &str,
         token: &str,
         tls: Option<&ServerTls>,
         timeout: Duration,
     ) -> reqwest::Result<Self> {
-        let mut builder = reqwest::Client::builder().timeout(timeout);
+        let mut builder = reqwest::Client::builder()
+            .timeout(timeout)
+            .tls_built_in_webpki_certs(false)
+            .proxy(env_proxy(|k| std::env::var(k).ok()));
         if let Some(tls) = tls {
             if !tls.roots.is_empty() {
                 builder = builder.tls_built_in_root_certs(false);
@@ -65,7 +70,8 @@ impl HttpClient {
         if !query.is_empty() {
             url = format!("{url}?{query}");
         }
-        let transport = |e: reqwest::Error| FleetError::Transport(format!("GET {path}: {e}"));
+        let transport =
+            |e: reqwest::Error| FleetError::Transport(format!("GET {path}: {}", causes(&e)));
 
         let mut builder = self.http.get(&url).header(ACCEPT, "application/json");
         // Healthz is the one endpoint the server serves without the read token.
@@ -100,6 +106,51 @@ impl Client for HttpClient {
     fn get(&self, req: Request) -> BoxFuture<'_, Reply> {
         Box::pin(self.fetch(req))
     }
+}
+
+/// Go's `http.ProxyFromEnvironment`: `HTTPS_PROXY` for https and `HTTP_PROXY` for http, each
+/// name read upper case first, hosts in `NO_PROXY` exempt, and never a proxy for `localhost` or a
+/// loopback address.
+fn env_proxy(get: impl Fn(&str) -> Option<String>) -> reqwest::Proxy {
+    let var = |name: &str| {
+        [name.to_owned(), name.to_lowercase()]
+            .into_iter()
+            .find_map(|n| get(&n).filter(|v| !v.is_empty()))
+            .unwrap_or_default()
+    };
+    let (http, https) = (var("HTTP_PROXY"), var("HTTPS_PROXY"));
+    let matcher = hyper_util::client::proxy::matcher::Matcher::builder()
+        .http(http.clone())
+        .https(https.clone())
+        .no(var("NO_PROXY"))
+        .build();
+    reqwest::Proxy::custom(move |url| {
+        let host = url.host_str()?;
+        let ip = host.trim_start_matches('[').trim_end_matches(']');
+        let loopback = ip
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback());
+        if host == "localhost" || loopback {
+            return None;
+        }
+        matcher.intercept(&url.as_str().parse::<hyper::Uri>().ok()?)?;
+        Some(if url.scheme() == "https" {
+            https.clone()
+        } else {
+            http.clone()
+        })
+    })
+}
+
+/// The error and each cause under it, as Go's wrapped errors print.
+pub(super) fn causes(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut next = e.source();
+    while let Some(cause) = next {
+        out += &format!(": {cause}");
+        next = cause.source();
+    }
+    out
 }
 
 /// Decodes the first JSON value of `body`, as Go's `json.Decoder` does, into the endpoint's type.

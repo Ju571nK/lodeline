@@ -193,19 +193,27 @@ where
 /// The client `cfg` selects: the mock fleet or the HTTP client, behind the read cache unless
 /// `FLEET_CACHE_DISABLED=1`. The cache keeps data for the SPA's poll interval and serves it
 /// stale for 12 times as long while it refreshes.
-pub fn from_config(cfg: &Config) -> Result<Arc<dyn Client>, reqwest::Error> {
+pub fn from_config(cfg: &Config) -> Result<Arc<dyn Client>, String> {
     let base: Arc<dyn Client> = if cfg.mock_fleet {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock after 1970");
         Arc::new(Mock::new(now.as_secs() as i64))
     } else {
-        Arc::new(HttpClient::new(
-            &cfg.server_base_url,
-            &cfg.server_read_token,
-            cfg.server_tls.as_ref(),
-            http::TIMEOUT,
-        )?)
+        Arc::new(
+            HttpClient::new(
+                &cfg.server_base_url,
+                &cfg.server_read_token,
+                cfg.server_tls.as_ref(),
+                http::TIMEOUT,
+            )
+            .map_err(|e| {
+                format!(
+                    "fleet client (LODELINE_SERVER_CA_PATH, LODELINE_SERVER_CLIENT_CERT_PATH): {}",
+                    http::causes(&e)
+                )
+            })?,
+        )
     };
     if cfg.fleet_cache_disabled {
         return Ok(base);
