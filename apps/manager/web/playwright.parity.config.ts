@@ -4,8 +4,9 @@ import * as env from './tests/parity/env.ts';
 /**
  * Parity recorder: `npm run parity` (see tests/parity/README.md). It runs
  * only with this config, so `npx playwright test` keeps running the e2e
- * suite alone. Two manager processes start from the same binary as the e2e
- * config: one on the mock fleet, one reading a stub upstream.
+ * suite alone. Three manager processes start from the same binary as the e2e
+ * config: one on the mock fleet, one reading a stub upstream, and one whose
+ * upstream port has no listener.
  */
 
 const MANAGER_BIN = process.env.MANAGER_BIN ?? '../target/release/lodeline-manager';
@@ -68,6 +69,21 @@ export default defineConfig({
         FLEET_CACHE_DISABLED: '1',
         TRIAGE_DB_PATH: env.LIVE_DB,
         LODELINE_INSECURE_COOKIE: '0',
+      }),
+    },
+    {
+      command: MANAGER_BIN,
+      url: `${env.DOWN_URL}/api/health`,
+      reuseExistingServer: false,
+      timeout: 30_000,
+      stderr: 'ignore',
+      env: managerEnv(env.DOWN_PORT, {
+        MOCK_FLEET: '0',
+        LODELINE_SERVER_BASE_URL: `http://127.0.0.1:${env.UNUSED_PORT}`,
+        LODELINE_SERVER_READ_TOKEN: env.READ_TOKEN,
+        FLEET_CACHE_DISABLED: '1',
+        TRIAGE_DB_PATH: env.DOWN_DB,
+        LODELINE_INSECURE_COOKIE: '1',
       }),
     },
   ],

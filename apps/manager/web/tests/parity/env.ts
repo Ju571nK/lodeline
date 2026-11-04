@@ -21,9 +21,13 @@ const basePort = Number(process.env.PARITY_PORT ?? '18281');
 export const MOCK_PORT = basePort;
 export const LIVE_PORT = basePort + 1;
 export const STUB_PORT = basePort + 2;
+// A manager whose upstream port has no listener, for the connection-refused case.
+export const DOWN_PORT = basePort + 3;
+export const UNUSED_PORT = basePort + 4;
 export const MOCK_URL = `http://127.0.0.1:${MOCK_PORT}`;
 export const LIVE_URL = `http://127.0.0.1:${LIVE_PORT}`;
 export const STUB_URL = `http://127.0.0.1:${STUB_PORT}`;
+export const DOWN_URL = `http://127.0.0.1:${DOWN_PORT}`;
 
 // Write goldens or testdata. Only for recording against the Go reference; CI never sets these.
 export const UPDATE = process.env.PARITY_UPDATE === '1';
@@ -47,3 +51,4 @@ export const RUN_DIR = process.env.PARITY_RUN_DIR;
 export const RUN_START_MS = Number(process.env.PARITY_RUN_START);
 export const MOCK_DB = join(RUN_DIR, 'triage.sqlite');
 export const LIVE_DB = join(RUN_DIR, 'triage-live.sqlite');
+export const DOWN_DB = join(RUN_DIR, 'triage-down.sqlite');

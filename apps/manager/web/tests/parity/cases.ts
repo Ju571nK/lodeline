@@ -72,6 +72,10 @@ export interface UpstreamReply {
   headers?: Record<string, string>;
   json?: unknown;
   text?: string;
+  /** Wait this long before answering. */
+  delayMs?: number;
+  /** Close the connection after the request instead of answering. */
+  close?: boolean;
 }
 
 export interface Case {
@@ -81,8 +85,11 @@ export interface Case {
   outcome: 'ok' | 'error';
   method: string;
   path: string;
-  /** `live` talks to the manager wired to the stub upstream instead of the mock fleet. */
-  server?: 'mock' | 'live';
+  /**
+   * `live` talks to the manager wired to the stub upstream instead of the mock fleet, `down` to
+   * one whose upstream port has no listener.
+   */
+  server?: 'mock' | 'live' | 'down';
   auth?: Auth;
   /** Cookie header lines, each holding one `lodeline_session` pair per entry; replaces `auth`. */
   cookies?: Auth[][];
@@ -1492,6 +1499,28 @@ export const CASES: Case[] = [
     status: 200,
     text: '{"events": [',
   }),
+  upstream('upstream-closed', 'GET /api/v1/fleet/hosts', '/api/v1/fleet/hosts', {
+    status: 200,
+    close: true,
+  }),
+  {
+    // The 5 s client timeout ends the one attempt: a timeout is not retried.
+    ...upstream('upstream-timeout', 'GET /api/v1/fleet/risk', '/api/v1/fleet/risk', {
+      status: 200,
+      json: { rows: [], next_cursor: null },
+      delayMs: 6500,
+    }),
+    minMs: 5000,
+    maxMs: 6000,
+  },
+  {
+    name: 'upstream-refused',
+    route: 'GET /api/v1/fleet/events',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/events',
+    server: 'down',
+  },
 
   // Last, seconds after the first health case, so a cached timestamp shows.
   {
