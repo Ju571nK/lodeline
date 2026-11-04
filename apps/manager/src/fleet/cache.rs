@@ -178,14 +178,15 @@ impl Inner {
                     st.flights.insert(key.clone(), rx.clone());
                     let inner = self.clone();
                     tokio::spawn(async move {
+                        // Ends the flight even if the fetch panics; waiters then see `tx` gone.
+                        let landing = Landing(inner.clone(), key.clone());
                         let reply = inner.next.get(req).await;
-                        let mut st = inner.state.lock().unwrap();
                         if let Ok(val) = &reply {
                             let now = (inner.clock)();
-                            st.store(key.clone(), val.clone(), now, inner.max_entries);
+                            let mut st = inner.state.lock().unwrap();
+                            st.store(key, val.clone(), now, inner.max_entries);
                         }
-                        st.flights.remove(&key);
-                        drop(st);
+                        drop(landing);
                         tx.send_replace(Some(reply));
                     });
                     rx
@@ -197,6 +198,16 @@ impl Inner {
             Ok(reply) => reply.expect("waited for an answer"),
             Err(_) => Err(FleetError::Transport("upstream call ended".into())),
         }
+    }
+}
+
+/// Removes its key's flight when dropped.
+struct Landing(Arc<Inner>, String);
+
+impl Drop for Landing {
+    fn drop(&mut self) {
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.flights.remove(&self.1);
     }
 }
 

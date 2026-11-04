@@ -334,3 +334,29 @@ async fn one_background_refresh_per_key() {
     eventually("the refresh", || up.count("events") == 2).await;
     assert_eq!(c.background_refreshes(), 1);
 }
+
+/// Panics on its first call, then answers.
+#[derive(Default)]
+struct PanicsOnce(AtomicU64);
+
+impl Client for PanicsOnce {
+    fn get(&self, _: Request) -> BoxFuture<'_, Reply> {
+        Box::pin(async move {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("fetch panicked");
+            }
+            Ok(Arc::new(Response::Events(EventsPage::default())))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_fetch_ends_its_flight() {
+    let c = CachingClient::new(Arc::new(PanicsOnce::default()), CacheConfig::default());
+    let err = c.get(events()).await.unwrap_err();
+    assert!(matches!(err, FleetError::Transport(_)), "{err}");
+    assert!(c.0.state.lock().unwrap().flights.is_empty());
+    c.get(events())
+        .await
+        .expect("the next call starts a new fetch");
+}
