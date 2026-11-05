@@ -757,7 +757,7 @@ async fn unassessed_since_follows_only_the_top_reading() {
 }
 
 #[tokio::test]
-async fn unknown_reason_kind_is_accepted_and_served_as_sent() {
+async fn unknown_reason_kind_is_accepted_and_served_as_the_same_value() {
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
     let state = state_with_token(dir.path(), "tok");

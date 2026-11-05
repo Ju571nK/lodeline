@@ -54,27 +54,33 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   When a parser cannot read or parse a config, the agent sends an `ai_guard_assess_failed`
   event for that source with `error_kind` (`unreadable` or `parse`), the failing `path`,
   `failing_since` and the time of the last good reading, which is `null` when the agent has
-  none since it started. It sends the event on the first failure, again when the error kind or
-  path changes, and on each 24h heartbeat while the source keeps failing, with
-  `is_reattestation: true`. `failing_since` stays the first failure the running agent saw
-  until a good reading. The event carries no file content and no error text. The first good
-  reading after a failure is always sent, even when it equals the last one. Before, a failing
-  source sent nothing on a change, and its heartbeat re-sent the last reading as if it were
-  current. `lodeline show risk` still lists a failing source's last good reading with its
-  original time, and leaves out a source that has failed since the agent started. Every server
-  since v0.3.0 accepts the event. A v0.12 or later server without `ai_guard_assess_failed`
-  ingest drops a failing source 48h after its last reading. A server older than v0.12 keeps
-  showing the last reading. (#333)
+  none since it started. It sends the event on the first failure, again when the error kind
+  or path changes, and on each 24h heartbeat while the source keeps failing. A heartbeat
+  re-send carries `is_reattestation: true` only when `error_kind` and `path` are unchanged.
+  `failing_since` stays the first failure the running agent saw until a good reading. The
+  event carries no file content and no error text. The first good reading after a failure is
+  always sent, even when it equals the last one. Before, a failing source sent nothing on a
+  change, and its heartbeat re-sent the last reading as if it were current. `lodeline show
+  risk` still lists a failing source's last good reading with its original time, and leaves
+  out a source that has failed since the agent started. Every server since v0.3.0 accepts
+  the event. A v0.12 or later server without `ai_guard_assess_failed` ingest drops a failing
+  source 48h after its last reading. A server older than v0.12 keeps showing the last
+  reading. (#333)
 
 - `lodeline-server` now accepts an `ai_guard_risk_assessed` event that holds a reason it
   cannot read, such as a reason kind added by a newer agent. Before, it rejected the whole
   event as `malformed_payload`, so the reading never reached the server JSONL or the fleet
-  index. The server keeps the reading and serves that reason in
-  `ai_guard.by_tool.<tool>.reasons` as the object the agent sent. It counts in
-  `reasons_count` and adds nothing to the score. An unknown `tool`, `bucket` or `scope` still
-  rejects the event. Older servers still reject an unknown reason kind, so agents must not
-  send one. `lodeline-core` gains `AiGuardReason::Unknown`, and a rule pack whose `emit` is not
-  a reason the agent knows now fails to load with an error that names the object. (#333)
+  index. A known reason kind with fields this server cannot decode is accepted the same way,
+  and is no longer rejected. The reason must still be an object with a string `kind`. The
+  server keeps the reading and serves that reason in `ai_guard.by_tool.<tool>.reasons` as
+  the same JSON value the agent sent, though its keys may come back in a different order.
+  `/v1/events` returns the event as stored, which is the payload the agent sent, not
+  re-encoded. The reason counts in `reasons_count`. The server reads the score from the
+  event, so an unknown reason does not change it. An unknown `tool`, `bucket` or `scope`
+  still rejects the event. Older servers still reject an unknown reason kind, so agents must
+  not send one. `lodeline-core` gains `AiGuardReason::Unknown`, and a rule pack whose `emit`
+  is not a reason the agent knows now fails to load with an error that names the object.
+  (#333)
 
 ## [0.12.6] - 2026-11-05
 

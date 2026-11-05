@@ -4,7 +4,10 @@
 #[path = "fixtures/released/v0_12_6_event.rs"]
 mod released;
 
-use lodeline_core::event::{AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject};
+use lodeline_core::event::{
+    AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject,
+    UnknownReason,
+};
 use time::macros::datetime;
 
 #[test]
@@ -78,21 +81,75 @@ const KNOWN_REASONS: &[&str] = &[
     r#"{"kind":"project_settings_marketplace","name":"m","source":"github:o/r"}"#,
 ];
 
+/// Lists every known variant with its wire kind. The match has no wildcard, so
+/// a new variant fails to compile here until it gets a kind and a sample.
+macro_rules! wire_kinds {
+    ($($variant:ident => $kind:literal,)*) => {
+        const ALL_KINDS: &[&str] = &[$($kind),*];
+        fn wire_kind(r: &AiGuardReason) -> Option<&'static str> {
+            match r {
+                $(AiGuardReason::$variant { .. } => Some($kind),)*
+                AiGuardReason::Unknown(_) => None,
+            }
+        }
+    };
+}
+
+wire_kinds! {
+    DestructiveInInlineCommand => "destructive_in_inline_command",
+    DestructiveInHookScript => "destructive_in_hook_script",
+    ExternalScriptUnscanned => "external_script_unscanned",
+    NoSandbox => "no_sandbox",
+    BroadMatcher => "broad_matcher",
+    PermissionsDenyEmpty => "permissions_deny_empty",
+    PermissionsAllowBroad => "permissions_allow_broad",
+    SandboxDisabled => "sandbox_disabled",
+    McpServerRemote => "mcp_server_remote",
+    McpServerLocalCommand => "mcp_server_local_command",
+    TrustedMcpServer => "trusted_mcp_server",
+    AutoApprovalEnabled => "auto_approval_enabled",
+    McpServerSuspiciousLauncher => "mcp_server_suspicious_launcher",
+    ProjectMcpAutoEnabled => "project_mcp_auto_enabled",
+    InstructionFileDirective => "instruction_file_directive",
+    UnattendedScheduledTask => "unattended_scheduled_task",
+    McpToolInstructionOverride => "mcp_tool_instruction_override",
+    McpToolHiddenText => "mcp_tool_hidden_text",
+    McpToolNameShadow => "mcp_tool_name_shadow",
+    McpToolSurfaceDrift => "mcp_tool_surface_drift",
+    McpUnapprovedNewTool => "mcp_unapproved_new_tool",
+    McpSchemaPrivilegeExpansion => "mcp_schema_privilege_expansion",
+    McpReadOnlyHintContradiction => "mcp_read_only_hint_contradiction",
+    AutoModeDefaultsDropped => "auto_mode_defaults_dropped",
+    HookForwardsToolCalls => "hook_forwards_tool_calls",
+    UnattendedLoopPrompt => "unattended_loop_prompt",
+    StandingCommandApproval => "standing_command_approval",
+    McpToolsAutoApproved => "mcp_tools_auto_approved",
+    ProjectSettingsPluginEnabled => "project_settings_plugin_enabled",
+    ProjectSettingsHelperCommand => "project_settings_helper_command",
+    ProjectSettingsEnvOverride => "project_settings_env_override",
+    ProjectSettingsUiCommand => "project_settings_ui_command",
+    ProjectSettingsMarketplace => "project_settings_marketplace",
+}
+
 #[test]
 fn known_reasons_keep_their_released_bytes() {
-    use lodeline_core::event::AiGuardReason;
+    let mut sampled = std::collections::HashSet::new();
     for wire in KNOWN_REASONS {
         let old: released::AiGuardReason = serde_json::from_str(wire).expect(wire);
         assert_eq!(serde_json::to_string(&old).unwrap(), *wire);
         let new: AiGuardReason = serde_json::from_str(wire).expect(wire);
-        assert!(!matches!(new, AiGuardReason::Unknown(_)), "{wire}");
+        let sent: serde_json::Value = serde_json::from_str(wire).unwrap();
+        assert_eq!(wire_kind(&new), sent["kind"].as_str(), "{wire}");
         assert_eq!(serde_json::to_string(&new).unwrap(), *wire);
+        sampled.insert(wire_kind(&new).unwrap());
+    }
+    for kind in ALL_KINDS {
+        assert!(sampled.contains(kind), "no sample for {kind}");
     }
 }
 
 #[test]
 fn unknown_reason_kind_keeps_the_event_and_the_object() {
-    use lodeline_core::event::AiGuardReason;
     let wire = serde_json::json!({
         "schema_version": 1, "event_id": uuid::Uuid::now_v7(), "ts": "2026-11-03T10:00:00Z",
         "host_id": "h", "agent_version": "0.14.0", "severity": "warn",
@@ -112,12 +169,38 @@ fn unknown_reason_kind_keeps_the_event_and_the_object() {
         panic!("{:?}", ev.evidence)
     };
     assert_eq!(reasons[0], AiGuardReason::SandboxDisabled);
-    assert!(matches!(&reasons[1], AiGuardReason::Unknown(_)));
+    let AiGuardReason::Unknown(UnknownReason { kind, rest }) = &reasons[1] else {
+        panic!("{:?}", reasons[1])
+    };
+    assert_eq!(kind, "future_reason");
+    assert_eq!(
+        serde_json::Value::Object(rest.clone()),
+        serde_json::json!({"detail": {"n": 2}, "path": "/x"})
+    );
+    // Value equality: the same JSON value, though key order may differ.
     assert_eq!(
         serde_json::to_value(reasons).unwrap(),
         wire["evidence"]["reasons"]
     );
     for not_an_object in [r#""sandbox_disabled""#, "7", "null"] {
         assert!(serde_json::from_str::<AiGuardReason>(not_an_object).is_err());
+    }
+}
+
+#[test]
+fn a_reason_without_a_string_kind_is_rejected() {
+    for bad in [
+        "{}",
+        r#"{"a":1}"#,
+        r#"{"kind":null}"#,
+        r#"{"kind":null,"a":1}"#,
+        r#"{"kind":500}"#,
+        r#"{"kind":true}"#,
+        r#"{"kind":{"x":1}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AiGuardReason>(bad).is_err(),
+            "{bad} decoded"
+        );
     }
 }

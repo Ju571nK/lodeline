@@ -203,6 +203,8 @@ fn interpolate_reason(
     let interpolated = serialized
         .replace("<selector-key>", &key_escaped)
         .replace("<selector-value>", &value_escaped);
+    // Substitution only changes escaped string content of a known reason, so
+    // `Unknown` cannot come back; the arm keeps an agent from ever emitting it.
     let mut out = match serde_json::from_str(&interpolated) {
         Ok(AiGuardReason::Unknown(_)) | Err(_) => reason.clone(),
         Ok(known) => known,

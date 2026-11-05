@@ -135,7 +135,7 @@ fn known_reason<'de, D: serde::Deserializer<'de>>(
     match crate::event::AiGuardReason::deserialize(d)? {
         crate::event::AiGuardReason::Unknown(obj) => Err(serde::de::Error::custom(format!(
             "emit is not a reason this agent knows, or its fields do not match: {}",
-            serde_json::Value::Object(obj)
+            serde_json::json!(obj)
         ))),
         known => Ok(known),
     }

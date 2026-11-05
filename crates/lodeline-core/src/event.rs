@@ -410,12 +410,21 @@ pub enum AiGuardReason {
         source: String,
     },
     /// #333 — a reason object this build cannot decode: a kind from a newer
-    /// agent, or a known kind whose fields changed. The object is kept as it
-    /// arrived, so the server accepts the event and serves the reason
-    /// unchanged. Agents never emit it, and a rule pack `emit` refuses it.
-    /// Untagged variants must come last.
+    /// agent, or a known kind whose fields changed. The object is kept as the
+    /// same JSON value, so the server accepts the event and serves the reason
+    /// back; key order may differ. Agents never emit it, and a rule pack
+    /// `emit` refuses it. Untagged variants must come last.
     #[serde(untagged)]
-    Unknown(serde_json::Map<String, serde_json::Value>),
+    Unknown(UnknownReason),
+}
+
+/// #333 — the body of `AiGuardReason::Unknown`. `kind` must be a string, so
+/// the console can always render it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UnknownReason {
+    pub kind: String,
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// #146 — category of instruction-file directive. Stable wire strings

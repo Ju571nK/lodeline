@@ -173,7 +173,8 @@ Field rules:
   `rule_pack_id` and `tool_label` are omitted when `None`.
 - `error_kind` is a string, not a Rust enum without a fallback, so a later value
   can never fail decoding on an older server. Start with `unreadable`,
-  `too_large` and `parse`.
+  `too_large` and `parse`. The agent sends `unreadable` and `parse` today. A
+  file over a size cap reports as `parse`.
 - `path` is the file that failed. It carries no file content and no free-form
   error text, so nothing from the config leaks.
 - `failing_since` is the first failure the running agent saw for this source.
