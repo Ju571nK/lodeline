@@ -58,8 +58,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   source sent nothing on a change, and its heartbeat re-sent the last reading as if it were
   current. `lodeline show risk` still lists a failing source's last good reading with its
   original time, and leaves out a source that has failed since the agent started. Every server
-  since v0.3.0 accepts the event. A server without `ai_guard_assess_failed` ingest drops a
-  failing source 48h after its last reading. (#333)
+  since v0.3.0 accepts the event. A v0.12 or later server without `ai_guard_assess_failed`
+  ingest drops a failing source 48h after its last reading. A server older than v0.12 keeps
+  showing the last reading. (#333)
 
 ## [0.12.6] - 2026-11-05
 

@@ -784,6 +784,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failure_after_recovery_starts_a_new_failing_since() {
+        let (ctx, parser, mut events) =
+            flaky_ctx(vec![unreadable("/a"), Ok(Vec::new()), unreadable("/a")]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let (_, _, first, _, _) = only_failure(&mut events);
+        // The clock must move, or a carried-over time would equal a fresh one.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        recv_next_risk_assessed(&mut events).await;
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let (_, _, second, last, reattest) = only_failure(&mut events);
+        assert!(second > first, "{second} after {first}");
+        assert!(last.is_some(), "the recovered reading is named");
+        assert!(!reattest);
+    }
+
+    #[tokio::test]
+    async fn drift_fires_once_when_a_toggle_turns_on_across_a_failure() {
+        let (ctx, parser, mut events) = flaky_ctx(vec![
+            Ok(vec![AiGuardReason::PermissionsDenyEmpty]),
+            unreadable("/a"),
+            Ok(vec![AiGuardReason::SandboxDisabled]),
+        ]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        assert_eq!(
+            drain_drift_toggles(&mut events),
+            vec!["sandbox_disabled".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_in_another_users_home_names_that_user() {
+        let (ctx, parser, mut events) =
+            flaky_ctx(vec![unreadable("/home/alice/.codex/config.toml")]);
+        let alice = AssessHome {
+            user: Some("alice".into()),
+            dir: PathBuf::from("/home/alice"),
+        };
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &alice, false).await;
+        let ev = events.try_recv().expect("an event").event;
+        assert!(
+            matches!(
+                ev.evidence,
+                Evidence::AiGuardAssessFailed { ref user, .. } if user.as_deref() == Some("alice")
+            ),
+            "{ev:?}"
+        );
+        let users: Vec<_> = ctx.state.read().keys().map(|k| k.3.clone()).collect();
+        assert_eq!(users, vec![Some("alice".to_string())]);
+    }
+
+    #[tokio::test]
     async fn root_agent_assesses_each_user_home() {
         let homes = tempfile::tempdir().unwrap();
         let (alice, bob) = (homes.path().join("alice"), homes.path().join("bob"));
@@ -1526,6 +1583,41 @@ mod tests {
             "nothing more for alice"
         );
         h.abort();
+    }
+
+    #[tokio::test]
+    async fn a_removed_user_drops_its_failing_sources() {
+        let (mut ctx, parser, _events) =
+            flaky_ctx(vec![unreadable("/a"), Ok(Vec::new()), unreadable("/b")]);
+        let user = |name: &str| AssessHome {
+            user: Some(name.into()),
+            dir: PathBuf::from("/home").join(name),
+        };
+        let (alice, bob) = (user("alice"), user("bob"));
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &alice, false).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &bob, false).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &bob, false).await;
+        let mut held: Vec<_> = ctx
+            .state
+            .read()
+            .iter()
+            .map(|(k, s)| (k.3.clone(), s.reading.is_some(), s.failure.is_some()))
+            .collect();
+        held.sort();
+        assert_eq!(
+            held,
+            vec![
+                (Some("alice".into()), false, true),
+                (Some("bob".into()), true, true),
+            ]
+        );
+
+        ctx.user_homes = vec![alice, bob];
+        set_user_homes(&mut ctx, Vec::new()).await;
+        assert!(
+            ctx.state.read().is_empty(),
+            "a removed user's failing sources leave the state map"
+        );
     }
 
     #[tokio::test(start_paused = true)]

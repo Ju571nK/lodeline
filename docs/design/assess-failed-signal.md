@@ -68,6 +68,9 @@ evidence kind and a new optional field are both safe.
 
 ### How a failure behaves today
 
+This section describes the agent before rollout step 5, which replaced this
+behavior with `ai_guard_assess_failed`.
+
 `eval_and_maybe_emit` (`crates/lodeline-agent/src/ai_guard/task.rs:206-232`)
 handles an `assess_posture` error in two ways:
 
