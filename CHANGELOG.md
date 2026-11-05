@@ -71,7 +71,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   cannot read, such as a reason kind added by a newer agent. Before, it rejected the whole
   event as `malformed_payload`, so the reading never reached the server JSONL or the fleet
   index. A known reason kind with fields this server cannot decode is accepted the same way,
-  and is no longer rejected. The reason must still be an object with a string `kind`. The
+  and is no longer rejected. The reason must still be an object with a string `kind`, so a
+  reason without one, or with a number such as `{"kind":7}`, still rejects the event. The
   server keeps the reading and serves that reason in `ai_guard.by_tool.<tool>.reasons` as
   the same JSON value the agent sent, though its keys may come back in a different order.
   `/v1/events` returns the event as stored, which is the payload the agent sent, not

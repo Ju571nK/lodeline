@@ -195,6 +195,11 @@ fn a_reason_without_a_string_kind_is_rejected() {
         r#"{"kind":null}"#,
         r#"{"kind":null,"a":1}"#,
         r#"{"kind":500}"#,
+        // A buffered tag would read an integer as a variant index.
+        r#"{"kind":0}"#,
+        r#"{"kind":5}"#,
+        r#"{"kind":7}"#,
+        r#"{"kind":7,"x":1}"#,
         r#"{"kind":true}"#,
         r#"{"kind":{"x":1}}"#,
     ] {

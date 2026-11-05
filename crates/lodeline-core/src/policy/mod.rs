@@ -132,7 +132,7 @@ pub struct RuleEntry {
 fn known_reason<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<crate::event::AiGuardReason, D::Error> {
-    match crate::event::AiGuardReason::deserialize(d)? {
+    match <crate::event::AiGuardReason as Deserialize>::deserialize(d)? {
         crate::event::AiGuardReason::Unknown(obj) => Err(serde::de::Error::custom(format!(
             "emit is not a reason this agent knows, or its fields do not match: {}",
             serde_json::json!(obj)
@@ -1482,6 +1482,7 @@ host_id_strategy: hostname
                 "{emit}: {err}"
             );
         }
+        assert!(rule("{ kind: 7 }").is_err(), "an integer kind decoded");
     }
 
     #[test]

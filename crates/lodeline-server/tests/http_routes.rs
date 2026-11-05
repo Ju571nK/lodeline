@@ -154,11 +154,13 @@ async fn malformed_payload_is_rejected() {
 async fn a_reason_without_a_string_kind_is_malformed() {
     let dir = tempfile::tempdir().unwrap();
     let app = build_router(state_in(dir.path(), None));
-    let ids = [ID_A, ID_B, ID_C];
+    let ids = [ID_A, ID_B, ID_C, "00000000-0000-0000-0000-00000000000d"];
     let bad = [
         serde_json::json!({}),
         serde_json::json!({"kind": null, "a": 1}),
         serde_json::json!({"kind": 500}),
+        // An integer kind must not decode as the known variant at that index.
+        serde_json::json!({"kind": 7}),
     ];
     let events: Vec<_> = ids
         .iter()
@@ -180,7 +182,7 @@ async fn a_reason_without_a_string_kind_is_malformed() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["accepted"], serde_json::json!([]), "{resp}");
     let rejected = resp["rejected"].as_array().unwrap();
-    assert_eq!(rejected.len(), 3, "{resp}");
+    assert_eq!(rejected.len(), 4, "{resp}");
     for r in rejected {
         assert_eq!(r["reason"], "malformed_payload", "{resp}");
     }
