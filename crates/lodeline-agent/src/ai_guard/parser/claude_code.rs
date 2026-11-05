@@ -3930,6 +3930,7 @@ mod tests {
         assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
     }
 
+    #[cfg(unix)]
     fn broad_rules(reasons: &[AiGuardReason]) -> Vec<&str> {
         reasons
             .iter()
@@ -3942,6 +3943,7 @@ mod tests {
 
     /// A main checkout and a linked worktree of it, laid out the way
     /// `git worktree add` writes them, each with a local settings file.
+    #[cfg(unix)]
     fn main_and_worktree(dir: &Path) -> (PathBuf, PathBuf) {
         let dir = dunce::canonicalize(dir).unwrap();
         let main = dir.join("main");
