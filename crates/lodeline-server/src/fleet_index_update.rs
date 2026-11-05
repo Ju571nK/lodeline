@@ -83,10 +83,14 @@ pub fn apply_event_received_between(
 ) {
     // Identity bookkeeping — every variant updates these.
     host.agent_version = event.agent_version.clone();
-    if host.last_seen_ts.is_none_or(|t| event.ts > t) {
-        host.last_seen_ts = Some(event.ts);
+    // An agent clock running ahead must not keep the host seen or move the 24h
+    // window (#442). One running behind keeps its own time: the server cannot
+    // tell it from a batch that arrives late.
+    let seen = event.ts.min(latest);
+    if host.last_seen_ts.is_none_or(|t| seen > t) {
+        host.last_seen_ts = Some(seen);
     }
-    let cur_hour = event.ts.unix_timestamp() / 3600;
+    let cur_hour = seen.unix_timestamp() / 3600;
     host.counts_24h.advance_to(cur_hour);
     let slot = host.counts_24h.slot_for(cur_hour);
 
@@ -169,7 +173,7 @@ pub fn apply_event_received_between(
             policy_expired_active,
             ..
         } => {
-            host.agent_health.last_heartbeat_ts = Some(event.ts);
+            host.agent_health.last_heartbeat_ts = Some(seen);
             host.agent_health.hash_p99_ms_latest = Some(*hash_p99_ms);
             host.agent_health.jsonl_above_soft_floor_latest = Some(*jsonl_above_soft_floor);
             // Heartbeat carries the agent's current policy view as a sticky
@@ -183,7 +187,7 @@ pub fn apply_event_received_between(
         }
         Evidence::PolicyReloaded { policy_version } => {
             host.policy_state.last_applied_policy_version = *policy_version;
-            host.policy_state.last_policy_reload_ts = Some(event.ts);
+            host.policy_state.last_policy_reload_ts = Some(seen);
             host.policy_state.policy_expired_active = false;
         }
         Evidence::PolicyExpiredActive { .. } => {
@@ -530,6 +534,33 @@ mod tests {
             h.current_risk[&AiTool::ClaudeCode].score,
             0.0,
             "a future-dated reading outlived the 48h window"
+        );
+    }
+
+    #[test]
+    fn future_dated_event_neither_keeps_the_host_seen_nor_moves_the_24h_window() {
+        let mut h = HostSummary::new("h".into());
+        let t0 = datetime!(2026-05-17 12:00 UTC);
+        let received = t0 + time::Duration::minutes(1);
+        let info = |ts| ev(heartbeat(1, false, 0, false), Severity::Info, ts);
+        apply(&mut h, &info(t0));
+        // The agent clock jumped three days ahead; the server got it a minute later.
+        apply_event(&mut h, &info(t0 + time::Duration::days(3)), received);
+        assert_eq!(h.last_seen_ts, Some(received));
+        assert_eq!(h.agent_health.last_heartbeat_ts, Some(received));
+        assert_eq!(
+            h.counts_24h.sum_info(),
+            2,
+            "the window moved to the agent clock"
+        );
+
+        let next_day = t0 + time::Duration::hours(25);
+        apply(&mut h, &info(next_day));
+        assert_eq!(h.last_seen_ts, Some(next_day));
+        assert_eq!(
+            h.counts_24h.sum_info(),
+            1,
+            "a future-dated event stayed counted past its receive time + 24h"
         );
     }
 

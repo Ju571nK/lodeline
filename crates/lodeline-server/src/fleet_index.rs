@@ -174,6 +174,7 @@ impl HourlyBuckets {
 pub struct HostSummary {
     pub host_id: String,
     pub agent_version: String,
+    /// The newest event `ts`, each capped at when the server received it.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub last_seen_ts: Option<OffsetDateTime>,
 
@@ -184,7 +185,8 @@ pub struct HostSummary {
     /// Latest report per source from the last 48h (#329), a reading or a
     /// failure, with the time the prune measures it by: its `ts`, capped at
     /// when the server received it. Rebuilt from JSONL on start, where the cap
-    /// is the end of the receive day, so it is not serialized.
+    /// is the persisted receive time, or the end of the receive day for a line
+    /// without one, so it is not serialized.
     #[serde(skip)]
     pub risk_sources: std::collections::HashMap<RiskSourceKey, (OffsetDateTime, SourceState)>,
 

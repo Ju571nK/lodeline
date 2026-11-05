@@ -3,7 +3,7 @@
 //! built map for swap-in to FleetIndex.
 
 use crate::fleet_index::HostSummary;
-use crate::fleet_index_update::apply_event_received_between;
+use crate::fleet_index_update::{apply_event, apply_event_received_between};
 use lodeline_core::event::Event;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -58,12 +58,26 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
     // Sort by file basename (the YYYY-MM-DD prefix makes this chronological).
     files.sort_by_key(|(_, name)| name.clone());
 
+    let boot = OffsetDateTime::now_utc();
     for (path, name) in files {
-        // shortcut: JSONL keeps no per-line receive time, only the UTC receive
-        // day in the file name, so replay prunes by the day's start and ages by
-        // its end. A reading can then outlive 48h by up to two days until the
-        // host's next live reading, and by up to one day after it. Persist a
-        // receive time per line if that slack ever matters.
+        // Each line takes the receive time of the first batch record that ends
+        // at or after it (`persist::receive_times_path`), its own batch's unless
+        // a record was lost. A line after the last record, as in a file written
+        // before receive times were kept, knows only its UTC receive day, so
+        // replay prunes by the day's start and caps times at its end or at boot. A reading can then outlive 48h by up to two days
+        // until the host's next live reading, and by up to one day after it.
+        let times: Vec<(u64, OffsetDateTime)> =
+            std::fs::read_to_string(crate::persist::receive_times_path(&path))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| {
+                    let (end, ts) = l.split_once(' ')?;
+                    let ts =
+                        OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
+                            .ok()?;
+                    Some((end.parse().ok()?, ts))
+                })
+                .collect();
         let day = name
             .get("received-".len()..)
             .and_then(|d| d.strip_suffix(".jsonl"))
@@ -72,8 +86,11 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
             });
         // A name with no day bounds nothing, so its events prune nothing.
         let (earliest, latest) = match day.and_then(|d| Some((d, d.next_day()?))) {
-            Some((d, next)) => (d.midnight().assume_utc(), next.midnight().assume_utc()),
-            None => (OffsetDateTime::UNIX_EPOCH, OffsetDateTime::now_utc()),
+            Some((d, next)) => (
+                d.midnight().assume_utc(),
+                next.midnight().assume_utc().min(boot),
+            ),
+            None => (OffsetDateTime::UNIX_EPOCH, boot),
         };
         let f = match std::fs::File::open(&path) {
             Ok(f) => f,
@@ -84,6 +101,7 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
         };
         let mut reader = BufReader::new(f);
         let mut line = String::new();
+        let mut offset = 0u64;
         loop {
             line.clear();
             let n = match reader.read_line(&mut line) {
@@ -94,6 +112,7 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
                     break;
                 }
             };
+            offset += n as u64;
             if line.trim().is_empty() {
                 continue;
             }
@@ -102,7 +121,10 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
                     let entry = out
                         .entry(event.host_id.clone())
                         .or_insert_with(|| HostSummary::new(event.host_id.clone()));
-                    apply_event_received_between(entry, &event, earliest, latest);
+                    match times.get(times.partition_point(|(end, _)| *end < offset)) {
+                        Some(&(_, received)) => apply_event(entry, &event, received),
+                        None => apply_event_received_between(entry, &event, earliest, latest),
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(?path, error = ?e, bytes = n, "skip corrupt jsonl line");
@@ -313,6 +335,61 @@ mod tests {
             "a future-dated reading pruned the host's other readings on replay"
         );
         assert_eq!(h.current_risk.len(), 2);
+    }
+
+    #[test]
+    fn rebuild_caps_times_at_the_persisted_receive_time() {
+        use time::macros::datetime;
+        let dir = tempdir().unwrap();
+        let host_dir = dir.path().join(HID);
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let file = host_dir.join("received-2026-05-17.jsonl");
+        write_line(
+            &file,
+            &host_meta_event(HID, "alice", "2026-05-20T12:00:00Z"),
+        );
+        let end = std::fs::metadata(&file).unwrap().len();
+        std::fs::write(
+            crate::persist::receive_times_path(&file),
+            format!("{end} 2026-05-17T08:00:00Z\n"),
+        )
+        .unwrap();
+        let h = &rebuild_from_jsonl(dir.path()).unwrap()[HID];
+        assert_eq!(h.last_seen_ts, Some(datetime!(2026-05-17 08:00 UTC)));
+
+        // A line after the last record falls back to the end of the receive day.
+        write_line(
+            &file,
+            &host_meta_event(HID, "alice", "2026-05-20T12:00:00Z"),
+        );
+        let h = &rebuild_from_jsonl(dir.path()).unwrap()[HID];
+        assert_eq!(h.last_seen_ts, Some(datetime!(2026-05-18 00:00 UTC)));
+    }
+
+    #[test]
+    fn rebuild_without_receive_times_caps_times_at_boot() {
+        let dir = tempdir().unwrap();
+        let host_dir = dir.path().join(HID);
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let now = OffsetDateTime::now_utc();
+        let ahead = (now + time::Duration::days(3))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let today = now.date();
+        write_line(
+            &host_dir.join(format!(
+                "received-{:04}-{:02}-{:02}.jsonl",
+                today.year(),
+                u8::from(today.month()),
+                today.day()
+            )),
+            &host_meta_event(HID, "alice", &ahead),
+        );
+        let seen = rebuild_from_jsonl(dir.path()).unwrap()[HID].last_seen_ts;
+        assert!(
+            seen.is_some_and(|t| t <= OffsetDateTime::now_utc()),
+            "{seen:?}"
+        );
     }
 
     #[test]

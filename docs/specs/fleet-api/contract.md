@@ -220,9 +220,11 @@ client-side configuration. Two consequences flow from F10:
 - `sort` — `last_seen|risk|host_id`. Default `last_seen`. Unrecognised
   values silently fall back to `last_seen` (not validated server-side in v1).
 
-**Status semantics** (computed against agent-side `event.ts`; producer chose
-not to use a separate server-received timestamp in v1 — see §13 gap on clock
-skew):
+**Status semantics** (computed from `last_seen_ts`, the newest agent-side
+`event.ts` with each `ts` capped at the time the server received that event.
+An agent clock running ahead cannot keep a host `healthy`. One running behind
+still makes the host look older than it is, because the server cannot tell it
+from a batch that arrives late. See §13 gap on clock skew and #442):
 - `healthy`: last_seen within 5 minutes.
 - `stale`: last_seen 5 min – 1 hour.
 - `disconnected`: last_seen > 1 hour or never connected.
@@ -330,7 +332,12 @@ Notes:
   agent re-sends each 24h. Like a reading, it drops 48h after its last report,
   measured by the event's `ts` capped at the server's receive time.
 - `open_event_counts_24h` counts events in the trailing 24-hour sliding
-  window grouped by `severity`. `info` is exposed for context even though
+  window grouped by `severity`. Each event is placed by its `ts` capped at
+  the server's receive time, so an agent clock running ahead neither moves
+  the window nor keeps an event in it longer. The same rule applies to every
+  `*_24h` count, `agent_health.last_heartbeat_ts` and
+  `policy_state.last_policy_reload_ts`. Events and `/v1/events` keep the
+  agent's `ts` unchanged. `info` is exposed for context even though
   it's not in the default alert set.
 - `total_estimated` is the producer's in-memory `HashMap.len()` and is
   **exact** in v1 (in-memory index per F11). The field name preserves room
@@ -818,7 +825,7 @@ consumer side knows what to compensate for, and so follow-up issues against
 
 | Gap | What's missing | Consumer-side impact / mitigation |
 |---|---|---|
-| **Clock skew** | No `server_received_ts` on events. `last_seen_ts` / `since` / `until` all rely on agent's `event.ts`. | Hosts with bad clocks may flip status. Mitigation: surface "host clock drifted from server" warning if a HostMetaSnapshot's `ts` is materially behind the consumer's wall clock at fetch time. Follow-up issue on lodeline. |
+| **Clock skew** | No `server_received_ts` on events. `since` / `until` rely on agent's `event.ts`. `last_seen_ts` and the 24h counts cap each `ts` at the server's receive time (#442), so a clock running ahead no longer keeps a host `healthy`. A clock running behind still does not get corrected. | Hosts with clocks running behind may show `stale` or `disconnected`. Mitigation: surface "host clock drifted from server" warning if a HostMetaSnapshot's `ts` is materially behind the consumer's wall clock at fetch time. Follow-up issue on lodeline. |
 | **Search** | `/v1/events` has no `q=`, no full-text. UI/UX §7.3 wants `q=injection`. | Plan 02 implements client-side filter on response bodies (limited to current page). Server-side search is post-v1. |
 | **Severity expansion** | Filter only accepts `info,warn`. Future variants with `error/critical` are undefined. | Mitigation: consumer treats unknown severity as `warn` for display, includes the raw string in the event detail panel. |
 | **Unknown evidence variant display** | Wire-stable additive — server returns it; consumer must render. | Mitigation: alert queue row template has a generic-evidence fallback (kind text + ts + host + "Unknown evidence — view raw"). |
