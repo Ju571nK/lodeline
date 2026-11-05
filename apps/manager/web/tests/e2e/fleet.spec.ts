@@ -67,6 +67,9 @@ test.describe('fleet pages', () => {
     await openAlerts(page);
     await page.goto('/fleet/events');
     await expect(page.locator('tbody tr').first()).toBeVisible({ timeout: 5_000 });
+    await expect(
+      page.getByRole('row').filter({ hasText: 'AI Guard assessment failed' }),
+    ).toContainText('Claude Code');
     const before = await page.locator('tbody tr').count();
 
     await page.getByRole('button', { name: /^AI Guard$/ }).click();

@@ -676,6 +676,10 @@ mod tests {
                 "is_reattestation": false,
             })
         );
+        assert_eq!(
+            j["ts"], j["evidence"]["failing_since"],
+            "the first report is dated when the failure began"
+        );
         assert!(
             tokio::time::timeout(Duration::from_secs(5), events.recv())
                 .await

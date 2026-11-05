@@ -39,6 +39,22 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   error names the variable. Those values were public. `.env.example` now leaves the secrets
   empty and shows how to generate each one.
 
+### Fixed
+
+- `lodeline-server` no longer lets an agent clock that runs ahead keep a host `healthy` or
+  empty its 24-hour counts. It used to take a host's `last_seen_ts` and the hour of each
+  24-hour count from the event's own timestamp. One event dated days ahead then kept the host
+  `healthy` and counted as active in `/v1/meta` for those days, and it moved the counts window
+  so that the host's correctly dated events stopped counting. These fields now use the earlier
+  of the event's timestamp and the time the server received it. `last_heartbeat_ts` and
+  `last_policy_reload_ts` follow the same rule. An agent clock that runs behind is not
+  corrected, because the server cannot tell it from events that arrive late. So that a restart
+  gives the same result, the server now records when it received each batch, in a
+  `.received-YYYY-MM-DD.jsonl.recv` file beside each event file. Event files written before
+  this change carry no receive time, and a restart caps their times at the end of the receive
+  day or at the restart, whichever is earlier. The event's own timestamp is unchanged in stored
+  events, SIEM output and `/v1/events`. (#442)
+
 ## [0.13.0] - 2026-11-05
 
 **Upgrade order.** Upgrade the fleet server first, then the agents. The server learns the

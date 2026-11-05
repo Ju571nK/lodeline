@@ -591,6 +591,52 @@ async fn assess_failure_keeps_the_score_and_the_source_live_and_after_rebuild() 
 }
 
 #[tokio::test]
+async fn a_future_dated_event_counts_by_receive_time_live_and_after_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_token(dir.path(), "tok");
+    let app = build_router(state.clone());
+    let now = time::OffsetDateTime::now_utc();
+    let host = uuid::Uuid::now_v7().to_string();
+    post_evidence(
+        &app,
+        &host,
+        &[
+            (now, ai_reading("codex", "alice", 7.5, "critical")),
+            (
+                now + time::Duration::days(3),
+                ai_reading("claude_code", "bob", 8.0, "critical"),
+            ),
+        ],
+    )
+    .await;
+    let received = time::OffsetDateTime::now_utc();
+
+    let live = host_views(&app, &host).await;
+    let [row, detail, risk] = &live;
+    let seen = time::OffsetDateTime::parse(
+        row["last_seen_ts"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert!(
+        seen <= received,
+        "the agent clock kept the host seen: {row}"
+    );
+    assert_eq!(row["status"], "healthy", "{row}");
+    assert_eq!(detail["open_event_counts_24h"]["warn"], 2, "{detail}");
+    assert_eq!(risk[0]["open_alert_count_24h"], 2, "{risk}");
+
+    state
+        .fleet_index
+        .replace(lodeline_server::boot_rebuild::rebuild_from_jsonl(dir.path()).unwrap());
+    assert_eq!(
+        host_views(&app, &host).await,
+        live,
+        "a rebuild must match live ingest"
+    );
+}
+
+#[tokio::test]
 async fn assess_failure_with_no_reading_leaves_current_risk_null() {
     let dir = tempfile::tempdir().unwrap();
     let app = build_router(state_with_token(dir.path(), "tok"));

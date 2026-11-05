@@ -1,6 +1,7 @@
 //! Per-host JSONL persistence + sequence-based dedup.
 //!
-//! Layout: `events_out_dir/<host_id>/received-YYYY-MM-DD.jsonl`, append mode.
+//! Layout: `events_out_dir/<host_id>/received-YYYY-MM-DD.jsonl`, append mode,
+//! with the receive time of each batch in `.received-YYYY-MM-DD.jsonl.recv`.
 //! Dedup: an in-memory `host_id → last_persisted_sequence` map is consulted
 //! before each write and persisted to `high_water_path` (atomic tmp+rename)
 //! after each batch, so a server restart does not re-persist already-seen
@@ -137,8 +138,35 @@ pub fn append_events<'e, 'p>(
         path: path.clone(),
         source,
     })?;
+    // The lines are already durable, so a lost record only makes boot rebuild
+    // fall back to the receive day for this batch.
+    if let Err(e) = f
+        .metadata()
+        .and_then(|m| record_receive_time(&path, m.len(), now))
+    {
+        tracing::warn!(?path, error = ?e, "receive time not recorded");
+    }
     high_water.set(host_id, max_seq);
     Ok(to_write)
+}
+
+/// The file beside `jsonl` that holds when the server received each batch
+/// (#442): one `<byte offset of the batch end> <RFC 3339 time>` line per batch.
+/// The JSONL lines stay the agent's events byte for byte.
+pub fn receive_times_path(jsonl: &Path) -> PathBuf {
+    let name = jsonl.file_name().unwrap_or_default().to_string_lossy();
+    jsonl.with_file_name(format!(".{name}.recv"))
+}
+
+fn record_receive_time(jsonl: &Path, end: u64, now: OffsetDateTime) -> std::io::Result<()> {
+    let ts = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(std::io::Error::other)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(receive_times_path(jsonl))?;
+    writeln!(f, "{end} {ts}")
 }
 
 #[cfg(test)]
