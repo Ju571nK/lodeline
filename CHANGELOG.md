@@ -34,6 +34,20 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- AI Guard reports a Codex `prefix_rule(..., decision="allow")` whose prefix can run any
+  program as `permissions_allow_broad`, next to its `standing_command_approval`. A prefix is
+  broad when it is one that Codex itself refuses to suggest as a standing approval, such as
+  `["bash", "-c"]`, `["python3"]`, `["sudo"]`, `["rm"]` or `["git"]`, or a shorter prefix of
+  one, such as `["npm"]` for `["npm", "run"]`. Codex runs a command that such a rule allows with
+  no prompt and outside the sandbox. The finding's `rule` is spelled from that list, for example
+  `prefix_rule(pattern=["python3", "-c"])`, so no path or argument from the rules file leaves
+  the host. A narrow prefix such as `["git", "status"]` is reported as before. This is an
+  existing reason kind, so every server version accepts it. (#200)
+- AI Guard no longer reports Codex config hooks when Codex has hooks turned off with
+  `[features] hooks = false` or the older name `codex_hooks = false`. The merged system, user
+  and project config decides, and a `[features]` pin in the system `requirements.toml` wins over
+  config. A pin from MDM or cloud policy, a `--profile` file and a `--disable hooks` flag are not
+  read. (#200)
 - `lodeline-manager` refuses to start when `JWT_SECRET`, `LODELINE_SERVER_READ_TOKEN` or
   `ADMIN_PASSWORD_BCRYPT` still holds the example value from an earlier `.env.example`, and the
   error names the variable. Those values were public. `.env.example` now leaves the secrets

@@ -27,6 +27,10 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         NoSandbox { .. } => {
             "The agent runs with no sandbox boundary — enable the tool's sandbox or limit what it can run."
         }
+        // #200: Codex rules-file prefixes are reported in the DSL's own form.
+        PermissionsAllowBroad { rule } if rule.starts_with("prefix_rule(") => {
+            "A Codex rules file approves a command prefix that can run any program, so matching commands run with no prompt and outside the sandbox. Pin the prefix to a specific command, or remove the rule."
+        }
         PermissionsAllowBroad { .. } => {
             "A wildcard allow rule grants broad tool access — narrow it to specific commands."
         }
@@ -144,6 +148,18 @@ mod tests {
         for r in &samples {
             assert!(!hint_for_reason(r).is_empty());
         }
+    }
+
+    #[test]
+    fn codex_broad_prefix_gets_its_own_hint() {
+        let codex = hint_for_reason(&AiGuardReason::PermissionsAllowBroad {
+            rule: r#"prefix_rule(pattern=["bash"])"#.into(),
+        });
+        let claude = hint_for_reason(&AiGuardReason::PermissionsAllowBroad {
+            rule: "Bash(*)".into(),
+        });
+        assert!(codex.contains("Codex rules file"), "{codex}");
+        assert!(!claude.contains("Codex"), "{claude}");
     }
 
     #[test]
