@@ -782,8 +782,8 @@ pub enum Evidence {
         rule_pack_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_label: Option<String>,
-        /// Such as `unreadable`, `too_large` or `parse`. A string, so a later
-        /// value never fails decoding.
+        /// `unreadable` or `parse` today. A string, so a later value never
+        /// fails decoding.
         error_kind: String,
         /// The file that failed. No content or error text from it.
         path: PathBuf,

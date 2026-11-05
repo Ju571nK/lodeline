@@ -1,9 +1,10 @@
 # Assess-failed signal and current_risk attribution
 
 Status: proposal. Rollout steps 2 (Option B1), 3 (Option A3 ingest on the
-server), 4 (console) and 5 (Option A3 emission in the agent) are implemented;
-step 1 is implemented for `AiGuardReason` only, and step 6 is not. Tracks
-two items from issue #333.
+server), 4 (console), 5 (Option A3 emission in the agent) and 6 (docs) are
+implemented. Step 1 is implemented for `AiGuardReason` only: `AiTool`,
+`AiGuardBucket` and `AiGuardScope` still reject an unknown value. Tracks two
+items from issue #333.
 
 This document covers two gaps in how AI Guard posture reaches the fleet:
 
