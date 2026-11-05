@@ -14,7 +14,7 @@ This folder is its own Cargo workspace. The root workspace does not build it, an
 - Rust 1.88 or later. In this repository, rustup picks the toolchain from `rust-toolchain.toml`.
 - A C compiler. `rusqlite` builds its bundled SQLite.
 - Node.js 20.19+ or 22.12+ and npm, to build the SPA. The SPA tests (`npm test`) need Node.js
-  22.12 or later, because they use `JSON.parse` source text and `JSON.rawJSON`. CI uses Node.js 24.
+  22.13 or later, because they use `JSON.parse` source text and `JSON.rawJSON`. CI uses Node.js 24.
 
 ## Build
 

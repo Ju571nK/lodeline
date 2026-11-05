@@ -110,7 +110,7 @@ describe('engines without JSON.parse source text', () => {
           },
       ),
     );
-    const text = `{"events":[{"schema_version":1.0,"evidence":${evidence},"source":{"n":1.50}}]}`;
+    const text = `{"events":[{"schema_version":1.0,"evidence":${evidence},"source":{"n":1.50},"subject":-0}]}`;
     const page = await fromServer<Page>(text);
     const members: unknown[] = [];
     // The replacer sees toJSON's result, so read the member from its holder.
