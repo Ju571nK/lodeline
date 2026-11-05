@@ -34,7 +34,9 @@ impl Drop for TempDir {
 }
 
 /// Host A has every detail block: host meta, two assessed tools with controls, a heartbeat,
-/// a policy reload, a signature failure and agent health signals. Host B has one warn event.
+/// a policy reload, a signature failure and agent health signals. Its Claude Code reading names a
+/// user and a rule pack and has failed since, and its Codex reading has no user. Host B has one
+/// warn event and a failing source with no reading.
 fn seed(dir: &Path) -> Vec<String> {
     std::fs::write(
         dir.join("signed-policy.json"),
@@ -67,7 +69,13 @@ fn seed(dir: &Path) -> Vec<String> {
                         "hook_event": "PreToolUse", "snippet": "rm -rf /"}],
                     "controls": [{"id": "fixture.restricted", "source_path": "/fixture/config",
                         "setting": "restricted", "value": true}],
+                    "user": "alice", "rule_pack_id": "acme-extended",
                     "is_reattestation": false}),
+                ),
+                (
+                    3,
+                    "warn",
+                    assess_failed("claude_code", Some("alice"), Some(4)),
                 ),
                 (
                     4,
@@ -109,11 +117,14 @@ fn seed(dir: &Path) -> Vec<String> {
         ),
         (
             HOST_B,
-            vec![(
-                30,
-                "warn",
-                json!({"kind": "host_id_conflict", "observed_status": 409}),
-            )],
+            vec![
+                (
+                    30,
+                    "warn",
+                    json!({"kind": "host_id_conflict", "observed_status": 409}),
+                ),
+                (29, "warn", assess_failed("cursor", None, None)),
+            ],
         ),
     ];
     let now = chrono::Utc::now();
@@ -144,6 +155,24 @@ fn seed(dir: &Path) -> Vec<String> {
         }
     }
     ids
+}
+
+/// An `ai_guard_assess_failed` for `tool` at user scope, failing since 3 minutes ago, with its last
+/// good reading `last_minutes_ago`.
+fn assess_failed(tool: &str, user: Option<&str>, last_minutes_ago: Option<i64>) -> Value {
+    let at = |m: i64| {
+        (chrono::Utc::now() - chrono::Duration::minutes(m))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    let mut e = json!({"kind": "ai_guard_assess_failed", "tool": tool,
+        "scope": {"kind": "user_global"}, "error_kind": "parse", "path": "/fixture/config",
+        "failing_since": at(3), "last_assessed_ts": last_minutes_ago.map(at),
+        "is_reattestation": false});
+    if let Some(user) = user {
+        e["user"] = user.into();
+        e["rule_pack_id"] = "acme-extended".into();
+    }
+    e
 }
 
 async fn serve(dir: &Path) -> String {
@@ -295,6 +324,53 @@ async fn the_http_client_reads_every_endpoint_of_a_real_server() {
     assert!(h.host_meta.is_some() && h.summary.current_risk.is_some());
     let tools = h.ai_guard.as_ref().unwrap().by_tool.as_ref().unwrap();
     assert!(tools["claude_code"].controls.is_some() && tools["codex"].controls.is_none());
+    let source = |s: &Option<Raw>, key: &str| s.as_ref().map(|s| s.member_str(key));
+    let (claude, codex) = (&tools["claude_code"], &tools["codex"]);
+    assert_eq!(source(&claude.source, "user").as_deref(), Some("alice"));
+    assert_eq!(
+        source(&claude.source, "rule_pack_id").as_deref(),
+        Some("acme-extended")
+    );
+    assert_eq!(source(&codex.source, "user").as_deref(), Some(""));
+    let codex_source = serde_json::to_value(codex.source.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        codex_source.get("user"),
+        Some(&Value::Null),
+        "{codex_source}"
+    );
+    assert!(claude.unassessed_since.is_some() && codex.unassessed_since.is_none());
+    let risk = h.summary.current_risk.as_ref().unwrap();
+    assert_eq!(
+        risk.by_tool.as_ref().unwrap()["claude_code"].unassessed_since,
+        claude.unassessed_since
+    );
+    let failing = &h.summary.ai_guard_unassessed.as_ref().unwrap()["claude_code"];
+    assert_eq!(failing.sources[0].user.as_deref(), Some("alice"));
+    assert!(failing.last_assessed_ts.is_some());
+
+    let Response::Hosts(hosts) = &*client
+        .get(Request::Hosts(Default::default()))
+        .await
+        .unwrap()
+    else {
+        panic!("not hosts")
+    };
+    let b = hosts.hosts.as_ref().unwrap().iter();
+    let b = b.clone().find(|h| h.host_id == HOST_B).unwrap();
+    assert!(b.current_risk.is_none(), "failures alone give no score");
+    let failing = &b.ai_guard_unassessed.as_ref().unwrap()["cursor"];
+    assert_eq!(
+        (failing.sources[0].user.as_ref(), failing.last_assessed_ts),
+        (None, None)
+    );
+    let Response::Risk(risk) = &*client.get(Request::Risk(Default::default())).await.unwrap()
+    else {
+        panic!("not risk")
+    };
+    let rows = risk.rows.as_ref().unwrap();
+    assert_eq!(rows.len(), 1, "host B has no reading, so no risk row");
+    assert_eq!(rows[0].unassessed_since, claude.unassessed_since);
+    assert_eq!(source(&rows[0].source, "user").as_deref(), Some("alice"));
     let Response::Events(page) = &*client
         .get(Request::Events(Default::default()))
         .await
@@ -427,9 +503,8 @@ fn current_risk(r: api::CurrentRisk) -> CurrentRisk {
                             assessed_ts,
                             bucket,
                             score,
-                            // The console does not read these yet.
-                            source: _,
-                            unassessed_since: _,
+                            source,
+                            unassessed_since,
                         },
                     )| {
                         let ts = time(assessed_ts);
@@ -439,6 +514,8 @@ fn current_risk(r: api::CurrentRisk) -> CurrentRisk {
                                 score,
                                 bucket,
                                 assessed_ts: ts,
+                                source: source.map(risk_source),
+                                unassessed_since: unassessed_since.map(time),
                             },
                         )
                     },
@@ -459,8 +536,7 @@ fn hosts_page(b: api::HostsPage) -> HostsPage {
         .map(
             |api::HostListItem {
                  agent_version,
-                 // The console does not read this yet.
-                 ai_guard_unassessed: _,
+                 ai_guard_unassessed,
                  current_risk: risk,
                  host_id,
                  hostname,
@@ -475,6 +551,7 @@ fn hosts_page(b: api::HostsPage) -> HostsPage {
                 status,
                 current_risk: risk.map(current_risk),
                 open_event_counts_24h: counts(open_event_counts_24h),
+                ai_guard_unassessed: ai_guard_unassessed.map(unassessed),
             },
         )
         .collect();
@@ -490,8 +567,7 @@ fn host_detail(b: api::HostDetail) -> HostDetail {
         agent_health,
         agent_version,
         ai_guard,
-        // The console does not read this yet.
-        ai_guard_unassessed: _,
+        ai_guard_unassessed,
         current_risk: risk,
         host_id,
         host_meta,
@@ -524,6 +600,7 @@ fn host_detail(b: api::HostDetail) -> HostDetail {
             status,
             current_risk: risk.map(current_risk),
             open_event_counts_24h: counts(open_event_counts_24h),
+            ai_guard_unassessed: ai_guard_unassessed.map(unassessed),
         },
         host_meta: host_meta.map(
             |api::HostMeta {
@@ -598,9 +675,8 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
         reasons,
         scope,
         score,
-        // The console does not read these yet.
-        source: _,
-        unassessed_since: _,
+        source,
+        unassessed_since,
     } = a;
     ToolAiGuard {
         controls: controls.map(|cs| {
@@ -626,7 +702,65 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
         is_reattestation,
         scope: raw(scope),
         reasons: Some(reasons.into_iter().map(raw).collect()),
+        source: source.map(risk_source),
+        unassessed_since: unassessed_since.map(time),
     }
+}
+
+fn risk_source(s: api::RiskSource) -> Raw {
+    let api::RiskSource {
+        rule_pack_id,
+        scope,
+        tool_label,
+        user,
+    } = s;
+    raw(
+        json!({"rule_pack_id": rule_pack_id, "scope": scope, "tool_label": tool_label,
+        "user": user}),
+    )
+}
+
+fn unassessed(
+    by_tool: std::collections::BTreeMap<String, api::ToolUnassessed>,
+) -> std::collections::BTreeMap<String, ToolUnassessed> {
+    by_tool
+        .into_iter()
+        .map(
+            |(
+                tool,
+                api::ToolUnassessed {
+                    last_assessed_ts,
+                    since,
+                    sources,
+                },
+            )| {
+                let sources = sources
+                    .into_iter()
+                    .map(
+                        |api::UnassessedSource {
+                             error_kind,
+                             path,
+                             rule_pack_id,
+                             scope,
+                             user,
+                         }| UnassessedSource {
+                            scope: raw(scope),
+                            user,
+                            rule_pack_id,
+                            error_kind,
+                            path,
+                        },
+                    )
+                    .collect();
+                let t = ToolUnassessed {
+                    since: time(since),
+                    last_assessed_ts: last_assessed_ts.map(time),
+                    sources,
+                };
+                (tool, t)
+            },
+        )
+        .collect()
 }
 
 fn risk_page(b: api::RowsPage<api::RiskRow>) -> RiskPage {
@@ -642,10 +776,9 @@ fn risk_page(b: api::RowsPage<api::RiskRow>) -> RiskPage {
                  open_alert_count_24h,
                  reasons_count,
                  score,
-                 // The console does not read these yet.
-                 source: _,
+                 source,
                  top_tool,
-                 unassessed_since: _,
+                 unassessed_since,
              }| RiskRow {
                 host_id,
                 hostname,
@@ -655,6 +788,8 @@ fn risk_page(b: api::RowsPage<api::RiskRow>) -> RiskPage {
                 reasons_count: reasons_count as i64,
                 assessed_ts: time(assessed_ts),
                 open_alert_count_24h: open_alert_count_24h.into(),
+                source: source.map(risk_source),
+                unassessed_since: unassessed_since.map(time),
             },
         )
         .collect();

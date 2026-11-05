@@ -3,9 +3,9 @@
 //! Go decodes each upstream body into these structs and encodes the struct again, so the SPA
 //! gets Go's shape whatever the server sent: unknown fields are dropped, a missing or `null`
 //! field becomes its zero value (`""`, `0`, `false`, year 1), times are re-formatted, and the
-//! open-ended parts (event source, subject and evidence, AI guard scope, reasons and control
-//! values) pass through as raw JSON. `lodeline-fleet-api` holds the server's own, stricter types;
-//! the contract test ties the two together.
+//! open-ended parts (event source, subject and evidence, AI guard scope, score source, reasons
+//! and control values) pass through as raw JSON. `lodeline-fleet-api` holds the server's own,
+//! stricter types; the contract test ties the two together.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -441,6 +441,27 @@ pub struct HostSummary {
     pub current_risk: Option<CurrentRisk>,
     /// Keyed by severity, with only the keys the server sent.
     pub open_event_counts_24h: Option<BTreeMap<String, i64>>,
+    /// Failing AI Guard sources per tool. Left out when none fails or the server predates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_guard_unassessed: Option<BTreeMap<String, ToolUnassessed>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolUnassessed {
+    pub since: GoTime,
+    pub last_assessed_ts: Option<GoTime>,
+    pub sources: Vec<UnassessedSource>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnassessedSource {
+    pub scope: Raw,
+    pub user: Option<String>,
+    pub rule_pack_id: Option<String>,
+    pub error_kind: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -457,6 +478,12 @@ pub struct ToolRisk {
     pub score: f64,
     pub bucket: String,
     pub assessed_ts: GoTime,
+    /// Relayed as written, so a missing `source` (an older server) stays distinct from one with
+    /// `user: null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Raw>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unassessed_since: Option<GoTime>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -467,8 +494,7 @@ pub struct HostsPage {
     pub total_estimated: i64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct HostDetail {
     #[serde(flatten)]
     pub summary: HostSummary,
@@ -476,6 +502,35 @@ pub struct HostDetail {
     pub policy_state: Option<PolicyState>,
     pub agent_health: Option<AgentHealth>,
     pub ai_guard: Option<AiGuard>,
+}
+
+/// The detail blocks of a host body. `HostDetail` reads them and the summary from the same text,
+/// because `flatten` would buffer the summary's members in a form a `Raw` cannot be read from.
+#[derive(Deserialize)]
+struct DetailBlocks {
+    host_meta: Option<HostMeta>,
+    policy_state: Option<PolicyState>,
+    agent_health: Option<AgentHealth>,
+    ai_guard: Option<AiGuard>,
+}
+
+impl<'de> Deserialize<'de> for HostDetail {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = Raw::deserialize(d)?;
+        let DetailBlocks {
+            host_meta,
+            policy_state,
+            agent_health,
+            ai_guard,
+        } = serde_json::from_str(text.0.get()).map_err(D::Error::custom)?;
+        Ok(Self {
+            summary: serde_json::from_str(text.0.get()).map_err(D::Error::custom)?,
+            host_meta,
+            policy_state,
+            agent_health,
+            ai_guard,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -546,6 +601,10 @@ pub struct ToolAiGuard {
     pub is_reattestation: bool,
     pub scope: Raw,
     pub reasons: Option<Vec<Raw>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Raw>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unassessed_since: Option<GoTime>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -566,6 +625,10 @@ pub struct RiskRow {
     pub reasons_count: i64,
     pub assessed_ts: GoTime,
     pub open_alert_count_24h: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Raw>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unassessed_since: Option<GoTime>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -732,6 +795,56 @@ mod tests {
             assert!(decode::<Event>(bad).is_err(), "{bad}");
         }
         assert!(decode::<HostDetail>(r#"{"current_risk": {"max_score": 1e400}}"#).is_err());
+    }
+
+    /// A missing `source` stays missing and one with `user: null` keeps it, so the SPA can tell an
+    /// older server from the agent's own home. Unassessed times are read as times.
+    #[test]
+    fn score_source_and_unassessed_fields_pass_through() {
+        let body = r#"{"current_risk": {"max_score": 2, "max_bucket": "medium", "by_tool": {
+                "codex": {"score": 2, "bucket": "medium", "assessed_ts": "2026-01-01T00:00:00Z",
+                    "source": {"scope": {"kind": "user_global"}, "user": null,
+                        "rule_pack_id": null, "tool_label": null},
+                    "unassessed_since": "2026-01-01T00:05:00.500+09:00"},
+                "gemini": {"score": 1, "bucket": "medium", "assessed_ts": "2026-01-01T00:00:00Z"}}},
+            "ai_guard_unassessed": {"cursor": {"since": "2026-01-01T00:01:00Z",
+                "last_assessed_ts": null, "sources": [{"scope": {"kind": "user_global"},
+                    "user": "bob", "rule_pack_id": null, "error_kind": "parse",
+                    "path": "/home/bob/.cursor/mcp.json"}]}}}"#;
+        let host: HostSummary = decode(body).unwrap();
+        let out = serde_json::to_value(&host).unwrap();
+        let by_tool = &out["current_risk"]["by_tool"];
+        let codex = host
+            .current_risk
+            .as_ref()
+            .unwrap()
+            .by_tool
+            .as_ref()
+            .unwrap()["codex"]
+            .clone();
+        assert_eq!(
+            text(codex.source.as_ref().unwrap()),
+            r#"{"scope": {"kind": "user_global"}, "user": null,
+                        "rule_pack_id": null, "tool_label": null}"#
+        );
+        assert_eq!(
+            by_tool["codex"]["unassessed_since"],
+            "2026-01-01T00:05:00.5+09:00"
+        );
+        assert!(by_tool["gemini"].get("source").is_none());
+        assert!(by_tool["gemini"].get("unassessed_since").is_none());
+        assert_eq!(
+            out["ai_guard_unassessed"]["cursor"],
+            serde_json::json!({"since": "2026-01-01T00:01:00Z", "last_assessed_ts": null,
+                "sources": [{"scope": {"kind": "user_global"}, "user": "bob",
+                    "rule_pack_id": null, "error_kind": "parse",
+                    "path": "/home/bob/.cursor/mcp.json"}]})
+        );
+        let older: HostSummary = decode(r#"{"ai_guard_unassessed": null}"#).unwrap();
+        assert!(serde_json::to_value(&older)
+            .unwrap()
+            .get("ai_guard_unassessed")
+            .is_none());
     }
 
     /// Raw and typed values share one nesting limit: the one `serde_json::Value` set when this
