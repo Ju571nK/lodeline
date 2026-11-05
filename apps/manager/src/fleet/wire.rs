@@ -612,6 +612,10 @@ pub struct ToolAiGuard {
 pub struct RiskPage {
     pub rows: Option<Vec<RiskRow>>,
     pub next_cursor: Option<String>,
+    /// Hosts with failing sources and no score, so not in `rows`. Left out when the server
+    /// predates it, which means unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_assessed_host_count: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

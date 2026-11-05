@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router';
 import { Pagination } from '@/components/Fleet/Pagination';
-import { RiskTable } from '@/components/Fleet/RiskTable';
+import { NotAssessedNotice, RiskTable } from '@/components/Fleet/RiskTable';
 import { DEFAULT_RISK_FILTER, type RiskFilter, useFleetRisk } from '@/hooks/useFleetRisk';
 
 interface RiskSearch {
@@ -62,6 +62,11 @@ function RiskTab() {
           </button>
         ))}
       </div>
+      {/* The server counts per selected tool, but the Devices filter spans all tools. */}
+      <NotAssessedNotice
+        count={risk.firstPage?.not_assessed_host_count}
+        link={!filter.tool.length}
+      />
       <div className="overflow-hidden rounded-md border border-border bg-bg-surface">
         <RiskTable rows={rows} isPending={isPending} />
         <Pagination {...risk} count={rows.length} />

@@ -285,7 +285,7 @@ async fn the_http_client_reads_every_endpoint_of_a_real_server() {
             )
         },
         {
-            let (b, raw) = server_body::<api::RowsPage<api::RiskRow>>(&url, "/v1/fleet/risk").await;
+            let (b, raw) = server_body::<api::RiskPage>(&url, "/v1/fleet/risk").await;
             let req = Request::Risk(RiskParams::default());
             (
                 req,
@@ -369,6 +369,11 @@ async fn the_http_client_reads_every_endpoint_of_a_real_server() {
     };
     let rows = risk.rows.as_ref().unwrap();
     assert_eq!(rows.len(), 1, "host B has no reading, so no risk row");
+    assert_eq!(
+        risk.not_assessed_host_count,
+        Some(1),
+        "host B is counted instead"
+    );
     assert_eq!(rows[0].unassessed_since, claude.unassessed_since);
     assert_eq!(source(&rows[0].source, "user").as_deref(), Some("alice"));
     let Response::Events(page) = &*client
@@ -763,8 +768,12 @@ fn unassessed(
         .collect()
 }
 
-fn risk_page(b: api::RowsPage<api::RiskRow>) -> RiskPage {
-    let api::RowsPage { next_cursor, rows } = b;
+fn risk_page(b: api::RiskPage) -> RiskPage {
+    let api::RiskPage {
+        next_cursor,
+        not_assessed_host_count,
+        rows,
+    } = b;
     let rows = rows
         .into_iter()
         .map(
@@ -796,6 +805,7 @@ fn risk_page(b: api::RowsPage<api::RiskRow>) -> RiskPage {
     RiskPage {
         rows: Some(rows),
         next_cursor,
+        not_assessed_host_count: not_assessed_host_count.map(|n| n as i64),
     }
 }
 

@@ -20,6 +20,17 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   version, which now follows the workspace version, so a release prep bumps
   `apps/manager/Cargo.toml` and `apps/manager/Cargo.lock` with the root. See
   `apps/manager/README.md`. There are no `.deb`, `.rpm` or container images for the console yet.
+- The web console's Risk tab now says when hosts are missing from it because they have
+  failing AI Guard sources and no score, such as "1 host is not assessed", with a link to those
+  hosts in the Devices tab. Before, such a host was absent from the Risk tab, and an empty
+  table read "No hosts above the selected risk level." The Devices tab gains a "Failing AI
+  Guard sources, no score" filter over loaded devices for the link. The link is left out while
+  a `tool` filter is set, because the Devices filter spans all tools. `GET /v1/fleet/risk` gains
+  `not_assessed_host_count`, the number of hosts with a failing source for a selected tool and
+  no reading for any selected tool. `tool` applies to it, `min_bucket` does not, and every page
+  carries the count for the whole result. These hosts still get no score and no row. The change
+  is additive. Older consoles ignore the field, and with an older server that omits it the
+  console shows no notice. (#485)
 
 ### Changed
 

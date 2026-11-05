@@ -42,6 +42,7 @@ export function usePagedFleet<T, P extends Page>(
   const refetch = useCallback(() => q.refetch({ cancelRefetch: false }), [q.refetch]);
   return {
     rows,
+    firstPage: q.data?.pages[0],
     isPending: q.isPending && !q.data,
     error: q.error,
     lastUpdatedAt: q.dataUpdatedAt,

@@ -351,6 +351,7 @@ async fn fleet_risk_empty_returns_empty_rows() {
     let (status, body) = get(&app, "/v1/fleet/risk", Some("tok")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["rows"].as_array().unwrap().is_empty());
+    assert_eq!(body["not_assessed_host_count"], 0, "{body}");
 }
 
 #[tokio::test]
@@ -614,6 +615,72 @@ async fn assess_failure_with_no_reading_leaves_current_risk_null() {
         risk,
         serde_json::json!([]),
         "a host with no score got a risk row"
+    );
+}
+
+#[tokio::test]
+async fn risk_counts_hosts_whose_selected_tools_fail_with_no_score() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = build_router(state_with_token(dir.path(), "tok"));
+    let now = time::OffsetDateTime::now_utc();
+    let m = |mins: i64| now - time::Duration::minutes(mins);
+    let failure_only = uuid::Uuid::now_v7().to_string();
+    let scored_and_failing = uuid::Uuid::now_v7().to_string();
+    let stale = uuid::Uuid::now_v7().to_string();
+    let scored = uuid::Uuid::now_v7().to_string();
+    let codex_failure = ai_failure("codex", "alice", "parse", m(2), None);
+    post_evidence(&app, &failure_only, &[(m(2), codex_failure.clone())]).await;
+    post_evidence(
+        &app,
+        &scored_and_failing,
+        &[
+            (m(3), ai_reading("claude_code", "alice", 7.5, "critical")),
+            (m(2), codex_failure),
+        ],
+    )
+    .await;
+    post_evidence(
+        &app,
+        &stale,
+        &[
+            (m(3), ai_reading("claude_code", "alice", 2.0, "medium")),
+            (
+                m(2),
+                ai_failure("claude_code", "alice", "parse", m(2), Some(m(3))),
+            ),
+        ],
+    )
+    .await;
+    post_evidence(
+        &app,
+        &scored,
+        &[(m(3), ai_reading("claude_code", "bob", 1.0, "low"))],
+    )
+    .await;
+
+    for (query, count) in [
+        ("", 1),
+        // These hosts have no bucket, so `min_bucket` leaves them in.
+        ("?min_bucket=critical", 1),
+        ("?limit=1", 1),
+        ("?tool=codex", 2),
+        ("?tool=claude_code", 0),
+        ("?tool=claude_code,codex", 1),
+    ] {
+        let body = get_rows_by_host(&app, &format!("/v1/fleet/risk{query}")).await;
+        assert_eq!(body["not_assessed_host_count"], count, "{query}: {body}");
+        let rows = body["rows"].as_array().unwrap();
+        assert!(
+            rows.iter().all(|r| r["host_id"] != failure_only.as_str()),
+            "{query}: a host with no score got a risk row: {body}"
+        );
+    }
+    let first = get_rows_by_host(&app, "/v1/fleet/risk?limit=1").await;
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let second = get_rows_by_host(&app, &format!("/v1/fleet/risk?limit=1&cursor={cursor}")).await;
+    assert_eq!(
+        second["not_assessed_host_count"], 1,
+        "a later page counts the whole fleet: {second}"
     );
 }
 

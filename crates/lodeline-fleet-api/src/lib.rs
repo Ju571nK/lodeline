@@ -282,11 +282,23 @@ pub struct PolicyState {
     pub policy_expired_active: bool,
 }
 
-/// `GET /v1/fleet/risk` and `GET /v1/fleet/compliance`.
+/// `GET /v1/fleet/compliance`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RowsPage<T> {
     pub next_cursor: Option<String>,
     pub rows: Vec<T>,
+}
+
+/// `GET /v1/fleet/risk`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RiskPage {
+    pub next_cursor: Option<String>,
+    /// Hosts left out of `rows` because the selected tools have failing
+    /// sources and no reading. The same on every page. Absent from servers
+    /// before this field existed, which means "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_assessed_host_count: Option<u64>,
+    pub rows: Vec<RiskRow>,
 }
 
 /// One host in `GET /v1/fleet/risk`, described by its riskiest tool.
@@ -458,7 +470,10 @@ mod tests {
             .unwrap()
             .clone(),
         );
-        let row: RiskRow = serde_json::from_value(row).unwrap();
-        assert_eq!((row.source, row.unassessed_since), (None, None));
+        let page: RiskPage =
+            serde_json::from_value(json!({"next_cursor": null, "rows": [row]})).unwrap();
+        assert_eq!(page.not_assessed_host_count, None);
+        let row = &page.rows[0];
+        assert_eq!((&row.source, &row.unassessed_since), (&None, &None));
     }
 }

@@ -193,6 +193,67 @@ test.describe('AI Guard score sources and unassessed parsers', () => {
     await page.screenshot({ path: test.info().outputPath('risk-sources.png'), fullPage: true });
   });
 
+  test('Risk tab names the host with no score and links to it in Devices', async ({ page }) => {
+    await openAlerts(page);
+    await page.goto('/fleet/risk');
+    const notice = page.getByRole('status').filter({ hasText: 'not assessed' });
+    await expect(notice).toContainText('1 host is not assessed.', { timeout: 5_000 });
+    await expect(row(page, 'frank-ci')).toHaveCount(0);
+    await page.screenshot({
+      path: test.info().outputPath('risk-not-assessed.png'),
+      fullPage: true,
+    });
+
+    await notice.getByRole('link', { name: 'Show in Devices' }).click();
+    await expect(page).toHaveURL(/\/fleet\/devices\?notAssessed=true/);
+    await expect(
+      page.getByRole('checkbox', { name: 'Failing AI Guard sources, no score' }),
+    ).toBeChecked();
+    await expect(page.locator('tbody tr')).toHaveCount(1);
+    await expect(row(page, 'frank-ci')).toContainText('Not assessed');
+    // carol-dev also has a failing source, but her stale score keeps her on the Risk tab.
+    await expect(row(page, 'carol-dev')).toHaveCount(0);
+
+    // The box follows the URL, which updates after the click, so click and wait on the result.
+    await page.getByRole('checkbox', { name: 'Failing AI Guard sources, no score' }).click();
+    await expect(page).not.toHaveURL(/notAssessed/);
+    await expect(page.locator('tbody tr')).toHaveCount(6);
+  });
+
+  test('Risk tab keeps the notice but drops the Devices link under a tool filter', async ({
+    page,
+  }) => {
+    await openAlerts(page);
+    // The count is per selected tool; the Devices filter spans all tools, so they could differ.
+    await page.goto('/fleet/risk?tool=claude_code');
+    const notice = page.getByRole('status').filter({ hasText: 'not assessed' });
+    await expect(notice).toContainText('1 host is not assessed.', { timeout: 5_000 });
+    await expect(notice.getByRole('link')).toHaveCount(0);
+  });
+
+  test('Devices filter asks to load more when no loaded device matches', async ({ page }) => {
+    await page.route(/\/api\/v1\/fleet\/hosts\?/, async (route) => {
+      const body = await (await route.fetch()).json();
+      body.hosts = body.hosts.filter((h: { current_risk: unknown }) => h.current_risk);
+      body.next_cursor = 'page2';
+      await route.fulfill({ json: body });
+    });
+    await openAlerts(page);
+    await page.goto('/fleet/devices?notAssessed=true');
+    await expect(
+      page.getByText('None of the loaded devices match. Load more to keep looking.'),
+    ).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('button', { name: 'Load more', exact: true })).toBeVisible();
+  });
+
+  test('Risk tab shows no notice when every selected tool has a score', async ({ page }) => {
+    await openAlerts(page);
+    // Only frank-ci's Claude Code source fails with no score, so a Codex view has none.
+    await page.goto('/fleet/risk?tool=codex');
+    await expect(row(page, 'bob-laptop')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('not assessed')).toHaveCount(0);
+  });
+
   test('host panel shows the source, a stale score and its failing source', async ({ page }) => {
     await openAlerts(page);
     await page.goto(`/hosts/${alice}`);
