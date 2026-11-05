@@ -113,6 +113,9 @@ pub struct HostsPage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HostListItem {
     pub agent_version: String,
+    /// The host's failing AI Guard sources per tool. `null` when none fails,
+    /// and absent from servers before this field existed.
+    pub ai_guard_unassessed: Option<BTreeMap<String, ToolUnassessed>>,
     /// `null` until the host reports an AI guard assessment.
     pub current_risk: Option<CurrentRisk>,
     pub host_id: String,
@@ -129,6 +132,8 @@ pub struct HostDetail {
     pub agent_health: AgentHealth,
     pub agent_version: String,
     pub ai_guard: AiGuard,
+    /// Same as in [`HostListItem`].
+    pub ai_guard_unassessed: Option<BTreeMap<String, ToolUnassessed>>,
     pub current_risk: Option<CurrentRisk>,
     pub host_id: String,
     /// `null` until the host reports a host meta snapshot.
@@ -162,6 +167,34 @@ pub struct ToolRisk {
     /// Absent from servers before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RiskSource>,
+    /// When the parser behind this reading started failing. Absent while the
+    /// reading is current, and from servers before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unassessed_since: Option<String>,
+}
+
+/// One tool's sources whose parser fails, so they have no current reading.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolUnassessed {
+    /// The oldest good reading of these sources, `null` when any has none.
+    pub last_assessed_ts: Option<String>,
+    /// The earliest `failing_since` of these sources.
+    pub since: String,
+    pub sources: Vec<UnassessedSource>,
+}
+
+/// One source whose parser fails. `scope`, `user` and `rule_pack_id` follow
+/// [`RiskSource`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnassessedSource {
+    /// Such as `unreadable`, `too_large` or `parse`. Consumers tolerate values
+    /// they do not recognize.
+    pub error_kind: String,
+    /// The file that failed.
+    pub path: String,
+    pub rule_pack_id: Option<String>,
+    pub scope: Value,
+    pub user: Option<String>,
 }
 
 /// The reading that a tool's score comes from. `user` is `null` for the
@@ -207,6 +240,10 @@ pub struct AiGuardAssessment {
     /// Absent from servers before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RiskSource>,
+    /// When the parser behind this reading started failing. Absent while the
+    /// reading is current, and from servers before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unassessed_since: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -266,6 +303,9 @@ pub struct RiskRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RiskSource>,
     pub top_tool: String,
+    /// Same as `unassessed_since` in [`ToolRisk`], for `top_tool`'s reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unassessed_since: Option<String>,
 }
 
 /// One host in `GET /v1/fleet/compliance`.
@@ -365,5 +405,60 @@ mod tests {
             a.reasons[0]["detail"], 1,
             "unknown reason kinds keep their payload"
         );
+    }
+
+    #[test]
+    fn decoding_a_body_from_before_source_and_unassessed() {
+        let reading = json!({"assessed_ts": "2026-01-01T00:00:00Z", "bucket": "low", "score": 0.5});
+        let host = json!({
+            "agent_version": "0.12.2", "host_id": "h", "hostname": null, "last_seen_ts": null,
+            "open_event_counts_24h": {"info": 0, "warn": 0}, "status": "healthy",
+            "current_risk": {"by_tool": {"codex": reading}, "max_bucket": "low", "max_score": 0.5}
+        });
+        let page: HostsPage = serde_json::from_value(
+            json!({"hosts": [host], "next_cursor": null, "total_estimated": 1}),
+        )
+        .unwrap();
+        let row = &page.hosts[0];
+        assert_eq!(row.ai_guard_unassessed, None);
+        let codex = &row.current_risk.as_ref().unwrap().by_tool["codex"];
+        assert_eq!((&codex.source, &codex.unassessed_since), (&None, &None));
+
+        let mut detail = host;
+        let mut assessment = reading.clone();
+        assessment.as_object_mut().unwrap().extend(
+            json!({"is_reattestation": false, "reasons": [], "scope": {"kind": "user_global"}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        detail.as_object_mut().unwrap().extend(
+            json!({
+                "agent_health": {"hash_p99_ms_latest": null, "jsonl_above_soft_floor_latest": null,
+                    "last_heartbeat_ts": null, "recent_channel_stalls_24h": 0,
+                    "recent_sender_lag_critical_24h": 0, "recent_watcher_degraded_24h": 0},
+                "ai_guard": {"by_tool": {"codex": assessment}}, "host_meta": null,
+                "policy_state": {"last_applied_policy_version": 0, "last_policy_reload_ts": null,
+                    "policy_expired_active": false}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let detail: HostDetail = serde_json::from_value(detail).unwrap();
+        assert_eq!(detail.ai_guard_unassessed, None);
+        let codex = &detail.ai_guard.by_tool["codex"];
+        assert_eq!((&codex.source, &codex.unassessed_since), (&None, &None));
+
+        let mut row = reading;
+        row.as_object_mut().unwrap().extend(
+            json!({"host_id": "h", "hostname": null, "open_alert_count_24h": 0,
+                "reasons_count": 0, "top_tool": "codex"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let row: RiskRow = serde_json::from_value(row).unwrap();
+        assert_eq!((row.source, row.unassessed_since), (None, None));
     }
 }

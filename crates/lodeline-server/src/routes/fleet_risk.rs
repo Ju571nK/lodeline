@@ -103,6 +103,7 @@ pub async fn get_fleet_risk(
             assessed_ts: super::rfc3339(entry.assessed_ts),
             open_alert_count_24h: h.counts_24h.sum_alerts(),
             source: Some(super::risk_source(entry)),
+            unassessed_since: h.unassessed_since(*tool).map(super::rfc3339),
         })
         .collect();
     let next_cursor = if end < rows.len() {

@@ -3,13 +3,14 @@
 
 use super::{error_response, rfc3339, risk_source, wire_str};
 use crate::app::SharedState;
-use crate::fleet_index::{HostSummary, RiskEntry};
+use crate::fleet_index::{AssessFailure, HostSummary, RiskEntry, RiskSourceKey};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use lodeline_core::event::{HostMetaSnapshot, NetworkInterface};
+use lodeline_core::event::{AiTool, HostMetaSnapshot, NetworkInterface};
 use lodeline_fleet_api as api;
+use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 fn clamp_limit(req: Option<u32>) -> usize {
@@ -175,6 +176,7 @@ fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {
                 bucket: wire_str(&entry.bucket),
                 score: f64::from(entry.score),
                 source: Some(risk_source(entry)),
+                unassessed_since: h.unassessed_since(*tool).map(rfc3339),
             };
             (wire_str(tool), risk)
         })
@@ -191,9 +193,50 @@ fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {
     })
 }
 
+/// `ai_guard_unassessed`: per tool, the sources whose latest report is a
+/// failure, or `None` when there are none.
+fn render_unassessed(h: &HostSummary) -> Option<BTreeMap<String, api::ToolUnassessed>> {
+    let mut by_tool: BTreeMap<AiTool, Vec<(&RiskSourceKey, &AssessFailure)>> = BTreeMap::new();
+    for (key, (_, state)) in &h.risk_sources {
+        if let Some(f) = state.failure() {
+            by_tool.entry(key.0).or_default().push((key, f));
+        }
+    }
+    if by_tool.is_empty() {
+        return None;
+    }
+    let scope_json = |k: &RiskSourceKey| serde_json::to_value(&k.1).expect("scope serializes");
+    let tools = by_tool.into_iter().map(|(tool, mut failing)| {
+        // Keys are unique per tool, so this order is total.
+        failing.sort_by_cached_key(|(k, _)| (k.2.clone(), k.3.clone(), scope_json(k).to_string()));
+        let since = failing.iter().map(|(_, f)| f.failing_since).min();
+        // `None` sorts first, so one source with no good reading makes it `null`.
+        let last_assessed_ts = failing.iter().map(|(_, f)| f.last_assessed_ts).min();
+        let sources = failing
+            .iter()
+            .map(|(k, f)| api::UnassessedSource {
+                error_kind: f.error_kind.clone(),
+                // Paths arrive as JSON strings, so they are always UTF-8.
+                path: f.path.to_string_lossy().into_owned(),
+                rule_pack_id: k.3.clone(),
+                scope: scope_json(k),
+                user: k.2.clone(),
+            })
+            .collect();
+        let tool_unassessed = api::ToolUnassessed {
+            last_assessed_ts: last_assessed_ts.flatten().map(rfc3339),
+            since: rfc3339(since.expect("a tool is listed only with a failing source")),
+            sources,
+        };
+        (wire_str(&tool), tool_unassessed)
+    });
+    Some(tools.collect())
+}
+
 fn render_host_summary_list(h: &HostSummary, now: OffsetDateTime) -> api::HostListItem {
     api::HostListItem {
         agent_version: h.agent_version.clone(),
+        ai_guard_unassessed: render_unassessed(h),
         current_risk: render_risk_block(h),
         host_id: h.host_id.clone(),
         hostname: h.hostname().map(str::to_string),
@@ -254,7 +297,10 @@ fn render_host_meta(m: &HostMetaSnapshot) -> api::HostMeta {
     }
 }
 
-fn render_assessment(entry: &RiskEntry) -> api::AiGuardAssessment {
+fn render_assessment(
+    entry: &RiskEntry,
+    unassessed_since: Option<OffsetDateTime>,
+) -> api::AiGuardAssessment {
     let RiskEntry {
         controls,
         score,
@@ -299,6 +345,7 @@ fn render_assessment(entry: &RiskEntry) -> api::AiGuardAssessment {
         scope: serde_json::to_value(scope).expect("scope serializes"),
         score: f64::from(*score),
         source: Some(risk_source(entry)),
+        unassessed_since: unassessed_since.map(rfc3339),
     }
 }
 
@@ -314,6 +361,7 @@ pub async fn get_fleet_host_by_id(
     // Detail = the list row plus the detail blocks.
     let api::HostListItem {
         agent_version,
+        ai_guard_unassessed,
         current_risk,
         host_id,
         hostname,
@@ -346,9 +394,13 @@ pub async fn get_fleet_host_by_id(
             by_tool: h
                 .current_risk
                 .iter()
-                .map(|(tool, entry)| (wire_str(tool), render_assessment(entry)))
+                .map(|(tool, entry)| {
+                    let a = render_assessment(entry, h.unassessed_since(*tool));
+                    (wire_str(tool), a)
+                })
                 .collect(),
         },
+        ai_guard_unassessed,
         current_risk,
         host_id,
         host_meta: h.latest_host_meta.as_ref().map(render_host_meta),

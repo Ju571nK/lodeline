@@ -428,3 +428,268 @@ async fn policy_meta_404_when_no_bundle() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
 }
+
+fn rfc(ts: time::OffsetDateTime) -> String {
+    ts.format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+fn ai_reading(tool: &str, user: &str, score: f64, bucket: &str) -> serde_json::Value {
+    serde_json::json!({"kind":"ai_guard_risk_assessed", "tool":tool,
+        "scope":{"kind":"user_global"}, "score":score, "bucket":bucket,
+        "reasons":[], "is_reattestation":false, "user":user})
+}
+
+fn ai_failure(
+    tool: &str,
+    user: &str,
+    error_kind: &str,
+    failing_since: time::OffsetDateTime,
+    last_assessed_ts: Option<time::OffsetDateTime>,
+) -> serde_json::Value {
+    serde_json::json!({"kind":"ai_guard_assess_failed", "tool":tool,
+        "scope":{"kind":"user_global"}, "user":user, "error_kind":error_kind,
+        "path":format!("/Users/{user}/.config/{tool}.json"),
+        "failing_since":rfc(failing_since), "last_assessed_ts":last_assessed_ts.map(rfc),
+        "is_reattestation":false})
+}
+
+/// POSTs `(ts, evidence)` events for `host` and asserts the server took them all.
+async fn post_evidence(
+    app: &axum::Router,
+    host: &str,
+    events: &[(time::OffsetDateTime, serde_json::Value)],
+) {
+    let entries: Vec<serde_json::Value> = events
+        .iter()
+        .enumerate()
+        .map(|(i, (ts, evidence))| {
+            let id = uuid::Uuid::now_v7();
+            serde_json::json!({"event_id":id, "sequence":i+1, "payload":{
+                "schema_version":1, "event_id":id, "ts":rfc(*ts),
+                "host_id":host, "agent_version":"fixture", "severity":"warn",
+                "source":{"kind":"agent"}, "subject":{"kind":"self"},
+                "evidence":evidence}})
+        })
+        .collect();
+    let body =
+        serde_json::json!({"envelope":{"host_id":host,"schema_version":1}, "events":entries});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let ack: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ack["accepted"].as_array().unwrap().len(),
+        events.len(),
+        "{ack}"
+    );
+}
+
+/// The host list row, host detail and risk rows for `host`.
+async fn host_views(app: &axum::Router, host: &str) -> [serde_json::Value; 3] {
+    let list = get_rows_by_host(app, "/v1/fleet/hosts").await;
+    let row = list["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["host_id"] == host)
+        .unwrap()
+        .clone();
+    let detail = get_rows_by_host(app, &format!("/v1/fleet/hosts/{host}")).await;
+    let risk = get_rows_by_host(app, "/v1/fleet/risk").await;
+    let risk: Vec<_> = risk["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["host_id"] == host)
+        .cloned()
+        .collect();
+    [row, detail, serde_json::Value::Array(risk)]
+}
+
+#[tokio::test]
+async fn assess_failure_keeps_the_score_and_the_source_live_and_after_rebuild() {
+    use serde_json::json;
+    use time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_token(dir.path(), "tok");
+    let app = build_router(state.clone());
+    let now = time::OffsetDateTime::now_utc();
+    let h = |hours: i64| now - Duration::hours(hours);
+    let host = uuid::Uuid::now_v7().to_string();
+    let mut events = vec![
+        (h(100), ai_reading("claude_code", "alice", 7.5, "critical")),
+        // Bob's source stops sending both, so it drops after 48h as before.
+        (h(90), ai_reading("codex", "bob", 1.0, "medium")),
+    ];
+    // Alice's parser fails from 80h ago, and the agent re-sends it each 24h.
+    for hours in [76, 52, 28, 4] {
+        events.push((
+            h(hours),
+            ai_failure("claude_code", "alice", "unreadable", h(80), Some(h(100))),
+        ));
+    }
+    // Carol's parser fails with no reading the agent could fall back on.
+    events.push((h(3), ai_failure("codex", "carol", "too_large", h(3), None)));
+    post_evidence(&app, &host, &events).await;
+
+    let live = host_views(&app, &host).await;
+    let [row, detail, risk] = &live;
+    let claude = &row["current_risk"]["by_tool"]["claude_code"];
+    assert_eq!(claude["score"], 7.5, "{row}");
+    assert_eq!(claude["source"]["user"], "alice", "{row}");
+    assert_eq!(claude["unassessed_since"], rfc(h(80)), "{row}");
+    assert_eq!(
+        row["current_risk"]["by_tool"].as_object().unwrap().len(),
+        1,
+        "bob's reading outlived 48h, or carol got a score-less entry: {row}"
+    );
+    assert_eq!(
+        row["ai_guard_unassessed"],
+        json!({
+            "claude_code": {"since": rfc(h(80)), "last_assessed_ts": rfc(h(100)), "sources": [
+                {"scope": {"kind": "user_global"}, "user": "alice", "rule_pack_id": null,
+                 "error_kind": "unreadable", "path": "/Users/alice/.config/claude_code.json"}]},
+            "codex": {"since": rfc(h(3)), "last_assessed_ts": null, "sources": [
+                {"scope": {"kind": "user_global"}, "user": "carol", "rule_pack_id": null,
+                 "error_kind": "too_large", "path": "/Users/carol/.config/codex.json"}]}
+        })
+    );
+    assert_eq!(detail["ai_guard_unassessed"], row["ai_guard_unassessed"]);
+    assert_eq!(detail["current_risk"], row["current_risk"]);
+    assert_eq!(
+        detail["ai_guard"]["by_tool"]["claude_code"]["unassessed_since"],
+        rfc(h(80))
+    );
+    assert_eq!(risk[0]["top_tool"], "claude_code", "{risk}");
+    assert_eq!(risk[0]["unassessed_since"], rfc(h(80)), "{risk}");
+
+    state
+        .fleet_index
+        .replace(lodeline_server::boot_rebuild::rebuild_from_jsonl(dir.path()).unwrap());
+    assert_eq!(
+        host_views(&app, &host).await,
+        live,
+        "a rebuild must match live ingest"
+    );
+}
+
+#[tokio::test]
+async fn assess_failure_with_no_reading_leaves_current_risk_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = build_router(state_with_token(dir.path(), "tok"));
+    let now = time::OffsetDateTime::now_utc();
+    let host = uuid::Uuid::now_v7().to_string();
+    post_evidence(
+        &app,
+        &host,
+        &[(now, ai_failure("codex", "alice", "parse", now, None))],
+    )
+    .await;
+    let [row, detail, risk] = host_views(&app, &host).await;
+    for body in [&row, &detail] {
+        assert!(body["current_risk"].is_null(), "{body}");
+        assert_eq!(
+            body["ai_guard_unassessed"]["codex"]["sources"][0]["error_kind"], "parse",
+            "{body}"
+        );
+    }
+    assert_eq!(detail["ai_guard"]["by_tool"], serde_json::json!({}));
+    assert_eq!(
+        risk,
+        serde_json::json!([]),
+        "a host with no score got a risk row"
+    );
+}
+
+#[tokio::test]
+async fn reading_after_assess_failure_clears_the_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = build_router(state_with_token(dir.path(), "tok"));
+    let now = time::OffsetDateTime::now_utc();
+    let m = |mins: i64| now - time::Duration::minutes(mins);
+    let host = uuid::Uuid::now_v7().to_string();
+    post_evidence(
+        &app,
+        &host,
+        &[
+            (m(3), ai_reading("codex", "alice", 7.5, "critical")),
+            (
+                m(2),
+                ai_failure("codex", "alice", "parse", m(2), Some(m(3))),
+            ),
+            (m(1), ai_reading("codex", "alice", 2.0, "medium")),
+        ],
+    )
+    .await;
+    let [row, detail, risk] = host_views(&app, &host).await;
+    assert!(row["ai_guard_unassessed"].is_null(), "{row}");
+    assert!(detail["ai_guard_unassessed"].is_null(), "{detail}");
+    let codex = &row["current_risk"]["by_tool"]["codex"];
+    assert_eq!(codex["score"], 2.0, "{row}");
+    assert!(codex.get("unassessed_since").is_none(), "{row}");
+    assert!(detail["ai_guard"]["by_tool"]["codex"]
+        .get("unassessed_since")
+        .is_none());
+    assert!(risk[0].get("unassessed_since").is_none(), "{risk}");
+}
+
+#[tokio::test]
+async fn future_dated_assess_failure_neither_prunes_others_nor_outlives_48h() {
+    use lodeline_core::event::Event;
+    use time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_token(dir.path(), "tok");
+    let app = build_router(state.clone());
+    let t0 = time::OffsetDateTime::now_utc() - Duration::days(10);
+    let host = uuid::Uuid::now_v7().to_string();
+    let apply = |ts: time::OffsetDateTime, evidence: serde_json::Value, received| {
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "event_id":uuid::Uuid::now_v7(), "ts":rfc(ts),
+            "host_id":host, "agent_version":"fixture", "severity":"warn",
+            "source":{"kind":"agent"}, "subject":{"kind":"self"},
+            "evidence":evidence, "target_id":null}))
+        .unwrap();
+        state.fleet_index.apply_event(&event, received);
+    };
+    apply(t0, ai_reading("codex", "alice", 7.0, "critical"), t0);
+    // The agent clock jumped three days ahead; the server got it a minute later.
+    let ahead = t0 + Duration::days(3);
+    apply(
+        ahead,
+        ai_failure("claude_code", "bob", "parse", ahead, None),
+        t0 + Duration::minutes(1),
+    );
+    let [row, ..] = host_views(&app, &host).await;
+    assert_eq!(
+        row["current_risk"]["by_tool"]["codex"]["score"], 7.0,
+        "a future-dated failure pruned the host's other readings: {row}"
+    );
+    assert!(
+        row["ai_guard_unassessed"]["claude_code"].is_object(),
+        "{row}"
+    );
+
+    let later = t0 + Duration::hours(49);
+    apply(later, ai_reading("codex", "alice", 0.0, "low"), later);
+    let [row, ..] = host_views(&app, &host).await;
+    assert!(
+        row["ai_guard_unassessed"].is_null(),
+        "a future-dated failure outlived the 48h window: {row}"
+    );
+}
