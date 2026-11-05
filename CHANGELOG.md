@@ -7,6 +7,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-05
+
+**Upgrade order.** Upgrade the fleet server first, then the agents. The server learns the
+`ai_guard_assess_failed` event and the new `source` and unassessed fields. The web console
+reads them from the server. The console is not a release asset, so if you run it, rebuild it
+from this release as `apps/manager/README.md` describes after you upgrade the server. An agent
+on this release still works with an older server. Every server since v0.3.0 accepts
+`ai_guard_assess_failed` and only counts it as a warn event. On a v0.12 server, though, a
+source that keeps failing drops out of `current_risk` 48h after its last reading, because the
+agent no longer re-sends the old reading. On a server of this release it shows as unassessed
+instead. A server older than v0.12 keeps showing the last reading. A console of this release
+against an older server looks as before.
+
 ### Added
 
 - `lodeline-server` now says which reading each tool's risk score comes from. Each tool in
@@ -41,8 +54,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   with failing sources but no score shows "Not assessed" with the same mark, never a clean
   state. The host page lists each failing source with its error and path. The event timeline
   shows an `ai_guard_assess_failed` event as "AI Guard assessment failed" with its tool, and
-  the event slide-over shows its error, path, source and times; it is not a default alert. With a server that sends none of these fields, the
-  console looks as before. (#469)
+  the event slide-over shows its error, path, source and times. It is not a default alert. With
+  a server that sends none of these fields, the console looks as before. (#469)
 
 ### Changed
 
