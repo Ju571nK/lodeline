@@ -64,8 +64,9 @@ pub fn rebuild_from_jsonl(events_out_dir: &Path) -> std::io::Result<HashMap<Stri
         // at or after it (`persist::receive_times_path`), its own batch's unless
         // a record was lost. A line after the last record, as in a file written
         // before receive times were kept, knows only its UTC receive day, so
-        // replay prunes by the day's start and caps times at its end or at boot. A reading can then outlive 48h by up to two days
-        // until the host's next live reading, and by up to one day after it.
+        // rebuild prunes by the day's start and caps times at its end or at
+        // boot. A reading can then outlive 48h by up to two days until the
+        // host's next live reading, and by up to one day after it.
         let times: Vec<(u64, OffsetDateTime)> =
             std::fs::read_to_string(crate::persist::receive_times_path(&path))
                 .unwrap_or_default()
