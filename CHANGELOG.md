@@ -15,8 +15,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   `lodeline-manager` repository, which is now archived. The console is rewritten in Rust and
   serves the same web UI. It starts from the Go console's environment and reads its session
   cookies and triage database without a migration. It is not yet published as a release
-  artifact, so build it from source as `apps/manager/README.md` describes. Three things differ
-  from the Go console. Behind a reverse proxy, set the new `TRUSTED_PROXIES`, or every client
+  artifact, so build it from source as `apps/manager/README.md` describes. Three of its
+  differences from the Go console may need action. Behind a reverse proxy, set the new `TRUSTED_PROXIES`, or every client
   shares the proxy's 10 logins a minute. Loopback is no longer exempt from the login limit.
   Login and triage `POST` requests get 415 unless their `Content-Type` is `application/json`.
   (#468)
