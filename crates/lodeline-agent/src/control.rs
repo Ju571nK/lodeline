@@ -292,12 +292,13 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                     Some(filter) => *t == filter,
                     None => true,
                 })
-                .map(|((t, scope, _pid, user), cached)| {
+                .filter_map(|((t, scope, _pid, user), source)| {
+                    let cached = source.reading.as_ref()?;
                     let last = cached
                         .last_assessed_ts
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
-                    RiskSummary {
+                    Some(RiskSummary {
                         controls: cached.controls.clone(),
                         tool: *t,
                         scope: scope.clone(),
@@ -306,7 +307,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                         reasons_count: cached.reasons_count,
                         last_assessed_ts: last,
                         user: user.clone(),
-                    }
+                    })
                 })
                 .collect();
             assessments.sort_by(|a, b| {
@@ -393,12 +394,13 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
             let snapshot = ctx.ai_guard_state.read();
             let mut latest_risk: Vec<RiskSummary> = snapshot
                 .iter()
-                .map(|((t, scope, _pid, user), cached)| {
+                .filter_map(|((t, scope, _pid, user), source)| {
+                    let cached = source.reading.as_ref()?;
                     let last = cached
                         .last_assessed_ts
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
-                    RiskSummary {
+                    Some(RiskSummary {
                         controls: cached.controls.clone(),
                         tool: *t,
                         scope: scope.clone(),
@@ -407,7 +409,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                         reasons_count: cached.reasons_count,
                         last_assessed_ts: last,
                         user: user.clone(),
-                    }
+                    })
                 })
                 .collect();
             drop(snapshot);

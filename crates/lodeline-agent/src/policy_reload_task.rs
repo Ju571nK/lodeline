@@ -1353,16 +1353,18 @@ mod tests {
                     None::<String>,
                     None::<String>,
                 ),
-                crate::ai_guard::task::CachedAssessment {
-                    controls: None,
-                    controls_blake3: [0; 32],
-                    score: 5.0,
-                    bucket: lodeline_core::event::AiGuardBucket::High,
-                    reasons_blake3: [0u8; 32],
-                    reasons_count: 1,
-                    reasons: vec![],
-                    last_assessed_ts: time::OffsetDateTime::now_utc(),
-                    dangerous_toggles: std::collections::BTreeSet::new(),
+                crate::ai_guard::task::SourceState {
+                    reading: Some(crate::ai_guard::task::CachedAssessment {
+                        controls: None,
+                        controls_blake3: [0; 32],
+                        score: 5.0,
+                        bucket: lodeline_core::event::AiGuardBucket::High,
+                        reasons_blake3: [0u8; 32],
+                        reasons_count: 1,
+                        last_assessed_ts: time::OffsetDateTime::now_utc(),
+                        dangerous_toggles: std::collections::BTreeSet::new(),
+                    }),
+                    failure: None,
                 },
             );
         }
@@ -1730,16 +1732,18 @@ mod tests {
                         Some(pack_id.to_string()),
                         None::<String>,
                     ),
-                    crate::ai_guard::task::CachedAssessment {
-                        controls: None,
-                        controls_blake3: [0; 32],
-                        score: 5.0,
-                        bucket: lodeline_core::event::AiGuardBucket::High,
-                        reasons_blake3: [0u8; 32],
-                        reasons_count: 1,
-                        reasons: vec![],
-                        last_assessed_ts: time::OffsetDateTime::now_utc(),
-                        dangerous_toggles: std::collections::BTreeSet::new(),
+                    crate::ai_guard::task::SourceState {
+                        reading: Some(crate::ai_guard::task::CachedAssessment {
+                            controls: None,
+                            controls_blake3: [0; 32],
+                            score: 5.0,
+                            bucket: lodeline_core::event::AiGuardBucket::High,
+                            reasons_blake3: [0u8; 32],
+                            reasons_count: 1,
+                            last_assessed_ts: time::OffsetDateTime::now_utc(),
+                            dangerous_toggles: std::collections::BTreeSet::new(),
+                        }),
+                        failure: None,
                     },
                 );
             }
