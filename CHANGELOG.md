@@ -7,6 +7,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Added
+
+- The web console's Risk tab now says when hosts are missing from it because they have
+  failing AI Guard sources and no score, such as "1 host is not assessed", with a link to those
+  hosts in the Devices tab. Before, such a host was absent from the Risk tab, and an empty
+  table read "No hosts above the selected risk level." The Devices tab gains a "Not assessed
+  only" filter over loaded devices for the link. `GET /v1/fleet/risk` gains
+  `not_assessed_host_count`, the number of hosts with a failing source for a selected tool and
+  no reading for any selected tool. `tool` applies to it, `min_bucket` does not, and every page
+  carries the count for the whole result. These hosts still get no score and no row. The change
+  is additive. Older consoles ignore the field, and with an older server that omits it the
+  console shows no notice. (#485)
+
 ## [0.13.0] - 2026-11-05
 
 **Upgrade order.** Upgrade the fleet server first, then the agents. The server learns the

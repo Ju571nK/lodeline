@@ -15,6 +15,7 @@
   "cookies": [],
   "body": {
     "next_cursor": null,
+    "not_assessed_host_count": 1,
     "rows": [
       {
         "assessed_ts": "<seed-5m Z>",

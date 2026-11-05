@@ -12,10 +12,13 @@ const statuses = ['healthy', 'stale', 'disconnected'] as const;
 type Status = (typeof statuses)[number];
 interface DeviceSearch {
   status?: Status;
+  /** Only hosts with failing AI Guard sources and no score, as the Risk tab counts them. */
+  notAssessed?: true;
 }
 export const Route = createFileRoute('/_authed/fleet/devices')({
   validateSearch: (raw: Record<string, unknown>): DeviceSearch => ({
     status: statuses.includes(raw.status as Status) ? (raw.status as Status) : undefined,
+    notAssessed: raw.notAssessed === true ? true : undefined,
   }),
   component: DevicesTab,
 });
@@ -24,7 +27,7 @@ const hostID = (host: HostSummary) => host.host_id;
 const normalizeVersion = (version: string) => version.trim().replace(/^v/, '');
 
 function DevicesTab() {
-  const { status } = Route.useSearch();
+  const { status, notAssessed } = Route.useSearch();
   const navigate = Route.useNavigate();
   const [search, setSearch] = useState('');
   const [target, setTarget] = useState('');
@@ -36,10 +39,14 @@ function DevicesTab() {
     hostID,
   );
   const needle = search.trim().toLowerCase();
-  const rows = devices.rows.filter((host) =>
-    [host.host_id, host.hostname ?? '', host.agent_version].some((value) =>
-      value.toLowerCase().includes(needle),
-    ),
+  // shortcut: notAssessed filters loaded pages only, like search; add a server-side hosts filter
+  // if fleets with not-assessed hosts past the first page become common.
+  const rows = devices.rows.filter(
+    (host) =>
+      (!notAssessed || (!host.current_risk && host.ai_guard_unassessed)) &&
+      [host.host_id, host.hostname ?? '', host.agent_version].some((value) =>
+        value.toLowerCase().includes(needle),
+      ),
   );
   const targetVersion = normalizeVersion(target);
   const inputClass = 'rounded border border-border bg-bg-surface px-2 py-1 text-sm';
@@ -57,7 +64,10 @@ function DevicesTab() {
             value={status ?? ''}
             onChange={(event) =>
               navigate({
-                search: { status: (event.target.value || undefined) as Status | undefined },
+                search: {
+                  status: (event.target.value || undefined) as Status | undefined,
+                  notAssessed,
+                },
               })
             }
           >
@@ -78,6 +88,16 @@ function DevicesTab() {
             placeholder="Hostname, host ID or version"
           />
         </label>
+        <label className="flex items-center gap-1.5 pb-1.5">
+          <input
+            type="checkbox"
+            checked={!!notAssessed}
+            onChange={(event) =>
+              navigate({ search: { status, notAssessed: event.target.checked || undefined } })
+            }
+          />
+          Not assessed only
+        </label>
         <label className="grid gap-1">
           Target agent version
           <input
@@ -89,9 +109,10 @@ function DevicesTab() {
         </label>
       </div>
       <p className="text-xs text-text-muted">
-        Status applies across the server results; search applies to loaded devices only. Versions
-        are last reported, not verified installations. Target comparison is an exact match (ignoring
-        a leading v), not an upgrade recommendation; the target is temporary for this view.
+        Status applies across the server results; search and Not assessed only apply to loaded
+        devices only. Versions are last reported, not verified installations. Target comparison is
+        an exact match (ignoring a leading v), not an upgrade recommendation; the target is
+        temporary for this view.
       </p>
       <div className="overflow-x-auto rounded-md border border-border bg-bg-surface">
         {devices.isPending ? (

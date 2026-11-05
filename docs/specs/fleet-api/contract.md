@@ -457,7 +457,8 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
       "unassessed_since": "2026-05-17T12:34:00Z"
     }
   ],
-  "next_cursor": null
+  "next_cursor": null,
+  "not_assessed_host_count": 2
 }
 ```
 
@@ -475,6 +476,16 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
 - Hosts with no `AiGuardRiskAssessed` yet are omitted entirely (not returned
   with `null` score). So is a host whose only sources are failing ones with no
   reading. `/v1/fleet/hosts` lists those in `ai_guard_unassessed`.
+- `not_assessed_host_count` counts the hosts that `rows` leaves out because
+  they have no reading to rank: hosts with a failing source (an entry in
+  `ai_guard_unassessed`, §5.3) for a selected tool and no reading for any
+  selected tool. With no `tool` filter, that is every host whose
+  `current_risk` is `null` and whose `ai_guard_unassessed` is set. `tool`
+  selects which tools count, `min_bucket` does not apply (these hosts have
+  no bucket), and `cursor` and `limit` do not change it: every page carries
+  the count for the whole result. A host whose failing source still has a
+  reading is a row with `unassessed_since` and is not counted. Servers
+  before this field omit it, so a missing count means "unknown", not 0.
 
 ### 5.6 `GET /v1/fleet/compliance`
 
