@@ -228,8 +228,8 @@ async fn event_by_id_decodes() {
     };
     assert_eq!(e.severity, "warn");
     assert_eq!(e.evidence_kind(), "ai_guard_risk_assessed");
-    assert_eq!(e.evidence["tool"], "claude_code");
-    assert_eq!(e.evidence["bucket"], "critical");
+    assert_eq!(e.evidence.member_str("tool"), "claude_code");
+    assert_eq!(e.evidence.member_str("bucket"), "critical");
     assert!(calls.lock().unwrap()[0].path.ends_with(id));
 }
 

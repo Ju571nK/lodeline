@@ -48,7 +48,8 @@ impl Mock {
     pub fn new(seed: i64) -> Self {
         let mut v: Value = serde_json::from_str(FIXTURES).expect("mock-fleet.json is JSON");
         expand(&mut v, "", seed);
-        let mut f: Fixtures = go_decode(v).expect("mock-fleet.json has the fleet types");
+        let v = serde_json::value::to_raw_value(&v).expect("JSON encodes");
+        let mut f: Fixtures = go_decode(&v).expect("mock-fleet.json has the fleet types");
         let n = f.events.len() as u64;
         for (i, e) in f.events.iter_mut().enumerate() {
             e.event_id = uuidv7_at(e.ts.unix_millis(), n - i as u64);
@@ -258,13 +259,10 @@ fn matches_event(e: &Event, p: &EventsParams) -> bool {
         && (p.until.is_zero() || e.ts < p.until)
         && (p.host_ids.is_empty() || p.host_ids.contains(&e.host_id))
         && (p.severity.is_empty() || p.severity.contains(&e.severity))
-        && (p.evidence_kinds.is_empty() || p.evidence_kinds.iter().any(|k| k == kind))
+        && (p.evidence_kinds.is_empty() || p.evidence_kinds.contains(&kind))
         && (p.min_ai_guard_bucket.is_empty()
             || kind != "ai_guard_risk_assessed"
-            || bucket_at_least(
-                e.evidence["bucket"].as_str().unwrap_or_default(),
-                &p.min_ai_guard_bucket,
-            ))
+            || bucket_at_least(&e.evidence.member_str("bucket"), &p.min_ai_guard_bucket))
 }
 
 /// Unknown buckets rank below `low`, so an unknown minimum lets everything through.

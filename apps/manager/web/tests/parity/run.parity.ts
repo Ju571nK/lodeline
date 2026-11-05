@@ -556,7 +556,8 @@ test('every allowlist entry names a reason and known cases', () => {
 
 for (const c of CASES) {
   test(c.name, async () => {
-    const record = await recordCase(c);
+    // In the form a golden holds it: JSON has no Infinity, so a relayed `1e400` reads as null.
+    const record = JSON.parse(JSON.stringify(await recordCase(c)));
     const file = join(GOLDENS, `${c.name}.json`);
     if (env.UPDATE) {
       writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);

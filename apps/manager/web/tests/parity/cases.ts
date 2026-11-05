@@ -1508,6 +1508,22 @@ export const CASES: Case[] = [
     },
     'ok',
   ),
+  {
+    // A number past f64 in one event's evidence: the page is served and the evidence text
+    // relayed as the server wrote it, key order and number spelling included.
+    ...upstream(
+      'live-events-out-of-range-number',
+      'GET /api/v1/fleet/events',
+      '/api/v1/fleet/events',
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        text: `{"events":[{"schema_version":1,"event_id":"01900000-0000-7000-8000-000000000002","ts":"${LIVE_TS}","host_id":"${H_ALICE}","agent_version":"0.12.4","severity":"warn","source":{"kind":"agent"},"subject":null,"evidence":{"kind":"future_variant","huge":1e400,"exact":1.50,"big":18446744073709551616}},${JSON.stringify(LIVE_EVENT)}],"next_cursor":null}`,
+      },
+      'ok',
+    ),
+    rawText: ['events.0.evidence'],
+  },
   ...[
     ['plus3', '%2B3'],
     ['007', '007'],
