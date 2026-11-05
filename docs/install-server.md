@@ -296,7 +296,8 @@ sudo systemctl edit lodeline-server
 ```
 
 The `lodeline-manager` web console reads the fleet through these routes with the
-same token. To run it, see [`apps/manager/README.md`](../apps/manager/README.md).
+same token. Each release has a `lodeline-manager-<version>-<target>` archive of it. To
+install and run it, see [`apps/manager/README.md`](../apps/manager/README.md).
 
 ### 5.1 Serve agent artifacts (air-gapped / PMS install)
 

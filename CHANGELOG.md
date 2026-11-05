@@ -1,11 +1,24 @@
 # Changelog
 
 All notable changes to Lodeline are recorded here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the workspace uses a
-single SemVer version across all crates. Full release notes for tagged releases
-also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the workspace and
+`apps/manager` use a single SemVer version across all crates. Full release notes for tagged
+releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases).
 
 ## [Unreleased]
+
+### Added
+
+- Releases now ship the `lodeline-manager` web console. Each release has a
+  `lodeline-manager-<version>-<target>.tar.gz` archive (`.zip` on Windows) for the same five
+  targets as the agent, with the SPA built in, so an operator no longer builds the console from
+  source. The archive also holds `.env.example`, `LICENSE`, `NOTICE` and a short README.
+  `SHA256SUMS`, the build provenance attestation and the signed `build-manifest.json` cover the
+  binary, and the release's native verify jobs check that it runs and prints the release version.
+  The manifest keeps schema version 1 and now lists 35 binaries; `lodeline doctor
+  --verify-self` of the agent binaries is unchanged. `lodeline-manager --version` prints the
+  version, which now follows the workspace version. See `apps/manager/README.md`. There are no
+  `.deb`, `.rpm` or container images for the console yet.
 
 ## [0.13.0] - 2026-11-05
 

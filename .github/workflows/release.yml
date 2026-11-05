@@ -2,7 +2,8 @@ name: Release
 
 # Cut a release by pushing a tag, e.g.:
 #   git tag v0.1.0 && git push origin v0.1.0
-# This builds prebuilt binaries for each target (x86_64 + aarch64), publishes
+# This builds prebuilt binaries for each target (x86_64 + aarch64), and the
+# lodeline-manager web console with its SPA embedded, publishes
 # them to a GitHub Release with a SHA256SUMS file, attaches build-provenance
 # attestations, and — when the SIGIL_BUILD_SIGNING_KEY secret is set — an
 # ed25519-signed build manifest (per-arch blake3) that `lodeline doctor
@@ -20,8 +21,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The console's SPA, built once so every target embeds the same files.
+  web:
+    name: build manager SPA
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: apps/manager/web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/manager/web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manager-web
+          path: apps/manager/web/dist
+          if-no-files-found: error
+
   build:
     name: build ${{ matrix.target }}
+    needs: web
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -51,6 +75,17 @@ jobs:
       - name: Build
         run: cargo build --release --locked --workspace --target ${{ matrix.target }}
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: manager-web
+          path: apps/manager/web/dist
+
+      - name: Build manager
+        working-directory: apps/manager
+        env:
+          LODELINE_MANAGER_REQUIRE_DIST: '1'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -64,6 +99,12 @@ jobs:
           done
           cp README.md LICENSE NOTICE "$dist/" 2>/dev/null || true
           tar -czf "${dist}.tar.gz" "$dist"
+          mdist="lodeline-manager-${ver}-${{ matrix.target }}"
+          mkdir "$mdist"
+          cp "apps/manager/target/${{ matrix.target }}/release/lodeline-manager" \
+            LICENSE NOTICE apps/manager/.env.example "$mdist/"
+          cp packaging/manager/README.md "$mdist/README.md"
+          tar -czf "${mdist}.tar.gz" "$mdist"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -77,6 +118,11 @@ jobs:
           }
           Copy-Item README.md,LICENSE,NOTICE $dist -ErrorAction SilentlyContinue
           Compress-Archive -Path $dist -DestinationPath "$dist.zip"
+          $mdist = "lodeline-manager-$ver-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $mdist | Out-Null
+          Copy-Item "apps/manager/target/${{ matrix.target }}/release/lodeline-manager.exe",LICENSE,NOTICE,apps/manager/.env.example $mdist -ErrorAction Stop
+          Copy-Item packaging/manager/README.md "$mdist/README.md" -ErrorAction Stop
+          Compress-Archive -Path $mdist -DestinationPath "$mdist.zip"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -273,9 +319,19 @@ jobs:
           Download the `.zip` for your architecture (`x86_64` for most PCs,
           `aarch64` for Arm devices such as Surface Pro X) and add it to your PATH.
 
-          Every archive contains all six binaries: `lodeline`, `lodeline-sender`, `lodeline-server`, `lodeline-sign`, `lodeline-mcp`, `lodeline-hook`.
+          Every `lodeline-<version>-<target>` archive contains all six binaries: `lodeline`, `lodeline-sender`, `lodeline-server`, `lodeline-sign`, `lodeline-mcp`, `lodeline-hook`.
 
           `lodeline-mcp` is the read-only fleet MCP server. Point an MCP client (Claude Desktop/Code) at a `lodeline-server`'s read API to query and reason over fleet posture. See [crates/lodeline-mcp/README.md](https://github.com/Ju571nK/lodeline/blob/main/crates/lodeline-mcp/README.md).
+
+          ## Web console
+
+          `lodeline-manager-<version>-<target>.tar.gz` (`.zip` on Windows) holds the read-only fleet
+          web console, `lodeline-manager`, with its web UI built in, for the same five targets. It
+          reads the fleet from a `lodeline-server` with the read API on. It reads its configuration
+          from environment variables only, and `.env.example` in the archive lists them. Run it
+          behind a TLS reverse proxy, and set `TRUSTED_PROXIES` to the proxy's address. See
+          [apps/manager/README.md](https://github.com/Ju571nK/lodeline/blob/main/apps/manager/README.md).
+          The signed `build-manifest.json` covers this binary too.
 
           ## Server + agent (Linux, x86_64 and aarch64)
 

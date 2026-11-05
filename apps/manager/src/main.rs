@@ -16,6 +16,10 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--version") {
+        println!("lodeline-manager {}", env!("CARGO_PKG_VERSION"));
+        return std::process::ExitCode::SUCCESS;
+    }
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {

@@ -103,7 +103,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/Ju571nK/lodeline/main/install.sh | LODELINE_PROFILE=fleet sh
 ```
 
-Linux `.deb`/`.rpm` and Windows `.zip` are on the [releases page](https://github.com/Ju571nK/lodeline/releases/latest).
+Linux `.deb`/`.rpm`, Windows `.zip` and the `lodeline-manager` web console archives are on the [releases page](https://github.com/Ju571nK/lodeline/releases/latest).
 Every release ships a `SHA256SUMS` (the installer verifies it) and a build-provenance attestation.
 Full guide: [docs/install-personal.md](docs/install-personal.md).
 

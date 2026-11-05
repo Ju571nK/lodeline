@@ -3,6 +3,7 @@
 import io
 import json
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -12,8 +13,12 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packaging"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "packaging"))
 import release_manifest as release
+
+PAIRS = [(name, target) for target in release.TARGETS
+         for binaries in release.PACKAGES.values() for name in binaries]
 
 
 class ReleaseManifestTests(unittest.TestCase):
@@ -25,10 +30,11 @@ class ReleaseManifestTests(unittest.TestCase):
         self.dist.mkdir()
         self.version = "0.8.1"
 
-    def archive(self, target, names=release.BINARIES, duplicate=False, symlink=False,
-                windows_separators=False):
-        path = self.dist / release.archive_name(self.version, target)
-        prefix = f"lodeline-{self.version}-{target}"
+    def archive(self, target, names=None, duplicate=False, symlink=False,
+                windows_separators=False, package="lodeline"):
+        names = names or release.PACKAGES[package]
+        path = self.dist / release.archive_name(self.version, target, package)
+        prefix = f"{package}-{self.version}-{target}"
         entries = list(names) + ([names[0]] if duplicate else [])
         if path.suffix == ".zip":
             with zipfile.ZipFile(path, "w") as bundle:
@@ -54,17 +60,31 @@ class ReleaseManifestTests(unittest.TestCase):
                 bundle.addfile(outside, io.BytesIO(b"x"))
         return path
 
+    def archives(self, target):
+        for package in release.PACKAGES:
+            self.archive(target, package=package)
+
     def manifest(self):
         return {"manifest": {"schema_version": 1, "git_sha": "test-sha", "artifacts": [
-            {"name": name, "target": target, "blake3": "a" * 64}
-            for target in release.TARGETS for name in release.BINARIES
+            {"name": name, "target": target, "blake3": "a" * 64} for name, target in PAIRS
         ]}, "signature": "test-signature"}
+
+    def test_manager_version_follows_the_workspace_version(self):
+        def version(path, section):
+            text = (ROOT / path).read_text(encoding="utf-8")
+            return re.search(rf'^\[{section}\]\n(?:.*\n)*?version = "([^"]+)"', text, re.M).group(1)
+
+        # A release-prep PR that bumps the workspace must bump the console too.
+        self.assertEqual(version("apps/manager/Cargo.toml", "package"),
+                         version("Cargo.toml", re.escape("workspace.package")))
 
     def test_all_tar_and_zip_binaries_keep_canonical_names(self):
         for target in release.TARGETS:
-            self.archive(target, windows_separators=True)
-            files = release.extract_binaries(self.dist, self.version, target, self.root / "out")
-            self.assertEqual(set(files), set(release.BINARIES))
+            for package in release.PACKAGES:
+                self.archive(target, windows_separators=True, package=package)
+            files = release.extract_target(self.dist, self.version, target, self.root / "out")
+            self.assertEqual(set(files), {name for name, t in PAIRS if t == target})
+            self.assertIn("lodeline-manager", files)
             for name, path in files.items():
                 self.assertEqual(path.read_bytes(), name.encode())
                 self.assertEqual(path.suffix, ".exe" if "windows" in target else "")
@@ -75,6 +95,10 @@ class ReleaseManifestTests(unittest.TestCase):
             self.archive(target, names=release.BINARIES[:-1])
             with self.assertRaisesRegex(ValueError, "missing binaries"):
                 release.extract_binaries(self.dist, self.version, target, self.root / "out")
+            self.archive(target, names=["lodeline"], package="lodeline-manager")
+            with self.assertRaisesRegex(ValueError, "missing binaries"):
+                release.extract_binaries(self.dist, self.version, target, self.root / "out",
+                                         "lodeline-manager")
 
     def test_duplicate_or_symlink_binary_is_rejected(self):
         for target in (release.TARGETS[0], release.TARGETS[-1]):
@@ -87,23 +111,28 @@ class ReleaseManifestTests(unittest.TestCase):
                     release.extract_binaries(self.dist, self.version, target, self.root / "link")
 
     def test_missing_archive_never_invokes_signer(self):
-        for target in release.TARGETS[:-1]:
-            self.archive(target)
-        with patch.object(release.subprocess, "run") as run:
-            with self.assertRaisesRegex(ValueError, "archive set mismatch"):
-                release.sign(self.dist, self.version, self.root / "key", "test-sha", "test-url")
-            run.assert_not_called()
+        for missing in release.PACKAGES:
+            with self.subTest(missing=missing):
+                for target in release.TARGETS:
+                    self.archives(target)
+                (self.dist / release.archive_name(self.version, release.TARGETS[-1], missing)).unlink()
+                with patch.object(release.subprocess, "run") as run:
+                    with self.assertRaisesRegex(ValueError, "archive set mismatch"):
+                        release.sign(self.dist, self.version, self.root / "key", "test-sha",
+                                     "test-url")
+                    run.assert_not_called()
 
-    def test_signer_receives_30_pairs_and_output_is_validated(self):
+    def test_signer_receives_every_pair_and_output_is_validated(self):
         for target in release.TARGETS:
-            self.archive(target)
+            self.archives(target)
 
         def sign(command, **kwargs):
             artifacts = [command[i + 1] for i, arg in enumerate(command) if arg == "--artifact"]
-            self.assertEqual(len(artifacts), 30)
-            for artifact in artifacts:
-                spec = dict(part.split("=", 1) for part in artifact.split(","))
-                self.assertIn(spec["name"], release.BINARIES)
+            specs = [dict(part.split("=", 1) for part in artifact.split(","))
+                     for artifact in artifacts]
+            self.assertEqual(sorted((s["name"], s["target"]) for s in specs), sorted(PAIRS))
+            self.assertEqual(len(specs), 35)
+            for spec in specs:
                 self.assertEqual(Path(spec["file"]).read_bytes(), spec["name"].encode())
             self.assertNotIn("SIGNING_KEY", kwargs["env"])
             Path(command[command.index("--out") + 1]).write_text(json.dumps(self.manifest()))
@@ -114,7 +143,7 @@ class ReleaseManifestTests(unittest.TestCase):
 
     def test_manifest_rejects_missing_duplicate_wrong_commit_and_bad_hash(self):
         path = self.dist / "build-manifest.json"
-        for case in ("missing", "duplicate", "commit", "hash", "exe-name"):
+        for case in ("missing", "duplicate", "commit", "hash", "exe-name", "no-manager"):
             with self.subTest(case=case):
                 signed = self.manifest()
                 manifest = signed["manifest"]
@@ -126,6 +155,9 @@ class ReleaseManifestTests(unittest.TestCase):
                     manifest["git_sha"] = "wrong"
                 elif case == "hash":
                     manifest["artifacts"][0]["blake3"] = "bad"
+                elif case == "no-manager":
+                    manifest["artifacts"] = [a for a in manifest["artifacts"]
+                                             if a["name"] != "lodeline-manager"]
                 else:
                     manifest["artifacts"][-1]["name"] += ".exe"
                 path.write_text(json.dumps(signed))
@@ -134,7 +166,7 @@ class ReleaseManifestTests(unittest.TestCase):
 
     def test_native_verification_requires_explicit_signature_rejection(self):
         target = release.TARGETS[-1]
-        self.archive(target)
+        self.archives(target)
         manifest = self.dist / "build-manifest.json"
         manifest.write_text(json.dumps(self.manifest()))
         for code, message, accepted in (
@@ -144,9 +176,10 @@ class ReleaseManifestTests(unittest.TestCase):
         ):
             with self.subTest(code=code, message=message):
                 def run(command, **kwargs):
-                    self.assertTrue(command[0].endswith("lodeline.exe"))
+                    name = Path(command[0]).name.removesuffix(".exe")
                     if command[1] == "--version":
-                        return subprocess.CompletedProcess(command, 0, f"lodeline {self.version}\n")
+                        return subprocess.CompletedProcess(command, 0, f"{name} {self.version}\n")
+                    self.assertEqual(Path(command[0]).name, "lodeline.exe")
                     if Path(command[-1]) == manifest.resolve():
                         self.assertTrue(kwargs["check"])
                         return subprocess.CompletedProcess(command, 0)
@@ -164,20 +197,28 @@ class ReleaseManifestTests(unittest.TestCase):
 
     def test_native_verification_stops_on_wrong_version_or_failed_signature(self):
         target = release.TARGETS[0]
-        self.archive(target)
+        self.archives(target)
         (self.dist / "build-manifest.json").write_text(json.dumps(self.manifest()))
         with patch.object(release.subprocess, "run", return_value=
                           subprocess.CompletedProcess([], 0, "lodeline 0.8.0")) as run:
-            with self.assertRaisesRegex(ValueError, "version mismatch"):
+            with self.assertRaisesRegex(ValueError, "lodeline version mismatch"):
                 release.verify(self.dist, self.version, target, "test-sha")
             self.assertEqual(run.call_count, 1)
         with patch.object(release.subprocess, "run", side_effect=[
             subprocess.CompletedProcess([], 0, f"lodeline {self.version}"),
+            subprocess.CompletedProcess([], 0, "lodeline-manager 0.0.0"),
+        ]) as run:
+            with self.assertRaisesRegex(ValueError, "lodeline-manager version mismatch"):
+                release.verify(self.dist, self.version, target, "test-sha")
+            self.assertTrue(run.call_args.args[0][0].endswith("lodeline-manager"))
+        with patch.object(release.subprocess, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, f"lodeline {self.version}"),
+            subprocess.CompletedProcess([], 0, f"lodeline-manager {self.version}"),
             subprocess.CalledProcessError(1, ["lodeline", "doctor"]),
         ]) as run:
             with self.assertRaises(subprocess.CalledProcessError):
                 release.verify(self.dist, self.version, target, "test-sha")
-            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_count, 3)
 
 
 if __name__ == "__main__":

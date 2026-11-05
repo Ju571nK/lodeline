@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-manager"
-version = "0.0.0"
+version = "0.13.0"
 dependencies = [
  "axum",
  "axum-server",
