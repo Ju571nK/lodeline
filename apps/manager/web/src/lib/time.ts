@@ -1,4 +1,4 @@
-import { formatDistanceToNowStrict } from 'date-fns';
+import { format, formatDistanceToNowStrict } from 'date-fns';
 
 /**
  * Bare relative age of an ISO timestamp, e.g. "3m", "2h". Returns "—" if the
@@ -9,5 +9,14 @@ export function relativeAge(ts: string): string {
     return formatDistanceToNowStrict(new Date(ts));
   } catch {
     return '—';
+  }
+}
+
+/** Local date and time of an ISO timestamp, e.g. "Nov 5, 14:31", or the input if unparseable. */
+export function shortTime(ts: string): string {
+  try {
+    return format(new Date(ts), 'MMM d, HH:mm');
+  } catch {
+    return ts;
   }
 }

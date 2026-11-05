@@ -1,7 +1,7 @@
 {
   "request": {
     "method": "GET",
-    "path": "/api/v1/fleet/hosts?cursor=5a7c3e91-aaaa-bbbb-cccc-555555555555",
+    "path": "/api/v1/fleet/hosts?cursor=5a7c3e91-aaaa-bbbb-cccc-666666666666",
     "server": "mock"
   },
   "status": 200,
@@ -16,6 +16,6 @@
   "body": {
     "hosts": null,
     "next_cursor": null,
-    "total_estimated": 5
+    "total_estimated": 6
   }
 }

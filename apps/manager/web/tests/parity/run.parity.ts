@@ -32,7 +32,7 @@ const GOLDENS = join(HERE, 'goldens');
 const DIST = join(HERE, '..', '..', 'dist');
 const TESTDATA = join(HERE, '..', '..', '..', 'testdata');
 const BRACKETS = join(env.RUN_DIR, 'brackets.jsonl');
-const MOCK_EVENT_COUNT = 32;
+const MOCK_EVENT_COUNT = 33;
 /** Goldens are recorded only from the Go build at this commit (its /api/health version prefix). */
 const GO_REFERENCE = 'e4fb077';
 /** Response headers left out of the record: framing, or set per response by the HTTP layer. */

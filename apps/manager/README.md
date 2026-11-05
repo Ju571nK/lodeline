@@ -50,7 +50,7 @@ unset.
 | `LODELINE_SERVER_READ_TOKEN` | required unless `MOCK_FLEET=1` | Bearer token for the server's read API. It must match the server's `LODELINE_SERVER_READ_TOKEN`. |
 | `LODELINE_SERVER_CA_PATH` | unset | CA bundle that signed the server's certificate. Unset uses the OS trust store. |
 | `LODELINE_SERVER_CLIENT_CERT_PATH`, `LODELINE_SERVER_CLIENT_KEY_PATH` | unset | Client certificate and key for a server that requires mTLS. Set both or neither. The three TLS variables need an `https://` base URL. |
-| `MOCK_FLEET` | `0` | `1` serves a built-in mock fleet of 5 hosts and makes no upstream request. |
+| `MOCK_FLEET` | `0` | `1` serves a built-in mock fleet of 6 hosts and makes no upstream request. |
 | `LISTEN_ADDR` | `:8080` | Listen address. `:port` listens on every IPv4 and IPv6 address. |
 | `TRIAGE_DB_PATH` | `./var/triage.sqlite` | The triage SQLite file. Its directory must exist and be writable. |
 | `JWT_TTL_HOURS` | `12` | Session lifetime in hours. |

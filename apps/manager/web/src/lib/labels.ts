@@ -1,4 +1,4 @@
-import type { HookEvidence, Scope } from '@/api/fleet';
+import type { HookEvidence, RiskSource, Scope } from '@/api/fleet';
 
 /**
  * Maps an AI-tool wire string (contract §14.5/§14.7/§14.9.1) to a display name.
@@ -71,6 +71,25 @@ export function shortPath(p: string | null | undefined): string {
   const parts = p.split('/').filter(Boolean);
   if (parts.length <= 2) return p;
   return `…/${parts.slice(-2).join('/')}`;
+}
+
+/**
+ * Who produced an AI Guard score or failure (contract §5.3 `source`), such as
+ * "user alice · rule pack acme". Null when there is no source, which is what an
+ * older server sends. A null `user` is the agent's own home or a project scope,
+ * so it gets its own words and never reads as an unknown source.
+ */
+export function sourceLabel(
+  source: Partial<Pick<RiskSource, 'scope' | 'user' | 'rule_pack_id'>> | null | undefined,
+): string | null {
+  if (!source) return null;
+  const kind = source.scope?.kind;
+  const who = source.user
+    ? `user ${source.user}`
+    : kind && kind !== 'user_global'
+      ? scopeLabel(source.scope)
+      : "agent's own home";
+  return `${who} · ${source.rule_pack_id ? `rule pack ${source.rule_pack_id}` : 'built-in rules'}`;
 }
 
 /** Humanizes an AI Guard scope (§14.5) for display: "project · …/path",

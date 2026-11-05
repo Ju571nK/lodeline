@@ -31,7 +31,7 @@
       ]
     },
     "fleet": {
-      "active_host_count": 5,
+      "active_host_count": 6,
       "active_window_days": 30
     },
     "schema_version": 1,

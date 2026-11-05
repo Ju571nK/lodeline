@@ -65,6 +65,16 @@
         "server_current_policy_version": 18,
         "signature_failures_24h": 0,
         "version_drift": 0
+      },
+      {
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-666666666666",
+        "hostname": "frank-ci",
+        "last_applied_policy_version": 18,
+        "last_policy_reload_ts": "<seed-4h Z>",
+        "policy_expired_active": false,
+        "server_current_policy_version": 18,
+        "signature_failures_24h": 0,
+        "version_drift": 0
       }
     ]
   }

@@ -81,7 +81,7 @@ function HostDetailPage() {
           )}
         </p>
       )}
-      <AiGuardByTool byTool={host.ai_guard?.by_tool ?? {}} />
+      <AiGuardByTool byTool={host.ai_guard?.by_tool ?? {}} unassessed={host.ai_guard_unassessed} />
       <div className="mb-4 grid gap-3 md:grid-cols-2">
         <HostMetaCard meta={host.host_meta} />
         <PolicyHealthCard

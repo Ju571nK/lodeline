@@ -37,9 +37,14 @@ write it again, copy that file into `internal/fleet/` of a `lodeline-manager` ch
 MOCK_DUMP_PATH=$PWD/mock-fleet.json go test -run TestDumpMock -count=1 ./internal/fleet
 ```
 
+Fixtures added after the dump are not in Go's mock: the `source`, `unassessed_since` and
+`ai_guard_unassessed` fields on alice-mbp and carol-dev, the host frank-ci, and its
+`ai_guard_assess_failed` event. A new event must sit at its index times 44 minutes before the
+seed, the spacing the parity recorder assumes for event IDs.
+
 The file differs from Go's encoded bodies in three ways, which `src/fleet/mock.rs` undoes:
 
-- Times under `ts` and `*_ts` keys are second offsets from the seed. The binary adds the seed,
+- Times under `ts`, `*_ts`, `since` and `*_since` keys are second offsets from the seed. The binary adds the seed,
   its start time truncated to the second, as Go's mock does.
 - Events have no `event_id`. The binary derives each one from the event time and the event's
   position, with the same function as Go.

@@ -35,6 +35,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   ignore the new fields. `lodeline-core` gains the `Evidence::AiGuardAssessFailed` variant.
   (#333)
 
+- The web console shows who produced each AI Guard score and which sources it could not
+  assess. The Devices table, the Risk table and the host's AI Guard panel name the user and
+  the rule pack next to a tool's score, or "agent's own home" when the server reports no user.
+  A score whose parser has failed since shows "Unassessed since" with the time, and a host
+  with failing sources but no score shows "Not assessed" with the same mark, never a clean
+  state. The host page lists each failing source with its error and path. The event timeline
+  shows an `ai_guard_assess_failed` event as "AI Guard assessment failed" with its tool, and
+  the event slide-over shows its error, path, source and times; it is not a default alert. With a server that sends none of these fields, the
+  console looks as before. (#469)
+
 ## [0.12.6] - 2026-11-05
 
 ### Changed

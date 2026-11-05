@@ -972,6 +972,36 @@
         "target_id": null,
         "triage": null,
         "ts": "<seed-1364m Z>"
+      },
+      {
+        "agent_version": "0.4.0",
+        "event_id": "EVT#32",
+        "evidence": {
+          "error_kind": "parse",
+          "failing_since": "<seed-1408m Z>",
+          "is_reattestation": false,
+          "kind": "ai_guard_assess_failed",
+          "last_assessed_ts": null,
+          "path": "/home/frank/.claude/settings.json",
+          "rule_pack_id": "acme-extended",
+          "scope": {
+            "kind": "user_global"
+          },
+          "tool": "claude_code",
+          "user": "frank"
+        },
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-666666666666",
+        "schema_version": 1,
+        "severity": "warn",
+        "source": {
+          "kind": "agent"
+        },
+        "subject": {
+          "kind": "agent"
+        },
+        "target_id": null,
+        "triage": null,
+        "ts": "<seed-1408m Z>"
       }
     ],
     "next_cursor": null

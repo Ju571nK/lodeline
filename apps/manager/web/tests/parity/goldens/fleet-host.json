@@ -41,7 +41,15 @@
           "scope": {
             "kind": "user_global"
           },
-          "score": 7.2
+          "score": 7.2,
+          "source": {
+            "rule_pack_id": "acme-extended",
+            "scope": {
+              "kind": "user_global"
+            },
+            "tool_label": null,
+            "user": "alice"
+          }
         }
       }
     },
@@ -50,7 +58,15 @@
         "claude_code": {
           "assessed_ts": "<seed-2m Z>",
           "bucket": "critical",
-          "score": 7.2
+          "score": 7.2,
+          "source": {
+            "rule_pack_id": "acme-extended",
+            "scope": {
+              "kind": "user_global"
+            },
+            "tool_label": null,
+            "user": "alice"
+          }
         }
       },
       "max_bucket": "critical",

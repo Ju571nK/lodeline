@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { relativeAge } from './time';
+import { relativeAge, shortTime } from './time';
 
 describe('relativeAge', () => {
   it('renders a strict, suffix-less distance for a recent timestamp', () => {
@@ -11,5 +11,12 @@ describe('relativeAge', () => {
 
   it('returns "—" for an unparseable timestamp', () => {
     expect(relativeAge('not-a-date')).toBe('—');
+  });
+});
+
+describe('shortTime', () => {
+  it('formats a parseable timestamp and passes an unparseable one through', () => {
+    expect(shortTime('2026-11-05T14:31:00')).toBe('Nov 5, 14:31');
+    expect(shortTime('not-a-date')).toBe('not-a-date');
   });
 });

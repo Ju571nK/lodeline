@@ -22,7 +22,15 @@
             "claude_code": {
               "assessed_ts": "<seed-2m Z>",
               "bucket": "critical",
-              "score": 7.2
+              "score": 7.2,
+              "source": {
+                "rule_pack_id": "acme-extended",
+                "scope": {
+                  "kind": "user_global"
+                },
+                "tool_label": null,
+                "user": "alice"
+              }
             }
           },
           "max_bucket": "critical",
@@ -61,12 +69,38 @@
       },
       {
         "agent_version": "0.4.0",
+        "ai_guard_unassessed": {
+          "claude_desktop": {
+            "last_assessed_ts": "<seed-1h Z>",
+            "since": "<seed-30m Z>",
+            "sources": [
+              {
+                "error_kind": "unreadable",
+                "path": "/home/carol/.config/Claude/claude_desktop_config.json",
+                "rule_pack_id": null,
+                "scope": {
+                  "kind": "user_global"
+                },
+                "user": null
+              }
+            ]
+          }
+        },
         "current_risk": {
           "by_tool": {
             "claude_desktop": {
               "assessed_ts": "<seed-1h Z>",
               "bucket": "high",
-              "score": 6.8
+              "score": 6.8,
+              "source": {
+                "rule_pack_id": null,
+                "scope": {
+                  "kind": "user_global"
+                },
+                "tool_label": null,
+                "user": null
+              },
+              "unassessed_since": "<seed-30m Z>"
             }
           },
           "max_bucket": "high",
@@ -114,9 +148,38 @@
           "warn": 21
         },
         "status": "healthy"
+      },
+      {
+        "agent_version": "0.4.0",
+        "ai_guard_unassessed": {
+          "claude_code": {
+            "last_assessed_ts": null,
+            "since": "<seed-1408m Z>",
+            "sources": [
+              {
+                "error_kind": "parse",
+                "path": "/home/frank/.claude/settings.json",
+                "rule_pack_id": "acme-extended",
+                "scope": {
+                  "kind": "user_global"
+                },
+                "user": "frank"
+              }
+            ]
+          }
+        },
+        "current_risk": null,
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-666666666666",
+        "hostname": "frank-ci",
+        "last_seen_ts": "<seed-2m Z>",
+        "open_event_counts_24h": {
+          "info": 0,
+          "warn": 1
+        },
+        "status": "healthy"
       }
     ],
     "next_cursor": null,
-    "total_estimated": 5
+    "total_estimated": 6
   }
 }

@@ -24,7 +24,16 @@
         "open_alert_count_24h": 8,
         "reasons_count": 0,
         "score": 6.8,
-        "top_tool": "claude_desktop"
+        "source": {
+          "rule_pack_id": null,
+          "scope": {
+            "kind": "user_global"
+          },
+          "tool_label": null,
+          "user": null
+        },
+        "top_tool": "claude_desktop",
+        "unassessed_since": "<seed-30m Z>"
       }
     ]
   }
