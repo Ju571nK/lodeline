@@ -46,6 +46,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ### Changed
 
+- The SIEM runbook gains a rule for `ai_guard_assess_failed`, and the fleet API contract now
+  says `open_alert_count_24h` counts events that match `alerts_definition_default`, not every
+  warn event. (#333)
+
 - The agent now reports a failed AI Guard assessment instead of re-sending the last reading.
   When a parser cannot read or parse a config, the agent sends an `ai_guard_assess_failed`
   event for that source with `error_kind` (`unreadable` or `parse`), the failing `path`,
