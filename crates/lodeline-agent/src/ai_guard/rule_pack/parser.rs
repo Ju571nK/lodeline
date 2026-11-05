@@ -203,8 +203,10 @@ fn interpolate_reason(
     let interpolated = serialized
         .replace("<selector-key>", &key_escaped)
         .replace("<selector-value>", &value_escaped);
-    let mut out: AiGuardReason =
-        serde_json::from_str(&interpolated).unwrap_or_else(|_| reason.clone());
+    let mut out = match serde_json::from_str(&interpolated) {
+        Ok(AiGuardReason::Unknown(_)) | Err(_) => reason.clone(),
+        Ok(known) => known,
+    };
     // The url field is redacted even when the pack built it from a non-URL selector.
     if let AiGuardReason::McpServerRemote { url, .. } = &mut out {
         *url = url_for_evidence(url);

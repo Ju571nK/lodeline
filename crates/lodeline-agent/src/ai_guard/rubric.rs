@@ -92,6 +92,7 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         AiGuardReason::ProjectSettingsEnvOverride { .. } => "project_settings_env_override",
         AiGuardReason::ProjectSettingsUiCommand { .. } => "project_settings_ui_command",
         AiGuardReason::ProjectSettingsMarketplace { .. } => "project_settings_marketplace",
+        AiGuardReason::Unknown(_) => "unknown",
     }
 }
 
@@ -263,6 +264,10 @@ impl Rubric {
     /// added without updating `Rubric::defaults()` doesn't panic in
     /// release.
     pub fn weight_for(&self, reason: &AiGuardReason) -> f32 {
+        // A reason this build cannot read has no weight to look up.
+        if let AiGuardReason::Unknown(_) = reason {
+            return 0.0;
+        }
         let key = kind_key(reason);
         match self.weights.get(key).copied() {
             Some(w) => w,
@@ -909,5 +914,21 @@ mod tests {
         assert_eq!(r.weights.get("mcp_launcher_transient_path"), Some(&3.0));
         assert!(r.overridden.contains("mcp_launcher_shell"));
         assert!(r.unknown_override_keys.is_empty());
+    }
+
+    #[test]
+    fn unreadable_reason_scores_zero_and_is_no_toggle() {
+        let unknown: AiGuardReason =
+            serde_json::from_str(r#"{"kind":"future_reason","n":1}"#).unwrap();
+        assert!(matches!(unknown, AiGuardReason::Unknown(_)));
+        let known = AiGuardReason::SandboxDisabled;
+        assert_eq!(score(std::slice::from_ref(&unknown)), 0.0);
+        assert_eq!(score(&[known.clone(), unknown.clone()]), score(&[known]));
+        assert!(dangerous_toggles(std::slice::from_ref(&unknown)).is_empty());
+        let mut o = HashMap::new();
+        o.insert("unknown".to_string(), 9.0_f32);
+        let r = Rubric::defaults().with_overrides(&o);
+        assert_eq!(r.unknown_override_keys, ["unknown"]);
+        assert_eq!(r.score(&[unknown]), 0.0);
     }
 }

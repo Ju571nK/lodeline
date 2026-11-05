@@ -122,6 +122,7 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         ProjectSettingsMarketplace { .. } => {
             "The repository's Claude Code settings register a plugin marketplace once the folder is trusted — confirm you trust the source first."
         }
+        Unknown(_) => "This Lodeline build does not recognize this finding. Upgrade it to see a hint.",
     }
 }
 

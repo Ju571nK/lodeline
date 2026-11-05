@@ -62,6 +62,16 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   ingest drops a failing source 48h after its last reading. A server older than v0.12 keeps
   showing the last reading. (#333)
 
+- `lodeline-server` now accepts an `ai_guard_risk_assessed` event that holds a reason it
+  cannot read, such as a reason kind added by a newer agent. Before, it rejected the whole
+  event as `malformed_payload`, so the reading never reached the server JSONL or the fleet
+  index. The server keeps the reading and serves that reason in
+  `ai_guard.by_tool.<tool>.reasons` as the object the agent sent. It counts in
+  `reasons_count` and adds nothing to the score. An unknown `tool`, `bucket` or `scope` still
+  rejects the event. Older servers still reject an unknown reason kind, so agents must not
+  send one. `lodeline-core` gains `AiGuardReason::Unknown`, and a rule pack whose `emit` is not
+  a reason the agent knows now fails to load with an error that names the object. (#333)
+
 ## [0.12.6] - 2026-11-05
 
 ### Changed
