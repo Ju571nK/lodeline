@@ -109,11 +109,13 @@ impl AiGuardParser for CodexParser {
 
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         let system_dir = super::policy_controls::codex_system_dir();
-        let mut out = CodexLayer::read_lenient(&system_dir).external_script_paths();
-        out.extend(
-            CodexLayer::read_lenient(&user_codex_dir(home_dir, self.codex_home.as_deref()))
-                .external_script_paths(),
-        );
+        let system = CodexLayer::read_lenient(&system_dir);
+        let user = CodexLayer::read_lenient(&user_codex_dir(home_dir, self.codex_home.as_deref()));
+        if !hooks_feature_enabled(&system_dir, [&system.config, &user.config]) {
+            return Vec::new();
+        }
+        let mut out = system.external_script_paths();
+        out.extend(user.external_script_paths());
         out
     }
 }
@@ -279,6 +281,40 @@ fn read_hooks_json(path: &Path) -> Option<Value> {
     }
 }
 
+/// #200: `[features] hooks = false`, or its legacy name `codex_hooks`, turns
+/// off every config hook (`ClaudeHooksEngine::new`, `hooks/src/engine/mod.rs`,
+/// rust-v0.164.0). Codex applies the keys in sorted order, so in the merged
+/// table `hooks` beats `codex_hooks`. A `[features]` pin in the system
+/// `requirements.toml` overrides config (`managed_features.rs`); an MDM or
+/// cloud pin, a profile, and `--disable hooks` are not seen. `configs` is low
+/// layer to high.
+fn hooks_feature_enabled<'a>(
+    system_dir: &Path,
+    configs: impl IntoIterator<Item = &'a Option<Value>>,
+) -> bool {
+    let flag = |features: &Value| {
+        let get = |key| features.get(key).and_then(Value::as_bool);
+        get("hooks").or_else(|| get("codex_hooks"))
+    };
+    // A malformed file fails the assessment in `policy_controls`; here it pins nothing.
+    let requirements = std::fs::read_to_string(system_dir.join("requirements.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<Value>(&text).ok());
+    let pinned = requirements
+        .as_ref()
+        .and_then(|r| r.get("features").or_else(|| r.get("feature_requirements")))
+        .and_then(flag);
+    let mut features = Value::Table(toml::Table::new());
+    for table in configs
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("features"))
+    {
+        merge_layer(&mut features, table);
+    }
+    pinned.or_else(|| flag(&features)).unwrap_or(true)
+}
+
 /// Codex merges config layers with the higher layer winning: tables merge key
 /// by key, any other value is replaced.
 fn merge_layer(base: &mut Value, overlay: &Value) {
@@ -340,8 +376,10 @@ fn assess_user_layers(
         emit_shell_environment_reasons(val, &mut out);
     }
     let [system, user] = &layers;
-    system.emit_hook_reasons(&HookTrust::Managed, &mut out);
-    user.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
+    if hooks_feature_enabled(system_dir, [&system.config, &user.config]) {
+        system.emit_hook_reasons(&HookTrust::Managed, &mut out);
+        user.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
+    }
     if let Some(val) = &effective {
         emit_mcp_reasons(val, &mut out);
     }
@@ -542,17 +580,17 @@ fn writable_root_everywhere(p: &str) -> bool {
 ///
 /// `"never"` is the autonomous setting: nothing is escalated to the user.
 /// `"untrusted"` and `"on-request"` still prompt, and the deprecated
-/// `"on-failure"` prompts on error, so none of those is a finding.
+/// `"on-failure"` is a serde alias of `"on-request"`
+/// (`AskForApproval`, `protocol/src/protocol.rs`, rust-v0.164.0), so none of
+/// those is a finding.
 ///
-/// The table form must not crash a scalar-shaped read — that is the robustness
-/// half of this — but it is also **not** scored. Its sub-keys
+/// The table form is read without error and is not a finding. Its booleans
 /// (`sandbox_approval`, `rules`, `mcp_elicitations`, `request_permissions`,
-/// `skill_approval`) each gate a different class of prompt, and a granular
-/// policy can be more restrictive than any scalar. Emitting
-/// `AutoApprovalEnabled` on the shape alone would assert that approvals are off
-/// when they may not be. The accepted values need hardware verification before
-/// this can say anything; until then the honest answer is silence, and the
-/// silence is recorded here rather than left to look like a clean result.
+/// `skill_approval`) say whether a prompt in that class is shown; `false`
+/// rejects the request instead. Commands no prompt covers run as under
+/// `on-request` (`render_decision_for_unmatched_command`,
+/// `core/src/exec_policy.rs`, rust-v0.164.0), so a granular policy never
+/// approves more than `on-request` does.
 ///
 /// `approvals_reviewer = "auto_review"` sends each escalation to a model
 /// reviewer first, and its `allow` approves the action with no human
@@ -580,13 +618,7 @@ pub(crate) fn emit_approval_policy_reasons(
         // `untrusted` and `never` are not routed; the deprecated `on-failure`
         // is a serde alias of `on-request`.
         Some(Value::String(scalar)) => matches!(scalar.as_str(), "on-request" | "on-failure"),
-        Some(policy) => {
-            let granular = policy.get("granular").is_some();
-            if granular {
-                tracing::info!("codex approval_policy: granular form not yet scored (see #200)");
-            }
-            granular
-        }
+        Some(policy) => policy.get("granular").is_some(),
     };
     if routed_to_reviewer
         && matches!(
@@ -717,10 +749,11 @@ fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
         .iter()
         .flat_map(|layer| rules_texts(&layer.dir.join("rules")))
         .collect();
-    let prefixes = texts
+    let allowed: Vec<Vec<String>> = texts
         .iter()
         .flat_map(|text| allow_patterns_in_rules_text(text))
-        .map(|words| program_basename(&words[0]));
+        .collect();
+    let prefixes = allowed.iter().map(|words| program_basename(&words[0]));
     let hosts = allowed_network_hosts(&texts)
         .into_iter()
         .map(|host| program_basename(&host));
@@ -738,6 +771,115 @@ fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
             "codex rules: capping StandingCommandApproval reasons"
         );
     }
+    let mut broad: Vec<String> = allowed.iter().filter_map(|w| broad_prefix(w)).collect();
+    broad.sort();
+    broad.dedup();
+    for rule in broad.into_iter().take(MAX_STANDING_APPROVAL_REASONS) {
+        out.push(AiGuardReason::PermissionsAllowBroad { rule });
+    }
+}
+
+/// #200: prefixes Codex refuses to offer as a standing approval because the
+/// approved command can run any program (`BANNED_PREFIX_SUGGESTIONS`,
+/// `core/src/exec_policy.rs`, rust-v0.164.0). First words are basenames
+/// without `.exe`, so `/bin/bash` and `cmd.exe` fold into `bash` and `cmd`.
+const BROAD_PREFIXES: &[&[&str]] = &[
+    &["bash", "-c"],
+    &["bash", "-lc"],
+    &["bun", "-e"],
+    &["bun", "run"],
+    &["cmd", "/c"],
+    &["cmd", "/k"],
+    &["dash", "-c"],
+    &["deno", "eval"],
+    &["env"],
+    &["fish", "-c"],
+    &["git"],
+    &["julia", "-e"],
+    &["ksh", "-c"],
+    &["lua", "-e"],
+    &["node", "-e"],
+    &["nodejs", "-e"],
+    &["npm", "run"],
+    &["osascript"],
+    &["perl", "-e"],
+    &["php", "-r"],
+    &["pnpm", "run"],
+    &["powershell", "-Command"],
+    &["powershell", "-EncodedCommand"],
+    &["powershell", "-File"],
+    &["powershell", "-c"],
+    &["pwsh", "-Command"],
+    &["pwsh", "-EncodedCommand"],
+    &["pwsh", "-File"],
+    &["pwsh", "-c"],
+    &["pwsh", "-e"],
+    &["pwsh", "-ec"],
+    &["pwsh", "-f"],
+    &["py", "-3"],
+    &["pypy"],
+    &["pypy3"],
+    &["python", "-"],
+    &["python", "-c"],
+    &["python3", "-"],
+    &["python3", "-c"],
+    &["pythonw"],
+    &["pyw"],
+    &["rm"],
+    &["rscript"],
+    &["ruby", "-e"],
+    &["sh", "-c"],
+    &["sh", "-lc"],
+    &["sudo"],
+    &["yarn", "run"],
+    &["zsh", "-c"],
+    &["zsh", "-lc"],
+];
+
+/// The rule an allow prefix is reported as when it is broad, or None. A prefix
+/// is broad when it is a [`BROAD_PREFIXES`] entry or a shorter prefix of one:
+/// `["bash"]` and `["npm"]` approve `bash -c ...` and `npm run ...`, while
+/// `["bash", "build.sh"]` or `["git", "status"]` pins what runs. Words compare
+/// case-insensitively, and an alternative `{a|b}` matches if one of its
+/// choices does. The rule is spelled from the table, so no word of the
+/// operator's own pattern (a path, a script name) leaves the host.
+fn broad_prefix(words: &[String]) -> Option<String> {
+    let first = |word: &str| -> String {
+        let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        let name = name.to_ascii_lowercase();
+        name.strip_suffix(".exe")
+            .map(str::to_string)
+            .unwrap_or(name)
+    };
+    let matches = |word: &str, want: &str, is_first: bool| {
+        let choices = word
+            .strip_prefix('{')
+            .and_then(|w| w.strip_suffix('}'))
+            .map_or_else(|| vec![word], |inner| inner.split('|').collect());
+        choices.into_iter().any(|choice| {
+            let choice = if is_first {
+                first(choice)
+            } else {
+                choice.to_string()
+            };
+            choice.eq_ignore_ascii_case(want)
+        })
+    };
+    BROAD_PREFIXES.iter().find_map(|entry| {
+        let hit = words.len() <= entry.len()
+            && words
+                .iter()
+                .zip(entry.iter())
+                .enumerate()
+                .all(|(i, (word, want))| matches(word, want, i == 0));
+        hit.then(|| {
+            let quoted: Vec<String> = entry[..words.len()]
+                .iter()
+                .map(|w| format!("\"{w}\""))
+                .collect();
+            format!("prefix_rule(pattern=[{}])", quoted.join(", "))
+        })
+    })
 }
 
 /// Basename of the first token, so a path's directories (usernames) never
@@ -1477,6 +1619,8 @@ impl CodexProjectParser {
             codex_dir.join("config.toml"),
             // An `approval_policy` there decides whether the project's reviewer is routed.
             super::policy_controls::codex_system_dir().join("config.toml"),
+            // A `[features] hooks` pin there decides whether the project's hooks run.
+            super::policy_controls::codex_requirements_path(),
         ]
     }
 
@@ -1484,7 +1628,17 @@ impl CodexProjectParser {
         if self.is_codex_home(codex_dir) {
             return Vec::new();
         }
-        CodexLayer::read_lenient(&self.repo_root.join(".codex")).external_script_paths()
+        let system_dir = super::policy_controls::codex_system_dir();
+        let layer = CodexLayer::read_lenient(&self.repo_root.join(".codex"));
+        let configs = [
+            &CodexLayer::read_lenient(&system_dir).config,
+            &CodexLayer::read_lenient(codex_dir).config,
+            &layer.config,
+        ];
+        if !hooks_feature_enabled(&system_dir, configs) {
+            return Vec::new();
+        }
+        layer.external_script_paths()
     }
 
     /// Codex skips a project `.codex` that is its own home, `CODEX_HOME` or
@@ -1545,7 +1699,9 @@ impl CodexProjectParser {
             emit_approval_policy_reasons(val, inherited_policy, &mut out);
             emit_shell_environment_reasons(val, &mut out);
         }
-        layer.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
+        if hooks_feature_enabled(system_dir, [&system.config, &user.config, &layer.config]) {
+            layer.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
+        }
         if let Some(val) = &layer.config {
             // #154 Option B — Codex (current main) loads repo-local
             // `.codex/config.toml` as a project layer and auto-launches its
@@ -2290,30 +2446,46 @@ command = "echo inline"
         }
     }
 
-    /// The table form must parse without error and without inventing a
-    /// posture claim: a granular policy can be stricter than any scalar, so
-    /// asserting auto-approval on its shape alone would be wrong.
+    /// A granular policy only turns prompts into rejections, so no shape of it
+    /// is an auto-approval, all-false included, and `skill_approval` and
+    /// `request_permissions` may be left out.
     #[test]
     fn granular_approval_policy_parses_and_claims_nothing() {
-        let dir = tempdir().unwrap();
-        write_config(
-            dir.path(),
-            r#"
-[approval_policy.granular]
-sandbox_approval = "on-request"
-rules = "never"
-mcp_elicitations = "on-request"
-"#,
-        );
-        let reasons = CodexParser::default()
-            .assess(dir.path())
-            .expect("table form must not error");
-        assert!(
-            !reasons
-                .iter()
-                .any(|r| matches!(r, AiGuardReason::AutoApprovalEnabled { .. })),
-            "got {reasons:?}"
-        );
+        for config in [
+            "[approval_policy.granular]\nsandbox_approval = true\nrules = false\nmcp_elicitations = true\n",
+            "approval_policy = { granular = { sandbox_approval = false, rules = false, mcp_elicitations = false, skill_approval = false, request_permissions = false } }\n",
+        ] {
+            let dir = tempdir().unwrap();
+            write_config(dir.path(), config);
+            let reasons = CodexParser::default()
+                .assess(dir.path())
+                .expect("table form must not error");
+            assert!(reasons.is_empty(), "{config}: {reasons:?}");
+        }
+    }
+
+    /// Codex routes a granular policy's escalations to the reviewer, as it
+    /// does `on-request` (and its alias `on-failure`).
+    #[test]
+    fn granular_and_on_failure_route_to_the_reviewer() {
+        for policy in [
+            "{ granular = { sandbox_approval = true, rules = true, mcp_elicitations = true } }",
+            "\"on-failure\"",
+        ] {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!("approval_policy = {policy}\napprovals_reviewer = \"auto_review\"\n"),
+            );
+            let reasons = CodexParser::default().assess(dir.path()).unwrap();
+            assert_eq!(
+                reasons,
+                vec![AiGuardReason::AutoApprovalEnabled {
+                    mode: "auto_review".to_string()
+                }],
+                "{policy}"
+            );
+        }
     }
 
     // ─── #200: standing command approvals (~/.codex/rules) ─────────────────
@@ -3983,5 +4155,288 @@ base_url = "https://llm.corp.example/v1"
                 Some("llm.example.net")
             )]
         );
+    }
+
+    // ─── #200: broad standing approvals ────────────────────────────────────
+
+    fn broad_rules(reasons: &[AiGuardReason]) -> Vec<&str> {
+        reasons
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::PermissionsAllowBroad { rule } => Some(rule.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn broad_for(pattern: &str) -> Vec<String> {
+        let dir = tempdir().unwrap();
+        write_rules(
+            dir.path(),
+            "b.rules",
+            &format!("prefix_rule(pattern={pattern}, decision=\"allow\")\n"),
+        );
+        broad_rules(&CodexParser::default().assess(dir.path()).unwrap())
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A prefix is broad when it is one Codex refuses to suggest, or shorter
+    /// than one, and the rule is spelled from that table, never from the
+    /// operator's path.
+    #[test]
+    fn broad_allow_prefixes_are_reported() {
+        for (pattern, rule) in [
+            (r#"["bash"]"#, r#"prefix_rule(pattern=["bash"])"#),
+            (
+                r#"["bash", "-lc"]"#,
+                r#"prefix_rule(pattern=["bash", "-lc"])"#,
+            ),
+            (
+                r#"["/home/alice/.venv/bin/python3", "-c"]"#,
+                r#"prefix_rule(pattern=["python3", "-c"])"#,
+            ),
+            (
+                r#"["C:\\Windows\\System32\\cmd.exe", "/C"]"#,
+                r#"prefix_rule(pattern=["cmd", "/c"])"#,
+            ),
+            (
+                r#"["pwsh", "-command"]"#,
+                r#"prefix_rule(pattern=["pwsh", "-Command"])"#,
+            ),
+            (r#"["npm"]"#, r#"prefix_rule(pattern=["npm"])"#),
+            (
+                r#"["yarn", "run"]"#,
+                r#"prefix_rule(pattern=["yarn", "run"])"#,
+            ),
+            (r#"["sudo"]"#, r#"prefix_rule(pattern=["sudo"])"#),
+            (r#"["git"]"#, r#"prefix_rule(pattern=["git"])"#),
+            (
+                r#"[["make", "sh"], "-c"]"#,
+                r#"prefix_rule(pattern=["sh", "-c"])"#,
+            ),
+        ] {
+            assert_eq!(broad_for(pattern), vec![rule.to_string()], "{pattern}");
+        }
+    }
+
+    #[test]
+    fn narrow_allow_prefixes_are_not_broad() {
+        for pattern in [
+            r#"["git", "status"]"#,
+            r#"["bash", "scripts/test.sh"]"#,
+            r#"["python3", "-m", "pytest"]"#,
+            r#"["npm", "test"]"#,
+            r#"["cargo"]"#,
+            r#"["bash", "-c", "make lint"]"#,
+            r#"["rmdir"]"#,
+        ] {
+            assert!(broad_for(pattern).is_empty(), "{pattern}");
+        }
+    }
+
+    /// The standing approval is still listed for a broad rule, a `prompt` or
+    /// `forbidden` rule is neither, and malformed rules beside a valid one
+    /// do not hide it.
+    #[test]
+    fn broad_rule_keeps_its_standing_approval_and_ignores_malformed_lines() {
+        let dir = tempdir().unwrap();
+        write_rules(
+            dir.path(),
+            "m.rules",
+            concat!(
+                "prefix_rule(pattern=\"bash\", decision=\"allow\")\n",
+                "prefix_rule(pattern=[], decision=\"allow\")\n",
+                "prefix_rule(pattern=[\"sh\"], decision=\"prompt\")\n",
+                "prefix_rule(pattern=[\"sudo\"], decision=\"forbidden\")\n",
+                "prefix_rule(pattern=[\"rm\"], decision=\"allow\")\n",
+            ),
+        );
+        let reasons = CodexParser::default().assess(dir.path()).unwrap();
+        assert_eq!(approvals(&reasons), vec!["rm"], "{reasons:?}");
+        assert_eq!(
+            broad_rules(&reasons),
+            vec![r#"prefix_rule(pattern=["rm"])"#]
+        );
+    }
+
+    #[test]
+    fn project_broad_rule_is_reported() {
+        let (dir, p) = project_with("");
+        let rules = p.repo_root.join(".codex").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("r.rules"),
+            "prefix_rule(pattern=[\"node\"], decision=\"allow\")\n",
+        )
+        .unwrap();
+        let reasons = p.assess(dir.path()).unwrap();
+        assert_eq!(
+            broad_rules(&reasons),
+            vec![r#"prefix_rule(pattern=["node"])"#]
+        );
+    }
+
+    // ─── #200: `[features] hooks` ──────────────────────────────────────────
+
+    /// The user layer's trusted destructive `hooks.json` hook, with `user`
+    /// prepended to the user config and `system` as the system config.
+    fn user_hook_reasons(
+        system_config: &str,
+        user: &str,
+        requirements: &str,
+    ) -> Vec<AiGuardReason> {
+        let (_root, system, home) = system_and_home();
+        let codex = home.join(".codex");
+        std::fs::write(codex.join("hooks.json"), DESTRUCTIVE_HOOKS_JSON).unwrap();
+        std::fs::write(
+            codex.join("config.toml"),
+            format!(
+                "{user}\n{}",
+                trusted(&codex.join("hooks.json"), "pre_tool_use", 0, 0)
+            ),
+        )
+        .unwrap();
+        std::fs::write(system.join("config.toml"), system_config).unwrap();
+        std::fs::write(system.join("requirements.toml"), requirements).unwrap();
+        assess_user_layers(&system, &codex).unwrap()
+    }
+
+    #[test]
+    fn hooks_feature_off_skips_config_hooks() {
+        for (system, user, requirements, runs) in [
+            ("", "", "", true),
+            ("", "[features]\nhooks = false", "", false),
+            ("", "[features]\ncodex_hooks = false", "", false),
+            (
+                "",
+                "[features]\ncodex_hooks = false\nhooks = true",
+                "",
+                true,
+            ),
+            (
+                "",
+                "[features]\nhooks = false\ncodex_hooks = true",
+                "",
+                false,
+            ),
+            ("[features]\nhooks = false", "", "", false),
+            (
+                "[features]\nhooks = false",
+                "[features]\nhooks = true",
+                "",
+                true,
+            ),
+            (
+                "",
+                "[features]\nhooks = false",
+                "[features]\nhooks = true",
+                true,
+            ),
+            ("", "", "[feature_requirements]\ncodex_hooks = false", false),
+            ("", "[features]\nhooks = false", "not toml [", false),
+        ] {
+            let reasons = user_hook_reasons(system, user, requirements);
+            assert_eq!(
+                has_destructive_inline(&reasons),
+                runs,
+                "system={system:?} user={user:?} requirements={requirements:?}: {reasons:?}"
+            );
+        }
+    }
+
+    /// The project is the highest layer, so its `features.hooks` wins over
+    /// the user's, in either direction.
+    #[test]
+    fn project_hooks_follow_the_merged_features_flag() {
+        for (user, project, runs) in [
+            ("", "", true),
+            ("", "[features]\nhooks = false\n", false),
+            ("[features]\nhooks = false", "", false),
+            (
+                "[features]\nhooks = false",
+                "[features]\nhooks = true\n",
+                true,
+            ),
+        ] {
+            let (_root, system, home) = system_and_home();
+            let repo = home.join("repo");
+            std::fs::create_dir_all(repo.join(".codex")).unwrap();
+            std::fs::write(
+                repo.join(".codex").join("hooks.json"),
+                DESTRUCTIVE_HOOKS_JSON,
+            )
+            .unwrap();
+            std::fs::write(repo.join(".codex").join("config.toml"), project).unwrap();
+            std::fs::write(
+                home.join(".codex").join("config.toml"),
+                format!(
+                    "{user}\n{}",
+                    trusted(
+                        &repo.join(".codex").join("hooks.json"),
+                        "pre_tool_use",
+                        0,
+                        0
+                    )
+                ),
+            )
+            .unwrap();
+            let p = CodexProjectParser { repo_root: repo };
+            let reasons = p.assess_layers(&system, &home.join(".codex")).unwrap();
+            assert_eq!(
+                has_destructive_inline(&reasons),
+                runs,
+                "{user:?} {project:?}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hooks_feature_off_drops_external_script_paths() {
+        let dir = tempdir().unwrap();
+        let hook = "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/opt/lodeline-tools/pre.sh\"\n";
+        write_config(dir.path(), hook);
+        assert_eq!(
+            CodexParser::default().collect_external_script_paths(dir.path()),
+            vec![PathBuf::from("/opt/lodeline-tools/pre.sh")]
+        );
+        write_config(dir.path(), &format!("[features]\nhooks = false\n{hook}"));
+        assert!(CodexParser::default()
+            .collect_external_script_paths(dir.path())
+            .is_empty());
+    }
+
+    #[test]
+    fn project_hooks_feature_off_drops_external_script_paths() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let codex = dir.path().join("home").join(".codex");
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        let hook = "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/opt/lodeline-tools/pre.sh\"\n";
+        let config = repo.join(".codex").join("config.toml");
+        let p = CodexProjectParser {
+            repo_root: repo.clone(),
+        };
+        std::fs::write(&config, hook).unwrap();
+        assert_eq!(
+            p.script_paths_in(&codex),
+            vec![PathBuf::from("/opt/lodeline-tools/pre.sh")]
+        );
+        std::fs::write(&config, format!("[features]\nhooks = false\n{hook}")).unwrap();
+        assert!(p.script_paths_in(&codex).is_empty());
+    }
+
+    /// A `[features] hooks` pin in `requirements.toml` changes whether the
+    /// project's hooks run, so an edit there must trigger a rescan.
+    #[test]
+    fn project_watched_paths_include_requirements_toml() {
+        let p = CodexProjectParser {
+            repo_root: PathBuf::from("/repo"),
+        };
+        assert!(p
+            .watched_paths_in(Path::new("/home/.codex"))
+            .contains(&super::super::policy_controls::codex_requirements_path()));
     }
 }
