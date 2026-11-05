@@ -41,8 +41,8 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   A score whose parser has failed since shows "Unassessed since" with the time, and a host
   with failing sources but no score shows "Not assessed" with the same mark, never a clean
   state. The host page lists each failing source with its error and path. The event timeline
-  and the event slide-over show an `ai_guard_assess_failed` event with its tool, error, path
-  and source; it is not a default alert. With a server that sends none of these fields, the
+  shows an `ai_guard_assess_failed` event as "AI Guard assessment failed" with its tool, and
+  the event slide-over shows its error, path, source and times; it is not a default alert. With a server that sends none of these fields, the
   console looks as before. (#469)
 
 ## [0.12.6] - 2026-11-05

@@ -225,7 +225,7 @@ test.describe('AI Guard score sources and unassessed parsers', () => {
     await expect(failing).toContainText(
       'Parse · /home/frank/.claude/settings.json · user frank · rule pack acme-extended',
     );
-    const event = row(page, 'Ai Guard Assess Failed');
+    const event = row(page, 'AI Guard assessment failed');
     await expect(event.getByRole('cell').last()).toHaveText('Claude Code');
     await page.screenshot({ path: test.info().outputPath('host-unassessed.png'), fullPage: true });
 

@@ -981,7 +981,7 @@ export const CASES: Case[] = [
     route: 'GET /api/v1/fleet/hosts',
     outcome: 'ok',
     method: 'GET',
-    path: `/api/v1/fleet/hosts?cursor=5a7c3e91-aaaa-bbbb-cccc-555555555555`,
+    path: `/api/v1/fleet/hosts?cursor=5a7c3e91-aaaa-bbbb-cccc-666666666666`,
   },
   {
     name: 'fleet-hosts-bad-limit',

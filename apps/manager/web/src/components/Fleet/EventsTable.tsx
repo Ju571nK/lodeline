@@ -53,6 +53,10 @@ export function EventsTable({ rows, isPending, onSelect }: Props) {
                   hook.kind === 'hook_invocation' ? hook.other_label : undefined,
                 )
               : '—';
+          const kind =
+            ev.evidence?.kind === 'ai_guard_assess_failed'
+              ? 'AI Guard assessment failed'
+              : humanKind(ev.evidence?.kind ?? '');
           return (
             <tr key={`${ev.host_id}:${ev.event_id}`} className="border-b border-border-subtle">
               <td className="px-3 py-2">
@@ -74,9 +78,9 @@ export function EventsTable({ rows, isPending, onSelect }: Props) {
                   type="button"
                   onClick={() => onSelect(ev)}
                   className="text-left text-accent hover:underline"
-                  aria-label={`Inspect ${humanKind(ev.evidence?.kind ?? '')} ${ev.event_id}`}
+                  aria-label={`Inspect ${kind} ${ev.event_id}`}
                 >
-                  {humanKind(ev.evidence?.kind ?? '')}
+                  {kind}
                 </button>
               </td>
               <td className="px-3 py-2 font-mono text-text-muted" title={ev.host_id}>

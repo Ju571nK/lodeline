@@ -92,7 +92,10 @@ function UnassessedSources({ failing }: { failing: [string, ToolUnassessed][] })
             </p>
             <ul className="mt-1 space-y-1 pl-3 text-text-muted">
               {u.sources.map((s) => (
-                <li key={`${s.path}:${s.user}:${s.rule_pack_id}`} className="break-all">
+                <li
+                  key={`${s.path}:${s.user}:${s.rule_pack_id}:${JSON.stringify(s.scope)}`}
+                  className="break-all"
+                >
                   {humanKind(s.error_kind)} · <code className="font-mono">{s.path}</code> ·{' '}
                   {sourceLabel(s)}
                 </li>
