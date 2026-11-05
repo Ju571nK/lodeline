@@ -52,7 +52,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   gives the same result, the server now records when it received each batch, in a
   `.received-YYYY-MM-DD.jsonl.recv` file beside each event file. Event files written before
   this change carry no receive time, and a restart caps their times at the end of the receive
-  day or at the restart, whichever is earlier. The event's own timestamp is unchanged in stored
+  day or at the restart, whichever is earlier. In a file that already holds lines from before the
+  upgrade, those lines take the receive time of the first batch the upgraded server appends,
+  which is later than their true receive time, on the same day, and earlier than the
+  restart that rebuilds them. The event's own timestamp is unchanged in stored
   events, SIEM output and `/v1/events`. (#442)
 
 ## [0.13.0] - 2026-11-05
