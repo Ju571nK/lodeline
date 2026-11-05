@@ -147,6 +147,8 @@ the rightmost hop that is not a trusted proxy. `True-Client-IP` and `X-Real-IP` 
 - Do not list `0.0.0.0/0` or `::/0`. Every peer would be trusted, and any client could name its
   own address in the header.
 
+## API requests
+
 `POST /api/v1/auth/login`, `/api/v1/triage/upsert` and `/api/v1/triage/note` take only
 `Content-Type: application/json`, in any letter case and with or without parameters such as
 `charset`. Any other type, `application/*+json` included, or no `Content-Type` gets 415 with
@@ -156,6 +158,12 @@ and the login limit answer first, so a refused login still counts as an attempt.
 Request bodies are read to at most 64 KiB for login and 4 MiB for the triage routes. A larger
 body gets 413. The reader stops at the end of the body's first JSON value. If that value has
 not fully arrived within 30 seconds, the request gets 408.
+
+An answer sent before the request body was read to the end, such as a 401, 405, 413, 415 or
+429, carries `Connection: close`. Before it goes out, the console reads and drops up to 64 KiB
+more of the body for at most 1 second, so a client that sends the body after the head still
+reads the answer. At most 64 such reads run at once; past that, or when the request carries
+`Expect: 100-continue`, the answer goes out at once.
 
 ## Moving from the Go console
 

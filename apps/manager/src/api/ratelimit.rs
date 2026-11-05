@@ -9,27 +9,17 @@
 //! smallest block a host is usually given, so it cannot step through addresses of its own.
 
 use std::collections::{HashMap, VecDeque};
-use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use ipnet::IpNet;
-use tokio::sync::Semaphore;
 
-use crate::api::LOGIN_BODY_LIMIT;
 use crate::server::error_response;
-
-/// The most 429s that read their request body at once; past that, a 429 closes at once.
-const MAX_DRAINS: usize = 64;
-/// How long a 429 reads the rest of the request body, which a client sends right behind the head.
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The most addresses with a window of their own. While the table is full of open windows, new
 /// addresses share one overflow window with the same limit, so no open window is ever dropped
@@ -42,7 +32,6 @@ pub struct RateLimiter {
     window: Duration,
     trusted: Arc<[IpNet]>,
     hits: Mutex<Hits>,
-    drains: Semaphore,
     now: Box<dyn Fn() -> Instant + Send + Sync>,
 }
 
@@ -78,7 +67,6 @@ impl RateLimiter {
             window,
             trusted,
             hits: Mutex::default(),
-            drains: Semaphore::new(MAX_DRAINS),
             now: Box::new(Instant::now),
         }
     }
@@ -168,11 +156,6 @@ pub async fn limit(State(limiter): State<Arc<RateLimiter>>, req: Request, next: 
     match limiter.allow(key(ip)) {
         Ok(()) => next.run(req).await,
         Err(retry) => {
-            // A connection closed with unread input resets, and the client can lose the 429 to
-            // that reset, so discard a login-sized body that arrives soon, while a permit is free.
-            if let Ok(_permit) = limiter.drains.try_acquire() {
-                let _ = tokio::time::timeout(DRAIN_TIMEOUT, discard(req.into_body())).await;
-            }
             let mut res = error_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",
@@ -182,18 +165,6 @@ pub async fn limit(State(limiter): State<Arc<RateLimiter>>, req: Request, next: 
             headers.insert(header::RETRY_AFTER, HeaderValue::from(retry.as_secs() + 1));
             headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
             res
-        }
-    }
-}
-
-/// Reads and drops `body` frame by frame until it ends, fails, or passes `LOGIN_BODY_LIMIT`.
-async fn discard(body: Body) {
-    let mut body = pin!(body);
-    let mut left = LOGIN_BODY_LIMIT;
-    while let Some(Ok(frame)) = poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
-        left = left.saturating_sub(frame.data_ref().map_or(0, |d| d.len()));
-        if left == 0 {
-            break;
         }
     }
 }
