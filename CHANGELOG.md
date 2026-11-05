@@ -54,6 +54,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   this change carry no receive time, and a restart caps their times at the end of the receive
   day or at the restart, whichever is earlier. The event's own timestamp is unchanged in stored
   events, SIEM output and `/v1/events`. (#442)
+- AI Guard now reads the Claude Code local settings file where current Claude Code keeps it.
+  Since v2.1.211, "Yes, and don't ask again" saves its allow rules to
+  `.claude/settings.local.json` at the git repository root, and a linked worktree uses the
+  main checkout's file. A project in a worktree or in a repository subdirectory now scores that
+  file together with its own copy. The root file wins a key both set, and the permission lists
+  of both apply. As Claude Code does, the root file is not used on Windows, when the root is
+  the home directory, or when the root, its `.git` or its `.claude` has another owner. A
+  repository whose only Claude Code file is `.claude/settings.local.json` or `.claude/loop.md`
+  is now discovered, and `lodeline scan` uses the same markers as the agent. Hooks in skills
+  under `<subdir>/.claude/skills/` below the repository root are now scored with the project,
+  because Claude Code loads such a skill once Claude works on a file in that folder. The walk
+  skips hidden, `node_modules` and `target` folders and symlinked directories. No reason kind
+  is new, so every server accepts these events. Scores can go up for such projects. (#199)
 
 ## [0.13.0] - 2026-11-05
 

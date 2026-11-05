@@ -76,6 +76,10 @@ pub fn discover_claude_repos(roots: &[String]) -> Vec<PathBuf> {
     set.extend(discover_per_repo(roots, ".mcp.json"));
     set.extend(discover_per_repo(roots, "CLAUDE.md"));
     set.extend(discover_per_repo(roots, "AGENTS.md"));
+    // #199: "Yes, and don't ask again" writes allow rules to the local file,
+    // so it is often the only one a repo has; a loop prompt runs unattended.
+    set.extend(discover_per_repo(roots, ".claude/settings.local.json"));
+    set.extend(discover_per_repo(roots, ".claude/loop.md"));
     // #199 — a repo that ships only skills or subagents can still carry hooks.
     set.extend(discover_per_repo_dir(roots, ".claude/skills"));
     set.extend(discover_per_repo_dir(roots, ".claude/agents"));
@@ -288,6 +292,19 @@ mod tests {
         let roots = vec![root.path().to_string_lossy().to_string()];
         assert!(discover_claude_repos(&roots).contains(&dunce::canonicalize(&repo).unwrap()));
     }
+    #[test]
+    fn discover_claude_repos_finds_local_settings_or_loop_prompt_only() {
+        let root = tempdir().unwrap();
+        make_repo_with(root.path(), "only-local", ".claude/settings.local.json");
+        make_repo_with(root.path(), "only-loop", ".claude/loop.md");
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        let found = discover_claude_repos(&roots);
+        for name in ["only-local", "only-loop"] {
+            let repo = dunce::canonicalize(root.path().join(name)).unwrap();
+            assert!(found.contains(&repo), "{name}: got {found:?}");
+        }
+    }
+
     #[test]
     fn discover_codex_repos_finds_hooks_json_only() {
         let root = tempdir().unwrap();

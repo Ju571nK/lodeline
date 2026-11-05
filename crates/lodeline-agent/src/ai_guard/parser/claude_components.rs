@@ -19,6 +19,10 @@ const MAX_SKILL_FILES: usize = 1000;
 const MAX_AGENT_FILES: usize = 1000;
 /// `agents/` is scanned recursively by Claude Code; this bounds the walk.
 const MAX_AGENT_DEPTH: usize = 8;
+/// Bounds on the walk for nested `.claude/skills` folders in a repository.
+const MAX_NESTED_DEPTH: usize = 8;
+const MAX_NESTED_WALK_DIRS: usize = 20_000;
+const NESTED_WALK_SKIPPED: &[&str] = &["node_modules", "target"];
 /// Frontmatter sits at the top of the file, so only this much is read.
 const FRONTMATTER_READ_CAP: u64 = 256 * 1024;
 
@@ -34,19 +38,43 @@ pub(crate) struct ComponentHooks {
 pub(crate) fn component_hooks(claude_dir: &Path) -> Vec<ComponentHooks> {
     component_files(claude_dir)
         .into_iter()
-        .filter_map(|path| {
-            let mut hooks = frontmatter_hooks(&path)?;
-            if path.file_name().is_some_and(|n| n == "SKILL.md") {
-                if let Some(dir) = skill_dir(&path) {
-                    substitute_skill_dir(&mut hooks, &dir);
-                }
-            }
-            Some(ComponentHooks {
-                path,
-                settings: serde_json::json!({ "hooks": hooks }),
-            })
-        })
+        .filter_map(hooks_of)
         .collect()
+}
+
+/// Skills in `<subdir>/.claude/skills/` below `repo_root`. Claude Code loads
+/// one the first time Claude reads or edits a file in `<subdir>`, so any
+/// session in the repository can pick up its hooks. The repository's own
+/// `.claude/skills/` is left to [`component_hooks`].
+pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
+    let mut skill_dirs = Vec::new();
+    let mut dir_budget = MAX_NESTED_WALK_DIRS;
+    collect_nested_skill_dirs(repo_root, 0, &mut dir_budget, &mut skill_dirs);
+    if dir_budget == 0 {
+        warn_capped(repo_root, "nested directories");
+    }
+    let mut files = Vec::new();
+    for dir in skill_dirs {
+        if !push_skill_files(&dir, &mut files) {
+            warn_capped(repo_root, "nested skills");
+            break;
+        }
+    }
+    files.sort();
+    files.into_iter().filter_map(hooks_of).collect()
+}
+
+fn hooks_of(path: PathBuf) -> Option<ComponentHooks> {
+    let mut hooks = frontmatter_hooks(&path)?;
+    if path.file_name().is_some_and(|n| n == "SKILL.md") {
+        if let Some(dir) = skill_dir(&path) {
+            substitute_skill_dir(&mut hooks, &dir);
+        }
+    }
+    Some(ComponentHooks {
+        path,
+        settings: serde_json::json!({ "hooks": hooks }),
+    })
 }
 
 /// Score component hooks. `NoSandbox` describes the host as a whole, so it is
@@ -87,19 +115,8 @@ pub(crate) fn component_external_script_paths(
 
 fn component_files(claude_dir: &Path) -> Vec<PathBuf> {
     let mut skills = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(claude_dir.join("skills")) {
-        for entry in entries.flatten() {
-            if skills.len() == MAX_SKILL_FILES {
-                warn_capped(claude_dir, "skills");
-                break;
-            }
-            // A skill entry may be a symlink to a directory elsewhere; Claude
-            // Code follows it, so `is_file` checks through the link.
-            let skill_md = entry.path().join("SKILL.md");
-            if skill_md.is_file() {
-                skills.push(skill_md);
-            }
-        }
+    if !push_skill_files(&claude_dir.join("skills"), &mut skills) {
+        warn_capped(claude_dir, "skills");
     }
     let mut agents = Vec::new();
     collect_agent_files(&claude_dir.join("agents"), 0, &mut agents);
@@ -110,6 +127,60 @@ fn component_files(claude_dir: &Path) -> Vec<PathBuf> {
     agents.sort();
     skills.extend(agents);
     skills
+}
+
+/// Push `<skills_dir>/<name>/SKILL.md` for each skill until `out` holds
+/// [`MAX_SKILL_FILES`]. Returns false when that budget ran out first.
+fn push_skill_files(skills_dir: &Path, out: &mut Vec<PathBuf>) -> bool {
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        if out.len() == MAX_SKILL_FILES {
+            return false;
+        }
+        // A skill entry may be a symlink to a directory elsewhere; Claude
+        // Code follows it, so `is_file` checks through the link.
+        let skill_md = entry.path().join("SKILL.md");
+        if skill_md.is_file() {
+            out.push(skill_md);
+        }
+    }
+    true
+}
+
+/// Walks `dir` for `.claude/skills` folders below it, without following
+/// symlinked directories and skipping hidden, dependency and build folders,
+/// which Claude rarely works in. `budget` bounds how many folders are read.
+fn collect_nested_skill_dirs(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == ".claude" {
+            let skills = entry.path().join("skills");
+            if depth > 0 && skills.is_dir() {
+                out.push(skills);
+            }
+            continue;
+        }
+        if name.starts_with('.') || NESTED_WALK_SKIPPED.contains(&name) || depth == MAX_NESTED_DEPTH
+        {
+            continue;
+        }
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        collect_nested_skill_dirs(&entry.path(), depth + 1, budget, out);
+    }
 }
 
 fn warn_capped(claude_dir: &Path, kind: &str) {
@@ -468,5 +539,41 @@ mod tests {
             &SKILL_WITH_DESTRUCTIVE_HOOK.replacen("---\n", "--- \n", 1),
         );
         assert!(has_destructive(&reasons(d.path())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_walk_finds_subdirectory_skills_only() {
+        let d = tempdir().unwrap();
+        let root = d.path().join("repo");
+        write(
+            &root,
+            ".claude/skills/own/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        write(
+            &root,
+            "apps/web/.claude/skills/web/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        write(
+            &root,
+            ".cache/x/.claude/skills/hidden/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        write(
+            &d.path().join("elsewhere"),
+            ".claude/skills/linked/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        std::os::unix::fs::symlink(d.path().join("elsewhere"), root.join("link")).unwrap();
+        let found: Vec<_> = nested_skill_hooks(&root)
+            .into_iter()
+            .map(|c| c.path.strip_prefix(&root).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(
+            found,
+            [PathBuf::from("apps/web/.claude/skills/web/SKILL.md")]
+        );
     }
 }
