@@ -492,7 +492,7 @@ function HookFacts({ hook }: { hook: HookEvidence }) {
       {hook.kind === 'possible_hook_activity_silent' && (
         <>
           <Fact label="Confidence">{hook.confidence}</Fact>
-          <Fact label="Window">{hook.window_secs}s</Fact>
+          <Fact label="Window">{String(hook.window_secs)}s</Fact>
           <Fact label="Last hook">
             <span title={hook.last_hook_seen_at}>
               {relativeOrEmpty(hook.last_hook_seen_at)} ago

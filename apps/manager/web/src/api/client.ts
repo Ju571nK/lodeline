@@ -108,8 +108,68 @@ async function safeJSON(res: Response): Promise<unknown> {
   const text = await res.text();
   if (!text) return undefined;
   try {
-    return JSON.parse(text);
+    return parseJSON(text);
   } catch {
     return text;
+  }
+}
+
+/** Keys whose values the server relays as the fleet server wrote them (`RAW_KEYS` in wire.rs). */
+const RAW_KEYS = new Set(['source', 'subject', 'evidence', 'scope', 'reasons', 'value']);
+
+/**
+ * A number under a raw key that JSON.parse would spell differently (`1.50`, `1e3`, `-0`, `1e400`,
+ * integers past 2^53). It computes as the parsed value; `String` and `JSON.stringify` give the
+ * server's text.
+ */
+export class JsonNumber extends Number {
+  readonly source: string;
+
+  constructor(value: number, source: string) {
+    super(value);
+    this.source = source;
+  }
+
+  override toString(): string {
+    return this.source;
+  }
+
+  toJSON(): unknown {
+    // Only made where the reviver gets source text, which ships together with JSON.rawJSON.
+    return (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(this.source);
+  }
+}
+
+/**
+ * JSON.parse that keeps the server's number text under raw keys. It needs the reviver's source
+ * text (Chrome 114, Firefox 135, Safari 18.4, Node 21); older engines parse as JSON.parse does.
+ */
+function parseJSON(text: string): unknown {
+  const respelled = new Map<object, Map<string, string>>();
+  return JSON.parse(
+    text,
+    function (this: object, key: string, value: unknown, context?: { source?: string }) {
+      const source = context?.source;
+      if (typeof value === 'number' && source !== undefined && String(value) !== source) {
+        if (RAW_KEYS.has(key)) return new JsonNumber(value, source);
+        respelled.set(this, (respelled.get(this) ?? new Map()).set(key, source));
+      } else if (RAW_KEYS.has(key)) {
+        keepText(value, respelled);
+      }
+      return value;
+    },
+  );
+}
+
+/** Replaces the re-spelled numbers inside one raw value; typed fields stay plain numbers. */
+function keepText(value: unknown, respelled: Map<object, Map<string, string>>): void {
+  if (typeof value !== 'object' || value === null) return;
+  const sources = respelled.get(value);
+  respelled.delete(value);
+  const holder = value as Record<string, unknown>;
+  for (const [key, member] of Object.entries(holder)) {
+    const source = sources?.get(key);
+    if (source === undefined) keepText(member, respelled);
+    else holder[key] = new JsonNumber(member as number, source);
   }
 }
