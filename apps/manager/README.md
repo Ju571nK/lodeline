@@ -6,8 +6,43 @@ console from [Ju571nK/lodeline-manager](https://github.com/Ju571nK/lodeline-mana
 reads that console's session cookies and triage database (see [Moving from the Go
 console](#moving-from-the-go-console)).
 
-This folder is its own Cargo workspace. The root workspace does not build it, and
-`.github/workflows/manager.yml` tests it.
+This folder is its own Cargo workspace. The root workspace does not build it,
+`.github/workflows/manager.yml` tests it, and `.github/workflows/release.yml` ships it with each
+release.
+
+## Install from a release
+
+Each release after v0.13.0 has a `lodeline-manager-<version>-<target>.tar.gz` archive (`.zip`
+on Windows) for the same targets as the agent: `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` and
+`aarch64-pc-windows-msvc`. The Linux binaries are static. The archive holds the
+`lodeline-manager` binary with the SPA built in, `.env.example`, `LICENSE`, `NOTICE` and a short
+`README.md`.
+
+Download the archive and `SHA256SUMS` from the [releases
+page](https://github.com/Ju571nK/lodeline/releases), then check both before you run the binary:
+
+```sh
+sha256sum --ignore-missing -c SHA256SUMS            # Linux
+shasum -a 256 --ignore-missing -c SHA256SUMS        # macOS
+gh attestation verify lodeline-manager-<version>-<target>.tar.gz --repo Ju571nK/lodeline
+tar -xzf lodeline-manager-<version>-<target>.tar.gz
+lodeline-manager-<version>-<target>/lodeline-manager --version
+```
+
+The signed `build-manifest.json` also lists the binary's blake3 hash. `lodeline doctor
+--verify-self` checks only the `lodeline` binary it runs as, so check the console with
+`SHA256SUMS` and the attestation.
+
+Set the required variables in [Configure](#configure): `ADMIN_USERNAME`,
+`ADMIN_PASSWORD_BCRYPT`, `JWT_SECRET`, `LODELINE_SERVER_BASE_URL` and
+`LODELINE_SERVER_READ_TOKEN`. Then start the binary as in [Run against
+lodeline-server](#run-against-lodeline-server). Put a TLS reverse proxy in front of it: the
+session cookie is `Secure`, so a browser drops it over plain HTTP and login fails, unless
+`LODELINE_INSECURE_COOKIE=1` is set, which is for loopback testing only (see
+[Configure](#configure)). Set `TRUSTED_PROXIES` to the proxy's address, `127.0.0.1` for a proxy on the same host. Without it,
+every client shares the proxy's 10 logins a minute. See [Behind a reverse
+proxy](#behind-a-reverse-proxy).
 
 ## Prerequisites
 
@@ -16,7 +51,7 @@ This folder is its own Cargo workspace. The root workspace does not build it, an
 - Node.js 20.19+ or 22.12+ and npm, to build the SPA. The SPA tests (`npm test`) need Node.js
   22.13 or later, because they use `JSON.parse` source text and `JSON.rawJSON`. CI uses Node.js 24.
 
-## Build
+## Build from source
 
 Build the SPA first, then the binary:
 
@@ -39,7 +74,8 @@ build you deploy.
 
 The binary reads only environment variables. It does not load `.env` itself.
 [`.env.example`](.env.example) lists every variable with its details. An empty value counts as
-unset.
+unset. The console refuses to start while `JWT_SECRET`, `LODELINE_SERVER_READ_TOKEN` or
+`ADMIN_PASSWORD_BCRYPT` holds the public example value from an earlier `.env.example`.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -202,7 +238,7 @@ npm run lint          # Biome
 npm test -- --run     # Vitest
 ```
 
-The browser and HTTP suites run against a release binary built as in [Build](#build):
+The browser and HTTP suites run against a release binary built as in [Build from source](#build-from-source):
 
 ```sh
 cd web

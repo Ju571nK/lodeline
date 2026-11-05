@@ -1,14 +1,25 @@
 # Changelog
 
 All notable changes to Lodeline are recorded here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the workspace uses a
-single SemVer version across all crates. Full release notes for tagged releases
-also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the workspace and
+`apps/manager` use a single SemVer version across all crates. Full release notes for tagged
+releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases).
 
 ## [Unreleased]
 
 ### Added
 
+- Releases now ship the `lodeline-manager` web console. Each release has a
+  `lodeline-manager-<version>-<target>.tar.gz` archive (`.zip` on Windows) for the same five
+  targets as the agent, with the SPA built in, so an operator no longer builds the console from
+  source. The archive also holds `.env.example`, `LICENSE`, `NOTICE` and a short README.
+  `SHA256SUMS`, the build provenance attestation and the signed `build-manifest.json` cover the
+  binary, and the release's native verify jobs check that it runs and prints the release version.
+  The manifest keeps schema version 1 and now lists 35 binaries; `lodeline doctor
+  --verify-self` of the agent binaries is unchanged. `lodeline-manager --version` prints the
+  version, which now follows the workspace version, so a release prep bumps
+  `apps/manager/Cargo.toml` and `apps/manager/Cargo.lock` with the root. See
+  `apps/manager/README.md`. There are no `.deb`, `.rpm` or container images for the console yet.
 - The web console's Risk tab now says when hosts are missing from it because they have
   failing AI Guard sources and no score, such as "1 host is not assessed", with a link to those
   hosts in the Devices tab. Before, such a host was absent from the Risk tab, and an empty
@@ -20,6 +31,13 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   carries the count for the whole result. These hosts still get no score and no row. The change
   is additive. Older consoles ignore the field, and with an older server that omits it the
   console shows no notice. (#485)
+
+### Changed
+
+- `lodeline-manager` refuses to start when `JWT_SECRET`, `LODELINE_SERVER_READ_TOKEN` or
+  `ADMIN_PASSWORD_BCRYPT` still holds the example value from an earlier `.env.example`, and the
+  error names the variable. Those values were public. `.env.example` now leaves the secrets
+  empty and shows how to generate each one.
 
 ## [0.13.0] - 2026-11-05
 

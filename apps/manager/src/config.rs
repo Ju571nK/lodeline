@@ -71,6 +71,12 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+// Public values earlier `.env.example` files set. The hash is compared as text, not checked with
+// bcrypt: copying the file is how it gets set, and bcrypt at the hash's own cost slows every start.
+const EXAMPLE_READ_TOKEN: &str = "replace-with-your-shared-secret";
+const EXAMPLE_ADMIN_HASH: &str = "$2a$10$55LlvKwbVdEZOVEdFBFshuFyd1fqHDSKTTXgK5L890cxNNZxATtg2";
+const EXAMPLE_JWT_SECRET: &str = "replace-this-with-a-32-byte-or-longer-secret";
+
 fn invalid(msg: impl Into<String>) -> ConfigError {
     ConfigError::Invalid(msg.into())
 }
@@ -154,6 +160,22 @@ impl Config {
         }
         if !missing.is_empty() {
             return Err(ConfigError::MissingRequired(missing));
+        }
+        let example = [
+            (
+                "LODELINE_SERVER_READ_TOKEN",
+                !mock_fleet && server_read_token == EXAMPLE_READ_TOKEN,
+            ),
+            (
+                "ADMIN_PASSWORD_BCRYPT",
+                admin_password_bcrypt == EXAMPLE_ADMIN_HASH,
+            ),
+            ("JWT_SECRET", jwt_secret == EXAMPLE_JWT_SECRET),
+        ];
+        if let Some((name, _)) = example.iter().find(|(_, same)| *same) {
+            return Err(invalid(format!(
+                "config: {name} is the public example value from .env.example; set a secret of your own (.env.example shows how to generate one)"
+            )));
         }
         if jwt_secret.len() < 32 {
             return Err(invalid(format!(

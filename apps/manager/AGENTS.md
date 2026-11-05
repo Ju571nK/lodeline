@@ -7,7 +7,10 @@ own triage notes. Lodeline measures and does not block, and the console keeps th
 its UI text and docs.
 
 This folder is its own Cargo workspace. The root workspace does not build it,
-`.github/workflows/manager.yml` tests it, and root `ci.yml` ignores `apps/**`.
+`.github/workflows/manager.yml` tests it, root `ci.yml` ignores `apps/**`, and
+`.github/workflows/release.yml` ships it. Its version is the root workspace version, and a
+release prep bumps the root and `apps/manager/Cargo.toml` and `apps/manager/Cargo.lock`
+(`tests/test_release_manifest.py` checks it).
 
 ## Build and test
 

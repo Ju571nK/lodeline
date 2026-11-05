@@ -1,11 +1,13 @@
-# A separate workspace: the root workspace and its CI, release and packages
-# workflows do not build this app. See .github/workflows/manager.yml.
+# A separate workspace: the root workspace, its CI and its packages workflow do
+# not build this app. .github/workflows/manager.yml tests it, and release.yml
+# ships it.
 [workspace]
 resolver = "3"
 
 [package]
 name = "lodeline-manager"
-version = "0.0.0"
+# The root workspace version: bump both in a release prep. tests/test_release_manifest.py checks it.
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"

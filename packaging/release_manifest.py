@@ -21,24 +21,28 @@ TARGETS = (
     "aarch64-pc-windows-msvc",
 )
 BINARIES = ("lodeline", "lodeline-sender", "lodeline-server", "lodeline-sign", "lodeline-mcp", "lodeline-hook")
+# Each release archive per target, by name prefix, and the binaries it must hold. Each prefix is
+# also the binary whose `--version` the native verifier checks.
+PACKAGES = {"lodeline": BINARIES, "lodeline-manager": ("lodeline-manager",)}
 MAX_BINARY_BYTES = 256 * 1024 * 1024
 
 
-def archive_name(version, target):
+def archive_name(version, target, package="lodeline"):
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?", version):
         raise ValueError("invalid release version")
     if target not in TARGETS:
         raise ValueError("unsupported release target")
     suffix = ".zip" if target.endswith("-windows-msvc") else ".tar.gz"
-    return f"lodeline-{version}-{target}{suffix}"
+    return f"{package}-{version}-{target}{suffix}"
 
 
-def extract_binaries(dist, version, target, work):
+def extract_binaries(dist, version, target, work, package="lodeline"):
     """Read only exact regular-file members; never extract archive-supplied paths."""
-    archive = dist / archive_name(version, target)
-    prefix = f"lodeline-{version}-{target}"
+    archive = dist / archive_name(version, target, package)
+    prefix = f"{package}-{version}-{target}"
     suffix = ".exe" if target.endswith("-windows-msvc") else ""
-    expected = {f"{prefix}/{name}{suffix}": name for name in BINARIES}
+    binaries = PACKAGES[package]
+    expected = {f"{prefix}/{name}{suffix}": name for name in binaries}
     files = {}
 
     def copy_member(name, size, regular, reader):
@@ -71,8 +75,15 @@ def extract_binaries(dist, version, target, work):
             for member in bundle:
                 copy_member(member.name, member.size, member.isfile(),
                             lambda member=member: bundle.extractfile(member))
-    if set(files) != set(BINARIES):
-        raise ValueError(f"missing binaries for {target}: {sorted(set(BINARIES) - set(files))}")
+    if set(files) != set(binaries):
+        raise ValueError(f"missing binaries for {target}: {sorted(set(binaries) - set(files))}")
+    return files
+
+
+def extract_target(dist, version, target, work):
+    files = {}
+    for package in PACKAGES:
+        files.update(extract_binaries(dist, version, target, work, package))
     return files
 
 
@@ -85,23 +96,24 @@ def validate_manifest(path, git_sha=None):
         raise ValueError("manifest commit mismatch")
     entries = manifest["artifacts"]
     pairs = [(entry["name"], entry["target"]) for entry in entries]
-    expected = {(name, target) for target in TARGETS for name in BINARIES}
+    expected = {(name, target) for target in TARGETS
+                for binaries in PACKAGES.values() for name in binaries}
     if len(pairs) != len(expected) or set(pairs) != expected:
-        raise ValueError("manifest must contain exactly 30 unique name/target pairs")
+        raise ValueError(f"manifest must contain exactly {len(expected)} unique name/target pairs")
     if any(not re.fullmatch(r"[0-9a-f]{64}", entry["blake3"]) for entry in entries):
         raise ValueError("invalid artifact digest")
     return signed
 
 
 def sign(dist, version, key, git_sha, run_url, signer=None):
-    expected = {archive_name(version, target) for target in TARGETS}
+    expected = {archive_name(version, target, package) for target in TARGETS for package in PACKAGES}
     found = {path.name for path in dist.iterdir() if path.name.endswith((".tar.gz", ".zip"))}
     if found != expected:
         raise ValueError(f"archive set mismatch: missing={sorted(expected - found)}, extra={sorted(found - expected)}")
     # Nothing is signed until every archive and every binary has been checked.
     with tempfile.TemporaryDirectory(prefix="lodeline-manifest-") as temp:
         work = Path(temp)
-        artifacts = {target: extract_binaries(dist, version, target, work) for target in TARGETS}
+        artifacts = {target: extract_target(dist, version, target, work) for target in TARGETS}
         executable = signer or artifacts["x86_64-unknown-linux-musl"]["lodeline-sign"]
         output = work / "build-manifest.json"
         command = [str(executable), "manifest", "--key", str(key),
@@ -116,7 +128,7 @@ def sign(dist, version, key, git_sha, run_url, signer=None):
         subprocess.run(command, check=True, env=environment)
         validate_manifest(output, git_sha)
         shutil.copyfile(output, dist / "build-manifest.json")
-    print("Signed manifest covers all 30 release binaries")
+    print(f"Signed manifest covers all {sum(map(len, artifacts.values()))} release binaries")
 
 
 def verify(dist, version, target, git_sha):
@@ -124,11 +136,13 @@ def verify(dist, version, target, git_sha):
     signed = validate_manifest(manifest, git_sha)
     with tempfile.TemporaryDirectory(prefix="lodeline-verify-") as temp:
         work = Path(temp)
-        executable = extract_binaries(dist, version, target, work)["lodeline"]
-        result = subprocess.run([str(executable), "--version"], check=True,
-                                capture_output=True, text=True)
-        if result.stdout.strip() != f"lodeline {version}":
-            raise ValueError("downloaded binary version mismatch")
+        binaries = extract_target(dist, version, target, work)
+        for name in PACKAGES:
+            result = subprocess.run([str(binaries[name]), "--version"], check=True,
+                                    capture_output=True, text=True)
+            if result.stdout.strip() != f"{name} {version}":
+                raise ValueError(f"downloaded {name} version mismatch")
+        executable = binaries["lodeline"]
         command = [str(executable), "doctor", "--verify-self", "--manifest"]
         subprocess.run(command + [str(manifest)], check=True)
         # Verify that the same native binary rejects a modified signed payload.
@@ -140,7 +154,7 @@ def verify(dist, version, target, git_sha):
         rejected = subprocess.run(command + [str(tampered)], capture_output=True, text=True)
         if rejected.returncode == 0 or "manifest verification failed" not in rejected.stdout:
             raise ValueError("native verifier did not explicitly reject the tampered signature")
-    print(f"Verified {target}: version, signed hash, and signature tamper rejection")
+    print(f"Verified {target}: versions, signed hash, and signature tamper rejection")
 
 
 def main():

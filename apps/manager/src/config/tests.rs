@@ -161,6 +161,35 @@ fn load_short_jwt_secret() {
 }
 
 #[test]
+fn load_refuses_example_values() {
+    for (key, value) in [
+        ("LODELINE_SERVER_READ_TOKEN", EXAMPLE_READ_TOKEN),
+        ("ADMIN_PASSWORD_BCRYPT", EXAMPLE_ADMIN_HASH),
+        ("JWT_SECRET", EXAMPLE_JWT_SECRET),
+    ] {
+        let mut env = full_valid_env();
+        set(&mut env, key, format!(" {value} "));
+        let err = load_err(&env).to_string();
+        assert!(
+            err.starts_with(&format!("config: {key} is the public example value")),
+            "{err}"
+        );
+    }
+    assert!(crate::auth::password_matches(
+        "change-me-on-first-boot",
+        EXAMPLE_ADMIN_HASH
+    ));
+}
+
+#[test]
+fn load_mock_fleet_ignores_example_read_token() {
+    let mut env = full_valid_env();
+    set(&mut env, "MOCK_FLEET", "1");
+    set(&mut env, "LODELINE_SERVER_READ_TOKEN", EXAMPLE_READ_TOKEN);
+    assert!(load(&env).is_ok());
+}
+
+#[test]
 fn load_invalid_bcrypt_hash() {
     for hash in [
         "plain",
