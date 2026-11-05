@@ -427,6 +427,8 @@ fn current_risk(r: api::CurrentRisk) -> CurrentRisk {
                             assessed_ts,
                             bucket,
                             score,
+                            // The console does not read `source` yet.
+                            source: _,
                         },
                     )| {
                         let ts = time(assessed_ts);
@@ -591,6 +593,8 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
         reasons,
         scope,
         score,
+        // The console does not read `source` yet.
+        source: _,
     } = a;
     ToolAiGuard {
         controls: controls.map(|cs| {
@@ -632,6 +636,8 @@ fn risk_page(b: api::RowsPage<api::RiskRow>) -> RiskPage {
                  open_alert_count_24h,
                  reasons_count,
                  score,
+                 // The console does not read `source` yet.
+                 source: _,
                  top_tool,
              }| RiskRow {
                 host_id,

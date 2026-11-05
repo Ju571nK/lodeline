@@ -159,6 +159,20 @@ pub struct ToolRisk {
     pub assessed_ts: String,
     pub bucket: String,
     pub score: f64,
+    /// Absent from servers before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RiskSource>,
+}
+
+/// The reading that a tool's score comes from. `user` is `null` for the
+/// agent's own home and for project scopes. `rule_pack_id` and `tool_label`
+/// are `null` for the built-in parsers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RiskSource {
+    pub rule_pack_id: Option<String>,
+    pub scope: Value,
+    pub tool_label: Option<String>,
+    pub user: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -190,6 +204,9 @@ pub struct AiGuardAssessment {
     pub reasons: Vec<Value>,
     pub scope: Value,
     pub score: f64,
+    /// Absent from servers before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RiskSource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -245,6 +262,9 @@ pub struct RiskRow {
     pub open_alert_count_24h: u32,
     pub reasons_count: u64,
     pub score: f64,
+    /// The source of `top_tool`'s reading. Absent from servers before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RiskSource>,
     pub top_tool: String,
 }
 

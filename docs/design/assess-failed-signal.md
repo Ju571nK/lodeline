@@ -1,6 +1,7 @@
 # Assess-failed signal and current_risk attribution
 
-Status: proposal, not implemented. Tracks two items from issue #333.
+Status: proposal. Rollout step 2 (Option B1) is implemented; the other steps
+are not. Tracks two items from issue #333.
 
 This document covers two gaps in how AI Guard posture reaches the fleet:
 

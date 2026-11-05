@@ -13,7 +13,7 @@ pub mod policy_meta;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use lodeline_fleet_api::ErrorBody;
+use lodeline_fleet_api::{ErrorBody, RiskSource};
 
 /// An error response in the read API's shape, `{"error": {"code", "message"}}`.
 pub(crate) fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
@@ -33,4 +33,15 @@ pub(crate) fn wire_str<T: serde::Serialize>(v: &T) -> String {
 pub(crate) fn rfc3339(ts: time::OffsetDateTime) -> String {
     ts.format(&time::format_description::well_known::Rfc3339)
         .unwrap()
+}
+
+/// The `source` object of a tool's reading in `current_risk`, `ai_guard` and
+/// `/v1/fleet/risk`.
+pub(crate) fn risk_source(e: &crate::fleet_index::RiskEntry) -> RiskSource {
+    RiskSource {
+        rule_pack_id: e.rule_pack_id.clone(),
+        scope: serde_json::to_value(&e.scope).expect("scope serializes"),
+        tool_label: e.tool_label.clone(),
+        user: e.user.clone(),
+    }
 }

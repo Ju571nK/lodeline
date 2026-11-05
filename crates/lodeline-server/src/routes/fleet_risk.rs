@@ -102,6 +102,7 @@ pub async fn get_fleet_risk(
             reasons_count: entry.reasons.len() as u64,
             assessed_ts: super::rfc3339(entry.assessed_ts),
             open_alert_count_24h: h.counts_24h.sum_alerts(),
+            source: Some(super::risk_source(entry)),
         })
         .collect();
     let next_cursor = if end < rows.len() {
