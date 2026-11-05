@@ -7,6 +7,17 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-05
+
+**Upgrade order.** Upgrade the fleet server first, then the console, then the agents. The
+server learns the `ai_guard_assess_failed` event and the new `source` and unassessed fields,
+and the console reads them from the server. An agent on this release still works with an older
+server. Every server since v0.3.0 accepts `ai_guard_assess_failed` and only counts it as a warn
+event. On a v0.12 server, though, a source that keeps failing drops out of `current_risk` 48h
+after its last reading, because the agent no longer re-sends the old reading. On a server of
+this release it shows as unassessed instead. A server older than v0.12 keeps showing the last
+reading. A console of this release against an older server looks as before.
+
 ### Added
 
 - `lodeline-server` now says which reading each tool's risk score comes from. Each tool in
