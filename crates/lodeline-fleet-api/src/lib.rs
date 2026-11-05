@@ -187,8 +187,8 @@ pub struct ToolUnassessed {
 /// [`RiskSource`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnassessedSource {
-    /// Such as `unreadable`, `too_large` or `parse`. Consumers tolerate values
-    /// they do not recognize.
+    /// `unreadable` or `parse` today. Consumers tolerate values they do not
+    /// recognize.
     pub error_kind: String,
     /// The file that failed.
     pub path: String,

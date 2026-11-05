@@ -64,24 +64,34 @@ note:     a process is generating events faster than 100/sec for one target
 
 ```
 source:   (host_id, evidence.tool, evidence.scope, evidence.user, evidence.rule_pack_id)
-trigger:  evidence.kind == "ai_guard_assess_failed"
-          AND evidence.failing_since < now - 1h
+check:    on a schedule, for each source take its latest ai_guard_assess_failed event F
+trigger:  F.failing_since < now - 1h
+          AND F.ts > now - 48h
           AND no evidence.kind == "ai_guard_risk_assessed" for the same source
-              with ts > evidence.failing_since
+              with ts > F.failing_since
 severity: medium
 note:     the parser could not read or parse a config, so the source has no
           current reading
 ```
 
+Run the check on a schedule. If your SIEM evaluates a rule only when an event
+arrives, the first alert comes at the next 24h re-send, up to 24h after
+`failing_since`.
+
 Read the fields this way:
 
 - `failing_since` is the first failure the running agent saw for the source. It
-  stays the same until a good reading. It resets when the agent restarts, and
-  the first report after a restart has `last_assessed_ts: null`.
+  stays the same until a good reading. It resets when the agent restarts, which
+  also restarts the 1h age.
+- `last_assessed_ts` is `null` until the agent has a good reading for the
+  source since it started. That covers the first report after a restart and a
+  source that has never read cleanly.
 - The agent sends the event on the first failure and again when `error_kind` or
   `path` changes. While the source keeps failing, it re-sends the event every
-  24h with `is_reattestation: true` and the same `failing_since`. Key the rule
-  on the source, not on the event, so a re-send does not open a second alert.
+  24h with the same `failing_since`. The re-send carries `is_reattestation: true`
+  only when `error_kind` and `path` are unchanged. A re-send with a changed kind
+  or path carries `false`. Key the rule on the source, not on the event, so a
+  re-send does not open a second alert.
 - `error_kind` is an open string. Today it is `unreadable` (the agent could not
   read the file) or `parse` (it read the file and could not parse it). Treat any
   other value as a failure too.
@@ -89,15 +99,16 @@ Read the fields this way:
   means the agent's own home or a project. Absent `rule_pack_id` means the
   built-in rules. Match them as null in the source key.
 - The first good assessment after a failure always sends `ai_guard_risk_assessed`,
-  even when the reasons equal the last reading, so the rule clears on the next
-  cycle.
-- A failing source is re-sent every 24h, so a source whose latest failure event
-  is older than 48h has stopped reporting. The agent has stopped, or the user
-  was removed from the host. The heartbeat absence rule covers a silent agent.
-  Limit this rule to sources with a failure event in the last 48h.
+  even when the reasons equal the last reading, so the rule's last condition is
+  met as soon as the source reads again.
+- A source whose latest failure event is older than 48h has stopped reporting.
+  The agent has stopped, the user was removed from the host, or a policy change
+  removed the rule pack or project. The heartbeat absence rule covers a silent
+  agent.
 
-Score-based rules no longer see a frozen reading. While a source fails, the
-agent sends the failure event and does not re-send the last reading.
+For agents from the release that carries #481, score-based rules no longer see a
+frozen reading. While a source fails, the agent sends the failure event and does
+not re-send the last reading.
 
 `ai_guard_assess_failed` is not in `/v1/meta` `alerts_definition_default`, so the
 server's `open_alert_count_24h` does not count it. It still counts in
