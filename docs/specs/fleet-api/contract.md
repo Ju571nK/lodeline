@@ -613,8 +613,9 @@ trust the producer schema and tolerate additive evolution (new
 **Time semantics caveat:** `ts` is the agent's clock at event emission.
 Producer chose not to add a `server_received_ts` in v1 (see §13 gap on clock
 skew). The events returned keep the agent's `ts` as sent. Only the fleet
-index (`last_seen_ts`, `status`, and the 24h counts) caps times at the receive
-time, as the Clock skew row in §13 describes (#442). Operators with hosts whose clocks drift significantly should treat
+index (for example `last_seen_ts`, `status`, and the 24h counts) caps times
+at the receive time, as the Clock skew row in §13 describes (#442).
+Operators with hosts whose clocks drift significantly should treat
 `/v1/events?since=...` results as approximate near the window boundary.
 
 ### 5.8 `GET /v1/events/{event_id}`

@@ -54,9 +54,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   this change carry no receive time, and a restart caps their times at the end of the receive
   day or at the restart, whichever is earlier. In a file that already holds lines from before the
   upgrade, those lines take the receive time of the first batch the upgraded server appends,
-  which is later than their true receive time, on the same day, and never later than the
-  restart. The event's own timestamp is unchanged in stored events, SIEM output and
-  `/v1/events`. (#442)
+  which is later than their true receive time, on the same day, and earlier than the
+  restart that rebuilds them. The event's own timestamp is unchanged in stored
+  events, SIEM output and `/v1/events`. (#442)
 
 ## [0.13.0] - 2026-11-05
 

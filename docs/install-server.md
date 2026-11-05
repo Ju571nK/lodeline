@@ -396,8 +396,9 @@ Once an agent+sender are pointed here, events land under
 `<events_out_dir>/<host_id>/…jsonl` and the host appears in `/v1/fleet/hosts`.
 Beside each `received-YYYY-MM-DD.jsonl`, the server writes a hidden
 `.received-YYYY-MM-DD.jsonl.recv` file with the time it received each batch.
-The server uses it to rebuild host status after a restart (#442). When you
-archive or delete old event files, treat the two files of a day together.
+A glob such as `received-*.jsonl` does not match the hidden file. The server
+uses it to rebuild host status after a restart (#442). When you archive or
+delete old event files, treat the two files of a day together.
 
 ---
 
