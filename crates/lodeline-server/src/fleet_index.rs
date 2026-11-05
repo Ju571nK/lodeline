@@ -29,6 +29,44 @@ pub struct RiskEntry {
     pub tool_label: Option<String>,
 }
 
+/// A source whose parser failed (#333): the latest `AiGuardAssessFailed`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssessFailure {
+    pub failing_since: OffsetDateTime,
+    pub last_assessed_ts: Option<OffsetDateTime>,
+    pub error_kind: String,
+    pub path: std::path::PathBuf,
+}
+
+/// What the server holds for one source.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceState {
+    /// The latest report is a reading.
+    Assessed(RiskEntry),
+    /// The parser failed after this reading, which still counts toward
+    /// `current_risk` so a failing source never looks clean.
+    Stale(RiskEntry, AssessFailure),
+    /// The parser failed and no reading is held, so the source is in no
+    /// `current_risk`.
+    Unassessed(AssessFailure),
+}
+
+impl SourceState {
+    pub fn reading(&self) -> Option<&RiskEntry> {
+        match self {
+            Self::Assessed(r) | Self::Stale(r, _) => Some(r),
+            Self::Unassessed(_) => None,
+        }
+    }
+
+    pub fn failure(&self) -> Option<&AssessFailure> {
+        match self {
+            Self::Stale(_, f) | Self::Unassessed(f) => Some(f),
+            Self::Assessed(_) => None,
+        }
+    }
+}
+
 /// Per-host policy state. signature_failures_24h is derived from HourlyBuckets
 /// at response time, not stored here.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -143,12 +181,12 @@ pub struct HostSummary {
 
     /// Per tool, the riskiest of that tool's readings in `risk_sources`.
     pub current_risk: BTreeMap<AiTool, RiskEntry>,
-    /// Latest reading per source from the last 48h (#329), with the time the
-    /// prune measures it by: its `ts`, capped at when the server received it.
-    /// Rebuilt from JSONL on start, where the cap is the end of the receive
-    /// day, so it is not serialized.
+    /// Latest report per source from the last 48h (#329), a reading or a
+    /// failure, with the time the prune measures it by: its `ts`, capped at
+    /// when the server received it. Rebuilt from JSONL on start, where the cap
+    /// is the end of the receive day, so it is not serialized.
     #[serde(skip)]
-    pub risk_sources: std::collections::HashMap<RiskSourceKey, (OffsetDateTime, RiskEntry)>,
+    pub risk_sources: std::collections::HashMap<RiskSourceKey, (OffsetDateTime, SourceState)>,
 
     pub policy_state: PolicyState,
     pub agent_health: AgentHealth,
@@ -161,6 +199,19 @@ impl HostSummary {
             host_id,
             ..Default::default()
         }
+    }
+
+    /// When the parser behind `tool`'s `current_risk` reading started failing,
+    /// or `None` when that reading is current.
+    pub fn unassessed_since(&self, tool: AiTool) -> Option<OffsetDateTime> {
+        let e = self.current_risk.get(&tool)?;
+        let key = (
+            tool,
+            e.scope.clone(),
+            e.user.clone(),
+            e.rule_pack_id.clone(),
+        );
+        Some(self.risk_sources.get(&key)?.1.failure()?.failing_since)
     }
 
     /// Convenience: `.hostname` lifted from `latest_host_meta`. None if no snapshot yet.

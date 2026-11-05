@@ -427,8 +427,9 @@ fn current_risk(r: api::CurrentRisk) -> CurrentRisk {
                             assessed_ts,
                             bucket,
                             score,
-                            // The console does not read `source` yet.
+                            // The console does not read these yet.
                             source: _,
+                            unassessed_since: _,
                         },
                     )| {
                         let ts = time(assessed_ts);
@@ -458,6 +459,8 @@ fn hosts_page(b: api::HostsPage) -> HostsPage {
         .map(
             |api::HostListItem {
                  agent_version,
+                 // The console does not read this yet.
+                 ai_guard_unassessed: _,
                  current_risk: risk,
                  host_id,
                  hostname,
@@ -487,6 +490,8 @@ fn host_detail(b: api::HostDetail) -> HostDetail {
         agent_health,
         agent_version,
         ai_guard,
+        // The console does not read this yet.
+        ai_guard_unassessed: _,
         current_risk: risk,
         host_id,
         host_meta,
@@ -593,8 +598,9 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
         reasons,
         scope,
         score,
-        // The console does not read `source` yet.
+        // The console does not read these yet.
         source: _,
+        unassessed_since: _,
     } = a;
     ToolAiGuard {
         controls: controls.map(|cs| {
@@ -636,9 +642,10 @@ fn risk_page(b: api::RowsPage<api::RiskRow>) -> RiskPage {
                  open_alert_count_24h,
                  reasons_count,
                  score,
-                 // The console does not read `source` yet.
+                 // The console does not read these yet.
                  source: _,
                  top_tool,
+                 unassessed_since: _,
              }| RiskRow {
                 host_id,
                 hostname,

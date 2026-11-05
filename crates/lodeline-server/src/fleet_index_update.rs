@@ -1,7 +1,7 @@
 //! Per-evidence-variant update mapping. Spec §3.3 table. Pure function so it
 //! can be exercised by unit tests without spinning up a FleetIndex.
 
-use crate::fleet_index::{HostSummary, RiskEntry};
+use crate::fleet_index::{AssessFailure, HostSummary, RiskEntry, RiskSourceKey, SourceState};
 use lodeline_core::event::{AiGuardBucket, Event, Evidence, Severity};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
@@ -22,6 +22,48 @@ fn is_alert_evidence(ev: &Evidence) -> bool {
             | Evidence::AgentDying { .. }
             | Evidence::SenderLagCritical { .. }
     )
+}
+
+/// Store the latest report of one AI Guard source, `next` of its previous
+/// state, and fold the sources into `current_risk`.
+fn put_source(
+    host: &mut HostSummary,
+    event: &Event,
+    earliest: OffsetDateTime,
+    latest: OffsetDateTime,
+    key: RiskSourceKey,
+    next: impl FnOnce(Option<SourceState>) -> SourceState,
+) {
+    // The agent re-sends every reading and every failure each 24h, so a
+    // source older than two heartbeats is gone (a removed repo, user or pack)
+    // and must not hold the host's risk up. Age is capped at the receive time,
+    // so an agent clock running ahead neither moves the cutoff forward nor
+    // keeps its own source past 48h. The cutoff takes the earliest receive
+    // time and the stored age the latest, so boot rebuild never drops a source
+    // that live ingest would keep.
+    let cutoff = event.ts.min(earliest) - time::Duration::hours(48);
+    host.risk_sources.retain(|_, (t, _)| *t >= cutoff);
+    let prev = host.risk_sources.remove(&key).map(|(_, s)| s);
+    host.risk_sources
+        .insert(key, (event.ts.min(latest), next(prev)));
+    // A clean reading for one user or project must not hide another's; on a
+    // tie the newest reading is shown. Rebuilt for every tool, so a tool whose
+    // readings were all pruned drops out. A source with no reading adds none.
+    let mut top: BTreeMap<_, (OffsetDateTime, &RiskEntry)> = BTreeMap::new();
+    for ((t, ..), (seen, state)) in &host.risk_sources {
+        let Some(r) = state.reading() else { continue };
+        let keep = top.get(t).is_some_and(|best| {
+            best.1
+                .score
+                .total_cmp(&r.score)
+                .then(best.0.cmp(seen))
+                .is_ge()
+        });
+        if !keep {
+            top.insert(*t, (*seen, r));
+        }
+    }
+    host.current_risk = top.into_iter().map(|(t, r)| (t, r.1.clone())).collect();
 }
 
 /// Apply one event to a HostSummary. Caller (FleetIndex in Task 5 / boot_rebuild
@@ -77,50 +119,48 @@ pub fn apply_event_received_between(
             rule_pack_id,
             tool_label,
         } => {
-            // The agent re-sends every reading each 24h, so one older than two
-            // heartbeats is gone (a removed repo, user or pack) and must not
-            // hold the host's risk up. Age is capped at the receive time, so an
-            // agent clock running ahead neither moves the cutoff forward nor
-            // keeps its own reading past 48h. The cutoff takes the earliest
-            // receive time and the stored age the latest, so boot replay never
-            // drops a reading that live ingest would keep.
-            let cutoff = event.ts.min(earliest) - time::Duration::hours(48);
-            host.risk_sources.retain(|_, (t, _)| *t >= cutoff);
-            host.risk_sources.insert(
-                (*tool, scope.clone(), user.clone(), rule_pack_id.clone()),
-                (
-                    event.ts.min(latest),
-                    RiskEntry {
-                        controls: controls.clone(),
-                        score: *score,
-                        bucket: *bucket,
-                        assessed_ts: event.ts,
-                        is_reattestation: *is_reattestation,
-                        scope: scope.clone(),
-                        reasons: reasons.clone(),
-                        user: user.clone(),
-                        rule_pack_id: rule_pack_id.clone(),
-                        tool_label: tool_label.clone(),
-                    },
-                ),
-            );
-            // A clean reading for one user or project must not hide another's;
-            // on a tie the newest reading is shown. Rebuilt for every tool, so
-            // a tool whose readings were all pruned drops out.
-            let mut top: BTreeMap<_, &(OffsetDateTime, RiskEntry)> = BTreeMap::new();
-            for ((t, ..), r) in &host.risk_sources {
-                let keep = top.get(t).is_some_and(|best| {
-                    best.1
-                        .score
-                        .total_cmp(&r.1.score)
-                        .then(best.0.cmp(&r.0))
-                        .is_ge()
-                });
-                if !keep {
-                    top.insert(*t, r);
+            let entry = RiskEntry {
+                controls: controls.clone(),
+                score: *score,
+                bucket: *bucket,
+                assessed_ts: event.ts,
+                is_reattestation: *is_reattestation,
+                scope: scope.clone(),
+                reasons: reasons.clone(),
+                user: user.clone(),
+                rule_pack_id: rule_pack_id.clone(),
+                tool_label: tool_label.clone(),
+            };
+            let key = (*tool, scope.clone(), user.clone(), rule_pack_id.clone());
+            put_source(host, event, earliest, latest, key, |_| {
+                SourceState::Assessed(entry)
+            });
+        }
+        Evidence::AiGuardAssessFailed {
+            tool,
+            scope,
+            user,
+            rule_pack_id,
+            tool_label: _,
+            error_kind,
+            path,
+            failing_since,
+            last_assessed_ts,
+            is_reattestation: _,
+        } => {
+            let failure = AssessFailure {
+                failing_since: *failing_since,
+                last_assessed_ts: *last_assessed_ts,
+                error_kind: error_kind.clone(),
+                path: path.clone(),
+            };
+            let key = (*tool, scope.clone(), user.clone(), rule_pack_id.clone());
+            put_source(host, event, earliest, latest, key, |prev| match prev {
+                Some(SourceState::Assessed(r) | SourceState::Stale(r, _)) => {
+                    SourceState::Stale(r, failure)
                 }
-            }
-            host.current_risk = top.into_iter().map(|(t, r)| (t, r.1.clone())).collect();
+                Some(SourceState::Unassessed(_)) | None => SourceState::Unassessed(failure),
+            });
         }
         Evidence::Heartbeat {
             hash_p99_ms,

@@ -20,6 +20,21 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   builds `source` the same way on ingest and on rebuild from JSONL. The change is additive. No
   agent or event change is needed, and older consoles ignore the field. (#333)
 
+- `lodeline-server` now accepts the `ai_guard_assess_failed` evidence kind, which says that a
+  parser could not assess one source, and shows that source as unassessed instead of current
+  or clean. If the source has a reading, the score stays in `current_risk`, and the tool's
+  `current_risk.by_tool` entry, its host detail `ai_guard.by_tool` entry and a
+  `GET /v1/fleet/risk` row for it get `unassessed_since`. A new top-level `ai_guard_unassessed`
+  on `GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}` lists each tool's failing
+  sources with their `scope`, `user`, `rule_pack_id`, `error_kind` and `path`, and is `null`
+  when none fails. A host with failures but no reading keeps `current_risk: null`. Each failure
+  report keeps the source from being dropped, so a source that keeps failing stays listed; one
+  that stops sending both readings and failures still drops after 48h. The next reading clears
+  the mark. The server rebuilds the same state from JSONL on start. The agent does not send the
+  kind yet. Released servers since v0.3.0 accept it and only count it, and older consoles
+  ignore the new fields. `lodeline-core` gains the `Evidence::AiGuardAssessFailed` variant.
+  (#333)
+
 ## [0.12.6] - 2026-11-05
 
 ### Changed

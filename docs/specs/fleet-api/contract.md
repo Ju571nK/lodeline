@@ -250,8 +250,19 @@ skew):
           "codex": {
             "score": 2.1, "bucket": "medium", "assessed_ts": "2026-05-17T12:30:11Z",
             "source": { "scope": { "kind": "user_global" }, "user": null,
-                        "rule_pack_id": null, "tool_label": null }
+                        "rule_pack_id": null, "tool_label": null },
+            "unassessed_since": "2026-05-17T12:31:00Z"
           }
+        }
+      },
+      "ai_guard_unassessed": {
+        "codex": {
+          "since": "2026-05-17T12:31:00Z",
+          "last_assessed_ts": "2026-05-17T12:30:11Z",
+          "sources": [
+            { "scope": { "kind": "user_global" }, "user": null, "rule_pack_id": null,
+              "error_kind": "unreadable", "path": "/Users/alice/.codex/config.toml" }
+          ]
         }
       },
       "open_event_counts_24h": {
@@ -271,12 +282,16 @@ Notes:
   this host (Phase 3b.4-pre, shipped 2026-05-17 / merge `b34dbdd`).
   `hostname: null` if the host has emitted no `HostMetaSnapshot` yet.
 - `current_risk` is `null` if the host has emitted no `AiGuardRiskAssessed`
-  events yet.
+  events yet. It stays `null` for a host whose only sources are failing ones
+  with no reading (see `ai_guard_unassessed`), and `by_tool` never holds a
+  tool without a score.
 - `by_tool` only includes tools that have been assessed. Missing key = no
   data, not "low".
 - Each `by_tool` entry is the riskiest current reading for that tool. When
-  readings tie on score, the newest one is shown. `source` names that
-  reading. The server copies its fields from the `ai_guard_risk_assessed`
+  readings tie on score, the newest one is shown. A failure report counts as
+  a newer report for its source, so on a tie `source` and `unassessed_since`
+  can move between a failing source and a current one as reports arrive,
+  while `score` stays the same. `source` names that reading. The server copies its fields from the `ai_guard_risk_assessed`
   event:
   - `scope`: the event's `scope`, unchanged.
   - `user`: the OS account whose home a root agent assessed. `null` for the
@@ -291,6 +306,29 @@ Notes:
   them. Servers before this field omit `source`, so a missing `source` means
   "unknown", and `source.user: null` means "the agent's own home or a
   project".
+- `unassessed_since` is present on a `by_tool` entry when the parser behind
+  that reading has reported `ai_guard_assess_failed` since the reading. It is
+  the `failing_since` of the latest failure report. The score is the last
+  good reading, and it still counts toward `max_score` and `max_bucket`, so a
+  failing source never looks clean. The next `ai_guard_risk_assessed` for the
+  source removes the field. Servers before this field never send it.
+- `ai_guard_unassessed` lists, per tool, the sources whose latest report is an
+  `ai_guard_assess_failed` event, whether or not the source has a reading.
+  It is `null` when no source is failing, and absent from servers before this
+  field. Per tool:
+  - `since`: the earliest `failing_since` of the tool's failing sources.
+  - `last_assessed_ts`: the oldest last good assessment of those sources, as
+    the agent reports it. `null` when any of them has none, as after an
+    agent restart.
+  - `sources`: one entry per failing source, ordered by `user`,
+    `rule_pack_id` and `scope`. `scope`, `user` and `rule_pack_id` have the
+    same meaning as in `source`. `error_kind` is a string such as
+    `unreadable`, `too_large` or `parse`; tolerate values you do not know.
+    `path` is the file that failed. It carries no file content.
+
+  A failing source is kept while failure reports keep arriving, which the
+  agent re-sends each 24h. Like a reading, it drops 48h after its last report,
+  measured by the event's `ts` capped at the server's receive time.
 - `open_event_counts_24h` counts events in the trailing 24-hour sliding
   window grouped by `severity`. `info` is exposed for context even though
   it's not in the default alert set.
@@ -365,7 +403,9 @@ may be `null` if the host hasn't emitted the relevant evidence yet):
                     "rule_pack_id": "acme-extended", "tool_label": null }
       }
     }
-  }
+  },
+
+  "ai_guard_unassessed": null
 }
 ```
 
@@ -377,8 +417,9 @@ Notes:
   and replaced with a top-level `signature_failures_24h` in
   `/v1/fleet/compliance` (see §5.6 / F13).
 - `ai_guard.by_tool` holds the same reading per tool as
-  `current_risk.by_tool`, with its `reasons`. Its `source` has the same
-  shape and rules as in §5.3.
+  `current_risk.by_tool`, with its `reasons`. Its `source` and
+  `unassessed_since` have the same shape and rules as in §5.3.
+- `ai_guard_unassessed` is the same as in §5.3.
 - `null` semantics in every block: the host hasn't yet emitted that variant.
   UI should distinguish "no data yet" from "data unavailable".
 
@@ -412,7 +453,8 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
       "assessed_ts": "2026-05-17T12:33:55Z",
       "open_alert_count_24h": 5,
       "source": { "scope": { "kind": "user_global" }, "user": "alice",
-                  "rule_pack_id": "acme-extended", "tool_label": null }
+                  "rule_pack_id": "acme-extended", "tool_label": null },
+      "unassessed_since": "2026-05-17T12:34:00Z"
     }
   ],
   "next_cursor": null
@@ -422,6 +464,9 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
 - `hostname: null` allowed (see §5.3).
 - `source` names the reading behind `top_tool`'s score, with the same shape
   and rules as `current_risk.by_tool.<tool>.source` in §5.3.
+- `unassessed_since` is present when that reading's parser has failed since,
+  with the same rules as `current_risk.by_tool.<tool>.unassessed_since` in
+  §5.3.
 - `open_alert_count_24h` — **producer spec §4.5 says this is the count
   matching `alerts_definition_default`. As of lodeline-server commit `0dce160`
   (2026-05-17), the actual implementation returns
@@ -432,7 +477,8 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
   `/v1/events` if the UI needs a tighter number. Tracked as a follow-up on
   `Ju571nK/lodeline` (see §13.1).
 - Hosts with no `AiGuardRiskAssessed` yet are omitted entirely (not returned
-  with `null` score).
+  with `null` score). So is a host whose only sources are failing ones with no
+  reading. `/v1/fleet/hosts` lists those in `ai_guard_unassessed`.
 
 ### 5.6 `GET /v1/fleet/compliance`
 

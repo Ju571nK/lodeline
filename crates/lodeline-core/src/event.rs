@@ -762,6 +762,33 @@ pub enum Evidence {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user: Option<String>,
     },
+    /// #333 — a parser could not assess one source, so no reading exists for
+    /// it since `failing_since`. `tool`, `scope`, `user`, `rule_pack_id` and
+    /// `tool_label` name the source as on `AiGuardRiskAssessed`. Servers before
+    /// this kind decode it as `Unknown` and accept it.
+    AiGuardAssessFailed {
+        tool: AiTool,
+        scope: AiGuardScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule_pack_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_label: Option<String>,
+        /// Such as `unreadable`, `too_large` or `parse`. A string, so a later
+        /// value never fails decoding.
+        error_kind: String,
+        /// The file that failed. No content or error text from it.
+        path: PathBuf,
+        /// The first failure the running agent saw for this source.
+        #[serde(with = "time::serde::rfc3339")]
+        failing_since: OffsetDateTime,
+        /// The last good assessment, or `null` when the agent has none, as
+        /// after a restart.
+        #[serde(default, with = "time::serde::rfc3339::option")]
+        last_assessed_ts: Option<OffsetDateTime>,
+        is_reattestation: bool,
+    },
     /// Phase 3b.4-pre — periodic snapshot of host identity + network + OS
     /// metadata. Emitted by host_meta_snapshot_task on boot, every 24h, and
     /// whenever the snapshot's canonical hash differs from the last
@@ -1563,6 +1590,30 @@ mod tests {
         let j = r#"{"kind":"some_future_kind","whatever":1}"#;
         let back: Evidence = serde_json::from_str(j).unwrap();
         assert!(matches!(back, Evidence::Unknown));
+    }
+
+    #[test]
+    fn ai_guard_assess_failed_wire_shape_pinned() {
+        let wire = serde_json::json!({
+            "kind": "ai_guard_assess_failed", "tool": "claude_code",
+            "scope": {"kind": "user_global"}, "error_kind": "a_future_error_kind",
+            "path": "/Users/alice/.claude/settings.json",
+            "failing_since": "2026-11-03T10:00:00Z", "last_assessed_ts": null,
+            "is_reattestation": false
+        });
+        let ev: Evidence = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&ev, Evidence::AiGuardAssessFailed { error_kind, .. }
+            if error_kind == "a_future_error_kind")
+        );
+        assert_eq!(
+            serde_json::to_value(&ev).unwrap(),
+            wire,
+            "None source fields are omitted and a missing last reading is null"
+        );
+        let mut legacy = wire;
+        legacy.as_object_mut().unwrap().remove("last_assessed_ts");
+        assert_eq!(serde_json::from_value::<Evidence>(legacy).unwrap(), ev);
     }
 
     #[test]
