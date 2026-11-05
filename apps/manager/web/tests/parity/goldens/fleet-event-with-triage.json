@@ -55,7 +55,7 @@
     "triage": {
       "assignee": null,
       "status": "investigating",
-      "updated_at": "<now@triage-upsert-no-content-type .fZ>"
+      "updated_at": "<now@triage-upsert-no-content-type-as-json .fZ>"
     },
     "ts": "<seed-132m Z>"
   }

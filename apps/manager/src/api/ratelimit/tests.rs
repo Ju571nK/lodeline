@@ -337,6 +337,7 @@ async fn an_ipv6_client_is_keyed_by_its_64() {
 async fn login_from(app: &Router, peer: &str, headers: &[(&'static str, &str)]) -> StatusCode {
     let mut req = axum::http::Request::post("/api/v1/auth/login")
         .header(header::HOST, "console.example")
+        .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from("{"))
         .unwrap();
     req.extensions_mut()

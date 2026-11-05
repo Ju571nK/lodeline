@@ -147,6 +147,12 @@ the rightmost hop that is not a trusted proxy. `True-Client-IP` and `X-Real-IP` 
 - Do not list `0.0.0.0/0` or `::/0`. Every peer would be trusted, and any client could name its
   own address in the header.
 
+`POST /api/v1/auth/login`, `/api/v1/triage/upsert` and `/api/v1/triage/note` take only
+`Content-Type: application/json`, in any letter case and with or without parameters such as
+`charset`. Any other type, `application/*+json` included, or no `Content-Type` gets 415 with
+code `unsupported_media_type` before the body is read. The session check on the triage routes
+and the login limit answer first, so a refused login still counts as an attempt.
+
 Request bodies are read to at most 64 KiB for login and 4 MiB for the triage routes. A larger
 body gets 413. The reader stops at the end of the body's first JSON value. If that value has
 not fully arrived within 30 seconds, the request gets 408.
@@ -164,9 +170,14 @@ theirs.
 logins a minute. Loopback is no longer exempt from the login limit, so a proxy on the same host
 is limited like any other client.
 
+The Go console read login and triage bodies as JSON whatever their `Content-Type`. This binary
+answers 415 unless the type is `application/json`, so a script that posts JSON without that
+header must add it. The console's own pages already send it.
+
 Some answers differ from Go's on purpose. The limiter reads only `X-Forwarded-For` and only
-from `TRUSTED_PROXIES`, and `/index.html` and `/assets/` serve the SPA instead of a redirect
-and a directory listing. The parity README lists every such difference.
+from `TRUSTED_PROXIES`, the body routes require `application/json`, and `/index.html` and
+`/assets/` serve the SPA instead of a redirect and a directory listing. The parity README lists
+every such difference.
 
 ## Test
 

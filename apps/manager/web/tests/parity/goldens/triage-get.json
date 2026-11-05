@@ -31,7 +31,7 @@
       },
       {
         "actor": "admin",
-        "at": "<now@triage-upsert-no-content-type .9Z>",
+        "at": "<now@triage-upsert-no-content-type-as-json .9Z>",
         "from_status": "acknowledged",
         "id": 3,
         "to_status": "investigating"
@@ -66,7 +66,7 @@
       },
       "host_id": "5a7c3e91-aaaa-bbbb-cccc-111111111111",
       "status": "investigating",
-      "updated_at": "<now@triage-upsert-no-content-type .9Z>"
+      "updated_at": "<now@triage-upsert-no-content-type-as-json .9Z>"
     }
   }
 }

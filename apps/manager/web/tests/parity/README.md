@@ -6,7 +6,7 @@ at `Ju571nK/lodeline-manager@e4fb077`, except the ones listed under "Goldens rec
 Rust build" below. The Rust port does not have to match Go; the suite is a regression check, so a
 run shows every place where the port answers differently from the recorded behavior.
 
-The table has 227 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 230 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
@@ -26,8 +26,8 @@ catch-all. The suite prints the count per route on every run.
 | 9 | `GET /api/v1/fleet/compliance` |
 | 12 | `GET /api/v1/fleet/hosts` |
 | 14 | `GET /api/v1/fleet/hosts/{host_id}` |
-| 13 | `POST /api/v1/triage/upsert` |
-| 11 | `POST /api/v1/triage/note` |
+| 15 | `POST /api/v1/triage/upsert` |
+| 12 | `POST /api/v1/triage/note` |
 | 6 | `GET /api/v1/triage/{host_id}/{event_id}` |
 | 20 | `GET /*` (SPA and unrouted paths) |
 
@@ -104,6 +104,12 @@ difference in the PR. These goldens hold Rust behavior:
 | `login-loopback-limited` | Loopback is limited. Go never limits it. The recorder's own address, `127.0.0.1` named in `X-Forwarded-For`, `::ffff:127.0.0.1`, and a hop that is not an address all count for `127.0.0.1`. |
 | `login-forwarded-loopback-127-0-0-2-limited` | Loopback is limited, as above. |
 | `login-forwarded-loopback-ipv6-limited` | Loopback is limited, as above. |
+| `login-text-plain` | A body sent as `text/plain` gets 415 `unsupported_media_type` and no session. Go read it as JSON and signed in. |
+| `triage-upsert-no-content-type` | A body without `Content-Type` gets 415 and writes nothing. Go moved the row to `investigating`. |
+| `triage-upsert-text-plain` | New case: a `text/plain` body gets 415 and writes nothing. |
+| `triage-note-text-plain` | A `text/plain` body gets 415 and stores no note. Go stored it. |
+| `triage-upsert-no-content-type-as-json`, `triage-note-text-plain-as-json` | New cases: the refused write sent again as `application/json`. Each answer equals Go's golden for the refused case, so the rows that later cases read back hold what Go stored. |
+| `triage-get`, `triage-get-bob`, `fleet-events-with-triage`, `fleet-event-with-triage` | Only the time placeholders differ: they name the `-as-json` case instead of the refused one. |
 | `live-events-out-of-range-number` | None expected: the case is new, so it was recorded from the Rust build. Go keeps evidence as `json.RawMessage`, which does not parse its numbers, so it serves this page too. |
 
 The parity managers run with `TRUSTED_PROXIES=127.0.0.1`, so the recorder is a trusted proxy and
