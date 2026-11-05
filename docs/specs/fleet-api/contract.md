@@ -291,8 +291,8 @@ Notes:
   readings tie on score, the newest one is shown. A failure report counts as
   a newer report for its source, so on a tie `source` and `unassessed_since`
   can move between a failing source and a current one as reports arrive,
-  while `score` stays the same. `source` names that reading. The server copies its fields from the `ai_guard_risk_assessed`
-  event:
+  while `score` stays the same. `source` names that reading. The server copies
+  its fields from the `ai_guard_risk_assessed` event:
   - `scope`: the event's `scope`, unchanged.
   - `user`: the OS account whose home a root agent assessed. `null` for the
     agent's own home, for project scopes, and for agents that do not report
@@ -322,9 +322,9 @@ Notes:
     agent restart.
   - `sources`: one entry per failing source, ordered by `user`,
     `rule_pack_id` and `scope`. `scope`, `user` and `rule_pack_id` have the
-    same meaning as in `source`. `error_kind` is a string such as
-    `unreadable`, `too_large` or `parse`; tolerate values you do not know.
-    `path` is the file that failed. It carries no file content.
+    same meaning as in `source`. `error_kind` is a string. The agent sends
+    `unreadable` or `parse` today; tolerate values you do not know. `path` is
+    the file that failed. It carries no file content.
 
   A failing source is kept while failure reports keep arriving, which the
   agent re-sends each 24h. Like a reading, it drops 48h after its last report,
@@ -467,15 +467,11 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
 - `unassessed_since` is present when that reading's parser has failed since,
   with the same rules as `current_risk.by_tool.<tool>.unassessed_since` in
   §5.3.
-- `open_alert_count_24h` — **producer spec §4.5 says this is the count
-  matching `alerts_definition_default`. As of lodeline-server commit `0dce160`
-  (2026-05-17), the actual implementation returns
-  `h.counts_24h.sum_warn()` — i.e., every `severity=warn` event in the
-  trailing 24h, regardless of whether it matches the alerts definition.**
-  Consumer should treat the field as a coarse "warn events in 24h"
-  indicator and recompute precise alert counts client-side from
-  `/v1/events` if the UI needs a tighter number. Tracked as a follow-up on
-  `Ju571nK/lodeline` (see §13.1).
+- `open_alert_count_24h` is the host's count of events in the trailing 24h that
+  match `/v1/meta.alerts_definition_default` (see §5.2 and §14.9.4). It is not
+  a count of every `severity=warn` event. For example,
+  `ai_guard_assess_failed` is a warn event that the default does not match, so
+  it counts in `open_event_counts_24h.warn` (§5.3) and not here.
 - Hosts with no `AiGuardRiskAssessed` yet are omitted entirely (not returned
   with `null` score). So is a host whose only sources are failing ones with no
   reading. `/v1/fleet/hosts` lists those in `ai_guard_unassessed`.
