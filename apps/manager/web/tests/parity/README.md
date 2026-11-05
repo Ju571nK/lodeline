@@ -145,7 +145,9 @@ Where the spelling is the behavior, a case names dot paths in `rawText`, and the
 the text of the value at each path exactly as the server wrote it. The triage snapshot cases use
 it: Go stores the client's JSON text and writes it back compacted, with number spelling and string
 escapes kept and `<`, `>`, `&`, U+2028 and U+2029 escaped. `live-events-out-of-range-number` uses
-it for relayed evidence, whose parsed form loses `1e400` and the digits of a large integer.
+it for relayed evidence, whose parsed form loses `1e400` and the digits of a large integer. A case
+with `rawText` compares its parsed body as a golden file can hold it, so `1e400` reads as `null`
+and `-0` as `0` there; every other case compares the parsed body as it is.
 
 The recorder notes when each request ran: from just before it sends to the last body byte. A time
 "from a request" lies in that bracket, allowing 2 ms for clock rounding and the value's own

@@ -416,6 +416,9 @@ async function recordCase(c: Case): Promise<Record<string, unknown>> {
     record.rawText = Object.fromEntries(
       c.rawText.map((p) => [p, (parsed ? rawJsonAt(text, p) : undefined) ?? null]),
     );
+    // rawText holds the exact text, so the parsed body is compared as a golden can hold it.
+    // JSON has no Infinity or -0, so a relayed `1e400` reads as null.
+    if (parsed) record.body = JSON.parse(JSON.stringify(record.body));
   }
   const body = record.body as Record<string, unknown>;
   // The build stamps its own version string into /api/health; an empty one stays raw.
@@ -556,8 +559,7 @@ test('every allowlist entry names a reason and known cases', () => {
 
 for (const c of CASES) {
   test(c.name, async () => {
-    // In the form a golden holds it: JSON has no Infinity, so a relayed `1e400` reads as null.
-    const record = JSON.parse(JSON.stringify(await recordCase(c)));
+    const record = await recordCase(c);
     const file = join(GOLDENS, `${c.name}.json`);
     if (env.UPDATE) {
       writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
