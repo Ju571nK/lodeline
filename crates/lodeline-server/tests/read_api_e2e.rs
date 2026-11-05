@@ -198,6 +198,131 @@ async fn resent_events_count_once_live_and_after_rebuild() {
 }
 
 #[tokio::test]
+async fn risk_source_names_the_newest_top_reading_live_and_after_rebuild() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_token(dir.path(), "tok");
+    let app = build_router(state.clone());
+    let now = time::OffsetDateTime::now_utc();
+    let ts = |mins: i64| {
+        (now - time::Duration::minutes(mins))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    let reading = |tool: &str, score: f64, bucket: &str, ts: String, extra: serde_json::Value| {
+        let mut evidence = json!({"kind":"ai_guard_risk_assessed", "tool":tool,
+            "scope":{"kind":"user_global"}, "score":score, "bucket":bucket,
+            "reasons":[], "is_reattestation":false});
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        (ts, evidence)
+    };
+    let older = reading(
+        "claude_code",
+        7.5,
+        "critical",
+        ts(3),
+        json!({"user":"alice", "rule_pack_id":"acme-extended"}),
+    );
+    let newer = reading("claude_code", 7.5, "critical", ts(2), json!({"user":"bob"}));
+    let own_home_lower = reading("claude_code", 2.0, "medium", ts(1), json!({}));
+    let other_tool = reading(
+        "other",
+        0.5,
+        "low",
+        ts(1),
+        json!({"rule_pack_id":"acme-extended", "tool_label":"Acme CLI"}),
+    );
+    // The newest of the tied top readings must win whichever arrives first.
+    let newer_first = uuid::Uuid::now_v7().to_string();
+    let older_first = uuid::Uuid::now_v7().to_string();
+    for (host, readings) in [
+        (&newer_first, [&newer, &older, &own_home_lower, &other_tool]),
+        (&older_first, [&older, &newer, &own_home_lower, &other_tool]),
+    ] {
+        let events: Vec<serde_json::Value> = readings
+            .iter()
+            .enumerate()
+            .map(|(i, (ts, evidence))| {
+                let id = uuid::Uuid::now_v7();
+                json!({"event_id":id, "sequence":i+1, "payload":{
+                    "schema_version":1, "event_id":id, "ts":ts,
+                    "host_id":host, "agent_version":"fixture", "severity":"warn",
+                    "source":{"kind":"agent"}, "subject":{"kind":"self"},
+                    "evidence":evidence}})
+            })
+            .collect();
+        let body = json!({"envelope":{"host_id":host,"schema_version":1}, "events":events});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let bob = json!({"scope":{"kind":"user_global"}, "user":"bob",
+        "rule_pack_id":null, "tool_label":null});
+    let labelled = json!({"scope":{"kind":"user_global"}, "user":null,
+        "rule_pack_id":"acme-extended", "tool_label":"Acme CLI"});
+    let paths = [
+        "/v1/fleet/hosts?sort=host_id".to_string(),
+        format!("/v1/fleet/hosts/{newer_first}"),
+        format!("/v1/fleet/hosts/{older_first}"),
+        "/v1/fleet/risk".to_string(),
+    ];
+    let mut live = Vec::new();
+    for path in &paths {
+        live.push(get_rows_by_host(&app, path).await);
+    }
+    let hosts = live[0]["hosts"].as_array().unwrap();
+    assert_eq!(hosts.len(), 2);
+    for h in hosts {
+        let by_tool = &h["current_risk"]["by_tool"];
+        assert_eq!(by_tool["claude_code"]["source"], bob, "{h}");
+        assert_eq!(by_tool["other"]["source"], labelled, "{h}");
+    }
+    for detail in &live[1..3] {
+        let by_tool = &detail["ai_guard"]["by_tool"];
+        assert_eq!(by_tool["claude_code"]["source"], bob, "{detail}");
+        assert_eq!(by_tool["other"]["source"], labelled, "{detail}");
+    }
+    let rows = live[3]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row["top_tool"], "claude_code", "{row}");
+        assert_eq!(row["source"], bob, "{row}");
+    }
+
+    state
+        .fleet_index
+        .replace(lodeline_server::boot_rebuild::rebuild_from_jsonl(dir.path()).unwrap());
+    for (path, live) in paths.iter().zip(&live) {
+        let rebuilt = get_rows_by_host(&app, path).await;
+        assert_eq!(&rebuilt, live, "{path}: a rebuild must match live ingest");
+    }
+}
+
+/// `get` with `rows` sorted by host, since risk rows that tie have no fixed order.
+async fn get_rows_by_host(app: &axum::Router, path: &str) -> serde_json::Value {
+    let (status, mut body) = get(app, path, Some("tok")).await;
+    assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    if let Some(rows) = body["rows"].as_array_mut() {
+        rows.sort_by_key(|r| r["host_id"].as_str().unwrap().to_string());
+    }
+    body
+}
+
+#[tokio::test]
 async fn meta_returns_alerts_default() {
     let dir = tempfile::tempdir().unwrap();
     let app = build_router(state_with_token(dir.path(), "tok"));

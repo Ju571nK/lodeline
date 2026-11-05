@@ -22,6 +22,11 @@ pub struct RiskEntry {
     pub is_reattestation: bool,
     pub scope: AiGuardScope,
     pub reasons: Vec<AiGuardReason>,
+    /// The event's fields of the same name, which name the reading's source
+    /// together with `scope`.
+    pub user: Option<String>,
+    pub rule_pack_id: Option<String>,
+    pub tool_label: Option<String>,
 }
 
 /// Per-host policy state. signature_failures_24h is derived from HourlyBuckets

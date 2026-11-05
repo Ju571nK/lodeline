@@ -75,7 +75,7 @@ pub fn apply_event_received_between(
             is_reattestation,
             user,
             rule_pack_id,
-            ..
+            tool_label,
         } => {
             // The agent re-sends every reading each 24h, so one older than two
             // heartbeats is gone (a removed repo, user or pack) and must not
@@ -98,6 +98,9 @@ pub fn apply_event_received_between(
                         is_reattestation: *is_reattestation,
                         scope: scope.clone(),
                         reasons: reasons.clone(),
+                        user: user.clone(),
+                        rule_pack_id: rule_pack_id.clone(),
+                        tool_label: tool_label.clone(),
                     },
                 ),
             );

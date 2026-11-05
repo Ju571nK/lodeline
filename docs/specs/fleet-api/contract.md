@@ -242,8 +242,16 @@ skew):
         "max_score": 7.2,
         "max_bucket": "critical",
         "by_tool": {
-          "claude_code": { "score": 7.2, "bucket": "critical", "assessed_ts": "2026-05-17T12:33:55Z" },
-          "codex":       { "score": 2.1, "bucket": "medium",   "assessed_ts": "2026-05-17T12:30:11Z" }
+          "claude_code": {
+            "score": 7.2, "bucket": "critical", "assessed_ts": "2026-05-17T12:33:55Z",
+            "source": { "scope": { "kind": "user_global" }, "user": "alice",
+                        "rule_pack_id": "acme-extended", "tool_label": null }
+          },
+          "codex": {
+            "score": 2.1, "bucket": "medium", "assessed_ts": "2026-05-17T12:30:11Z",
+            "source": { "scope": { "kind": "user_global" }, "user": null,
+                        "rule_pack_id": null, "tool_label": null }
+          }
         }
       },
       "open_event_counts_24h": {
@@ -266,6 +274,23 @@ Notes:
   events yet.
 - `by_tool` only includes tools that have been assessed. Missing key = no
   data, not "low".
+- Each `by_tool` entry is the riskiest current reading for that tool. When
+  readings tie on score, the newest one is shown. `source` names that
+  reading. The server copies its fields from the `ai_guard_risk_assessed`
+  event:
+  - `scope`: the event's `scope`, unchanged.
+  - `user`: the OS account whose home a root agent assessed. `null` for the
+    agent's own home, for project scopes, and for agents that do not report
+    `user`.
+  - `rule_pack_id`: the rule pack that produced the reading. `null` for the
+    built-in parsers.
+  - `tool_label`: the rule pack's name for an `other` tool. `null` for the
+    built-in tools.
+
+  The three fields are always present and are `null` when the event omits
+  them. Servers before this field omit `source`, so a missing `source` means
+  "unknown", and `source.user: null` means "the agent's own home or a
+  project".
 - `open_event_counts_24h` counts events in the trailing 24-hour sliding
   window grouped by `severity`. `info` is exposed for context even though
   it's not in the default alert set.
@@ -335,7 +360,9 @@ may be `null` if the host hasn't emitted the relevant evidence yet):
         "scope": { "kind": "user_global" },
         "reasons": [
           { "kind": "destructive_in_inline_command", "pattern": "rm -rf", "hook_event": "PreToolUse", "snippet": "rm -rf /" }
-        ]
+        ],
+        "source": { "scope": { "kind": "user_global" }, "user": "alice",
+                    "rule_pack_id": "acme-extended", "tool_label": null }
       }
     }
   }
@@ -349,6 +376,9 @@ Notes:
 - `policy_state.signature_failures_24h` from the original draft was removed
   and replaced with a top-level `signature_failures_24h` in
   `/v1/fleet/compliance` (see §5.6 / F13).
+- `ai_guard.by_tool` holds the same reading per tool as
+  `current_risk.by_tool`, with its `reasons`. Its `source` has the same
+  shape and rules as in §5.3.
 - `null` semantics in every block: the host hasn't yet emitted that variant.
   UI should distinguish "no data yet" from "data unavailable".
 
@@ -380,7 +410,9 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
       "top_tool": "claude_code",
       "reasons_count": 3,
       "assessed_ts": "2026-05-17T12:33:55Z",
-      "open_alert_count_24h": 5
+      "open_alert_count_24h": 5,
+      "source": { "scope": { "kind": "user_global" }, "user": "alice",
+                  "rule_pack_id": "acme-extended", "tool_label": null }
     }
   ],
   "next_cursor": null
@@ -388,6 +420,8 @@ breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
 ```
 
 - `hostname: null` allowed (see §5.3).
+- `source` names the reading behind `top_tool`'s score, with the same shape
+  and rules as `current_risk.by_tool.<tool>.source` in §5.3.
 - `open_alert_count_24h` — **producer spec §4.5 says this is the count
   matching `alerts_definition_default`. As of lodeline-server commit `0dce160`
   (2026-05-17), the actual implementation returns

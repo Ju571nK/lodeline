@@ -7,6 +7,19 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 
 ## [Unreleased]
 
+### Added
+
+- `lodeline-server` now says which reading each tool's risk score comes from. Each tool in
+  `current_risk.by_tool` of `GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}`, each
+  tool in the host detail's `ai_guard.by_tool`, and each `GET /v1/fleet/risk` row get a
+  `source` object with the reading's `scope`, `user`, `rule_pack_id` and `tool_label`. On a
+  host where a root agent assesses every user, an operator can see whose config and which rule
+  pack produced the score without searching the event stream. `user`, `rule_pack_id` and
+  `tool_label` are `null` when the event omits them, so `user: null` means the agent's own home
+  or a project. When two readings tie on score, the newest is shown, as before. The server
+  builds `source` the same way on ingest and on rebuild from JSONL. The change is additive. No
+  agent or event change is needed, and older consoles ignore the field. (#333)
+
 ## [0.12.6] - 2026-11-05
 
 ### Changed

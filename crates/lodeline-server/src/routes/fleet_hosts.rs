@@ -1,7 +1,7 @@
 //! GET /v1/fleet/hosts — list (paged, filterable, sortable)
 //! GET /v1/fleet/hosts/{host_id} — single host detail (full host_meta block)
 
-use super::{error_response, rfc3339, wire_str};
+use super::{error_response, rfc3339, risk_source, wire_str};
 use crate::app::SharedState;
 use crate::fleet_index::{HostSummary, RiskEntry};
 use axum::extract::{Path, Query, State};
@@ -174,6 +174,7 @@ fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {
                 assessed_ts: rfc3339(entry.assessed_ts),
                 bucket: wire_str(&entry.bucket),
                 score: f64::from(entry.score),
+                source: Some(risk_source(entry)),
             };
             (wire_str(tool), risk)
         })
@@ -262,6 +263,10 @@ fn render_assessment(entry: &RiskEntry) -> api::AiGuardAssessment {
         is_reattestation,
         scope,
         reasons,
+        // Read by `risk_source`.
+        user: _,
+        rule_pack_id: _,
+        tool_label: _,
     } = entry;
     let controls = controls.as_ref().map(|cs| {
         cs.iter()
@@ -293,6 +298,7 @@ fn render_assessment(entry: &RiskEntry) -> api::AiGuardAssessment {
             .collect(),
         scope: serde_json::to_value(scope).expect("scope serializes"),
         score: f64::from(*score),
+        source: Some(risk_source(entry)),
     }
 }
 
