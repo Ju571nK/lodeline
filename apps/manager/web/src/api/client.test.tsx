@@ -3,8 +3,8 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ObservedControls } from '@/components/ObservedControls';
 import { ReasonList } from '@/components/ReasonList';
-import { api } from './client';
-import type { AiGuardControl, ReasonLike } from './fleet';
+import { api, JsonNumber } from './client';
+import type { AiGuardControl, HostDetail, ReasonLike } from './fleet';
 
 afterEach(() => {
   cleanup();
@@ -79,5 +79,46 @@ describe('numbers in raw fleet fields', () => {
       />,
     );
     expect(screen.getByText('1e400')).toBeInTheDocument();
+  });
+
+  it('keeps a by_tool score a plain number', async () => {
+    const host = await fromServer<HostDetail>(
+      '{"current_risk":{"max_score":7.0,"by_tool":{"claude":{"score":7.0}}},' +
+        '"ai_guard":{"by_tool":{"claude":{"score":7.0,"scope":{"kind":"user_global","n":1.50}}}}}',
+    );
+    expect(host.current_risk?.by_tool.claude.score).toBe(7);
+    expect(host.ai_guard?.by_tool.claude.score).toBe(7);
+    expect(JSON.stringify(host.ai_guard?.by_tool.claude.scope)).toBe(
+      '{"kind":"user_global","n":1.50}',
+    );
+  });
+});
+
+describe('engines without JSON.parse source text', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('parses as plain JSON.parse does', async () => {
+    const parse = JSON.parse;
+    vi.spyOn(JSON, 'parse').mockImplementation((text, reviver) =>
+      parse(
+        text,
+        reviver &&
+          function (this: unknown, key: string, value: unknown) {
+            return reviver.call(this, key, value);
+          },
+      ),
+    );
+    const text = `{"events":[{"schema_version":1.0,"evidence":${evidence},"source":{"n":1.50}}]}`;
+    const page = await fromServer<Page>(text);
+    const members: unknown[] = [];
+    // The replacer sees toJSON's result, so read the member from its holder.
+    JSON.stringify(page, function (this: Record<string, unknown>, key, value) {
+      members.push(this[key]);
+      return value;
+    });
+    expect(members.some((member) => member instanceof JsonNumber)).toBe(false);
+    expect(page).toEqual(parse(text));
   });
 });
