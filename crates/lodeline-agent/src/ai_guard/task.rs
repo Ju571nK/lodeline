@@ -364,6 +364,7 @@ async fn eval_and_maybe_emit(
     for toggle in appeared {
         send(
             ctx,
+            now,
             Evidence::AiGuardToggleDrift {
                 tool: key.0,
                 scope: key.1.clone(),
@@ -376,8 +377,11 @@ async fn eval_and_maybe_emit(
         .await;
     }
 
+    // The cache's `last_assessed_ts` is this event's `ts`, so a later failure
+    // names the reading it refers to exactly.
     send(
         ctx,
+        now,
         Evidence::AiGuardRiskAssessed {
             controls,
             tool: key.0,
@@ -410,6 +414,7 @@ async fn report_failure(
         AssessError::Io { path, .. } => ("unreadable", path),
         AssessError::Parse { path, .. } => ("parse", path),
     };
+    let now = OffsetDateTime::now_utc();
     let (since, unchanged, last_assessed_ts) = {
         let mut state = ctx.state.write();
         let entry = state.entry(key.clone()).or_default();
@@ -417,7 +422,7 @@ async fn report_failure(
         let unchanged = prev
             .as_ref()
             .is_some_and(|f| f.error_kind == error_kind && f.path == *path);
-        let since = prev.map_or_else(OffsetDateTime::now_utc, |f| f.since);
+        let since = prev.map_or(now, |f| f.since);
         entry.failure = Some(AssessFailure {
             since,
             error_kind,
@@ -434,6 +439,7 @@ async fn report_failure(
     }
     send(
         ctx,
+        now,
         Evidence::AiGuardAssessFailed {
             tool: key.0,
             scope: key.1.clone(),
@@ -450,11 +456,11 @@ async fn report_failure(
     .await;
 }
 
-async fn send(ctx: &TaskCtx, evidence: Evidence) {
+async fn send(ctx: &TaskCtx, ts: OffsetDateTime, evidence: Evidence) {
     let event = Event {
         schema_version: SCHEMA_VERSION,
         event_id: uuid::Uuid::now_v7(),
-        ts: OffsetDateTime::now_utc(),
+        ts,
         host_id: ctx.host_id.clone(),
         agent_version: AGENT_VERSION.to_string(),
         severity: Severity::Warn,
@@ -689,9 +695,7 @@ mod tests {
         ]);
         let home = own_home(&ctx);
         eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
-        recv_next_risk_assessed(&mut events).await;
-        let good = ctx.state.read().values().next().unwrap().reading.clone();
-        let good_ts = good.unwrap().last_assessed_ts;
+        let good_ts = recv_next_risk_assessed(&mut events).await.event.ts;
 
         eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
         let (kind, path, since, last, reattest) = only_failure(&mut events);

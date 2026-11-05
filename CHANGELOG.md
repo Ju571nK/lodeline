@@ -83,6 +83,11 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   not a reason the agent knows fails to load as before, and the error now shows the `emit`
   object instead of naming the unknown kind or the missing field. (#333)
 
+### Fixed
+
+- The agent stamps an AI Guard reading's event and its cached copy with one time, so the
+  `last_assessed_ts` of a later `ai_guard_assess_failed` event equals that reading's `ts`. (#333)
+
 ## [0.12.6] - 2026-11-05
 
 ### Changed
