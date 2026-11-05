@@ -693,3 +693,65 @@ async fn future_dated_assess_failure_neither_prunes_others_nor_outlives_48h() {
         "a future-dated failure outlived the 48h window: {row}"
     );
 }
+
+#[tokio::test]
+async fn unassessed_since_follows_only_the_top_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = build_router(state_with_token(dir.path(), "tok"));
+    let now = time::OffsetDateTime::now_utc();
+    let m = |mins: i64| now - time::Duration::minutes(mins);
+    let clean_top = uuid::Uuid::now_v7().to_string();
+    let stale_top = uuid::Uuid::now_v7().to_string();
+    post_evidence(
+        &app,
+        &clean_top,
+        &[
+            (m(5), ai_reading("claude_code", "alice", 7.5, "critical")),
+            (m(4), ai_reading("claude_code", "bob", 1.0, "medium")),
+            (
+                m(2),
+                ai_failure("claude_code", "bob", "parse", m(3), Some(m(4))),
+            ),
+        ],
+    )
+    .await;
+    post_evidence(
+        &app,
+        &stale_top,
+        &[
+            (m(5), ai_reading("claude_code", "alice", 7.5, "critical")),
+            (m(4), ai_reading("claude_code", "bob", 1.0, "medium")),
+            (
+                m(2),
+                ai_failure("claude_code", "alice", "parse", m(3), Some(m(5))),
+            ),
+        ],
+    )
+    .await;
+
+    let [row, detail, risk] = host_views(&app, &clean_top).await;
+    let claude = &row["current_risk"]["by_tool"]["claude_code"];
+    assert_eq!(claude["source"]["user"], "alice", "{row}");
+    assert!(
+        claude.get("unassessed_since").is_none(),
+        "a failing lower source marked a clean top reading: {row}"
+    );
+    assert!(detail["ai_guard"]["by_tool"]["claude_code"]
+        .get("unassessed_since")
+        .is_none());
+    assert!(risk[0].get("unassessed_since").is_none(), "{risk}");
+    assert_eq!(
+        row["ai_guard_unassessed"]["claude_code"]["sources"][0]["user"], "bob",
+        "{row}"
+    );
+
+    let [row, detail, risk] = host_views(&app, &stale_top).await;
+    let claude = &row["current_risk"]["by_tool"]["claude_code"];
+    assert_eq!(claude["source"]["user"], "alice", "{row}");
+    assert_eq!(claude["unassessed_since"], rfc(m(3)), "{row}");
+    assert_eq!(
+        detail["ai_guard"]["by_tool"]["claude_code"]["unassessed_since"],
+        rfc(m(3))
+    );
+    assert_eq!(risk[0]["unassessed_since"], rfc(m(3)), "{risk}");
+}

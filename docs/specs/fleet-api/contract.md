@@ -288,8 +288,10 @@ Notes:
 - `by_tool` only includes tools that have been assessed. Missing key = no
   data, not "low".
 - Each `by_tool` entry is the riskiest current reading for that tool. When
-  readings tie on score, the newest one is shown. `source` names that
-  reading. The server copies its fields from the `ai_guard_risk_assessed`
+  readings tie on score, the newest one is shown. A failure report counts as
+  a newer report for its source, so on a tie `source` and `unassessed_since`
+  can move between a failing source and a current one as reports arrive,
+  while `score` stays the same. `source` names that reading. The server copies its fields from the `ai_guard_risk_assessed`
   event:
   - `scope`: the event's `scope`, unchanged.
   - `user`: the OS account whose home a root agent assessed. `null` for the
