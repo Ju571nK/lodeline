@@ -30,12 +30,14 @@ export function humanTool(tool: string, toolLabel?: string | null): string {
     case 'other':
       return 'Other';
     default:
-      return tool;
+      // The wire type is not checked at runtime, and React cannot render an object.
+      return typeof tool === 'string' ? tool : 'Unknown';
   }
 }
 
 /** Title-cases a snake_case wire kind/reason string for display, e.g. "policy_reloaded" → "Policy Reloaded". */
 export function humanKind(kind: string): string {
+  if (typeof kind !== 'string') return 'Unknown';
   return kind
     .split('_')
     .map((s) => (s.length ? s[0].toUpperCase() + s.slice(1) : s))
@@ -67,7 +69,7 @@ export function hookTitle(hook: HookEvidence): string {
 
 /** Collapses a long filesystem path to "…/last/two" segments; short paths (≤2 segments) pass through unchanged. Empty/missing → "". */
 export function shortPath(p: string | null | undefined): string {
-  if (!p) return '';
+  if (typeof p !== 'string' || !p) return '';
   const parts = p.split('/').filter(Boolean);
   if (parts.length <= 2) return p;
   return `…/${parts.slice(-2).join('/')}`;

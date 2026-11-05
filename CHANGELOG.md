@@ -79,8 +79,20 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   re-encoded. The reason counts in `reasons_count`. The server reads the score from the
   event, so an unknown reason does not change it. An unknown `tool`, `bucket` or `scope`
   still rejects the event. Older servers still reject an unknown reason kind, so agents must
-  not send one. `lodeline-core` gains `AiGuardReason::Unknown`, and a rule pack whose `emit`
-  is not a reason the agent knows now fails to load with an error that names the object.
+  not send one. `lodeline-core` gains `AiGuardReason::Unknown`. A rule pack whose `emit` is
+  not a reason the agent knows fails to load as before, and the error now shows the `emit`
+  object instead of naming the unknown kind or the missing field. (#333)
+
+### Fixed
+
+- The agent stamps an AI Guard reading's event and its cached copy with one time, so the
+  `last_assessed_ts` of a later `ai_guard_assess_failed` event equals that reading's `ts`. (#333)
+
+- The web console shows a reason kind or tool that is not a string as "Unknown" instead of
+  failing to render the page. (#333)
+
+- The console's event timeline shows `ai_guard_risk_assessed` as "AI Guard risk assessed" and
+  `ai_guard_toggle_drift` as "AI Guard toggle drift", next to "AI Guard assessment failed".
   (#333)
 
 ## [0.12.6] - 2026-11-05

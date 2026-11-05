@@ -438,6 +438,7 @@ impl<'de> Deserialize<'de> for AiGuardReason {
         if !v.get("kind").is_some_and(serde_json::Value::is_string) {
             return Err(D::Error::custom("an AI Guard reason needs a string `kind`"));
         }
+        #[allow(clippy::disallowed_methods)] // the one caller that ran the check
         AiGuardReason::deserialize(v).map_err(D::Error::custom)
     }
 }

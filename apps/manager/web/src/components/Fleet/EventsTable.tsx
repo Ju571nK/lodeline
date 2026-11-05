@@ -11,6 +11,13 @@ import { humanKind, humanTool } from '@/lib/labels';
 import { relativeAge } from '@/lib/time';
 import { cn } from '@/lib/utils';
 
+// A Map, so a kind such as "constructor" never reads a prototype property.
+const AI_GUARD_KINDS = new Map([
+  ['ai_guard_risk_assessed', 'AI Guard risk assessed'],
+  ['ai_guard_toggle_drift', 'AI Guard toggle drift'],
+  ['ai_guard_assess_failed', 'AI Guard assessment failed'],
+]);
+
 interface Props {
   rows: EventWithTriage[];
   isPending: boolean;
@@ -53,10 +60,7 @@ export function EventsTable({ rows, isPending, onSelect }: Props) {
                   hook.kind === 'hook_invocation' ? hook.other_label : undefined,
                 )
               : '—';
-          const kind =
-            ev.evidence?.kind === 'ai_guard_assess_failed'
-              ? 'AI Guard assessment failed'
-              : humanKind(ev.evidence?.kind ?? '');
+          const kind = AI_GUARD_KINDS.get(ev.evidence?.kind) ?? humanKind(ev.evidence?.kind ?? '');
           return (
             <tr key={`${ev.host_id}:${ev.event_id}`} className="border-b border-border-subtle">
               <td className="px-3 py-2">

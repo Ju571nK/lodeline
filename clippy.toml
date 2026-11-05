@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "lodeline_core::event::AiGuardReason::deserialize", reason = "the derived decoder skips the string `kind` check; decode through `Deserialize` (e.g. `serde_json::from_value`)" },
+]
