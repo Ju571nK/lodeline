@@ -1,6 +1,7 @@
 //! The listener and connection loop, with the behavior of Go's `http.Server` as `main.go` sets
 //! it up: HTTP/1.1 only, a 10 s header read timeout, no idle timeout, and a 5 s drain. An
-//! answer sent before its request body was read closes the connection.
+//! answer sent before its request body was read closes the connection unless the rest of the
+//! body can be read and dropped first.
 
 use std::future::{poll_fn, Future};
 use std::io;
@@ -127,12 +128,12 @@ async fn accept(listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
     Ok((stream, peer))
 }
 
-/// Closes the connection after any answer sent before its request body was read to the end:
-/// a 401, 405, 413, 415 or 429, among others. A connection closed with unread input resets, and
-/// the client can lose the answer to that reset, so while one of `MAX_DRAINS` permits is free,
-/// up to `DRAIN_LIMIT` of the rest of the body is read and dropped for at most `DRAIN_TIMEOUT`
-/// first. A client that sent `Expect` may still be waiting to send its body, and reading the body
-/// would tell it to go ahead, so its answer goes out at once.
+/// Reads the rest of any request body the app left unread, such as after a 401, 405, 413, 415
+/// or 429, or the terminator after a chunked body's JSON value. While one of `MAX_DRAINS`
+/// permits is free, up to `DRAIN_LIMIT` of it is read and dropped for at most `DRAIN_TIMEOUT`,
+/// and a body read to its end keeps the connection. Otherwise the answer carries
+/// `Connection: close`. A client that sent an `Expect` header may still be waiting to send its
+/// body, and reading the body would tell it to go ahead, so its answer goes out at once.
 async fn close_unread(State(drains): State<Arc<Semaphore>>, req: Request, next: Next) -> Response {
     let (parts, body) = req.into_parts();
     let expects = parts.headers.contains_key(header::EXPECT);
@@ -146,23 +147,36 @@ async fn close_unread(State(drains): State<Arc<Semaphore>>, req: Request, next: 
         } else {
             drains.try_acquire().ok()
         };
-        if permit.is_some() {
-            let _ = tokio::time::timeout(DRAIN_TIMEOUT, discard(rest)).await;
+        let ended = match permit {
+            Some(_permit) => tokio::time::timeout(DRAIN_TIMEOUT, discard(rest))
+                .await
+                .unwrap_or(false),
+            None => false,
+        };
+        if !ended {
+            let headers = res.headers_mut();
+            headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
         }
-        let headers = res.headers_mut();
-        headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
     }
     res
 }
 
-/// Reads and drops `body` frame by frame until it ends, fails, or passes `DRAIN_LIMIT`.
-async fn discard(body: Body) {
+/// Reads and drops `body` frame by frame. True when it ends within `DRAIN_LIMIT`, false when it
+/// fails or passes the limit.
+async fn discard(body: Body) -> bool {
     let mut body = pin!(body);
     let mut left = DRAIN_LIMIT;
-    while let Some(Ok(frame)) = poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
-        left = left.saturating_sub(frame.data_ref().map_or(0, |d| d.len()));
-        if left == 0 {
-            break;
+    loop {
+        match poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
+            None => return true,
+            Some(Ok(frame)) => {
+                let n = frame.data_ref().map_or(0, Bytes::len);
+                let Some(rest) = left.checked_sub(n) else {
+                    return false;
+                };
+                left = rest;
+            }
+            Some(Err(_)) => return false,
         }
     }
 }

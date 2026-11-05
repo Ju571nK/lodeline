@@ -149,45 +149,30 @@ async fn send_late(addr: SocketAddr, what: &str, head: &str, parts: &[Vec<u8>]) 
     responses(&raw)
 }
 
-/// A client that sends its body after the head still reads the whole early answer and a clean
-/// end of stream, and is told the connection closes.
+/// A keep-alive client that sends its body after the head, and its next request right behind
+/// the body, gets the early answer once the body is read and dropped, then the next answer on
+/// the same connection, then a clean end of stream. A body read in full does the same. A 400 for
+/// a bad request closes the connection itself, as Go's does, and still ends cleanly.
 #[tokio::test]
-async fn an_early_answer_waits_for_a_body_sent_after_the_head() {
-    let addr = start_console().await;
-    for (what, head, body, status) in early_answers() {
-        let res = send_late(addr, what, &head, &body).await;
-        assert_eq!(res.len(), 1, "{what}: {res:?}");
-        assert!(
-            res[0].starts_with(&format!("HTTP/1.1 {status} ")),
-            "{what}: {res:?}"
-        );
-        assert!(
-            res[0].contains("\r\nconnection: close\r\n"),
-            "{what}: {res:?}"
-        );
-    }
-}
-
-/// A keep-alive client that sends its next request right behind the body gets the early answer,
-/// told the connection closes, and a clean end of stream instead of a reset. A body read in full
-/// keeps the connection open for the next request.
-#[tokio::test]
-async fn a_reused_connection_closes_cleanly_after_an_early_answer() {
+async fn an_early_answer_waits_for_a_body_sent_after_the_head_and_keeps_the_connection() {
     let addr = start_console().await;
     let next = b"GET /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
     for (what, head, body, status) in early_answers() {
         let mut parts = body;
         parts.last_mut().unwrap().extend_from_slice(next);
         let res = send_late(addr, what, &head, &parts).await;
-        assert_eq!(res.len(), 1, "{what}: {res:?}");
         assert!(
             res[0].starts_with(&format!("HTTP/1.1 {status} ")),
             "{what}: {res:?}"
         );
-        assert!(
-            res[0].contains("\r\nconnection: close\r\n"),
-            "{what}: {res:?}"
-        );
+        if status == "400" {
+            assert_eq!(res.len(), 1, "{what}: {res:?}");
+            assert!(res[0].contains("\r\nconnection: close\r\n"), "{res:?}");
+            continue;
+        }
+        assert_eq!(res.len(), 2, "{what}: {res:?}");
+        assert!(!res[0].contains("connection: close"), "{what}: {res:?}");
+        assert!(res[1].starts_with("HTTP/1.1 200 "), "{what}: {res:?}");
     }
     let body = b"{\"username\":1}";
     let head = head("POST /api/v1/auth/login", "application/json", body.len());
@@ -202,6 +187,51 @@ async fn a_reused_connection_closes_cleanly_after_an_early_answer() {
     assert!(res[0].starts_with("HTTP/1.1 400 "), "{res:?}");
     assert!(!res[0].contains("connection: close"), "{res:?}");
     assert!(res[1].starts_with("HTTP/1.1 200 "), "{res:?}");
+}
+
+/// Writes `raw` in one go and reads to the end of stream, which must come within 5 s and be clean.
+async fn send_at_once(addr: SocketAddr, raw: &[u8]) -> Vec<String> {
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(raw).await.unwrap();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out))
+        .await
+        .unwrap()
+        .unwrap();
+    responses(&out)
+}
+
+/// A request whose whole body came with its head, answered early or with the body's terminator
+/// left unread, keeps the connection for the request pipelined behind it.
+#[tokio::test]
+async fn a_body_that_arrived_with_its_head_keeps_the_connection() {
+    let addr = start_console().await;
+    let next = "GET /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    let json = "application/json";
+    let login = r#"{"username":"admin","password":"test-password"}"#;
+    let chunked = format!(
+        "POST /api/v1/auth/login HTTP/1.1\r\nHost: x\r\nContent-Type: {json}\r\n\
+         Transfer-Encoding: chunked\r\n\r\n{:x}\r\n{login}\r\n0\r\n\r\n",
+        login.len()
+    );
+    for (what, req, status) in [
+        (
+            "session",
+            head("POST /api/v1/triage/note", json, 2) + "{}",
+            "401",
+        ),
+        ("no route", head("POST /api/v1/nope", json, 2) + "{}", "404"),
+        ("chunked login", chunked, "200"),
+    ] {
+        let res = send_at_once(addr, (req + next).as_bytes()).await;
+        assert_eq!(res.len(), 2, "{what}: {res:?}");
+        assert!(
+            res[0].starts_with(&format!("HTTP/1.1 {status} ")),
+            "{what}: {res:?}"
+        );
+        assert!(!res[0].contains("connection: close"), "{what}: {res:?}");
+        assert!(res[1].starts_with("HTTP/1.1 200 "), "{what}: {res:?}");
+    }
 }
 
 /// With every drain permit held, an early answer goes out at once instead of waiting for the
@@ -248,6 +278,12 @@ async fn an_early_answer_to_a_client_that_expects_100_continue_goes_out_at_once(
     assert_eq!(res.len(), 1, "{res:?}");
     assert!(res[0].starts_with("HTTP/1.1 405 "), "{res:?}");
     assert!(res[0].contains("\r\nconnection: close\r\n"), "{res:?}");
+}
+
+#[tokio::test]
+async fn a_drain_ends_only_within_its_limit() {
+    assert!(discard(Body::from(vec![0; DRAIN_LIMIT])).await);
+    assert!(!discard(Body::from(vec![0; DRAIN_LIMIT + 1])).await);
 }
 
 #[tokio::test]

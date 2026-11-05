@@ -159,11 +159,12 @@ Request bodies are read to at most 64 KiB for login and 4 MiB for the triage rou
 body gets 413. The reader stops at the end of the body's first JSON value. If that value has
 not fully arrived within 30 seconds, the request gets 408.
 
-An answer sent before the request body was read to the end, such as a 401, 405, 413, 415 or
-429, carries `Connection: close`. Before it goes out, the console reads and drops up to 64 KiB
-more of the body for at most 1 second, so a client that sends the body after the head still
-reads the answer. At most 64 such reads run at once; past that, or when the request carries
-`Expect: 100-continue`, the answer goes out at once.
+When the console answers before it has read the request body to the end, such as with a 401,
+405, 413, 415 or 429, it first reads and drops up to 64 KiB more of the body for at most
+1 second. If the body ends within that, the connection stays open for the next request, so an
+over-limit body that arrives whole may get its 413 on a connection that stays open. Otherwise
+the answer carries `Connection: close`. At most 64 such reads run at once. Past that, or for a
+request with an `Expect` header, the answer goes out at once with `Connection: close`.
 
 ## Moving from the Go console
 
