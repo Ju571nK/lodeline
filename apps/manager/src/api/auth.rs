@@ -44,7 +44,7 @@ struct LoginBody {
     password: String,
 }
 
-/// Go's `handleLogin`. The body is read as Go's decoder reads it, whatever its `Content-Type`.
+/// Go's `handleLogin`. The body is read as Go's decoder reads it, and only as `application/json`.
 pub async fn login(State(s): State<AppState>, req: Request) -> Response {
     let body = match read_body(req, LOGIN_BODY_LIMIT).await {
         Ok(body) => body.and_then(|b| login_body(&b)),

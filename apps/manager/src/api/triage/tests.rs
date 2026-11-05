@@ -334,6 +334,7 @@ async fn nesting_stops_at_go_depth() {
                     .uri("/api/v1/triage/upsert")
                     .header(header::HOST, "console.example")
                     .header(header::COOKIE, cookie("admin"))
+                    .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body(key, depth)))
                     .unwrap();
                 let res = app.clone().oneshot(req).await.unwrap();
@@ -367,6 +368,13 @@ impl axum::body::HttpBody for Frames {
     }
 }
 
+fn json_request(body: Body) -> Request<Body> {
+    Request::post("/")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .unwrap()
+}
+
 /// Like Go's decoder, the body is read until its first value is complete and no further: the
 /// frame after the value would fail the read. After a top-level `null`, Go waits for one more
 /// byte or the end of the body; this read does not.
@@ -374,7 +382,7 @@ impl axum::body::HttpBody for Frames {
 async fn body_is_read_to_the_end_of_its_first_value() {
     let read = |frames: &[&'static str]| {
         let body = Body::new(Frames(frames.iter().copied().collect()));
-        read_body(Request::new(body), TRIAGE_BODY_LIMIT)
+        read_body(json_request(body), TRIAGE_BODY_LIMIT)
     };
     for (frames, want) in [
         (&[r#"{"host_id":"a"}"#][..], r#"{"host_id":"a"}"#),
@@ -409,7 +417,7 @@ async fn body_is_read_to_the_end_of_its_first_value() {
 async fn the_body_limit_applies_to_the_first_value() {
     let read = |frames: &[&'static str]| {
         let body = Body::new(Frames(frames.iter().copied().collect()));
-        read_body(Request::new(body), 16)
+        read_body(json_request(body), 16)
     };
     let fits = read(&[r#"{"host_id":"ab"} and more"#]).await.unwrap();
     assert_eq!(fits.as_deref(), Some(&br#"{"host_id":"ab"}"#[..]));

@@ -93,11 +93,12 @@ async fn other_methods_get_chi_405_before_auth() {
     }
 }
 
-/// What a valid session gets with no body: the mock fleet's answer or an empty triage store's.
+/// What a valid session gets with no body or `Content-Type`: the mock fleet's answer or an empty
+/// triage store's.
 fn authorized_status(uri: &str) -> u16 {
     match uri {
         "/api/v1/fleet/events/e1" | "/api/v1/fleet/hosts/h1" | "/api/v1/triage/h1/e1" => 404,
-        "/api/v1/triage/upsert" | "/api/v1/triage/note" => 400,
+        "/api/v1/triage/upsert" | "/api/v1/triage/note" => 415,
         _ => 200,
     }
 }
@@ -272,4 +273,110 @@ fn routes_match_the_parity_table() {
         .collect();
     let ours: Vec<String> = ROUTES.iter().map(|(m, p, _)| format!("{m} {p}")).collect();
     assert_eq!(ours, table);
+}
+
+fn post(uri: &str, content_type: Option<&str>, cookie: Option<&str>, body: Body) -> Request {
+    let mut req = Request::post(uri).header(header::HOST, "console.example");
+    if let Some(content_type) = content_type {
+        req = req.header(header::CONTENT_TYPE, content_type);
+    }
+    if let Some(cookie) = cookie {
+        req = req.header(header::COOKIE, cookie);
+    }
+    req.body(body).unwrap()
+}
+
+const UNSUPPORTED: &str = "{\"error\":{\"code\":\"unsupported_media_type\",\"message\":\"Content-Type must be application/json\"}}\n";
+
+/// The body routes read only `application/json`, whatever its case or parameters.
+#[tokio::test]
+async fn bodies_must_be_application_json() {
+    let app = app();
+    let cookie = session(4_000_000_000);
+    for (uri, body, ok) in [
+        (
+            "/api/v1/auth/login",
+            r#"{"username":"admin","password":"wrong"}"#,
+            401,
+        ),
+        (
+            "/api/v1/triage/upsert",
+            r#"{"host_id":"h1","event_id":"e1","status":"open","evidence_snapshot":{}}"#,
+            200,
+        ),
+        (
+            "/api/v1/triage/note",
+            r#"{"host_id":"h1","event_id":"e1","body":"n"}"#,
+            200,
+        ),
+    ] {
+        for (content_type, want) in [
+            (Some("text/plain"), 415),
+            (Some("text/plain;charset=UTF-8"), 415),
+            (None, 415),
+            (Some("application/x-www-form-urlencoded"), 415),
+            (Some("multipart/form-data; boundary=x"), 415),
+            (Some("application/vnd.api+json"), 415),
+            (Some("application/json; charset=utf-8"), ok),
+            (Some("Application/JSON"), ok),
+            (Some("application/json"), ok),
+        ] {
+            let req = post(uri, content_type, Some(&cookie), Body::from(body));
+            let (res, text) = call(app.clone(), req).await;
+            assert_eq!(res.status(), want, "{uri} {content_type:?}");
+            if want == 415 {
+                assert_eq!(text, UNSUPPORTED, "{uri} {content_type:?}");
+            }
+        }
+    }
+}
+
+/// The type is checked before any of the body is read.
+#[tokio::test]
+async fn the_type_is_checked_before_the_body_is_read() {
+    let cookie = session(4_000_000_000);
+    for uri in [
+        "/api/v1/auth/login",
+        "/api/v1/triage/upsert",
+        "/api/v1/triage/note",
+    ] {
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let body = Body::new(crate::testutil::Trickle {
+            prefix: b"{",
+            filler: b' ',
+            total: 1 << 20,
+            stall: true,
+            sent: sent.clone(),
+        });
+        let req = post(uri, Some("text/plain"), Some(&cookie), body);
+        let (res, _) = call(app(), req).await;
+        assert_eq!(res.status(), 415, "{uri}");
+        assert_eq!(sent.load(std::sync::atomic::Ordering::Relaxed), 0, "{uri}");
+    }
+}
+
+/// A session check still answers first, and a refused login still counts toward the limit.
+#[tokio::test]
+async fn auth_and_the_login_limit_come_before_the_type_check() {
+    for uri in ["/api/v1/triage/upsert", "/api/v1/triage/note"] {
+        let (res, _) = call(app(), post(uri, Some("text/plain"), None, Body::from("{}"))).await;
+        assert_eq!(res.status(), 401, "{uri}");
+    }
+    let app = app();
+    for _ in 0..10 {
+        let req = post(
+            "/api/v1/auth/login",
+            Some("text/plain"),
+            None,
+            Body::from("{}"),
+        );
+        assert_eq!(call(app.clone(), req).await.0.status(), 415);
+    }
+    let req = post(
+        "/api/v1/auth/login",
+        Some("application/json"),
+        None,
+        Body::from("{}"),
+    );
+    assert_eq!(call(app, req).await.0.status(), 429);
 }

@@ -93,6 +93,7 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Why a body was not read.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BodyError {
+    NotJson,
     TooLarge,
     TimedOut,
 }
@@ -100,6 +101,11 @@ pub enum BodyError {
 impl IntoResponse for BodyError {
     fn into_response(self) -> Response {
         match self {
+            Self::NotJson => error_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                "Content-Type must be application/json",
+            ),
             Self::TooLarge => error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "body_too_large",
@@ -116,9 +122,19 @@ impl IntoResponse for BodyError {
 
 /// The body a frame at a time up to the end of its first JSON value, as Go's decoder reads it.
 /// `Ok(None)` when a read fails before the value ends or the value nests deeper than Go allows.
-/// An error once the value runs past `limit` bytes, which are all that is held, or when the body
-/// has not arrived within 30 s.
+/// An error before any of it is read when `Content-Type` is not `application/json` (any case,
+/// parameters ignored), once the value runs past `limit` bytes, which are all that is held, or
+/// when the body has not arrived within 30 s.
 pub async fn read_body(req: Request, limit: usize) -> Result<Option<Vec<u8>>, BodyError> {
+    let json = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"));
+    if !json {
+        return Err(BodyError::NotJson);
+    }
     let read = async {
         let mut body = req.into_body();
         let (mut buf, mut scan, mut over) = (Vec::new(), Scan::default(), false);

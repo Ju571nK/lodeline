@@ -48,7 +48,8 @@ async fn call(app: &Router, method: Method, uri: &str, cookie: Option<&str>, bod
     let mut req = Request::builder()
         .method(method)
         .uri(uri)
-        .header(header::HOST, "console.example");
+        .header(header::HOST, "console.example")
+        .header(header::CONTENT_TYPE, "application/json");
     if let Some(cookie) = cookie {
         req = req.header(header::COOKIE, cookie);
     }
@@ -508,6 +509,7 @@ fn trickle(total: usize, stall: bool) -> (Request<Body>, Arc<std::sync::atomic::
     };
     let req = Request::post("/api/v1/auth/login")
         .header(header::HOST, "console.example")
+        .header(header::CONTENT_TYPE, "application/json")
         .header(header::TRANSFER_ENCODING, "chunked")
         .body(Body::new(body))
         .unwrap();

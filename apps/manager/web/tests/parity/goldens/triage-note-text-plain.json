@@ -4,7 +4,7 @@
     "path": "/api/v1/triage/note",
     "server": "mock"
   },
-  "status": 200,
+  "status": 415,
   "headers": {
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
     "content-type": "application/json",
@@ -14,11 +14,9 @@
   },
   "cookies": [],
   "body": {
-    "author": "admin",
-    "body": "sent as text/plain",
-    "created_at": "<now#1 .9Z>",
-    "event_id": "EVT#6",
-    "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
-    "id": 3
+    "error": {
+      "code": "unsupported_media_type",
+      "message": "Content-Type must be application/json"
+    }
   }
 }
