@@ -3,7 +3,7 @@
  * (`src/fleet/wire.rs`).
  */
 
-import { api } from './client';
+import { api, type JsonNumber } from './client';
 
 // -----------------------------------------------------------------------------
 // Healthz + Meta
@@ -111,7 +111,7 @@ export interface AiGuardEvidence extends Evidence {
    */
   tool_label?: string;
   scope: ScopeUserGlobal | ScopeProject | ScopeApplication;
-  score: number;
+  score: number | JsonNumber;
   bucket: 'low' | 'medium' | 'high' | 'critical';
   reasons: ReasonLike[];
   is_reattestation: boolean;
@@ -152,7 +152,7 @@ export interface ReasonLike {
 export interface HookInvocationEvidence extends Evidence {
   kind: 'hook_invocation';
   agent: string;
-  peer_uid: number;
+  peer_uid: number | JsonNumber;
   agent_session_id?: string;
   tool_use_id?: string;
   action_kind: string;
@@ -167,7 +167,7 @@ export interface HookInvocationEvidence extends Evidence {
 export interface HookDecisionEvidence extends Evidence {
   kind: 'hook_decision';
   agent: string;
-  peer_uid: number;
+  peer_uid: number | JsonNumber;
   agent_session_id?: string;
   tool_use_id?: string;
   action_kind: string;
@@ -184,7 +184,7 @@ export interface HookDecisionEvidence extends Evidence {
 export interface HookConfigDriftEvidence extends Evidence {
   kind: 'hook_config_drift';
   agent: string;
-  peer_uid: number;
+  peer_uid: number | JsonNumber;
   drift_kind: string;
   settings_path: string;
   expected_command_hash: string;
@@ -197,10 +197,10 @@ export interface HookConfigDriftEvidence extends Evidence {
 export interface PossibleHookActivitySilentEvidence extends Evidence {
   kind: 'possible_hook_activity_silent';
   agent: string;
-  uid?: number;
+  uid?: number | JsonNumber;
   last_hook_seen_at: string;
   last_session_activity_at?: string;
-  window_secs: number;
+  window_secs: number | JsonNumber;
   probe_kind: string;
   path_hash?: string;
   probe_error?: string;

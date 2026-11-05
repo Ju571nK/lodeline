@@ -12,6 +12,7 @@ on:
       - '!**.md'
       - '!docs/**'
       - '!apps/**'
+      - '!.github/workflows/manager.yml'
       - 'docs/specs/lodeline-proxy/contracts/**'
       - '.claude/skills/signed-policy/**'
   pull_request:
@@ -24,6 +25,7 @@ on:
       - '!**.md'
       - '!docs/**'
       - '!apps/**'
+      - '!.github/workflows/manager.yml'
       - 'docs/specs/lodeline-proxy/contracts/**'
       - '.claude/skills/signed-policy/**'
 

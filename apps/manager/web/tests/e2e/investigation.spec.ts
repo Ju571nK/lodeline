@@ -273,3 +273,31 @@ test('Settings distinguishes successful legacy metadata from missing signed head
   await page.getByRole('button', { name: 'Retry connection', exact: true }).click();
   await expect(page.getByText('no signed head available', { exact: true })).toBeVisible();
 });
+
+test('Event detail shows evidence numbers as the server wrote them', async ({ page }) => {
+  await openAlerts(page);
+  const id = eventID(102);
+  const evidence =
+    '{"kind":"ai_guard_risk_assessed","tool":"codex","scope":{"kind":"user_global"},' +
+    '"score":7.0,"bucket":"high","is_reattestation":false,"big":18446744073709551616,' +
+    '"reasons":[{"kind":"x","limit":1.50}],' +
+    '"controls":[{"id":"c1","source_path":"/p","setting":"s","value":1e400}]}';
+  const event =
+    `{"schema_version":1,"event_id":"${id}","ts":"2026-09-13T01:00:00Z","host_id":"${alice}",` +
+    `"agent_version":"0.8.0","severity":"warn","source":{"kind":"agent"},"subject":{},` +
+    `"evidence":${evidence},"target_id":null,"triage":null}`;
+  await page.route(eventsPattern, (route) =>
+    route.fulfill({ json: { events: [], next_cursor: null } }),
+  );
+  await page.route(`**/api/v1/fleet/events/${id}`, (route) =>
+    route.fulfill({ contentType: 'application/json', body: event }),
+  );
+  await page.goto(`/fleet/events?event=${id}`);
+  await expect(page.getByText('1.50', { exact: true })).toBeVisible();
+  await expect(page.getByText('1e400', { exact: true })).toBeVisible();
+  await expect(page.getByText('7.0', { exact: true })).toBeVisible();
+  const raw = page.locator('pre');
+  await expect(raw).toContainText('"big": 18446744073709551616');
+  await expect(raw).toContainText('"score": 7.0');
+  await expect(raw).toContainText('"value": 1e400');
+});
