@@ -1,17 +1,24 @@
 //! The listener and connection loop, with the behavior of Go's `http.Server` as `main.go` sets
-//! it up: HTTP/1.1 only, a 10 s header read timeout, no idle timeout, and a 5 s drain.
+//! it up: HTTP/1.1 only, a 10 s header read timeout, no idle timeout, and a 5 s drain. An
+//! answer sent before its request body was read closes the connection unless the rest of the
+//! body can be read and dropped first.
 
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{ready, Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::extract::ConnectInfo;
+use axum::body::{Body, Bytes, HttpBody};
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{header, HeaderValue};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::{Extension, Router};
+use hyper::body::{Frame, SizeHint};
 use hyper::rt::{Sleep, Timer};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -20,9 +27,18 @@ use hyper_util::service::TowerToHyperService;
 use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tower::Layer;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// The most early answers that read their request body at once, across all connections; past
+/// that, an early answer closes at once.
+const MAX_DRAINS: usize = 64;
+/// How long an early answer reads the rest of the request body, which a client sends right
+/// behind the head.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// How much of the rest an early answer reads, the size of a login body.
+const DRAIN_LIMIT: usize = 64 << 10;
 const READ_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Go's listener default for both the keep-alive idle time and the probe interval.
 const KEEPALIVE: Duration = Duration::from_secs(15);
@@ -53,6 +69,8 @@ fn dual_stack(port: u16) -> io::Result<TcpListener> {
 
 /// Serves `app` until `shutdown` completes, then drains open connections for up to 5 s.
 pub async fn serve(listener: TcpListener, app: Router, shutdown: impl Future<Output = ()>) {
+    let drains = Arc::new(Semaphore::new(MAX_DRAINS));
+    let app = app.layer(middleware::from_fn_with_state(drains, close_unread));
     let graceful = GracefulShutdown::new();
     let mut shutdown = pin!(shutdown);
     loop {
@@ -108,6 +126,97 @@ async fn accept(listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
         .with_interval(KEEPALIVE);
     let _ = SockRef::from(&stream).set_tcp_keepalive(&keepalive);
     Ok((stream, peer))
+}
+
+/// Reads the rest of any request body the app left unread, such as after a 401, 405, 413, 415
+/// or 429, or the terminator after a chunked body's JSON value. While one of `MAX_DRAINS`
+/// permits is free, up to `DRAIN_LIMIT` of it is read and dropped for at most `DRAIN_TIMEOUT`,
+/// and a body read to its end keeps the connection. Otherwise the answer carries
+/// `Connection: close`. A client that sent an `Expect` header may still be waiting to send its
+/// body, and reading the body would tell it to go ahead, so its answer goes out at once.
+async fn close_unread(State(drains): State<Arc<Semaphore>>, req: Request, next: Next) -> Response {
+    let (parts, body) = req.into_parts();
+    let expects = parts.headers.contains_key(header::EXPECT);
+    let unread = Arc::new(Mutex::new(Some(body)));
+    let req = Request::from_parts(parts, Body::new(Unread(unread.clone())));
+    let mut res = next.run(req).await;
+    let rest = lock(&unread).take().filter(|b| !b.is_end_stream());
+    if let Some(rest) = rest {
+        let permit = if expects {
+            None
+        } else {
+            drains.try_acquire().ok()
+        };
+        let ended = match permit {
+            Some(_permit) => tokio::time::timeout(DRAIN_TIMEOUT, discard(rest))
+                .await
+                .unwrap_or(false),
+            None => false,
+        };
+        if !ended {
+            let headers = res.headers_mut();
+            headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+        }
+    }
+    res
+}
+
+/// Reads and drops `body` frame by frame. True when it ends within `DRAIN_LIMIT`, false when it
+/// fails or passes the limit.
+async fn discard(body: Body) -> bool {
+    let mut body = pin!(body);
+    let mut left = DRAIN_LIMIT;
+    loop {
+        match poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
+            None => return true,
+            Some(Ok(frame)) => {
+                let n = frame.data_ref().map_or(0, Bytes::len);
+                let Some(rest) = left.checked_sub(n) else {
+                    return false;
+                };
+                left = rest;
+            }
+            Some(Err(_)) => return false,
+        }
+    }
+}
+
+/// A request body the app reads through, which lets go of the body once it ends or fails, so
+/// whatever is left after the app answers is the part it did not read.
+struct Unread(Arc<Mutex<Option<Body>>>);
+
+fn lock(body: &Mutex<Option<Body>>) -> MutexGuard<'_, Option<Body>> {
+    body.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl HttpBody for Unread {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
+        let mut slot = lock(&self.0);
+        let Some(body) = slot.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let frame = ready!(Pin::new(body).poll_frame(cx));
+        if !matches!(frame, Some(Ok(_))) {
+            *slot = None;
+        }
+        Poll::Ready(frame)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        lock(&self.0).as_ref().is_none_or(HttpBody::is_end_stream)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        lock(&self.0)
+            .as_ref()
+            .map_or(SizeHint::with_exact(0), HttpBody::size_hint)
+    }
 }
 
 /// hyper starts its header read timeout as soon as it waits for a request head, which closes an

@@ -395,6 +395,20 @@ async fn bodies_must_be_application_json() {
     }
 }
 
+/// Parameters are ignored even when they are not ASCII.
+#[tokio::test]
+async fn a_non_ascii_parameter_is_ignored() {
+    let mut req = post(
+        "/api/v1/auth/login",
+        None,
+        None,
+        Body::from(r#"{"username":1}"#),
+    );
+    let content_type = HeaderValue::from_bytes(b"application/json; charset=\xe9").unwrap();
+    req.headers_mut().insert(header::CONTENT_TYPE, content_type);
+    assert_eq!(call(app(), req).await.0.status(), 400);
+}
+
 /// The type is checked before any of the body is read.
 #[tokio::test]
 async fn the_type_is_checked_before_the_body_is_read() {

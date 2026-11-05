@@ -236,6 +236,8 @@ A passing run says nothing about the following. Each needs its own test in the p
 - `OPTIONS` beyond `login-options`, and repeated query keys beyond `host_id`,
   `fleet-events-duplicate-key` and the `limit` cases of risk, compliance and hosts.
 - `Content-Length` of a non-empty `GET` response, and whether a response is chunked.
+- The `Connection` header, and how a connection ends after an answer sent before the request
+  body was read. `src/conn/tests.rs` covers them over raw sockets.
 - Percent-encoded path parameters in mock mode. The live cases show what Go sends upstream.
 - Limiter behavior that needs time to pass or many addresses: window reset after 60 s, dropping
   windows that have reset, the 65,536-address cap with its shared window, and IPv6 clients

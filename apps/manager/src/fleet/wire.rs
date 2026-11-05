@@ -57,10 +57,9 @@ const RAW_KEYS: [&str; 6] = ["source", "subject", "evidence", "scope", "reasons"
 /// Float fields. Every other number the console decodes is an integer.
 const FLOAT_KEYS: [&str; 2] = ["score", "max_score"];
 
-/// The most levels a body may nest, counting each value one level below the array or object that
-/// holds it, raw values included. A body that ends in a scalar gets the 127 nested arrays and
-/// objects `serde_json::Value` allows, the bound this decode had when it parsed the whole body
-/// into one.
+/// The most levels a body may nest, raw values included: one more than its deepest array or
+/// object, empty or not. That is the 127 nested arrays and objects `serde_json::Value` allows,
+/// the bound this decode had when it parsed the whole body into one.
 const MAX_DEPTH: usize = 128;
 
 /// Decodes `json` with Go's rules for typed fields. Go treats `null` and a missing key alike for
@@ -80,8 +79,13 @@ pub fn go_decode<T: DeserializeOwned>(json: &RawValue) -> serde_json::Result<T> 
 
 fn normalize(v: &RawValue, float: bool, depth: usize) -> serde_json::Result<String> {
     let text = v.get();
-    let depth = depth.checked_sub(1).ok_or_else(too_deep)?;
-    Ok(match text.as_bytes().first() {
+    let first = text.as_bytes().first();
+    // As in `levels`, an array or object takes a level below it even when it is empty.
+    if depth < 1 + usize::from(matches!(first, Some(b'{' | b'['))) {
+        return Err(too_deep());
+    }
+    let depth = depth - 1;
+    Ok(match first {
         Some(b'{') => object(text, None, |k, v| {
             if RAW_KEYS.contains(&k) {
                 if levels(v.get()) > depth {
@@ -111,8 +115,8 @@ fn too_deep() -> serde_json::Error {
     <serde_json::Error as serde::de::Error>::custom("recursion limit exceeded")
 }
 
-/// The levels `normalize` would count in `text`, which is valid JSON: the deepest value's level,
-/// where a value is one level below the array or object that holds it. A single pass with no
+/// The levels `normalize` would count in `text`, which is valid JSON, as `serde_json::Value`
+/// bounds them: one more than the deepest array or object, empty or not. A single pass with no
 /// recursion, so it measures any nesting safely.
 fn levels(text: &str) -> usize {
     let (mut depth, mut max) = (0, 0);
@@ -124,24 +128,19 @@ fn levels(text: &str) -> usize {
                 max = max.max(depth);
             }
             b'}' | b']' => depth -= 1,
-            b',' | b':' | b' ' | b'\t' | b'\n' | b'\r' => {}
-            // A key or scalar: either way the array or object holding it is not empty, so it
-            // holds a value one level down.
-            _ => {
-                max = max.max(depth + 1);
-                if b == b'"' {
-                    while let Some(b) = bytes.next() {
-                        match b {
-                            b'\\' => _ = bytes.next(),
-                            b'"' => break,
-                            _ => {}
-                        }
+            b'"' => {
+                while let Some(b) = bytes.next() {
+                    match b {
+                        b'\\' => _ = bytes.next(),
+                        b'"' => break,
+                        _ => {}
                     }
                 }
             }
+            _ => {}
         }
     }
-    max
+    max + 1
 }
 
 /// The object `text` written again with each member's value mapped by `f`. A `null` member is
@@ -739,15 +738,20 @@ mod tests {
     /// decode parsed the whole body into it.
     #[test]
     fn nesting_is_bounded_under_raw_and_typed_keys() {
-        let body = |key: &str, n: usize| {
+        // `n` arrays and objects under `x`, the deepest holding a scalar or nothing.
+        let body = |key: &str, n: usize, end: &str| {
+            let n = if end == "1" { n } else { n - 1 };
             let (open, close) = ("[".repeat(n), "]".repeat(n));
-            format!(r#"{{"{key}":{{"kind":"k","x":{open}1{close}}}}}"#)
+            format!(r#"{{"{key}":{{"kind":"k","x":{open}{end}{close}}}}}"#)
         };
         for key in ["evidence", "unknown"] {
-            for (n, ok) in [(125, true), (126, false), (100_000, false)] {
-                let as_value = serde_json::from_str::<serde_json::Value>(&body(key, n));
-                assert_eq!(as_value.is_ok(), ok, "{key} at {n} as Value");
-                assert_eq!(decode::<Event>(body(key, n)).is_ok(), ok, "{key} at {n}");
+            for end in ["1", "[]", "{}"] {
+                for (n, ok) in [(125, true), (126, false), (100_000, false)] {
+                    let body = body(key, n, end);
+                    let as_value = serde_json::from_str::<serde_json::Value>(&body);
+                    assert_eq!(as_value.is_ok(), ok, "{key} {end} at {n} as Value");
+                    assert_eq!(decode::<Event>(body).is_ok(), ok, "{key} {end} at {n}");
+                }
             }
         }
         // Brackets inside strings, escaped quotes included, are text, not nesting.

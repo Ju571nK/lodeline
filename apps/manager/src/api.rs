@@ -129,9 +129,8 @@ pub async fn read_body(req: Request, limit: usize) -> Result<Option<Vec<u8>>, Bo
     let json = req
         .headers()
         .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(';').next())
-        .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"));
+        .and_then(|v| v.as_bytes().split(|&b| b == b';').next())
+        .is_some_and(|t| t.trim_ascii().eq_ignore_ascii_case(b"application/json"));
     if !json {
         return Err(BodyError::NotJson);
     }
