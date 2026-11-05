@@ -17,8 +17,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   binary, and the release's native verify jobs check that it runs and prints the release version.
   The manifest keeps schema version 1 and now lists 35 binaries; `lodeline doctor
   --verify-self` of the agent binaries is unchanged. `lodeline-manager --version` prints the
-  version, which now follows the workspace version. See `apps/manager/README.md`. There are no
-  `.deb`, `.rpm` or container images for the console yet.
+  version, which now follows the workspace version, so a release prep bumps
+  `apps/manager/Cargo.toml` and `apps/manager/Cargo.lock` with the root. See
+  `apps/manager/README.md`. There are no `.deb`, `.rpm` or container images for the console yet.
+
+### Changed
+
+- `lodeline-manager` refuses to start when `JWT_SECRET`, `LODELINE_SERVER_READ_TOKEN` or
+  `ADMIN_PASSWORD_BCRYPT` still holds the example value from an earlier `.env.example`, and the
+  error names the variable. Those values were public. `.env.example` now leaves the secrets
+  empty and shows how to generate each one.
 
 ## [0.13.0] - 2026-11-05
 

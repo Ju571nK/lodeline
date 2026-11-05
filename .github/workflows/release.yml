@@ -25,11 +25,15 @@ jobs:
   web:
     name: build manager SPA
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: apps/manager/web
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -263,9 +267,11 @@ jobs:
            (needs.manifest.outputs.signed != 'true' && needs.verify.result == 'skipped')) }}
     runs-on: ubuntu-latest
     steps:
+      # Archives, packages and the manifest; not manager-web, the SPA the build job embeds.
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: '{*-*-*,build-manifest}'
           merge-multiple: true
       - name: Checksums
         working-directory: dist
