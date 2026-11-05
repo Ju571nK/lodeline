@@ -34,6 +34,14 @@
         "open_alert_count_24h": 14,
         "reasons_count": 0,
         "score": 7.2,
+        "source": {
+          "rule_pack_id": "acme-extended",
+          "scope": {
+            "kind": "user_global"
+          },
+          "tool_label": null,
+          "user": "alice"
+        },
         "top_tool": "claude_code"
       }
     ]

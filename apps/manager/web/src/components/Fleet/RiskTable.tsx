@@ -1,7 +1,8 @@
 import { Link } from '@tanstack/react-router';
 import type { RiskRow } from '@/api/fleet';
 import { SkeletonRows } from '@/components/Fleet/SkeletonRows';
-import { humanTool } from '@/lib/labels';
+import { UnassessedSince } from '@/components/UnassessedSince';
+import { humanTool, sourceLabel } from '@/lib/labels';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -53,7 +54,15 @@ export function RiskTable({ rows, isPending }: Props) {
               </Link>
             </td>
             <td className="px-3 py-2 font-mono">{row.score.toFixed(1)}</td>
-            <td className="px-3 py-2 text-text-muted">{humanTool(row.top_tool)}</td>
+            <td className="px-3 py-2 text-text-muted">
+              {humanTool(row.top_tool, row.source?.tool_label)}
+              {row.source && <div className="text-text-subtle">{sourceLabel(row.source)}</div>}
+              {row.unassessed_since && (
+                <div>
+                  <UnassessedSince ts={row.unassessed_since} />
+                </div>
+              )}
+            </td>
             <td className="px-3 py-2 text-text-muted">{row.reasons_count}</td>
             <td className="px-3 py-2 text-text-muted">{row.open_alert_count_24h}</td>
           </tr>

@@ -2,8 +2,10 @@ import { formatDistanceToNowStrict } from 'date-fns';
 import { Check, Loader2, Search } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import {
+  type AssessFailedEvidence,
   type EventWithTriage,
   extractAiGuard,
+  extractAssessFailed,
   extractHook,
   extractToggleDrift,
   type HookEvidence,
@@ -23,7 +25,8 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { useAppendNote, useTriageDetailOrNull, useUpsertTriage } from '@/hooks/useTriage';
-import { hookTitle, humanKind, humanTool, scopeLabel } from '@/lib/labels';
+import { hookTitle, humanKind, humanTool, scopeLabel, sourceLabel } from '@/lib/labels';
+import { shortTime } from '@/lib/time';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -92,6 +95,7 @@ function SlideOverBody({
   const ag = extractAiGuard(event);
   const hook = extractHook(event);
   const drift = extractToggleDrift(event);
+  const failed = extractAssessFailed(event);
   const triage = useTriageDetailOrNull(event.host_id, event.event_id);
   const upsert = useUpsertTriage();
   const appendNote = useAppendNote();
@@ -181,7 +185,9 @@ function SlideOverBody({
                 ? hookTitle(hook)
                 : drift
                   ? `AI Guard toggle drift · ${humanTool(drift.tool, drift.tool_label)}`
-                  : humanKind(event.evidence?.kind ?? 'unknown')}
+                  : failed
+                    ? `AI Guard assessment failed · ${humanTool(failed.tool, failed.tool_label)}`
+                    : humanKind(event.evidence?.kind ?? 'unknown')}
           </SheetTitle>
           <SheetDescription className="text-xs text-text-muted">
             event_id <code className="font-mono">{event.event_id}</code>
@@ -203,7 +209,7 @@ function SlideOverBody({
             <div className="h-2 w-3/4 animate-pulse rounded bg-bg-elevated" />
           </div>
         )}
-        <FactGrid event={event} ag={ag} hook={hook} drift={drift} />
+        <FactGrid event={event} ag={ag} hook={hook} drift={drift} failed={failed} />
         {ag && <ObservedControls controls={ag.controls} assessedAt={event.ts} scope={ag.scope} />}
 
         {/* Actions */}
@@ -373,11 +379,13 @@ function FactGrid({
   ag,
   hook,
   drift,
+  failed,
 }: {
   event: EventWithTriage;
   ag: ReturnType<typeof extractAiGuard>;
   hook: HookEvidence | null;
   drift: ToggleDriftEvidence | null;
+  failed: AssessFailedEvidence | null;
 }) {
   return (
     <dl className="grid grid-cols-[110px_minmax(0,1fr)] gap-y-1.5 text-xs">
@@ -397,6 +405,7 @@ function FactGrid({
       )}
       {hook && <HookFacts hook={hook} />}
       {drift && <ToggleDriftFacts drift={drift} />}
+      {failed && <AssessFailedFacts failed={failed} />}
       <Fact label="Time">
         <span title={event.ts}>{relativeOrEmpty(event.ts)} ago</span>
       </Fact>
@@ -520,6 +529,33 @@ function ToggleDriftFacts({ drift }: { drift: ToggleDriftEvidence }) {
       </Fact>
       <Fact label="Scope">{scopeLabel(drift.scope)}</Fact>
       {drift.rule_pack_id && <Fact label="Rule pack">{drift.rule_pack_id}</Fact>}
+    </>
+  );
+}
+
+/**
+ * Facts for an `ai_guard_assess_failed` evidence: which source could not be
+ * assessed and why. The event carries no score, so none is shown.
+ */
+function AssessFailedFacts({ failed }: { failed: AssessFailedEvidence }) {
+  const at = (ts: string) => (
+    <time dateTime={ts} title={ts}>
+      {shortTime(ts)}
+    </time>
+  );
+  return (
+    <>
+      <Fact label="Tool">{humanTool(failed.tool, failed.tool_label)}</Fact>
+      <Fact label="Error">{humanKind(failed.error_kind)}</Fact>
+      <Fact label="Path">
+        <code className="font-mono break-all">{failed.path}</code>
+      </Fact>
+      <Fact label="Source">{sourceLabel(failed)}</Fact>
+      <Fact label="Scope">{scopeLabel(failed.scope)}</Fact>
+      <Fact label="Failing since">{at(failed.failing_since)}</Fact>
+      <Fact label="Last good reading">
+        {failed.last_assessed_ts ? at(failed.last_assessed_ts) : 'none reported'}
+      </Fact>
     </>
   );
 }

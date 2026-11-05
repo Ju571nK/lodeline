@@ -22,7 +22,15 @@
             "claude_code": {
               "assessed_ts": "<seed-2m Z>",
               "bucket": "critical",
-              "score": 7.2
+              "score": 7.2,
+              "source": {
+                "rule_pack_id": "acme-extended",
+                "scope": {
+                  "kind": "user_global"
+                },
+                "tool_label": null,
+                "user": "alice"
+              }
             }
           },
           "max_bucket": "critical",
@@ -61,6 +69,6 @@
       }
     ],
     "next_cursor": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
-    "total_estimated": 5
+    "total_estimated": 6
   }
 }

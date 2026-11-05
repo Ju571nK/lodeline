@@ -14,8 +14,38 @@
   },
   "cookies": [],
   "body": {
-    "hosts": null,
+    "hosts": [
+      {
+        "agent_version": "0.4.0",
+        "ai_guard_unassessed": {
+          "claude_code": {
+            "last_assessed_ts": null,
+            "since": "<seed-1408m Z>",
+            "sources": [
+              {
+                "error_kind": "parse",
+                "path": "/home/frank/.claude/settings.json",
+                "rule_pack_id": "acme-extended",
+                "scope": {
+                  "kind": "user_global"
+                },
+                "user": "frank"
+              }
+            ]
+          }
+        },
+        "current_risk": null,
+        "host_id": "5a7c3e91-aaaa-bbbb-cccc-666666666666",
+        "hostname": "frank-ci",
+        "last_seen_ts": "<seed-2m Z>",
+        "open_event_counts_24h": {
+          "info": 0,
+          "warn": 1
+        },
+        "status": "healthy"
+      }
+    ],
     "next_cursor": null,
-    "total_estimated": 5
+    "total_estimated": 6
   }
 }

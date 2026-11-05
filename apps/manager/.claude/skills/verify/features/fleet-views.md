@@ -26,13 +26,14 @@ Preconditions:
 - For the API steps, log in for the API as [Login and session](./login-session.md) shows.
 
 - **Browser journey.** Run `drive.sh e2e "$RUN" fleet-browser tests/e2e/fleet.spec.ts -g 'redirect|active host count|tab switching|min_bucket|AI Guard chip'`. Exit code `0`, and the runner prints `7 passed`: the `setup` login and 6 tests.
+- **Score sources and unassessed parsers.** Run `drive.sh e2e "$RUN" sources-browser tests/e2e/fleet.spec.ts -g 'Devices names|Risk rows name'`. Exit code `0`, and the runner prints `3 passed`. Devices shows alice's user and rule pack, carol's stale score as `Unassessed since`, and frank-ci, which has no score, as `Not assessed` plus `Unassessed since`. The Risk tab shows the same source for alice and carol and has no row for frank-ci.
 - **Risk rows.** Run `drive.sh api "$RUN" risk GET /api/v1/fleet/risk`. Status `200` with 4 `rows`.
 - **Risk filter.** Run `drive.sh api "$RUN" risk-critical GET '/api/v1/fleet/risk?min_bucket=critical'`. Status `200` with 2 `rows`, for `eve-workstation` and `alice-mbp`.
 - **Compliance rows.** Run `drive.sh api "$RUN" compliance GET /api/v1/fleet/compliance`. Status `200` with `rows`.
 - **Events.** Run `drive.sh api "$RUN" events GET '/api/v1/fleet/events?limit=5'`. Status `200` with 5 `events` and a `next_cursor`.
 - **Bad query.** Run `drive.sh api "$RUN" events-bad GET '/api/v1/fleet/events?limit=notanumber'`. Status `400` with code `invalid_query`.
-- **Devices data.** Run `drive.sh api "$RUN" hosts GET /api/v1/fleet/hosts` and `drive.sh api "$RUN" hosts-down GET '/api/v1/fleet/hosts?status=disconnected'`. Status `200`, with 5 hosts in the first response and 1 host in the second.
-- **Metadata.** Run `drive.sh api "$RUN" meta GET /api/v1/fleet/meta`. Status `200` with `fleet.active_host_count` set to `5`.
+- **Devices data.** Run `drive.sh api "$RUN" hosts GET /api/v1/fleet/hosts` and `drive.sh api "$RUN" hosts-down GET '/api/v1/fleet/hosts?status=disconnected'`. Status `200`, with 6 hosts in the first response and 1 host in the second.
+- **Metadata.** Run `drive.sh api "$RUN" meta GET /api/v1/fleet/meta`. Status `200` with `fleet.active_host_count` set to `6`.
 
 ## Gotchas
 

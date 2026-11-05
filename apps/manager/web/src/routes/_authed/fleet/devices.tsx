@@ -3,7 +3,9 @@ import { useState } from 'react';
 import { fleetHosts, type HostSummary, type HostsPage } from '@/api/fleet';
 import { Pagination } from '@/components/Fleet/Pagination';
 import { SkeletonRows } from '@/components/Fleet/SkeletonRows';
+import { UnassessedSince } from '@/components/UnassessedSince';
 import { usePagedFleet } from '@/hooks/usePagedFleet';
+import { humanTool, sourceLabel } from '@/lib/labels';
 import { relativeAge } from '@/lib/time';
 
 const statuses = ['healthy', 'stale', 'disconnected'] as const;
@@ -148,9 +150,7 @@ function DevicesTab() {
                     </td>
                   )}
                   <td className="px-3 py-2">
-                    {host.current_risk
-                      ? `${host.current_risk.max_bucket} · ${host.current_risk.max_score.toFixed(1)}`
-                      : 'Not assessed'}
+                    <RiskCell host={host} />
                   </td>
                 </tr>
               ))}
@@ -160,5 +160,42 @@ function DevicesTab() {
         <Pagination {...devices} count={devices.rows.length} />
       </div>
     </div>
+  );
+}
+
+/**
+ * The host's max risk, then a line per tool that names its source or is stale, then a line per
+ * tool whose failing sources have no stale score shown. A tool without either adds nothing, so a
+ * server that predates `source` renders as before.
+ */
+function RiskCell({ host }: { host: HostSummary }) {
+  const risk = host.current_risk;
+  const byTool = risk?.by_tool ?? {};
+  const failing = Object.entries(host.ai_guard_unassessed ?? {}).filter(
+    ([tool]) => !byTool[tool]?.unassessed_since,
+  );
+  return (
+    <>
+      {risk ? `${risk.max_bucket} · ${risk.max_score.toFixed(1)}` : 'Not assessed'}
+      {Object.entries(byTool)
+        .filter(([, t]) => t.source || t.unassessed_since)
+        .map(([tool, t]) => (
+          <div key={tool} className="mt-1 text-text-muted">
+            {humanTool(tool, t.source?.tool_label)} {t.score.toFixed(1)}
+            {t.source && ` · ${sourceLabel(t.source)}`}
+            {t.unassessed_since && (
+              <>
+                {' · '}
+                <UnassessedSince ts={t.unassessed_since} />
+              </>
+            )}
+          </div>
+        ))}
+      {failing.map(([tool, u]) => (
+        <div key={tool} className="mt-1 text-text-muted">
+          {humanTool(tool)} · <UnassessedSince ts={u.since} />
+        </div>
+      ))}
+    </>
   );
 }

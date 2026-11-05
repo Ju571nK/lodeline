@@ -1,4 +1,4 @@
-//! The built-in mock fleet for `MOCK_FLEET=1` (Go's `internal/fleet/mock.go`): 5 hosts and 32
+//! The built-in mock fleet for `MOCK_FLEET=1` (Go's `internal/fleet/mock.go`): 6 hosts and 33
 //! events over the 24 hours before the seed, which is the process start.
 //!
 //! The fixtures are `testdata/mock-fleet.json`, written once from the Go mock (see
@@ -130,6 +130,7 @@ impl Mock {
             if !p.min_bucket.is_empty() && !bucket_at_least(&risk.max_bucket, &p.min_bucket) {
                 continue;
             }
+            let top = by_tool.get(&top_tool);
             let counts = h.open_event_counts_24h.as_ref();
             rows.push(RiskRow {
                 host_id: h.host_id.clone(),
@@ -144,6 +145,8 @@ impl Mock {
                     .max()
                     .unwrap_or_default(),
                 open_alert_count_24h: counts.and_then(|c| c.get("warn")).copied().unwrap_or(0),
+                source: top.and_then(|t| t.source.clone()),
+                unassessed_since: top.and_then(|t| t.unassessed_since),
             });
         }
         rows.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -214,7 +217,9 @@ fn expand(v: &mut Value, key: &str, seed: i64) {
     match v {
         Value::Object(m) => m.iter_mut().for_each(|(k, e)| expand(e, k, seed)),
         Value::Array(a) => a.iter_mut().for_each(|e| expand(e, key, seed)),
-        Value::Number(n) if key == "ts" || key.ends_with("_ts") => {
+        Value::Number(n)
+            if key == "ts" || key.ends_with("_ts") || key == "since" || key.ends_with("_since") =>
+        {
             let offset = n.as_i64().expect("time offsets are whole seconds");
             *v = Value::String(GoTime::from_unix(seed + offset).to_string());
         }
@@ -317,8 +322,8 @@ mod tests {
     fn fixtures_load_with_go_ids_times_and_addresses() {
         let seed = 1_767_225_600; // 2026-01-01T00:00:00Z
         let m = Mock::new(seed);
-        assert_eq!((m.hosts.len(), m.events.len()), (5, 32));
-        assert_eq!(m.events[0].event_id, uuidv7_at(seed * 1000, 32));
+        assert_eq!((m.hosts.len(), m.events.len()), (6, 33));
+        assert_eq!(m.events[0].event_id, uuidv7_at(seed * 1000, 33));
         assert_eq!(m.events[31].ts, GoTime::from_unix(seed - 31 * 44 * 60));
         assert!(
             m.events.windows(2).all(|w| w[0].event_id > w[1].event_id),
@@ -332,6 +337,28 @@ mod tests {
         assert_eq!(
             expand_addresses("x ipv4:c0000201/24 ipv4:zz"),
             "x 192.0.2.1/24 ipv4:zz"
+        );
+    }
+
+    #[test]
+    fn risk_rows_carry_the_top_reading_source_and_failures_stay_out() {
+        let seed = 1_767_225_600;
+        let m = Mock::new(seed);
+        let rows = m.risk(&RiskParams::default()).rows.unwrap();
+        let name = |r: &RiskRow| r.hostname.clone().unwrap_or_default();
+        let carol = rows.iter().find(|r| name(r) == "carol-dev").unwrap();
+        assert_eq!(carol.unassessed_since, Some(GoTime::from_unix(seed - 1800)));
+        assert_eq!(
+            carol.source.as_ref().unwrap().member_str("rule_pack_id"),
+            ""
+        );
+        assert!(
+            rows.iter().all(|r| name(r) != "frank-ci"),
+            "a host with failures and no score has no risk row"
+        );
+        assert_eq!(
+            m.events[32].evidence.member_str("failing_since"),
+            GoTime::from_unix(seed - 32 * 44 * 60).to_string()
         );
     }
 

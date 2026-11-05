@@ -27,6 +27,7 @@ Preconditions:
 - Doctor exits 0.
 - The triage tables are empty, so run this feature on a new run.
 
+- **Assessment failure in the slide-over.** Run `drive.sh e2e "$RUN" assess-failed tests/e2e/alerts.spec.ts -g 'assessment failure'`. Exit code `0`, and the runner prints `2 passed`. The queue has no row for the `ai_guard_assess_failed` event, because it is not a default alert kind, and `/alerts?alert=<its id>` shows its error, path and source.
 - **Assign and acknowledge in the browser.** Run `drive.sh e2e "$RUN" triage-browser tests/e2e/alerts.spec.ts -g 'assign \+ acknowledge'`. Exit code `0`, and the runner prints `2 passed`: the `setup` login and this test. After the reload, the screenshot shows the slide-over with `ACKNOWLEDGED` and the assignee `alice`.
 - **Stored row.** Run `drive.sh db "$RUN" triage-row 'select host_id,event_id,status,assignee from triage'`. One row with status `acknowledged` and assignee `alice`. Copy its `host_id` and `event_id`.
 - **Transition log.** Run `drive.sh db "$RUN" triage-log 'select actor,from_status,to_status from triage_log'`. Two rows, `admin||open` and `admin|open|acknowledged`.

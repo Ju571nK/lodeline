@@ -142,3 +142,37 @@ test('AI Guard event detail displays observation context and values', async ({ p
     fullPage: true,
   });
 });
+
+test('an assessment failure opens in the slide-over and is not a default alert', async ({
+  page,
+}) => {
+  await openAlerts(page);
+  await expect(page.locator('button:has-text("AI Guard")').first()).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(page.locator('button:has-text("assessment failed")')).toHaveCount(0);
+  const res = await page.request.get('/api/v1/fleet/events?evidence_kind=ai_guard_assess_failed');
+  expect(res.ok()).toBeTruthy();
+  const { events } = await res.json();
+  expect(events).toHaveLength(1);
+
+  await page.goto(`/alerts?alert=${events[0].event_id}`);
+  const sheet = page.getByRole('dialog');
+  await expect(sheet.getByText('AI Guard assessment failed · Claude Code')).toBeVisible();
+  const facts = sheet.locator('dl');
+  for (const [label, value] of [
+    ['Error', 'Parse'],
+    ['Path', '/home/frank/.claude/settings.json'],
+    ['Source', 'user frank · rule pack acme-extended'],
+    ['Last good reading', 'none reported'],
+  ]) {
+    await expect(facts.locator('dt', { hasText: label }).locator('+ dd')).toHaveText(value);
+  }
+  await expect(
+    facts.locator('dt', { hasText: 'Failing since' }).locator('+ dd time'),
+  ).toBeVisible();
+  await page.screenshot({
+    path: test.info().outputPath('alert-assess-failed.png'),
+    fullPage: true,
+  });
+});

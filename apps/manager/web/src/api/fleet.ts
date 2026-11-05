@@ -248,6 +248,33 @@ export function extractToggleDrift(ev: Event): ToggleDriftEvidence | null {
     : null;
 }
 
+/**
+ * `ai_guard_assess_failed` evidence: a parser could not assess one source. Names the source as
+ * `ai_guard_risk_assessed` does; `user`, `rule_pack_id` and `tool_label` are absent when unset.
+ * Not a default alert kind.
+ */
+export interface AssessFailedEvidence extends Evidence {
+  kind: 'ai_guard_assess_failed';
+  tool: string;
+  scope: Scope;
+  user?: string;
+  rule_pack_id?: string;
+  tool_label?: string;
+  /** Such as `unreadable`, `too_large` or `parse`; later values are shown as sent. */
+  error_kind: string;
+  path: string;
+  failing_since: string;
+  last_assessed_ts: string | null;
+  is_reattestation: boolean;
+}
+
+/** Returns the typed [`AssessFailedEvidence`] view if the event matches, else null. */
+export function extractAssessFailed(ev: Event): AssessFailedEvidence | null {
+  return ev.evidence?.kind === 'ai_guard_assess_failed'
+    ? (ev.evidence as AssessFailedEvidence)
+    : null;
+}
+
 /** Server-side join: triage view embedded per event, or null if untriaged. */
 export interface TriageView {
   status: 'open' | 'acknowledged' | 'investigating' | 'resolved';
@@ -308,6 +335,9 @@ export interface RiskRow {
    * client-side only if the operator overrides alerts_definition_default.
    */
   open_alert_count_24h: number;
+  /** The reading behind `top_tool`'s score; see [`RiskSource`]. */
+  source?: RiskSource;
+  unassessed_since?: string;
 }
 
 export interface RiskPage {
@@ -420,6 +450,20 @@ export interface ToolAiGuard {
   // Nullable on the wire: a Go nil reasons slice serializes to `null`, so a
   // tool with no reasons arrives as null, not []. Consumers must guard.
   reasons: ReasonLike[] | null;
+  source?: RiskSource;
+  unassessed_since?: string;
+}
+
+/**
+ * Who produced a score (§5.3 `source`). Absent when the server predates the field. `user` is
+ * null for the agent's own home and for project scopes; `rule_pack_id` is null for the built-in
+ * parsers.
+ */
+export interface RiskSource {
+  scope: Scope;
+  user: string | null;
+  rule_pack_id: string | null;
+  tool_label: string | null;
 }
 
 /** Per-tool current risk rollup embedded in current_risk (§5.4). */
@@ -427,6 +471,25 @@ export interface ToolRisk {
   score: number;
   bucket: 'low' | 'medium' | 'high' | 'critical' | string;
   assessed_ts: string;
+  source?: RiskSource;
+  /** The parser behind this reading has failed since then; the score is the last good one. */
+  unassessed_since?: string;
+}
+
+/** One source whose parser fails (§5.3 `ai_guard_unassessed`). */
+export interface UnassessedSource {
+  scope: Scope;
+  user: string | null;
+  rule_pack_id: string | null;
+  error_kind: string;
+  path: string;
+}
+
+/** One tool's failing sources. `last_assessed_ts` is null when any of them has no reading. */
+export interface ToolUnassessed {
+  since: string;
+  last_assessed_ts: string | null;
+  sources: UnassessedSource[];
 }
 
 export interface CurrentRisk {
@@ -444,6 +507,8 @@ export interface HostSummary {
   status: 'healthy' | 'stale' | 'disconnected' | string;
   current_risk: CurrentRisk | null;
   open_event_counts_24h: Record<string, number>;
+  /** Absent when no source fails. A host can have failures and `current_risk: null`. */
+  ai_guard_unassessed?: Record<string, ToolUnassessed>;
 }
 
 export interface HostDetail extends HostSummary {

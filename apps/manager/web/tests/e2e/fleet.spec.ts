@@ -22,8 +22,8 @@ test.describe('fleet pages', () => {
   test('fleet header shows the active host count from /v1/meta', async ({ page }) => {
     await openAlerts(page);
     await page.goto('/fleet');
-    // Mock /v1/meta reports fleet { active_host_count: 5, active_window_days: 30 }.
-    await expect(page.getByText('5 active hosts · last 30 days')).toBeVisible({ timeout: 5_000 });
+    // Mock /v1/meta reports fleet { active_host_count: 6, active_window_days: 30 }.
+    await expect(page.getByText('6 active hosts · last 30 days')).toBeVisible({ timeout: 5_000 });
   });
 
   test('bare /fleet redirects to /fleet/risk', async ({ page }) => {
@@ -52,7 +52,7 @@ test.describe('fleet pages', () => {
   test('risk min_bucket chip narrows the row set', async ({ page }) => {
     await openAlerts(page);
     await page.goto('/fleet/risk');
-    // Default min_bucket=low lists all 4 risk-bearing hosts (dave has no risk).
+    // Default min_bucket=low lists all 4 risk-bearing hosts (dave and frank have no score).
     await expect(page.locator('tbody tr')).toHaveCount(4, { timeout: 5_000 });
 
     await page.getByRole('button', { name: /^critical$/ }).click();
@@ -149,4 +149,90 @@ test('observed controls survive the host API and remain inspectable at low risk'
   await page.keyboard.press('Enter');
   await expect(settings.getByText('false', { exact: true })).toBeVisible();
   await expect(page.getByText('low 0.00', { exact: true })).toBeVisible();
+});
+
+test.describe('AI Guard score sources and unassessed parsers', () => {
+  const alice = '5a7c3e91-aaaa-bbbb-cccc-111111111111';
+  const carol = '5a7c3e91-aaaa-bbbb-cccc-333333333333';
+  const frank = '5a7c3e91-aaaa-bbbb-cccc-666666666666';
+  const row = (page: Page, name: string) => page.getByRole('row').filter({ hasText: name });
+
+  test('Devices names each source and shows failing parsers as unassessed', async ({ page }) => {
+    await openAlerts(page);
+    await page.goto('/fleet/devices');
+    await expect(row(page, 'alice-mbp')).toContainText(
+      'Claude Code 7.2 · user alice · rule pack acme-extended',
+      { timeout: 5_000 },
+    );
+    await expect(row(page, 'carol-dev')).toContainText(
+      "Claude Desktop 6.8 · agent's own home · built-in rules · Unassessed since",
+    );
+    // No score, so the state comes from ai_guard_unassessed alone and must not read as clean.
+    await expect(row(page, 'frank-ci')).toContainText('Not assessed');
+    await expect(row(page, 'frank-ci')).toContainText('Claude Code · Unassessed since');
+    // A reading with no source, as an older server sends it, adds nothing.
+    await expect(row(page, 'eve-workstation').getByRole('cell').last()).toHaveText(
+      'critical · 8.4',
+    );
+    await page.screenshot({ path: test.info().outputPath('devices-sources.png'), fullPage: true });
+  });
+
+  test('Risk rows name the source of the top score and mark a stale one', async ({ page }) => {
+    await openAlerts(page);
+    await page.goto('/fleet/risk');
+    await expect(row(page, 'alice-mbp')).toContainText('user alice · rule pack acme-extended', {
+      timeout: 5_000,
+    });
+    await expect(row(page, 'carol-dev')).toContainText("agent's own home · built-in rules");
+    await expect(row(page, 'carol-dev')).toContainText('Unassessed since');
+    await expect(row(page, 'eve-workstation').getByRole('cell').nth(3)).toHaveText('Continue.dev');
+    await expect(row(page, 'frank-ci')).toHaveCount(0);
+    await page.screenshot({ path: test.info().outputPath('risk-sources.png'), fullPage: true });
+  });
+
+  test('host panel shows the source, a stale score and its failing source', async ({ page }) => {
+    await openAlerts(page);
+    await page.goto(`/hosts/${alice}`);
+    await expect(
+      page.getByText('· user alice · rule pack acme-extended', { exact: true }),
+    ).toBeVisible({
+      timeout: 5_000,
+    });
+    await page.screenshot({ path: test.info().outputPath('host-attributed.png'), fullPage: true });
+
+    await page.goto(`/hosts/${carol}`);
+    await expect(
+      page.getByText("· agent's own home · built-in rules", { exact: true }),
+    ).toBeVisible({
+      timeout: 5_000,
+    });
+    const failing = page.getByRole('region', { name: 'Unassessed sources' });
+    await expect(failing).toContainText('Claude Desktop');
+    await expect(failing).toContainText(
+      "Unreadable · /home/carol/.config/Claude/claude_desktop_config.json · agent's own home",
+    );
+    await expect(page.getByText('Unassessed since')).toHaveCount(2);
+    await page.screenshot({ path: test.info().outputPath('host-stale.png'), fullPage: true });
+  });
+
+  test('a host with only failing sources is unassessed and its event opens', async ({ page }) => {
+    await openAlerts(page);
+    await page.goto(`/hosts/${frank}`);
+    await expect(page.getByText('No AI Guard scores yet.')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('No AI Guard assessments yet.')).toHaveCount(0);
+    const failing = page.getByRole('region', { name: 'Unassessed sources' });
+    await expect(failing).toContainText('Last good reading: none reported');
+    await expect(failing).toContainText(
+      'Parse · /home/frank/.claude/settings.json · user frank · rule pack acme-extended',
+    );
+    const event = row(page, 'Ai Guard Assess Failed');
+    await expect(event.getByRole('cell').last()).toHaveText('Claude Code');
+    await page.screenshot({ path: test.info().outputPath('host-unassessed.png'), fullPage: true });
+
+    await event.getByRole('button').click();
+    const sheet = page.getByRole('dialog');
+    await expect(sheet.getByText('AI Guard assessment failed · Claude Code')).toBeVisible();
+    await expect(sheet.getByText('/home/frank/.claude/settings.json').first()).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath('host-event.png'), fullPage: true });
+  });
 });

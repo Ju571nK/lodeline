@@ -34,6 +34,14 @@
         "open_alert_count_24h": 14,
         "reasons_count": 0,
         "score": 7.2,
+        "source": {
+          "rule_pack_id": "acme-extended",
+          "scope": {
+            "kind": "user_global"
+          },
+          "tool_label": null,
+          "user": "alice"
+        },
         "top_tool": "claude_code"
       },
       {
@@ -44,7 +52,16 @@
         "open_alert_count_24h": 8,
         "reasons_count": 0,
         "score": 6.8,
-        "top_tool": "claude_desktop"
+        "source": {
+          "rule_pack_id": null,
+          "scope": {
+            "kind": "user_global"
+          },
+          "tool_label": null,
+          "user": null
+        },
+        "top_tool": "claude_desktop",
+        "unassessed_since": "<seed-30m Z>"
       },
       {
         "assessed_ts": "<seed-15m Z>",

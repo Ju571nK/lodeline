@@ -1,5 +1,11 @@
 import { Link } from '@tanstack/react-router';
-import { type EventWithTriage, extractAiGuard, extractHook, extractToggleDrift } from '@/api/fleet';
+import {
+  type EventWithTriage,
+  extractAiGuard,
+  extractAssessFailed,
+  extractHook,
+  extractToggleDrift,
+} from '@/api/fleet';
 import { SkeletonRows } from '@/components/Fleet/SkeletonRows';
 import { humanKind, humanTool } from '@/lib/labels';
 import { relativeAge } from '@/lib/time';
@@ -36,19 +42,17 @@ export function EventsTable({ rows, isPending, onSelect }: Props) {
       </thead>
       <tbody>
         {rows.map((ev) => {
-          const ag = extractAiGuard(ev);
+          // The AI Guard kinds share `tool` and `tool_label`.
+          const aiGuard = extractAiGuard(ev) ?? extractToggleDrift(ev) ?? extractAssessFailed(ev);
           const hook = extractHook(ev);
-          const drift = extractToggleDrift(ev);
-          const tool = ag
-            ? humanTool(ag.tool, ag.tool_label)
+          const tool = aiGuard
+            ? humanTool(aiGuard.tool, aiGuard.tool_label)
             : hook
               ? humanTool(
                   hook.agent,
                   hook.kind === 'hook_invocation' ? hook.other_label : undefined,
                 )
-              : drift
-                ? humanTool(drift.tool, drift.tool_label)
-                : '—';
+              : '—';
           return (
             <tr key={`${ev.host_id}:${ev.event_id}`} className="border-b border-border-subtle">
               <td className="px-3 py-2">

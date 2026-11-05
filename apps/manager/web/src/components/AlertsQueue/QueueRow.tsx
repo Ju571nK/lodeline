@@ -1,4 +1,10 @@
-import { type EventWithTriage, extractAiGuard, extractHook, extractToggleDrift } from '@/api/fleet';
+import {
+  type EventWithTriage,
+  extractAiGuard,
+  extractAssessFailed,
+  extractHook,
+  extractToggleDrift,
+} from '@/api/fleet';
 import { hookTitle, humanKind, humanTool } from '@/lib/labels';
 import { bucketTextColor } from '@/lib/severity';
 import { relativeAge } from '@/lib/time';
@@ -147,5 +153,7 @@ function computeTitle(ev: EventWithTriage, ag: ReturnType<typeof extractAiGuard>
   if (hook) return hookTitle(hook);
   const drift = extractToggleDrift(ev);
   if (drift) return `AI Guard toggle drift · ${humanTool(drift.tool, drift.tool_label)}`;
+  const failed = extractAssessFailed(ev);
+  if (failed) return `AI Guard assessment failed · ${humanTool(failed.tool, failed.tool_label)}`;
   return KIND_TITLES[ev.evidence?.kind] ?? humanKind(ev.evidence?.kind ?? 'unknown');
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { HookEvidence } from '@/api/fleet';
-import { hookTitle, humanKind, humanTool, scopeLabel, shortPath } from './labels';
+import { hookTitle, humanKind, humanTool, scopeLabel, shortPath, sourceLabel } from './labels';
 
 describe('humanTool', () => {
   it('maps the six known tool wire strings to display names', () => {
@@ -139,5 +139,33 @@ describe('scopeLabel', () => {
   });
   it('labels application scope by app name', () => {
     expect(scopeLabel({ kind: 'application', app: 'Slack' })).toBe('app · Slack');
+  });
+});
+
+describe('sourceLabel', () => {
+  const scope = { kind: 'user_global' } as const;
+
+  it('shows nothing when the server sent no source', () => {
+    expect(sourceLabel(undefined)).toBeNull();
+    expect(sourceLabel(null)).toBeNull();
+  });
+
+  it('names the user and the rule pack', () => {
+    expect(sourceLabel({ scope, user: 'alice', rule_pack_id: 'acme-extended' })).toBe(
+      'user alice · rule pack acme-extended',
+    );
+  });
+
+  it("tells a null user (the agent's own home or a project) from a missing source", () => {
+    expect(sourceLabel({ scope, user: null, rule_pack_id: null })).toBe(
+      "agent's own home · built-in rules",
+    );
+    expect(
+      sourceLabel({ scope: { kind: 'project', path: '/a/b/c' }, user: null, rule_pack_id: null }),
+    ).toBe('project · …/b/c · built-in rules');
+  });
+
+  it('reads an event whose unset fields are absent', () => {
+    expect(sourceLabel({ scope })).toBe("agent's own home · built-in rules");
   });
 });
