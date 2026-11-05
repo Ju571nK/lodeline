@@ -3,4 +3,4 @@ source: crates/lodeline-server/tests/read_api_snapshots.rs
 expression: "call(&app, path, Some(\"tok\"), &r).await"
 ---
 200
-{"next_cursor":null,"rows":[]}
+{"next_cursor":null,"not_assessed_host_count":0,"rows":[]}

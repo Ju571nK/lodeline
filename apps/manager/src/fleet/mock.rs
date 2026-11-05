@@ -104,10 +104,22 @@ impl Mock {
         }
     }
 
-    /// One row per host with a current risk, riskiest first.
+    /// One row per host with a current risk, riskiest first, and a count of the hosts whose
+    /// selected tools fail with no score, as the server counts them.
     fn risk(&self, p: &RiskParams) -> RiskPage {
         let mut rows: Vec<RiskRow> = Vec::new();
+        let selected = |tool: &String| p.tool.is_empty() || p.tool.contains(tool);
+        let mut not_assessed = 0;
         for h in self.hosts.iter().map(|h| &h.detail.summary) {
+            let scored = h.current_risk.as_ref().and_then(|r| r.by_tool.as_ref());
+            if h.ai_guard_unassessed
+                .iter()
+                .flatten()
+                .any(|(t, _)| selected(t))
+                && !scored.iter().flat_map(|b| b.keys()).any(selected)
+            {
+                not_assessed += 1;
+            }
             let Some(risk) = &h.current_risk else {
                 continue;
             };
@@ -151,7 +163,11 @@ impl Mock {
         }
         rows.sort_by(|a, b| b.score.total_cmp(&a.score));
         let (rows, next_cursor) = page(rows, &p.cursor, p.limit, |r| &r.host_id);
-        RiskPage { rows, next_cursor }
+        RiskPage {
+            rows,
+            next_cursor,
+            not_assessed_host_count: Some(not_assessed),
+        }
     }
 
     fn compliance(&self, p: &ComplianceParams) -> CompliancePage {
@@ -356,6 +372,18 @@ mod tests {
             rows.iter().all(|r| name(r) != "frank-ci"),
             "a host with failures and no score has no risk row"
         );
+        let count = |tool: &str| {
+            let tool = tool.split(',').filter(|t| !t.is_empty()).map(Into::into);
+            let p = RiskParams {
+                tool: tool.collect(),
+                ..RiskParams::default()
+            };
+            m.risk(&p).not_assessed_host_count
+        };
+        // frank-ci counts; carol-dev's failing Claude Desktop source still has a score.
+        assert_eq!(count(""), Some(1));
+        assert_eq!(count("claude_code"), Some(1));
+        assert_eq!(count("claude_desktop,codex"), Some(0));
         assert_eq!(
             m.events[32].evidence.member_str("failing_since"),
             GoTime::from_unix(seed - 32 * 44 * 60).to_string()

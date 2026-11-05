@@ -6,7 +6,7 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use lodeline_core::event::AiGuardBucket;
-use lodeline_fleet_api::{RiskQuery, RiskRow, RowsPage};
+use lodeline_fleet_api::{RiskPage, RiskQuery, RiskRow};
 
 fn clamp_limit(req: Option<u32>) -> usize {
     req.unwrap_or(100).clamp(1, 1000) as usize
@@ -41,6 +41,12 @@ pub async fn get_fleet_risk(
         .tool
         .as_ref()
         .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+    let selected = |tool: &lodeline_core::event::AiTool| {
+        tool_filter
+            .as_ref()
+            .is_none_or(|tf| tf.contains(&super::wire_str(tool)))
+    };
+    let mut not_assessed: u64 = 0;
 
     // Collect (host, top_tool, top_entry) for each host that has any risk meeting filters.
     let mut rows: Vec<(
@@ -49,13 +55,17 @@ pub async fn get_fleet_risk(
         crate::fleet_index::RiskEntry,
     )> = Vec::new();
     for h in state.fleet_index.snapshot_all() {
+        let failing = h
+            .risk_sources
+            .iter()
+            .any(|(key, (_, source))| source.failure().is_some() && selected(&key.0));
+        if failing && !h.current_risk.keys().any(selected) {
+            not_assessed += 1;
+        }
         let mut top: Option<(lodeline_core::event::AiTool, crate::fleet_index::RiskEntry)> = None;
         for (tool, entry) in &h.current_risk {
-            if let Some(tf) = &tool_filter {
-                let tstr = super::wire_str(tool);
-                if !tf.iter().any(|t| t == &tstr) {
-                    continue;
-                }
+            if !selected(tool) {
+                continue;
             }
             if bucket_rank(entry.bucket) < min {
                 continue;
@@ -111,8 +121,9 @@ pub async fn get_fleet_risk(
     } else {
         None
     };
-    Json(RowsPage {
+    Json(RiskPage {
         next_cursor,
+        not_assessed_host_count: Some(not_assessed),
         rows: page,
     })
 }

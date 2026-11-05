@@ -343,6 +343,8 @@ export interface RiskRow {
 export interface RiskPage {
   rows: RiskRow[];
   next_cursor: string | null;
+  /** Hosts left out of `rows` for failing sources with no score. Absent from older servers. */
+  not_assessed_host_count?: number;
 }
 
 export interface RiskParams {

@@ -72,6 +72,37 @@ export function RiskTable({ rows, isPending }: Props) {
   );
 }
 
+/**
+ * Hosts with failing AI Guard sources and no score have no row, so say so rather than let an
+ * empty or short table read as clean. `count` is absent from older servers: show nothing.
+ * `link` adds "Show in Devices", whose filter ignores the Risk tab's tool filter.
+ */
+export function NotAssessedNotice({ count, link }: { count?: number; link: boolean }) {
+  if (!count) return null;
+  const one = count === 1;
+  return (
+    <p role="status" className="mb-3 text-xs text-text-muted">
+      <span className="font-medium text-sev-medium">
+        {count} {one ? 'host is' : 'hosts are'} not assessed.
+      </span>{' '}
+      {one ? 'It has' : 'They have'} failing AI Guard sources and no score, so this table leaves{' '}
+      {one ? 'it' : 'them'} out.
+      {link && (
+        <>
+          {' '}
+          <Link
+            to="/fleet/devices"
+            search={{ notAssessed: true }}
+            className="text-accent hover:underline"
+          >
+            Show in Devices
+          </Link>
+        </>
+      )}
+    </p>
+  );
+}
+
 function RiskBar({ bucket, score }: { bucket: string; score: number }) {
   const color = bucketBarColor(bucket);
   const pct = Math.max(0, Math.min(100, (score / 10) * 100));

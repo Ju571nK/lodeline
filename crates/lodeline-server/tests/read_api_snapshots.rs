@@ -468,7 +468,7 @@ async fn bodies_round_trip_through_the_wire_types() {
         let path = format!("/v1/fleet/hosts/{host}");
         round_trip::<api::HostDetail>(&call(&app, &path, tok, &r).await);
     }
-    round_trip::<api::RowsPage<api::RiskRow>>(&call(&app, "/v1/fleet/risk", tok, &r).await);
+    round_trip::<api::RiskPage>(&call(&app, "/v1/fleet/risk", tok, &r).await);
     round_trip::<api::RowsPage<api::ComplianceRow>>(
         &call(&app, "/v1/fleet/compliance?limit=1", tok, &r).await,
     );
