@@ -60,7 +60,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   main checkout's file. A project in a worktree or in a repository subdirectory now scores that
   file together with its own copy. The root file wins a key both set, and the permission lists
   of both apply. As Claude Code does, the root file is not used on Windows, when the root is
-  the home directory, or when the root, its `.git` or its `.claude` has another owner. A
+  the home directory, or when the root, its `.git` or its `.claude` has another owner. A root
+  file that cannot be read or parsed is ignored, and the project keeps its own findings. A
   repository whose only Claude Code file is `.claude/settings.local.json` or `.claude/loop.md`
   is now discovered, and `lodeline scan` uses the same markers as the agent. Hooks in skills
   under `<subdir>/.claude/skills/` below the repository root are now scored with the project,

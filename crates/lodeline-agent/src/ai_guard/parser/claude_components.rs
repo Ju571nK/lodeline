@@ -49,8 +49,7 @@ pub(crate) fn component_hooks(claude_dir: &Path) -> Vec<ComponentHooks> {
 pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
     let mut skill_dirs = Vec::new();
     let mut dir_budget = MAX_NESTED_WALK_DIRS;
-    collect_nested_skill_dirs(repo_root, 0, &mut dir_budget, &mut skill_dirs);
-    if dir_budget == 0 {
+    if !collect_nested_skill_dirs(repo_root, 0, &mut dir_budget, &mut skill_dirs) {
         warn_capped(repo_root, "nested directories");
     }
     let mut files = Vec::new();
@@ -132,10 +131,7 @@ fn component_files(claude_dir: &Path) -> Vec<PathBuf> {
 /// Push `<skills_dir>/<name>/SKILL.md` for each skill until `out` holds
 /// [`MAX_SKILL_FILES`]. Returns false when that budget ran out first.
 fn push_skill_files(skills_dir: &Path, out: &mut Vec<PathBuf>) -> bool {
-    let Ok(entries) = std::fs::read_dir(skills_dir) else {
-        return true;
-    };
-    for entry in entries.flatten() {
+    for entry in sorted_entries(skills_dir) {
         if out.len() == MAX_SKILL_FILES {
             return false;
         }
@@ -151,12 +147,15 @@ fn push_skill_files(skills_dir: &Path, out: &mut Vec<PathBuf>) -> bool {
 
 /// Walks `dir` for `.claude/skills` folders below it, without following
 /// symlinked directories and skipping hidden, dependency and build folders,
-/// which Claude rarely works in. `budget` bounds how many folders are read.
-fn collect_nested_skill_dirs(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// which Claude rarely works in. `budget` bounds how many folders are read;
+/// returns false when it ran out before a folder could be read.
+fn collect_nested_skill_dirs(
+    dir: &Path,
+    depth: usize,
+    budget: &mut usize,
+    out: &mut Vec<PathBuf>,
+) -> bool {
+    for entry in sorted_entries(dir) {
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
@@ -176,11 +175,23 @@ fn collect_nested_skill_dirs(dir: &Path, depth: usize, budget: &mut usize, out: 
             continue;
         }
         if *budget == 0 {
-            return;
+            return false;
         }
         *budget -= 1;
-        collect_nested_skill_dirs(&entry.path(), depth + 1, budget, out);
+        if !collect_nested_skill_dirs(&entry.path(), depth + 1, budget, out) {
+            return false;
+        }
     }
+    true
+}
+
+/// `dir`'s entries by name, so the caps pick the same files on every run.
+fn sorted_entries(dir: &Path) -> Vec<std::fs::DirEntry> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    entries
 }
 
 fn warn_capped(claude_dir: &Path, kind: &str) {
@@ -574,6 +585,67 @@ mod tests {
         assert_eq!(
             found,
             [PathBuf::from("apps/web/.claude/skills/web/SKILL.md")]
+        );
+    }
+
+    #[test]
+    fn nested_walk_stops_below_the_depth_bound() {
+        let d = tempdir().unwrap();
+        let deepest = "1/2/3/4/5/6/7/8";
+        write(
+            d.path(),
+            &format!("{deepest}/.claude/skills/s/SKILL.md"),
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        write(
+            d.path(),
+            &format!("{deepest}/9/.claude/skills/s/SKILL.md"),
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        let found: Vec<_> = nested_skill_hooks(d.path())
+            .into_iter()
+            .map(|c| c.path.strip_prefix(d.path()).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(
+            found,
+            [PathBuf::from(format!(
+                "{deepest}/.claude/skills/s/SKILL.md"
+            ))]
+        );
+    }
+
+    /// Each folder walked into costs one from the budget, in name order; a
+    /// walk that reads its last folder on the last unit is still complete.
+    #[test]
+    fn nested_walk_stops_when_the_folder_budget_runs_out() {
+        let d = tempdir().unwrap();
+        for name in ["b", "a"] {
+            write(
+                d.path(),
+                &format!("{name}/.claude/skills/s/SKILL.md"),
+                SKILL_WITH_DESTRUCTIVE_HOOK,
+            );
+        }
+        let walk = |budget: usize| {
+            let mut budget = budget;
+            let mut out = Vec::new();
+            let complete = collect_nested_skill_dirs(d.path(), 0, &mut budget, &mut out);
+            let out: Vec<_> = out
+                .iter()
+                .map(|p| p.strip_prefix(d.path()).unwrap().to_path_buf())
+                .collect();
+            (complete, out)
+        };
+        assert_eq!(walk(1), (false, vec![PathBuf::from("a/.claude/skills")]));
+        assert_eq!(
+            walk(2),
+            (
+                true,
+                vec![
+                    PathBuf::from("a/.claude/skills"),
+                    PathBuf::from("b/.claude/skills")
+                ]
+            )
         );
     }
 }

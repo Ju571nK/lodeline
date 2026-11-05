@@ -117,6 +117,38 @@ mod tests {
         assert_eq!(local_settings_root(&sub), Some(main));
     }
 
+    /// A worktree of a bare repository has no main checkout to read from.
+    #[test]
+    fn worktree_of_a_bare_repository_keeps_its_own_file() {
+        let dir = tempdir().unwrap();
+        let git_dir = canon(dir.path()).join("repo.git/worktrees/wt");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        let wt = canon(dir.path()).join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
+        assert_eq!(local_settings_root(&wt), None);
+    }
+
+    /// The start directory's owner is read through a symlink, so a link to
+    /// `/` stands in for a start directory another user owns.
+    #[test]
+    fn root_owned_by_another_user_keeps_the_start_file() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir().unwrap();
+        let root = canon(dir.path());
+        if root.metadata().unwrap().uid() == 0 {
+            return;
+        }
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let mine = root.join("mine");
+        std::fs::create_dir(&mine).unwrap();
+        assert_eq!(local_settings_root(&mine), Some(root.clone()));
+        let other = root.join("other");
+        std::os::unix::fs::symlink("/", &other).unwrap();
+        assert_eq!(local_settings_root(&other), None);
+    }
+
     #[test]
     fn submodule_is_its_own_repository() {
         let dir = tempdir().unwrap();

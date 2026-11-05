@@ -1278,11 +1278,17 @@ fn assess_project(
     let base = super::read_json_optional(&cd.join("settings.json"))?;
     let local = super::read_json_optional(&cd.join("settings.local.json"))?;
     // #199: the repository root's copy wins a key both files set, and the
-    // permission lists of both apply.
-    let shared = match shared_local_settings(repo_root, home) {
-        Some(path) => super::read_json_optional(&path)?,
-        None => None,
-    };
+    // permission lists of both apply. That file belongs to another checkout,
+    // so a broken copy is ignored rather than failing this project's score.
+    let shared = shared_local_settings(repo_root, home).and_then(|path| {
+        super::read_json_optional(&path).unwrap_or_else(|e| {
+            tracing::warn!(
+                file = %path.display(), error = %e,
+                "claude project: ignoring unreadable repository-root settings.local.json"
+            );
+            None
+        })
+    });
     let local = match local {
         Some(local) => Some(merge_overlay(local, shared)),
         None => shared,
@@ -4010,6 +4016,22 @@ mod tests {
             rubric::bucket(rubric::score(&reasons)),
             lodeline_core::event::AiGuardBucket::Medium
         );
+    }
+
+    /// A half-written file in the main checkout must not cost the worktree
+    /// the findings its own files carry. The worktree's own file still fails.
+    #[cfg(unix)]
+    #[test]
+    fn malformed_main_checkout_local_settings_is_ignored() {
+        let dir = tempdir().unwrap();
+        let (main, wt) = main_and_worktree(dir.path());
+        write_file(&main, ".claude/settings.local.json", r#"{"permissions": "#);
+        let policy = tempdir().unwrap();
+        let reasons = assess_project(&wt, Path::new(NO_HOME), policy.path()).unwrap();
+        assert_eq!(broad_rules(&reasons), ["mcp__github__*"]);
+
+        write_file(&wt, ".claude/settings.local.json", r#"{"permissions": "#);
+        assert!(assess_project(&wt, Path::new(NO_HOME), policy.path()).is_err());
     }
 
     /// #199: a skill in `<subdir>/.claude/skills/` loads once Claude works on
