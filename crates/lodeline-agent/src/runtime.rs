@@ -1773,13 +1773,23 @@ pub(crate) fn push_claude_code_synthetic_targets(
         description: format!("Phase 3b.6.2 synthetic settings: {}", repo_root.display()),
         tier: lodeline_core::policy::Tier::Critical,
         platform: lodeline_core::policy::Platform::Any,
-        paths: vec![
-            cd.join("settings.json").to_string_lossy().to_string(),
-            cd.join("settings.local.json").to_string_lossy().to_string(),
-            repo_root.join(".mcp.json").to_string_lossy().to_string(),
-            repo_root.join("CLAUDE.md").to_string_lossy().to_string(),
-            repo_root.join("AGENTS.md").to_string_lossy().to_string(),
-        ],
+        paths: [
+            cd.join("settings.json"),
+            cd.join("settings.local.json"),
+            repo_root.join(".mcp.json"),
+            repo_root.join("CLAUDE.md"),
+            repo_root.join("AGENTS.md"),
+        ]
+        .into_iter()
+        // #199: the repository root's local file, which Claude Code reads
+        // for a session started here. The home-directory exception is not
+        // applied, so at worst one extra file is watched.
+        .chain(
+            crate::ai_guard::parser::claude_repo::local_settings_root(repo_root)
+                .map(|root| root.join(".claude").join("settings.local.json")),
+        )
+        .map(|p| p.to_string_lossy().to_string())
+        .collect(),
         recursive: false,
         follow_symlinks: false,
         disabled: false,

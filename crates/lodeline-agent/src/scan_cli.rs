@@ -189,8 +189,20 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
     let has = |rel: &str| dir.join(rel).exists();
     let root = || dir.to_path_buf();
 
-    // Claude Code: .claude/settings.json | .mcp.json | CLAUDE.md | AGENTS.md
-    if has(".claude/settings.json") || has(".mcp.json") || has("CLAUDE.md") || has("AGENTS.md") {
+    // Claude Code: the markers `discover_claude_repos` uses.
+    if [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".claude/loop.md",
+        ".claude/skills",
+        ".claude/agents",
+        ".mcp.json",
+        "CLAUDE.md",
+        "AGENTS.md",
+    ]
+    .iter()
+    .any(|rel| has(rel))
+    {
         out.push(Arc::new(ClaudeCodeProjectParser { repo_root: root() }));
     }
     // Codex: .codex/config.toml | AGENTS.md

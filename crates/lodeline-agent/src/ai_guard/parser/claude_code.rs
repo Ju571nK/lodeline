@@ -1211,9 +1211,9 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         }
     }
 
-    fn watched_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
+    fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         let cd = self.repo_root.join(".claude");
-        vec![
+        let mut paths = vec![
             cd.join("settings.json"),
             cd.join("settings.local.json"),
             cd.join("hooks"),
@@ -1225,28 +1225,76 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             cd.join("loop.md"),
             cd.join("skills"),
             cd.join("agents"),
-        ]
+        ];
+        paths.extend(shared_local_settings(&self.repo_root, home_dir));
+        paths
     }
 
-    fn collect_external_script_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
-        external_script_paths(&self.repo_root.join(".claude"))
+    fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
+        let hooks_dir = self.repo_root.join(".claude").join("hooks");
+        let mut paths = external_script_paths(&self.repo_root.join(".claude"));
+        let shared = shared_local_settings(&self.repo_root, home_dir)
+            .and_then(|p| super::read_json_optional(&p).ok().flatten());
+        if let Some(shared) = shared {
+            paths.extend(collect_external_script_paths_from_settings(
+                &shared, &hooks_dir,
+            ));
+        }
+        paths.extend(super::claude_components::component_external_script_paths(
+            &super::claude_components::nested_skill_hooks(&self.repo_root),
+            &hooks_dir,
+        ));
+        paths
     }
 
-    fn assess(&self, _home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
         assess_project(
             &self.repo_root,
+            home_dir,
             &super::policy_controls::claude_policy_dir(),
         )
     }
 }
 
+/// #199: the `settings.local.json` Claude Code reads at the repository root
+/// for a session started at `repo_root`, if that is somewhere else. A root
+/// that is the user's home keeps the start directory's file.
+// shortcut: only the agent's own home is compared, so a git repository at
+// another user's home is still read; pass every user's home if that matters.
+fn shared_local_settings(repo_root: &Path, home: &Path) -> Option<PathBuf> {
+    let root = super::claude_repo::local_settings_root(repo_root)?;
+    let home = dunce::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    (root != home).then(|| root.join(".claude").join("settings.local.json"))
+}
+
 /// The project assessment. `policy_dir` is the managed-settings folder,
 /// passed in so tests do not depend on the host's real one.
-fn assess_project(repo_root: &Path, policy_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+fn assess_project(
+    repo_root: &Path,
+    home: &Path,
+    policy_dir: &Path,
+) -> Result<Vec<AiGuardReason>, AssessError> {
     let cd = repo_root.join(".claude");
     let base = super::read_json_optional(&cd.join("settings.json"))?;
     let local = super::read_json_optional(&cd.join("settings.local.json"))?;
-    let components = super::claude_components::component_hooks(&cd);
+    // #199: the repository root's copy wins a key both files set, and the
+    // permission lists of both apply. That file belongs to another checkout,
+    // so a broken copy is ignored rather than failing this project's score.
+    let shared = shared_local_settings(repo_root, home).and_then(|path| {
+        super::read_json_optional(&path).unwrap_or_else(|e| {
+            tracing::warn!(
+                file = %path.display(), error = %e,
+                "claude project: ignoring unreadable repository-root settings.local.json"
+            );
+            None
+        })
+    });
+    let local = match local {
+        Some(local) => Some(merge_overlay(local, shared)),
+        None => shared,
+    };
+    let mut components = super::claude_components::component_hooks(&cd);
+    components.extend(super::claude_components::nested_skill_hooks(repo_root));
     // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
     // abort the whole assess and thereby blind us to a malicious
     // `.claude/settings.json` in the same repo (a corrupt-sidecar evasion
@@ -1336,6 +1384,9 @@ mod tests {
     use lodeline_core::event::AiGuardReason;
     use lodeline_core::event::InstructionDirectiveKind;
     use tempfile::tempdir;
+
+    /// A home no test repository sits in.
+    const NO_HOME: &str = "/nonexistent-lodeline-home";
 
     fn write_settings(home: &Path, contents: &str) {
         let claude = home.join(".claude");
@@ -2993,7 +3044,7 @@ mod tests {
                 "managed-settings.d/10-mode.json",
                 &format!(r#"{{"permissions": {{"defaultMode": "{managed}"}}}}"#),
             );
-            let reasons = assess_project(repo.path(), policy.path()).unwrap();
+            let reasons = assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
             assert!(
                 auto_findings(&reasons).is_empty(),
                 "managed {managed}: {reasons:?}"
@@ -3005,7 +3056,12 @@ mod tests {
             ".claude/settings.json",
             r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
         );
-        let reasons = assess_project(repo.path(), &repo.path().join("no-policy")).unwrap();
+        let reasons = assess_project(
+            repo.path(),
+            Path::new(NO_HOME),
+            &repo.path().join("no-policy"),
+        )
+        .unwrap();
         assert_eq!(auto_findings(&reasons), ["mode:acceptEdits"]);
     }
 
@@ -3025,7 +3081,7 @@ mod tests {
             "managed-settings.d/10-mode.json",
             r#"{"permissions": {"disableAutoMode": "disable"}}"#,
         );
-        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        let reasons = assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
         assert_eq!(auto_findings(&reasons), ["mode:acceptEdits"]);
     }
 
@@ -3715,7 +3771,7 @@ mod tests {
             ".claude/agents/deployer.md",
             "---\nname: deployer\nhooks:\n  Stop:\n    - hooks:\n        - command: rm -rf ~/y\n---\n",
         );
-        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        let reasons = assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
         assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
 
         write_file(
@@ -3723,7 +3779,7 @@ mod tests {
             ".claude/settings.local.json",
             r#"{"disableAllHooks": false}"#,
         );
-        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        let reasons = assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
         assert_eq!(
             hook_events(&reasons),
             ["sandbox", "PreToolUse", "PreToolUse", "Stop"],
@@ -3845,7 +3901,7 @@ mod tests {
             ".claude/settings.json",
             r#"{"disableAllHooks": true, "statusLine": {"command": "x"}, "apiKeyHelper": "y"}"#,
         );
-        let reasons = assess_project(repo.path(), policy.path()).unwrap();
+        let reasons = assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
         assert!(
             !reasons
                 .iter()
@@ -3878,5 +3934,129 @@ mod tests {
         )
         .unwrap();
         assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
+    }
+
+    #[cfg(unix)]
+    fn broad_rules(reasons: &[AiGuardReason]) -> Vec<&str> {
+        reasons
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::PermissionsAllowBroad { rule } => Some(rule.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A main checkout and a linked worktree of it, laid out the way
+    /// `git worktree add` writes them, each with a local settings file.
+    #[cfg(unix)]
+    fn main_and_worktree(dir: &Path) -> (PathBuf, PathBuf) {
+        let dir = dunce::canonicalize(dir).unwrap();
+        let main = dir.join("main");
+        let git_dir = main.join(".git/worktrees/wt");
+        write_file(&git_dir, "commondir", "../..\n");
+        write_file(
+            &main,
+            ".claude/settings.local.json",
+            r#"{"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(*)"]}}"#,
+        );
+        let wt = dir.join("wt");
+        write_file(&wt, ".git", &format!("gitdir: {}\n", git_dir.display()));
+        write_file(
+            &wt,
+            ".claude/settings.local.json",
+            r#"{"permissions": {"defaultMode": "default", "allow": ["mcp__github__*"], "deny": ["Read(.env)"]}}"#,
+        );
+        (main, wt)
+    }
+
+    /// #199: Claude Code reads a worktree session's local settings from the
+    /// main checkout, where "don't ask again" saves its rules. The main file
+    /// wins `defaultMode`, and the allow lists of both files apply.
+    #[cfg(unix)]
+    #[test]
+    fn worktree_reads_the_main_checkout_local_settings() {
+        let dir = tempdir().unwrap();
+        let (_main, wt) = main_and_worktree(dir.path());
+        let policy = tempdir().unwrap();
+        let reasons = assess_project(&wt, Path::new(NO_HOME), policy.path()).unwrap();
+        assert_eq!(auto_findings(&reasons), ["mode:acceptEdits"]);
+        let mut rules = broad_rules(&reasons);
+        rules.sort();
+        assert_eq!(rules, ["Bash(*)", "mcp__github__*"]);
+        // Two broad rules (2.0, then 2.5 as a repeat) and acceptEdits (2.0).
+        // The worktree's own file alone scores 2.0, Medium.
+        let score = rubric::score(&reasons);
+        assert_eq!(score, 6.5, "{reasons:?}");
+        assert_eq!(
+            rubric::bucket(score),
+            lodeline_core::event::AiGuardBucket::High
+        );
+
+        let parser = ClaudeCodeProjectParser { repo_root: wt };
+        let main_file = dir.path().join("main/.claude/settings.local.json");
+        let main_file = dunce::canonicalize(main_file).unwrap();
+        assert!(parser
+            .watched_paths(Path::new(NO_HOME))
+            .contains(&main_file));
+    }
+
+    /// A repository root that is the user's home keeps the start directory's
+    /// file, so the main checkout's rules are not read.
+    #[cfg(unix)]
+    #[test]
+    fn worktree_of_a_home_repository_keeps_its_own_local_settings() {
+        let dir = tempdir().unwrap();
+        let (main, wt) = main_and_worktree(dir.path());
+        let policy = tempdir().unwrap();
+        let reasons = assess_project(&wt, &main, policy.path()).unwrap();
+        assert!(auto_findings(&reasons).is_empty(), "{reasons:?}");
+        assert_eq!(broad_rules(&reasons), ["mcp__github__*"]);
+        assert_eq!(
+            rubric::bucket(rubric::score(&reasons)),
+            lodeline_core::event::AiGuardBucket::Medium
+        );
+    }
+
+    /// A half-written file in the main checkout must not cost the worktree
+    /// the findings its own files carry. The worktree's own file still fails.
+    #[cfg(unix)]
+    #[test]
+    fn malformed_main_checkout_local_settings_is_ignored() {
+        let dir = tempdir().unwrap();
+        let (main, wt) = main_and_worktree(dir.path());
+        write_file(&main, ".claude/settings.local.json", r#"{"permissions": "#);
+        let policy = tempdir().unwrap();
+        let reasons = assess_project(&wt, Path::new(NO_HOME), policy.path()).unwrap();
+        assert_eq!(broad_rules(&reasons), ["mcp__github__*"]);
+
+        write_file(&wt, ".claude/settings.local.json", r#"{"permissions": "#);
+        assert!(assess_project(&wt, Path::new(NO_HOME), policy.path()).is_err());
+    }
+
+    /// #199: a skill in `<subdir>/.claude/skills/` loads once Claude works on
+    /// a file there, so its hooks count for the repository. A dependency
+    /// folder is not walked.
+    #[test]
+    fn nested_skill_hooks_are_scored_for_the_repository() {
+        let repo = tempdir().unwrap();
+        let skill = "---\nname: clean\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: rm -rf ~/cache\n---\n";
+        write_file(
+            repo.path(),
+            "packages/web/.claude/skills/clean/SKILL.md",
+            skill,
+        );
+        write_file(
+            repo.path(),
+            "node_modules/dep/.claude/skills/clean/SKILL.md",
+            skill,
+        );
+        let policy = tempdir().unwrap();
+        let reasons = assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
+        let destructive = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+            .count();
+        assert_eq!(destructive, 1, "{reasons:?}");
     }
 }

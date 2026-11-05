@@ -81,8 +81,10 @@ line-based filter misreads a `#` inside a multi-line quote or after a `\`
 continuation and would hide code that runs. Sigil does not block, so the
 false positive is the cheaper error.
 
-Not covered: plugin skills and agents, nested `<subdir>/.claude/skills/`
-below a repository root, parent-directory walks, and workspace-trust state.
+Not covered: plugin skills and agents, parent-directory walks, and workspace-trust state.
 Changes to a symlinked `SKILL.md` target outside the watched directories are
 picked up on the next periodic assessment, not by the watcher. Reasons carry
 no field naming the skill or agent that declared the hook.
+
+Since 2026-11-06 nested `<subdir>/.claude/skills/` below a repository root
+are scored too; see [the surface refresh](claude-code-surface-2026-11-06.md).
