@@ -11,13 +11,17 @@
 //!   their custom policy, this task falls back to heartbeat-only.
 //! - **Heartbeat** (24h): every parser re-evaluates and force-emits. Provides
 //!   liveness regardless of whether file-change events flow.
+//!
+//! A failed assessment sends `ai_guard_assess_failed`, never the last reading.
+//! It is sent on the first failure, when the error kind or path changes, and
+//! on each heartbeat while the source keeps failing (#333).
 
-use crate::ai_guard::parser::AiGuardParser;
+use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rubric;
 use crate::state_task::CommittableEvent;
 use lodeline_core::event::{
-    AiGuardBucket, AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind,
-    Subject, AGENT_VERSION, SCHEMA_VERSION,
+    AiGuardBucket, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject,
+    AGENT_VERSION, SCHEMA_VERSION,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -33,7 +37,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 /// (tool, scope) but belonging to different rule packs never collide; `user`
 /// does the same for one parser assessed against several homes (#329).
 /// Read by the operator IPC handler (Task 7) for `lodeline show risk`.
-pub type StateMap = HashMap<StateKey, CachedAssessment>;
+pub type StateMap = HashMap<StateKey, SourceState>;
 pub type StateKey = (AiTool, AiGuardScope, Option<String>, Option<String>);
 
 /// A home a home-relative parser is assessed against. `user: None` is the
@@ -50,6 +54,25 @@ pub(crate) fn canonical_home(dir: &std::path::Path) -> PathBuf {
     dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
+/// One source in `StateMap`. An entry exists once the source was assessed or
+/// failed, so at least one field is set.
+#[derive(Clone, Debug, Default)]
+pub struct SourceState {
+    /// The last good reading, kept while the source fails.
+    pub reading: Option<CachedAssessment>,
+    /// Set while assessment fails; a good assessment clears it.
+    pub failure: Option<AssessFailure>,
+}
+
+/// #333 — the failure last reported for a source.
+#[derive(Clone, Debug)]
+pub struct AssessFailure {
+    /// The first failure since the agent started; stable until a good reading.
+    pub since: OffsetDateTime,
+    pub error_kind: &'static str,
+    pub path: PathBuf,
+}
+
 /// One parser's last emitted state, kept in `StateMap` for change-detection
 /// and IPC introspection. Both hashes participate in emission change detection.
 #[derive(Clone, Debug)]
@@ -60,9 +83,6 @@ pub struct CachedAssessment {
     pub bucket: AiGuardBucket,
     pub reasons_blake3: [u8; 32],
     pub reasons_count: usize,
-    /// #329 — re-sent on a heartbeat whose assessment fails, so the server's
-    /// 48h prune cannot drop a reading just because the config became unreadable.
-    pub reasons: Vec<AiGuardReason>,
     pub last_assessed_ts: OffsetDateTime,
     /// #147 — the dangerous-toggle kinds present at this assessment. Compared
     /// against the next assessment's set to detect OFF→ON transitions (drift).
@@ -255,16 +275,8 @@ async fn eval_and_maybe_emit(
     let mut assessment = match parser.assess_posture(&home.dir) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = ?e, tool = ?parser.tool(), "ai_guard assess failed; skip cycle");
-            let prev = ctx.state.read().get(&key).cloned();
-            if let (true, Some(p)) = (force_emit, prev) {
-                let score = ctx.rubric.read().score(&p.reasons);
-                let bucket = rubric::bucket(score);
-                send_risk(
-                    ctx, parser, &key, p.controls, score, bucket, p.reasons, true,
-                )
-                .await;
-            }
+            tracing::warn!(error = ?e, tool = ?parser.tool(), "ai_guard assess failed");
+            report_failure(parser, ctx, &key, &e, force_emit).await;
             return;
         }
     };
@@ -278,18 +290,24 @@ async fn eval_and_maybe_emit(
     let score = rubric_snapshot.score(&reasons);
     let bucket = rubric::bucket(score);
     let reasons_hash = rubric::canonical_hash(&reasons);
-    let prev = ctx.state.read().get(&key).cloned();
-    let changed = prev
-        .as_ref()
-        .map(|p| p.reasons_blake3 != reasons_hash || p.controls_blake3 != controls_hash)
-        .unwrap_or(true);
+    let SourceState {
+        reading: prev,
+        failure,
+    } = ctx.state.read().get(&key).cloned().unwrap_or_default();
+    // A recovery always emits, so the server clears the unassessed mark now
+    // and not at the next heartbeat.
+    let changed = failure.is_some()
+        || prev
+            .as_ref()
+            .map(|p| p.reasons_blake3 != reasons_hash || p.controls_blake3 != controls_hash)
+            .unwrap_or(true);
     if !changed && !force_emit {
         return;
     }
     let now = OffsetDateTime::now_utc();
     // Reattestation iff this emit is force-driven AND reasons and controls are
-    // unchanged from the previous one. Boot (no prior state) is NOT a
-    // reattestation even though it's force-emitted.
+    // unchanged from the previous one and no failure came between. Boot (no
+    // prior state) is NOT a reattestation even though it's force-emitted.
     let is_reattestation = force_emit && prev.is_some() && !changed;
 
     // #147 — dangerous-toggle drift. A toggle is "dangerous" iff its reason
@@ -327,32 +345,26 @@ async fn eval_and_maybe_emit(
 
     ctx.state.write().insert(
         key.clone(),
-        CachedAssessment {
-            controls: controls.clone(),
-            controls_blake3: controls_hash,
-            score,
-            bucket,
-            reasons_blake3: reasons_hash,
-            reasons_count: reasons.len(),
-            reasons: reasons.clone(),
-            last_assessed_ts: now,
-            dangerous_toggles: new_toggles,
+        SourceState {
+            reading: Some(CachedAssessment {
+                controls: controls.clone(),
+                controls_blake3: controls_hash,
+                score,
+                bucket,
+                reasons_blake3: reasons_hash,
+                reasons_count: reasons.len(),
+                last_assessed_ts: now,
+                dangerous_toggles: new_toggles,
+            }),
+            failure: None,
         },
     );
 
-    // Emit one drift event per appeared toggle, via the same sink/channel and
-    // full-Event envelope as AiGuardRiskAssessed below.
+    // One drift event per appeared toggle, sent before the reading.
     for toggle in appeared {
-        let drift_event = Event {
-            schema_version: SCHEMA_VERSION,
-            event_id: uuid::Uuid::now_v7(),
-            ts: now,
-            host_id: ctx.host_id.clone(),
-            agent_version: AGENT_VERSION.to_string(),
-            severity: Severity::Warn,
-            source: SourceKind::Agent,
-            subject: Subject::Self_,
-            evidence: Evidence::AiGuardToggleDrift {
+        send(
+            ctx,
+            Evidence::AiGuardToggleDrift {
                 tool: key.0,
                 scope: key.1.clone(),
                 toggle,
@@ -360,57 +372,13 @@ async fn eval_and_maybe_emit(
                 tool_label: parser.tool_label().map(|s| s.to_string()),
                 user: key.3.clone(),
             },
-            target_id: None,
-        };
-        if ctx
-            .event_tx
-            .send(CommittableEvent {
-                event: drift_event,
-                new_hash: None,
-                path_for_db: PathBuf::new(),
-                target_id: String::new(),
-            })
-            .await
-            .is_err()
-        {
-            tracing::debug!(tool = ?key.0, "ai_guard drift event_tx send failed (sink closed during shutdown?)");
-        }
+        )
+        .await;
     }
 
-    send_risk(
+    send(
         ctx,
-        parser,
-        &key,
-        controls,
-        score,
-        bucket,
-        reasons,
-        is_reattestation,
-    )
-    .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_risk(
-    ctx: &TaskCtx,
-    parser: &dyn AiGuardParser,
-    key: &StateKey,
-    controls: Option<Vec<lodeline_core::event::AiGuardControl>>,
-    score: f32,
-    bucket: AiGuardBucket,
-    reasons: Vec<AiGuardReason>,
-    is_reattestation: bool,
-) {
-    let event = Event {
-        schema_version: SCHEMA_VERSION,
-        event_id: uuid::Uuid::now_v7(),
-        ts: OffsetDateTime::now_utc(),
-        host_id: ctx.host_id.clone(),
-        agent_version: AGENT_VERSION.to_string(),
-        severity: Severity::Warn,
-        source: SourceKind::Agent,
-        subject: Subject::Self_,
-        evidence: Evidence::AiGuardRiskAssessed {
+        Evidence::AiGuardRiskAssessed {
             controls,
             tool: key.0,
             scope: key.1.clone(),
@@ -422,6 +390,77 @@ async fn send_risk(
             tool_label: parser.tool_label().map(|s| s.to_string()),
             user: key.3.clone(),
         },
+    )
+    .await;
+}
+
+/// #333 — record a failed assessment and send `ai_guard_assess_failed` on the
+/// first failure, when the error kind or path changes, and on a heartbeat.
+/// The last good reading stays cached but is never re-sent.
+async fn report_failure(
+    parser: &dyn AiGuardParser,
+    ctx: &TaskCtx,
+    key: &StateKey,
+    error: &AssessError,
+    force_emit: bool,
+) {
+    // A size cap reached surfaces as `Parse` with only a message, so it maps
+    // to `parse`; no message text goes on the wire.
+    let (error_kind, path) = match error {
+        AssessError::Io { path, .. } => ("unreadable", path),
+        AssessError::Parse { path, .. } => ("parse", path),
+    };
+    let (since, unchanged, last_assessed_ts) = {
+        let mut state = ctx.state.write();
+        let entry = state.entry(key.clone()).or_default();
+        let prev = entry.failure.take();
+        let unchanged = prev
+            .as_ref()
+            .is_some_and(|f| f.error_kind == error_kind && f.path == *path);
+        let since = prev.map_or_else(OffsetDateTime::now_utc, |f| f.since);
+        entry.failure = Some(AssessFailure {
+            since,
+            error_kind,
+            path: path.clone(),
+        });
+        (
+            since,
+            unchanged,
+            entry.reading.as_ref().map(|r| r.last_assessed_ts),
+        )
+    };
+    if unchanged && !force_emit {
+        return;
+    }
+    send(
+        ctx,
+        Evidence::AiGuardAssessFailed {
+            tool: key.0,
+            scope: key.1.clone(),
+            user: key.3.clone(),
+            rule_pack_id: key.2.clone(),
+            tool_label: parser.tool_label().map(|s| s.to_string()),
+            error_kind: error_kind.to_string(),
+            path: path.clone(),
+            failing_since: since,
+            last_assessed_ts,
+            is_reattestation: unchanged,
+        },
+    )
+    .await;
+}
+
+async fn send(ctx: &TaskCtx, evidence: Evidence) {
+    let event = Event {
+        schema_version: SCHEMA_VERSION,
+        event_id: uuid::Uuid::now_v7(),
+        ts: OffsetDateTime::now_utc(),
+        host_id: ctx.host_id.clone(),
+        agent_version: AGENT_VERSION.to_string(),
+        severity: Severity::Warn,
+        source: SourceKind::Agent,
+        subject: Subject::Self_,
+        evidence,
         target_id: None,
     };
     if ctx
@@ -435,7 +474,7 @@ async fn send_risk(
         .await
         .is_err()
     {
-        tracing::debug!(tool = ?key.0, "ai_guard event_tx send failed (sink closed during shutdown?)");
+        tracing::debug!("ai_guard event_tx send failed (sink closed during shutdown?)");
     }
 }
 
@@ -516,68 +555,289 @@ mod tests {
         )
     }
 
-    struct FailsAfterFirst(std::sync::atomic::AtomicBool);
+    /// Test parser whose `assess()` returns scripted results in order.
+    struct Flaky(StdMutex<Vec<Result<Vec<AiGuardReason>, AssessError>>>);
 
-    impl AiGuardParser for FailsAfterFirst {
+    impl AiGuardParser for Flaky {
         fn tool(&self) -> AiTool {
             AiTool::Codex
         }
         fn scope(&self) -> AiGuardScope {
             AiGuardScope::UserGlobal
         }
+        fn tool_label(&self) -> Option<&str> {
+            Some("codex-label")
+        }
         fn watched_paths(&self, _home: &std::path::Path) -> Vec<PathBuf> {
             Vec::new()
         }
         fn assess(&self, _home: &std::path::Path) -> Result<Vec<AiGuardReason>, AssessError> {
-            if self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                Err(AssessError::Io {
-                    path: PathBuf::from("/tmp/test-home/.codex"),
-                    source: std::io::Error::other("unreadable"),
-                })
-            } else {
-                Ok(vec![AiGuardReason::SandboxDisabled])
-            }
+            self.0.lock().unwrap().remove(0)
         }
     }
 
-    #[tokio::test]
-    async fn heartbeat_resends_the_last_reading_when_assess_fails() {
+    fn unreadable(path: &str) -> Result<Vec<AiGuardReason>, AssessError> {
+        Err(AssessError::Io {
+            path: path.into(),
+            source: std::io::Error::other("message that must stay local"),
+        })
+    }
+
+    fn unparsable(path: &str) -> Result<Vec<AiGuardReason>, AssessError> {
+        Err(AssessError::Parse {
+            path: path.into(),
+            message: "message that must stay local".into(),
+        })
+    }
+
+    /// `(error_kind, path, failing_since, last_assessed_ts, is_reattestation)`
+    /// of the one event the cycle sent, which must be `ai_guard_assess_failed`.
+    type Failed = (
+        String,
+        PathBuf,
+        OffsetDateTime,
+        Option<OffsetDateTime>,
+        bool,
+    );
+
+    fn only_failure(events: &mut mpsc::Receiver<CommittableEvent>) -> Failed {
+        let ev = events.try_recv().expect("an event").event;
+        assert!(events.try_recv().is_err(), "one event per cycle");
+        assert_eq!(ev.severity, Severity::Warn);
+        let text = serde_json::to_string(&ev).unwrap();
+        assert!(!text.contains("must stay local"), "{text}");
+        match ev.evidence {
+            Evidence::AiGuardAssessFailed {
+                error_kind,
+                path,
+                failing_since,
+                last_assessed_ts,
+                is_reattestation,
+                ..
+            } => (
+                error_kind,
+                path,
+                failing_since,
+                last_assessed_ts,
+                is_reattestation,
+            ),
+            other => panic!("expected ai_guard_assess_failed, got {other:?}"),
+        }
+    }
+
+    fn flaky_ctx(
+        script: Vec<Result<Vec<AiGuardReason>, AssessError>>,
+    ) -> (
+        TaskCtx,
+        Arc<dyn AiGuardParser>,
+        mpsc::Receiver<CommittableEvent>,
+    ) {
         let (_fc_tx, fc_rx) = broadcast::channel(8);
-        let (ctx, mut events) = ctx_with(
-            FailsAfterFirst(Default::default()),
+        let (ctx, events) = ctx_with(
+            Flaky(StdMutex::new(script)),
             fc_rx,
             Duration::from_secs(3600),
         );
         let parser = ctx.parsers.read()[0].clone();
+        (ctx, parser, events)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_at_boot_reports_with_no_reading() {
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (ctx, mut events) = ctx_with(
+            Flaky(StdMutex::new(vec![unparsable(
+                "/tmp/test-home/.codex/config.toml",
+            )])),
+            fc_rx,
+            Duration::from_secs(24 * 3600),
+        );
+        let state = ctx.state.clone();
+        let h = tokio::spawn(run(ctx));
+        let ev = events.recv().await.expect("boot event").event;
+        let j = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            j["evidence"],
+            serde_json::json!({
+                "kind": "ai_guard_assess_failed",
+                "tool": "codex",
+                "scope": {"kind": "user_global"},
+                "tool_label": "codex-label",
+                "error_kind": "parse",
+                "path": "/tmp/test-home/.codex/config.toml",
+                "failing_since": j["evidence"]["failing_since"],
+                "last_assessed_ts": null,
+                "is_reattestation": false,
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .is_err(),
+            "one report per failure"
+        );
+        assert!(state.read().values().all(|s| s.reading.is_none()));
+        h.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_a_reading_names_it_and_never_resends_it() {
+        let (ctx, parser, mut events) = flaky_ctx(vec![
+            Ok(vec![AiGuardReason::SandboxDisabled]),
+            unreadable("/tmp/test-home/.codex/config.toml"),
+            unreadable("/tmp/test-home/.codex/config.toml"),
+        ]);
         let home = own_home(&ctx);
         eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
-        let first = recv_next_risk_assessed(&mut events).await;
+        recv_next_risk_assessed(&mut events).await;
+        let good = ctx.state.read().values().next().unwrap().reading.clone();
+        let good_ts = good.unwrap().last_assessed_ts;
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let (kind, path, since, last, reattest) = only_failure(&mut events);
+        assert_eq!(kind, "unreadable");
+        assert_eq!(path, PathBuf::from("/tmp/test-home/.codex/config.toml"));
+        assert_eq!(last, Some(good_ts));
+        assert!(!reattest);
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        let heartbeat = only_failure(&mut events);
+        assert_eq!(
+            heartbeat,
+            (kind, path, since, Some(good_ts), true),
+            "the heartbeat re-sends the failure, not the cached reading"
+        );
+    }
+
+    #[tokio::test]
+    async fn while_failing_only_heartbeats_and_new_errors_report() {
+        let (ctx, parser, mut events) = flaky_ctx(vec![
+            unreadable("/a"),
+            unreadable("/a"),
+            unreadable("/a"),
+            unreadable("/b"),
+            unparsable("/b"),
+        ]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let (_, _, since, last, reattest) = only_failure(&mut events);
+        assert_eq!((last, reattest), (None, false));
+
         eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
         assert!(
             events.try_recv().is_err(),
-            "a failed change-driven read emits nothing"
+            "a repeat change-driven failure sends nothing"
         );
+
         eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
-        let again = recv_next_risk_assessed(&mut events).await;
-        let (
-            Evidence::AiGuardRiskAssessed {
-                score: s1,
-                reasons: r1,
-                ..
-            },
-            Evidence::AiGuardRiskAssessed {
-                score: s2,
-                reasons: r2,
-                is_reattestation,
-                ..
-            },
-        ) = (first.event.evidence, again.event.evidence)
-        else {
-            unreachable!()
+        assert_eq!(
+            only_failure(&mut events),
+            ("unreadable".into(), "/a".into(), since, None, true)
+        );
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        assert_eq!(
+            only_failure(&mut events),
+            ("unreadable".into(), "/b".into(), since, None, false),
+            "a new path is a fresh report under the first failure time"
+        );
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        assert_eq!(
+            only_failure(&mut events),
+            ("parse".into(), "/b".into(), since, None, false),
+            "a new error kind is a fresh report"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_emits_even_when_the_reading_matches_the_cache() {
+        let reading = || Ok(vec![AiGuardReason::SandboxDisabled]);
+        let (ctx, parser, mut events) =
+            flaky_ctx(vec![reading(), unreadable("/a"), reading(), reading()]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        recv_next_risk_assessed(&mut events).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        only_failure(&mut events);
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let ev = events.try_recv().expect("recovery emits").event;
+        assert!(
+            matches!(
+                ev.evidence,
+                Evidence::AiGuardRiskAssessed {
+                    is_reattestation: false,
+                    ..
+                }
+            ),
+            "{ev:?}"
+        );
+        assert!(events.try_recv().is_err(), "no drift on recovery");
+        assert!(ctx.state.read().values().all(|s| s.failure.is_none()));
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        assert!(
+            events.try_recv().is_err(),
+            "after recovery an identical cycle is quiet again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_recovery_starts_a_new_failing_since() {
+        let (ctx, parser, mut events) =
+            flaky_ctx(vec![unreadable("/a"), Ok(Vec::new()), unreadable("/a")]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let (_, _, first, _, _) = only_failure(&mut events);
+        // The clock must move, or a carried-over time would equal a fresh one.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        recv_next_risk_assessed(&mut events).await;
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let (_, _, second, last, reattest) = only_failure(&mut events);
+        assert!(second > first, "{second} after {first}");
+        assert!(last.is_some(), "the recovered reading is named");
+        assert!(!reattest);
+    }
+
+    #[tokio::test]
+    async fn drift_fires_once_when_a_toggle_turns_on_across_a_failure() {
+        let (ctx, parser, mut events) = flaky_ctx(vec![
+            Ok(vec![AiGuardReason::PermissionsDenyEmpty]),
+            unreadable("/a"),
+            Ok(vec![AiGuardReason::SandboxDisabled]),
+        ]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        assert_eq!(
+            drain_drift_toggles(&mut events),
+            vec!["sandbox_disabled".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_in_another_users_home_names_that_user() {
+        let (ctx, parser, mut events) =
+            flaky_ctx(vec![unreadable("/home/alice/.codex/config.toml")]);
+        let alice = AssessHome {
+            user: Some("alice".into()),
+            dir: PathBuf::from("/home/alice"),
         };
-        assert!(s1 > 0.0);
-        assert_eq!((s1, r1), (s2, r2));
-        assert!(is_reattestation);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &alice, false).await;
+        let ev = events.try_recv().expect("an event").event;
+        assert!(
+            matches!(
+                ev.evidence,
+                Evidence::AiGuardAssessFailed { ref user, .. } if user.as_deref() == Some("alice")
+            ),
+            "{ev:?}"
+        );
+        let users: Vec<_> = ctx.state.read().keys().map(|k| k.3.clone()).collect();
+        assert_eq!(users, vec![Some("alice".to_string())]);
     }
 
     #[tokio::test]
@@ -838,19 +1098,27 @@ mod tests {
                 ..
             }
         ));
-        let previous = ctx.state.read().values().next().unwrap().controls.clone();
+        let cached_controls = || {
+            let state = ctx.state.read();
+            state
+                .values()
+                .next()
+                .unwrap()
+                .reading
+                .clone()
+                .unwrap()
+                .controls
+        };
+        let previous = cached_controls();
         *parser.0.lock().unwrap() = Some(vec![]);
         parser.1.store(true, std::sync::atomic::Ordering::Relaxed);
         eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
-        assert!(
-            matches!(
-                events.try_recv().unwrap().event.evidence,
-                Evidence::AiGuardRiskAssessed { controls, is_reattestation: true, .. } if controls == previous
-            ),
-            "a failed heartbeat read re-sends the last reading"
+        assert_eq!(
+            only_failure(&mut events).0,
+            "unreadable",
+            "a failed heartbeat read reports the failure"
         );
-        assert!(events.try_recv().is_err());
-        assert_eq!(ctx.state.read().values().next().unwrap().controls, previous);
+        assert_eq!(cached_controls(), previous);
     }
 
     #[tokio::test(start_paused = true)]
@@ -983,51 +1251,6 @@ mod tests {
             ),
             other => panic!("got {other:?}"),
         }
-        h.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn parser_assess_error_is_logged_and_does_not_emit() {
-        struct ErrorParser;
-        impl AiGuardParser for ErrorParser {
-            fn tool(&self) -> AiTool {
-                AiTool::ClaudeCode
-            }
-            fn scope(&self) -> AiGuardScope {
-                AiGuardScope::UserGlobal
-            }
-            fn watched_paths(&self, _h: &std::path::Path) -> Vec<PathBuf> {
-                vec![PathBuf::from("/tmp/x")]
-            }
-            fn assess(&self, _h: &std::path::Path) -> Result<Vec<AiGuardReason>, AssessError> {
-                Err(AssessError::Parse {
-                    path: PathBuf::from("/tmp/x"),
-                    message: "mock".into(),
-                })
-            }
-        }
-        let (_tx, fc_rx) = broadcast::channel(8);
-        let (event_tx, mut events) = mpsc::channel(8);
-        let ctx = TaskCtx {
-            parsers: Arc::new(RwLock::new(vec![
-                Arc::new(ErrorParser) as Arc<dyn AiGuardParser>
-            ])),
-            fc_rx,
-            event_tx,
-            state: Arc::new(RwLock::new(HashMap::new())),
-            heartbeat_interval: Duration::from_secs(24 * 3600),
-            home_dir: PathBuf::from("/tmp"),
-            user_homes: Vec::new(),
-            users_rx: watch::channel(Vec::new()).1,
-            host_id: "h".into(),
-            ext_scripts: crate::ai_guard::empty_ext_script_registry(),
-            rubric: crate::ai_guard::default_rubric_handle(),
-        };
-        let h = tokio::spawn(run(ctx));
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(10)).await;
-        let attempt = tokio::time::timeout(Duration::from_millis(50), events.recv()).await;
-        assert!(attempt.is_err(), "errored parser should not emit");
         h.abort();
     }
 
@@ -1362,6 +1585,41 @@ mod tests {
         h.abort();
     }
 
+    #[tokio::test]
+    async fn a_removed_user_drops_its_failing_sources() {
+        let (mut ctx, parser, _events) =
+            flaky_ctx(vec![unreadable("/a"), Ok(Vec::new()), unreadable("/b")]);
+        let user = |name: &str| AssessHome {
+            user: Some(name.into()),
+            dir: PathBuf::from("/home").join(name),
+        };
+        let (alice, bob) = (user("alice"), user("bob"));
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &alice, false).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &bob, false).await;
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &bob, false).await;
+        let mut held: Vec<_> = ctx
+            .state
+            .read()
+            .iter()
+            .map(|(k, s)| (k.3.clone(), s.reading.is_some(), s.failure.is_some()))
+            .collect();
+        held.sort();
+        assert_eq!(
+            held,
+            vec![
+                (Some("alice".into()), false, true),
+                (Some("bob".into()), true, true),
+            ]
+        );
+
+        ctx.user_homes = vec![alice, bob];
+        set_user_homes(&mut ctx, Vec::new()).await;
+        assert!(
+            ctx.state.read().is_empty(),
+            "a removed user's failing sources leave the state map"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_change_to_another_users_external_script_reassesses_that_user() {
         let homes = tempfile::tempdir().unwrap();
@@ -1461,6 +1719,9 @@ mod tests {
         // Baseline was recorded.
         let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None, None);
         assert!(ctx.state.read()[&key]
+            .reading
+            .as_ref()
+            .unwrap()
             .dangerous_toggles
             .contains("auto_approval_enabled"));
     }
@@ -1563,7 +1824,12 @@ mod tests {
         );
         // Cache reflects the toggle is gone.
         let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None, None);
-        assert!(ctx.state.read()[&key].dangerous_toggles.is_empty());
+        assert!(ctx.state.read()[&key]
+            .reading
+            .as_ref()
+            .unwrap()
+            .dangerous_toggles
+            .is_empty());
     }
 
     /// on→off→on: the toggle re-appearing fires drift again (each on-transition).

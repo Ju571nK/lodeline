@@ -30,10 +30,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   when none fails. A host with failures but no reading keeps `current_risk: null`. Each failure
   report keeps the source from being dropped, so a source that keeps failing stays listed; one
   that stops sending both readings and failures still drops after 48h. The next reading clears
-  the mark. The server rebuilds the same state from JSONL on start. The agent does not send the
-  kind yet. Released servers since v0.3.0 accept it and only count it, and older consoles
-  ignore the new fields. `lodeline-core` gains the `Evidence::AiGuardAssessFailed` variant.
-  (#333)
+  the mark. The server rebuilds the same state from JSONL on start. Released servers since
+  v0.3.0 accept it and only count it, and older consoles ignore the new fields.
+  `lodeline-core` gains the `Evidence::AiGuardAssessFailed` variant. (#333)
 
 - The web console shows who produced each AI Guard score and which sources it could not
   assess. The Devices table, the Risk table and the host's AI Guard panel name the user and
@@ -44,6 +43,24 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
   shows an `ai_guard_assess_failed` event as "AI Guard assessment failed" with its tool, and
   the event slide-over shows its error, path, source and times; it is not a default alert. With a server that sends none of these fields, the
   console looks as before. (#469)
+
+### Changed
+
+- The agent now reports a failed AI Guard assessment instead of re-sending the last reading.
+  When a parser cannot read or parse a config, the agent sends an `ai_guard_assess_failed`
+  event for that source with `error_kind` (`unreadable` or `parse`), the failing `path`,
+  `failing_since` and the time of the last good reading, which is `null` when the agent has
+  none since it started. It sends the event on the first failure, again when the error kind or
+  path changes, and on each 24h heartbeat while the source keeps failing, with
+  `is_reattestation: true`. `failing_since` stays the first failure the running agent saw
+  until a good reading. The event carries no file content and no error text. The first good
+  reading after a failure is always sent, even when it equals the last one. Before, a failing
+  source sent nothing on a change, and its heartbeat re-sent the last reading as if it were
+  current. `lodeline show risk` still lists a failing source's last good reading with its
+  original time, and leaves out a source that has failed since the agent started. Every server
+  since v0.3.0 accepts the event. A v0.12 or later server without `ai_guard_assess_failed`
+  ingest drops a failing source 48h after its last reading. A server older than v0.12 keeps
+  showing the last reading. (#333)
 
 ## [0.12.6] - 2026-11-05
 

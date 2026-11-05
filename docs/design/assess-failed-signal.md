@@ -1,8 +1,8 @@
 # Assess-failed signal and current_risk attribution
 
-Status: proposal. Rollout steps 2 (Option B1) and 3 (Option A3 ingest on the
-server) are implemented; the other steps are not. Tracks two items from issue
-#333.
+Status: proposal. Rollout steps 2 (Option B1), 3 (Option A3 ingest on the
+server), 4 (console) and 5 (Option A3 emission in the agent) are implemented;
+steps 1 and 6 are not. Tracks two items from issue #333.
 
 This document covers two gaps in how AI Guard posture reaches the fleet:
 
@@ -67,6 +67,9 @@ evidence kind and a new optional field are both safe.
 ## Item A: an explicit assess-failed signal
 
 ### How a failure behaves today
+
+This section describes the agent before rollout step 5, which replaced this
+behavior with `ai_guard_assess_failed`.
 
 `eval_and_maybe_emit` (`crates/lodeline-agent/src/ai_guard/task.rs:206-232`)
 handles an `assess_posture` error in two ways:
