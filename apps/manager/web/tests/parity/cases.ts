@@ -186,16 +186,20 @@ function limited(
     method: 'POST',
     path: '/api/v1/auth/login',
     auth: 'none',
-    headers,
+    headers: { ...headers, 'Content-Type': 'application/json' },
     raw: '{',
-    prelude: prelude.map((p) => ({ raw: '{', ...p })),
+    prelude: prelude.map((p) => ({
+      raw: '{',
+      ...p,
+      headers: { ...p.headers, 'Content-Type': 'application/json' },
+    })),
   };
 }
 
-/** A login or note body sent verbatim with the given Content-Type. */
+/** A login or triage body sent verbatim with the given Content-Type. */
 function body(
   name: string,
-  route: 'POST /api/v1/auth/login' | 'POST /api/v1/triage/note',
+  route: 'POST /api/v1/auth/login' | 'POST /api/v1/triage/upsert' | 'POST /api/v1/triage/note',
   raw: string,
   outcome: 'ok' | 'error',
   contentType = 'application/json',
@@ -415,6 +419,7 @@ export const CASES: Case[] = [
     method: 'POST',
     path: '/api/v1/auth/login',
     auth: 'none',
+    headers: { 'Content-Type': 'application/json' },
     raw: '{"username":',
   },
   {
@@ -424,6 +429,7 @@ export const CASES: Case[] = [
     method: 'POST',
     path: '/api/v1/auth/login',
     auth: 'none',
+    headers: { 'Content-Type': 'application/json' },
     raw: '',
   },
   {
@@ -474,7 +480,7 @@ export const CASES: Case[] = [
     'login-text-plain',
     'POST /api/v1/auth/login',
     '{"username":"{admin}","password":"{password}"}',
-    'ok',
+    'error',
     'text/plain',
   ),
   body(
@@ -584,7 +590,7 @@ export const CASES: Case[] = [
         status: 400,
         method: 'POST',
         path: '/api/v1/auth/login',
-        headers: { 'X-Forwarded-For': '203.0.113.26' },
+        headers: { 'X-Forwarded-For': '203.0.113.26', 'Content-Type': 'application/json' },
         raw: '{',
       },
       {
@@ -1093,11 +1099,25 @@ export const CASES: Case[] = [
   {
     name: 'triage-upsert-no-content-type',
     route: 'POST /api/v1/triage/upsert',
-    outcome: 'ok',
+    outcome: 'error',
     method: 'POST',
     path: '/api/v1/triage/upsert',
     raw: `{"host_id":"${H_ALICE}","event_id":"{event:3}","status":"investigating"}`,
   },
+  body(
+    'triage-upsert-text-plain',
+    'POST /api/v1/triage/upsert',
+    `{"host_id":"${H_ALICE}","event_id":"{event:3}","status":"investigating"}`,
+    'error',
+    'text/plain',
+  ),
+  // The write the two cases above were refused, so the row holds what Go stored from them.
+  body(
+    'triage-upsert-no-content-type-as-json',
+    'POST /api/v1/triage/upsert',
+    `{"host_id":"${H_ALICE}","event_id":"{event:3}","status":"investigating"}`,
+    'ok',
+  ),
   {
     name: 'triage-upsert-invalid-status',
     route: 'POST /api/v1/triage/upsert',
@@ -1120,6 +1140,7 @@ export const CASES: Case[] = [
     outcome: 'error',
     method: 'POST',
     path: '/api/v1/triage/upsert',
+    headers: { 'Content-Type': 'application/json' },
     raw: '{"host_id":',
   },
   {
@@ -1167,6 +1188,7 @@ export const CASES: Case[] = [
     outcome: 'error',
     method: 'POST',
     path: '/api/v1/triage/note',
+    headers: { 'Content-Type': 'application/json' },
     raw: 'not json',
   },
   noSession('POST /api/v1/triage/note', 'POST', '/api/v1/triage/note', 'triage-note-no-session'),
@@ -1211,8 +1233,15 @@ export const CASES: Case[] = [
     'triage-note-text-plain',
     'POST /api/v1/triage/note',
     `{"host_id":"${H_BOB}","event_id":"{event:6}","body":"sent as text/plain"}`,
-    'ok',
+    'error',
     'text/plain',
+  ),
+  // The note the case above was refused, so the row holds what Go stored from it.
+  body(
+    'triage-note-text-plain-as-json',
+    'POST /api/v1/triage/note',
+    `{"host_id":"${H_BOB}","event_id":"{event:6}","body":"sent as text/plain"}`,
+    'ok',
   ),
   body(
     'triage-note-extra-fields',

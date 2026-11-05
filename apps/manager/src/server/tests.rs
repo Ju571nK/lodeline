@@ -93,11 +93,12 @@ async fn other_methods_get_chi_405_before_auth() {
     }
 }
 
-/// What a valid session gets with no body: the mock fleet's answer or an empty triage store's.
+/// What a valid session gets with no body or `Content-Type`: the mock fleet's answer or an empty
+/// triage store's.
 fn authorized_status(uri: &str) -> u16 {
     match uri {
         "/api/v1/fleet/events/e1" | "/api/v1/fleet/hosts/h1" | "/api/v1/triage/h1/e1" => 404,
-        "/api/v1/triage/upsert" | "/api/v1/triage/note" => 400,
+        "/api/v1/triage/upsert" | "/api/v1/triage/note" => 415,
         _ => 200,
     }
 }
@@ -300,7 +301,7 @@ async fn bodies_must_be_application_json() {
         ),
         (
             "/api/v1/triage/upsert",
-            r#"{"host_id":"h1","event_id":"e1","status":"open"}"#,
+            r#"{"host_id":"h1","event_id":"e1","status":"open","evidence_snapshot":{}}"#,
             200,
         ),
         (

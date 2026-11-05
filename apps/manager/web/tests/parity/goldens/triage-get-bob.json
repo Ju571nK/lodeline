@@ -27,7 +27,7 @@
       {
         "author": "admin",
         "body": "sent as text/plain",
-        "created_at": "<now@triage-note-text-plain .9Z>",
+        "created_at": "<now@triage-note-text-plain-as-json .9Z>",
         "event_id": "EVT#6",
         "host_id": "5a7c3e91-aaaa-bbbb-cccc-222222222222",
         "id": 3
