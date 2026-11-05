@@ -151,6 +151,44 @@ async fn malformed_payload_is_rejected() {
 }
 
 #[tokio::test]
+async fn a_reason_without_a_string_kind_is_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = build_router(state_in(dir.path(), None));
+    let ids = [ID_A, ID_B, ID_C, "00000000-0000-0000-0000-00000000000d"];
+    let bad = [
+        serde_json::json!({}),
+        serde_json::json!({"kind": null, "a": 1}),
+        serde_json::json!({"kind": 500}),
+        // An integer kind must not decode as the known variant at that index.
+        serde_json::json!({"kind": 7}),
+    ];
+    let events: Vec<_> = ids
+        .iter()
+        .zip(&bad)
+        .enumerate()
+        .map(|(i, (id, reason))| {
+            let mut payload = sample_event_json("h-1", id);
+            payload["evidence"] = serde_json::json!({"kind": "ai_guard_risk_assessed",
+                "tool": "codex", "scope": {"kind": "user_global"}, "score": 1.0,
+                "bucket": "low", "reasons": [reason], "is_reattestation": false});
+            serde_json::json!({"event_id": id, "sequence": i + 1, "payload": payload})
+        })
+        .collect();
+    let body = serde_json::json!({
+        "envelope": {"host_id": "h-1", "schema_version": 1},
+        "events": events,
+    });
+    let (status, resp) = post_events(&app, &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["accepted"], serde_json::json!([]), "{resp}");
+    let rejected = resp["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 4, "{resp}");
+    for r in rejected {
+        assert_eq!(r["reason"], "malformed_payload", "{resp}");
+    }
+}
+
+#[tokio::test]
 async fn resending_a_batch_does_not_double_write() {
     let dir = tempfile::tempdir().unwrap();
     let app = build_router(state_in(dir.path(), None));

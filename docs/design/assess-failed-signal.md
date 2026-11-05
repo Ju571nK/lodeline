@@ -2,7 +2,9 @@
 
 Status: proposal. Rollout steps 2 (Option B1), 3 (Option A3 ingest on the
 server), 4 (console), 5 (Option A3 emission in the agent) and 6 (docs) are
-implemented; step 1 is not. Tracks two items from issue #333.
+implemented. Step 1 is implemented for `AiGuardReason` only: `AiTool`,
+`AiGuardBucket` and `AiGuardScope` still reject an unknown value. Tracks two
+items from issue #333.
 
 This document covers two gaps in how AI Guard posture reaches the fleet:
 
@@ -33,7 +35,7 @@ advances its offset (`data_task.rs:382`). The sender does not retry the event.
 
 | Change on the wire | Older server | Where |
 |---|---|---|
-| Unknown `AiGuardReason` kind inside `reasons` | Rejects the whole event | `AiGuardReason` is internally tagged with no `#[serde(other)]` fallback (`crates/lodeline-core/src/event.rs:162-164`) |
+| Unknown `AiGuardReason` kind inside `reasons` | Rejects the whole event, through v0.12.6. Servers released after v0.12.6 have rollout step 1 and accept it as `AiGuardReason::Unknown` | `AiGuardReason` is internally tagged with no `#[serde(other)]` fallback (`crates/lodeline-core/src/event.rs:162-164`) |
 | Unknown evidence `kind` | Accepts it as `Evidence::Unknown` | `#[serde(other)]` at `event.rs:783-786`, present since v0.3.0 (commit `29d09e0`, #83) |
 | Unknown field on a known evidence kind | Accepts it and ignores the field | No `deny_unknown_fields` on `Event` or `Evidence` |
 | Unknown `AiTool` value | Rejects the whole event | No fallback on `AiTool` (`event.rs:105-107`) |
@@ -62,7 +64,9 @@ API is therefore safe for an older console.
 
 The rule that follows: a new agent must never put an unknown reason kind, tool,
 bucket or scope kind into an event that an older server will decode. A new
-evidence kind and a new optional field are both safe.
+evidence kind and a new optional field are both safe. Rollout step 1 is
+implemented for reason kinds, but it protects only servers that have it, so the
+rule still holds.
 
 ## Item A: an explicit assess-failed signal
 
@@ -169,7 +173,8 @@ Field rules:
   `rule_pack_id` and `tool_label` are omitted when `None`.
 - `error_kind` is a string, not a Rust enum without a fallback, so a later value
   can never fail decoding on an older server. Start with `unreadable`,
-  `too_large` and `parse`.
+  `too_large` and `parse`. The agent sends `unreadable` and `parse` today. A
+  file over a size cap reports as `parse`.
 - `path` is the file that failed. It carries no file content and no free-form
   error text, so nothing from the config leaks.
 - `failing_since` is the first failure the running agent saw for this source.

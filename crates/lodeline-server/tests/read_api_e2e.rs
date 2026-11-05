@@ -755,3 +755,37 @@ async fn unassessed_since_follows_only_the_top_reading() {
     );
     assert_eq!(risk[0]["unassessed_since"], rfc(m(3)), "{risk}");
 }
+
+#[tokio::test]
+async fn unknown_reason_kind_is_accepted_and_served_as_the_same_value() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_token(dir.path(), "tok");
+    let app = build_router(state.clone());
+    let host = uuid::Uuid::now_v7().to_string();
+    let reasons = json!([{"kind":"sandbox_disabled"},
+        {"kind":"future_reason", "detail":{"n":2}, "path":"/x"}]);
+    let mut reading = ai_reading("codex", "alice", 3.0, "medium");
+    reading["reasons"] = reasons.clone();
+    post_evidence(&app, &host, &[(time::OffsetDateTime::now_utc(), reading)]).await;
+
+    let live = host_views(&app, &host).await;
+    let [row, detail, risk] = &live;
+    assert_eq!(
+        row["current_risk"]["by_tool"]["codex"]["score"], 3.0,
+        "{row}"
+    );
+    assert_eq!(detail["ai_guard"]["by_tool"]["codex"]["reasons"], reasons);
+    assert_eq!(risk[0]["reasons_count"], 2, "{risk}");
+    let (_, history) = get(&app, &format!("/v1/events?host_id={host}"), Some("tok")).await;
+    assert_eq!(history["events"][0]["evidence"]["reasons"], reasons);
+
+    state
+        .fleet_index
+        .replace(lodeline_server::boot_rebuild::rebuild_from_jsonl(dir.path()).unwrap());
+    assert_eq!(
+        host_views(&app, &host).await,
+        live,
+        "a rebuild must match live ingest"
+    );
+}

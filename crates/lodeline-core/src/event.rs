@@ -159,8 +159,12 @@ pub enum AiGuardBucket {
 /// Phase 3b.1 — one finding inside an `AiGuardRiskAssessed` event.
 /// Stable wire strings — operators filter by these in the SIEM, so renames are
 /// breaking changes.
+///
+/// The derived serde code is reachable only as the inherent
+/// `AiGuardReason::{serialize, deserialize}` (`remote = "Self"`). Call the
+/// trait impls below, which require a string `kind`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(remote = "Self", tag = "kind", rename_all = "snake_case")]
 pub enum AiGuardReason {
     /// Inline shell command in a hook contains a destructive pattern.
     DestructiveInInlineCommand {
@@ -409,6 +413,42 @@ pub enum AiGuardReason {
         name: String,
         source: String,
     },
+    /// #333 — a reason object this build cannot decode: a kind from a newer
+    /// agent, or a known kind whose fields changed. The object is kept as the
+    /// same JSON value, so the server accepts the event and serves the reason
+    /// back; key order may differ. Agents never emit it, and a rule pack
+    /// `emit` refuses it. Untagged variants must come last.
+    #[serde(untagged)]
+    Unknown(UnknownReason),
+}
+
+impl Serialize for AiGuardReason {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        AiGuardReason::serialize(self, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for AiGuardReason {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // The untagged fallback makes serde buffer the object, and a buffered
+        // tag accepts an integer as a variant index, so `{"kind":7}` would
+        // decode as a known reason. Only a string `kind` reaches the derived code.
+        let v = serde_json::Value::deserialize(d)?;
+        if !v.get("kind").is_some_and(serde_json::Value::is_string) {
+            return Err(D::Error::custom("an AI Guard reason needs a string `kind`"));
+        }
+        AiGuardReason::deserialize(v).map_err(D::Error::custom)
+    }
+}
+
+/// #333 — the body of `AiGuardReason::Unknown`. `kind` must be a string, so
+/// the console can always render it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UnknownReason {
+    pub kind: String,
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// #146 — category of instruction-file directive. Stable wire strings

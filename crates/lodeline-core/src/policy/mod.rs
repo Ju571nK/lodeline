@@ -119,11 +119,26 @@ pub struct RuleEntry {
     pub format: RuleFormat,
     pub selector: String,
     pub matcher: Matcher,
+    #[serde(deserialize_with = "known_reason")]
     pub emit: crate::event::AiGuardReason,
     /// Phase 3b.7.1 (Tier 2) — gate conditions (AND). Empty (default) = the flat
     /// Tier-1 rule (no gating). Requires pack_version 2.
     #[serde(default)]
     pub when: Vec<Condition>,
+}
+
+/// A rule pack must name a reason this build knows, so an agent never sends
+/// `AiGuardReason::Unknown`, which servers before #333 step 1 reject.
+fn known_reason<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<crate::event::AiGuardReason, D::Error> {
+    match <crate::event::AiGuardReason as Deserialize>::deserialize(d)? {
+        crate::event::AiGuardReason::Unknown(obj) => Err(serde::de::Error::custom(format!(
+            "emit is not a reason this agent knows, or its fields do not match: {}",
+            serde_json::json!(obj)
+        ))),
+        known => Ok(known),
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1446,6 +1461,28 @@ host_id_strategy: hostname
         assert_eq!(r2.when.len(), 2);
         assert!(!r2.when[0].negate);
         assert!(r2.when[1].negate);
+    }
+
+    #[test]
+    fn rule_entry_refuses_an_emit_this_build_cannot_read() {
+        let rule = |emit: &str| {
+            serde_yaml::from_str::<RuleEntry>(&format!(
+                "id: r1\non_file: /x\nformat: json\nselector: \"$.a\"\nmatcher: {{ kind: exists }}\nemit: {emit}\n"
+            ))
+        };
+        let ok = rule("{ kind: no_sandbox, executor: host_shell }").unwrap();
+        assert!(matches!(
+            ok.emit,
+            crate::event::AiGuardReason::NoSandbox { .. }
+        ));
+        for emit in ["{ kind: future_reason }", "{ kind: no_sandbox }"] {
+            let err = rule(emit).unwrap_err().to_string();
+            assert!(
+                err.contains("emit is not a reason this agent knows"),
+                "{emit}: {err}"
+            );
+        }
+        assert!(rule("{ kind: 7 }").is_err(), "an integer kind decoded");
     }
 
     #[test]

@@ -75,8 +75,8 @@ note:     the parser could not read or parse a config, so the source has no
 ```
 
 Run the check on a schedule. If your SIEM evaluates a rule only when an event
-arrives, the first alert comes at the next 24h re-send, up to 24h after
-`failing_since`.
+arrives, the first alert comes at the first 24h re-send that arrives more than
+1h after `failing_since`, so up to about 25h after `failing_since`.
 
 Read the fields this way:
 

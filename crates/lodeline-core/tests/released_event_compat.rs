@@ -4,7 +4,10 @@
 #[path = "fixtures/released/v0_12_6_event.rs"]
 mod released;
 
-use lodeline_core::event::{AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject};
+use lodeline_core::event::{
+    AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject,
+    UnknownReason,
+};
 use time::macros::datetime;
 
 #[test]
@@ -37,4 +40,172 @@ fn released_server_accepts_ai_guard_assess_failed_as_unknown() {
     let old: released::Event = serde_json::from_value(wire).expect("v0.12.6 rejects the event");
     assert!(matches!(old.evidence, released::Evidence::Unknown));
     assert_eq!(old.event_id, ev.event_id);
+}
+
+/// One sample per reason kind, fields in declaration order, so the bytes a
+/// build writes can be compared with these strings.
+const KNOWN_REASONS: &[&str] = &[
+    r#"{"kind":"destructive_in_inline_command","pattern":"p","hook_event":"PreToolUse","snippet":"s"}"#,
+    r#"{"kind":"destructive_in_hook_script","pattern":"p","hook_event":"PreToolUse","script_path":"/h/a.sh","snippet":"s","source_chain":["/h/a.sh"]}"#,
+    r#"{"kind":"external_script_unscanned","hook_event":"PreToolUse","script_path":"/x.sh"}"#,
+    r#"{"kind":"no_sandbox","executor":"host_shell"}"#,
+    r#"{"kind":"broad_matcher","hook_event":"PreToolUse","matcher":".*"}"#,
+    r#"{"kind":"permissions_deny_empty"}"#,
+    r#"{"kind":"permissions_allow_broad","rule":"Bash(*)"}"#,
+    r#"{"kind":"sandbox_disabled"}"#,
+    r#"{"kind":"mcp_server_remote","server_name":"s","url":"https://example.com"}"#,
+    r#"{"kind":"mcp_server_local_command","server_name":"s","command":"npx"}"#,
+    r#"{"kind":"trusted_mcp_server","server_name":"s"}"#,
+    r#"{"kind":"auto_approval_enabled","mode":"yolo"}"#,
+    r#"{"kind":"mcp_server_suspicious_launcher","server_name":"s","command":"bash","shape":"shell","evidence":"bash -c"}"#,
+    r#"{"kind":"project_mcp_auto_enabled","mechanism":"enableAllProjectMcpServers"}"#,
+    r#"{"kind":"instruction_file_directive","path":"/r/AGENTS.md","directive_kind":"override_marker","snippet":"s"}"#,
+    r#"{"kind":"unattended_scheduled_task","name":"n"}"#,
+    r#"{"kind":"mcp_tool_instruction_override","server":"s","tool":"t","pattern":"p"}"#,
+    r#"{"kind":"mcp_tool_hidden_text","server":"s","tool":"t","text_kind":"bidi"}"#,
+    r#"{"kind":"mcp_tool_name_shadow","tool":"t","servers":["a","b"]}"#,
+    r#"{"kind":"mcp_tool_surface_drift","server":"s","tool":"t","baseline_hash":"a","current_hash":"b"}"#,
+    r#"{"kind":"mcp_unapproved_new_tool","server":"s","tool":"t","current_hash":"b"}"#,
+    r#"{"kind":"mcp_schema_privilege_expansion","server":"s","tool":"t"}"#,
+    r#"{"kind":"mcp_read_only_hint_contradiction","server":"s","tool":"t"}"#,
+    r#"{"kind":"auto_mode_defaults_dropped","list":"soft_deny"}"#,
+    r#"{"kind":"hook_forwards_tool_calls","hook_event":"PreToolUse","destination":"example.com"}"#,
+    r#"{"kind":"unattended_loop_prompt","source":"user"}"#,
+    r#"{"kind":"standing_command_approval","pattern":"git"}"#,
+    r#"{"kind":"mcp_tools_auto_approved","server_name":"s","tools":["t"]}"#,
+    r#"{"kind":"project_settings_plugin_enabled","plugins":["p@m"]}"#,
+    r#"{"kind":"project_settings_helper_command","key":"apiKeyHelper"}"#,
+    r#"{"kind":"project_settings_env_override","variable":"V","effect":"redirect","destination":"example.com"}"#,
+    r#"{"kind":"project_settings_env_override","variable":"V","effect":"exec_code"}"#,
+    r#"{"kind":"project_settings_ui_command","key":"statusLine"}"#,
+    r#"{"kind":"project_settings_marketplace","name":"m","source":"github:o/r"}"#,
+];
+
+/// Lists every known variant with its wire kind. The match has no wildcard, so
+/// a new variant fails to compile here until it gets a kind and a sample.
+macro_rules! wire_kinds {
+    ($($variant:ident => $kind:literal,)*) => {
+        const ALL_KINDS: &[&str] = &[$($kind),*];
+        fn wire_kind(r: &AiGuardReason) -> Option<&'static str> {
+            match r {
+                $(AiGuardReason::$variant { .. } => Some($kind),)*
+                AiGuardReason::Unknown(_) => None,
+            }
+        }
+    };
+}
+
+wire_kinds! {
+    DestructiveInInlineCommand => "destructive_in_inline_command",
+    DestructiveInHookScript => "destructive_in_hook_script",
+    ExternalScriptUnscanned => "external_script_unscanned",
+    NoSandbox => "no_sandbox",
+    BroadMatcher => "broad_matcher",
+    PermissionsDenyEmpty => "permissions_deny_empty",
+    PermissionsAllowBroad => "permissions_allow_broad",
+    SandboxDisabled => "sandbox_disabled",
+    McpServerRemote => "mcp_server_remote",
+    McpServerLocalCommand => "mcp_server_local_command",
+    TrustedMcpServer => "trusted_mcp_server",
+    AutoApprovalEnabled => "auto_approval_enabled",
+    McpServerSuspiciousLauncher => "mcp_server_suspicious_launcher",
+    ProjectMcpAutoEnabled => "project_mcp_auto_enabled",
+    InstructionFileDirective => "instruction_file_directive",
+    UnattendedScheduledTask => "unattended_scheduled_task",
+    McpToolInstructionOverride => "mcp_tool_instruction_override",
+    McpToolHiddenText => "mcp_tool_hidden_text",
+    McpToolNameShadow => "mcp_tool_name_shadow",
+    McpToolSurfaceDrift => "mcp_tool_surface_drift",
+    McpUnapprovedNewTool => "mcp_unapproved_new_tool",
+    McpSchemaPrivilegeExpansion => "mcp_schema_privilege_expansion",
+    McpReadOnlyHintContradiction => "mcp_read_only_hint_contradiction",
+    AutoModeDefaultsDropped => "auto_mode_defaults_dropped",
+    HookForwardsToolCalls => "hook_forwards_tool_calls",
+    UnattendedLoopPrompt => "unattended_loop_prompt",
+    StandingCommandApproval => "standing_command_approval",
+    McpToolsAutoApproved => "mcp_tools_auto_approved",
+    ProjectSettingsPluginEnabled => "project_settings_plugin_enabled",
+    ProjectSettingsHelperCommand => "project_settings_helper_command",
+    ProjectSettingsEnvOverride => "project_settings_env_override",
+    ProjectSettingsUiCommand => "project_settings_ui_command",
+    ProjectSettingsMarketplace => "project_settings_marketplace",
+}
+
+#[test]
+fn known_reasons_keep_their_released_bytes() {
+    let mut sampled = std::collections::HashSet::new();
+    for wire in KNOWN_REASONS {
+        let old: released::AiGuardReason = serde_json::from_str(wire).expect(wire);
+        assert_eq!(serde_json::to_string(&old).unwrap(), *wire);
+        let new: AiGuardReason = serde_json::from_str(wire).expect(wire);
+        let sent: serde_json::Value = serde_json::from_str(wire).unwrap();
+        assert_eq!(wire_kind(&new), sent["kind"].as_str(), "{wire}");
+        assert_eq!(serde_json::to_string(&new).unwrap(), *wire);
+        sampled.insert(wire_kind(&new).unwrap());
+    }
+    for kind in ALL_KINDS {
+        assert!(sampled.contains(kind), "no sample for {kind}");
+    }
+}
+
+#[test]
+fn unknown_reason_kind_keeps_the_event_and_the_object() {
+    let wire = serde_json::json!({
+        "schema_version": 1, "event_id": uuid::Uuid::now_v7(), "ts": "2026-11-03T10:00:00Z",
+        "host_id": "h", "agent_version": "0.14.0", "severity": "warn",
+        "source": {"kind": "agent"}, "subject": {"kind": "self"},
+        "evidence": {"kind": "ai_guard_risk_assessed", "tool": "codex",
+            "scope": {"kind": "user_global"}, "score": 3.0, "bucket": "medium",
+            "reasons": [{"kind": "sandbox_disabled"},
+                {"kind": "future_reason", "detail": {"n": 2}, "path": "/x"}],
+            "is_reattestation": false}
+    });
+    assert!(
+        serde_json::from_value::<released::Event>(wire.clone()).is_err(),
+        "v0.12.6 rejects an event with an unknown reason kind"
+    );
+    let ev: Event = serde_json::from_value(wire.clone()).unwrap();
+    let Evidence::AiGuardRiskAssessed { reasons, .. } = &ev.evidence else {
+        panic!("{:?}", ev.evidence)
+    };
+    assert_eq!(reasons[0], AiGuardReason::SandboxDisabled);
+    let AiGuardReason::Unknown(UnknownReason { kind, rest }) = &reasons[1] else {
+        panic!("{:?}", reasons[1])
+    };
+    assert_eq!(kind, "future_reason");
+    assert_eq!(
+        serde_json::Value::Object(rest.clone()),
+        serde_json::json!({"detail": {"n": 2}, "path": "/x"})
+    );
+    // Value equality: the same JSON value, though key order may differ.
+    assert_eq!(
+        serde_json::to_value(reasons).unwrap(),
+        wire["evidence"]["reasons"]
+    );
+    for not_an_object in [r#""sandbox_disabled""#, "7", "null"] {
+        assert!(serde_json::from_str::<AiGuardReason>(not_an_object).is_err());
+    }
+}
+
+#[test]
+fn a_reason_without_a_string_kind_is_rejected() {
+    for bad in [
+        "{}",
+        r#"{"a":1}"#,
+        r#"{"kind":null}"#,
+        r#"{"kind":null,"a":1}"#,
+        r#"{"kind":500}"#,
+        // A buffered tag would read an integer as a variant index.
+        r#"{"kind":0}"#,
+        r#"{"kind":5}"#,
+        r#"{"kind":7}"#,
+        r#"{"kind":7,"x":1}"#,
+        r#"{"kind":true}"#,
+        r#"{"kind":{"x":1}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AiGuardReason>(bad).is_err(),
+            "{bad} decoded"
+        );
+    }
 }
