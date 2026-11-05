@@ -4406,4 +4406,37 @@ base_url = "https://llm.corp.example/v1"
             .collect_external_script_paths(dir.path())
             .is_empty());
     }
+
+    #[test]
+    fn project_hooks_feature_off_drops_external_script_paths() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let codex = dir.path().join("home").join(".codex");
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        let hook = "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/opt/lodeline-tools/pre.sh\"\n";
+        let config = repo.join(".codex").join("config.toml");
+        let p = CodexProjectParser {
+            repo_root: repo.clone(),
+        };
+        std::fs::write(&config, hook).unwrap();
+        assert_eq!(
+            p.script_paths_in(&codex),
+            vec![PathBuf::from("/opt/lodeline-tools/pre.sh")]
+        );
+        std::fs::write(&config, format!("[features]\nhooks = false\n{hook}")).unwrap();
+        assert!(p.script_paths_in(&codex).is_empty());
+    }
+
+    /// A `[features] hooks` pin in `requirements.toml` changes whether the
+    /// project's hooks run, so an edit there must trigger a rescan.
+    #[test]
+    fn project_watched_paths_include_requirements_toml() {
+        let p = CodexProjectParser {
+            repo_root: PathBuf::from("/repo"),
+        };
+        assert!(p
+            .watched_paths_in(Path::new("/home/.codex"))
+            .contains(&super::super::policy_controls::codex_requirements_path()));
+    }
 }

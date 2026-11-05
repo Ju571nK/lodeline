@@ -42,7 +42,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   no prompt and outside the sandbox. The finding's `rule` is spelled from that list, for example
   `prefix_rule(pattern=["python3", "-c"])`, so no path or argument from the rules file leaves
   the host. A narrow prefix such as `["git", "status"]` is reported as before. This is an
-  existing reason kind, so every server version accepts it. (#200)
+  existing reason kind, so every server version accepts it. A broad rule now adds the
+  `permissions_allow_broad` weight on top of `standing_command_approval`. Both weigh 2.0, so one
+  `["git"]` rule scores 4.0 instead of 2.0, and several such rules reach the 10.0 cap. (#200)
 - AI Guard no longer reports Codex config hooks when Codex has hooks turned off with
   `[features] hooks = false` or the older name `codex_hooks = false`. The merged system, user
   and project config decides, and a `[features]` pin in the system `requirements.toml` wins over
