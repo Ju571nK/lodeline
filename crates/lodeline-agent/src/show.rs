@@ -527,6 +527,12 @@ fn evidence_summary(e: &lodeline_core::event::Evidence) -> (&'static str, String
             "ai_guard_toggle_drift",
             format!("{tool:?} {toggle} turned on (drift)"),
         ),
+        Evidence::AiGuardAssessFailed {
+            tool, error_kind, ..
+        } => (
+            "ai_guard_assess_failed",
+            format!("tool={tool:?} error_kind={error_kind}"),
+        ),
         Evidence::HostMetaSnapshot { .. } => ("host_meta_snapshot", String::new()),
         Evidence::HookInvocation(_) => ("hook_invocation", String::new()),
         Evidence::HookDecision(d) => (

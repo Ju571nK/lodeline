@@ -64,6 +64,7 @@ fn evidence_kind_str(e: &lodeline_core::event::Evidence) -> &'static str {
         SenderLagCritical { .. } => "sender_lag_critical",
         AiGuardRiskAssessed { .. } => "ai_guard_risk_assessed",
         AiGuardToggleDrift { .. } => "ai_guard_toggle_drift",
+        AiGuardAssessFailed { .. } => "ai_guard_assess_failed",
         HostMetaSnapshot { .. } => "host_meta_snapshot",
         HookInvocation(_) => "hook_invocation",
         HookDecision(_) => "hook_decision",
