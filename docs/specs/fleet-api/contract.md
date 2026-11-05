@@ -63,7 +63,7 @@ producer-side decision letter so the lineage is auditable.
 | F3  | URL prefix | Flat `/v1/...`. No `/read/` subtree. | **D** |
 | F4  | Ordering | Events: `ts desc` always (no `asc` in v1). Hosts: sortable via `sort=last_seen\|risk\|host_id`, default `last_seen`. | (producer §4.3, §4.7) |
 | F5  | Pagination | **Cursor = opaque string carrying the last `event_id` (UUIDv7)** for `/v1/events`; for fleet endpoints, last `host_id` string. UUIDv7's lexicographic ordering = chronological. `limit` default 100, max 1000. `limit>1000` silently capped (see open issue note in §6.1). | **G** |
-| F6  | Time format | RFC 3339 strings everywhere. Events carry `ts` from agent's clock; server does **not** add a `server_received_ts` in v1 (see §13 gap). | (producer §4) |
+| F6  | Time format | RFC 3339 strings everywhere. Events carry `ts` from agent's clock; server does **not** add a `server_received_ts` in v1 (see §13 gap). The fleet index caps `last_seen_ts` and the 24h counts at the server's receive time (see the Clock skew row in §13 and #442). | (producer §4) |
 | F7  | Score scale | **0.0–10.0** float (CVSS-style, matches `AiGuardRiskAssessed.score`). **Locked — UI/UX spec §5.2 to be updated** from "0-100" to "0-10". | producer §9 Q1 |
 | F8  | Streaming | Polling only in v1 (UI/UX §7.2 = 5s). SSE/WebSocket deferred (producer Out-of-scope §8 → 3b.4.1 or lodeline-cloud). | producer §8 |
 | F9  | Versioning | Path version (`/v1/`). Additive non-breaking (new fields, new endpoints, new evidence variants). Breaking → `/v2/`, both run ≥1 minor cycle. | (producer §7.3) |
@@ -538,7 +538,9 @@ score.
 The core paged query. Per F11, this endpoint is served by an **on-demand
 reverse JSONL scan** — no event-level index in v1. JSONL files are organized
 as `events_out_dir/<host_id>/received-YYYY-MM-DD.jsonl`, so date partitioning
-comes for free.
+comes for free. The server also writes `.received-YYYY-MM-DD.jsonl.recv` beside
+each file, with the time it received each batch. These files are internal to
+the server and not part of the API. A server from before #442 ignores them.
 
 **Query params:**
 - `cursor` — opaque string. Server encodes the last `event_id` (UUIDv7) of
@@ -610,7 +612,10 @@ trust the producer schema and tolerate additive evolution (new
 
 **Time semantics caveat:** `ts` is the agent's clock at event emission.
 Producer chose not to add a `server_received_ts` in v1 (see §13 gap on clock
-skew). Operators with hosts whose clocks drift significantly should treat
+skew). The events returned keep the agent's `ts` as sent. Only the fleet
+index (for example `last_seen_ts`, `status`, and the 24h counts) caps times
+at the receive time, as the Clock skew row in §13 describes (#442).
+Operators with hosts whose clocks drift significantly should treat
 `/v1/events?since=...` results as approximate near the window boundary.
 
 ### 5.8 `GET /v1/events/{event_id}`
