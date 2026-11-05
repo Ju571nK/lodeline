@@ -385,7 +385,11 @@ fn event(v: Value) -> Event {
     for key in GO_FIELDS {
         assert!(v.get(key).is_some(), "the server's event has no {key}: {v}");
     }
-    go_decode(v).unwrap()
+    go_decode(&serde_json::value::to_raw_value(&v).unwrap()).unwrap()
+}
+
+fn raw(v: Value) -> Raw {
+    serde_json::from_str(&v.to_string()).unwrap()
 }
 
 fn events_page(b: api::EventsPage) -> EventsPage {
@@ -601,7 +605,7 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
                         id,
                         source_path,
                         setting,
-                        value,
+                        value: raw(value),
                     },
                 )
                 .collect()
@@ -610,8 +614,8 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
         bucket,
         assessed_ts: time(assessed_ts),
         is_reattestation,
-        scope,
-        reasons: Some(reasons),
+        scope: raw(scope),
+        reasons: Some(reasons.into_iter().map(raw).collect()),
     }
 }
 

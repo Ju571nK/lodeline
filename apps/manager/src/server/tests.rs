@@ -275,6 +275,70 @@ fn routes_match_the_parity_table() {
     assert_eq!(ours, table);
 }
 
+/// The router reading `body` from a stand-in `lodeline-server` that answers every request with it.
+async fn live_app(body: &'static str) -> Router {
+    let upstream = Router::new()
+        .fallback(move || async move { ([(header::CONTENT_TYPE, "application/json")], body) });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let client = fleet::HttpClient::new(&url, "token", None, Duration::from_secs(2)).unwrap();
+    router(AppState::for_tests(SECRET, Arc::new(client)))
+}
+
+async fn get_live(body: &'static str, uri: &str) -> (Response, String) {
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::HOST, "console.example")
+        .header(header::COOKIE, session(4_000_000_000))
+        .body(Body::empty())
+        .unwrap();
+    call(live_app(body).await, req).await
+}
+
+/// The open-ended fields keep the server's text: key order and number spelling, past the range
+/// of `f64` and `u64` too. Only Go's HTML escaping applies.
+#[tokio::test]
+async fn an_event_is_relayed_with_the_servers_text() {
+    const EVENT: &str = r#"{"schema_version":1,"event_id":"e1","ts":"2026-05-19T12:00:00Z","host_id":"h1","agent_version":"0.12.4","severity":"warn","source":{"kind":"agent","b":1,"a":2},"subject":{"z":-0,"a":[1E3,2.0]},"evidence":{"kind":"x","z":1.50,"e":1e3,"long":0.1000000000000000055511151231257827,"big":18446744073709551616,"a":"a<b"},"target_id":null}"#;
+    let (res, body) = get_live(EVENT, "/api/v1/fleet/events/e1").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        body,
+        r#"{"schema_version":1,"event_id":"e1","ts":"2026-05-19T12:00:00Z","host_id":"h1","agent_version":"0.12.4","severity":"warn","source":{"kind":"agent","b":1,"a":2},"subject":{"z":-0,"a":[1E3,2.0]},"evidence":{"kind":"x","z":1.50,"e":1e3,"long":0.1000000000000000055511151231257827,"big":18446744073709551616,"a":"a\u003cb"},"target_id":null,"triage":null}"#
+            .to_owned()
+            + "\n"
+    );
+}
+
+/// A number no `f64` holds inside one event's evidence does not cost the rest of the page.
+#[tokio::test]
+async fn a_page_with_an_out_of_range_evidence_number_is_served() {
+    const PAGE: &str = r#"{"events":[{"event_id":"e2","ts":"2026-05-19T12:00:00Z","severity":"warn","evidence":{"kind":"x","huge":1e400}},{"event_id":"e1","ts":"2026-05-19T11:00:00Z","severity":"info","evidence":{"kind":"y"}}],"next_cursor":null}"#;
+    let (res, body) = get_live(PAGE, "/api/v1/fleet/events").await;
+    assert_eq!(res.status(), StatusCode::OK, "{body}");
+    assert!(
+        body.contains(r#""evidence":{"kind":"x","huge":1e400}"#),
+        "{body}"
+    );
+    assert!(body.contains(r#""event_id":"e1""#), "{body}");
+}
+
+/// The AI guard's scope, reasons and control values keep the server's text too.
+#[tokio::test]
+async fn a_hosts_ai_guard_is_relayed_with_the_servers_text() {
+    const HOST: &str = r#"{"host_id":"h1","ai_guard":{"by_tool":{"codex":{"controls":[{"id":"c1","value":1e400}],"score":7.5,"scope":{"kind":"user_global","b":1.50},"reasons":[{"w":1e3},"text"]}}}}"#;
+    let (res, body) = get_live(HOST, "/api/v1/fleet/hosts/h1").await;
+    assert_eq!(res.status(), StatusCode::OK, "{body}");
+    for raw in [
+        r#""value":1e400"#,
+        r#""scope":{"kind":"user_global","b":1.50}"#,
+        r#""reasons":[{"w":1e3},"text"]"#,
+    ] {
+        assert!(body.contains(raw), "{raw} in {body}");
+    }
+}
+
 fn post(uri: &str, content_type: Option<&str>, cookie: Option<&str>, body: Body) -> Request {
     let mut req = Request::post(uri).header(header::HOST, "console.example");
     if let Some(content_type) = content_type {

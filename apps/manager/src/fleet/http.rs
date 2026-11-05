@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use reqwest::header::{ACCEPT, RETRY_AFTER};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::value::RawValue;
 
 use super::{go_decode, path_escape, BoxFuture, Client, FleetError, Reply, Request, Response};
 use crate::config::ServerTls;
@@ -193,7 +193,7 @@ pub(super) fn causes(e: &dyn std::error::Error) -> String {
 /// Decodes the first JSON value of `body`, as Go's `json.Decoder` does, into the endpoint's type.
 pub(super) fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response> {
     let v = serde_json::Deserializer::from_slice(body)
-        .into_iter::<Value>()
+        .into_iter::<Box<RawValue>>()
         .next()
         .unwrap_or_else(|| {
             Err(serde_json::Error::io(
@@ -201,20 +201,20 @@ pub(super) fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response>
             ))
         })?;
     Ok(match req {
-        Request::Healthz => Response::Healthz(go_decode(v)?),
-        Request::Meta => Response::Meta(decode_meta(v)?),
-        Request::Events(_) => Response::Events(go_decode(v)?),
-        Request::EventById(_) => Response::Event(go_decode(v)?),
-        Request::Hosts(_) => Response::Hosts(go_decode(v)?),
-        Request::HostById(_) => Response::Host(go_decode(v)?),
-        Request::Risk(_) => Response::Risk(go_decode(v)?),
-        Request::Compliance(_) => Response::Compliance(go_decode(v)?),
+        Request::Healthz => Response::Healthz(go_decode(&v)?),
+        Request::Meta => Response::Meta(decode_meta(&v)?),
+        Request::Events(_) => Response::Events(go_decode(&v)?),
+        Request::EventById(_) => Response::Event(go_decode(&v)?),
+        Request::Hosts(_) => Response::Hosts(go_decode(&v)?),
+        Request::HostById(_) => Response::Host(go_decode(&v)?),
+        Request::Risk(_) => Response::Risk(go_decode(&v)?),
+        Request::Compliance(_) => Response::Compliance(go_decode(&v)?),
     })
 }
 
 /// `lodeline-server` 0.8 and earlier report the active-host count inside `license`, which v0.9.0
 /// replaced with `fleet`. The rest of `license` is dropped.
-fn decode_meta(v: Value) -> serde_json::Result<super::Meta> {
+fn decode_meta(v: &RawValue) -> serde_json::Result<super::Meta> {
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct Legacy {
@@ -226,7 +226,7 @@ fn decode_meta(v: Value) -> serde_json::Result<super::Meta> {
         current_host_count: i64,
         active_window_days: i64,
     }
-    let mut meta: super::Meta = go_decode(v.clone())?;
+    let mut meta: super::Meta = go_decode(v)?;
     let legacy: Legacy = go_decode(v)?;
     if let (None, Some(l)) = (&meta.fleet, legacy.license) {
         meta.fleet = Some(super::ActiveHosts {
@@ -258,9 +258,9 @@ fn api_error(status: u16, body: &[u8]) -> FleetError {
         code: String,
         message: String,
     }
-    let wire = serde_json::from_slice::<Value>(body)
+    let wire = serde_json::from_slice::<Box<RawValue>>(body)
         .ok()
-        .and_then(|v| go_decode::<Wire>(v).ok());
+        .and_then(|v| go_decode::<Wire>(&v).ok());
     match wire {
         Some(w) if !w.error.code.is_empty() => FleetError::Api {
             status,

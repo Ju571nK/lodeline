@@ -416,6 +416,9 @@ async function recordCase(c: Case): Promise<Record<string, unknown>> {
     record.rawText = Object.fromEntries(
       c.rawText.map((p) => [p, (parsed ? rawJsonAt(text, p) : undefined) ?? null]),
     );
+    // rawText holds the exact text, so the parsed body is compared as a golden can hold it.
+    // JSON has no Infinity or -0, so a relayed `1e400` reads as null.
+    if (parsed) record.body = JSON.parse(JSON.stringify(record.body));
   }
   const body = record.body as Record<string, unknown>;
   // The build stamps its own version string into /api/health; an empty one stays raw.

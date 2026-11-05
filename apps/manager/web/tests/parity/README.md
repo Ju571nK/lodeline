@@ -6,7 +6,7 @@ at `Ju571nK/lodeline-manager@e4fb077`, except the ones listed under "Goldens rec
 Rust build" below. The Rust port does not have to match Go; the suite is a regression check, so a
 run shows every place where the port answers differently from the recorded behavior.
 
-The table has 229 cases over 19 routes: the 18 API routes of the Go router plus the SPA
+The table has 230 cases over 19 routes: the 18 API routes of the Go router plus the SPA
 catch-all. The suite prints the count per route on every run.
 
 | Cases | Route |
@@ -20,7 +20,7 @@ catch-all. The suite prints the count per route on every run.
 | 27 | `GET /api/v1/auth/me` |
 | 6 | `GET /api/v1/fleet/meta` |
 | 4 | `GET /api/v1/fleet/healthz` |
-| 38 | `GET /api/v1/fleet/events` |
+| 39 | `GET /api/v1/fleet/events` |
 | 14 | `GET /api/v1/fleet/events/{event_id}` |
 | 11 | `GET /api/v1/fleet/risk` |
 | 9 | `GET /api/v1/fleet/compliance` |
@@ -110,6 +110,7 @@ difference in the PR. These goldens hold Rust behavior:
 | `triage-note-text-plain` | A `text/plain` body gets 415 and stores no note. Go stored it. |
 | `triage-upsert-no-content-type-as-json`, `triage-note-text-plain-as-json` | New cases: the refused write sent again as `application/json`. Each answer equals Go's golden for the refused case, so the rows that later cases read back hold what Go stored. |
 | `triage-get`, `triage-get-bob`, `fleet-events-with-triage`, `fleet-event-with-triage` | Only the time placeholders differ: they name the `-as-json` case instead of the refused one. |
+| `live-events-out-of-range-number` | None expected: the case is new, so it was recorded from the Rust build. Go keeps evidence as `json.RawMessage`, which does not parse its numbers, so it serves this page too. |
 
 The parity managers run with `TRUSTED_PROXIES=127.0.0.1`, so the recorder is a trusted proxy and
 the limiter cases name their client in `X-Forwarded-For`. The Go reference ignores the variable.
@@ -143,7 +144,10 @@ part of a value that changes from run to run.
 Where the spelling is the behavior, a case names dot paths in `rawText`, and the record also holds
 the text of the value at each path exactly as the server wrote it. The triage snapshot cases use
 it: Go stores the client's JSON text and writes it back compacted, with number spelling and string
-escapes kept and `<`, `>`, `&`, U+2028 and U+2029 escaped.
+escapes kept and `<`, `>`, `&`, U+2028 and U+2029 escaped. `live-events-out-of-range-number` uses
+it for relayed evidence, whose parsed form loses `1e400` and the digits of a large integer. A case
+with `rawText` compares its parsed body as a golden file can hold it, so `1e400` reads as `null`
+and `-0` as `0` there; every other case compares the parsed body as it is.
 
 The recorder notes when each request ran: from just before it sends to the last body byte. A time
 "from a request" lies in that bracket, allowing 2 ms for clock rounding and the value's own

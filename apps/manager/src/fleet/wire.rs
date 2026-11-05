@@ -14,10 +14,42 @@ use chrono::{DateTime, Datelike, NaiveDate, Timelike};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+use serde_json::value::RawValue;
 
-/// Raw JSON, Go's `json.RawMessage`: `null` when the key is missing.
-pub type Raw = Value;
+/// Raw JSON, Go's `json.RawMessage`: the server's text, relayed as written, so key order and
+/// number spelling survive and a number past `f64` does not fail the decode. `null` when the key
+/// is missing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Raw(Box<RawValue>);
+
+impl Default for Raw {
+    fn default() -> Self {
+        Self(RawValue::NULL.to_owned())
+    }
+}
+
+impl PartialEq for Raw {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
+}
+
+impl Raw {
+    /// The string member `key` of an object, or `""`.
+    pub fn member_str(&self, key: &str) -> String {
+        members(self.0.get())
+            .ok()
+            .and_then(|m| serde_json::from_str(m.get(key)?.get()).ok())
+            .unwrap_or_default()
+    }
+}
+
+/// An object's members, the last of repeated keys kept, as Go and `serde_json::Value` read them.
+/// The values stay text, so their numbers are never parsed.
+fn members(text: &str) -> serde_json::Result<BTreeMap<String, Box<RawValue>>> {
+    serde_json::from_str(text)
+}
 
 /// Keys whose values Go keeps as `json.RawMessage`; their contents are never normalized.
 const RAW_KEYS: [&str; 6] = ["source", "subject", "evidence", "scope", "reasons", "value"];
@@ -25,70 +57,126 @@ const RAW_KEYS: [&str; 6] = ["source", "subject", "evidence", "scope", "reasons"
 /// Float fields. Every other number the console decodes is an integer.
 const FLOAT_KEYS: [&str; 2] = ["score", "max_score"];
 
-/// Decodes `v` with Go's rules for typed fields. Go treats `null` and a missing key alike for
+/// The most levels a body may nest, counting each value one level below the array or object that
+/// holds it, raw values included. A body that ends in a scalar gets the 127 nested arrays and
+/// objects `serde_json::Value` allows, the bound this decode had when it parsed the whole body
+/// into one.
+const MAX_DEPTH: usize = 128;
+
+/// Decodes `json` with Go's rules for typed fields. Go treats `null` and a missing key alike for
 /// every typed field (a pointer stays nil, any other field keeps its zero value), so `null`
 /// members are removed and `#[serde(default)]` fills the rest. A `null` map entry is kept as the
 /// value type's zero value, as Go stores it. Go reads `-0` into an integer as 0, where serde
-/// reads it as a float, so `-0` outside a float field becomes 0.
+/// reads it as a float, so `-0` outside a float field becomes 0. A number past `f64` in a typed
+/// field fails the decode, as in Go. A body nested past `MAX_DEPTH`, raw values included, fails
+/// the decode.
 ///
 /// shortcut: a `null` element inside a typed array fails to decode, where Go stores the zero
 /// value; and `-0.0` or `-0e0` in an integer field decodes as 0, where Go refuses it. Upgrade if
 /// a server ever sends one.
-pub fn go_decode<T: DeserializeOwned>(v: Value) -> serde_json::Result<T> {
-    serde_json::from_value(normalize(v, false))
+pub fn go_decode<T: DeserializeOwned>(json: &RawValue) -> serde_json::Result<T> {
+    serde_json::from_str(&normalize(json, false, MAX_DEPTH)?)
 }
 
-fn normalize(v: Value, float: bool) -> Value {
-    match v {
-        Value::Object(m) => Value::Object(
-            m.into_iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| {
-                    let v = if RAW_KEYS.contains(&k.as_str()) {
-                        v
-                    } else if let Some(zero) = map_zero(&k) {
-                        normalize_map(v, zero)
-                    } else {
-                        normalize(v, FLOAT_KEYS.contains(&k.as_str()))
-                    };
-                    (k, v)
-                })
-                .collect(),
-        ),
-        Value::Array(a) => Value::Array(a.into_iter().map(|v| normalize(v, false)).collect()),
-        Value::Number(n)
-            if !float && n.as_f64().is_some_and(|f| f == 0.0 && f.is_sign_negative()) =>
-        {
-            Value::from(0)
+fn normalize(v: &RawValue, float: bool, depth: usize) -> serde_json::Result<String> {
+    let text = v.get();
+    let depth = depth.checked_sub(1).ok_or_else(too_deep)?;
+    Ok(match text.as_bytes().first() {
+        Some(b'{') => object(text, None, |k, v| {
+            if RAW_KEYS.contains(&k) {
+                if levels(v.get()) > depth {
+                    return Err(too_deep());
+                }
+                Ok(v.get().to_owned())
+            } else if let Some(zero) = map_zero(k) {
+                normalize_map(v, zero, depth)
+            } else {
+                normalize(v, FLOAT_KEYS.contains(&k), depth)
+            }
+        })?,
+        Some(b'[') => {
+            let items: Vec<Box<RawValue>> = serde_json::from_str(text)?;
+            let items: Vec<String> = items
+                .iter()
+                .map(|v| normalize(v, false, depth))
+                .collect::<serde_json::Result<_>>()?;
+            format!("[{}]", items.join(","))
         }
-        v => v,
+        Some(b'-') if !float && text.parse::<f64>().is_ok_and(|f| f == 0.0) => "0".to_owned(),
+        _ => text.to_owned(),
+    })
+}
+
+fn too_deep() -> serde_json::Error {
+    <serde_json::Error as serde::de::Error>::custom("recursion limit exceeded")
+}
+
+/// The levels `normalize` would count in `text`, which is valid JSON: the deepest value's level,
+/// where a value is one level below the array or object that holds it. A single pass with no
+/// recursion, so it measures any nesting safely.
+fn levels(text: &str) -> usize {
+    let (mut depth, mut max) = (0, 0);
+    let mut bytes = text.bytes();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'{' | b'[' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b'}' | b']' => depth -= 1,
+            b',' | b':' | b' ' | b'\t' | b'\n' | b'\r' => {}
+            // A key or scalar: either way the array or object holding it is not empty, so it
+            // holds a value one level down.
+            _ => {
+                max = max.max(depth + 1);
+                if b == b'"' {
+                    while let Some(b) = bytes.next() {
+                        match b {
+                            b'\\' => _ = bytes.next(),
+                            b'"' => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
     }
+    max
+}
+
+/// The object `text` written again with each member's value mapped by `f`. A `null` member is
+/// dropped, or written as `null_as` when one is given.
+fn object(
+    text: &str,
+    null_as: Option<&str>,
+    f: impl Fn(&str, &RawValue) -> serde_json::Result<String>,
+) -> serde_json::Result<String> {
+    let mut out = Vec::new();
+    for (k, v) in members(text)? {
+        let v = match (v.get(), null_as) {
+            ("null", None) => continue,
+            ("null", Some(zero)) => zero.to_owned(),
+            _ => f(&k, &v)?,
+        };
+        out.push(format!("{}:{v}", serde_json::to_string(&k)?));
+    }
+    Ok(format!("{{{}}}", out.join(",")))
 }
 
 /// The zero value Go stores for a `null` entry of each map field.
-fn map_zero(key: &str) -> Option<Value> {
+fn map_zero(key: &str) -> Option<&'static str> {
     match key {
-        "open_event_counts_24h" => Some(Value::from(0)),
-        "by_tool" => Some(Value::Object(Default::default())),
+        "open_event_counts_24h" => Some("0"),
+        "by_tool" => Some("{}"),
         _ => None,
     }
 }
 
-fn normalize_map(v: Value, zero: Value) -> Value {
-    match v {
-        Value::Object(m) => Value::Object(
-            m.into_iter()
-                .map(|(k, v)| {
-                    let v = if v.is_null() {
-                        zero.clone()
-                    } else {
-                        normalize(v, false)
-                    };
-                    (k, v)
-                })
-                .collect(),
-        ),
-        v => normalize(v, false),
+fn normalize_map(v: &RawValue, zero: &str, depth: usize) -> serde_json::Result<String> {
+    if v.get().starts_with('{') {
+        object(v.get(), Some(zero), |_, v| normalize(v, false, depth))
+    } else {
+        normalize(v, false, depth)
     }
 }
 
@@ -528,29 +616,38 @@ pub struct Event {
 
 impl Event {
     /// `evidence.kind`, or `""`.
-    pub fn evidence_kind(&self) -> &str {
-        self.evidence["kind"].as_str().unwrap_or_default()
+    pub fn evidence_kind(&self) -> String {
+        self.evidence.member_str("kind")
     }
 }
 
 /// Go's `Evidence.UnmarshalJSON`: an object whose `kind`, if present, is a string or `null`.
 fn evidence<'de, D: Deserializer<'de>>(d: D) -> Result<Raw, D::Error> {
-    let v = Value::deserialize(d)?;
-    match &v {
-        Value::Object(m)
-            if matches!(m.get("kind"), None | Some(Value::Null | Value::String(_))) =>
-        {
-            Ok(v)
-        }
-        _ => Err(D::Error::custom(
+    let raw = Raw::deserialize(d)?;
+    let kind_ok = |m: BTreeMap<String, Box<RawValue>>| {
+        m.get("kind")
+            .is_none_or(|k| serde_json::from_str::<Option<String>>(k.get()).is_ok())
+    };
+    if members(raw.0.get()).is_ok_and(kind_ok) {
+        Ok(raw)
+    } else {
+        Err(D::Error::custom(
             "fleet: evidence: not an object with a string kind",
-        )),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode<T: DeserializeOwned>(json: impl ToString) -> serde_json::Result<T> {
+        go_decode(&serde_json::from_str::<Box<RawValue>>(&json.to_string()).unwrap())
+    }
+
+    fn text(raw: &Raw) -> &str {
+        raw.0.get()
+    }
 
     #[test]
     fn parse_accepts_and_refuses_what_go_time_parse_does() {
@@ -597,7 +694,7 @@ mod tests {
 
     #[test]
     fn decoding_follows_go_for_missing_null_and_unknown_fields() {
-        let page: HostsPage = go_decode(serde_json::json!({
+        let page: HostsPage = decode(serde_json::json!({
             "hosts": [{"host_id": "h", "hostname": null, "status": null, "extra": 1,
                 "open_event_counts_24h": {"warn": 2}}],
             "added_later": true
@@ -612,23 +709,53 @@ mod tests {
                 "next_cursor": null, "total_estimated": 0})
         );
 
-        let ev: Event = go_decode(serde_json::json!({
-            "event_id": "e", "evidence": {"kind": "x", "inner": null}, "subject": null
-        }))
+        let ev: Event = decode(
+            r#"{"event_id": "e", "evidence": {"kind": "x", "inner": null, "n": 1e400}, "subject": null}"#,
+        )
         .unwrap();
-        assert_eq!(ev.evidence, serde_json::json!({"kind": "x", "inner": null}));
-        assert_eq!(ev.subject, Value::Null);
-        let ev: Event = go_decode(serde_json::json!({"evidence": {"kind": null}})).unwrap();
-        assert_eq!(ev.evidence, serde_json::json!({"kind": null}));
+        assert_eq!(
+            text(&ev.evidence),
+            r#"{"kind": "x", "inner": null, "n": 1e400}"#
+        );
+        assert_eq!(text(&ev.subject), "null");
+        assert_eq!(ev.evidence_kind(), "x");
+        let ev: Event = decode(r#"{"evidence": {"kind": null}}"#).unwrap();
+        assert_eq!(text(&ev.evidence), r#"{"kind": null}"#);
         assert_eq!(ev.evidence_kind(), "");
         for bad in [
-            serde_json::json!({"evidence": "text"}),
-            serde_json::json!({"evidence": {"kind": 5}}),
-            serde_json::json!({"schema_version": 1.5}),
-            serde_json::json!({"ts": 5}),
+            r#"{"evidence": "text"}"#,
+            r#"{"evidence": {"kind": 5}}"#,
+            r#"{"schema_version": 1.5}"#,
+            r#"{"ts": 5}"#,
+            // Typed fields are parsed: a number past f64 fails the body, as in Go.
+            r#"{"schema_version": 1e400}"#,
         ] {
-            assert!(go_decode::<Event>(bad.clone()).is_err(), "{bad}");
+            assert!(decode::<Event>(bad).is_err(), "{bad}");
         }
+        assert!(decode::<HostDetail>(r#"{"current_risk": {"max_score": 1e400}}"#).is_err());
+    }
+
+    /// Raw and typed values share one nesting limit: the one `serde_json::Value` set when this
+    /// decode parsed the whole body into it.
+    #[test]
+    fn nesting_is_bounded_under_raw_and_typed_keys() {
+        let body = |key: &str, n: usize| {
+            let (open, close) = ("[".repeat(n), "]".repeat(n));
+            format!(r#"{{"{key}":{{"kind":"k","x":{open}1{close}}}}}"#)
+        };
+        for key in ["evidence", "unknown"] {
+            for (n, ok) in [(125, true), (126, false), (100_000, false)] {
+                let as_value = serde_json::from_str::<serde_json::Value>(&body(key, n));
+                assert_eq!(as_value.is_ok(), ok, "{key} at {n} as Value");
+                assert_eq!(decode::<Event>(body(key, n)).is_ok(), ok, "{key} at {n}");
+            }
+        }
+        // Brackets inside strings, escaped quotes included, are text, not nesting.
+        let brackets = format!(
+            r#"{{"evidence":{{"kind":"\"{}","x":[]}}}}"#,
+            "[{".repeat(200)
+        );
+        assert!(decode::<Event>(brackets).is_ok());
     }
 
     /// A `null` map entry is the value type's zero value, and `-0` is 0 in an integer field and
@@ -639,7 +766,7 @@ mod tests {
             "current_risk": {"max_score": -0, "by_tool": {"codex": null}},
             "ai_guard": {"by_tool": {"gemini": null}},
             "agent_health": {"hash_p99_ms_latest": -0, "recent_channel_stalls_24h": -0}}"#;
-        let host: HostDetail = go_decode(serde_json::from_str(body).unwrap()).unwrap();
+        let host: HostDetail = decode(body).unwrap();
         let out = serde_json::to_value(&host).unwrap();
         assert_eq!(
             out["open_event_counts_24h"],
@@ -663,8 +790,7 @@ mod tests {
         );
         assert_eq!(out["agent_health"]["hash_p99_ms_latest"], 0);
         assert_eq!(out["agent_health"]["recent_channel_stalls_24h"], 0);
-        let ev: Event =
-            go_decode(serde_json::from_str(r#"{"schema_version": -0}"#).unwrap()).unwrap();
+        let ev: Event = decode(r#"{"schema_version": -0}"#).unwrap();
         assert_eq!(ev.schema_version, 0);
     }
 }
