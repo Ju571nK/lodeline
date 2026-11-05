@@ -11,11 +11,11 @@ import { NotAssessedNotice } from './RiskTable';
 
 afterEach(cleanup);
 
-async function renderNotice(count: number | undefined) {
+async function renderNotice(count: number | undefined, link = true) {
   const rootRoute = createRootRoute({
     component: () => (
       <div data-testid="page">
-        <NotAssessedNotice count={count} />
+        <NotAssessedNotice count={count} link={link} />
       </div>
     ),
   });
@@ -41,6 +41,14 @@ describe('not-assessed notice on the Risk tab', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       '1 host is not assessed. It has failing AI Guard sources and no score, so this table leaves it out.',
     );
+  });
+
+  it('leaves out the link when asked', async () => {
+    await renderNotice(2, false);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /^2 hosts are not assessed\. .* leaves them out\.$/,
+    );
+    expect(screen.queryByRole('link')).toBeNull();
   });
 
   // 0: no such host. undefined: a server that predates the count.

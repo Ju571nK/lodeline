@@ -62,7 +62,11 @@ function RiskTab() {
           </button>
         ))}
       </div>
-      <NotAssessedNotice count={risk.firstPage?.not_assessed_host_count} />
+      {/* The server counts per selected tool, but the Devices filter spans all tools. */}
+      <NotAssessedNotice
+        count={risk.firstPage?.not_assessed_host_count}
+        link={!filter.tool.length}
+      />
       <div className="overflow-hidden rounded-md border border-border bg-bg-surface">
         <RiskTable rows={rows} isPending={isPending} />
         <Pagination {...risk} count={rows.length} />

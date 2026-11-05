@@ -39,8 +39,9 @@ function DevicesTab() {
     hostID,
   );
   const needle = search.trim().toLowerCase();
-  // shortcut: notAssessed filters loaded pages only, like search; add a server-side hosts filter
-  // if fleets with not-assessed hosts past the first page become common.
+  // shortcut: notAssessed filters loaded pages only, like search, and spans all tools, so the Risk
+  // tab links here only with no tool filter; add a server-side hosts filter with a tool parameter
+  // if fleets with not-assessed hosts past the first page or per-tool triage become common.
   const rows = devices.rows.filter(
     (host) =>
       (!notAssessed || (!host.current_risk && host.ai_guard_unassessed)) &&
@@ -96,7 +97,7 @@ function DevicesTab() {
               navigate({ search: { status, notAssessed: event.target.checked || undefined } })
             }
           />
-          Not assessed only
+          Failing AI Guard sources, no score
         </label>
         <label className="grid gap-1">
           Target agent version
@@ -109,10 +110,10 @@ function DevicesTab() {
         </label>
       </div>
       <p className="text-xs text-text-muted">
-        Status applies across the server results; search and Not assessed only apply to loaded
-        devices only. Versions are last reported, not verified installations. Target comparison is
-        an exact match (ignoring a leading v), not an upgrade recommendation; the target is
-        temporary for this view.
+        Status applies across the server results; search and "Failing AI Guard sources, no score"
+        apply to loaded devices only. Versions are last reported, not verified installations. Target
+        comparison is an exact match (ignoring a leading v), not an upgrade recommendation; the
+        target is temporary for this view.
       </p>
       <div className="overflow-x-auto rounded-md border border-border bg-bg-surface">
         {devices.isPending ? (
@@ -121,9 +122,11 @@ function DevicesTab() {
           <p className="p-6 text-sm text-text-muted">
             {devices.error
               ? 'Device data is unavailable.'
-              : devices.rows.length || devices.hasMore
-                ? 'No matching devices in loaded results.'
-                : 'No observed devices for this status.'}
+              : devices.hasMore
+                ? 'None of the loaded devices match. Load more to keep looking.'
+                : devices.rows.length
+                  ? 'No matching devices in loaded results.'
+                  : 'No observed devices for this status.'}
           </p>
         ) : (
           <table className="w-full text-left text-xs">
