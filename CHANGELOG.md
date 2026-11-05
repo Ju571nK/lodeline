@@ -88,6 +88,9 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - The agent stamps an AI Guard reading's event and its cached copy with one time, so the
   `last_assessed_ts` of a later `ai_guard_assess_failed` event equals that reading's `ts`. (#333)
 
+- The web console shows a reason kind or tool that is not a string as "Unknown" instead of
+  failing to render the page. (#333)
+
 ## [0.12.6] - 2026-11-05
 
 ### Changed

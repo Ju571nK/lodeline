@@ -35,6 +35,11 @@ describe('humanTool', () => {
   it('falls back to the raw string for unknown tools', () => {
     expect(humanTool('future_tool')).toBe('future_tool');
   });
+
+  it('shows "Unknown" for a tool that is not a string', () => {
+    expect(humanTool({ name: 'x' } as unknown as string)).toBe('Unknown');
+    expect(humanTool(7 as unknown as string)).toBe('Unknown');
+  });
 });
 
 describe('humanKind', () => {
@@ -54,6 +59,12 @@ describe('humanKind', () => {
   it('preserves empty segments from leading/double underscores', () => {
     expect(humanKind('a__b')).toBe('A  B');
   });
+
+  it('shows "Unknown" for a kind that is not a string instead of throwing', () => {
+    expect(humanKind(7 as unknown as string)).toBe('Unknown');
+    expect(humanKind(null as unknown as string)).toBe('Unknown');
+    expect(humanKind({} as unknown as string)).toBe('Unknown');
+  });
 });
 
 describe('shortPath', () => {
@@ -66,6 +77,10 @@ describe('shortPath', () => {
   it('truncates long paths to "…/" plus the last two segments', () => {
     expect(shortPath('/home/user/project/src/index.ts')).toBe('…/src/index.ts');
     expect(shortPath('a/b/c')).toBe('…/b/c');
+  });
+
+  it('returns "" for a path that is not a string', () => {
+    expect(shortPath(7 as unknown as string)).toBe('');
   });
 });
 

@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ReasonLike } from '@/api/fleet';
 import { ReasonList } from './ReasonList';
 
 afterEach(cleanup);
@@ -84,5 +85,10 @@ describe('reason evidence', () => {
     expect(screen.getByText(path)).toBeVisible();
     expect(screen.getByText('false')).toBeInTheDocument();
     expect(screen.getByText('<script>alert(1)</script>')).toBeInTheDocument();
+  });
+  it('renders a reason whose kind is not a string', () => {
+    render(<ReasonList reasons={[{ kind: 7, server: 'server-x' } as unknown as ReasonLike]} />);
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.getByText('server-x')).toBeInTheDocument();
   });
 });
