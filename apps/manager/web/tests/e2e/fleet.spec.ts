@@ -87,11 +87,14 @@ test.describe('fleet pages', () => {
     await page.getByRole('link', { name: /alice/ }).first().click();
     await expect(page).toHaveURL(/\/hosts\/5a7c3e91-aaaa-bbbb-cccc-111111111111/);
     // Header + AI Guard block render. Scope "AI Guard risk" to the section
-    // heading — the literal also appears as "Ai Guard Risk Assessed" event-kind
+    // heading — the literal also appears as "AI Guard risk assessed" event-kind
     // cells in the Recent Events table below (strict-mode would match both).
     await expect(page.getByRole('heading', { name: /alice-mbp/ })).toBeVisible({ timeout: 5_000 });
     await expect(page.getByRole('heading', { name: /AI Guard risk/i })).toBeVisible();
     await expect(page.getByText(/claude code/i).first()).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: /^Inspect AI Guard risk assessed / }).first(),
+    ).toBeVisible();
   });
 
   test('host detail shows metadata + per-host events', async ({ page }) => {

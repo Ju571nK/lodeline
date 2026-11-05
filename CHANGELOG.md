@@ -91,6 +91,10 @@ also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline/releases
 - The web console shows a reason kind or tool that is not a string as "Unknown" instead of
   failing to render the page. (#333)
 
+- The console's event timeline shows `ai_guard_risk_assessed` as "AI Guard risk assessed" and
+  `ai_guard_toggle_drift` as "AI Guard toggle drift", next to "AI Guard assessment failed".
+  (#333)
+
 ## [0.12.6] - 2026-11-05
 
 ### Changed
