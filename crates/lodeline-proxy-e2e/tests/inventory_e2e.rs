@@ -429,6 +429,11 @@ impl Running {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
+        self.call_on(&client, body).await
+    }
+
+    /// [`Running::call`] on `client`, so a load loop reuses its connection.
+    async fn call_on(&self, client: &reqwest::Client, body: Value) -> (u16, Value) {
         let url = format!("http://127.0.0.1:{}/mcp/r1", self.listen);
         let mut session = self.session.lock().await;
         if session.is_none() {
@@ -662,6 +667,45 @@ async fn a_forged_cursor_never_completes_a_listing() {
     assert!(h.snapshots().await.is_empty());
 }
 
+/// Calls of `method` from `clients` concurrent clients, `calls` each, through
+/// the relay; returns how many were answered 503.
+async fn refused_under_load(
+    px: &Arc<Running>,
+    method: &'static str,
+    clients: u64,
+    calls: u64,
+) -> u64 {
+    let mut tasks = Vec::new();
+    for c in 0..clients {
+        let px = px.clone();
+        tasks.push(tokio::spawn(async move {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap();
+            let mut refused = 0;
+            for i in 0..calls {
+                let mut body = json!({"jsonrpc": "2.0", "id": c * 1000 + i, "method": method});
+                if method == "tools/call" {
+                    body["params"] = json!({"name": NAMES[0], "arguments": {}});
+                }
+                let (st, v) = px.call_on(&client, body).await;
+                match st {
+                    200 => {}
+                    503 => refused += 1,
+                    other => panic!("{method} answered {other}: {v}"),
+                }
+            }
+            refused
+        }));
+    }
+    let mut refused = 0;
+    for t in tasks {
+        refused += t.await.unwrap();
+    }
+    refused
+}
+
 /// Concurrent `tools/call` through the relay on a healthy registry are never
 /// refused. At the per-principal call limit (8) more registry lookups overlap
 /// than there are blocking-read slots, and an overlap is not a registry that
@@ -674,32 +718,28 @@ async fn concurrent_tool_calls_on_a_healthy_registry_are_not_refused() {
     let px = Arc::new(start_proxy(&h, Duration::from_secs(120)).await);
     assert_eq!(px.list_all().await, 1);
     let (clients, calls) = (8, 100);
-    let mut tasks = Vec::new();
-    for c in 0..clients {
-        let px = px.clone();
-        tasks.push(tokio::spawn(async move {
-            let mut refused = 0;
-            for i in 0..calls {
-                let (st, v) = px
-                    .call(
-                        json!({"jsonrpc": "2.0", "id": c * 1000 + i, "method": "tools/call",
-                                 "params": {"name": NAMES[0], "arguments": {}}}),
-                    )
-                    .await;
-                match st {
-                    200 => {}
-                    503 => refused += 1,
-                    other => panic!("tools/call answered {other}: {v}"),
-                }
-            }
-            refused
-        }));
-    }
-    let mut refused = 0;
-    for t in tasks {
-        refused += t.await.unwrap();
-    }
+    let refused = refused_under_load(&px, "tools/call", clients, calls).await;
     assert_eq!(refused, 0, "of {} tools/call", clients * calls);
+    Arc::into_inner(px).expect("no clients left").stop().await;
+    assert!(h.srv.stop().await > 0);
+}
+
+/// Sustained concurrent load keeps every call: the audit writer keeps up with
+/// completions, so its bounded queue never fills and no start is refused.
+/// More calls than the queue holds, for a call that needs no registry lookup
+/// (`ping`) and one that does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sustained_concurrent_calls_are_not_refused() {
+    let Some(h) = H::new(&[(NAMES[0], "first tool")], 10).await else {
+        return;
+    };
+    let px = Arc::new(start_proxy(&h, Duration::from_secs(120)).await);
+    assert_eq!(px.list_all().await, 1);
+    let (clients, calls) = (8, 400);
+    for method in ["ping", "tools/call"] {
+        let refused = refused_under_load(&px, method, clients, calls).await;
+        assert_eq!(refused, 0, "of {} {method}", clients * calls);
+    }
     Arc::into_inner(px).expect("no clients left").stop().await;
     assert!(h.srv.stop().await > 0);
 }

@@ -1307,6 +1307,52 @@ mod tests {
         assert_eq!(ev[2]["payload"]["reason"], "cancel_no_response");
     }
 
+    /// Concurrent callers each run start, then completion, more calls than the
+    /// queue holds. The writer keeps up with the completions while the starts
+    /// commit side by side, so no start is refused and no record is lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sustained_concurrent_calls_are_neither_refused_nor_lost() {
+        let d = tempfile::tempdir().unwrap();
+        let sp = spool(d.path());
+        let (g, gaps) = gaps();
+        let (sink, h) =
+            InvocationSink::start(Admission::new(sp.clone()), "px-1", sp.epoch_id(), None, g)
+                .unwrap();
+        let (clients, calls) = (16u64, 400u64);
+        let mut tasks = Vec::new();
+        for c in 0..clients {
+            let sink = sink.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut refused = 0;
+                for i in 0..calls {
+                    let seq = c * calls + i + 1;
+                    let s = started(seq, Method::Ping, ToolField::NotApplicable);
+                    if sink.request_started(&s).await == StartVerdict::Refuse {
+                        refused += 1;
+                        continue;
+                    }
+                    sink.observe(Observation::Completed(completed(
+                        seq,
+                        Outcome::Success,
+                        Delivery::Sent,
+                        Cause::None,
+                        false,
+                    )));
+                }
+                refused
+            }));
+        }
+        let mut refused = 0;
+        for t in tasks {
+            refused += t.await.unwrap();
+        }
+        assert!(h.shutdown(Duration::from_secs(30)).await);
+        assert_eq!(refused, 0, "of {} starts", clients * calls);
+        assert_eq!(sink.lost_records(), 0);
+        assert!(gaps.lock().unwrap().is_empty());
+        assert_eq!(events(d.path()).len() as u64, 2 * clients * calls);
+    }
+
     #[tokio::test]
     async fn a_full_or_broken_spool_refuses_the_start() {
         let d = tempfile::tempdir().unwrap();
