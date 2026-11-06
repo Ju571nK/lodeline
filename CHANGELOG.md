@@ -9,6 +9,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- `lodeline doctor` now starts each hook exe that `lodeline-hook install` registered, with
+  `--version`, no stdin and a 2-second limit, and warns about each one that cannot start. Before,
+  nothing on the host reported such a hook. On Windows, Smart App Control or a WDAC policy can
+  block an unsigned `lodeline-hook.exe` while `lodeline.exe` still runs. Claude Code then logs
+  hook status 126 and runs the tool, Codex shows nothing, no event reaches the agent, and an
+  `--enforce` deny rule has no effect. Doctor now prints `[WARN] hook <agent>: cannot start
+  <path>: blocked by Windows Application Control (Smart App Control or WDAC); hooks will not run`
+  and exits `1`. A missing or non-executable hook gets the same warning with the OS error. A hook
+  that starts prints `[OK]`. Doctor does not run this check as root. See the Platform section of
+  `docs/install-personal.md`.
 - Releases now ship the `lodeline-manager` web console. Each release has a
   `lodeline-manager-<version>-<target>.tar.gz` archive (`.zip` on Windows) for the same five
   targets as the agent, with the SPA built in, so an operator no longer builds the console from

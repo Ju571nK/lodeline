@@ -9,6 +9,7 @@
 - `doctor-daemon-down` falls back to the static rubric when no daemon answers.
 - `doctor-override` marks a `--policy` rubric override with `*`.
 - `doctor-bad-policy` exits `2` on a policy that does not parse.
+- `doctor-hook-launch` starts each hook exe that `lodeline-hook install` registered and warns when one cannot start.
 
 ## How to get to it (user POV)
 
@@ -27,6 +28,8 @@ Preconditions:
 - **Override marker.** Run `drive.sh run "$RUN" doctor-override -- lodeline doctor --policy ../home/override.yaml`. `.stdout` holds `destructive_in_hook_script            5.0 *`.
 - **Bad policy.** Run `drive.sh run "$RUN" doctor-bad -- lodeline doctor --policy ../home/bad.yaml`. Exit code `2`, stdout holds `[ERROR] policy parse failed`, and the last line is `1 error(s); daemon will not start.`.
 - **No state created.** Run `drive.sh run "$RUN" doctor-side-effects -- find ../state -type f`. Stdout is empty.
+- **Hook starts.** Run `drive.sh run "$RUN" doctor-hook-install -- sh -c 'mkdir -p "$HOME/hook dir" && cp "$(command -v lodeline-hook)" "$HOME/hook dir/" && "$HOME/hook dir/lodeline-hook" install --agent claude-code --write'`, then `drive.sh run "$RUN" doctor-hook-ok -- lodeline doctor`. Stdout holds `[OK]   hook claude-code:` and a path that ends in `hook dir/lodeline-hook starts`.
+- **Hook cannot start.** Run `drive.sh run "$RUN" doctor-hook-chmod -- sh -c 'chmod -x "$HOME/hook dir/lodeline-hook"'`, then `drive.sh run "$RUN" doctor-hook-blocked -- lodeline doctor`. Exit code `1`, and stdout holds `[WARN] hook claude-code: cannot start` and `Permission denied (os error 13); hooks will not run`. The Windows Application Control text needs a Windows host where Smart App Control or WDAC blocks the exe, which this harness cannot drive.
 
 ## Gotchas
 

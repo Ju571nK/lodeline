@@ -7,11 +7,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// Result of a single doctor check: `(level, message)`. Free type so the
-/// Linux helpers don't have to thread `warn_count`/`error_count` themselves —
-/// the main `run()` aggregates from the returned `Level`. Linux-only because
-/// every consumer (`check_selinux`, `check_control_socket_perms`,
-/// `check_systemd_unit`, `check_events_dir_perms`) is Linux-only.
-#[cfg(target_os = "linux")]
+/// helpers don't have to thread `warn_count`/`error_count` themselves; the
+/// main `run()` aggregates from the returned `Level`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CheckLevel {
     Ok,
@@ -19,14 +16,12 @@ pub(crate) enum CheckLevel {
     Warn,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CheckResult {
     pub(crate) level: CheckLevel,
     pub(crate) message: String,
 }
 
-#[cfg(target_os = "linux")]
 impl CheckResult {
     pub(crate) fn ok(msg: impl Into<String>) -> Self {
         Self {
@@ -301,43 +296,49 @@ pub fn run(
         }
     }
 
+    let mut checks = Vec::new();
     #[cfg(target_os = "linux")]
-    {
-        let checks = [
-            check_selinux(std::path::Path::new("/sys/fs/selinux/enforce")),
-            {
-                // Resolve the SAME socket path the daemon/CLI use: root →
-                // /var/run/lodeline, non-root → the XDG/tmp fallback. Expect it to
-                // be owned by our euid (root for a root install). A non-root
-                // personal install therefore no longer warns about a root-owned
-                // socket at a path it never binds (#178).
-                let euid = unsafe { libc::geteuid() };
-                check_control_socket_perms(control_socket, std::path::Path::new("/etc/group"), euid)
-            },
-            check_systemd_unit(
-                std::path::Path::new("/run/systemd/system"),
-                std::path::Path::new("/usr/lib/systemd/system/lodeline.service"),
-                std::path::Path::new("/sys/fs/cgroup/system.slice/lodeline.service/cgroup.procs"),
-                std::path::Path::new(
-                    "/etc/systemd/system/multi-user.target.wants/lodeline.service",
-                ),
-            ),
-            check_events_dir_perms(
-                std::path::Path::new("/var/log/lodeline"),
-                std::path::Path::new("/etc/group"),
-            ),
-        ];
-        for r in checks {
-            let prefix = match r.level {
-                CheckLevel::Ok => "[OK]  ",
-                CheckLevel::Info => "[INFO]",
-                CheckLevel::Warn => {
-                    warn_count += 1;
-                    "[WARN]"
-                }
-            };
-            println!("{prefix} {}", r.message);
-        }
+    checks.extend([
+        check_selinux(std::path::Path::new("/sys/fs/selinux/enforce")),
+        {
+            // Resolve the SAME socket path the daemon/CLI use: root →
+            // /var/run/lodeline, non-root → the XDG/tmp fallback. Expect it to
+            // be owned by our euid (root for a root install). A non-root
+            // personal install therefore no longer warns about a root-owned
+            // socket at a path it never binds (#178).
+            let euid = unsafe { libc::geteuid() };
+            check_control_socket_perms(control_socket, std::path::Path::new("/etc/group"), euid)
+        },
+        check_systemd_unit(
+            std::path::Path::new("/run/systemd/system"),
+            std::path::Path::new("/usr/lib/systemd/system/lodeline.service"),
+            std::path::Path::new("/sys/fs/cgroup/system.slice/lodeline.service/cgroup.procs"),
+            std::path::Path::new("/etc/systemd/system/multi-user.target.wants/lodeline.service"),
+        ),
+        check_events_dir_perms(
+            std::path::Path::new("/var/log/lodeline"),
+            std::path::Path::new("/etc/group"),
+        ),
+    ]);
+    if crate::control::is_root() {
+        // A root doctor would run a path from a file that `sudo` may resolve in
+        // the invoking user's home.
+        checks.push(CheckResult::info(
+            "hook launch: not checked as root; run `lodeline doctor` as the user whose agent runs the hooks",
+        ));
+    } else {
+        checks.extend(check_hook_launch(&lodeline_core::paths::hook_state_dir()));
+    }
+    for r in checks {
+        let prefix = match r.level {
+            CheckLevel::Ok => "[OK]  ",
+            CheckLevel::Info => "[INFO]",
+            CheckLevel::Warn => {
+                warn_count += 1;
+                "[WARN]"
+            }
+        };
+        println!("{prefix} {}", r.message);
     }
 
     #[cfg(feature = "operator-cli")]
@@ -383,6 +384,88 @@ pub fn run(
     } else {
         println!("All checks passed.");
         0
+    }
+}
+
+/// `ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION`: `CreateProcessW` fails with it when
+/// Smart App Control or WDAC blocks an unsigned exe. No Unix errno has this value.
+const APP_CONTROL_BLOCKED: i32 = 4551;
+
+/// Start each hook exe that `lodeline-hook install` registered, as the agent
+/// would, so a hook the OS refuses to run shows up here instead of as an
+/// agent-side hook error that nothing reports.
+fn check_hook_launch(state_dir: &Path) -> Vec<CheckResult> {
+    let mut hooks: Vec<(String, String)> = std::fs::read_dir(state_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let agent = name
+                .strip_prefix("hook-registration-")?
+                .strip_suffix(".json")?
+                .to_string();
+            let baseline: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
+            Some((
+                agent,
+                hook_exe(baseline.get("command")?.as_str()?).to_string(),
+            ))
+        })
+        .collect();
+    if hooks.is_empty() {
+        return vec![CheckResult::info(format!(
+            "hook launch: no hook registered by `lodeline-hook install` in {}",
+            state_dir.display()
+        ))];
+    }
+    hooks.sort();
+    hooks
+        .into_iter()
+        .map(|(agent, exe)| match start_hook(Path::new(&exe)) {
+            Ok(()) => CheckResult::ok(format!("hook {agent}: {exe} starts")),
+            Err(e) => CheckResult::warn(format!(
+                "hook {agent}: cannot start {exe}: {}; hooks will not run",
+                launch_failure(&e)
+            )),
+        })
+        .collect()
+}
+
+/// The exe at the start of a registered hook command: a leading double-quoted
+/// path, else the first whitespace token (the form `lodeline-hook install` writes).
+fn hook_exe(command: &str) -> &str {
+    let command = command.trim_start();
+    match command.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or(""),
+        None => command.split([' ', '\t']).next().unwrap_or(""),
+    }
+}
+
+fn start_hook(exe: &Path) -> std::io::Result<()> {
+    let mut child = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while child.try_wait()?.is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+fn launch_failure(e: &std::io::Error) -> String {
+    if e.raw_os_error() == Some(APP_CONTROL_BLOCKED) {
+        "blocked by Windows Application Control (Smart App Control or WDAC)".to_string()
+    } else {
+        e.to_string()
     }
 }
 
@@ -1114,6 +1197,65 @@ mod linux_tests {
             assert_eq!(r.level, CheckLevel::Warn, "{r:?}");
             assert!(r.message.contains("uid="), "{:?}", r);
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_launch_tests {
+    use super::*;
+
+    #[test]
+    fn app_control_block_is_named() {
+        let e = std::io::Error::from_raw_os_error(4551);
+        assert_eq!(
+            launch_failure(&e),
+            "blocked by Windows Application Control (Smart App Control or WDAC)"
+        );
+        let other = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(launch_failure(&other), other.to_string());
+    }
+
+    #[test]
+    fn missing_hook_exe_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("no such dir").join("lodeline-hook");
+        let exe = exe.to_str().unwrap();
+        std::fs::write(
+            dir.path().join("hook-registration-codex.json"),
+            serde_json::json!({ "command": format!("\"{exe}\" codex --capture redacted") })
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("hook-index.json"), "[]").unwrap();
+        let r = check_hook_launch(dir.path());
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].level, CheckLevel::Warn, "{r:?}");
+        assert!(
+            r[0].message
+                .starts_with(&format!("hook codex: cannot start {exe}: "))
+                && r[0].message.ends_with("; hooks will not run"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn no_registration_is_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = check_hook_launch(dir.path());
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].level, CheckLevel::Info, "{r:?}");
+    }
+
+    #[test]
+    fn hook_exe_reads_quoted_and_bare_paths() {
+        assert_eq!(
+            hook_exe(r#""C:/Program Files/x/lodeline-hook.exe" codex --capture redacted"#),
+            "C:/Program Files/x/lodeline-hook.exe"
+        );
+        assert_eq!(
+            hook_exe("/usr/bin/lodeline-hook claude-code --capture redacted"),
+            "/usr/bin/lodeline-hook"
+        );
     }
 }
 
