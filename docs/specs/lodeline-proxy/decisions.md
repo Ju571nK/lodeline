@@ -185,8 +185,11 @@ M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 �
   completion을 잃은 호출은 start만 남는다(재시작 뒤 completion이 없는 호출과 같은 기본값, 2026-10-20). 잃은 ACK 표시는 재전송되고 서버가 같은 digest로 중복 처리한다.
   DB는 깨지지 않는다(WAL frame checksum, SQLite 문서의 NORMAL 일관성 보장).
 - 잃은 기록의 sequence는 재시작 뒤 다시 배정된다. 그래서 spool은 fsync로 덮인 행만 수집 client에 넘긴다. 이전 규칙 "sequence는 재사용하지 않는다"는
-  "proxy 밖으로 나간 sequence는 재사용하지 않는다"가 된다. status의 `last_assigned_sequence`는 durable하지 않은 sequence를 보고할 수 있으나, 서버는 그 수로
-  tail gap만 열고 그 sequence의 event가 도착하면 닫으므로 내용 충돌이 생기지 않는다.
+  "proxy 밖으로 나간 sequence는 재사용하지 않는다"가 된다. status의 `last_assigned_sequence`는 durable하지 않은 sequence를 보고할 수 있다. 서버는 tail gap을
+  `last_assigned_sequence − spool.unsent_events`까지만 여는데(2026-10-21 결정), durable하지 않은 행은 수집 client에 넘기지 않으므로
+  늘 `unsent_events`에도 들어 있다. 그래서 tail 끝은 전원 손실 뒤에도 남는 sequence만 가리키고, 사라질 수 있는 sequence로 tail gap이 열리지 않는다
+  (2026-11-06 확인, 시험 `the_tail_a_status_names_survives_a_power_loss`). `last_assigned_sequence`만 `durable_seq`로 낮추면 이 차이가
+  durable하지 않은 행 수만큼 작아져 실제 tail을 다음 fsync까지 덜 보고하므로 그렇게 하지 않는다.
 - line 146과 다른 점: 이전에는 spool의 모든 기록이 fsync 뒤 local ack였다. 이제 start만 그렇고, completion·cancel·ACK 표시는 commit 뒤 응답한다.
 - 함께 바꾼 것(계약 안): `wal_autocheckpoint=0`. checkpoint는 commit 안이 아니라 writer의 명령 사이에서 돈다. maintenance pass마다, 수집 client가
   durable하지 않은 행만 찾았을 때, 그리고 512 명령마다 한 번(WAL 상한) 한다.

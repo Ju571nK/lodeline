@@ -84,6 +84,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-proxy` no longer refuses healthy calls with HTTP 503 `audit_unavailable` under
+  sustained concurrent load. The audit writer stored one completion at a time and waited for
+  each before the next, while the call starts committed side by side, so its queue of 1024
+  records filled within about 1,300 calls in a local test. From then on the proxy refused new
+  calls, and the completions that found the queue full were lost and reported as
+  `local_record_failed` gaps. A local run of 8 clients making 400 `ping` calls each had about
+  1,300 of 3,200 calls refused this way, and `tools/call` behaved the same. The writer now hands
+  its whole queue to the spool at once. Start records are still durable before the proxy
+  forwards a call, and a full or failing spool still refuses calls as before.
 - `lodeline-server` no longer lets an agent clock that runs ahead keep a host `healthy` or
   empty its 24-hour counts. It used to take a host's `last_seen_ts` and the hour of each
   24-hour count from the event's own timestamp. One event dated days ahead then kept the host

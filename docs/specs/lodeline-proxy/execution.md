@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-06 · spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-06 · 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,73 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-06 지속 부하에서 감사 writer queue가 차서 나던 503 수정 (`fix/proxy-writer-queue`)
+
+증상: 동시 호출을 오래 걸면 정상 호출이 503 `audit_unavailable`로 거절됐다. 로컬에서 relay를 지나는 8 client × 400 `ping`은 3,200회 중 1,295–1,330회,
+AWS gp3에서 동시성 8 `tools/call`은 3,200회 중 1,239–1,510회였다. [validation.md](validation.md)는 정상 부하에서 거절 0을 요구한다.
+
+client 요청에서 spool까지의 경로:
+
+1. relay는 upstream에 닿기 전에 `request_started`를 기다리고, 거절이면 503 `audit_unavailable`로 답한다(`server.rs`).
+2. `record_start`(`invocation_sink.rs`)는 기다리지 않고 바로 거절한다: 종료 중, writer queue가 가득 참(`tx.capacity() == 0`, `QUEUE_DEPTH` 1024),
+   진행 중 호출 4,096개(`MAX_INFLIGHT`), 같은 호출 번호.
+3. `tools/call`만 registry 조회를 한다. slot 4개를 `LOOKUP_TIMEOUT`(2초) 안에서 기다린다(`fix/proxy-lookup-503`).
+4. start는 자기 task에서 spool에 append하고 commit과 fsync를 기다린다. spool 명령 channel은 상한이 없고, spool writer thread 하나가 FIFO 순서로
+   명령마다 transaction 하나를 commit한다. spool이 거절하는 것은 가득 참(`Full`)과 저장 불가(`Unavailable`)뿐이다.
+5. cancel, completion, 거절 쌍은 relay가 기다리지 않는 bounded queue(1024)에 들어가고, 넘치면 `local_record_failed` gap으로 센다.
+   writer task 하나가 이를 spool에 append한다.
+
+원인: 5의 writer task는 기록 하나를 append하고 그 응답을 받은 뒤에야 다음 기록을 꺼냈다. start는 호출마다 자기 task에서 같은 spool FIFO에
+들어가므로, completion 하나는 앞에 줄 선 start를 모두 기다렸다. 로컬 e2e에 임시 계측을 넣어 확인했다. completion 두 개 사이에 spool이 commit한
+start는 0–8개(대부분 3–6개)였고, writer queue는 completion 40개마다 0, 175, 384, 565, 751, 937, 1024로 늘어난 뒤 가득 찬 채로 남았다.
+거절은 모두 2의 `tx.capacity() == 0`에서 나왔다(`ping` 3회 1,295–1,330회 전부, `tools/call` 1회 1,173회 전부). `ping`은 조회를 하지 않으므로
+조회 slot 문제가 아니다. queue가 찬 동안 들어온 completion은 버려져 `local_record_failed`가 됐다. gp3에서는 start fsync가 약 2 ms라
+completion 하나가 기다리는 시간이 길어 더 빨리 찬다. 위 `perf/proxy-spool-sync` 절의 동시성 8 503도 이것이다.
+
+수정: writer task는 queue에 쌓인 job을 모두 꺼내(`recv_many`) 그 event를 모두 spool에 보낸 뒤에 응답을 기다린다. spool 왕복 한 번에 backlog
+전체를 넘긴다. `Spool::append_async`와 `Admission::append`는 처음 poll할 때가 아니라 호출하는 순간 명령을 보내므로 event 순서는 queue 순서
+그대로다. 거절 쌍은 전처럼 start가 저장된 뒤에만 completion을 append한다. `Stop` 뒤에 들어온 job은 버리지 않고 함께 쓴다.
+바꾸지 않은 것: queue 상한과 `tx.capacity() == 0` 거절(이제 spool이 실제로 뒤처질 때만 난다), start fsync 뒤 전달, completion·cancel·ACK의
+NORMAL commit, `durable_seq`와 넘김 규칙. group commit(start 여러 개를 fsync 하나로)은 이 503의 원인이 아니어서 넣지 않았다. spool만 group
+commit하면 writer는 여전히 왕복마다 completion 하나만 넘기므로 queue가 같은 방식으로 찬다(모델 추론, 시험하지 않음). 아래 AWS 수치처럼
+지금 처리량 상한은 start fsync 직렬이라 group commit은 별도 성능 작업 후보다.
+
+status `last_assigned_sequence`(#498 리뷰 후속): 바꾸지 않았다. 서버는 tail gap을 `last_assigned_sequence − spool.unsent_events`까지만 연다
+([ledger-and-query.md](contracts/ledger-and-query.md), 2026-10-21 결정). durable하지 않은 행은 넘기지 않으므로 늘 `unsent_events`에도 들어 있고,
+tail 끝은 전원 손실 뒤에도 남는 sequence만 가리킨다. `min(last_seq, durable_seq)`만 보고하면 tail을 durable하지 않은 행 수만큼 덜 보고한다.
+[decisions.md](decisions.md) 문구를 이에 맞게 고쳤다.
+
+시험: `sustained_concurrent_calls_are_neither_refused_nor_lost`(sink 단위, 16 × 400 `ping`, 거절 0·손실 0·gap 없음·event 12,800개. 수정 전
+6,400회 중 5,246회 거절, 3/3회), e2e `sustained_concurrent_calls_are_not_refused`(relay 경유 8 × 400 `ping`과 `tools/call`. 수정 전 `ping`
+1,295–1,330회 거절, 3/3회), `the_tail_a_status_names_survives_a_power_loss`. `only_a_start_commit_fsyncs`,
+`power_loss_never_reissues_a_handed_out_sequence` 등 #498 시험은 그대로 통과한다. mutation 7개 중 5개가 실패했다. 살아남은 둘(거절 쌍에서 start
+실패 뒤 completion append, 종료로 포기한 writer의 submit)은 이 PR이 옮기기만 한 분기이고 main에도 시험이 없다(추론, main에서 돌리지 않음).
+
+AWS 측정(노드 A, t4g.small, AL2023 aarch64, gp3 xfs, 기준 `db9e804`과 브랜치 바이너리를 같은 노드에서, 운영자의 로컬 harness, Python client가
+호출마다 새 연결, proxy 하나에 principal 하나):
+
+| 조건 | 기준 `db9e804` | 변경 |
+|---|---|---|
+| gp3, 동시성 8 × 400 `tools/call`, 기준과 변경을 단독으로 3회 교대, 503 | 3,200회 중 1,354–1,510 | 0 |
+| 같은 run, 성공 호출 p50 / p99 | 13.7–14.1 / 41.5–51.4 ms | 16.8–17.3 / 52.5–54.1 ms |
+| 같은 run, 저장된 호출/s | 369–408 | 385–405 |
+| proxy 4개(gp3·tmpfs × 기준·변경) 교대, `tools/call` 3 round, 503 | gp3 1,239–1,389, tmpfs 0 | gp3 0, tmpfs 0 |
+| 같은 방식 `ping` 2 round, 503 | gp3 1,374–1,685, tmpfs 0 | gp3 0, tmpfs 0 |
+| 동시성 8, 약 100 calls/s, 300초(30,000회), 1회 | 거절 0, p50 5.26, p99 25.5 ms | 거절 0, p50 5.31, p99 28.3 ms |
+| 동시성 1, 200회 × 5 교대, 추가 p50 중앙값(범위) | 2.97 ms (2.28–3.22) | 3.03 ms (1.82–3.42) |
+| strace, 동시성 8 × 400: WAL fsync / 저장된 start | 1,678 / 1,649 | 3,244 / 3,200 |
+
+변경 쪽 처리량 상한은 spool writer의 start fsync 직렬이다. 저장된 호출은 두 쪽 모두 초당 약 400회로, 격리 FULL commit 2.05 ms에 맞고,
+strace의 fsync 중앙값은 2.12 ms였다. 그동안 CPU는 80% idle, IO pressure full은 약 10%였다. 기준은 같은 속도로 저장하고 나머지를 503으로
+빨리 돌려보내므로 성공 호출의 p50이 낮다. 약 100 calls/s에서는 기준도 거절하지 않았다. queue는 부하가 start fsync 처리량에 가까울 때만 찬다.
+proxy 4개를 한 round에 차례로 돌린 run에서는 뒤 round로 갈수록 두 쪽 모두 느려졌다(변경 `tools/call` 388 → 211 → 141 calls/s). 단독 교대
+run에서는 재현되지 않았다(385–405 calls/s). 앞 proxy가 남긴 서버 수집 작업이 같은 디스크를 쓴 탓으로 추정하며 확인하지 않았다.
+동시성 32 run(약 100 calls/s)은 무효다. principal 하나의 동시 호출 한도 8 때문에 429가 나고(기준 2, 변경 5), session 시작에서 429를 받은
+client는 끝나 버려 호출의 약 절반만 돌았다. 그 run의 503은 두 쪽 모두 0이었다.
+노드는 11:26–12:18 UTC에 켜졌고(약 1.7 노드시간, 약 $0.04), 끝난 뒤 둘 다 stopped를 확인했다.
+
+미검증: 동시성 32(principal 하나의 동시 호출 한도 8 때문에 이 harness로는 만들 수 없다), Rocky 9·목표 VM, Linux에서 e2e 반복, 실제 전원 차단.
 
 ## 2026-11-06 spool 기록별 내구성 (`perf/proxy-spool-sync`)
 
@@ -25,7 +92,7 @@ writer는 fsync로 덮인 가장 높은 sequence(`durable_seq`)를 기억한다.
 `rows_wait_while_a_reader_stops_the_checkpoint_short`, `checkpoints_bound_the_wal`, `maintenance_checkpoints`. mutation 11개 중 10개가 실패했다.
 살아남은 하나는 open 직후 `durable_seq`를 0 대신 최댓값으로 두는 것이다. 시작 때 maintenance pass가 첫 명령 전에 checkpoint하므로 다른 연결의 reader가 그 checkpoint를 막지 않는 한 동작이 같다.
 
-AWS 측정(노드 A, t4g.small, gp3 xfs, `6632638` 기준 바이너리와 브랜치 `9d1bd54` 바이너리를 같은 노드에서, `aws-test-env/proxy-smoke/px-lat.sh`, state를 gp3와 tmpfs에 둔 proxy 4개, 호출마다 새 연결, 오류 0):
+AWS 측정(노드 A, t4g.small, gp3 xfs, `6632638` 기준 바이너리와 브랜치 `9d1bd54` 바이너리를 같은 노드에서, 운영자의 로컬 harness, state를 gp3와 tmpfs에 둔 proxy 4개, 호출마다 새 연결, 오류 0):
 
 | 조건 | 기준 | 변경 |
 |---|---|---|
