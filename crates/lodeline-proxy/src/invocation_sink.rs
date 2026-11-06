@@ -1486,6 +1486,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookups_beyond_the_slots_wait_for_a_busy_registry_and_proceed() {
+        let d = tempfile::tempdir().unwrap();
+        let sp = spool(d.path());
+        let rd = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            rd.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let (store, _) = RegistryStore::open(rd.path(), "px-1").unwrap();
+        let (g, _) = gaps();
+        let (sink, h) = InvocationSink::start(
+            Admission::new(sp.clone()),
+            "px-1",
+            sp.epoch_id(),
+            Some(store.clone()),
+            g,
+        )
+        .unwrap();
+        // Idle for longer than LOOKUP_TIMEOUT, then busy (a write holds its
+        // lock) but answering well within it: the overlapping lookups all wait.
+        tokio::time::sleep(LOOKUP_TIMEOUT + Duration::from_millis(100)).await;
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let held = tokio::task::spawn_blocking(move || {
+            let _lock = store.lock();
+            ready.send(()).unwrap();
+            let _ = release_rx.blocking_recv();
+        });
+        ready_rx.await.unwrap();
+        let n = LOOKUP_CONCURRENCY + 2;
+        let mut reqs = Vec::new();
+        for i in 0..n {
+            let s2 = sink.clone();
+            reqs.push(tokio::spawn(async move {
+                s2.request_started(&started(
+                    i as u64 + 1,
+                    Method::ToolsCall,
+                    ToolField::Name(ToolName::parse("t").unwrap()),
+                ))
+                .await
+            }));
+        }
+        wait_for(|| {
+            sink.shared.lookups.available_permits() == 0
+                && (sink.lock().len() == n || sink.refused_starts() > 0)
+        })
+        .await;
+        release.send(()).unwrap();
+        held.await.unwrap();
+        for r in reqs {
+            assert_eq!(r.await.unwrap(), StartVerdict::Proceed);
+        }
+        assert_eq!(sink.refused_starts(), 0);
+        h.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
     async fn a_record_after_shutdown_is_counted_as_a_gap() {
         let d = tempfile::tempdir().unwrap();
         let sp = spool(d.path());

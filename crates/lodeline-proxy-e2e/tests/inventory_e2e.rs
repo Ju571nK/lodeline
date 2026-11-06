@@ -662,6 +662,46 @@ async fn a_forged_cursor_never_completes_a_listing() {
     assert!(h.snapshots().await.is_empty());
 }
 
+/// Concurrent `tools/call` through the relay on a healthy registry are never
+/// refused: at the per-principal call limit (8) their registry lookups overlap
+/// (more than the blocking-read cap),
+/// and an overlap is not a registry that cannot answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_tool_calls_on_a_healthy_registry_are_not_refused() {
+    let Some(h) = H::new(&[(NAMES[0], "first tool")], 10).await else {
+        return;
+    };
+    let px = Arc::new(start_proxy(&h, Duration::from_secs(120)).await);
+    assert_eq!(px.list_all().await, 1);
+    let (clients, calls) = (8, 100);
+    let mut tasks = Vec::new();
+    for c in 0..clients {
+        let px = px.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut refused = 0;
+            for i in 0..calls {
+                let (st, v) = px
+                    .call(json!({"jsonrpc": "2.0", "id": c * 1000 + i, "method": "tools/call",
+                                 "params": {"name": NAMES[0], "arguments": {}}}))
+                    .await;
+                match st {
+                    200 => {}
+                    503 => refused += 1,
+                    other => panic!("tools/call answered {other}: {v}"),
+                }
+            }
+            refused
+        }));
+    }
+    let mut refused = 0;
+    for t in tasks {
+        refused += t.await.unwrap();
+    }
+    assert_eq!(refused, 0, "of {} tools/call", clients * calls);
+    Arc::into_inner(px).expect("no clients left").stop().await;
+    assert!(h.srv.stop().await > 0);
+}
+
 // ------------------------------------------------------- the real binary
 
 /// Build (a no-op when current) and locate the real `lodeline-proxy` binary, built
