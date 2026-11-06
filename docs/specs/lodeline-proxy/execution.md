@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-06 · AWS 실기 run I: 상태 유지·fixture 변형·패키지 systemd 경로 (기준 커밋 `3500adb`)
+갱신: 2026-11-06 · spool 기록별 내구성(`perf/proxy-spool-sync`), AWS 실기 run I: 상태 유지·fixture 변형·패키지 systemd 경로 (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,39 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-06 spool 기록별 내구성 (`perf/proxy-spool-sync`)
+
+사용자 결정(안 3, [decisions.md](decisions.md) "spool 기록별 내구성")의 구현이다. `invocation.started`만 `synchronous=FULL`로 commit하고,
+completion·cancel_requested·수집 ACK 표시는 같은 writer 연결에서 그 transaction만 `synchronous=NORMAL`로 commit한다(`spool.rs` `Writer::deferred`).
+writer는 fsync로 덮인 가장 높은 sequence(`durable_seq`)를 기억한다. start commit이 끝나거나 checkpoint가 WAL을 모두 옮기면 올라간다.
+수집 client에는 `sequence <= durable_seq`인 행만 넘기고, 그런 행이 없는데 덮이지 않은 행이 있으면 먼저 checkpoint한다.
+`wal_autocheckpoint=0`이고 checkpoint는 명령 사이에서만 돈다: maintenance pass, 위의 poll, 512 명령마다(응답 뒤).
+
+시험(`spool.rs` tests, 시험 전용 VFS `sync_vfs.rs`가 파일별 `xSync`를 세고 마지막 `xSync` 때의 파일 내용을 보관해 전원 손실을 모사한다):
+`only_a_start_commit_fsyncs`, `power_loss_never_reissues_a_handed_out_sequence`(process crash 사본은 모두 유지, 전원 손실 사본은 start만 남고 sequence 2를 다시 배정하지만 넘긴 행은 모두 같은 sequence로 남음, idle poll이 checkpoint 뒤 나머지를 넘김),
+`rows_wait_while_a_reader_stops_the_checkpoint_short`, `checkpoints_bound_the_wal`, `maintenance_checkpoints`. mutation 11개 중 10개가 실패했다.
+살아남은 하나는 open 직후 `durable_seq`를 0 대신 최댓값으로 두는 것이다. 시작 때 maintenance pass가 첫 명령 전에 checkpoint하므로 다른 연결의 reader가 그 checkpoint를 막지 않는 한 동작이 같다.
+
+AWS 측정(노드 A, t4g.small, gp3 xfs, `6632638` 기준 바이너리와 브랜치 `9d1bd54` 바이너리를 같은 노드에서, `aws-test-env/proxy-smoke/px-lat.sh`, state를 gp3와 tmpfs에 둔 proxy 4개, 호출마다 새 연결, 오류 0):
+
+| 조건 | 기준 | 변경 |
+|---|---|---|
+| 동시성 1, 200회 × 5 교대, 추가 p50 중앙값(범위) | 3.44 ms (3.24–3.86) | 2.95 ms (2.67–3.50) |
+| 같은 조건 p99 중앙값(범위) | 10.36 ms (9.70–12.98) | 10.72 ms (8.17–12.04) |
+| 동시성 1, 1000회 × 5 교대, 추가 p50 | 3.54 ms (3.46–3.56) | 3.23 ms (3.08–3.39) |
+| tmpfs 대조, 추가 p50(200회) | 0.62 ms | 0.64 ms |
+| strace, 동시성 1, 1000회: WAL fsync/호출, `spool.db` fsync | 2.07, 16 | 1.01, 5 |
+| strace, 동시성 8, 800회: WAL fsync/호출 | 2.04 | 1.03 |
+
+run마다 변경 쪽 p50이 낮았다(200회 5/5, 0.36–0.77 ms. 1000회 5/5, 0.15–0.48 ms). tmpfs 쪽 차이는 −0.10–0.35 ms로 차이가 없다. 남은 추가 시간은 start fsync 하나(앞에 fsync가 없을 때 p50 2.42 ms)와 proxy 자체 약 0.6 ms다.
+p99는 200회에서 차이가 없고, 1000회에서는 기준 42.0 ms(17.4–42.2), 변경 24.0 ms(23.6–25.5)다. 꼬리의 원인은 밝히지 못했다. strace를 걸면 호출이 7–8 ms로 느려져 귀속이 안 됐고, tmpfs 쪽 p99도 4.7–16.3 ms라 저장장치 밖의 잡음도 섞인다.
+
+동시성 8(8 × 200, 5회)은 **결론 없음**이다. 두 바이너리 모두 gp3 쪽에서만 503 `audit_unavailable`이 났다. `tools/call` 기준 8000회 중 1609회, 변경 1221회. `ping`도 기준 1587회, 변경 877회이고 tmpfs 쪽은 `ping` 0회다.
+`ping`은 registry 조회를 하지 않으므로 이 503은 조회 slot 한도가 아니라 spool append 거절로 보이며(proxy log의 "could not be stored locally" 경고가 기준 328, 변경 190), 원인 코드는 확인하지 않았다. 진단 때(8 × 100, proxy 2개)는 gp3 쪽 0회였다.
+노드는 10:23–10:48 UTC에 켜졌고(약 0.8 노드시간, 약 $0.02) 끝난 뒤 둘 다 stopped를 확인했다.
+
+미검증: 실제 전원 차단(모사만 함), Rocky 9·목표 VM, macOS의 `F_FULLFSYNC`, group commit(별도 PR).
 
 ## 2026-11-06 AWS 실기 run I (상태 유지, 변형, 패키지)
 

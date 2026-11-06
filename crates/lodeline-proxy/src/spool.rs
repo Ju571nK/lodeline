@@ -904,8 +904,8 @@ struct Writer {
     since_checkpoint: u32,
 }
 
-/// Commands between two checkpoints at most. A command writes at most a few
-/// dozen WAL pages (an append about 8), so the WAL stays near 4 to 16 MiB.
+/// Commands between two checkpoints at most. An append writes about 8 WAL
+/// pages, so the WAL stays near 16 MiB (18 MiB high-water on AWS, 2026-11-06).
 const CHECKPOINT_EVERY: u32 = 512;
 
 const ADDITIVE_SCHEMA: &str = "
