@@ -47,6 +47,20 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- `lodeline-proxy` now fsyncs the spool only for `invocation.started` records. Completion and
+  cancel records and ingest acknowledgements commit without their own fsync and become durable
+  at the next start commit or spool checkpoint. The start record is still durable before the call
+  is forwarded. A process crash loses nothing. A power loss or OS crash can drop the completion,
+  cancel and acknowledgement records written since the last start commit or checkpoint. A call
+  whose completion is dropped shows as a start-only call. A dropped acknowledgement makes the
+  proxy send those events again, and the server counts them as duplicates. The proxy sends the server only spool rows
+  that an fsync covers, so a sequence number the server has seen is never assigned again. SQLite
+  checkpoints no longer run inside a commit. They run in the maintenance pass, when the ingest
+  client finds only rows that are not yet durable, and after every 512 spool commands, which
+  bounds the WAL (18 MiB high-water on the test node). On an AWS t4g.small with gp3 storage, the
+  added latency of a sequential `tools/call` went from 3.44 ms to 2.95 ms p50 (median of 5
+  alternating runs of 200 calls), with 1.0 instead of 2.1 WAL fsyncs per call. p99 did not change
+  measurably. See `docs/specs/lodeline-proxy/decisions.md` (2026-11-06).
 - AI Guard reports a Codex `prefix_rule(..., decision="allow")` whose prefix can run any
   program as `permissions_allow_broad`, next to its `standing_command_approval`. A prefix is
   broad when it is one that Codex itself refuses to suggest as a standing approval, such as

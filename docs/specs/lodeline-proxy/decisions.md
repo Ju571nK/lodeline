@@ -144,6 +144,7 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
 - T-13/T-14 범위(2026-10-20, 사용자 결정·추천안 채택): 호출 lifecycle과 inventory 수집은 MCP 해석이 필요하므로 T-12b를 둘로 나눠
   T-12b1(요청·응답 분류, `Observation` seam, cancel, protocol version·batch·`tasks/*` 거절)을 T-13보다 먼저 한다. session·DELETE·GET 405는 T-12b2.
   spool은 SQLite WAL(`synchronous=FULL`)이며 fsync 뒤에만 local ack한다. T-12b1 전에는 해석 없는 임시 이벤트를 만들지 않는다.
+  (2026-11-06 변경: `invocation.started`만 이 규칙을 따른다. 아래 "spool 기록별 내구성" 참고.)
   spool이 차면 P1은 차단만 한다(`allow-with-gap`은 미룸). inventory는 status 보고와 분리된 `POST /v1/proxy-inventory`로 보낸다(O-4).
   도구 이름 조회(R6)는 P1에서 ref만 두고 T-15에서 다시 본다. test 전용 feature 이름은 crate별 기존 이름을 유지한다(proxy `test-util`, server `test-support`).
   기본값: 재시작 뒤 완료가 없는 호출은 start만 남는다. key 회전 시 이전 K는 즉시 폐기한다(O-2). scope를 넘는 link는 만들지 않는다(O-6).
@@ -170,3 +171,23 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
 2025-11-25 지원·B1 선처리·원문 보존·감사 vocabulary·제품 호환성 gate는 유지한다.
 M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 이번 runtime 범위 완료로
 전체 P1 종료나 실기 검증을 선언하지 않는다. 구현과 회귀 테스트·독립 코드 리뷰는 execution.md에서 추적한다.
+
+## spool 기록별 내구성 (2026-11-06, 사용자 결정: 안 3)
+
+2026-11-06 AWS 측정(gp3, t4g.small)에서 proxy 추가 지연의 대부분이 spool WAL fsync였다. 호출마다 fsync가 약 2번(start, completion) 일어나고,
+연속 호출에서는 다음 start가 앞 호출의 completion fsync를 기다렸다. 사용자는 아래 안을 택했다.
+
+- `invocation.started`는 그대로 `synchronous=FULL`로 commit하고 fsync 뒤에만 local ack한다. upstream 전달 전 durable 조건은 바뀌지 않는다.
+- `invocation.completed`, `invocation.cancel_requested`, 수집 ACK 표시(`state = 1`)는 같은 writer 연결에서 그 transaction만 `synchronous=NORMAL`로 commit한다.
+  자기 fsync가 없고 다음 FULL commit(다음 start)이나 checkpoint의 fsync에서 durable이 된다. WAL은 파일 하나라 그 fsync가 앞의 모든 frame을 덮는다.
+  quarantine, gap, 만료, maintenance 삭제는 FULL 그대로다.
+- process crash에서는 아무것도 잃지 않는다. 전원 손실이나 OS crash에서는 마지막 durable commit 뒤의 completion·cancel·ACK 표시를 잃을 수 있다.
+  completion을 잃은 호출은 start만 남는다(재시작 뒤 completion이 없는 호출과 같은 기본값, 2026-10-20). 잃은 ACK 표시는 재전송되고 서버가 같은 digest로 중복 처리한다.
+  DB는 깨지지 않는다(WAL frame checksum, SQLite 문서의 NORMAL 일관성 보장).
+- 잃은 기록의 sequence는 재시작 뒤 다시 배정된다. 그래서 spool은 fsync로 덮인 행만 수집 client에 넘긴다. 이전 규칙 "sequence는 재사용하지 않는다"는
+  "proxy 밖으로 나간 sequence는 재사용하지 않는다"가 된다. status의 `last_assigned_sequence`는 durable하지 않은 sequence를 보고할 수 있으나, 서버는 그 수로
+  tail gap만 열고 그 sequence의 event가 도착하면 닫으므로 내용 충돌이 생기지 않는다.
+- line 146과 다른 점: 이전에는 spool의 모든 기록이 fsync 뒤 local ack였다. 이제 start만 그렇고, completion·cancel·ACK 표시는 commit 뒤 응답한다.
+- 함께 바꾼 것(계약 안): `wal_autocheckpoint=0`. checkpoint는 commit 안이 아니라 writer의 명령 사이에서 돈다. maintenance pass마다, 수집 client가
+  durable하지 않은 행만 찾았을 때, 그리고 512 명령마다 한 번(WAL 상한) 한다.
+- 나중에 따로: group commit(여러 start를 한 fsync로). 이번 범위가 아니다.

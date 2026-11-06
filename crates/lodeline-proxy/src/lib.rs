@@ -30,5 +30,7 @@ pub mod session;
 pub mod spool;
 pub mod state_dir;
 pub mod status_report;
+#[cfg(test)]
+mod sync_vfs;
 pub mod tls;
 pub mod token;

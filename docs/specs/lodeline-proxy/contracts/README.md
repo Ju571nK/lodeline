@@ -155,12 +155,15 @@ manager 범위는 **M0(read-only)**로 결정했다(2026-10-10): P1에서 manage
 
 upstream 전송 전 요청 크기를 검사하고 정책 판단에 필요한 메시지를 파싱한다.
 응답은 고정 상한 buffer로 streaming한다. audit는 bounded queue + 전용 writer로 보낸다.
-기존 spool append는 동기 fsync이므로 Tokio I/O task에서 직접 실행하지 않는다.
+spool append는 동기 commit(started는 fsync까지)이므로 Tokio I/O task에서 직접 실행하지 않는다.
 기본 모드에서는 started의 **LOCAL spool durable commit ACK**를 기다린 후 upstream에 전달한다.
 이 ACK는 중앙 POST /v1/proxy-events의 durable acceptance와 다른 경계다.
 유효한 로컬 설정과 spool 여유가 있으면 중앙 단절 중에도 중계하며, 중앙 ACK를 전송 선행 조건으로 삼지 않는다.
 이에 따른 디스크 지연도 benchmark에 포함하며 '감사 무비용'을 주장하지 않는다.
 completion 저장 실패는 이미 수행된 동작을 되돌리지 못한다. degraded/audit-gap으로 표시한다.
+completion·cancel_requested 기록과 수집 ACK 표시는 fsync 없이 commit하며 다음 started commit이나 checkpoint에서 durable이 된다
+([decisions.md](../decisions.md) 2026-11-06). 전원 손실 때 그 사이의 기록은 사라질 수 있고, completion이 사라진 호출은 start만 남는다.
+spool은 fsync로 덮인 행만 중앙에 보내므로 중앙에 보낸 sequence는 재시작 뒤에도 다른 내용으로 다시 쓰이지 않는다.
 
 **취소 순서(M3).** proxy는 인증 주체의 같은 session 안에서 `(session, requestId)`로 취소를 대응시킨다.
 - 요청 X의 dispatch 시작(요청 bytes를 upstream에 쓰기 시작한 시점) 전에 X에 대한 `notifications/cancelled`를
