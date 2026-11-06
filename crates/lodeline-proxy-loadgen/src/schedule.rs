@@ -7,7 +7,8 @@
 //! the lane caps keep every principal under the proxy's per-principal limit,
 //! and a slow proxy shows up as queueing here. Latency starts when the call
 //! task runs. How late that was after the due time (timer and scheduler delay
-//! of the driver itself) is recorded apart as the send lag.
+//! of the driver itself) is recorded apart as the send lag, and the from-due
+//! latency starts at the due time, send lag included.
 //!
 //! Closed loop: a fixed number of workers each send the next call as soon as the
 //! previous one is answered. Latency runs from the send; the result is the

@@ -5,7 +5,9 @@
 #
 #   stack.sh up WORK      PKI, server, principals, config, load server, proxy
 #   stack.sh stats WORK   proxy resource use (peak RSS, CPU time, open FDs, spool)
-#   stack.sh down WORK    stop everything and delete WORK (tokens and keys live there)
+#   stack.sh down WORK    stop what this stack started and delete WORK (tokens and keys live there)
+#
+# A failed `up` tears down what it started. `down` also works on a half-built WORK.
 #
 # Environment (defaults in brackets):
 #   BIN          dir with lodeline-server, lodeline-proxy, lodeline-proxy-loadgen [target/release]
@@ -27,18 +29,33 @@ PRINCIPALS="${PRINCIPALS:-8}"; ROUTES="${ROUTES:-4}"
 SERVER_PORT="${SERVER_PORT:-18443}"; PROXY_PORT="${PROXY_PORT:-18480}"; LOAD_PORT="${LOAD_PORT:-18090}"
 PID_NAME=px-load
 PROXY_WRAP="${PROXY_WRAP:-}"; LOAD_WRAP="${LOAD_WRAP:-}"
+MARK=.lodeline-load-stack # holds the proxy state dir; written first by up
 die() { echo "stack.sh: $*" >&2; exit 1; }
 pids() { pgrep -f "$1" || true; }
+# Start a process in the background and record its pid in WORK/run.
+start() { local name=$1; shift; "$@" </dev/null & echo $! >"$W/run/$name.pid"; }
+# The pid recorded for NAME if that process still runs a command matching PATTERN.
+recorded() {
+  local p
+  p=$(cat "$W/run/$1.pid" 2>/dev/null) || return 0
+  ps -o command= -p "$p" 2>/dev/null | grep -q -- "$2" && echo "$p"
+  return 0
+}
 
 up() {
   [ -e "$W" ] && die "$W exists; run: stack.sh down $W"
   for b in lodeline-server lodeline-proxy lodeline-proxy-loadgen; do
     [ -x "$BIN/$b" ] || die "missing $BIN/$b (cargo build --release -p lodeline-server -p lodeline-proxy -p lodeline-proxy-loadgen)"
   done
-  mkdir -p "$W/pki" "$W/server/state" "$W/server/events"
+  local state="${STATE_DIR:-}"
+  case "$state" in "" | /*) ;; *) state="$PWD/$state" ;; esac
+  [ -n "$state" ] && [ -e "$state" ] && die "STATE_DIR $state exists"
+  mkdir -p "$W/pki" "$W/server/state" "$W/server/events" "$W/run"
   W=$(cd "$W" && pwd)
-  local state="${STATE_DIR:-$W/proxy-state}"
-  [ -e "$state" ] && die "STATE_DIR $state exists"
+  state="${state:-$W/proxy-state}"
+  printf '%s\n' "$state" >"$W/$MARK"
+  # shellcheck disable=SC2154
+  trap 'rc=$?; trap - EXIT; if [ "$rc" != 0 ]; then echo "stack.sh: up failed, tearing down" >&2; down; fi; exit "$rc"' EXIT
   cd "$W/pki"
   for ca in host proxy; do
     openssl req -x509 -new -newkey rsa:2048 -nodes -keyout $ca-ca.key -out $ca-ca.crt -days 2 \
@@ -95,7 +112,7 @@ proxy:
   config_ttl_seconds: 900
 EOF
   # shellcheck disable=SC2086
-  $LOAD_WRAP "$BIN/lodeline-server" serve --config "$W/server/server.yaml" >"$W/server/server.log" 2>&1 </dev/null &
+  start server $LOAD_WRAP "$BIN/lodeline-server" serve --config "$W/server/server.yaml" >"$W/server/server.log" 2>&1
   local url="https://127.0.0.1:$SERVER_PORT" i
   for i in $(seq 60); do
     curl -s -o /dev/null --cacert host-ca.crt --cert mgmt.crt --key mgmt.key "$url/" && break
@@ -133,16 +150,18 @@ EOF
   "$BIN/lodeline-proxy" check-config --config "$W/proxy.yaml" >/dev/null
 
   # shellcheck disable=SC2086
-  $LOAD_WRAP "$BIN/lodeline-proxy-loadgen" serve --listen "127.0.0.1:$LOAD_PORT" >"$W/load-server.log" 2>&1 </dev/null &
+  start load $LOAD_WRAP "$BIN/lodeline-proxy-loadgen" serve --listen "127.0.0.1:$LOAD_PORT" >"$W/load-server.log" 2>&1
   # shellcheck disable=SC2086
-  $PROXY_WRAP "$BIN/lodeline-proxy" run --config "$W/proxy.yaml" >"$W/proxy.log" 2>&1 </dev/null &
+  start proxy $PROXY_WRAP "$BIN/lodeline-proxy" run --config "$W/proxy.yaml" >"$W/proxy.log" 2>&1
   for i in $(seq 60); do
     "$BIN/lodeline-proxy" health --config "$W/proxy.yaml" 2>/dev/null | grep -q '^forwarding: true' && break
     [ "$i" = 60 ] && { tail -5 "$W/proxy.log" >&2; die "proxy is not forwarding"; }
     /bin/sleep 0.5
   done
+  [ -n "$(recorded load "lodeline-proxy-loadgen serve --listen")" ] || { tail -3 "$W/load-server.log" >&2; die "load server exited"; }
   echo "proxy: forwarding on 127.0.0.1:$PROXY_PORT, state $state"
   echo "run:   $BIN/lodeline-proxy-loadgen run --direct http://127.0.0.1:$LOAD_PORT/mcp --targets $W/load/targets.json --rate 100 --concurrency 32 --out REPORT.json"
+  trap - EXIT
 }
 
 stats() {
@@ -168,24 +187,39 @@ stats() {
   echo "spool: $(du -sk "$state" | cut -f1) KiB in state_dir"
 }
 
+# Pids this stack started that still run. The proxy is also matched by its
+# config path, which holds the absolute WORK: under a sudo wrapper the recorded
+# pid is the wrapper's.
+ours() {
+  {
+    recorded server "lodeline-server serve --config $W/server/server.yaml"
+    recorded load "lodeline-proxy-loadgen serve --listen"
+    recorded proxy "lodeline-proxy run --config $W/proxy.yaml"
+    pids "lodeline-proxy run --config $W/proxy.yaml"
+  } | sort -u
+}
+
 down() {
-  [ -f "$W/proxy.yaml" ] || die "$W is not a stack dir"
-  local pat state
-  state=$(sed -n 's/^state_dir: "\(.*\)"$/\1/p' "$W/proxy.yaml")
-  for pat in "lodeline-proxy run --config $W/proxy.yaml" "lodeline-proxy-loadgen serve --listen 127.0.0.1:$LOAD_PORT" \
-    "lodeline-server serve --config $W/server/server.yaml"; do
-    # shellcheck disable=SC2046
-    [ -n "$(pids "$pat")" ] && kill $(pids "$pat") 2>/dev/null || true
-  done
-  /bin/sleep 2
-  for pat in "lodeline-proxy run --config $W/proxy.yaml" "lodeline-proxy-loadgen serve --listen 127.0.0.1:$LOAD_PORT"; do
-    # shellcheck disable=SC2046
-    [ -n "$(pids "$pat")" ] && kill -9 $(pids "$pat") 2>/dev/null || true
+  local state p i
+  state=$(cat "$W/$MARK")
+  p=$(ours)
+  # shellcheck disable=SC2086
+  [ -n "$p" ] && { kill $p 2>/dev/null || true; }
+  for i in $(seq 20); do
+    p=$(ours)
+    [ -z "$p" ] && break
+    # shellcheck disable=SC2086
+    [ "$i" = 20 ] && { kill -9 $p 2>/dev/null || true; }
+    /bin/sleep 0.25
   done
   rm -rf "$W" "$state"
   echo "down: processes stopped, $W and the proxy state removed"
 }
 
+if [ "$cmd" != up ]; then
+  [ -f "$W/$MARK" ] || die "$W is not a stack dir"
+  W=$(cd "$W" && pwd)
+fi
 case "$cmd" in
   up) up ;;
   stats) stats ;;

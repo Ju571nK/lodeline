@@ -21,13 +21,17 @@ Rust crate `crates/lodeline-proxy-loadgen`(publish 안 함, release·패키지 �
 - `serve`: `load_echo` 도구 하나, 응답을 요청한 크기로 채움, `/_load/counters`로 받은 호출 수 공개.
 - `principals`: principal마다 256-bit token(0600 파일)과 SHA-256 verifier. config에는 verifier만 들어가고 control plane의
   `PUT /v1/proxies/{id}/config`로 적용한다. principal `i`는 route `i % R`만 쓴다. principal 하나의 동시 호출 한도 8과
-  route 하나의 한도 16 때문에 동시성 C에는 principal C/8개, route C/16개 이상이 필요하다. 기본값 8 × 4.
-- `run`: lane 하나가 principal 하나의 MCP session이다. open loop(고정 rate, 동시성 상한)와 closed loop, direct와 proxied를
-  round마다 교대한다. 응답마다 id와 marker를 확인하고 오류를 종류별로 센다. 성공 응답 수와 load server 호출 수를 비교한다.
+  route 하나의 한도 16 때문에 동시성 C에는 principal C/8개, route C/16개 이상이 필요하다. 기본값 8 × 4는 동시성 32까지,
+  64에는 16 × 8을 쓴다.
+- `run`: lane 하나가 principal 하나의 MCP session이다. open loop(고정 rate, 동시성 상한)와 closed loop. round마다 direct와
+  proxied를 돌리고 짝수 round는 proxied가 먼저다. 응답마다 id와 marker를 확인하고 오류를 종류별로 센다. 성공 응답 수와 load
+  server 호출 수를 비교한다. 측정 구간 오류(`--allow-errors`가 없을 때)나 호출 수 불일치가 있으면 0이 아닌 값으로 끝난다.
+  timeout은 latency 분포에 경과 시간으로 들어가고, 예정 시각부터 잰 `latency_from_due_ms`를 함께 낸다.
 - `stack.sh`: 시험 PKI, local collector `lodeline-server`, proxy, load server를 loopback에 띄운다. `PROXY_WRAP`로 systemd scope.
+  pid 파일로 자기가 띄운 프로세스만 멈추고, `up`이 중간에 실패하면 띄운 것을 거둔다.
 
-시험: 단위 19개(scheduler의 open-loop 시각·상한·warm-up·closed loop·lane 수, 분위수, 오류 분류, principal 파일, 응답·요청 크기),
-load server 직접 1개, e2e `loadgen_e2e.rs` 1개(실제 relay·spool·server. 동시성 32 open loop 오류 0, 40 worker closed loop는 429만),
+시험: 단위 21개(scheduler의 open-loop 시각·상한·warm-up·closed loop·lane 수, 분위수, timeout 집계, 예정 시각 기준 latency,
+오류 분류, principal 파일, 응답·요청 크기), load server 직접 3개(호출 수, round 순서 교대, 종료 코드), e2e `loadgen_e2e.rs` 1개(실제 relay·spool·server. 동시성 32 open loop 오류 0, 40 worker closed loop는 429만),
 긴 run 1개는 `#[ignore]`.
 
 로컬(macOS 26.6.2 arm64, release, 12 core, load average 1.8–2.7, state는 APFS): 100 calls/s, 동시성 32, warm-up 5초 + 30초 × 3 round.
@@ -43,6 +47,8 @@ Linux loopback은 `tcp_tw_reuse` 기본값 2로 TIME_WAIT를 재사용하므로 
 AWS(노드 A만, t4g.small 2 vCPU, AL2023 aarch64, kernel 6.18.54, Neoverse-N1, gp3 xfs, rustc 1.99.1, `cb55a10`): server, proxy,
 load server, driver를 A 한 대에. proxy는 `systemd-run --scope`(MemoryMax 512M, MemorySwapMax 0, AllowedCPUs 0), 나머지는 `taskset -c 1`.
 validation.md의 목표 환경(Rocky 9, 4 vCPU x86_64, proxy 2 vCPU)이 아니다. 아래 수치는 이 환경의 baseline이고 목표 판정이 아니다.
+위 로컬 run과 아래 AWS run은 이 절의 수정 전 도구로 쟀다. round마다 direct가 늘 먼저였고, `latency_from_due_ms`가 없었다.
+두 run 모두 timeout을 포함한 오류가 0이라 timeout 집계 변경의 영향은 없다. 예정 시각 기준 추가 지연과 순서 교대 결과는 다시 재야 한다.
 
 | 조건 | 결과 |
 |---|---|

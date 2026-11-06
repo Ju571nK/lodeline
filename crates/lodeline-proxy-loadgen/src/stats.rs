@@ -17,9 +17,12 @@ fn histogram() -> Histogram<u64> {
 /// only count outcomes, so a report can still check every call that was sent.
 pub struct Recorder {
     /// From the call becoming ready to send (open loop: its task runs, before
-    /// it waits for a lane slot; closed loop: the send) to the complete reply,
-    /// successful calls only.
+    /// it waits for a lane slot; closed loop: the send) to the complete reply.
+    /// Successful calls, and timeouts at their elapsed time (at least the
+    /// timeout, so a lower bound): leaving them out would hide the slowest calls.
     pub latency: Histogram<u64>,
+    /// The same calls from their due time: `latency` plus the send lag.
+    pub from_due: Histogram<u64>,
     /// Open loop: how late each measured call's task ran after its due time.
     pub send_lag: Histogram<u64>,
     pub outcomes: BTreeMap<String, u64>,
@@ -30,6 +33,7 @@ impl Default for Recorder {
     fn default() -> Self {
         Recorder {
             latency: histogram(),
+            from_due: histogram(),
             send_lag: histogram(),
             outcomes: BTreeMap::new(),
             warmup_outcomes: BTreeMap::new(),
@@ -51,8 +55,9 @@ impl Recorder {
         *map.entry(outcome.key()).or_default() += 1;
         if measured {
             self.send_lag.saturating_record(micros(lag));
-            if *outcome == Outcome::Ok {
+            if matches!(outcome, Outcome::Ok | Outcome::Timeout) {
                 self.latency.saturating_record(micros(latency));
+                self.from_due.saturating_record(micros(latency + lag));
             }
         }
     }
@@ -203,6 +208,47 @@ mod tests {
             near(q.p50, 0.25) && near(q.p99, 0.25) && near(q.max, 2.5),
             "{q:?}"
         );
+    }
+
+    #[test]
+    fn timeouts_count_in_the_latency_at_their_elapsed_time() {
+        let mut r = Recorder::default();
+        for _ in 0..98 {
+            r.record(true, Duration::from_millis(2), Duration::ZERO, &Outcome::Ok);
+        }
+        r.record(
+            true,
+            Duration::from_secs(30),
+            Duration::ZERO,
+            &Outcome::Timeout,
+        );
+        r.record(
+            true,
+            Duration::from_millis(1),
+            Duration::ZERO,
+            &Outcome::Transport,
+        );
+        let q = quantiles(&r.latency);
+        assert_eq!(q.count, 99, "the timeout is in, the transport error out");
+        assert!(near(q.max, 30_000.0), "{q:?}");
+        assert!(
+            near(q.p99, 30_000.0),
+            "the slowest 1% is the timeout: {q:?}"
+        );
+        assert_eq!(non_ok(&r.outcomes).get("timeout"), Some(&1));
+    }
+
+    #[test]
+    fn from_due_adds_the_send_lag() {
+        let mut r = Recorder::default();
+        r.record(
+            true,
+            Duration::from_millis(1),
+            Duration::from_millis(4),
+            &Outcome::Ok,
+        );
+        assert!(near(quantiles(&r.latency).max, 1.0));
+        assert!(near(quantiles(&r.from_due).max, 5.0));
     }
 
     #[test]

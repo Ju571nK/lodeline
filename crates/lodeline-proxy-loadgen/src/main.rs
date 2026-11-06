@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use lodeline_proxy_loadgen::client::Target;
 use lodeline_proxy_loadgen::principals::{generate, Layout, Targets};
-use lodeline_proxy_loadgen::run::{run, summary, Plan, Side, SideName};
+use lodeline_proxy_loadgen::run::{failures, run, summary, Plan, Side, SideName};
 use lodeline_proxy_loadgen::schedule::{Mode, Window};
 use lodeline_proxy_loadgen::server::{serve, Counters};
 
@@ -93,6 +93,10 @@ struct RunArgs {
     /// Free text stored in the report (commit, host class, limits).
     #[arg(long)]
     note: Option<String>,
+    /// Exit 0 even with measured errors, for runs meant to hit a limit (429).
+    /// An upstream count mismatch still fails.
+    #[arg(long)]
+    allow_errors: bool,
 }
 
 fn read_token(path: &Path) -> anyhow::Result<String> {
@@ -181,6 +185,12 @@ async fn run_cmd(a: RunArgs) -> anyhow::Result<()> {
             .with_context(|| format!("write {}", out.display()))?;
     }
     print!("{}", summary(&rep));
+    let bad = failures(&rep, a.allow_errors);
+    anyhow::ensure!(
+        bad.is_empty(),
+        "the run is not a clean measurement (report kept):\n{}",
+        bad.join("\n")
+    );
     Ok(())
 }
 

@@ -24,23 +24,30 @@ sides have the same shape.
 - **Open loop** (`--rate R --concurrency C`). Call `n` is due at `start + n / R`. Each call is its own task, so a slow
   call never delays the start of the next one. A call waits for a slot of its lane, and that wait counts as latency.
   The lane slots add up to `C`. Latency starts when the call task runs. The delay between the due time and that
-  moment comes from the driver's own timer and scheduler. It is reported apart as `send_lag_ms`, so it never inflates
-  either side.
+  moment comes from the driver's own timer and scheduler. It is reported apart as `send_lag_ms`. `latency_from_due_ms`
+  starts at the due time instead, send lag included, so driver lag that grows under CPU contention with the proxy is
+  not hidden. When a run's send lag p99 is over 1 ms the summary warns, and the two latencies should be compared.
 - **Closed loop** (`--concurrency C` without `--rate`). `C` workers each send the next call when the last one is
   answered. The `ok_per_s` result is the sustainable throughput at that concurrency.
-- **Rounds.** Each round runs the direct side, then the proxied side, with fresh sessions. Each run has a warm-up
+- **Rounds.** Each round runs both sides with fresh sessions. Odd rounds run direct first, even rounds proxied first,
+  so neither side always runs first. `round_order` in the report records the order. Each run has a warm-up
   (`--warmup`). Calls due in the warm-up are sent and checked but not measured.
 - **Every reply is checked.** A call is `ok` only when the reply is HTTP 200 and the JSON-RPC result echoes the call's
   own id and marker. Everything else gets a class: `http_<status>_<code>` for the proxy's
   `{"error":"<code>"}` answers (`http_429_too_many_requests`, `http_503_audit_unavailable`), `http_<status>` for other
-  statuses, `jsonrpc_error_<code>`, `bad_reply`, `timeout` and `transport`. Latency percentiles use `ok` calls only.
-  The errors are counted next to them.
+  statuses, `jsonrpc_error_<code>`, `bad_reply`, `timeout` and `transport`. Latency percentiles use `ok` calls and
+  timeouts. A timeout counts at its elapsed time, which is at least `--timeout`, so with timeouts p99 and max are lower
+  bounds and the summary warns. Other errors are counted next to the latency, not in it: a 429 answers at once and
+  would pull the percentiles down.
 - **Upstream check.** The driver reads the load server's counters before and after each run. `upstream_tools_calls`
   must equal `ok_all` (successful replies, warm-up included). A difference means a call reached the upstream without
   a good reply, or one reply came without a call.
-- **Added latency** is the proxied quantile minus the direct quantile of the same round (p50, p95, p99, max). The
-  summary gives the median and range over rounds. This compares two distributions. It is not the added time of any
-  single call.
+- **Added latency** is the proxied quantile minus the direct quantile of the same round (p50, p95, p99, max), for both
+  latencies. The summary gives the median and range over rounds. This compares two distributions. It is not the added
+  time of any single call.
+- **Exit status.** `run` exits non-zero when any measured call failed or any run's upstream count differs from its
+  `ok_all`. The report is still written. `--allow-errors` accepts measured errors, for runs meant to hit a limit
+  (429). An upstream mismatch fails in every case.
 
 Percentiles come from an HDR histogram in microseconds with 3 significant digits. A reported value is the upper
 end of its bucket, at most 0.1% above the recorded value.
@@ -54,13 +61,16 @@ one with 429 at once, because the queue depth is 0. One principal can therefore 
 
 `principals --principals N --routes R` writes:
 
-- `tokens/load-p<i>.token`: one token per principal, mode 0600. Tokens stay on the load host.
+- `tokens/load-p<i>.token`: one token per principal, mode 0600 on Unix. On Windows the file gets the directory's
+  default permissions. Tokens stay on the load host.
 - `config.json`: the `config` object for `PUT /v1/proxies/{id}/config`. It has routes `load-r0..` to the load server
   and principals `load-p0..`, each with its verifier. Principal `i` may use only route `i % R`.
 - `targets.json`: one lane per principal, with the route URL and the token file.
 
 The driver gives each lane `C / lanes` slots, spread evenly. At concurrency `C`, use at least `C / 8` principals over
-at least `C / 16` routes. The defaults (8 principals, 4 routes) cover concurrency 1 to 64.
+at least `C / 16` routes. The defaults (8 principals, 4 routes) cover concurrency 1 to 32 below every limit. At 64
+they put exactly 8 calls on each principal and 16 on each route, the limits themselves, so use `PRINCIPALS=16
+ROUTES=8`. Concurrency 64 still equals the proxy's total limit.
 
 ## Commands
 
@@ -86,7 +96,7 @@ target/release/lodeline-proxy-loadgen run \
   --note "commit, host class, kernel, filesystem" --out open-100-c32.json
 ```
 
-Throughput sweep, closed loop, one run per concurrency:
+Throughput sweep, closed loop, one run per concurrency (start the stack with `PRINCIPALS=16 ROUTES=8` for 64):
 
 ```sh
 for c in 1 8 32 64; do
@@ -97,7 +107,9 @@ done
 ```
 
 The summary goes to stdout, the full report to `--out`. Read the proxy's resource use while it runs or at the end,
-then stop everything. `down` deletes the work directory, so keep reports outside it.
+then stop everything. `down` deletes the work directory, so keep reports outside it. `down` stops only the processes
+this stack started, by the pids `up` recorded in `WORK/run` and the proxy's config path. A failed `up` runs `down`
+itself.
 
 ```sh
 crates/lodeline-proxy-loadgen/stack.sh stats /tmp/lodeline-load
@@ -126,9 +138,10 @@ report (`--note`), as validation.md asks.
 
 `--out` writes `lodeline-proxy-loadgen.report/1` JSON. It has the run parameters, `env` (OS, arch, CPU count), and
 for each run: `side`, `round`, `lanes`, `sent`, `measured`, `ok`, `ok_per_s`, `errors`, `warmup_errors`,
-`latency_ms` (`count`, `min`, `mean`, `p50`, `p90`, `p95`, `p99`, `p999`, `max`), `send_lag_ms`,
-`upstream_tools_calls` and `ok_all`. It also has `added` per round and `added_summary` (median, min and max over
-rounds).
+`latency_ms` (`count`, `min`, `mean`, `p50`, `p90`, `p95`, `p99`, `p999`, `max`), `latency_from_due_ms`,
+`send_lag_ms`, `upstream_tools_calls` and `ok_all`. It also has `round_order`, `added` per round (`added_ms` and
+`added_from_due_ms`), `added_summary` and `added_from_due_summary` (median, min and max over rounds), and
+`warnings`.
 
 ## Limits
 
