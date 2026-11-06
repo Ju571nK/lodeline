@@ -2572,6 +2572,40 @@ mod tests {
         );
     }
 
+    /// The server opens a tail gap up to `last_assigned_sequence -
+    /// unsent_events` (ledger L-gaps, 2026-10-21). That end never names a
+    /// sequence a power loss can take back: a row that is not durable yet was
+    /// never handed out, so it is still counted as unsent.
+    #[test]
+    fn the_tail_a_status_names_survives_a_power_loss() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let tail_end = |s: &Spool| {
+            let snap = s.snapshot();
+            snap.last_assigned_sequence - snap.unsent_events as i64
+        };
+        let survives = |end: i64| {
+            let (p, _) = open(power_loss_copy(d.path()).path());
+            let kept = p.snapshot().last_assigned_sequence;
+            assert!(end <= kept, "tail end {end} beyond the {kept} kept");
+        };
+        s.append(event(1)).unwrap();
+        s.append(completed(2)).unwrap();
+        s.append(cancel(3)).unwrap();
+        survives(tail_end(&s));
+        assert_eq!(sequences(&mut s), vec![(1, uid(1))]);
+        s.acknowledged(&[uid(1)]);
+        assert_eq!(tail_end(&s), 1);
+        survives(tail_end(&s));
+        s.append(event(4)).unwrap();
+        s.append(completed(5)).unwrap();
+        let handed = sequences(&mut s);
+        s.acknowledged(&handed.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>());
+        assert_eq!(tail_end(&s), 4);
+        survives(tail_end(&s));
+    }
+
     #[test]
     fn rows_wait_while_a_reader_stops_the_checkpoint_short() {
         let d = tempfile::tempdir().unwrap();
