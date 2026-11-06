@@ -25,7 +25,7 @@ writer는 fsync로 덮인 가장 높은 sequence(`durable_seq`)를 기억한다.
 `rows_wait_while_a_reader_stops_the_checkpoint_short`, `checkpoints_bound_the_wal`, `maintenance_checkpoints`. mutation 11개 중 10개가 실패했다.
 살아남은 하나는 open 직후 `durable_seq`를 0 대신 최댓값으로 두는 것이다. 시작 때 maintenance pass가 첫 명령 전에 checkpoint하므로 다른 연결의 reader가 그 checkpoint를 막지 않는 한 동작이 같다.
 
-AWS 측정(노드 A, t4g.small, gp3 xfs, `6632638` 기준 바이너리와 브랜치 `9d1bd54` 바이너리를 같은 노드에서, `aws-test-env/proxy-smoke/px-lat.sh`, state를 gp3와 tmpfs에 둔 proxy 4개, 호출마다 새 연결, 오류 0):
+AWS 측정(노드 A, t4g.small, gp3 xfs, `6632638` 기준 바이너리와 브랜치 `9d1bd54` 바이너리를 같은 노드에서, 운영자의 로컬 harness, state를 gp3와 tmpfs에 둔 proxy 4개, 호출마다 새 연결, 오류 0):
 
 | 조건 | 기준 | 변경 |
 |---|---|---|
