@@ -15,6 +15,7 @@ path = "src/lib.rs"
 lodeline-server = { path = "../lodeline-server", features = ["test-support"] }
 lodeline-proxy = { path = "../lodeline-proxy", features = ["test-util"] }
 lodeline-proxy-api = { path = "../lodeline-proxy-api" }
+lodeline-proxy-loadgen = { path = "../lodeline-proxy-loadgen" }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
