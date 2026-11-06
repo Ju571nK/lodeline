@@ -1236,7 +1236,15 @@ mod hook_launch_tests {
     fn script(path: &Path, body: &str) {
         use std::os::unix::fs::PermissionsExt;
         let ran = format!("{}.ran", path.display());
-        std::fs::write(path, format!("#!/bin/sh\n: > '{ran}'\n{body}\n")).unwrap();
+        let src = format!("{}.src", path.display());
+        std::fs::write(&src, format!("#!/bin/sh\n: > '{ran}'\n{body}\n")).unwrap();
+        // `cp` writes the exe, so no write fd on it leaks into a child that a
+        // parallel test forks; that fd makes exec fail with ETXTBSY on Linux.
+        let copied = std::process::Command::new("cp")
+            .args([&src, &path.display().to_string()])
+            .status()
+            .unwrap();
+        assert!(copied.success());
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
