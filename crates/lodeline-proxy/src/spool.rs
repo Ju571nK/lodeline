@@ -7,10 +7,20 @@
 //!
 //! Guarantees:
 //!
-//! * [`Spool::append`] returns only after the row is committed and fsynced; the
-//!   event sequence is assigned inside that same transaction from a counter in
-//!   the database (monotonic per epoch, never reused, survives restart and the
-//!   purge of acknowledged rows). Nothing is acknowledged before it is durable.
+//! * [`Spool::append`] of an `invocation.started` returns only after the row is
+//!   committed and fsynced. Completions, cancel records and acknowledgements
+//!   commit with `synchronous=NORMAL` (decisions.md 2026-11-06): they survive a
+//!   process crash, and they become durable at the next start commit or
+//!   checkpoint, whose fsync covers every earlier WAL frame. A power loss can drop
+//!   the ones since then; a completion becomes a start-only call. The event
+//!   sequence is assigned inside the append transaction from a counter in the
+//!   database (monotonic per epoch, survives restart and the purge of
+//!   acknowledged rows). A power loss can roll back the sequence of a dropped
+//!   record, so [`EventSource::next_events`] hands out only rows covered by an
+//!   fsync: no sequence that leaves the process is ever reissued.
+//! * Checkpoints run on the writer thread between commands, never inside a
+//!   commit: in the maintenance pass, when the ingest client finds only rows not
+//!   yet durable, and after [`CHECKPOINT_EVERY`] commands, which bounds the WAL.
 //! * Events are delivered oldest sequence first. `acknowledged` marks rows
 //!   (kept for [`SpoolConfig::ack_retention`], then purged). `quarantined` moves
 //!   rows unchanged to the `quarantine` table; nothing is ever dropped silently.
@@ -62,7 +72,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lodeline_proxy_api::status::{QuarantineCode, SpoolExpiredGap};
-use lodeline_proxy_api::{GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
+use lodeline_proxy_api::{EventPayload, GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use tokio::sync::oneshot;
 
@@ -546,9 +556,10 @@ impl Spool {
             .store(age.as_secs(), Ordering::SeqCst);
     }
 
-    /// Append an event durably. Blocks until commit and fsync (call from a
-    /// blocking context, or use [`Spool::append_async`]). The event's `sequence`
-    /// is ignored and replaced; its `proxy_id` and `epoch_id` must match.
+    /// Append an event. Blocks until commit, and for an `invocation.started`
+    /// until its fsync (call from a blocking context, or use
+    /// [`Spool::append_async`]). The event's `sequence` is ignored and
+    /// replaced; its `proxy_id` and `epoch_id` must match.
     pub fn append(&self, event: ProxyEvent) -> Result<Appended, AppendError> {
         self.call(|r| Cmd::Append(Box::new(event), r))
             .unwrap_or(Err(AppendError::Unavailable))
@@ -778,9 +789,9 @@ pub enum Refusal {
 
 /// The relay's way into the spool (T-13d calls [`Admission::append`]).
 ///
-/// The returned future completes after the event is committed and fsynced, so
-/// the caller may forward the call only after `Ok`. It never blocks a tokio
-/// worker.
+/// For an `invocation.started` the returned future completes after the event
+/// is committed and fsynced, so the caller may forward the call only after
+/// `Ok`. It never blocks a tokio worker.
 #[derive(Clone)]
 pub struct Admission {
     spool: Spool,
@@ -885,7 +896,17 @@ struct Writer {
     conn: Connection,
     cfg: SpoolConfig,
     shared: Arc<Shared>,
+    /// Highest sequence whose commit is known fsynced. Rows above it are never
+    /// handed to the ingest client. 0 at open: a crashed process may have left
+    /// rows only in the page cache; the maintenance pass at start checkpoints.
+    durable_seq: i64,
+    /// Commands since the last checkpoint (see [`CHECKPOINT_EVERY`]).
+    since_checkpoint: u32,
 }
+
+/// Commands between two checkpoints at most. A command writes at most a few
+/// dozen WAL pages (an append about 8), so the WAL stays near 4 to 16 MiB.
+const CHECKPOINT_EVERY: u32 = 512;
 
 const ADDITIVE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS rewrite_originals (
@@ -1044,13 +1065,22 @@ impl Writer {
         if level != 2 {
             return Err(SpoolError::Storage("synchronous".into()));
         }
+        // Checkpoints run between commands (`Writer::checkpoint`), not inside one.
+        conn.execute_batch("PRAGMA wal_autocheckpoint=0;")
+            .map_err(|e| classify_open(&e))?;
         let quick: String = conn
             .query_row("PRAGMA quick_check", [], |r| r.get(0))
             .map_err(|e| classify_open(&e))?;
         if quick != "ok" {
             return Err(SpoolError::Corrupt);
         }
-        let mut w = Writer { conn, cfg, shared };
+        let mut w = Writer {
+            conn,
+            cfg,
+            shared,
+            durable_seq: 0,
+            since_checkpoint: 0,
+        };
         if tables == 0 {
             w.init_schema().map_err(|e| classify_open(&e))?;
         } else {
@@ -1179,6 +1209,11 @@ impl Writer {
                     Err(SpoolError::GapReserveExceeded) => {}
                     Err(_) => self.set_degraded(true),
                 }
+                self.checkpoint();
+            }
+            // After the last reply, so no caller waits on it unless already queued.
+            if self.since_checkpoint >= CHECKPOINT_EVERY {
+                self.checkpoint();
             }
             let wait = next_maintenance.saturating_duration_since(std::time::Instant::now());
             let cmd = match rx.recv_timeout(wait) {
@@ -1186,8 +1221,23 @@ impl Writer {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             };
+            self.since_checkpoint += 1;
             match cmd {
-                Cmd::Append(ev, r) => r.send(self.append(*ev)),
+                Cmd::Append(ev, r) if matches!(ev.payload, EventPayload::Started(_)) => {
+                    let res = self.append(*ev);
+                    if let Ok(a) = &res {
+                        // FULL commit: its fsync covers every earlier WAL frame.
+                        self.durable_seq = a.sequence;
+                    }
+                    r.send(res)
+                }
+                Cmd::Append(ev, r) => {
+                    let (res, restored) = self.deferred(|w| w.append(*ev));
+                    r.send(res);
+                    if !restored {
+                        return;
+                    }
+                }
                 Cmd::Next(max, skip, r) => {
                     #[cfg(any(test, feature = "test-util"))]
                     if self.shared.delivery_paused.load(Ordering::SeqCst) {
@@ -1196,7 +1246,13 @@ impl Writer {
                     }
                     r.send(self.next(max, &skip))
                 }
-                Cmd::Ack(ids, r) => r.send(self.ack(&ids).inspect_err(|_| self.set_degraded(true))),
+                Cmd::Ack(ids, r) => {
+                    let (res, restored) = self.deferred(|w| w.ack(&ids));
+                    r.send(res.inspect_err(|_| self.set_degraded(true)));
+                    if !restored {
+                        return;
+                    }
+                }
                 Cmd::Quarantine(ids, code, r) => r.send(
                     self.quarantine(&ids, &code)
                         .inspect_err(|_| self.set_degraded(true)),
@@ -1213,6 +1269,43 @@ impl Writer {
                 ),
                 Cmd::Shutdown => return,
             }
+        }
+    }
+
+    /// Run `f` with `synchronous=NORMAL`: its commit is not fsynced (decisions.md
+    /// 2026-11-06). The flag is false when FULL could not be restored; the
+    /// caller then stops the writer, so no start ever commits without its fsync.
+    fn deferred<T>(&mut self, f: impl FnOnce(&mut Writer) -> T) -> (T, bool) {
+        let normal = self
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL;")
+            .is_ok();
+        let out = f(self);
+        let restored = !normal || self.conn.execute_batch("PRAGMA synchronous=FULL;").is_ok();
+        (out, restored)
+    }
+
+    /// PASSIVE checkpoint. It fsyncs the WAL before copying it into the database
+    /// and fsyncs the database after, so once every frame is copied, every commit
+    /// so far is durable. Only another connection's reader can stop it short.
+    fn checkpoint(&mut self) {
+        self.since_checkpoint = 0;
+        let res = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            });
+        match res {
+            Ok((0, log, copied)) if log == copied => {
+                let last = self.counters().last_seq;
+                self.durable_seq = last;
+            }
+            Ok(_) => {}
+            Err(_) => self.set_degraded(true),
         }
     }
 
@@ -1365,22 +1458,35 @@ impl Writer {
         Ok(())
     }
 
+    /// Unsent rows covered by an fsync, oldest first. Rows committed since the
+    /// last start are left for the next poll while durable rows remain; when
+    /// none remain, a checkpoint makes them durable (an idle proxy still drains).
     fn next(&mut self, max: usize, skip: &HashSet<String>) -> Vec<ProxyEvent> {
+        let out = self.next_durable(max, skip);
+        let last = self.counters().last_seq;
+        if out.is_empty() && max > 0 && self.durable_seq < last {
+            self.checkpoint();
+            return self.next_durable(max, skip);
+        }
+        out
+    }
+
+    fn next_durable(&mut self, max: usize, skip: &HashSet<String>) -> Vec<ProxyEvent> {
         let mut out = Vec::new();
         if max == 0 {
             return out;
         }
-        let mut stmt = match self
-            .conn
-            .prepare_cached("SELECT event_id, bytes FROM events WHERE state = 0 ORDER BY sequence")
-        {
+        let mut stmt = match self.conn.prepare_cached(
+            "SELECT event_id, bytes FROM events WHERE state = 0 AND sequence <= ?1 \
+             ORDER BY sequence",
+        ) {
             Ok(s) => s,
             Err(_) => {
                 self.set_degraded(true);
                 return out;
             }
         };
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([self.durable_seq], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
         });
         let Ok(rows) = rows else {
@@ -2305,6 +2411,215 @@ mod tests {
         assert_eq!(s.snapshot().pending_gaps, 0);
         assert_eq!(s.snapshot().gap_bytes, 0);
         assert_eq!(s.expire_now().unwrap(), ExpireReport::default());
+    }
+
+    fn record(n: u32, event_type: &str, payload: serde_json::Value) -> ProxyEvent {
+        serde_json::from_value(json!({
+            "schema_version": 1, "event_id": uid(n), "proxy_id": "px-1",
+            "epoch_id": uid(EPOCH), "sequence": 1,
+            "occurred_at": "2026-10-14T00:00:00Z",
+            "event_type": event_type, "payload": payload,
+        }))
+        .unwrap()
+    }
+
+    fn completed(n: u32) -> ProxyEvent {
+        record(
+            n,
+            "invocation.completed",
+            json!({"invocation_id": uid(7000 + n), "outcome": "success",
+                "delivery_state": "sent", "duration_ms": 1, "response_bytes": 10}),
+        )
+    }
+
+    fn cancel(n: u32) -> ProxyEvent {
+        record(
+            n,
+            "invocation.cancel_requested",
+            json!({"invocation_id": uid(7000 + n)}),
+        )
+    }
+
+    /// `spool.db` and its WAL as the writer opens them (the VFS keys by path).
+    fn spool_files(dir: &Path) -> (PathBuf, PathBuf) {
+        let d = dir.canonicalize().unwrap();
+        (d.join(SPOOL_FILE), d.join(format!("{SPOOL_FILE}-wal")))
+    }
+
+    /// A directory holding what a power loss now would leave: each spool file
+    /// as of its last fsync.
+    fn power_loss_copy(dir: &Path) -> tempfile::TempDir {
+        let (db, wal) = spool_files(dir);
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(
+            out.path().join(SPOOL_FILE),
+            crate::sync_vfs::synced_image(&db),
+        )
+        .unwrap();
+        std::fs::write(
+            out.path().join(format!("{SPOOL_FILE}-wal")),
+            crate::sync_vfs::synced_image(&wal),
+        )
+        .unwrap();
+        out
+    }
+
+    fn sequences(s: &mut Spool) -> Vec<(i64, String)> {
+        s.next_events(100, &HashSet::new())
+            .iter()
+            .map(|e| (e.sequence.get(), e.event_id.as_str().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn only_a_start_commit_fsyncs() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (db, wal) = spool_files(d.path());
+        // The first commit after open may also sync a fresh WAL header.
+        s.append(event(1)).unwrap();
+        let (db0, wal0) = (crate::sync_vfs::syncs(&db), crate::sync_vfs::syncs(&wal));
+        s.append(event(2)).unwrap();
+        assert_eq!(
+            crate::sync_vfs::syncs(&wal),
+            wal0 + 1,
+            "a start commit fsyncs the WAL"
+        );
+        s.append(completed(3)).unwrap();
+        s.append(cancel(4)).unwrap();
+        s.acknowledged(&[uid(1)]);
+        assert_eq!(
+            crate::sync_vfs::syncs(&wal),
+            wal0 + 1,
+            "completion, cancel and ack commits do not fsync"
+        );
+        s.append(event(5)).unwrap();
+        assert_eq!(crate::sync_vfs::syncs(&wal), wal0 + 2);
+        assert_eq!(
+            crate::sync_vfs::syncs(&db),
+            db0,
+            "no checkpoint inside a commit"
+        );
+    }
+
+    #[test]
+    fn power_loss_never_reissues_a_handed_out_sequence() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(event(1)).unwrap();
+        s.append(completed(2)).unwrap();
+        let handed = sequences(&mut s);
+        assert_eq!(
+            handed,
+            vec![(1, uid(1))],
+            "a row not yet durable is not handed out"
+        );
+        s.acknowledged(&[uid(1)]);
+
+        // Process crash: the page cache survives, so nothing is lost.
+        let crash = tempfile::tempdir().unwrap();
+        let (db, wal) = spool_files(d.path());
+        std::fs::copy(&db, crash.path().join(SPOOL_FILE)).unwrap();
+        std::fs::copy(&wal, crash.path().join(format!("{SPOOL_FILE}-wal"))).unwrap();
+        let (mut c, _) = open(crash.path());
+        assert_eq!(
+            sequences(&mut c),
+            vec![(2, uid(2))],
+            "crash keeps completion and ack"
+        );
+        let (mut c2, _) = open(power_loss_copy(crash.path()).path());
+        assert_eq!(
+            sequences(&mut c2),
+            vec![(2, uid(2))],
+            "synced before handed out"
+        );
+        drop(c2);
+
+        // Power loss: the start stays (a start-only call), the completion and
+        // the ack go, and the lost sequence 2 is assigned again. It never left.
+        let lost = power_loss_copy(d.path());
+        let (mut p, _) = open(lost.path());
+        assert_eq!(p.snapshot().last_assigned_sequence, 1);
+        assert_eq!(
+            sequences(&mut p),
+            handed,
+            "acked row is resent, same sequence"
+        );
+        assert_eq!(p.append(event(3)).unwrap().sequence, 2);
+
+        // Idle: no durable row left, so the poll checkpoints and drains the rest.
+        assert_eq!(sequences(&mut s), vec![(2, uid(2))]);
+        let (mut p, _) = open(power_loss_copy(d.path()).path());
+        assert_eq!(
+            sequences(&mut p),
+            vec![(2, uid(2))],
+            "handed out only once durable"
+        );
+    }
+
+    #[test]
+    fn rows_wait_while_a_reader_stops_the_checkpoint_short() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(event(1)).unwrap();
+        let mut reader = Connection::open(d.path().join(SPOOL_FILE)).unwrap();
+        let snap = reader.transaction().unwrap();
+        let _: i64 = snap
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        s.append(completed(2)).unwrap();
+        s.acknowledged(&[uid(1)]);
+        assert!(
+            sequences(&mut s).is_empty(),
+            "checkpoint did not cover row 2"
+        );
+        drop(snap);
+        assert_eq!(sequences(&mut s), vec![(2, uid(2))]);
+    }
+
+    #[test]
+    fn checkpoints_bound_the_wal() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (db, wal) = spool_files(d.path());
+        // The first command waits for the maintenance pass that runs at start.
+        s.append(event(1)).unwrap();
+        let db0 = crate::sync_vfs::syncs(&db);
+        // The checkpoint after command 3 * CHECKPOINT_EVERY runs before the next.
+        let n = 3 * CHECKPOINT_EVERY + 1;
+        for i in 2..=n {
+            s.append(event(i)).unwrap();
+        }
+        let checkpoints = crate::sync_vfs::syncs(&db) - db0;
+        assert_eq!(
+            checkpoints, 3,
+            "one checkpoint per {CHECKPOINT_EVERY} commands"
+        );
+        // An append writes 8 pages of 4 KiB plus a 24-byte frame header each.
+        let bound = u64::from(CHECKPOINT_EVERY + 1) * 8 * (4096 + 24) + 32;
+        let size = std::fs::metadata(&wal).unwrap().len();
+        assert!(size <= bound, "WAL {size} bytes, bound {bound}");
+    }
+
+    #[test]
+    fn maintenance_checkpoints() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut c = cfg(d.path(), now);
+        c.maintenance_interval = Duration::from_millis(30);
+        let s = Spool::open(c).unwrap();
+        let (db, _) = spool_files(d.path());
+        s.append(event(1)).unwrap();
+        let db0 = crate::sync_vfs::syncs(&db);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            crate::sync_vfs::syncs(&db) > db0,
+            "maintenance pass checkpointed"
+        );
     }
 
     #[test]
