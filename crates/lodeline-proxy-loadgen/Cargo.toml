@@ -1,0 +1,36 @@
+[package]
+name = "lodeline-proxy-loadgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Test-only: synthetic MCP load server and open/closed-loop load driver for the Lodeline Proxy performance targets (validation.md). Not shipped."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lodeline-proxy-loadgen"
+path = "src/main.rs"
+
+[dependencies]
+lodeline-proxy-api = { path = "../lodeline-proxy-api" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+hdrhistogram = { workspace = true }
+reqwest = { workspace = true }
+# Load server. Same raw hyper stack as lodeline-proxy; all already in Cargo.lock.
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+getrandom = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
