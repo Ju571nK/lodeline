@@ -253,7 +253,7 @@ impl LookupSlots {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn free(&self) -> usize {
         self.state.lock().unwrap().free
     }
