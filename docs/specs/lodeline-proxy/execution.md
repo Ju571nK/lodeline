@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-03 · registry entry 보존과 inventory report backlog 상한 #307 (기준 커밋 `faf944a`)
+갱신: 2026-11-06 · AWS 실기 run I: 상태 유지·fixture 변형·패키지 systemd 경로 (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -9,6 +9,30 @@
   계약 종료는 구현·실기 검증 완료가 아니다.
 - P1 착수. 사용자 창구: 이 대화의 orchestrator. 하위 작업은 구체적인 파일 소유권과 인수 조건을 지정하고, 실행 provider/model 기본값을 유지한다.
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
+- **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
+- **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-06 AWS 실기 run I (상태 유지, 변형, 패키지)
+
+`3500adb`(main, #495)에서 운영자가 로컬 harness로 같은 2노드 환경(t4g.small 2대, AL2023 aarch64, 커널 6.18.54, systemd 252)을 다시 띄워 세 단계를 실행했다. 시험서는 [aws-smoke-test.md §19](aws-smoke-test.md#19-aws-run-i-2026-11-06-utc)다. 빌드는 A에서 `cargo build --release --locked -p lodeline-server -p lodeline-proxy`(증분 193초, `lodeline-proxy 0.13.0`, rustc 1.99.1)다. 1·2단계는 SELinux Permissive(이전 실행과 같음), 3단계는 A만 Enforcing으로 돌렸고 끝나고 Permissive로 되돌렸다.
+
+| 단계 | 구성 | 결과 |
+|---|---|---|
+| 1 상태 유지 §4–§13 | B의 proxy, D1 | 모두 통과. 10-25 H와 10-31 재시험과 숫자가 같다. 시나리오 27/27, ledger 22 completed·중복 0·canary와 도구 이름 0, drift added→removed(member_count 5, 6, 5), fixture `smoke_echo` 1·`deletes` 2·`cancels_matched` 1, privacy B 15·A 12 파일 0건(대조군 FOUND), offline replay 6(중복 0), 서버 없이 재시작 `Expired`·`forwarding: false`·401 → 복구 뒤 `Valid`·200, spool 32×200/48×503(upstream delta 32 일치)과 경계 호출 1건 `started`, disable 401 → enable 200, 관리 감사 seq 0–4 ok |
+| 2 fixture 변형 §9–§10 (AWS 첫 실행) | B의 proxy, D1. 변형마다 fixture와 proxy를 재시작 | `--stateless`, `--initialize-sse`, 둘 다 모두 시나리오 27/27, ledger 22(표 동일), privacy B 15·A 12 파일 0건. fixture `deletes`는 stateless 0(proxy가 DELETE에 직접 응답), initialize-sse 2, 둘 다 0. `cancels_matched`는 모두 1. 둘 다 변형은 §17 로컬 리허설과 같다 |
+| 3 패키지 + systemd | A 한 대, RPM(`packaging/build.sh proxy rpm`, 110초), A의 loopback fixture, Enforcing | 모두 통과, AVC 0건. 설치 직후 `disabled`·`inactive`, 라이브 `proxy.yaml` 없음, 8480 listen 없음. 시작 후 `Valid`·`forwarding: true`, NRestarts 0, 프로세스 context `unconfined_service_t`, state dir 0700. §9 27/27, ledger 22, privacy 16 파일(state dir, journal, `proxy.yaml`) 0건, offline replay 6, `systemctl restart`를 서버 없이 해도 유닛이 active로 남고(crash loop 없음) 401 → 복구 뒤 200, spool 32/48·delta 32, disable/enable, 감사 seq 5–9 ok. `systemctl stop` 0.04초, `outcome=Drained`, Result=success |
+
+AVC는 Enforcing 구간(05:57:39–06:02:29 UTC)과 당일 전체에서 `ausearch -m avc,user_avc` 0건이다. 같은 구간에 `lodeline-proxy`의 SERVICE_START 4건이 잡혀 검색이 동작함을 확인했다. 처음 AVC 단계는 날짜 형식 오류로 실패해 시각만 쓰도록 harness를 고친 뒤 다시 조회했다.
+
+관찰값(validation.md의 성능 조건이 아님, 패키지 proxy, release 빌드, 기본 한도). RSS 9.2 MiB(§9–§13 뒤) → 12.1 MiB(호출 2,000회 뒤), fd 17, 스레드 7로 뒤에도 같다. soak이 아니다. 순차 호출(동시성 1, 요청마다 새 연결) 200회를 5번 교대로 쟀고 전부 200이다. 직접 1.5–1.6 ms/호출, proxy 경유 5.0–5.8 ms(중앙값 5.2), 추가 약 3.6 ms다. 지연의 원인은 **프로파일하지 않았다.** proxy CPU는 약 1.04초 실행당 약 0.29초라 CPU 한계는 아니다. 같은 gp3 볼륨의 600 byte write+fsync 중앙값이 1.99 ms라서, 호출마다 하는 fsync가 추가 시간의 큰 몫일 것으로 추정한다. 프로파일이나 spool을 tmpfs에 두는 비교로 확인하기 전에는 추정이다.
+
+성능 목표(100 calls/s 동시성 32의 p50/p95/p99, 32×60초 SSE, 1·8 MiB 경계 부하, 65-call 포화)는 측정하지 않았다. 고정 환경(Rocky 9, 4 vCPU/8 GiB, proxy cgroup 2 vCPU/512 MiB)을 t4g.small(2 vCPU/2 GiB 전체)이 만족하지 못하고, 별도 부하 서버·driver가 필요한데 validation.md가 Python smoke fixture를 성능 서버로 쓰지 못하게 하며 저장소에 load driver도 없다.
+
+이번에 다시 읽지 않은 것: harness가 proxy-detail의 gap 목록을 출력하지 않아 `local_record_failed`와 `central_outage` gap은 확인하지 못했다(`started` 경계 호출은 확인함).
+
+시험이 끝난 뒤 패키지, 유닛, listen, 파일 목록이 두 노드 모두 실행 전과 같음을 확인하고 노드를 중지했다.
+
+미측정: vendor client(R, 별도로 승인된 compatibility probe 필요), D2 공개 HTTPS(공개 DNS 이름, 해당 이름의 인증서, 고정 IP, 방화벽 규칙 필요), x86_64, 성능 목표(load driver와 4 vCPU/8 GiB Rocky 9 호스트 필요), 제한된 proxy SELinux 도메인(존재하지 않음), 호스트 사이 패키지 경로, Rocky 9.
 
 ## 2026-10-29–31 spool hardening·실기 재시험
 

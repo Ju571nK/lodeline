@@ -1,7 +1,7 @@
 # Lodeline Proxy AWS two-instance smoke test (runbook)
 
 2026-10-24 · base `e5612f8` plus the T-13d/T-12b2 change, merged as `b17b2d2` (#314)
-· status: **H run passed on 2026-10-25 at `b17b2d2` (D1, §18).** Real clients (R), D2, manager UI and systemd remain unmeasured.
+· status: **H run passed on 2026-10-25 at `b17b2d2` (D1, §18). Run I passed on 2026-11-06 at `3500adb` (D1 stateful, fixture variants, packaged systemd under SELinux Enforcing, §19).** Real clients (R), D2, x86_64, performance targets and manager UI remain unmeasured.
 Traces: PX-003/004/006–011/013–016, AC-03/04/05/06/07/08/12/15 (see [t13d-t12b2.md](t13d-t12b2.md)).
 Tools: [`scripts/proxy-smoke/`](../../../scripts/proxy-smoke/README.md).
 
@@ -604,3 +604,82 @@ certificates are deliberately not recorded here.
 Differences from §17: spool counts 32/48 instead of 31/49 (fill counts depend on record bytes and are observations), and the
 boundary start-only invocation appeared (as in §15, not in §17). Not measured: the stateless and `--initialize-sse` fixture
 variants on AWS, final stopped-state scans, D2, real vendor clients (R), manager UI, systemd/SELinux.
+
+## 19. AWS run (I, 2026-11-06 UTC)
+
+Operator-run with the operator's local harness at `3500adb` (main, #495), two EC2 instances as in §18. Account, region, addresses, instance IDs, tokens and certificates are deliberately not recorded here. B plays the PC role, so the PC to B port-forward leg is not exercised.
+
+| Item | Value |
+|---|---|
+| A, B | t4g.small (2 vCPU, 2 GiB; A with 4 GiB swap), Amazon Linux 2023.12 aarch64, kernel 6.18.54, systemd 252, Python 3.9.25, OpenSSL 3.5.8, gp3 |
+| Build | on A, `cargo build --release --locked -p lodeline-server -p lodeline-proxy`, 193 s incremental; `lodeline-proxy 0.13.0`, rustc 1.99.1; the binary's SHA256 is equal on A and B |
+| RPM | `packaging/build.sh proxy rpm` on A, 110 s, `lodeline-proxy-0.13.0-1.aarch64.rpm`. Its binary hash differs from the harness binary. Inferred cause: it was built with `-p lodeline-proxy` alone instead of together with `lodeline-server` (feature unification). Not investigated |
+| SELinux | Permissive for steps 1 and 2, as in earlier runs. For step 3, A was Enforcing from 05:57:39 to 06:02:29 UTC, then restored to Permissive |
+| Data plane | D1 (SSH tunnel from B to the loopback fixture on A) for steps 1 and 2. A-local loopback fixture for step 3 |
+
+### 19.1 Stateful smoke, §4–§13 (B proxy, D1)
+
+Every number equals the §18 run and the 2026-10-31 rerun.
+
+| Check | Result |
+|---|---|
+| §9 scenario | 27/27 passed |
+| §9 ledger | 22 completed, zero duplicate invocation/event sets, zero canary and tool-name occurrences. Table equals §9 |
+| §9 drift / inventory | one `metadata_ref` `added` then `removed`; snapshot `member_count` 5, 6, 5 |
+| §9 fixture counters | `smoke_echo` 1, `deletes` 2, `cancels_matched` 1 |
+| §10 privacy | B 15 / A 12 readable files, zero occurrences, zero errors; positive control FOUND |
+| §11 server offline within TTL | initialize 202, five calls 200; after restart exactly six completed invocations, no duplicates |
+| §11 proxy restart with server down | `Expired`, `forwarding: false`, initialize 401; after server start `Valid`, call 200 |
+| §12 spool 49152 / reserve 16384 | 32 calls 200, 48 calls 503; fixture `smoke_echo` delta 32 (match). After drain one call 200. Window ledger 35 with one boundary invocation `started` |
+| §13 disable / enable | `Disabled` and 401; `Valid` and 200 |
+| Management audit | seq 0–4 = register, fingerprint_register, config_put, disable, enable, all `ok` |
+
+The harness does not print the proxy-detail gap list, so the `local_record_failed` and `central_outage` gaps were not re-read in this run. The `started` boundary invocation was.
+
+### 19.2 Fixture variants, §9–§10 (B proxy, D1; first AWS run of these)
+
+The fixture was restarted with each flag set and B's proxy restarted before each scenario.
+
+| Variant | Scenario | Ledger | Fixture `deletes` | Privacy B / A |
+|---|---|---|---|---|
+| `--stateless` | 27/27 | 22 completed, 0 duplicates, 0 canary or tool name | 0 (the proxy answers DELETE itself) | 15 / 12 files, 0 occurrences |
+| `--initialize-sse` | 27/27 | 22, same table | 2 | 15 / 12, 0 |
+| `--stateless --initialize-sse` | 27/27 | 22, same table | 0 | 15 / 12, 0 |
+
+The combined variant matches the §17 local rehearsal (27/27, 22, DELETE 0). `cancels_matched` stayed 1 in every variant.
+
+### 19.3 Packaged proxy under systemd, SELinux Enforcing (A)
+
+| Check | Result |
+|---|---|
+| Install | `dnf install` of the local RPM. Unit `disabled` and `inactive`, no `/etc/lodeline/proxy.yaml`, `proxy.yaml.example` present, nothing listening on 8480. `/usr/bin/lodeline-proxy` is `bin_t` |
+| Configure | `/etc/lodeline/proxy.yaml` root:lodeline-proxy 0640. Key and secret files owned by `lodeline-proxy`, 0600. `check-config` as `lodeline-proxy`: `config ok`. Registered, fingerprinted and configured through the same management CLI |
+| Start | `systemctl start`; `Valid`, `forwarding: true`, NRestarts 0. Process context `system_u:system_r:unconfined_service_t:s0`, because no proxy SELinux domain exists yet (the unit file says so). State dir `/var/lib/lodeline-proxy` 0700, `var_lib_t` |
+| §9 | 27/27, ledger 22 (same table), drift added then removed, counters 1 / 2 / 1 |
+| §10 | 16 files (state dir, `journalctl -u lodeline-proxy -o cat`, `proxy.yaml`), zero occurrences, zero errors; positive control FOUND. A: 12 files, 0 |
+| §11 | offline: initialize 202 and five calls 200, then six completed, no duplicates. `systemctl restart` with the server down: the unit stays active (no crash loop), `Expired`, `forwarding: false`, 401, then 200 after recovery |
+| §12 | 32 calls 200, 48 calls 503, delta 32 (match), one boundary `started`, ledger 35 |
+| §13 | `Disabled` 401, then `Valid` 200. Audit seq 5–9 `ok` |
+| Stop | `systemctl stop` took 0.04 s, log `shutdown outcome=Drained`, Result=success |
+| AVC | zero records from `ausearch -m avc,user_avc` for the Enforcing window and for the whole day. Control: four SERVICE_START records for `lodeline-proxy` in the same window, so the search works. The first AVC step failed on a date-format error in the harness and was rerun with times only |
+
+Not measured here: a confined `lodeline_proxy_t` domain (none exists in `packaging/selinux/`), the packaged proxy across hosts (step 3 was single-host), Rocky 9.
+
+### 19.4 Performance targets (validation.md): not measured
+
+The candidate acceptance targets cannot be measured in this environment as specified. The fixed environment is Rocky 9 with 4 vCPU and 8 GiB, the proxy in a 2 vCPU / 512 MiB cgroup, and the upstream and driver on the remaining CPU. A t4g.small has 2 vCPU and 2 GiB in total. The targets need a separate synthetic load server and driver. validation.md forbids using the Python smoke fixture as the performance server, and the repo has no load driver. These stay unrun: 100 calls/s at concurrency 32 with p50/p95/p99 deltas, 32 SSE streams for 60 s, 1 MiB and 8 MiB boundaries under load, and 65-call saturation.
+
+Observations only (not the validation.md condition), packaged proxy on A, release build, default limits:
+
+- RSS 9.2 MiB after the §9–§13 suite and 12.1 MiB after 2,000 more calls (VmHWM 12.1 MiB), with 17 fds and 7 threads before and after. This is not a steady-state soak.
+- Sequential calls, concurrency 1, a new HTTP connection per request, 200 calls per run, 5 alternating runs per side, all 200 OK. Direct: 1.5–1.6 ms per call. Through the proxy: 5.0–5.8 ms per call (median 5.2). That adds about 3.6 ms per call.
+- The cause of the added time is **unprofiled.** The proxy used about 0.29 s of CPU per run of about 1.04 s, so it is not CPU-bound. A 600-byte write plus fsync on the same gp3 volume takes 1.99 ms median (1.95–2.09, 5 runs of 200). The per-call fsync of the durable start record is therefore the likely main part of the added time. This is a guess until a profile or a spool-on-tmpfs comparison confirms it.
+
+### 19.5 Not covered and what each needs
+
+- Real vendor clients (R): a separately authorised compatibility probe per AGENTS.md, with current-version research recorded first.
+- D2 public HTTPS: a public DNS name, a certificate valid for it that chains to B's trust store, a fixed public address for A, and a firewall rule for TCP 443 from B's egress address.
+- x86_64: a new instance. A Rocky 9 image would also cover the D-04 target OS.
+- Performance targets: a load driver and synthetic load server written for validation.md, and a 4 vCPU / 8 GiB Rocky 9 host.
+
+Teardown: the RPM, its config, state dir and temporary keys were removed, and package lists, units and listeners on both nodes equal the pre-run state. Both nodes were confirmed stopped.
