@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-06 · 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -9,8 +9,58 @@
   계약 종료는 구현·실기 검증 완료가 아니다.
 - P1 착수. 사용자 창구: 이 대화의 orchestrator. 하위 작업은 구체적인 파일 소유권과 인수 조건을 지정하고, 실행 provider/model 기본값을 유지한다.
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
-- **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
+- **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 성능 측정 도구 (`feat/proxy-loadgen`)
+
+[validation.md](validation.md)가 요구한 synthetic load server와 driver다. Python fixture는 성능 측정에 쓰지 않는다는 조건에 맞춰
+Rust crate `crates/lodeline-proxy-loadgen`(publish 안 함, release·패키지 목록에 없음)으로 만들었다. 사용법은
+[그 README](../../../crates/lodeline-proxy-loadgen/README.md), validation.md 대응과 차이는 [validation.md](validation.md) "성능 측정 도구" 절.
+
+- `serve`: `load_echo` 도구 하나, 응답을 요청한 크기로 채움, `/_load/counters`로 받은 호출 수 공개.
+- `principals`: principal마다 256-bit token(0600 파일)과 SHA-256 verifier. config에는 verifier만 들어가고 control plane의
+  `PUT /v1/proxies/{id}/config`로 적용한다. principal `i`는 route `i % R`만 쓴다. principal 하나의 동시 호출 한도 8과
+  route 하나의 한도 16 때문에 동시성 C에는 principal C/8개, route C/16개 이상이 필요하다. 기본값 8 × 4.
+- `run`: lane 하나가 principal 하나의 MCP session이다. open loop(고정 rate, 동시성 상한)와 closed loop, direct와 proxied를
+  round마다 교대한다. 응답마다 id와 marker를 확인하고 오류를 종류별로 센다. 성공 응답 수와 load server 호출 수를 비교한다.
+- `stack.sh`: 시험 PKI, local collector `lodeline-server`, proxy, load server를 loopback에 띄운다. `PROXY_WRAP`로 systemd scope.
+
+시험: 단위 19개(scheduler의 open-loop 시각·상한·warm-up·closed loop·lane 수, 분위수, 오류 분류, principal 파일, 응답·요청 크기),
+load server 직접 1개, e2e `loadgen_e2e.rs` 1개(실제 relay·spool·server. 동시성 32 open loop 오류 0, 40 worker closed loop는 429만),
+긴 run 1개는 `#[ignore]`.
+
+로컬(macOS 26.6.2 arm64, release, 12 core, load average 1.8–2.7, state는 APFS): 100 calls/s, 동시성 32, warm-up 5초 + 30초 × 3 round.
+오류 0, load server 호출 수 = 성공 응답 수. direct p50 0.26 ms, 추가 p50 0.94 ms(0.935–0.945), p95 1.48 ms(1.31–1.56),
+p99 4.41 ms(4.12–4.92). driver timer 지연(`send_lag_ms`)은 macOS에서 p50 약 2.5 ms라 latency 시작점을 task 실행 시각으로 했다.
+principal 하나에 closed loop 동시성 16을 걸면 429 `too_many_requests` 132,057회와 성공 9,297회로 셌다(upstream 9,297).
+
+관찰(macOS): closed loop 고속 run에서 proxy는 호출마다 upstream 연결을 새로 연다. 약 2초 만에 load server 쪽 TIME_WAIT가 16,332개로
+macOS ephemeral port 범위(16,384)를 채웠고, 그 뒤 호출은 502 `upstream_unavailable`이었다(동시성 8, 8초, 35,708회 중 19,400회).
+Linux loopback은 `tcp_tw_reuse` 기본값 2로 TIME_WAIT를 재사용하므로 아래 AWS run에서는 나지 않았다. loopback이 아닌 upstream에서
+같은 상한이 걸리는지는 측정하지 않았다.
+
+AWS(노드 A만, t4g.small 2 vCPU, AL2023 aarch64, kernel 6.18.54, Neoverse-N1, gp3 xfs, rustc 1.99.1, `cb55a10`): server, proxy,
+load server, driver를 A 한 대에. proxy는 `systemd-run --scope`(MemoryMax 512M, MemorySwapMax 0, AllowedCPUs 0), 나머지는 `taskset -c 1`.
+validation.md의 목표 환경(Rocky 9, 4 vCPU x86_64, proxy 2 vCPU)이 아니다. 아래 수치는 이 환경의 baseline이고 목표 판정이 아니다.
+
+| 조건 | 결과 |
+|---|---|
+| 100 calls/s, 동시성 32, warm-up 30초 + 300초 × 3 round, state gp3 | 측정 호출 180,000회 오류 0, round마다 load server 33,000회 = 성공 응답 33,000회. direct p50 0.27 ms |
+| 같은 run, 추가 지연 round 중앙값(범위) | p50 3.33 ms (3.328–3.332), p95 7.93 ms (7.36–8.05), p99 20.8 ms (15.8–22.9), max 71.6 ms (58.2–80.1) |
+| state tmpfs 대조, 60초 × 2 round | 추가 p50 0.77 ms (0.763–0.777), p95 3.5 ms (2.5–4.5), p99 9.9 ms (9.5–10.3), 오류 0 |
+| closed loop 30초, gp3, 동시성 1 / 8 / 32 / 64 | proxied 281 / 313 / 378 / 416 calls/s, p50 2.5 / 16.9 / 62.3 / 129 ms, 오류 0 |
+| closed loop 30초, tmpfs, 동시성 32 | proxied 2,049 calls/s, p50 15.2 ms, 오류 0 |
+| proxy 자원(gp3 run 전체 뒤) | VmHWM 16 MiB, cgroup memory.peak 238 MB(spool page cache 포함), FD 17 |
+
+한계 요인: gp3의 추가 p50 3.33 ms 중 tmpfs와의 차이 약 2.56 ms가 저장장치다. 2026-11-06 측정의 격리 start fsync 2.2 ms와 맞는다.
+gp3 closed loop 처리량 약 400 calls/s도 같은 날 측정한 start fsync 직렬 상한(약 400)과 같다. tmpfs 2,049 calls/s의 상한은 proxy가
+쓰는 CPU 0 한 개로 추정한다(측정 안 함). driver와 load server는 CPU 1 하나로 direct 9,200–10,700 calls/s를 냈으므로 proxied run의
+상한이 아니다. 추가 p99와 max의 원인은 이번에 밝히지 않았다.
+
+미검증: 목표 VM(Rocky 9, x86_64, SELinux Enforcing), proxy 2 vCPU, validation.md 3·4단계, TLS listener, loopback이 아닌
+upstream의 연결 재사용, Linux에서 ignored 긴 e2e.
+노드는 A만 14:52–15:49 UTC에 켰다(약 0.95 노드시간, 약 $0.03). 끝난 뒤 A·B 모두 stopped를 확인했다.
 
 ## 2026-11-06 지속 부하에서 감사 writer queue가 차서 나던 503 수정 (`fix/proxy-writer-queue`)
 
