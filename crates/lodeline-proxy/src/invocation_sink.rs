@@ -85,7 +85,8 @@ pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 /// out keeps its slot until its blocking read returns, so a stuck registry
 /// holds at most this many blocking threads. A lookup beyond them waits for a
 /// slot within its timeout; it fails at once only when every slot is held by
-/// a read older than the timeout (the registry is stuck).
+/// a read past its own deadline (the registry is stuck), so client retries
+/// and the writer's refusal lookups do not each wait out the timeout.
 pub const LOOKUP_CONCURRENCY: usize = 4;
 /// Invocation ids named in one `local_record_failed` gap (schema bound).
 const MAX_GAP_IDS: usize = 100;
@@ -193,9 +194,7 @@ struct Shared {
     /// Shutdown began: nothing more is queued (a late record is counted).
     closed: AtomicBool,
     notify: Notify,
-    lookups: Arc<tokio::sync::Semaphore>,
-    /// When a lookup last took a slot.
-    lookup_taken: Mutex<tokio::time::Instant>,
+    lookups: Arc<LookupSlots>,
     gap_slot: Arc<tokio::sync::Semaphore>,
     late_flush_running: AtomicBool,
     next_gap_attempt: Mutex<std::time::Instant>,
@@ -204,6 +203,60 @@ struct Shared {
     /// Tests: held while a start's append waits.
     #[cfg(test)]
     append_gate: Arc<tokio::sync::RwLock<()>>,
+}
+
+/// The [`LOOKUP_CONCURRENCY`] registry lookup slots. Taking a slot and the
+/// stuck check read and write one lock, so no lookup decides on a slot that
+/// another has taken but not yet accounted for.
+struct LookupSlots {
+    state: Mutex<SlotState>,
+    freed: Notify,
+}
+
+struct SlotState {
+    free: usize,
+    /// The latest deadline of any lookup that took a slot.
+    latest_deadline: tokio::time::Instant,
+}
+
+/// Released on drop, which wakes the lookups waiting for a slot.
+struct LookupSlot(Arc<LookupSlots>);
+
+impl Drop for LookupSlot {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap_or_else(|p| p.into_inner()).free += 1;
+        self.0.freed.notify_waiters();
+    }
+}
+
+impl LookupSlots {
+    /// A slot for a lookup that gives up at `deadline`. `None` at once when no
+    /// slot is free and every holder is past its deadline: waiting cannot
+    /// succeed.
+    async fn take(self: &Arc<Self>, deadline: tokio::time::Instant) -> Option<LookupSlot> {
+        loop {
+            let mut freed = std::pin::pin!(self.freed.notified());
+            // Registered before the check, so a release in between still wakes it.
+            freed.as_mut().enable();
+            {
+                let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                if s.free > 0 {
+                    s.free -= 1;
+                    s.latest_deadline = s.latest_deadline.max(deadline);
+                    return Some(LookupSlot(self.clone()));
+                }
+                if tokio::time::Instant::now() >= s.latest_deadline {
+                    return None;
+                }
+            }
+            freed.await;
+        }
+    }
+
+    #[cfg(test)]
+    fn free(&self) -> usize {
+        self.state.lock().unwrap().free
+    }
 }
 
 /// The producer. Install with [`crate::server::Proxy::with_sink`] (wrapped in a
@@ -474,20 +527,10 @@ impl Shared {
         };
         let scope = scope?;
         let name = name.as_str().to_string();
-        let now = tokio::time::Instant::now();
-        let taken = &self.lookup_taken;
-        // No free slot and none taken within the timeout: every slot is held
-        // by a read that outlived its own wait, so waiting cannot succeed.
-        if self.lookups.available_permits() == 0
-            && now.duration_since(*taken.lock().unwrap_or_else(|p| p.into_inner()))
-                >= LOOKUP_TIMEOUT
-        {
-            return None;
-        }
+        let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
         let slots = self.lookups.clone();
-        let found = tokio::time::timeout_at(now + LOOKUP_TIMEOUT, async move {
-            let slot = slots.acquire_owned().await.ok()?;
-            *taken.lock().unwrap_or_else(|p| p.into_inner()) = tokio::time::Instant::now();
+        let found = tokio::time::timeout_at(deadline, async move {
+            let slot = slots.take(deadline).await?;
             tokio::task::spawn_blocking(move || {
                 // Released when the read returns, not when the wait gives up.
                 let _slot = slot;
@@ -613,8 +656,13 @@ impl InvocationSink {
             abandon: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             notify: Notify::new(),
-            lookups: Arc::new(tokio::sync::Semaphore::new(LOOKUP_CONCURRENCY)),
-            lookup_taken: Mutex::new(tokio::time::Instant::now()),
+            lookups: Arc::new(LookupSlots {
+                state: Mutex::new(SlotState {
+                    free: LOOKUP_CONCURRENCY,
+                    latest_deadline: tokio::time::Instant::now(),
+                }),
+                freed: Notify::new(),
+            }),
             refused_starts: AtomicU64::new(0),
             gap_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             late_flush_running: AtomicBool::new(false),
@@ -1464,7 +1512,7 @@ mod tests {
         }
         assert_eq!(sink.refused_starts(), n as u64);
         // the timed-out reads still hold their slots, no more than the bound
-        assert_eq!(sink.shared.lookups.available_permits(), 0);
+        assert_eq!(sink.shared.lookups.free(), 0);
         assert!(sink.lock().is_empty());
         // Repeated client retries and the writer's refusal path share the
         // same occupied slots and must fail immediately, without more work.
@@ -1494,10 +1542,10 @@ mod tests {
         })
         .await
         .expect("saturated lookups must refuse immediately");
-        assert_eq!(sink.shared.lookups.available_permits(), 0);
+        assert_eq!(sink.shared.lookups.free(), 0);
         release.send(()).unwrap();
         held.await.unwrap();
-        wait_for(|| sink.shared.lookups.available_permits() == LOOKUP_CONCURRENCY).await;
+        wait_for(|| sink.shared.lookups.free() == LOOKUP_CONCURRENCY).await;
         h.shutdown(Duration::from_secs(5)).await;
         assert_eq!(sp.snapshot().unsent_events, 0);
     }
@@ -1522,9 +1570,9 @@ mod tests {
             g,
         )
         .unwrap();
-        // Idle for longer than LOOKUP_TIMEOUT, then busy (a write holds its
-        // lock) but answering well within it: the overlapping lookups all wait.
-        tokio::time::sleep(LOOKUP_TIMEOUT + Duration::from_millis(100)).await;
+        // No slot holder has a deadline ahead (as after an idle spell). The
+        // registry is busy (a write holds its lock) but answers well within
+        // LOOKUP_TIMEOUT: the overlapping lookups all wait.
         let (ready, ready_rx) = tokio::sync::oneshot::channel();
         let (release, release_rx) = tokio::sync::oneshot::channel();
         let held = tokio::task::spawn_blocking(move || {
@@ -1547,8 +1595,7 @@ mod tests {
             }));
         }
         wait_for(|| {
-            sink.shared.lookups.available_permits() == 0
-                && (sink.lock().len() == n || sink.refused_starts() > 0)
+            sink.shared.lookups.free() == 0 && (sink.lock().len() == n || sink.refused_starts() > 0)
         })
         .await;
         release.send(()).unwrap();
@@ -1557,6 +1604,59 @@ mod tests {
             assert_eq!(r.await.unwrap(), StartVerdict::Proceed);
         }
         assert_eq!(sink.refused_starts(), 0);
+        h.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn a_lookup_arriving_as_a_slot_frees_waits_instead_of_failing_fast() {
+        let d = tempfile::tempdir().unwrap();
+        let sp = spool(d.path());
+        let rd = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            rd.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let (store, _) = RegistryStore::open(rd.path(), "px-1").unwrap();
+        let (g, _) = gaps();
+        let (sink, h) = InvocationSink::start(
+            Admission::new(sp.clone()),
+            "px-1",
+            sp.epoch_id(),
+            Some(store),
+            g,
+        )
+        .unwrap();
+        let mut held = Vec::new();
+        for _ in 0..LOOKUP_CONCURRENCY {
+            let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
+            held.push(sink.shared.lookups.take(deadline).await.unwrap());
+        }
+        let s2 = sink.clone();
+        let first = tokio::spawn(async move {
+            s2.request_started(&started(
+                1,
+                Method::ToolsCall,
+                ToolField::Name(ToolName::parse("t").unwrap()),
+            ))
+            .await
+        });
+        wait_for(|| sink.lock().len() == 1).await;
+        // Every holder is past its deadline when one slot frees. The waiting
+        // lookup is woken but has not run yet when the second one arrives.
+        sink.shared.lookups.state.lock().unwrap().latest_deadline = tokio::time::Instant::now();
+        held.pop();
+        assert_eq!(
+            sink.request_started(&started(
+                2,
+                Method::ToolsCall,
+                ToolField::Name(ToolName::parse("t").unwrap()),
+            ))
+            .await,
+            StartVerdict::Proceed
+        );
+        assert_eq!(first.await.unwrap(), StartVerdict::Proceed);
+        drop(held);
         h.shutdown(Duration::from_secs(5)).await;
     }
 

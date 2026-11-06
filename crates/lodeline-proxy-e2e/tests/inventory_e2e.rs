@@ -663,9 +663,9 @@ async fn a_forged_cursor_never_completes_a_listing() {
 }
 
 /// Concurrent `tools/call` through the relay on a healthy registry are never
-/// refused: at the per-principal call limit (8) their registry lookups overlap
-/// (more than the blocking-read cap),
-/// and an overlap is not a registry that cannot answer.
+/// refused. At the per-principal call limit (8) more registry lookups overlap
+/// than there are blocking-read slots, and an overlap is not a registry that
+/// cannot answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_tool_calls_on_a_healthy_registry_are_not_refused() {
     let Some(h) = H::new(&[(NAMES[0], "first tool")], 10).await else {
