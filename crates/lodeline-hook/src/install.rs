@@ -20,6 +20,7 @@
 //     The separate plugin-bundle path in `install_antigravity.rs` is a
 //     different mechanism and has not been re-probed.
 
+use lodeline_core::paths::{command_exe, is_hook_binary, SHELL_WS};
 use serde_json::{json, Value};
 use std::io;
 use std::path::PathBuf;
@@ -57,10 +58,6 @@ fn command_string_enforce(exe: &str, agent: &str, capture: &str, on_failure: &st
     format!("{exe} {agent} --enforce --on-failure {on_failure} --capture {capture}")
 }
 
-/// Whitespace a shell splits a command on. Not Unicode whitespace: a path with
-/// U+3000 or U+00A0 is one token to a shell and must stay unquoted.
-const SHELL_WS: [char; 4] = [' ', '\t', '\r', '\n'];
-
 /// The binary path as written into a hook command.
 ///
 /// On Windows, `/` is the one separator that runs under Git Bash (Claude Code),
@@ -78,16 +75,6 @@ pub(crate) fn hook_exe(path: &str, windows: bool) -> String {
         format!("\"{p}\"")
     } else {
         p
-    }
-}
-
-/// The binary path at the start of a hook command: a leading double-quoted
-/// string, else the first whitespace token.
-pub(crate) fn command_exe(cmd: &str) -> &str {
-    let cmd = cmd.trim_start_matches(SHELL_WS);
-    match cmd.strip_prefix('"').and_then(|rest| rest.find('"')) {
-        Some(end) => &cmd[..end + 2],
-        None => cmd.split(SHELL_WS).next().unwrap_or(""),
     }
 }
 
@@ -134,14 +121,6 @@ fn is_our_command(cmd: &str, agent: &str) -> bool {
         && !path.iter().any(|t| t.contains(['"', '\'']))
         && !path[..bin].iter().any(|t| is_launcher(t))
         && has_our_args(tokens[bin + 1..].iter().copied(), agent)
-}
-
-/// The last path component is our binary. Windows file names ignore case.
-fn is_hook_binary(path: &str) -> bool {
-    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    ["lodeline-hook", "lodeline-hook.exe"]
-        .iter()
-        .any(|n| name.eq_ignore_ascii_case(n))
 }
 
 /// Programs that run the rest of their command line.

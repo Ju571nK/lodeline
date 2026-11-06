@@ -320,15 +320,11 @@ pub fn run(
             std::path::Path::new("/etc/group"),
         ),
     ]);
-    if crate::control::is_root() {
-        // A root doctor would run a path from a file that `sudo` may resolve in
-        // the invoking user's home.
-        checks.push(CheckResult::info(
-            "hook launch: not checked as root; run `lodeline doctor` as the user whose agent runs the hooks",
-        ));
-    } else {
-        checks.extend(check_hook_launch(&lodeline_core::paths::hook_state_dir()));
-    }
+    checks.extend(check_hook_launch(
+        crate::control::is_root(),
+        &lodeline_core::paths::hook_state_dir(),
+        HOOK_START_TIMEOUT,
+    ));
     for r in checks {
         let prefix = match r.level {
             CheckLevel::Ok => "[OK]  ",
@@ -391,10 +387,23 @@ pub fn run(
 /// Smart App Control or WDAC blocks an unsigned exe. No Unix errno has this value.
 const APP_CONTROL_BLOCKED: i32 = 4551;
 
+const HOOK_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Start each hook exe that `lodeline-hook install` registered, as the agent
 /// would, so a hook the OS refuses to run shows up here instead of as an
 /// agent-side hook error that nothing reports.
-fn check_hook_launch(state_dir: &Path) -> Vec<CheckResult> {
+fn check_hook_launch(
+    is_root: bool,
+    state_dir: &Path,
+    timeout: std::time::Duration,
+) -> Vec<CheckResult> {
+    if is_root {
+        // A root doctor would run a path from a file that `sudo` may resolve in
+        // the invoking user's home.
+        return vec![CheckResult::info(
+            "hook launch: not checked as root; run `lodeline doctor` as the user whose agent runs the hooks",
+        )];
+    }
     let mut hooks: Vec<(String, String)> = std::fs::read_dir(state_dir)
         .into_iter()
         .flatten()
@@ -407,10 +416,8 @@ fn check_hook_launch(state_dir: &Path) -> Vec<CheckResult> {
                 .to_string();
             let baseline: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
-            Some((
-                agent,
-                hook_exe(baseline.get("command")?.as_str()?).to_string(),
-            ))
+            let exe = lodeline_core::paths::command_exe(baseline.get("command")?.as_str()?);
+            Some((agent, exe.trim_matches('"').to_string()))
         })
         .collect();
     if hooks.is_empty() {
@@ -422,43 +429,52 @@ fn check_hook_launch(state_dir: &Path) -> Vec<CheckResult> {
     hooks.sort();
     hooks
         .into_iter()
-        .map(|(agent, exe)| match start_hook(Path::new(&exe)) {
-            Ok(()) => CheckResult::ok(format!("hook {agent}: {exe} starts")),
-            Err(e) => CheckResult::warn(format!(
-                "hook {agent}: cannot start {exe}: {}; hooks will not run",
-                launch_failure(&e)
-            )),
+        .map(|(agent, exe)| {
+            // Only our own binary is started, so doctor never runs a script or a
+            // PATH lookup that a registration file names.
+            if !Path::new(&exe).is_absolute() || !lodeline_core::paths::is_hook_binary(&exe) {
+                return CheckResult::warn(format!(
+                    "hook {agent}: not started: {exe} is not an absolute path to lodeline-hook"
+                ));
+            }
+            match start_hook(Path::new(&exe), timeout) {
+                Ok(true) => CheckResult::ok(format!("hook {agent}: {exe} starts")),
+                Ok(false) => CheckResult::ok(format!(
+                    "hook {agent}: {exe} starts (still running after {} s, stopped)",
+                    timeout.as_secs_f32()
+                )),
+                Err(e) => CheckResult::warn(format!(
+                    "hook {agent}: cannot start {exe}: {}; hooks will not run",
+                    launch_failure(&e)
+                )),
+            }
         })
         .collect()
 }
 
-/// The exe at the start of a registered hook command: a leading double-quoted
-/// path, else the first whitespace token (the form `lodeline-hook install` writes).
-fn hook_exe(command: &str) -> &str {
-    let command = command.trim_start();
-    match command.strip_prefix('"') {
-        Some(rest) => rest.split('"').next().unwrap_or(""),
-        None => command.split([' ', '\t']).next().unwrap_or(""),
-    }
-}
-
-fn start_hook(exe: &Path) -> std::io::Result<()> {
+/// Run `exe --version` with null stdio. `Ok(false)` means it was still running
+/// at `timeout` and was killed.
+fn start_hook(exe: &Path, timeout: std::time::Duration) -> std::io::Result<bool> {
     let mut child = std::process::Command::new(exe)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while child.try_wait()?.is_none() {
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            break;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            waited => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return waited.map(|_| false);
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    Ok(())
 }
 
 fn launch_failure(e: &std::io::Error) -> String {
@@ -1203,6 +1219,31 @@ mod linux_tests {
 #[cfg(test)]
 mod hook_launch_tests {
     use super::*;
+    use std::time::Duration;
+
+    const T: Duration = Duration::from_secs(2);
+
+    fn register(dir: &Path, agent: &str, command: &str) {
+        std::fs::write(
+            dir.join(format!("hook-registration-{agent}.json")),
+            serde_json::json!({ "command": command }).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// An executable shell script at `path` that touches `<path>.ran` and then runs `body`.
+    #[cfg(unix)]
+    fn script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let ran = format!("{}.ran", path.display());
+        std::fs::write(path, format!("#!/bin/sh\n: > '{ran}'\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn ran(path: &Path) -> bool {
+        Path::new(&format!("{}.ran", path.display())).exists()
+    }
 
     #[test]
     fn app_control_block_is_named() {
@@ -1220,14 +1261,13 @@ mod hook_launch_tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("no such dir").join("lodeline-hook");
         let exe = exe.to_str().unwrap();
-        std::fs::write(
-            dir.path().join("hook-registration-codex.json"),
-            serde_json::json!({ "command": format!("\"{exe}\" codex --capture redacted") })
-                .to_string(),
-        )
-        .unwrap();
+        register(
+            dir.path(),
+            "codex",
+            &format!("\"{exe}\" codex --capture redacted"),
+        );
         std::fs::write(dir.path().join("hook-index.json"), "[]").unwrap();
-        let r = check_hook_launch(dir.path());
+        let r = check_hook_launch(false, dir.path(), T);
         assert_eq!(r.len(), 1, "{r:?}");
         assert_eq!(r[0].level, CheckLevel::Warn, "{r:?}");
         assert!(
@@ -1241,21 +1281,133 @@ mod hook_launch_tests {
     #[test]
     fn no_registration_is_info() {
         let dir = tempfile::tempdir().unwrap();
-        let r = check_hook_launch(dir.path());
+        let r = check_hook_launch(false, dir.path(), T);
         assert_eq!(r.len(), 1, "{r:?}");
         assert_eq!(r[0].level, CheckLevel::Info, "{r:?}");
     }
 
     #[test]
-    fn hook_exe_reads_quoted_and_bare_paths() {
-        assert_eq!(
-            hook_exe(r#""C:/Program Files/x/lodeline-hook.exe" codex --capture redacted"#),
-            "C:/Program Files/x/lodeline-hook.exe"
+    fn only_an_absolute_lodeline_hook_is_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("steer.sh");
+        let cmd_file = dir.path().join("lodeline-hook.cmd");
+        #[cfg(unix)]
+        for p in [&other, &cmd_file] {
+            script(p, "exit 0");
+        }
+        let other = other.to_str().unwrap();
+        let cmd_file = cmd_file.to_str().unwrap();
+        register(
+            dir.path(),
+            "a-relative",
+            "lodeline-hook codex --capture redacted",
         );
-        assert_eq!(
-            hook_exe("/usr/bin/lodeline-hook claude-code --capture redacted"),
-            "/usr/bin/lodeline-hook"
+        register(
+            dir.path(),
+            "b-other",
+            &format!("{other} codex --capture redacted"),
         );
+        register(
+            dir.path(),
+            "c-cmd",
+            &format!("\"{cmd_file}\" codex --capture redacted"),
+        );
+        let r = check_hook_launch(false, dir.path(), T);
+        let expect = |agent: &str, exe: &str| CheckResult {
+            level: CheckLevel::Warn,
+            message: format!(
+                "hook {agent}: not started: {exe} is not an absolute path to lodeline-hook"
+            ),
+        };
+        assert_eq!(
+            r,
+            [
+                expect("a-relative", "lodeline-hook"),
+                expect("b-other", other),
+                expect("c-cmd", cmd_file),
+            ]
+        );
+        #[cfg(unix)]
+        assert!(
+            !ran(Path::new(other)) && !ran(Path::new(cmd_file)),
+            "doctor ran an exe that is not lodeline-hook"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_does_not_start_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("lodeline-hook");
+        script(&exe, "exit 0");
+        register(dir.path(), "codex", &format!("{} codex", exe.display()));
+        let r = check_hook_launch(true, dir.path(), T);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].level, CheckLevel::Info, "{r:?}");
+        assert!(!ran(&exe), "root doctor started the hook");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_that_exits_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("lodeline-hook");
+        script(&exe, "exit 0");
+        register(
+            dir.path(),
+            "claude-code",
+            &format!("{} claude-code", exe.display()),
+        );
+        let r = check_hook_launch(false, dir.path(), T);
+        assert_eq!(
+            r,
+            [CheckResult::ok(format!(
+                "hook claude-code: {} starts",
+                exe.display()
+            ))]
+        );
+        assert!(ran(&exe));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_still_running_at_timeout_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("lodeline-hook");
+        let pid_file = dir.path().join("pid");
+        script(
+            &exe,
+            &format!("echo $$ > '{}'\nexec /bin/sleep 10", pid_file.display()),
+        );
+        register(dir.path(), "codex", &format!("{} codex", exe.display()));
+        let started = std::time::Instant::now();
+        let r = check_hook_launch(false, dir.path(), Duration::from_millis(500));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].level, CheckLevel::Ok, "{r:?}");
+        assert!(
+            r[0].message
+                .ends_with("(still running after 0.5 s, stopped)"),
+            "{r:?}"
+        );
+        // A hook left running writes its pid by now; one killed before it got
+        // that far never does.
+        std::thread::sleep(Duration::from_secs(1));
+        let Ok(pid) = std::fs::read_to_string(&pid_file) else {
+            return;
+        };
+        let pid: i32 = pid.trim().parse().unwrap();
+        // SAFETY: signal 0 only checks that the pid exists.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            // SAFETY: `pid` is the child this test started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(!alive, "hook {pid} still running after doctor returned");
     }
 }
 

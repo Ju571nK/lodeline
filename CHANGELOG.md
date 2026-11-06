@@ -17,8 +17,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `--enforce` deny rule has no effect. Doctor now prints `[WARN] hook <agent>: cannot start
   <path>: blocked by Windows Application Control (Smart App Control or WDAC); hooks will not run`
   and exits `1`. A missing or non-executable hook gets the same warning with the OS error. A hook
-  that starts prints `[OK]`. Doctor does not run this check as root. See the Platform section of
-  `docs/install-personal.md`.
+  that starts prints `[OK]`, and one still running at the limit is stopped and reported as started.
+  Doctor starts only an absolute path whose file name is `lodeline-hook` or `lodeline-hook.exe`. For
+  any other command it prints `[WARN] hook <agent>: not started: <exe> is not an absolute path to
+  lodeline-hook` and runs nothing. Doctor does not run this check as root. See the Platform
+  section of `docs/install-personal.md`.
 - Releases now ship the `lodeline-manager` web console. Each release has a
   `lodeline-manager-<version>-<target>.tar.gz` archive (`.zip` on Windows) for the same five
   targets as the agent, with the SPA built in, so an operator no longer builds the console from
