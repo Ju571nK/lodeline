@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-06 · spool 기록별 내구성(`perf/proxy-spool-sync`), AWS 실기 run I: 상태 유지·fixture 변형·패키지 systemd 경로 (기준 커밋 `3500adb`)
+갱신: 2026-11-06 · spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -40,10 +40,26 @@ run마다 변경 쪽 p50이 낮았다(200회 5/5, 0.36–0.77 ms. 1000회 5/5, 0
 p99는 200회에서 차이가 없고, 1000회에서는 기준 42.0 ms(17.4–42.2), 변경 24.0 ms(23.6–25.5)다. 꼬리의 원인은 밝히지 못했다. strace를 걸면 호출이 7–8 ms로 느려져 귀속이 안 됐고, tmpfs 쪽 p99도 4.7–16.3 ms라 저장장치 밖의 잡음도 섞인다.
 
 동시성 8(8 × 200, 5회)은 **결론 없음**이다. 두 바이너리 모두 gp3 쪽에서만 503 `audit_unavailable`이 났다. `tools/call` 기준 8000회 중 1609회, 변경 1221회. `ping`도 기준 1587회, 변경 877회이고 tmpfs 쪽은 `ping` 0회다.
-`ping`은 registry 조회를 하지 않으므로 이 503은 조회 slot 한도가 아니라 spool append 거절로 보이며(proxy log의 "could not be stored locally" 경고가 기준 328, 변경 190), 원인 코드는 확인하지 않았다. 진단 때(8 × 100, proxy 2개)는 gp3 쪽 0회였다.
+`ping`은 registry 조회를 하지 않으므로 이 503은 조회 slot 한도가 아니다. 아래 `fix/proxy-lookup-503` 절이 계측한 writer queue 가득 참(`tx.capacity() == 0`)과 맞는다(추정, 이 run에서 계측하지 않음): completion을 writer task 하나가 차례로 append하므로, start fsync가 느린 gp3에서 지속 부하가 걸리면 queue가 먼저 찬다. proxy log의 "could not be stored locally" 경고는 기준 328, 변경 190회였다. 진단 때(8 × 100, proxy 2개)는 gp3 쪽 0회였다.
 노드는 10:23–10:48 UTC에 켜졌고(약 0.8 노드시간, 약 $0.02) 끝난 뒤 둘 다 stopped를 확인했다.
 
 미검증: 실제 전원 차단(모사만 함), Rocky 9·목표 VM, macOS의 `F_FULLFSYNC`, group commit(별도 PR).
+
+## 2026-11-06 registry lookup 슬롯 부족으로 인한 503 수정 (`fix/proxy-lookup-503`)
+
+증상(AWS node A, AL2023 aarch64, `3500adb`, state를 tmpfs에 둔 proxy): 동시성 8에서 `tools/call` 800회마다 4–13회가 503 `audit_unavailable`이었다. 같은 조건의 `ping` 1,600회와 state를 gp3에 둔 proxy는 0회였다. [validation.md](validation.md)는 정상 부하에서 거절 0을 요구한다.
+
+원인: `invocation_sink.rs`의 registry lookup은 blocking pool 슬롯 4개(`LOOKUP_CONCURRENCY`)를 `try_acquire_owned`로 기다리지 않고 잡았고, 슬롯이 없으면 lookup 실패(`None`)로 처리해 start를 거절했다. registry 읽기는 하나의 mutex 아래에서 직렬로 돌기 때문에, 정상 registry에서도 5번째 이후의 겹친 lookup이 바로 거절됐다. gp3에서는 start가 fsync 뒤에 줄을 서서 겹침이 드물었다. 로컬 재현: 기존 코드에서 relay를 지나는 8 client × 100 `tools/call` e2e가 20회 중 5회 실패(503 1회 4번, 16회 1번)했고, 임시 계측에서 그 503은 슬롯 획득 실패에서 나왔다.
+
+슬롯 상한이 지키던 것(T-13d producer 리뷰 F2, "lookup timeout 잔존 작업 상한"): timeout으로 포기한 lookup도 blocking 읽기가 끝날 때까지 슬롯을 쥐므로, 멈춘 registry가 잡는 blocking thread는 4개 이하다. 또 멈춘 registry에서는 client 재시도와 writer의 refusal 기록 경로가 기다리지 않고 바로 실패한다(writer task가 2초씩 멈추지 않음).
+
+수정: lookup은 이제 자기 `LOOKUP_TIMEOUT`(2초) 안에서 슬롯을 기다린다(deadline은 슬롯 대기와 읽기를 합친 시간). 슬롯은 semaphore 대신 `LookupSlots`(빈 슬롯 수와 "슬롯을 잡은 lookup 중 가장 늦은 deadline"을 한 lock 아래에 둠, 해제 시 `Notify`로 대기자를 깨움)로 관리한다. 바로 실패하는 경우는 빈 슬롯이 없고 그 가장 늦은 deadline도 지났을 때, 즉 모든 슬롯이 자기 deadline을 넘긴 읽기에 잡혀 있을 때(registry가 멈춤)뿐이다. 슬롯 획득과 deadline 기록, 멈춤 판정이 같은 lock 안에서 일어나므로, 다른 lookup이 슬롯을 잡았지만 아직 시각을 기록하지 않은 틈에 판정해 정상 registry에서 503을 내는 경합(독립 리뷰 지적, 첫 수정의 `acquire_owned` 뒤 timestamp 방식)이 구조상 없다. blocking thread 상한 4는 그대로다. writer 동작: 멈춘 registry에서 슬롯이 찬 뒤 처음 최대 2초 동안은 즉시 실패가 아니므로 writer는 멈춘 구간마다 한 번 최대 2초를 기다릴 수 있고, 바쁜 정상 registry에서는 refusal 기록을 버리던 자리에서 최대 2초를 기다린다. writer의 refusal 기록 lookup도 같은 함수를 쓰므로, 겹침 때문에 refusal 기록이 `local_record_failed`로 잃어지던 경로도 같이 고쳐졌다(이 경로는 따로 측정하지 않음).
+
+테스트: `lookups_beyond_the_slots_wait_for_a_busy_registry_and_proceed`(registry lock을 모든 슬롯이 찰 때까지만 잡음, 수정 전 `Refuse`), `a_lookup_arriving_as_a_slot_frees_waits_instead_of_failing_fast`(위 경합을 결정적으로 재현, 첫 수정에서 `Refuse`), e2e `concurrent_tool_calls_on_a_healthy_registry_are_not_refused`(8 × 100, AWS와 같은 모양), 기존 `a_stuck_registry_holds_a_bounded_number_of_lookups`는 슬롯 수 읽는 방법만 바꾸고 통과. mutation 8개는 PR 본문에 기록했다.
+
+새로 찾은 별도 문제(이 PR에서 고치지 않음): 같은 e2e를 8 × 400으로 돌리면 3,200회 중 약 1,100회가 503이고, 계측상 원인은 lookup이 아니라 writer queue 가득 참(`tx.capacity() == 0`, `QUEUE_DEPTH` 1024)이다. 추정: start는 8개가 동시에 spool에 commit되지만 completion은 writer task 하나가 한 번에 하나씩 append하므로, 빠른 storage에서 지속 부하가 걸리면 queue가 쌓인다. 800회 이하 묶음에서는 1024에 닿지 않아 AWS run에서는 보이지 않았다. 이슈 등록과 수정 방향(group commit 등)은 orchestrator 판단으로 남긴다.
+
+미측정: AWS 재확인, 동시성 32, Linux에서의 e2e 반복.
 
 ## 2026-11-06 AWS 실기 run I (상태 유지, 변형, 패키지)
 
