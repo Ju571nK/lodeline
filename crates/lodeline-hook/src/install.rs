@@ -571,25 +571,7 @@ pub fn count_lodeline_entries(root: &Value, exe: &str, agent: &str) -> usize {
         }
 }
 
-/// The user's home directory, cross-platform: `HOME` (Unix) or `USERPROFILE`
-/// (Windows, where `HOME` is usually unset).
-pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|s| !s.is_empty()))
-        .map(PathBuf::from)
-}
-
-/// `$XDG_STATE_HOME/lodeline` or `<home>/.local/state/lodeline`.
-pub fn state_dir() -> PathBuf {
-    if let Ok(base) = std::env::var("XDG_STATE_HOME") {
-        PathBuf::from(base).join("lodeline")
-    } else {
-        home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".local/state/lodeline")
-    }
-}
+pub use lodeline_core::paths::{home_dir, hook_state_dir as state_dir};
 
 /// Per-agent baseline path, only for agents with a known hook format (so a raw
 /// `--agent` string can never be interpolated into a traversal path).

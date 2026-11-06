@@ -18,3 +18,24 @@ pub fn default_sender_config() -> PathBuf {
 pub fn default_sender_offset() -> PathBuf {
     PathBuf::from("/var/lib/lodeline-sender/sender-offset.json")
 }
+
+/// The user's home directory, cross-platform: `HOME` (Unix) or `USERPROFILE`
+/// (Windows, where `HOME` is usually unset).
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|s| !s.is_empty()))
+        .map(PathBuf::from)
+}
+
+/// Where `lodeline-hook install` records its registrations:
+/// `$XDG_STATE_HOME/lodeline` or `<home>/.local/state/lodeline`.
+pub fn hook_state_dir() -> PathBuf {
+    if let Ok(base) = std::env::var("XDG_STATE_HOME") {
+        PathBuf::from(base).join("lodeline")
+    } else {
+        home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".local/state/lodeline")
+    }
+}
