@@ -132,3 +132,31 @@ p95 ≤ 20 ms, 종료 후 연결/메모리 증가가 누적되지 않을 것. �
 
 D-04는 OS(Rocky Linux 9)와 limits를 P1 초기 기본값으로 채택했다(2026-10-10). 위 성능 목표는 미측정이다. P1 출시에는 위 측정 결과, 실제 vendor client 1종 이상,
 proxy/server/manager E2E, 독립 리뷰, AC 전체 결과가 추가로 필요하다.
+
+## 성능 측정 도구 (2026-11-06)
+
+위 "별도 준비가 필요한" synthetic load server와 driver는 `crates/lodeline-proxy-loadgen`이다. 사용법, 출력 형식,
+proxy cgroup 명령은 [그 README](../../../crates/lodeline-proxy-loadgen/README.md)에 있다. 단일 호스트 stack
+(시험 PKI, local collector인 `lodeline-server`, proxy, load server)은 `crates/lodeline-proxy-loadgen/stack.sh`가 만든다.
+release 산출물과 OS 패키지에는 들어가지 않는다.
+
+위 절차와의 대응:
+
+- 1단계: 같은 round 안에서 direct와 proxied를 차례로 돌리고 round를 반복한다. audit/spool과 local collector는 켠 채다.
+  추가 지연은 같은 round의 proxied 분위수에서 direct 분위수를 뺀 값이고, round별 중앙값과 범위를 함께 낸다.
+- 2단계: 1 KiB 요청, 4 KiB JSON 응답이 기본값이다. 100 calls/s 고정 부하는 open loop(`--rate 100 --concurrency 32`)다.
+  concurrency 1/8/32/64와 최대 처리량은 closed loop(`--concurrency C`)로 잰다. warm-up 30초, 측정 300초, 3 round가 기본값이다.
+- principal 하나는 동시 호출 8, route 하나는 16을 넘을 수 없으므로(D-04, 429), concurrency C에는 principal C/8개 이상과
+  route C/16개 이상이 필요하다. `principals` 하위 명령이 token, verifier가 든 config, driver용 targets를 만든다. 기본값은
+  principal 8개, route 4개로 concurrency 64까지 덮는다.
+- 5단계: 요청별 분포, p50/p95/p99/max, 오류 종류별 개수, 처리량, load server가 실제로 받은 호출 수를 JSON으로 남긴다.
+  proxy의 최대 RSS(`VmHWM`), CPU 시간, 열린 FD, cgroup `memory.peak`, spool 크기는 `stack.sh stats`로 읽는다.
+
+절차와 다른 점:
+
+- latency의 시작점은 호출 task가 실행된 시각이다. 그 뒤 lane 슬롯을 기다린 시간은 latency에 들어간다. 예정 시각부터 task
+  실행까지 driver 자신의 timer 지연은 `send_lag_ms`로 따로 낸다. macOS에서는 이 지연이 p50 약 2.5 ms라 예정 시각을
+  시작점으로 쓰면 direct 쪽 값이 driver 지연으로 채워진다.
+- 연결은 HTTP keep-alive pool을 쓴다. 2026-11-06 이전 Python harness는 호출마다 새 연결이었다.
+- 3단계(큰 요청/응답, limit+1, SSE, slow reader)와 4단계(중앙 단절, spool fill, 재시작)는 아직 없다. TLS listener 비교도 없다.
+- queue/buffer 깊이, 활성 연결 수, event당 spool bytes는 driver가 표본을 뜨지 않는다.
