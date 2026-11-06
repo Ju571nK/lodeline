@@ -77,12 +77,15 @@ pub const QUEUE_DEPTH: usize = 1024;
 /// Started invocations whose completion is still to come. A start beyond it is
 /// refused (fail closed), never recorded without a way to complete it.
 pub const MAX_INFLIGHT: usize = 4096;
-/// Longest wait for a registry lookup before the start is refused.
+/// Longest wait for a registry lookup (a free slot, then the read) before the
+/// start is refused.
 // OPEN: not in D-04. The lookup is one indexed read of local SQLite.
 pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 /// Registry lookups running at once on the blocking pool. A lookup that timed
 /// out keeps its slot until its blocking read returns, so a stuck registry
-/// holds at most this many blocking threads.
+/// holds at most this many blocking threads. A lookup beyond them waits for a
+/// slot within its timeout; it fails at once only when every slot is held by
+/// a read older than the timeout (the registry is stuck).
 pub const LOOKUP_CONCURRENCY: usize = 4;
 /// Invocation ids named in one `local_record_failed` gap (schema bound).
 const MAX_GAP_IDS: usize = 100;
@@ -191,6 +194,8 @@ struct Shared {
     closed: AtomicBool,
     notify: Notify,
     lookups: Arc<tokio::sync::Semaphore>,
+    /// When a lookup last took a slot.
+    lookup_taken: Mutex<tokio::time::Instant>,
     gap_slot: Arc<tokio::sync::Semaphore>,
     late_flush_running: AtomicBool,
     next_gap_attempt: Mutex<std::time::Instant>,
@@ -469,9 +474,20 @@ impl Shared {
         };
         let scope = scope?;
         let name = name.as_str().to_string();
+        let now = tokio::time::Instant::now();
+        let taken = &self.lookup_taken;
+        // No free slot and none taken within the timeout: every slot is held
+        // by a read that outlived its own wait, so waiting cannot succeed.
+        if self.lookups.available_permits() == 0
+            && now.duration_since(*taken.lock().unwrap_or_else(|p| p.into_inner()))
+                >= LOOKUP_TIMEOUT
+        {
+            return None;
+        }
         let slots = self.lookups.clone();
-        let found = tokio::time::timeout(LOOKUP_TIMEOUT, async move {
-            let slot = slots.try_acquire_owned().ok()?;
+        let found = tokio::time::timeout_at(now + LOOKUP_TIMEOUT, async move {
+            let slot = slots.acquire_owned().await.ok()?;
+            *taken.lock().unwrap_or_else(|p| p.into_inner()) = tokio::time::Instant::now();
             tokio::task::spawn_blocking(move || {
                 // Released when the read returns, not when the wait gives up.
                 let _slot = slot;
@@ -598,6 +614,7 @@ impl InvocationSink {
             closed: AtomicBool::new(false),
             notify: Notify::new(),
             lookups: Arc::new(tokio::sync::Semaphore::new(LOOKUP_CONCURRENCY)),
+            lookup_taken: Mutex::new(tokio::time::Instant::now()),
             refused_starts: AtomicU64::new(0),
             gap_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             late_flush_running: AtomicBool::new(false),

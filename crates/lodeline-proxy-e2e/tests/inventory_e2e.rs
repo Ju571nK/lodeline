@@ -681,8 +681,10 @@ async fn concurrent_tool_calls_on_a_healthy_registry_are_not_refused() {
             let mut refused = 0;
             for i in 0..calls {
                 let (st, v) = px
-                    .call(json!({"jsonrpc": "2.0", "id": c * 1000 + i, "method": "tools/call",
-                                 "params": {"name": NAMES[0], "arguments": {}}}))
+                    .call(
+                        json!({"jsonrpc": "2.0", "id": c * 1000 + i, "method": "tools/call",
+                                 "params": {"name": NAMES[0], "arguments": {}}}),
+                    )
                     .await;
                 match st {
                     200 => {}

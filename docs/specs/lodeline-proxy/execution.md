@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-06 · AWS 실기 run I: 상태 유지·fixture 변형·패키지 systemd 경로 (기준 커밋 `3500adb`)
+갱신: 2026-11-06 · registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,22 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-06 registry lookup 슬롯 부족으로 인한 503 수정 (`fix/proxy-lookup-503`)
+
+증상(AWS node A, AL2023 aarch64, `3500adb`, state를 tmpfs에 둔 proxy): 동시성 8에서 `tools/call` 800회마다 4–13회가 503 `audit_unavailable`이었다. 같은 조건의 `ping` 1,600회와 state를 gp3에 둔 proxy는 0회였다. [validation.md](validation.md)는 정상 부하에서 거절 0을 요구한다.
+
+원인: `invocation_sink.rs`의 registry lookup은 blocking pool 슬롯 4개(`LOOKUP_CONCURRENCY`)를 `try_acquire_owned`로 기다리지 않고 잡았고, 슬롯이 없으면 lookup 실패(`None`)로 처리해 start를 거절했다. registry 읽기는 하나의 mutex 아래에서 직렬로 돌기 때문에, 정상 registry에서도 5번째 이후의 겹친 lookup이 바로 거절됐다. gp3에서는 start가 fsync 뒤에 줄을 서서 겹침이 드물었다. 로컬 재현: 기존 코드에서 relay를 지나는 8 client × 100 `tools/call` e2e가 20회 중 5회 실패(503 1회 4번, 16회 1번)했고, 임시 계측에서 그 503은 슬롯 획득 실패에서 나왔다.
+
+슬롯 상한이 지키던 것(T-13d producer 리뷰 F2, "lookup timeout 잔존 작업 상한"): timeout으로 포기한 lookup도 blocking 읽기가 끝날 때까지 슬롯을 쥐므로, 멈춘 registry가 잡는 blocking thread는 4개 이하다. 또 멈춘 registry에서는 client 재시도와 writer의 refusal 기록 경로가 기다리지 않고 바로 실패한다(writer task가 2초씩 멈추지 않음).
+
+수정: lookup은 이제 자기 `LOOKUP_TIMEOUT`(2초) 안에서 슬롯을 기다린다(`acquire_owned`, deadline은 슬롯 대기와 읽기를 합친 시간). 바로 실패하는 경우는 빈 슬롯이 없고 마지막으로 슬롯을 잡은 지 `LOOKUP_TIMEOUT` 이상 지났을 때, 즉 모든 슬롯이 자기 대기 시간을 넘긴 읽기에 잡혀 있을 때(registry가 멈춤)뿐이다. blocking thread 상한 4와 멈춘 registry에서의 즉시 실패는 그대로다. writer의 refusal 기록 lookup도 같은 함수를 쓰므로, 겹침 때문에 refusal 기록이 `local_record_failed`로 잃어지던 경로도 같이 고쳐졌다(이 경로는 따로 측정하지 않음).
+
+테스트: `lookups_beyond_the_slots_wait_for_a_busy_registry_and_proceed`(registry lock을 모든 슬롯이 찰 때까지만 잡음, 수정 전 `Refuse`), e2e `concurrent_tool_calls_on_a_healthy_registry_are_not_refused`(8 × 100, AWS와 같은 모양), 기존 `a_stuck_registry_holds_a_bounded_number_of_lookups`는 바꾸지 않고 통과. mutation 6개는 PR 본문에 기록했다.
+
+새로 찾은 별도 문제(이 PR에서 고치지 않음): 같은 e2e를 8 × 400으로 돌리면 3,200회 중 약 1,100회가 503이고, 계측상 원인은 lookup이 아니라 writer queue 가득 참(`tx.capacity() == 0`, `QUEUE_DEPTH` 1024)이다. 추정: start는 8개가 동시에 spool에 commit되지만 completion은 writer task 하나가 한 번에 하나씩 append하므로, 빠른 storage에서 지속 부하가 걸리면 queue가 쌓인다. 800회 이하 묶음에서는 1024에 닿지 않아 AWS run에서는 보이지 않았다. 이슈 등록과 수정 방향(group commit 등)은 orchestrator 판단으로 남긴다.
+
+미측정: AWS 재확인, 동시성 32, Linux에서의 e2e 반복.
 
 ## 2026-11-06 AWS 실기 run I (상태 유지, 변형, 패키지)
 
