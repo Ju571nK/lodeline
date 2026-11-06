@@ -610,18 +610,14 @@ async fn writer(shared: Arc<Shared>, mut rx: mpsc::Receiver<AccountedJob>) {
     shared.flush_lost().await;
 }
 
-/// Write every queued job; true at `Stop` (the jobs after it are dropped, and
-/// their guards count them). All events go to the spool before any reply is
-/// awaited: the writer keeps up with completions only if it hands over its
-/// whole backlog per spool round trip, not one record per round trip while
-/// the starts commit side by side.
+/// Write every queued job; true if one was `Stop`. All events go to the spool
+/// before any reply is awaited: the writer keeps up with completions only if
+/// it hands over its whole backlog per spool round trip, not one record per
+/// round trip while the starts commit side by side.
 async fn write_batch(shared: &Arc<Shared>, batch: &mut Vec<AccountedJob>) -> bool {
     let mut sent = Vec::with_capacity(batch.len());
     let mut stop = false;
     for mut owned in batch.drain(..) {
-        if stop {
-            continue;
-        }
         match owned.job.take().expect("queued job") {
             Job::Stop => stop = true,
             Job::Event(ev) => sent.push((owned, shared.submit(*ev).await)),
