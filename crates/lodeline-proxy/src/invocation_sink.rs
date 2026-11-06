@@ -146,6 +146,11 @@ impl AccountedJob {
             id: None,
         }
     }
+
+    /// The record was stored, or its loss was already counted.
+    fn settle(mut self) {
+        self.id = None;
+    }
 }
 
 impl Drop for AccountedJob {
@@ -553,38 +558,49 @@ impl Shared {
         })
     }
 
-    async fn append(&self, ev: ProxyEvent) -> bool {
+    /// Queue `ev` in the spool now; the returned future says whether it was
+    /// stored.
+    async fn submit(
+        &self,
+        ev: ProxyEvent,
+    ) -> impl std::future::Future<Output = bool> + Send + 'static {
         #[cfg(test)]
-        let _gate = self.append_gate.clone().read_owned().await;
-        if self.abandon.load(Ordering::SeqCst) {
-            return false;
+        let gate = self.append_gate.clone().read_owned().await;
+        let appended = (!self.abandon.load(Ordering::SeqCst)).then(|| self.admission.append(ev));
+        async move {
+            #[cfg(test)]
+            let _gate = gate;
+            match appended {
+                Some(a) => a.await.is_ok(),
+                None => false,
+            }
         }
-        self.admission.append(ev).await.is_ok()
+    }
+
+    async fn append(&self, ev: ProxyEvent) -> bool {
+        self.submit(ev).await.await
     }
 }
 
 async fn writer(shared: Arc<Shared>, mut rx: mpsc::Receiver<AccountedJob>) {
     let mut retry = tokio::time::interval(Duration::from_millis(250));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut batch = Vec::with_capacity(QUEUE_DEPTH);
     loop {
         if shared.abandon.load(Ordering::SeqCst) {
             break;
         }
-        let job = tokio::select! {
-            j = rx.recv() => j,
+        let n = tokio::select! {
+            n = rx.recv_many(&mut batch, QUEUE_DEPTH) => n,
             _ = retry.tick() => { shared.flush_lost().await; continue; },
             _ = shared.notify.notified() => {
                 if rx.is_empty() { shared.flush_lost().await; }
                 continue;
             }
         };
-        let Some(mut owned) = job else { break };
-        let job = owned.job.take().expect("queued job");
-        if matches!(job, Job::Stop) {
+        if n == 0 || write_batch(&shared, &mut batch).await {
             break;
         }
-        write_job(&shared, job).await;
-        owned.id = None;
         if rx.is_empty() {
             shared.flush_lost().await;
         }
@@ -594,44 +610,64 @@ async fn writer(shared: Arc<Shared>, mut rx: mpsc::Receiver<AccountedJob>) {
     shared.flush_lost().await;
 }
 
-async fn write_job(shared: &Arc<Shared>, job: Job) {
-    match job {
-        Job::Stop => {}
-        Job::Event(ev) => {
-            let id = ev.payload.invocation_id().clone();
-            if !shared.append(*ev).await {
-                shared.note_lost(&id);
+/// Write every queued job; true at `Stop` (the jobs after it are dropped, and
+/// their guards count them). All events go to the spool before any reply is
+/// awaited: the writer keeps up with completions only if it hands over its
+/// whole backlog per spool round trip, not one record per round trip while
+/// the starts commit side by side.
+async fn write_batch(shared: &Arc<Shared>, batch: &mut Vec<AccountedJob>) -> bool {
+    let mut sent = Vec::with_capacity(batch.len());
+    let mut stop = false;
+    for mut owned in batch.drain(..) {
+        if stop {
+            continue;
+        }
+        match owned.job.take().expect("queued job") {
+            Job::Stop => stop = true,
+            Job::Event(ev) => sent.push((owned, shared.submit(*ev).await)),
+            Job::Refused(r) => {
+                write_refused(shared, *r).await;
+                owned.settle();
             }
         }
-        Job::Refused(r) => {
-            let RefusedJob {
-                invocation_id,
-                mut started,
-                name,
-                scope,
-                completed,
-                occurred_at,
-            } = *r;
-            if let Some(n) = &name {
-                match shared.lookup(scope, n).await {
-                    Some(t) => started.tool = Some(t),
-                    None => {
-                        shared.note_lost(&invocation_id);
-                        return;
-                    }
-                }
-            }
-            let start = shared.envelope(occurred_at, EventPayload::Started(started));
-            let done = shared.envelope(now_ts(), EventPayload::Completed(completed));
-            match (start, done) {
-                (Some(s), Some(d)) => {
-                    if !shared.append(s).await || !shared.append(d).await {
-                        shared.note_lost(&invocation_id);
-                    }
-                }
-                _ => shared.note_lost(&invocation_id),
+    }
+    for (owned, stored) in sent {
+        // A record that was not stored is counted by its guard.
+        if stored.await {
+            owned.settle();
+        }
+    }
+    stop
+}
+
+async fn write_refused(shared: &Arc<Shared>, r: RefusedJob) {
+    let RefusedJob {
+        invocation_id,
+        mut started,
+        name,
+        scope,
+        completed,
+        occurred_at,
+    } = r;
+    if let Some(n) = &name {
+        match shared.lookup(scope, n).await {
+            Some(t) => started.tool = Some(t),
+            None => {
+                shared.note_lost(&invocation_id);
+                return;
             }
         }
+    }
+    let start = shared.envelope(occurred_at, EventPayload::Started(started));
+    let done = shared.envelope(now_ts(), EventPayload::Completed(completed));
+    match (start, done) {
+        // In turn: a completion is stored only after its start.
+        (Some(s), Some(d)) => {
+            if !shared.append(s).await || !shared.append(d).await {
+                shared.note_lost(&invocation_id);
+            }
+        }
+        _ => shared.note_lost(&invocation_id),
     }
 }
 

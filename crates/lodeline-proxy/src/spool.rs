@@ -500,18 +500,21 @@ impl Spool {
         got
     }
 
-    async fn call_async<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Option<T> {
+    /// Sends the command when called, not when first polled, so commands keep
+    /// the order of the calls even if their replies are awaited later.
+    fn call_async<T: Send + 'static>(
+        &self,
+        make: impl FnOnce(Reply<T>) -> Cmd,
+    ) -> impl std::future::Future<Output = Option<T>> + Send + 'static {
         let (s, r) = oneshot::channel();
-        if self.inner.tx.send(make(Reply::Async(s))).is_err() {
-            self.inner.shared.dead.store(true, Ordering::SeqCst);
-            return None;
-        }
-        match r.await {
-            Ok(v) => Some(v),
-            Err(_) => {
-                self.inner.shared.dead.store(true, Ordering::SeqCst);
-                None
+        let sent = self.inner.tx.send(make(Reply::Async(s))).is_ok();
+        let shared = self.inner.shared.clone();
+        async move {
+            let got = if sent { r.await.ok() } else { None };
+            if got.is_none() {
+                shared.dead.store(true, Ordering::SeqCst);
             }
+            got
         }
     }
 
@@ -566,11 +569,14 @@ impl Spool {
     }
 
     /// Like [`Spool::append`], without blocking the async worker. This is the
-    /// admission call of the relay (see [`Admission`]).
-    pub async fn append_async(&self, event: ProxyEvent) -> Result<Appended, AppendError> {
-        self.call_async(|r| Cmd::Append(Box::new(event), r))
-            .await
-            .unwrap_or(Err(AppendError::Unavailable))
+    /// admission call of the relay (see [`Admission`]). The event takes its
+    /// place in the commit order when this is called.
+    pub fn append_async(
+        &self,
+        event: ProxyEvent,
+    ) -> impl std::future::Future<Output = Result<Appended, AppendError>> + Send + 'static {
+        let reply = self.call_async(|r| Cmd::Append(Box::new(event), r));
+        async move { reply.await.unwrap_or(Err(AppendError::Unavailable)) }
     }
 
     /// Cheap, non-blocking view of the counters (no database access).
@@ -802,17 +808,24 @@ impl Admission {
         Admission { spool }
     }
 
-    /// Append the event or refuse it with a typed [`Refusal`].
-    pub async fn append(&self, event: ProxyEvent) -> Result<Appended, Refusal> {
-        self.spool.append_async(event).await.map_err(|e| match e {
-            AppendError::Full => Refusal::Full,
-            AppendError::DiskFull | AppendError::Storage | AppendError::Unavailable => {
-                Refusal::Unavailable
-            }
-            e @ (AppendError::TooLarge | AppendError::Duplicate | AppendError::WrongIdentity) => {
-                Refusal::Invalid(e)
-            }
-        })
+    /// Append the event or refuse it with a typed [`Refusal`]. Like
+    /// [`Spool::append_async`], the event is queued when this is called.
+    pub fn append(
+        &self,
+        event: ProxyEvent,
+    ) -> impl std::future::Future<Output = Result<Appended, Refusal>> + Send + 'static {
+        let appended = self.spool.append_async(event);
+        async move {
+            appended.await.map_err(|e| match e {
+                AppendError::Full => Refusal::Full,
+                AppendError::DiskFull | AppendError::Storage | AppendError::Unavailable => {
+                    Refusal::Unavailable
+                }
+                e @ (AppendError::TooLarge
+                | AppendError::Duplicate
+                | AppendError::WrongIdentity) => Refusal::Invalid(e),
+            })
+        }
     }
 
     /// Cheap view for the status report and for early refusal.
