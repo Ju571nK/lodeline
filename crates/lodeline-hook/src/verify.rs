@@ -78,7 +78,7 @@ pub fn check_one(b: &Baseline) -> Option<DriftReport> {
 /// Claude/codex path (verbatim original check_one logic).
 /// Order: entry_missing -> command_drift -> matcher_drift.
 fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
-    let exe = install::command_exe(&b.command).to_string();
+    let exe = lodeline_core::paths::command_exe(&b.command).to_string();
     let root: serde_json::Value = std::fs::read(&b.settings_path)
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -153,9 +153,9 @@ fn check_one_claude(b: &Baseline) -> Option<DriftReport> {
 /// Pass 3 reports a failClosed that differs from the baseline.
 fn check_one_cursor(b: &Baseline) -> Option<DriftReport> {
     use install::{
-        command_exe, cursor_entry_command, cursor_entry_fail_closed, cursor_entry_is_ours,
-        CURSOR_EVENTS,
+        cursor_entry_command, cursor_entry_fail_closed, cursor_entry_is_ours, CURSOR_EVENTS,
     };
+    use lodeline_core::paths::command_exe;
     let exe = command_exe(&b.command).to_string();
     let root: serde_json::Value = std::fs::read(&b.settings_path)
         .ok()
