@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-08 · spool 묶음 transaction 하나(`perf/proxy-group-tx`), 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,40 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-08 spool 묶음을 transaction 하나로 (`perf/proxy-group-tx`)
+
+문제: group commit(아래 `perf/proxy-group-commit` 절) 뒤에도 묶음의 기록은 하나씩 commit했다. 같은 page(B-tree 오른쪽 끝 leaf, `seq`)가
+기록마다 WAL에 다시 쓰였고, 호출당 proxy 쓰기는 group commit 전과 같았다(78.8 KB 대 76.8 KB). AWS 동시성 64에서 checkpoint가 writer 시간의
+39.5%였다(아래 절의 측정).
+
+수정(`spool.rs` `Writer::append_group`, `commit_group`, `append_record`): 묶음 하나가 IMMEDIATE transaction 하나다. 기록마다 savepoint를 열고,
+거절(`Duplicate`, `TooLarge`, `Full`, `WrongIdentity`, 문장 오류)이면 그 savepoint만 되돌린다. 묶음에 start가 있으면 FULL로, 없으면 NORMAL로
+commit한다. safety level은 transaction 안에서 바꿀 수 없으므로 묶음을 열기 전에 정한다. 혼자 온 append도 같은 길이다. 묶음 안의 admission은 앞
+기록의 bytes를 더해 판단하고, acked 행 purge도 그 기록의 savepoint 안에서 돈다. counters와 `durable_seq`는 commit이 성공한 뒤에만 바뀐다.
+fsync가 아닌 이유로 commit이 실패하면 writer는 계속 돌기 때문이다. 문장 오류로 SQLite가 transaction 전체를 되돌리면 남은 기록은 `Storage`이고
+앞의 Ok도 `Storage`가 된다. commit 앞에서 `SYNC_FAILED`를 보고, 켜져 있으면 commit하지 않는다. 값 없는 FULL commit `sync_wal`은 지웠다.
+
+계약 변경(사용자 승인, 2026-11-08): commit이 실패하면 같은 묶음의 completion과 cancel도 `Storage`다. 전에는 자기 NORMAL commit의 결과(Ok)를
+받았다. sink는 completion 실패를 lost로 센다(`invocation_sink.rs` `note_lost`). fsync가 실패한 commit의 frame을 재시작 복구가 commit으로 읽으면
+completion 행과 gap이 함께 남는다. 과다 기록 방향이며 전달된 호출을 잃지 않는다(추정, 재시작 뒤 서버 쪽 중복 처리는 확인하지 않음).
+결정은 [decisions.md](decisions.md) "spool 기록별 내구성"의 group commit 항목.
+
+WAL 쓰기(로컬 macOS, 시험 `a_group_writes_each_page_once`, 측정): start 32개 묶음 하나가 WAL frame 11개를 더했다. 같은 32개를 하나씩
+append하면 170개였다. 시험 event는 `event_id`가 순차이고 boot stamp가 없다. 실제 UUID `event_id`는 색인 leaf가 흩어지므로 차이는 이보다
+작을 것이다(추정). 지연과 처리량에 대한 효과는 재지 않았다. 로컬 macOS loadgen은 꼬리를 재현하지 못하므로 판정은 AWS 교대 측정으로 한다.
+
+시험(`spool.rs`): `a_group_writes_each_page_once`(위 수치, 상한 32 frame), `a_refused_record_does_not_undo_its_group`(묶음 가운데에 중복,
+`TooLarge`, 행을 쓴 뒤 실패하는 기록. 실패는 시험 trigger의 `RAISE(ABORT)`. 나머지는 Ok이고 sequence가 빈틈 없이 이어지며 전원 손실 사본에
+남는다), `a_record_that_ends_the_transaction_refuses_its_group`(`RAISE(ROLLBACK)`, 묶음 전체가 `Storage`, counters는 그대로, writer는
+계속 돈다), `a_full_spool_purges_acked_rows_inside_a_group`(묶음 안 purge와 admission, 재시작 뒤 counters 일치).
+`a_failed_group_fsync_refuses_every_start`는 completion 기대를 `Err(Storage)`로 바꾸고 counters가 그대로인지 더 본다. 나머지 spool 시험은
+그대로 통과한다.
+
+mutation(한 번에 하나씩 되돌림): savepoint 제거(1개 실패), start가 있는 묶음을 NORMAL로 commit(8), counters를 commit 전에 더함(2),
+기록마다 commit(4). 살아남은 것 하나: commit 앞 `SYNC_FAILED` 확인 제거. 묶음 안에서 commit 전에 fsync가 일어나는 길은 page cache spill뿐인데,
+event schema가 id 길이를 제한해 시험 event로는 묶음이 cache(기본 약 2 MB)를 넘지 못했다. 실패한 fsync 뒤의 fsync를 믿지 않는다는
+fail-stop 규칙을 지키려고 남겼다.
 
 ## 2026-11-07 로컬 status의 spool 상태 (`feat/proxy-status-spool`)
 
@@ -110,9 +144,7 @@ writer thread의 표시(`SYNC_FAILED`)를 켜고 끄지 않는다. writer의 SQL
 
 | fsync 경로 | 실패 뒤 |
 |---|---|
-| 혼자 온 start의 FULL commit | 그 start는 `Storage`. writer가 멈춘다 |
-| 묶음의 공유 FULL commit(`PRAGMA user_version = 0`) | 묶음의 start는 모두 `Storage`(전과 같음). writer가 멈춘다 |
-| 묶음 안 NORMAL commit의 새 WAL header fsync(checkpoint로 WAL이 처음부터 다시 시작될 때) | `sync_wal`이 fsync 없이 실패를 돌려 묶음의 start는 `Storage`. writer가 멈춘다 |
+| append 묶음 transaction의 commit(혼자 온 append 포함. start가 있으면 FULL. NORMAL이어도 checkpoint로 WAL이 처음부터 다시 시작되면 새 WAL header를 fsync) | 묶음의 기록은 모두 `Storage`(2026-11-08부터 completion·cancel 포함, `perf/proxy-group-tx`). writer가 멈춘다 |
 | checkpoint(maintenance, 수집 poll, 512 명령마다)의 WAL·DB fsync | `durable_seq`가 오르지 않는다. 뒤의 checkpoint는 실행하지 않는다. writer가 멈춘다 |
 | maintenance·quarantine·gap·hand-off·registry conflict의 FULL commit | 그 명령은 오류. writer가 멈춘다 |
 | 닫을 때 SQLite의 checkpoint | `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`로 끈다. 재시작이 WAL을 복구한다 |

@@ -8,15 +8,17 @@
 //! Guarantees:
 //!
 //! * [`Spool::append`] of an `invocation.started` returns only after the row is
-//!   committed and fsynced. Appends already queued share one fsync (group
-//!   commit): each commits in order, then one FULL commit fsyncs the WAL for all
-//!   of them, and only then does any of those starts return. Nothing waits for
-//!   more appends to arrive. Completions, cancel records and acknowledgements
-//!   commit with `synchronous=NORMAL` (decisions.md 2026-11-06): they survive a
-//!   process crash, and they become durable at the next start commit or
-//!   checkpoint, whose fsync covers every earlier WAL frame. A power loss can drop
-//!   the ones since then; a completion becomes a start-only call. The event
-//!   sequence is assigned inside the append transaction from a counter in the
+//!   committed and fsynced. Appends already queued share one transaction (group
+//!   commit), a savepoint per record so a refusal undoes only that record. A
+//!   group with a start commits FULL, and no reply of the group goes out before
+//!   that fsync returns; if the commit fails, every record of the group is
+//!   refused. Nothing waits for more appends to arrive. A group of completions
+//!   and cancel records, and acknowledgements, commit with `synchronous=NORMAL`
+//!   (decisions.md 2026-11-06): they survive a process crash, and they become
+//!   durable at the next start commit or checkpoint, whose fsync covers every
+//!   earlier WAL frame. A power loss can drop the ones since then; a
+//!   completion becomes a start-only call. The event sequence is assigned
+//!   inside the append transaction from a counter in the
 //!   database (monotonic per epoch, survives restart and the purge of
 //!   acknowledged rows). A power loss can roll back the sequence of a dropped
 //!   record, so [`EventSource::next_events`] hands out only rows covered by an
@@ -82,7 +84,9 @@ use std::time::Duration;
 use lodeline_proxy_api::status::{QuarantineCode, SpoolExpiredGap};
 use lodeline_proxy_api::{EventPayload, GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
 use rusqlite::config::DbConfig;
-use rusqlite::{ffi, params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{
+    ffi, params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use tokio::sync::oneshot;
 
 use crate::boot_clock::{system_boot_clock, BootClock, BootInstant};
@@ -198,8 +202,9 @@ pub enum SpoolError {
 }
 
 /// Why an append was refused. Nothing was stored in any of these cases, except
-/// a start refused with [`AppendError::Storage`] because its group's fsync failed:
-/// its row can stay, a start-only record like the one a crash leaves.
+/// a record refused with [`AppendError::Storage`] because its group's commit
+/// failed in its fsync: the restart can recover that commit from the WAL, as
+/// it would after a crash.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AppendError {
     /// The event does not fit under `capacity - gap_reserve` (see [`admits`]). The
@@ -1398,64 +1403,104 @@ impl Writer {
         }
     }
 
-    /// Group commit of queued appends. A lone start commits FULL, as before.
-    /// Otherwise each append commits NORMAL, in order, and then one FULL commit
-    /// fsyncs the WAL for all of them. A start hears Ok only after that fsync
-    /// returns; if it fails, every start of the group is refused. Completions
-    /// and cancel records keep their NORMAL result. False when FULL could not
-    /// be restored; the caller then stops the writer.
+    /// Group commit of queued appends, a lone one included: one IMMEDIATE
+    /// transaction with a savepoint per record, so a refused record undoes only
+    /// its own rows. A group with a start commits FULL, and no reply goes out
+    /// before that fsync returns; a group without one commits NORMAL
+    /// (decisions.md 2026-11-06). If the commit fails, every record of the group
+    /// is refused. False when FULL could not be restored; the caller then stops
+    /// the writer.
     fn append_group(&mut self, group: Vec<(Box<ProxyEvent>, AppendReply)>) -> bool {
-        let is_start = |ev: &ProxyEvent| matches!(ev.payload, EventPayload::Started(_));
-        if let [(ev, _)] = group.as_slice() {
-            if is_start(ev) {
-                let (ev, r) = group.into_iter().next().expect("one append");
-                let res = self.append(*ev);
-                if let Ok(a) = &res {
-                    // FULL commit: its fsync covers every earlier WAL frame.
-                    self.durable_seq = a.sequence;
-                }
-                r.send(res);
-                return true;
-            }
+        let start = group
+            .iter()
+            .any(|(ev, _)| matches!(ev.payload, EventPayload::Started(_)));
+        let (events, replies): (Vec<_>, Vec<_>) = group.into_iter().map(|(ev, r)| (*ev, r)).unzip();
+        // The safety level cannot change inside a transaction, so it is set first.
+        let (results, restored) = if start {
+            (self.commit_group(events), true)
+        } else {
+            self.deferred(|w| w.commit_group(events))
+        };
+        if start && results.iter().any(Result::is_ok) {
+            // FULL commit: its fsync covers every earlier WAL frame.
+            let last = self.counters().last_seq;
+            self.durable_seq = last;
         }
-        let (events, replies): (Vec<_>, Vec<_>) = group.into_iter().unzip();
-        let (results, restored) = self.deferred(|w| {
-            events
-                .into_iter()
-                .map(|ev| (is_start(&ev), w.append(*ev)))
-                .collect::<Vec<_>>()
-        });
-        let started = results.iter().any(|(start, res)| *start && res.is_ok());
-        let synced = restored && (!started || self.sync_wal());
-        for (r, (start, res)) in replies.into_iter().zip(results) {
-            r.send(match res {
-                Ok(_) if start && !synced => Err(AppendError::Storage),
-                res => res,
-            });
+        for (r, res) in replies.into_iter().zip(results) {
+            r.send(res);
         }
         restored
     }
 
-    /// A FULL commit that changes nothing, for its fsync: it covers every
-    /// earlier WAL frame. `user_version` is unused and stays 0; setting it
-    /// always writes page 1, where an unchanged row would write nothing.
-    fn sync_wal(&mut self) -> bool {
-        // A failed fsync earlier in the group (a fresh WAL header) is not undone.
-        if SYNC_FAILED.get() {
-            return false;
-        }
-        match self.conn.execute_batch("PRAGMA user_version = 0;") {
-            Ok(_) => {
-                let last = self.counters().last_seq;
-                self.durable_seq = last;
-                true
-            }
+    /// The group's records in one transaction. Counters change only once it
+    /// commits: a commit that fails for a reason other than an fsync leaves the
+    /// writer running, and the counters must still match the database.
+    fn commit_group(&self, events: Vec<ProxyEvent>) -> Vec<Result<Appended, AppendError>> {
+        let (unsent_bytes, acked_bytes) = {
+            let k = self.counters();
+            (k.unsent_bytes, k.acked_bytes)
+        };
+        let mut g = Group {
+            now: (self.cfg.clock)(),
+            boot: (self.cfg.boot_clock)(),
+            limit: self.shared.admission_limit(),
+            unsent_bytes,
+            acked_bytes,
+            events: 0,
+            bytes: 0,
+            last_seq: None,
+            purged: None,
+        };
+        let tx = match Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate) {
+            Ok(tx) => tx,
             Err(e) => {
-                note_sync_failure(&e);
                 self.set_degraded(true);
-                false
+                return vec![Err(append_storage(&e)); events.len()];
+            }
+        };
+        let results: Vec<_> = events
+            .into_iter()
+            .map(|mut ev| {
+                // Some failed statements make SQLite roll back the whole transaction.
+                if tx.is_autocommit() {
+                    Err(AppendError::Storage)
+                } else {
+                    self.append_record(&tx, &mut ev, &mut g)
+                }
+            })
+            .collect();
+        // A failed fsync inside the group (a fresh WAL header) is not undone by a
+        // later one that succeeds.
+        let commit = if tx.is_autocommit() || SYNC_FAILED.get() {
+            Err(AppendError::Storage)
+        } else {
+            tx.commit().map_err(|e| append_storage(&e))
+        };
+        if let Err(e) = commit {
+            self.set_degraded(true);
+            return results.into_iter().map(|r| r.and(Err(e.clone()))).collect();
+        }
+        let mut k = self.counters();
+        k.unsent_events += g.events;
+        k.unsent_bytes += g.bytes;
+        if let Some(seq) = g.last_seq {
+            k.last_seq = seq;
+            k.oldest_created.get_or_insert(g.now);
+        }
+        if let Some(archived) = g.purged {
+            k.acked = 0;
+            k.acked_bytes = 0;
+            k.quarantined_bytes += archived;
+        }
+        drop(k);
+        for r in &results {
+            match r {
+                Ok(_) => self.set_degraded(false),
+                Err(AppendError::DiskFull | AppendError::Storage) => self.set_degraded(true),
+                Err(_) => {}
             }
         }
+        results
     }
 
     /// Run `f` with `synchronous=NORMAL`: its commit is not fsynced (decisions.md
@@ -1509,7 +1554,13 @@ impl Writer {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    fn append(&mut self, mut event: ProxyEvent) -> Result<Appended, AppendError> {
+    /// One record of the group transaction, under its own savepoint.
+    fn append_record(
+        &self,
+        c: &Connection,
+        event: &mut ProxyEvent,
+        g: &mut Group,
+    ) -> Result<Appended, AppendError> {
         if event.proxy_id.as_str() != self.cfg.proxy_id
             || event.epoch_id.as_str() != self.cfg.epoch_id
         {
@@ -1517,63 +1568,65 @@ impl Writer {
         }
         #[cfg(any(test, feature = "test-util"))]
         if self.shared.inject_failure.load(Ordering::SeqCst) {
-            self.set_degraded(true);
             return Err(AppendError::DiskFull);
         }
-        let limit = self.shared.admission_limit();
-        let now = (self.cfg.clock)();
-        let boot = (self.cfg.boot_clock)();
-        let mut res = self.append_tx(&mut event, now, boot.as_ref(), limit);
-        if matches!(res, Err(AppendTx::PurgeAcked)) {
+        c.execute_batch("SAVEPOINT record")
+            .map_err(|e| append_storage(&e))?;
+        let res = match self.append_tx(c, event, g, g.acked_bytes) {
             // Over capacity only because acknowledged rows are still retained:
             // the server holds them, so drop them before refusing the call.
-            res = match self.purge_all_acked() {
-                Ok(()) => self.append_tx(&mut event, now, boot.as_ref(), limit),
+            Err(AppendTx::PurgeAcked) => match self.purge_all_acked(c, g.now, g.boot.as_ref()) {
+                Ok(archived) => self
+                    .append_tx(c, event, g, 0)
+                    .map(|ok| (ok, Some(archived))),
                 Err(_) => Err(AppendTx::Refused(AppendError::Storage)),
-            };
+            },
+            res => res.map(|ok| (ok, None)),
         }
-        let res = res.map_err(|e| match e {
+        .map_err(|e| match e {
             AppendTx::Refused(e) => e,
             AppendTx::PurgeAcked => AppendError::Full,
+        })
+        .and_then(|ok| {
+            c.execute_batch("RELEASE record")
+                .map(|()| ok)
+                .map_err(|e| append_storage(&e))
         });
         match res {
-            Ok((seq, size)) => {
-                let mut k = self.counters();
-                k.unsent_events += 1;
-                k.unsent_bytes += size;
-                k.last_seq = seq;
-                k.oldest_created.get_or_insert(now);
-                drop(k);
-                self.set_degraded(false);
+            Ok(((seq, size), archived)) => {
+                g.events += 1;
+                g.bytes += size;
+                g.last_seq = Some(seq);
+                if archived.is_some() {
+                    g.acked_bytes = 0;
+                    g.purged = archived;
+                }
                 Ok(Appended { sequence: seq })
             }
             Err(e) => {
-                if matches!(e, AppendError::DiskFull | AppendError::Storage) {
-                    self.set_degraded(true);
+                // Left in place, its rows would commit with the group.
+                if c.execute_batch("ROLLBACK TO record; RELEASE record")
+                    .is_err()
+                {
+                    let _ = c.execute_batch("ROLLBACK");
                 }
                 Err(e)
             }
         }
     }
 
-    /// One append transaction. Counters change only after commit, by the caller.
+    /// One record's statements, in the caller's transaction. `acked_bytes` is 0
+    /// once this record purged the acknowledged rows.
     fn append_tx(
-        &mut self,
+        &self,
+        c: &Connection,
         event: &mut ProxyEvent,
-        now: i64,
-        boot: Option<&BootInstant>,
-        limit: u64,
+        g: &Group,
+        acked_bytes: u64,
     ) -> Result<(i64, u64), AppendTx> {
-        let (unsent_bytes, acked_bytes) = {
-            let k = self.counters();
-            (k.unsent_bytes, k.acked_bytes)
-        };
+        let unsent_bytes = g.unsent_bytes + g.bytes;
         let st = |e: rusqlite::Error| AppendTx::Refused(append_storage(&e));
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(st)?;
-        let dup: bool = tx
+        let dup: bool = c
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1) \
                  OR EXISTS(SELECT 1 FROM quarantine WHERE event_id = ?1)",
@@ -1584,7 +1637,7 @@ impl Writer {
         if dup {
             return Err(AppendTx::Refused(AppendError::Duplicate));
         }
-        let last: i64 = tx
+        let last: i64 = c
             .query_row("SELECT last FROM seq WHERE id = 1", [], |r| r.get(0))
             .map_err(st)?;
         let seq = last
@@ -1598,40 +1651,39 @@ impl Writer {
         if size > self.shared.event_max_bytes.load(Ordering::Relaxed) {
             return Err(AppendTx::Refused(AppendError::TooLarge));
         }
-        if !admits(unsent_bytes, size, limit) {
+        if !admits(unsent_bytes, size, g.limit) {
             return Err(AppendTx::Refused(AppendError::Full));
         }
         if unsent_bytes
             .saturating_add(acked_bytes)
             .saturating_add(size)
-            > limit
+            > g.limit
         {
             return Err(AppendTx::PurgeAcked);
         }
-        tx.execute(
+        c.execute(
             "INSERT INTO events(sequence, event_id, bytes, size, created_at, state) \
              VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![seq, event.event_id.as_str(), bytes, size as i64, now],
+            params![seq, event.event_id.as_str(), bytes, size as i64, g.now],
         )
         .map_err(st)?;
-        stamp_row(&tx, STAMP_EVENT, seq, boot).map_err(st)?;
-        tx.execute("UPDATE seq SET last = ?1 WHERE id = 1", [seq])
+        stamp_row(c, STAMP_EVENT, seq, g.boot.as_ref()).map_err(st)?;
+        c.execute("UPDATE seq SET last = ?1 WHERE id = 1", [seq])
             .map_err(st)?;
-        tx.commit().map_err(st)?;
         Ok((seq, size))
     }
 
-    /// Delete every acknowledged row (the server holds them).
-    fn purge_all_acked(&mut self) -> Result<(), SpoolError> {
+    /// Delete every acknowledged row (the server holds them), in the caller's
+    /// transaction. Returns the bytes of originals archived to quarantine.
+    fn purge_all_acked(
+        &self,
+        c: &Connection,
+        now: i64,
+        boot: Option<&BootInstant>,
+    ) -> Result<u64, SpoolError> {
         let st = |e: rusqlite::Error| SpoolError::Storage(code_name(&e));
-        let now = (self.cfg.clock)();
-        let boot = (self.cfg.boot_clock)();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(st)?;
         let ids: Vec<String> = {
-            let mut q = tx
+            let mut q = c
                 .prepare("SELECT event_id FROM events WHERE state = 1")
                 .map_err(st)?;
             let mapped = q.query_map([], |r| r.get(0)).map_err(st)?;
@@ -1639,16 +1691,11 @@ impl Writer {
         };
         let mut archived = 0u64;
         for id in &ids {
-            archived += archive_original(&tx, id, now, boot.as_ref()).map_err(st)?;
+            archived += archive_original(c, id, now, boot).map_err(st)?;
         }
-        tx.execute("DELETE FROM events WHERE state = 1", [])
+        c.execute("DELETE FROM events WHERE state = 1", [])
             .map_err(st)?;
-        tx.commit().map_err(st)?;
-        let mut k = self.counters();
-        k.acked = 0;
-        k.acked_bytes = 0;
-        k.quarantined_bytes += archived;
-        Ok(())
+        Ok(archived)
     }
 
     /// Unsent rows covered by an fsync, oldest first. Rows committed since the
@@ -2121,6 +2168,21 @@ fn shared_gap_bytes(sh: &Shared) -> u64 {
         .gap_bytes
 }
 
+/// An open group transaction: the counters as it began, and what its records
+/// add to them once it commits.
+struct Group {
+    now: i64,
+    boot: Option<BootInstant>,
+    limit: u64,
+    unsent_bytes: u64,
+    acked_bytes: u64,
+    events: u64,
+    bytes: u64,
+    last_seq: Option<i64>,
+    /// Bytes of originals archived by the purge of acknowledged rows, if one ran.
+    purged: Option<u64>,
+}
+
 enum AppendTx {
     Refused(AppendError),
     /// Fits only after the retained acknowledged rows are purged.
@@ -2144,7 +2206,7 @@ const STAMP_QUARANTINE: &str =
 /// Stamp a row written in the caller's transaction. Without a boot clock the row
 /// stays unstamped and ages on the wall clock.
 fn stamp_row(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     insert: &str,
     sequence: i64,
     boot: Option<&BootInstant>,
@@ -2216,7 +2278,7 @@ fn move_to_quarantine(
 /// (if it was rewritten) into `quarantine` under [`ORIGINAL_CODE`] and drop the
 /// originals row, in the caller's transaction. Returns the bytes archived.
 fn archive_original(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     id: &str,
     now: i64,
     boot: Option<&BootInstant>,
@@ -2749,7 +2811,17 @@ mod tests {
         for q in starts {
             assert_eq!(q.await, Err(AppendError::Storage), "Ok before an fsync");
         }
-        assert!(done.await.is_ok(), "a completion never waited for an fsync");
+        assert_eq!(
+            done.await,
+            Err(AppendError::Storage),
+            "a completion commits with its group"
+        );
+        let snap = s.snapshot();
+        assert_eq!(
+            (snap.unsent_events, snap.last_assigned_sequence),
+            (1, 1),
+            "a refused group is not counted"
+        );
         crate::sync_vfs::fail_syncs(&wal, false);
         assert_stopped(s).await;
         // Power loss before the shared fsync: none of the refused starts was
@@ -2762,6 +2834,147 @@ mod tests {
             ids(&s.next_events(100, &HashSet::new())),
             (1..=6).map(uid).collect::<Vec<_>>()
         );
+    }
+
+    async fn sequences_of(
+        queued: Vec<impl std::future::Future<Output = Result<Appended, AppendError>>>,
+    ) -> Vec<Result<i64, AppendError>> {
+        let mut out = Vec::new();
+        for q in queued {
+            out.push(q.await.map(|a| a.sequence));
+        }
+        out
+    }
+
+    fn oversized(n: u32) -> ProxyEvent {
+        let mut big = serde_json::to_value(event(n)).unwrap();
+        big["payload"]["actor"]["actor_id"] = json!("a".repeat(100));
+        serde_json::from_value(big).unwrap()
+    }
+
+    /// Make the record of `event_id` fail after its row is written, the way a
+    /// storage error can, with `RAISE(<action>, ...)`.
+    fn fail_after_insert(dir: &Path, event_id: &str, action: &str) {
+        Connection::open(dir.join(SPOOL_FILE))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_after_insert BEFORE UPDATE ON seq \
+                 WHEN (SELECT event_id FROM events WHERE sequence = NEW.last) = '{event_id}' \
+                 BEGIN SELECT RAISE({action}, 'test'); END;"
+            ))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_group_writes_each_page_once() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        let wal_len = || std::fs::metadata(&wal).unwrap().len();
+        // Past the WAL's high-water mark from opening, so every frame adds length.
+        for n in 1..=16 {
+            s.append(event(n)).unwrap();
+        }
+        let before = wal_len();
+        let hold = hold_writer(&s);
+        let queued: Vec<_> = (17..=48).map(|n| s.append_async(event(n))).collect();
+        drop(hold);
+        assert!(sequences_of(queued).await.iter().all(Result::is_ok));
+        let frames = (wal_len() - before) / (4096 + 24);
+        // A commit per record writes the same pages again for each: 170 frames
+        // for these 32 (2026-11-08).
+        assert!(frames <= 32, "{frames} WAL frames for a group of 32 starts");
+    }
+
+    #[tokio::test]
+    async fn a_refused_record_does_not_undo_its_group() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        s.append(event(1)).unwrap();
+        fail_after_insert(d.path(), &uid(4), "ABORT");
+        s.set_event_max_bytes_for_test(event_size() + 2);
+        let hold = hold_writer(&s);
+        let queued = vec![
+            s.append_async(event(2)),
+            s.append_async(event(1)),
+            s.append_async(oversized(3)),
+            s.append_async(event(4)),
+            s.append_async(event(5)),
+            s.append_async(completed(6)),
+        ];
+        drop(hold);
+        assert_eq!(
+            sequences_of(queued).await,
+            vec![
+                Ok(2),
+                Err(AppendError::Duplicate),
+                Err(AppendError::TooLarge),
+                Err(AppendError::Storage),
+                Ok(3),
+                Ok(4),
+            ]
+        );
+        // Power loss after the group's fsync: the accepted records, and no other.
+        let (mut p, _) = open(power_loss_copy(d.path()).path());
+        assert_eq!(
+            sequences(&mut p),
+            vec![(1, uid(1)), (2, uid(2)), (3, uid(5)), (4, uid(6))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_that_ends_the_transaction_refuses_its_group() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        s.append(event(1)).unwrap();
+        fail_after_insert(d.path(), &uid(3), "ROLLBACK");
+        let hold = hold_writer(&s);
+        let queued = vec![
+            s.append_async(event(2)),
+            s.append_async(event(3)),
+            s.append_async(completed(4)),
+        ];
+        drop(hold);
+        assert_eq!(
+            sequences_of(queued).await,
+            vec![Err(AppendError::Storage); 3]
+        );
+        let snap = s.snapshot();
+        assert_eq!((snap.unsent_events, snap.last_assigned_sequence), (1, 1));
+        // Not an fsync failure: the writer goes on.
+        assert_eq!(s.append(event(5)).map(|a| a.sequence), Ok(2));
+        assert_eq!(sequences(&mut s), vec![(1, uid(1)), (2, uid(5))]);
+    }
+
+    #[tokio::test]
+    async fn a_full_spool_purges_acked_rows_inside_a_group() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let sz = event_size();
+        s.set_capacity_for_test(2 * sz + 1024, 1024);
+        s.append(event(1)).unwrap();
+        s.append(event(2)).unwrap();
+        s.acknowledged(&[uid(1), uid(2)]);
+        let hold = hold_writer(&s);
+        let queued: Vec<_> = (3..=5).map(|n| s.append_async(event(n))).collect();
+        drop(hold);
+        assert_eq!(
+            sequences_of(queued).await,
+            vec![Ok(3), Ok(4), Err(AppendError::Full)]
+        );
+        let counts = |s: &Spool| {
+            let snap = s.snapshot();
+            (
+                snap.retained_acked_bytes,
+                snap.unsent_bytes,
+                snap.unsent_events,
+            )
+        };
+        assert_eq!(counts(&s), (0, 2 * sz, 2));
+        s.close_blocking_for_test();
+        let (s, _) = open(d.path());
+        assert_eq!(counts(&s), (0, 2 * sz, 2), "counters match the database");
     }
 
     /// After a failed fsync every call is refused and the spool reports

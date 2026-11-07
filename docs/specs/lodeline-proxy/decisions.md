@@ -193,11 +193,11 @@ M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 �
 - line 146과 다른 점: 이전에는 spool의 모든 기록이 fsync 뒤 local ack였다. 이제 start만 그렇고, completion·cancel·ACK 표시는 commit 뒤 응답한다.
 - 함께 바꾼 것(계약 안): `wal_autocheckpoint=0`. checkpoint는 commit 안이 아니라 writer의 명령 사이에서 돈다. maintenance pass마다, 수집 client가
   durable하지 않은 행만 찾았을 때, 그리고 512 명령마다 한 번(WAL 상한) 한다.
-- 2026-11-07 group commit(`perf/proxy-group-commit`, 위 계약 안의 구현이며 새 결정이 아니다): writer는 이미 queue에 있는 append를 최대 64개까지
-  한 묶음으로 처리한다. 묶음의 기록은 차례로 NORMAL commit하고, 이어서 바꾸는 값 없는 FULL commit 하나(`PRAGMA user_version = 0`)의 fsync가
-  모두를 덮는다. start는 그 fsync가 끝난 뒤에만 local ack를 받으므로 upstream 전달 전 durable 조건은 그대로다. 혼자 온 start는 전처럼 자기 FULL
-  commit을 한다. 더 올 append를 기다리는 타이머는 없다. 그 fsync가 실패하면 묶음의 start는 모두 거절되고, 이미 commit된 행은 crash 뒤와 같은
-  start만 있는 기록으로 남을 수 있다(전달은 없음).
+- 2026-11-07 group commit(`perf/proxy-group-commit`, 위 계약 안의 구현), 2026-11-08 묶음 transaction 하나(`perf/proxy-group-tx`): writer는 이미
+  queue에 있는 append를 최대 64개까지 한 transaction으로 commit한다. 기록마다 savepoint로 거절을 가둔다. 묶음에 start가 있으면 그 commit이
+  FULL이고, 그 fsync 뒤에만 묶음의 응답이 나간다. start가 없으면 NORMAL이다. 혼자 온 append도 같은 길이다. 더 올 append를 기다리는 타이머는 없다.
+  upstream 전달 전 durable 조건은 그대로다. commit이 실패하면 묶음의 기록은 모두 거절된다. completion·cancel도 거절하는 것은 2026-11-08 계약
+  변경이다(사용자 승인, 전에는 start만). 이미 디스크에 닿은 frame은 재시작 뒤 commit으로 복구될 수 있다(전달 없음, 과다 기록 방향).
 
 ## spool fsync 실패 뒤 fail-stop (2026-11-07, orchestrator)
 
@@ -207,14 +207,14 @@ Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시�
 
 - fsync 실패(`SQLITE_IOERR_FSYNC`, `SQLITE_IOERR_DIR_FSYNC`)는 재시도하지 않는다. spool writer는 그 프로세스에서 영구히 멈춘다(fail-stop).
   뒤의 append, ACK, quarantine, checkpoint, `next_events` 전달은 모두 거절되거나 일어나지 않는다. 자기 checkpoint가 실패한 `next_events` 호출도
-  `durable_seq` 이하 행, 곧 앞서 성공한 fsync가 덮은 행만 넘기고 그 너머는 넘기지 않는다. 실패한 묶음의 start는 전처럼 모두 `Storage`로
-  거절되고, 뒤의 호출은 `Unavailable`이다(relay는 둘 다 503). spool은 재시작까지 `degraded`로 보고한다. 실패 뒤에는 `degraded`를 지우지 않으므로
+  `durable_seq` 이하 행, 곧 앞서 성공한 fsync가 덮은 행만 넘기고 그 너머는 넘기지 않는다. 실패한 묶음의 기록은 모두 `Storage`로
+  거절되고(completion·cancel은 2026-11-08부터), 뒤의 호출은 `Unavailable`이다(relay는 둘 다 503). spool은 재시작까지 `degraded`로 보고한다. 실패 뒤에는 `degraded`를 지우지 않으므로
   writer가 멈추기 전에 나간 응답 사이에도 `degraded`다. 기존의 멈춘 writer와 같은 경로이며 새 상태나 reason은 없다.
 - 닫을 때 SQLite가 하는 checkpoint를 끈다. 실패한 page를 DB로 복사하지 않고, 재시작이 checksum으로 WAL을 복구하게 둔다.
 - 근거: 같은 파일의 fsync 재시도는 Linux에서 성공을 보고하지만 아무것도 증명하지 않는다. PostgreSQL도 2018년 이후 fsync 실패에 PANIC하고
   재시작 때 WAL에서 복구한다. degraded로 계속 받는 안이나 재시도 안은 이 증명 공백을 남긴다.
-- 실패한 묶음에서 이미 NORMAL commit된 행은 재시작 뒤 start만 있는 기록으로 남아 서버로 간다(전달 없음, 과다 기록 방향). 2026-11-07 group commit
-  항목의 과다 기록과 같다.
+- 실패한 묶음의 commit이 디스크에 남긴 frame은 재시작 뒤 commit으로 복구되어 서버로 갈 수 있다(start만 있는 기록, 거절된 completion의 행 포함.
+  전달 없음, 과다 기록 방향). group commit 항목의 과다 기록과 같다.
 - 남는 한계: 재시작의 WAL 복구와 첫 checkpoint는 WAL을 page cache로 읽는다. 실패한 page가 cache에 남아 있으면 디스크에 실제로 있었는지 모른 채
   DB로 복사된다. 재시작 전 전원 손실이나 OS crash는 그 구간을 잃는다. 그 구간의 start는 Ok를 받지 않았으므로 전달된 호출은 없다. 완전히 안전하지는
   않으며, 운영자는 재시작 전에 디스크를 확인해야 한다.
