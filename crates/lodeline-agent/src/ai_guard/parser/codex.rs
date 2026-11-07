@@ -281,38 +281,18 @@ fn read_hooks_json(path: &Path) -> Option<Value> {
     }
 }
 
-/// #200: `[features] hooks = false`, or its legacy name `codex_hooks`, turns
-/// off every config hook (`ClaudeHooksEngine::new`, `hooks/src/engine/mod.rs`,
-/// rust-v0.164.0). Codex applies the keys in sorted order, so in the merged
-/// table `hooks` beats `codex_hooks`. A `[features]` pin in the system
-/// `requirements.toml` overrides config (`managed_features.rs`); an MDM or
-/// cloud pin, a profile, and `--disable hooks` are not seen. `configs` is low
-/// layer to high.
+/// See [`lodeline_core::codex::hooks_disabled_by`]. `configs` is low layer to high.
 fn hooks_feature_enabled<'a>(
     system_dir: &Path,
     configs: impl IntoIterator<Item = &'a Option<Value>>,
 ) -> bool {
-    let flag = |features: &Value| {
-        let get = |key| features.get(key).and_then(Value::as_bool);
-        get("hooks").or_else(|| get("codex_hooks"))
-    };
     // A malformed file fails the assessment in `policy_controls`; here it pins nothing.
     let requirements = std::fs::read_to_string(system_dir.join("requirements.toml"))
         .ok()
         .and_then(|text| toml::from_str::<Value>(&text).ok());
-    let pinned = requirements
-        .as_ref()
-        .and_then(|r| r.get("features").or_else(|| r.get("feature_requirements")))
-        .and_then(flag);
-    let mut features = Value::Table(toml::Table::new());
-    for table in configs
-        .into_iter()
-        .flatten()
-        .filter_map(|c| c.get("features"))
-    {
-        merge_layer(&mut features, table);
-    }
-    pinned.or_else(|| flag(&features)).unwrap_or(true)
+    let configs: Vec<_> = configs.into_iter().flatten().map(|c| ((), c)).collect();
+    lodeline_core::codex::hooks_disabled_by(requirements.as_ref().map(|r| ((), r)), &configs)
+        .is_none()
 }
 
 /// Codex merges config layers with the higher layer winning: tables merge key
