@@ -367,6 +367,11 @@ impl GapQueue {
         self.lock().overflow
     }
 
+    /// How many handles share this queue (this one included).
+    pub(crate) fn handles(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// The last write to the persister failed.
     pub fn persist_failed(&self) -> bool {
         self.lock().persist_failed

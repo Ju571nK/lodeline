@@ -514,6 +514,11 @@ impl RegistryStore {
         self.lock().proxy_id.clone()
     }
 
+    /// How many handles share this store (this one included).
+    pub(crate) fn handles(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// The current `key_id` (not secret).
     pub fn key_id(&self) -> String {
         self.lock().key.key_id()
