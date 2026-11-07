@@ -4258,4 +4258,82 @@ mod tests {
             .unwrap();
         assert!(created > 0);
     }
+
+    /// What a power loss leaves when the kernel dropped the WAL pages of a
+    /// failed fsync and reported later fsyncs as successful (Linux writeback
+    /// error semantics, https://wiki.postgresql.org/wiki/Fsync_Errors): bytes
+    /// written between the last good fsync (`before`) and the failure
+    /// (`unsynced`), and not rewritten since, keep their old content.
+    fn power_loss_after_lost_writeback(
+        dir: &Path,
+        before: &[u8],
+        unsynced: &[u8],
+    ) -> tempfile::TempDir {
+        let (db, wal) = spool_files(dir);
+        let mut disk = crate::sync_vfs::synced_image(&wal);
+        let old = |i: usize| before.get(i).copied().unwrap_or(0);
+        for i in 0..unsynced.len().min(disk.len()) {
+            if unsynced[i] != old(i) && disk[i] == unsynced[i] {
+                disk[i] = old(i);
+            }
+        }
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(
+            out.path().join(SPOOL_FILE),
+            crate::sync_vfs::synced_image(&db),
+        )
+        .unwrap();
+        std::fs::write(out.path().join(format!("{SPOOL_FILE}-wal")), disk).unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn no_later_fsync_is_trusted_after_a_failed_one() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (db, wal) = spool_files(d.path());
+        s.append(event(1)).unwrap();
+        let before = crate::sync_vfs::synced_image(&wal);
+        let hold = hold_writer(&s);
+        let refused: Vec<_> = (2..=5).map(|n| s.append_async(event(n))).collect();
+        crate::sync_vfs::fail_syncs(&wal, true);
+        drop(hold);
+        for q in refused {
+            assert_eq!(q.await, Err(AppendError::Storage));
+        }
+        crate::sync_vfs::fail_syncs(&wal, false);
+        let unsynced = std::fs::read(&wal).unwrap();
+
+        let kept = |p: &mut Spool, ok: &[String], handed: i64| {
+            let held = ids(&p.next_events(100, &HashSet::new()));
+            for id in ok {
+                assert!(held.contains(id), "start {id} heard Ok and was lost");
+            }
+            let next = p.append(event(999)).unwrap().sequence;
+            assert!(next > handed, "sequence {next} was already handed out");
+        };
+        let mut ok = vec![uid(1)];
+        if s.append(event(6)).is_ok() {
+            ok.push(uid(6));
+        }
+        let handed = sequences(&mut s).last().map_or(0, |(q, _)| *q);
+        let (mut p, _) = open(power_loss_after_lost_writeback(d.path(), &before, &unsynced).path());
+        kept(&mut p, &ok, handed);
+
+        // Read-only commands up to the next checkpoint, which copies the WAL into
+        // the database; a write after it would restart the WAL.
+        let db0 = crate::sync_vfs::syncs(&db);
+        for _ in 0..2 * CHECKPOINT_EVERY {
+            if crate::sync_vfs::syncs(&db) > db0 {
+                break;
+            }
+            let _ = s.oldest_held_sequence();
+        }
+        let copy = power_loss_after_lost_writeback(d.path(), &before, &unsynced);
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut p =
+            Spool::open(cfg(copy.path(), now)).expect("the spool opens after the power loss");
+        kept(&mut p, &ok, handed);
+    }
 }
