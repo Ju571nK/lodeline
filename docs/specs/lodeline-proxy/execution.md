@@ -19,12 +19,13 @@
 `TimeoutStopSec=45`를 넘으면 systemd가 SIGKILL하고 `stopped`와 durable 집계가 기록되지 않는다.
 
 수정(`lifecycle.rs`): shutdown future가 끝난 시각(신호)을 `OnceLock`에 남기고 `deadline = 신호 + grace`를 한 번 계산한다. 감사 drain은
-남은 시간만 받고, blocking 작업 대기도 같은 deadline에서 끝난다. 각 단계의 시간 초과 동작(손실 집계, `invocation_accounted=false` 등)은
-그대로다. 감사 producer의 gap handover 5초 상한은 grace 밖에 그대로 남는다(기본 30 + 5초 < 45초). blocking 작업 대기가 끝날 때 경고에
+남은 시간만 받되 최소 0.5초(`AUDIT_DRAIN_FLOOR`)를 받고, blocking 작업 대기도 같은 deadline에서 끝난다. 늦은 단계는 남은 시간만 받으므로
+진행 중 completion이 spool 기록 대신 집계된 gap으로 끝나는 경우가 늘 수 있다. `stopped` 전에 SIGKILL되지 않는 대가다. 감사 producer의
+gap handover 5초 상한은 grace 밖에 그대로 남는다(기본 30 + 0.5 + 5초 < 45초). blocking 작업 대기가 끝날 때 경고에
 gap queue·registry handle 수를 남긴다(N2). 유닛 주석과 `config/proxy.example.yaml`에 grace를 올리면 `TimeoutStopSec`도 올리라고 적었다.
 
 시험: `lifecycle::tests::shutdown_phases_share_one_grace`(grace 2초, 요청 head 중간에 멈춘 client가 relay drain을 잡고, 시험 전용
-`RunTuning::gaps_out`으로 받은 gap queue 사본이 blocking 작업 대기를 잡음). 수정 전 4.05초(2 × grace)로 실패, 수정 후 통과(시험 전체 2.3초).
+`RunTuning::gaps_out`으로 받은 gap queue 사본이 blocking 작업 대기를 잡음). 수정 전 4.05초(2 × grace)로 실패, 수정 후 통과(시험 전체 2.3초). 상한은 floor와 느린 CI를 감안해 grace + 1.5초.
 
 ## 2026-11-07 spool start 기록 group commit (`perf/proxy-group-commit`)
 

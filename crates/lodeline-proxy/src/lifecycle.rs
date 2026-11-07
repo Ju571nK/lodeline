@@ -472,6 +472,9 @@ struct Pacing {
 const SPOOL_GAP_PUMP_INTERVAL: Duration = Duration::from_secs(5);
 /// Registry entry retention pass, as often as the spool's maintenance.
 const ENTRY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
+/// Least time the audit drain gets after the relay drain used the grace: a
+/// drain that ends in milliseconds appends its completions instead of counting them.
+const AUDIT_DRAIN_FLOOR: Duration = Duration::from_millis(500);
 
 async fn run_inner(
     b: &Bootstrap,
@@ -830,8 +833,12 @@ async fn run_inner(
     // The relay stopped: drain the audit producer first (its completions and
     // cancels reach the spool, or are counted as a gap), before any task stops.
     let invocation_accounted = if let Some(h) = invocation_handle.take() {
-        h.shutdown(deadline.saturating_duration_since(tokio::time::Instant::now()))
-            .await
+        h.shutdown(
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(AUDIT_DRAIN_FLOOR),
+        )
+        .await
     } else {
         true
     };
@@ -1470,12 +1477,15 @@ mod tests {
         let (ran, (signaled, _held, _client)) = tokio::join!(run, drive);
         let took = signaled.elapsed();
         ran.unwrap();
+        // Holds while `server::HEADER_READ_TIMEOUT` is longer than grace.
         assert!(
             took >= grace,
             "the relay drain waited for the client: {took:?}"
         );
+        // Room for the audit drain floor and slow CI runners; one grace each
+        // (before the fix) is about 2 x grace.
         assert!(
-            took < grace + Duration::from_millis(900),
+            took < grace + Duration::from_millis(1500),
             "shutdown took {took:?}, more than one grace of {grace:?}"
         );
     }
