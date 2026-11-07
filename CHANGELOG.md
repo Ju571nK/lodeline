@@ -7,6 +7,18 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- `lodeline-proxy health` and the local `status.json` now show the spool state that the status
+  report sends to the server. Before, an operator on the host could not see that the proxy refused
+  calls because its event spool had stopped. `status.json` has a new optional `spool` section, such
+  as `{"state": "degraded", "reason": "fsync_failed"}`, and `health` prints a matching line, such as
+  `spool: Degraded (FsyncFailed)`. The reason is one of `fsync_failed` (a failed storage sync stopped
+  the spool until restart), `writer_stopped`, `gap_reserve_exhausted`, `storage_failed`, or
+  `ingest_stopped`, and appears only while the state is degraded. The status report to the server
+  does not change. Files written by an older proxy still read, and `health` prints `spool: unknown`
+  for them. The exit code of `health` does not change.
+
 ### Fixed
 
 - `lodeline-proxy` now uploads a registry entry again when the server answers an event batch

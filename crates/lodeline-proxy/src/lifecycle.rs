@@ -50,11 +50,30 @@ pub struct LocalStatus {
     /// Absent (false) in the normal case.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ingest_stopped: bool,
+    /// The `spool.state` of the status report, and why it is degraded. Absent
+    /// until the running proxy first reads it, and in files of older proxies.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_if_unreadable"
+    )]
+    pub spool: Option<crate::status_report::SpoolView>,
     pub updated_at: String,
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// A section this build cannot read (a value from a newer proxy) reads as
+/// absent, so the rest of the file still reads.
+fn absent_if_unreadable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 /// Forwarding requires a valid applied config and a running process. Nothing
@@ -124,6 +143,7 @@ impl Lifecycle {
             status_sequence_wedged: false,
             gap_queue_persist_failed: false,
             ingest_stopped: false,
+            spool: None,
             updated_at: now_rfc3339(),
         };
         let mut lc = Lifecycle {
@@ -276,6 +296,15 @@ impl Lifecycle {
     /// Publish whether ingest is stopped.
     pub fn set_ingest_stopped(&mut self, stopped: bool) -> Result<(), StateError> {
         self.status.ingest_stopped = stopped;
+        self.publish()
+    }
+
+    /// Publish the spool view (on change only: it is polled).
+    pub fn set_spool(&mut self, v: crate::status_report::SpoolView) -> Result<(), StateError> {
+        if self.status.spool == Some(v) {
+            return Ok(());
+        }
+        self.status.spool = Some(v);
         self.publish()
     }
 
@@ -470,6 +499,8 @@ struct Pacing {
 
 /// How often the spool's own gaps (R expiry) are handed to the gap queue.
 const SPOOL_GAP_PUMP_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the local status file follows the spool state.
+const SPOOL_VIEW_INTERVAL: Duration = Duration::from_secs(1);
 /// Registry entry retention pass, as often as the spool's maintenance.
 const ENTRY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 /// Least time the audit drain gets after the relay drain used the grace: a
@@ -543,6 +574,7 @@ async fn run_inner(
     let mut retention_task = None;
     let mut registry_task = None;
     let mut entry_retention_task = None;
+    let mut spool_view_task = None;
     // The inventory: the relay's observation sink and the worker behind it.
     let mut inventory_sink: Option<std::sync::Arc<crate::inventory_sink::InventorySink>> = None;
     let mut inventory_handle: Option<crate::inventory_sink::InventoryHandle> = None;
@@ -715,6 +747,15 @@ async fn run_inner(
             if let Some(probe) = registry_probe {
                 reporter = reporter.with_registry(probe);
             }
+            // The local status file shows the spool state the report sends.
+            let (view_spool, view_central, lc9, mut view_stop) =
+                (spool.clone(), central.clone(), lc.clone(), stop_rx.clone());
+            spool_view_task = Some(tokio::spawn(async move {
+                follow_spool_view(view_spool, view_central, lc9, async move {
+                    let _ = view_stop.wait_for(|v| *v).await;
+                })
+                .await;
+            }));
             // R follows the applied server config.
             let (ret_spool, ret_rx, mut ret_stop) =
                 (spool.clone(), view_rx.clone(), stop_rx.clone());
@@ -860,6 +901,7 @@ async fn run_inner(
         retention_task,
         registry_task,
         entry_retention_task,
+        spool_view_task,
     ]
     .into_iter()
     .flatten()
@@ -936,6 +978,27 @@ async fn follow_retention(
                     return;
                 }
             }
+        }
+    }
+}
+
+/// Publish the spool view of the status report to the local status file every
+/// [`SPOOL_VIEW_INTERVAL`] until `shutdown` completes.
+async fn follow_spool_view(
+    spool: crate::spool::Spool,
+    central: crate::status_report::CentralHealth,
+    lc: std::sync::Arc<std::sync::Mutex<Lifecycle>>,
+    shutdown: impl Future<Output = ()>,
+) {
+    tokio::pin!(shutdown);
+    loop {
+        let v = crate::status_report::SpoolView::of(&spool.snapshot(), central.ingest_stopped());
+        if let Err(e) = lock(&lc).set_spool(v) {
+            tracing::error!(error = %e, "cannot publish the spool state");
+        }
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = tokio::time::sleep(SPOOL_VIEW_INTERVAL) => {}
         }
     }
 }
@@ -1103,6 +1166,7 @@ mod tests {
             status_sequence_wedged: false,
             gap_queue_persist_failed: false,
             ingest_stopped: false,
+            spool: None,
             updated_at: String::new(),
         };
         assert_eq!(startup_config_state(None), ConfigState::None);
@@ -1306,6 +1370,102 @@ mod tests {
         lc.set_ingest_stopped(false).unwrap();
         let s = std::fs::read_to_string(b.state_dir.join(STATUS_FILE)).unwrap();
         assert!(!s.contains("ingest_stopped"), "absent when false");
+    }
+
+    /// Old files have no `spool` section, and a newer proxy may write a reason
+    /// this build does not know: the rest of the file still reads.
+    #[test]
+    fn a_status_file_with_an_absent_or_unknown_spool_section_reads() {
+        let t = tempfile::tempdir().unwrap();
+        let old = serde_json::json!({
+            "schema_version": 1, "proxy_id": "px-1", "epoch_id": "e", "pid": 1,
+            "run_state": "running", "config_state": "disabled", "forwarding": false,
+            "updated_at": "2026-11-07T00:00:00Z"
+        });
+        let read = |spool: Option<serde_json::Value>| {
+            let mut v = old.clone();
+            if let Some(s) = spool {
+                v["spool"] = s;
+            }
+            std::fs::write(t.path().join(STATUS_FILE), v.to_string()).unwrap();
+            let s = read_status(t.path()).expect("the file reads");
+            assert_eq!(s.config_state, ConfigState::Disabled);
+            s.spool
+        };
+        assert_eq!(read(None), None);
+        assert_eq!(
+            read(Some(
+                serde_json::json!({"state": "degraded", "reason": "fsync_failed"})
+            )),
+            Some(crate::status_report::SpoolView {
+                state: crate::spool::SpoolState::Degraded,
+                reason: Some(crate::spool::DegradedReason::FsyncFailed),
+            })
+        );
+        assert_eq!(
+            read(Some(
+                serde_json::json!({"state": "degraded", "reason": "later"})
+            )),
+            None
+        );
+    }
+
+    /// #512 follow-up: the local status file shows the spool state, and after a
+    /// failed fsync that the writer stopped for it.
+    #[tokio::test]
+    async fn a_failed_spool_fsync_is_shown_in_the_local_status() {
+        use crate::spool::{DegradedReason, SpoolState};
+        use crate::status_report::SpoolView;
+        crate::sync_vfs::install();
+        let t = tempfile::tempdir().unwrap();
+        let mut b = bootstrap(t.path());
+        b.control_plane_url = "https://127.0.0.1:1".into();
+        let (spool_tx, spool_rx) = tokio::sync::oneshot::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let tuning = RunTuning {
+            listener: Some(std::net::TcpListener::bind("127.0.0.1:0").unwrap()),
+            spool_out: Some(spool_tx),
+            ..RunTuning::default()
+        };
+        let run = run_tuned(
+            &b,
+            crate::route::TableHandle::new(),
+            async {
+                let _ = stop_rx.await;
+            },
+            tuning,
+        );
+        let drive = async {
+            let spool = spool_rx.await.unwrap();
+            let state_dir = &b.state_dir;
+            let shown = |want: SpoolView| async move {
+                let end = tokio::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let got = health(state_dir).status.and_then(|s| s.spool);
+                    if got == Some(want) {
+                        return;
+                    }
+                    assert!(tokio::time::Instant::now() < end, "status shows {got:?}");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            shown(SpoolView {
+                state: SpoolState::Ok,
+                reason: None,
+            })
+            .await;
+            let wal = b.state_dir.canonicalize().unwrap().join("spool.db-wal");
+            crate::sync_vfs::fail_next_sync(&wal);
+            assert!(spool.inject_test_event("up-1").await.is_err());
+            shown(SpoolView {
+                state: SpoolState::Degraded,
+                reason: Some(DegradedReason::FsyncFailed),
+            })
+            .await;
+            stop_tx.send(()).unwrap();
+        };
+        let (ran, ()) = tokio::join!(run, drive);
+        ran.unwrap();
     }
 
     /// M4: a failing gap queue write shows in the local status and clears.

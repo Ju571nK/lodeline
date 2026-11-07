@@ -156,6 +156,10 @@ fn run_lock_signal_and_health() {
     let s = status_json(t.path()).unwrap();
     assert_eq!(s["forwarding"], false);
     assert_eq!(s["config_state"], "none");
+    assert!(
+        wait_for(|| status_json(t.path()).is_some_and(|s| s["spool"]["state"] == "ok")),
+        "status never showed the spool"
+    );
     let epoch = s["epoch_id"].as_str().unwrap().to_string();
 
     let second = Command::new(BIN)
@@ -177,7 +181,7 @@ fn run_lock_signal_and_health() {
     assert_eq!(health.status.code(), Some(0));
     let h = String::from_utf8_lossy(&health.stdout);
     assert!(
-        h.contains("alive: true") && h.contains("forwarding: false"),
+        h.contains("alive: true") && h.contains("forwarding: false") && h.contains("\nspool: Ok\n"),
         "{h}"
     );
 
@@ -214,4 +218,48 @@ fn run_lock_signal_and_health() {
         .output()
         .unwrap();
     assert_eq!(after.status.code(), Some(1), "stopped proxy is not alive");
+}
+
+/// `health` prints the spool state of the status file, with the reason when it
+/// is degraded, and still reads a file of an older proxy without it.
+#[test]
+fn health_prints_the_spool_state() {
+    let (t, cfg) = fixture();
+    std::fs::create_dir_all(t.path().join("state")).unwrap();
+    let health = |spool: Option<serde_json::Value>| {
+        let mut v = serde_json::json!({
+            "schema_version": 1, "proxy_id": "px-1", "epoch_id": "e", "pid": 1,
+            "run_state": "running", "config_state": "valid", "forwarding": true,
+            "updated_at": "2026-11-07T00:00:00Z"
+        });
+        if let Some(s) = spool {
+            v["spool"] = s;
+        }
+        std::fs::write(t.path().join("state/status.json"), v.to_string()).unwrap();
+        let out = Command::new(BIN)
+            .args(["health", "--config"])
+            .arg(&cfg)
+            .output()
+            .unwrap();
+        // No process holds the lock: not alive, whatever the file says.
+        assert_eq!(out.status.code(), Some(1));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains("proxy_id: px-1"), "{stdout}");
+        stdout
+            .lines()
+            .find(|l| l.starts_with("spool:"))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        health(Some(
+            serde_json::json!({"state": "degraded", "reason": "fsync_failed"})
+        )),
+        "spool: Degraded (FsyncFailed)"
+    );
+    assert_eq!(
+        health(Some(serde_json::json!({"state": "full"}))),
+        "spool: Full"
+    );
+    assert_eq!(health(None), "spool: unknown");
 }
