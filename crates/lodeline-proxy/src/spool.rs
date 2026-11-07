@@ -1253,7 +1253,10 @@ impl Writer {
     }
 
     fn set_degraded(&self, on: bool) {
-        self.shared.degraded.store(on, Ordering::Relaxed);
+        // Never cleared after a failed fsync: replies go out before the writer stops.
+        self.shared
+            .degraded
+            .store(on || SYNC_FAILED.get(), Ordering::Relaxed);
     }
 
     fn run(&mut self, rx: mpsc::Receiver<Cmd>) {
@@ -1284,6 +1287,12 @@ impl Writer {
             }
             // Fail-stop: queued and later commands are refused unrun.
             if SYNC_FAILED.get() {
+                // Test knob: a queued hold still waits here, after the replies.
+                #[cfg(test)]
+                if let Some(Cmd::Hold(rx)) = held.take() {
+                    let _ = rx.recv();
+                }
+                self.set_degraded(true);
                 return;
             }
             let wait = next_maintenance.saturating_duration_since(std::time::Instant::now());
@@ -2809,6 +2818,32 @@ mod tests {
             Err(AppendError::Storage),
             "Ok after a failed fsync"
         );
+        assert_stopped(s).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_fsync_reports_degraded_before_the_writer_stops() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        s.append(completed(1)).unwrap();
+        assert_eq!(s.next_events(100, &HashSet::new()).len(), 1);
+        let hold = hold_writer(&s);
+        let done = s.append_async(completed(2));
+        let start = s.append_async(event(3));
+        // Keeps the writer from leaving its loop after the group's replies.
+        let exit = hold_writer(&s);
+        crate::sync_vfs::fail_next_sync(&wal);
+        drop(hold);
+        let _ = done.await;
+        assert_eq!(start.await, Err(AppendError::Storage));
+        assert_eq!(
+            s.snapshot().state,
+            SpoolState::Degraded,
+            "a later commit in the group cleared degraded"
+        );
+        drop(exit);
         assert_stopped(s).await;
     }
 

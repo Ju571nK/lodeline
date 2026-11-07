@@ -206,9 +206,10 @@ Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시�
 그 성공은 실패한 page가 디스크에 있다는 뜻이 아니다. 전원 손실 뒤 Ok를 받은 start가 사라지고 넘긴 sequence가 다시 배정될 수 있었다.
 
 - fsync 실패(`SQLITE_IOERR_FSYNC`, `SQLITE_IOERR_DIR_FSYNC`)는 재시도하지 않는다. spool writer는 그 프로세스에서 영구히 멈춘다(fail-stop).
-  뒤의 append, ACK, quarantine, checkpoint, `next_events` 전달은 모두 거절되거나 일어나지 않는다. 실패한 묶음의 start는 전처럼 모두 `Storage`로
-  거절되고, 뒤의 호출은 `Unavailable`이다(relay는 둘 다 503). spool은 재시작까지 `degraded`로 보고한다. 기존의 멈춘 writer와 같은 경로이며 새 상태나
-  reason은 없다.
+  뒤의 append, ACK, quarantine, checkpoint, `next_events` 전달은 모두 거절되거나 일어나지 않는다. 자기 checkpoint가 실패한 `next_events` 호출도
+  `durable_seq` 이하 행, 곧 앞서 성공한 fsync가 덮은 행만 넘기고 그 너머는 넘기지 않는다. 실패한 묶음의 start는 전처럼 모두 `Storage`로
+  거절되고, 뒤의 호출은 `Unavailable`이다(relay는 둘 다 503). spool은 재시작까지 `degraded`로 보고한다. 실패 뒤에는 `degraded`를 지우지 않으므로
+  writer가 멈추기 전에 나간 응답 사이에도 `degraded`다. 기존의 멈춘 writer와 같은 경로이며 새 상태나 reason은 없다.
 - 닫을 때 SQLite가 하는 checkpoint를 끈다. 실패한 page를 DB로 복사하지 않고, 재시작이 checksum으로 WAL을 복구하게 둔다.
 - 근거: 같은 파일의 fsync 재시도는 Linux에서 성공을 보고하지만 아무것도 증명하지 않는다. PostgreSQL도 2018년 이후 fsync 실패에 PANIC하고
   재시작 때 WAL에서 복구한다. degraded로 계속 받는 안이나 재시도 안은 이 증명 공백을 남긴다.

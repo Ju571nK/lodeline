@@ -27,6 +27,9 @@ Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시�
 writer thread의 표시(`SYNC_FAILED`)를 켜고 끄지 않는다. writer의 SQLite 오류는 모두 `note_sync_failure`를 거친다(`code_name`, `append_storage`,
 `sync_wal`, `checkpoint`). writer는 다음 명령을 받기 전에 그 표시를 보고 `run`에서 나온다. 기존 멈춘 writer와 같은 경로라 `dead`가 켜지고, 남은 명령과
 뒤의 호출은 `Unavailable`, `next_events`는 빈 목록, status의 `spool.state`는 재시작까지 `degraded`다(`dead_writer_is_reported_degraded`와 같음).
+표시가 켜진 뒤에는 `set_degraded`가 `degraded`를 지우지 않는다. 묶음의 응답은 writer가 멈추기 전에 나가고, 같은 묶음의 뒤 NORMAL commit 성공이
+그 사이 `degraded`를 지울 수 있었기 때문이다. 자기 checkpoint가 실패한 `next_events` 호출은 `durable_seq` 이하 행, 곧 앞서 성공한 fsync가 덮은
+행만 넘긴다.
 
 | fsync 경로 | 실패 뒤 |
 |---|---|
@@ -44,11 +47,13 @@ writer thread의 표시(`SYNC_FAILED`)를 켜고 끄지 않는다. writer의 SQL
 시험(`spool.rs`, `sync_vfs.rs`에 한 번만 실패하는 `fail_next_sync`를 더함): `a_failed_group_fsync_refuses_every_start`(뒤 호출 거절·전달 없음·
 degraded·close 뒤 재시작에서 행 1부터 6까지), `a_failed_start_fsync_stops_the_writer`(실패 뒤 512 명령째 checkpoint도, close checkpoint도 DB를 fsync하지
 않음, 재시작이 WAL을 복구), `a_failed_checkpoint_fsync_stops_the_writer`, `a_failed_maintenance_fsync_stops_the_writer`(gap 기록 commit),
-`a_failed_wal_header_fsync_refuses_the_group`. 공통 확인은 `assert_stopped`(뒤 start는 `Unavailable`, `next_events` 없음, ACK는 아무것도 하지 않음,
+`a_failed_wal_header_fsync_refuses_the_group`, `a_failed_fsync_reports_degraded_before_the_writer_stops`(묶음 응답 뒤, writer가 멈추기 전의
+snapshot이 `degraded`, 시험 전용 `Cmd::Hold`로 멈춤 직전에 세움). 공통 확인은 `assert_stopped`(뒤 start는 `Unavailable`, `next_events` 없음, ACK는 아무것도 하지 않음,
 `degraded`, `close` 반환). 재현 시험은 이제 통과한다.
 
 mutation(한 번에 하나씩 되돌림, 각각 위 시험 중 하나 이상이 실패): 명령 전 멈춤 확인 제거(6개 실패), checkpoint 생략 제거(1), close checkpoint 끄기
-제거(2), `sync_wal` 앞 확인 제거(header 시험), `checkpoint`·`sync_wal`·`append_storage`·`code_name`의 `note_sync_failure` 각각 제거(1, 2, 2, 1).
+제거(2), `sync_wal` 앞 확인 제거(header 시험), `checkpoint`·`sync_wal`·`append_storage`·`code_name`의 `note_sync_failure` 각각 제거(1, 2, 2, 1), `set_degraded`의 표시 확인 제거
+(`a_failed_fsync_reports_degraded_before_the_writer_stops`가 `left: Ok`로 실패).
 
 남는 한계: 재시작의 WAL 복구와 첫 checkpoint는 WAL을 page cache로 읽는다. 실패한 fsync의 page가 cache에 남아 있으면 그 내용이 DB로 복사되고, 실제로
 디스크에 있었는지는 알 수 없다. 재시작 전에 전원 손실이나 OS crash가 오면 그 구간을 잃는다. 그 구간의 start는 Ok를 받지 않았으므로 전달된 호출은 없다.
