@@ -53,7 +53,7 @@ run마다 새 stack을 쓴다. closed loop 동시성 32와 64(warm-up 10초 + 30
 100 calls/s 한 번씩(10 + 120초), collector를 tmpfs에 둔 동시성 64 대조 한 번씩 쟀다. 16 run 모두 오류 0이고 upstream 호출 수가 일치했다(측정).
 t4g.small이라 [validation.md](validation.md)의 목표 환경(Rocky 9, 4 vCPU x86)이 아니다.
 
-판정 기준은 run 전에 정했다. 동시성 64에서 p99 160 ms 이하이고 calls/s 1,183 이상이다. 반증 조건은 호출당 proxy 쓰기 bytes가 50% 넘게 줄지 않는 것이다.
+판정 기준은 run 전에 정했다. 동시성 64에서 p99 160 ms 이하이고 calls/s 1,183 이상이다. 두 값은 2026-11-07 측정의 기준 c64 p99와 변경 c64 처리량에서 가져온 이 실험의 기준이며 제품 합격 목표가 아니다. 반증 조건은 호출당 proxy 쓰기 bytes가 50% 넘게 줄지 않는 것이다.
 결과는 처리량 충족, p99 미충족이다. 반증 조건은 걸리지 않아 bytes 예측은 맞았다.
 
 동시성 64, 3 run 중앙값(범위, 측정):
@@ -85,7 +85,7 @@ collector를 tmpfs에 둔 동시성 64 대조(1 run씩, 측정): 기준 1,440 ca
 
 해석(추정):
 
-- 디스크의 한계는 쓰기 바이트가 아니라 쓰기 횟수(ops)다. w/s p50이 양쪽 모두 gp3 기준 3,000 IOPS 근처다. #518은 쓰기 하나의 크기를 약 39 KB에서
+- #518 뒤 디스크의 한계는 쓰기 바이트가 아니라 쓰기 횟수(ops)다(추정). w/s p50이 양쪽 모두 gp3 기준 3,000 IOPS 근처다. 기준 쪽은 wkB/s p90도 gp3 기준 처리량 125 MiB/s 근처라 바이트와 횟수가 함께 한도 가까이였고, 변경 쪽은 바이트만 한도에서 멀어졌다. #518은 쓰기 하나의 크기를 약 39 KB에서
   15 KB로 줄였을 뿐 횟수는 거의 그대로(호출당 2.17 → 1.95)다. 그래서 같은 w/s에서 calls/s가 3% 오르는 데 그쳤다.
 - checkpoint가 복사하는 DB page 쓰기는 줄지 않는다. 설계가 처음부터 그렇게 예측했다(묶음의 WAL frame만 준다). checkpoint가 writer 시간의
   절반을 쓰는 구조는 그대로다.
@@ -101,7 +101,7 @@ collector를 tmpfs에 둔 동시성 64 대조(1 run씩, 측정): 기준 1,440 ca
 현재 계획(되돌릴 수 있음): 별도 checkpoint 설계(아래 "수정안과 계약 영향"의 1)는 지금 시작하지 않는다.
 
 1. 측정이 가리키는 한계가 쓰기 횟수라면 checkpoint를 writer thread 밖으로 옮겨도 용량은 늘지 않는다. 별도 연결의 DB fsync가 쓰기 횟수를 더할 수
-   있다(추정). PASSIVE checkpoint가 따라가지 못하면 WAL이 커진다. checkpoint를 끈 run이 2026-11-07에 WAL 약 2 GB와 memory.max 512 MiB에 닿았다(측정).
+   있다(추정). PASSIVE checkpoint가 따라가지 못하면 WAL이 커진다. checkpoint를 끈 run이 2026-11-07에 state 약 2.1 GB와 memory.max 512 MiB에 닿았다(측정). 그 run은 checkpoint를 아예 껐으므로 PASSIVE가 뒤처지는 경우와는 비유일 뿐이다.
 2. closed loop 포화의 처리량과 꼬리는 보고 값이고 합격 목표가 아니다([validation.md](validation.md)의 후보 합격 목표). 합격 판단은 open loop
    100 calls/s로 한다. 이번 open loop 결과는 회귀가 없다(1 run씩).
 
