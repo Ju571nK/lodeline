@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-agent"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1994,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-diag"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "insta",
  "libc",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-fleet-api"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-hook"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "blake3",
  "clap",
@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-mcp"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "httpmock",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-proxy"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-proxy-api"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-proxy-e2e"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2149,7 +2149,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-proxy-loadgen"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2169,11 +2169,11 @@ dependencies = [
 
 [[package]]
 name = "lodeline-rules-basic"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "lodeline-sender"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-server"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2246,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-signer"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "lodeline-spool"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "notify",
  "parking_lot",
