@@ -4,7 +4,7 @@
 //! [`install`] makes it the default VFS of the process; it only observes, so
 //! other tests' connections behave as before.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, CStr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -24,6 +24,18 @@ static OPEN: LazyLock<Mutex<HashMap<usize, (PathBuf, usize)>>> = LazyLock::new(D
 static TABLES: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(Default::default);
 static SYNCED: LazyLock<Mutex<HashMap<PathBuf, Synced>>> = LazyLock::new(Default::default);
 static REAL: AtomicPtr<ffi::sqlite3_vfs> = AtomicPtr::new(std::ptr::null_mut());
+/// Files whose `xSync` fails without syncing, as a dying disk's would.
+static FAILING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+
+/// Make every `xSync` on `path` fail (`on`) or work again.
+pub fn fail_syncs(path: &Path, on: bool) {
+    let mut f = FAILING.lock().unwrap();
+    if on {
+        f.insert(path.to_path_buf());
+    } else {
+        f.remove(path);
+    }
+}
 
 /// Number of `xSync` calls on `path` so far.
 pub fn syncs(path: &Path) -> u64 {
@@ -97,6 +109,9 @@ fn real_methods(file: *mut ffi::sqlite3_file) -> (PathBuf, *const ffi::sqlite3_i
 
 unsafe extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
     let (path, real) = real_methods(file);
+    if FAILING.lock().unwrap().contains(&path) {
+        return ffi::SQLITE_IOERR_FSYNC;
+    }
     let rc = unsafe { ((*real).xSync.unwrap())(file, flags) };
     if rc == ffi::SQLITE_OK {
         let image = std::fs::read(&path).unwrap_or_default();

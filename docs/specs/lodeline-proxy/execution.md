@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · spool group commit(`perf/proxy-group-commit`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,55 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 spool start 기록 group commit (`perf/proxy-group-commit`)
+
+목표: AWS gp3에서 closed loop 처리량이 초당 약 400회(동시성 32에서 378, tmpfs 2,049)에 묶인 것을 푼다. 내구성 계약([decisions.md](decisions.md)
+"spool 기록별 내구성", 2026-11-06)은 바꾸지 않는다.
+
+변경 전 상한: spool writer는 `invocation.started` append 하나마다 FULL transaction 하나를 commit했다. 동시 호출의 start는 writer 채널에서 줄을 서고
+fsync를 하나씩 기다렸다. #499의 `recv_many`는 completion을 넘기는 sink writer에 있고 spool writer에는 묶음이 없었다(코드 확인). 로컬 macOS에서
+동시성 32 closed loop 중 `sample`로 본 spool writer 스레드 표본 3,070개 중 2,422개가 `fsync`, 약 500개가 `pwrite`였다(표본기가 느리게 만든
+run이라 처리량은 쓰지 않음). 앞 절의 AWS strace(WAL fsync/저장된 start 1.01, fsync 중앙값 2.12 ms, CPU 80% idle)와 같은 상한이다.
+
+수정(`spool.rs` `Writer::append_group`): writer가 append 명령을 받으면 채널에 이미 와 있는 append를 `try_recv`로 최대 64개(`APPEND_GROUP_MAX`)까지
+더 꺼낸다. 기다리는 타이머는 없다. append가 아닌 명령이 나오면 묶음을 닫고 그 명령을 다음에 처리하므로 명령 순서는 그대로다. 묶음의 기록은 차례로
+NORMAL commit하고, start가 하나라도 저장됐으면 바꾸는 값 없는 FULL commit(`PRAGMA user_version = 0`, page 1을 늘 씀) 하나로 WAL을 fsync한다.
+그 뒤에야 묶음의 모든 응답을 보낸다. start는 그 fsync가 성공했을 때만 Ok를 받고, `durable_seq`도 그때 오른다. 혼자 온 start는 전처럼 자기 FULL
+commit을 한다. 같은 행을 바꾸지 않는 `UPDATE`는 SQLite가 page를 쓰지 않아 fsync가 일어나지 않았다(첫 시험에서 확인).
+
+계약이 지켜지는 이유: 전달은 start append의 Ok 뒤에만 일어나고(`invocation_sink.rs` `record_start`), Ok는 그 행을 덮는 fsync 뒤에만 나간다.
+fsync 전 process crash는 행을 page cache에 남기지만 응답이 없었으므로 전달된 호출이 없다(start만 있는 기록). fsync 전 전원 손실은 그 행을 잃지만
+역시 전달된 호출이 없고, 넘기지 않은 sequence라 다시 배정돼도 된다. fsync가 실패하면 묶음의 start는 모두 `Storage`로 거절되고 spool은 degraded다.
+이미 commit된 행은 다음 fsync 때 start만 있는 기록이 될 수 있다(전달 없음, 과다 기록 방향). completion·cancel은 원래 NORMAL이라 결과가 그대로다.
+completion은 자기 start가 Ok를 받은 뒤에만 queue에 들어가므로(`settle_start`) 앞 묶음에서 이미 durable한 start 뒤에 온다. checkpoint와
+maintenance는 명령 사이에서 그대로 돌고, 묶음 하나는 checkpoint를 최대 63 명령 늦출 수 있다.
+
+시험(`spool.rs`, 시험 전용 명령 `Cmd::Hold`로 writer를 잡아 명령을 쌓고, `sync_vfs.rs`에 `fail_syncs`를 더함):
+`queued_starts_share_one_fsync`(start 9개와 completion 1개가 WAL fsync 1번, 그 fsync 뒤 전원 손실 사본에 Ok를 받은 start가 모두 있음),
+`a_failed_group_fsync_refuses_every_start`(공유 fsync 실패: start 4개 모두 `Storage`, completion은 Ok, durable하지 않은 행은 넘기지 않음,
+전원 손실 사본에는 묶음 전 행만 있음). mutation 2개(`APPEND_GROUP_MAX = 1`, fsync 실패를 무시)는 각 시험에서 실패했다.
+`sustained_concurrent_calls_are_neither_refused_nor_lost`, `the_tail_a_status_names_survives_a_power_loss`, `only_a_start_commit_fsyncs`를
+포함한 proxy·proxy-e2e 시험은 그대로 통과한다.
+
+로컬 측정(macOS aarch64 12코어, APFS, `lodeline-proxy-loadgen`·`stack.sh`, principal 16 × route 8, run마다 warm-up 3초 + 15초, 기준 main
+`9f85676`과 변경 바이너리를 stack 단위로 3번 교대, 오류 0, upstream 수 불일치 0). 같은 시간에 다른 작업이 CPU와 디스크를 크게 써서(load average
+15–29) 절대값은 잡음이 크다. 양쪽이 같은 잡음을 보도록 교대했다. proxied 성공 호출/s, 중앙값(범위):
+
+| 조건 | 기준 | 변경 |
+|---|---|---|
+| closed 동시성 1 | 120 (66–194) | 88 (54–470) |
+| closed 동시성 8 | 171 (82–297) | 243 (184–298) |
+| closed 동시성 32 | 202 (124–393) | 466 (336–662) |
+| closed 동시성 64 | 222 (200–338) | 756 (736–861) |
+| open 100 calls/s 동시성 32, p50 / p95 / p99 ms | 24.1 / 823 / 933 | 15.9 / 620 / 878 |
+
+동시성 64는 3 round 모두 변경이 높았다(2.2–3.7배). 동시성 32는 2/3 round에서 높았다. 동시성 1은 묶을 start가 없으므로 차이가 없어야 하며,
+범위가 겹쳐 측정된 차이는 없다. open loop 지연은 잡음 때문에 결론 없음이다. due 기준 지연도 같은 방향이다(보고서 `latency_from_due_ms`).
+
+AWS 노드 A 측정은 하지 못했다. AWS 로그인 세션이 만료돼 노드를 켜지 않았다(비용 $0). gp3에서 상한이 얼마나 오르는지는 미검증이다.
+
+미검증: AWS gp3·tmpfs 전후, Linux에서 실제 fsync 횟수(strace), 실제 전원 차단(모사만 함), Rocky 9·목표 VM.
 
 ## 2026-11-07 upstream 연결 재사용 (`fix/proxy-upstream-pool`)
 
