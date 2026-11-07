@@ -1005,7 +1005,9 @@ async fn handle_inner(req: Request<Incoming>, sh: &Arc<Shared>) -> Response<Resp
         ),
         Ok(Ok(r)) => r,
     };
-    route.upstream_pool.put_when_idle(sender, peer);
+    route
+        .upstream_pool
+        .put_when_idle(sender, peer, lim.max_calls_per_route as usize);
 
     let (rparts, rbody) = resp.into_parts();
     let status = rparts.status;

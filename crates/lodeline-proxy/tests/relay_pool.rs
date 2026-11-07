@@ -138,3 +138,90 @@ async fn new_table_uses_the_new_upstream() {
     assert_eq!(old.count(), 1);
     assert_eq!(new.count(), 3);
 }
+
+/// An upstream that answers with `Connection: close`: every call opens a new
+/// upstream connection and gets its own answer.
+#[tokio::test]
+async fn connection_close_is_not_reused() {
+    let up = Up::start(|s| {
+        let Reply::Full {
+            status,
+            mut headers,
+            body,
+        } = answer(s)
+        else {
+            unreachable!()
+        };
+        headers.push(("connection".into(), "close".into()));
+        Reply::Full {
+            status,
+            headers,
+            body,
+        }
+    })
+    .await;
+    let px = simple(&up, limits()).await;
+    assert_eq!(
+        px.post("/mcp/a", Some("tok-a"), &[], &ping(1)).await.status,
+        200
+    );
+    let first = up.conns();
+    for i in 2..=4 {
+        let r = px.post("/mcp/a", Some("tok-a"), &[], &ping(i)).await;
+        assert_eq!(r.status, 200, "call {i}");
+        assert_eq!(
+            r.body(),
+            format!(r#"{{"jsonrpc":"2.0","id":{i},"result":{{}}}}"#).as_bytes()
+        );
+        assert_eq!(
+            up.conns(),
+            first + i as usize - 1,
+            "call {i} opened a new connection"
+        );
+    }
+}
+
+/// A connection idle for longer than 1 second is not reused.
+#[tokio::test]
+async fn connection_idle_over_1s_is_not_reused() {
+    let up = Up::start(answer).await;
+    let px = simple(&up, limits()).await;
+    assert_eq!(
+        px.post("/mcp/a", Some("tok-a"), &[], &ping(1)).await.status,
+        200
+    );
+    let first = up.conns();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(
+        px.post("/mcp/a", Some("tok-a"), &[], &ping(2)).await.status,
+        200
+    );
+    assert_eq!(up.conns(), first + 1);
+}
+
+/// The name now resolves to an address without a listener: the call does not
+/// take the idle connection to the address it resolved to before, so it fails
+/// to connect and the upstream sees nothing.
+#[tokio::test]
+async fn pooled_connection_to_an_address_outside_this_check_is_not_taken() {
+    let up = Up::start(answer).await;
+    let l = limits();
+    let t = table(
+        &[R::new(
+            "a",
+            format!("http://localhost:{}/up", up.addr.port()),
+            &[("pa", "tok-a")],
+        )],
+        &l,
+    );
+    let dns = StaticResolver::sequence(vec![vec!["127.0.0.1".parse().unwrap()]]);
+    let px = Px::start_with(Some(t), l, dns.clone()).await;
+    assert_eq!(
+        px.post("/mcp/a", Some("tok-a"), &[], &ping(1)).await.status,
+        200
+    );
+    *dns.0.lock().unwrap() = vec![vec!["::1".parse().unwrap()]];
+    let r = px.post("/mcp/a", Some("tok-a"), &[], &ping(2)).await;
+    assert_eq!(r.status, 502);
+    assert_eq!(up.count(), 1);
+}
