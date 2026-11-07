@@ -1011,3 +1011,63 @@ async fn real_invocations_replay_deduplicate_and_refuse_before_dispatch() {
     }
     px.stop().await;
 }
+
+/// README "Not-yet-synced refs": an event 424 makes the producer upload the
+/// pending entries from local state. The server reaches "the proxy believes the
+/// entry is acked but the server lacks it" for real: it restarts with its
+/// `proxy-metadata.sqlite` gone (the store is then created empty) while the
+/// proxy registry and the ledger survive. A tool call naming the acked ref must
+/// still reach the server: the entry is uploaded again and the event accepted.
+#[tokio::test]
+async fn an_event_424_uploads_an_entry_the_server_lost() {
+    let Some(mut h) = H::new(&[(NAMES[0], "first tool")], 10).await else {
+        return;
+    };
+    let px = start_proxy(&h, Duration::from_millis(30)).await;
+    let spool = px.spool.as_ref().unwrap().clone();
+    assert_eq!(px.list_all().await, 1);
+    eventually("the baseline is on the server", || async {
+        h.snapshots().await.len() == 1
+    })
+    .await;
+    eventually("the entry is acked and the spool drained", || async {
+        h.status()
+            .is_some_and(|s| s.registry.pending_entries.get() == 0)
+            && spool.snapshot().unsent_events == 0
+    })
+    .await;
+    assert_eq!(h.srv.ctx.metadata.count(PROXY).unwrap(), 1);
+
+    let port = h.srv.stop().await;
+    for f in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(h.pki.dir.path().join(format!("proxy-metadata.sqlite{f}")));
+    }
+    let tweak: Tweak = Arc::new(|_| {});
+    let mut up = None;
+    for _ in 0..20 {
+        up = Server::try_start(&h.pki, port, false, &tweak).await;
+        if up.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    h.srv = up.expect("server rebinds its port");
+    assert_eq!(
+        h.srv.ctx.metadata.count(PROXY).unwrap(),
+        0,
+        "the server lost the entry"
+    );
+
+    let (st, v) = px
+        .call(json!({"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":NAMES[0]}}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    eventually(
+        "the entry is uploaded again and the start accepted",
+        || async {
+            h.srv.ctx.metadata.count(PROXY).unwrap() == 1 && spool.snapshot().unsent_events == 0
+        },
+    )
+    .await;
+    px.stop().await;
+}
