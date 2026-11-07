@@ -842,6 +842,20 @@ async fn run_inner(
     {
         let _ = t.await;
     }
+    // A step the shutdown cancelled can still run on the blocking pool with a
+    // clone of the gap queue (whose persister holds this state_dir lock) or of
+    // the registry. Wait for it, so no write lands after `stopped` and a restart
+    // in this process finds the lock free.
+    let settle = tokio::time::Instant::now() + Duration::from_secs(b.limits.shutdown_grace_secs);
+    while invocation_gaps.as_ref().is_some_and(|g| g.handles() > 1)
+        || registry.as_ref().is_some_and(|r| r.handles() > 1)
+    {
+        if tokio::time::Instant::now() >= settle {
+            tracing::warn!("blocking work still holds the proxy state after the grace");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     // The relay stops appending once `serve` returned; the spool closes when its
     // last handle goes.
     drop(admission);
