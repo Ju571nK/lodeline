@@ -40,8 +40,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   its own fsync, which capped proxied throughput at about 400 calls/s on an AWS gp3 volume. A
   call is still forwarded only after the fsync that covers its start record returns, and a lone
   call commits as before with no added wait. If that fsync fails, every start record in the
-  group is refused. On a local machine at 64 concurrent clients, proxied throughput rose from
-  222 to 756 calls/s (median of 3 alternating runs). See
+  group is refused. On a busy shared local machine at 64 concurrent clients, proxied throughput
+  rose from 222 to 756 calls/s (median of 3 alternating runs). Treat that as indicative only,
+  because the gain on AWS gp3 is not measured yet. See
   `docs/specs/lodeline-proxy/decisions.md` (2026-11-07).
 
 ## [0.14.0] - 2026-11-07
