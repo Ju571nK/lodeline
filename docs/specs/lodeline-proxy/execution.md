@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -193,7 +193,7 @@ proxied 성공 호출/s, 3 round 중앙값(범위):
 - 표의 closed 값은 앞 run이 남긴 쓰기 위에서 쟀다. 새 stack(빈 spool)에서 동시성 64 단일 run은 기준 502, 변경 1,415 calls/s였다
   (변경 CPU 0 busy 73%, 1 run씩이라 참고값).
 
-closed loop의 꼬리: 변경은 p50이 줄고 p95·p99가 커졌다(동시성 64 p99 212 → 557 ms). 이 run에서는 원인을 계측하지 않았다. 로컬 계측은 아래 절.
+closed loop의 꼬리: 변경은 p50이 줄고 p95·p99가 커졌다(동시성 64 p99 212 → 557 ms). 이 run에서는 원인을 계측하지 않았다. 로컬 계측과 AWS 계측은 아래 두 절.
 
 open loop의 꼬리: closed 뒤 같은 stack에서는 변경의 p95·p99가 컸지만 run 순서 때문이다. 볼륨의 분당 VolumeWriteOps(CloudWatch)를
 보면 open run의 direct 절반(proxy에 호출이 없음)에서도 디스크가 3,000 IOPS 한도에 붙어 있었다. 기준은 약 3.5분 뒤 풀려 proxied
@@ -275,6 +275,117 @@ AWS 측정 계획(노드 A, 위 절과 같은 구성과 순서):
 - handler 시간이 client 지연보다 크게 작으면 원인은 proxy 밖이다.
 - 같은 시간에 `iostat -x 1`(w/s, w_await)과 CloudWatch VolumeWriteOps를 남긴다. collector state를 tmpfs에 둔 대조 run 1개로 collector 쓰기의
   영향을 가른다.
+
+### closed loop 꼬리 AWS 계측 (2026-11-07)
+
+위 계획대로 노드 A에서 쟀다. 원인은 writer thread에서 도는 PASSIVE checkpoint다(측정). group commit 뒤 처리량이 두 배를 넘자 spool 쓰기가
+gp3 기준 한도(3,000 IOPS, 125 MiB/s) 근처에 붙었고, 그 상태에서 checkpoint 하나가 수십에서 수백 ms 걸렸다. 그동안 writer는 묶음을
+처리하지 않으므로 대기열의 start가 모두 기다린다. 코드는 바꾸지 않았다.
+
+환경은 위 AWS 절과 같다(노드 A만, t4g.small, gp3 xfs 루트 볼륨, proxy는 CPU 0·512 MiB scope, 나머지는 CPU 1, principal 16 × route 8).
+기준 `c24bd16`과 main `2ab6f4e`에 임시 계측 patch(커밋하지 않음, 로컬 절과 같은 측정점에 기록 시각을 더함)를 넣어 노드에서 release로
+빌드했다. 앞 절과 달리 run마다 새 stack(빈 spool, 새 collector)을 띄웠다. closed loop 동시성 32와 64, warm-up 10초 + 30초, 1 round.
+바이너리는 stack 단위로 기준, 변경, 변경, 기준, 기준, 변경 순서로 교대했다(동시성마다 3 round). 모든 run에서 오류 0, upstream 호출 수 =
+성공 응답 수였다. 계측 값은 proxied 측정 30초 창 안의 기록만 쓴다. 디스크는 `/proc/diskstats`를 1초마다 읽어 `iostat -x`의 열을
+계산했다(sysstat는 설치하지 않음). 계측 자체의 부하는 따로 재지 않았다.
+
+proxied 성공 호출/s와 client가 잰 지연(ms), 3 round 중앙값(범위):
+
+| 조건 | 기준 동시성 32 | 변경 동시성 32 | 기준 동시성 64 | 변경 동시성 64 |
+|---|---|---|---|---|
+| calls/s | 491 (491–502) | 1,118 (1,107–1,119) | 510 (503–515) | 1,183 (1,181–1,186) |
+| p50 | 61.4 | 17.8 | 122.0 | 33.8 |
+| p90 | 80.6 | 61.2 | 141.2 | 111.0 |
+| p99 | 99.6 (96.3–104.4) | 165.2 (153.2–168.7) | 160.0 (159.1–167.8) | 323.8 (311.8–341.0) |
+| max | 133.5 | 356.4 | 226.9 | 381.7 |
+
+새 stack에서도 앞 절과 같은 모양이다. p50은 줄고 p99는 두 배가 됐다. 앞 절의 p99 557 ms는 앞 run이 남긴 collector 쓰기 위에서 쟀다.
+
+변경 동시성 64의 분위별 분해(ms, 3 round 중앙값). 열마다 따로 정렬한 분위라 한 호출을 따라간 값이 아니다. checkpoint와 묶음 열은 writer가
+한 번 하는 일의 길이다.
+
+| 분위 | client | handler | start spool 대기 | 그중 채널 대기 | checkpoint 1회 | 묶음 전체 | 묶음 FULL commit | 묶음 안 NORMAL commit 1회 |
+|---|---|---|---|---|---|---|---|---|
+| p50 | 33.8 | 30.9 | 27.4 | 10.4 | 75.3 | 12.2 | 5.4 | 0.1 |
+| p90 | 111.0 | 107.8 | 103.7 | 88.9 | 209.9 | 18.0 | 10.7 | 0.1 |
+| p95 | 132.2 | 127.9 | 125.6 | 109.2 | 271.7 | 22.8 | 17.5 | 0.1 |
+| p99 | 323.8 | 321.1 | 316.4 | 298.1 | 333.3 | 43.7 | 40.3 | 0.6 |
+| max | 381.7 | 378.2 | 377.3 | 364.2 | 349.1 | 76.6 | 55.3 | 21.3 |
+
+기준 동시성 64는 client 122.0 / 141.2 / 146.4 / 160.0 ms(p50 / p90 / p95 / p99), handler와 spool 대기가 분위마다 1 ms 안이다.
+checkpoint 1회는 21.0 / 24.5 / 25.5 / 34.8 ms, append 하나의 FULL commit은 1.5 / 2.5 / 2.7 / 5.2 ms다. 기준의 꼬리는 fsync 직렬 대기열이다.
+
+start spool 대기를 분위 구간으로 나누고, 각 대기가 writer의 checkpoint와 겹친 시간을 기록 시각으로 셌다(변경 동시성 64, 3 round 중앙값):
+
+| spool 대기 구간 | 평균 대기 | checkpoint와 겹친 시간 | 묶음과 겹친 시간 | checkpoint와 겹친 대기 비율 |
+|---|---|---|---|---|
+| p50 이하 | 20.0 | 0.3 | 19.5 | 10% |
+| p50–p90 | 49.4 | 16.3 | 32.7 | 43% |
+| p90–p99 | 156.7 | 118.6 | 37.6 | 99.7% |
+| p99 초과 | 347.0 | 300.4 | 44.7 | 100% |
+
+변경 동시성 32도 같다. p99 초과 구간 평균 210.8 ms 중 185.4 ms가 checkpoint와 겹쳤다. 기준 동시성 64의 p99 초과 구간은 183.1 ms 중
+22.0 ms다.
+
+계획의 판정 규칙:
+
+- checkpoint: 변경의 checkpoint는 p50 75 ms, p95 272 ms, p99 333 ms다. p50은 수백 ms가 아니지만 p90 위의 대기는 거의 모두 checkpoint와
+  겹치고, 겹친 시간이 대기의 76–87%다. 원인은 writer thread의 checkpoint다(측정).
+- 묶음 안 NORMAL commit: p99 0.6 ms, max 21 ms라 꼬리를 설명하지 못한다. writeback 대기 가설은 기각한다.
+- proxy 밖: client와 handler의 차이가 분위마다 5 ms 이하다. 기각한다.
+
+checkpoint가 왜 길어졌나: 주기는 양쪽 모두 512 명령이다. 30초에 기준 60회(평균 20.6 ms), 변경 132회(평균 89.8 ms)였다. 변경에서
+writer thread의 시간은 checkpoint 39.5%(37.8–39.6%), 묶음 59.6%, 나머지 0.7%로 쉬는 틈이 없다. 기준은 checkpoint 4.1%, append 87.6%다.
+디스크(1초 표본, run 3개 범위): 변경 w/s p50 3,019–3,085, wkB/s p90 128,669–135,344(125 MiB/s 근처), w_await p50 2.8–3.1 ms. 기준 w/s p50
+1,666–1,851, wkB/s p50 48,492–50,821, w_await p50 1.1 ms. proxy의 write_bytes를 upstream 호출 수로 나누면 호출당 기준 78.8 KB, 변경 76.8 KB로
+같다(round 1). 변경은 같은 쓰기를 2.3배의 호출에 하므로 볼륨 기준 한도에 닿는다(측정). 1,183 calls/s × 76.8 KB는 약 91 MB/s이고 디스크가
+본 쓰기 약 95 MB/s와 맞는다(collector 포함). checkpoint의 DB 쓰기와 fsync가 한도에 묶인 대기열 뒤에 서서 길어진다는 설명은 추정이다.
+CloudWatch VolumeWriteOps(분당 합)는 변경 run이 든 분에 최대 126,971(분 평균 2,116/s, run 하나가 약 100초 주기 중 proxied 약 40초)이었고,
+VolumeIOPSExceededCheck와 VolumeThroughputExceededCheck는 이번에도 데이터점이 없었다. 그래서 볼륨이 실제로 throttle했다는 직접 증거는 없다.
+
+처리량의 상한: 변경은 writer thread가 늘 바쁘고 CPU 0 busy 46–48%, iowait 43–48%라 writer가 디스크를 기다린다. 디스크는 위처럼 gp3
+기준값에 붙어 있다. 그래서 상한은 gp3 쓰기이고, writer 시간의 약 40%가 checkpoint다.
+
+collector를 tmpfs에 둔 대조(stack 디렉터리를 `/dev/shm`에, proxy state는 gp3 그대로, 동시성 64, 1 run씩):
+
+| 조건 | calls/s | client p50 / p90 / p99 | checkpoint p50 / p99 | w_await p50 |
+|---|---|---|---|---|
+| 기준, collector gp3 (위 중앙값) | 510 | 122.0 / 141.2 / 160.0 | 21.0 / 34.8 | 1.1 |
+| 기준, collector tmpfs | 519 | 120.1 / 140.8 / 147.5 | 21.2 / 25.9 | 1.1 |
+| 변경, collector gp3 (위 중앙값) | 1,183 | 33.8 / 111.0 / 323.8 | 75.3 / 333.3 | 3.0 |
+| 변경, collector tmpfs | 1,441 | 32.6 / 105.5 / 132.2 | 71.9 / 107.7 | 2.3 |
+
+collector 쓰기(run마다 0.28–0.43 GB)를 빼도 변경의 디스크는 w/s p50 3,040이다. proxy 혼자 볼륨 한도에 닿는다. collector를 빼면
+checkpoint의 긴 꼬리가 줄고 client p99가 324 → 132 ms가 된다. p90 위 대기의 checkpoint 겹침은 그대로 크다(p99 초과 구간 131.3 ms 중
+101.4 ms). 기준은 거의 변하지 않는다.
+
+checkpoint를 끈 run(계측 knob로 512 명령 주기만 끔, 변경 동시성 64, 1 run): 89.6 calls/s, p50 670 ms로 무너졌다. state가 약 2.1 GB가 됐고
+proxy cgroup memory.peak가 memory.max(512 MiB)에 닿았다. 묶음 안 NORMAL commit이 p50 4.4 ms(평소 0.1 ms)였고 CPU 0 iowait 91%인데 w/s p50은
+51이었다. WAL을 cgroup 한도 안에서 page cache에 두지 못해 다시 읽는 것으로 추정한다. 로컬과 달리 이 구성에서 WAL 상한을 푸는 것은 수정안이
+아니다.
+
+수정안과 계약 영향(아직 구현하지 않음, 효과는 모두 미측정):
+
+1. checkpoint를 writer thread 밖으로 옮긴다(별도 연결과 thread). start가 checkpoint를 기다리지 않는다. 디스크 경쟁은 남아서 묶음 FULL commit의
+   fsync는 여전히 느릴 수 있다(추정). 계약: 2026-11-06 결정의 "checkpoint는 writer의 명령 사이에서 돈다"를 고쳐야 한다. `durable_seq`는 부하
+   중에는 묶음 FULL commit이 올리므로, checkpoint가 올리는 경우(idle poll, maintenance)를 writer에 남기거나 checkpoint thread가 덮은 sequence를
+   writer에 넘겨야 한다. 2026-11-07 fail-stop: fsync 실패 표시가 writer thread의 지역 값이라, checkpoint thread의 fsync 실패도 writer를 멈추도록
+   공유 표시로 바꾸고, 실패 뒤에는 두 연결 모두 닫을 때 checkpoint하지 않아야 한다. start의 upstream 전달 전 durable 조건은 그대로다.
+2. 호출당 쓰기를 줄인다. 지금 호출당 약 77 KB다. 묶음을 기록마다 commit하지 않고 한 transaction으로 commit하면(기록마다 savepoint로 실패를
+   가둠) 같은 page(색인 leaf, counter)를 묶음마다 한 번만 쓴다. WAL frame과 checkpoint가 복사할 page가 함께 준다(추정). 계약: 2026-11-07
+   group commit 항목의 "묶음의 기록은 차례로 NORMAL commit"이 바뀐다. process crash 때 묶음 중간까지 commit된 행이 남지 않지만, 그 행은
+   응답 전이라 잃는 확인 응답은 없다. completion과 ACK 표시의 응답이 묶음 commit 뒤로 조금 늦어진다. fsync 실패 때 묶음 전체를 거절하고
+   writer가 멈추는 것은 지금과 같다.
+3. checkpoint 주기를 늘린다. writer에 있는 한 한 번의 멈춤이 더 길어지고, 위 run처럼 WAL이 커지면 512 MiB cgroup에서 무너진다. 1과
+   함께일 때만 검토할 값이다.
+4. 배치: collector를 spool 볼륨 밖에 두거나(tmpfs 대조 p99 324 → 132 ms, 1 run), 볼륨 IOPS와 처리량을 기준보다 높게 잡는다. 계약 변경은 없고
+   운영 문서 사항이다.
+5. admission 상한을 낮춰 볼륨 한도 밑에서 돌게 한다. 처리량을 내준다. 계약 변경은 없다.
+
+판단: 1이 꼬리의 직접 원인을 없애고, 2가 한계 요인인 쓰기 양을 줄인다. 1 다음 2를 이 harness로 하나씩 재는 순서를 권한다. open loop 100
+calls/s의 새 stack에서는 앞 절에서 차이가 없었으므로, 이 꼬리는 gp3 기준 한도에서 포화로 돌 때의 문제다.
+
+미검증: 계측 부하, 볼륨 throttle의 직접 지표, 수정안의 효과, 목표 VM.
 
 ## 2026-11-07 upstream 연결 재사용 (`fix/proxy-upstream-pool`)
 
