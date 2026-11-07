@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,66 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 upstream 연결 재사용 (`fix/proxy-upstream-pool`)
+
+아래 loadgen 절의 관찰(macOS closed loop에서 TIME_WAIT가 ephemeral port를 채우고 502 `upstream_unavailable`)을 고쳤다.
+
+원인: `server.rs`의 relay가 호출마다 `connect`로 TCP(https면 TLS도)를 새로 열고 `http1::handshake`를 했다. 응답이 끝나면
+`SendRequest`가 버려져 proxy 쪽에서 연결을 닫았고, 닫은 쪽인 proxy의 local port가 TIME_WAIT(macOS MSL 15초, 30초)에 남았다.
+
+수정:
+
+- route마다 idle 연결 pool(`upstream_pool.rs`)을 둔다. pool은 `RouteTable::build_carrying`이 route를 만들 때 새로 만들므로
+  config apply(새 revision)마다 비어서 시작한다. 같은 revision의 TTL refresh는 table을 다시 만들지 않으므로 pool이 유지된다.
+- 연결은 hyper `SendRequest::ready()`가 끝난 뒤에만 pool에 돌아간다. 응답 body를 끝까지 읽은 뒤다. 끝까지 읽지 않은 응답,
+  `Connection: close`, 오류는 연결을 닫고 pool에 넣지 않는다.
+- DNS 해석과 목적지 검사는 지금처럼 호출마다 한다(AC-08). pool에서 꺼내는 연결은 이번 호출의 검사를 통과한 주소로 연결된
+  것뿐이다. idle 1초가 지난 연결과 닫힌 연결은 버린다.
+- 호출은 한 번만 보낸다(PX-015). pool 연결이 실패해도 새 연결로 다시 보내지 않는다. hyper가 요청을 한 byte도 쓰지 않고
+  돌려준 경우(pool 연결이 먼저 닫힘)는 `not_sent`/`connect_failed`, 그 밖의 실패는 지금처럼 `unknown`/`send_failed`다.
+
+pool을 route 단위로 둔 이유: 연결에 묶이는 값(scheme, host, port, TLS server name, 목적지 검사, `allow_private`)은 모두 route가
+정한다. upstream TLS client 인증서는 없다. upstream credential, upstream `Mcp-Session-Id`, 나머지 header는 요청마다 넣는다.
+HTTP/1.1이라 연결 하나에 동시에 한 요청만 있고, 다음 요청은 이전 응답이 끝난 뒤에만 쓴다. 그래서 같은 route의 principal끼리
+연결을 나눠 써도 응답이나 session이 섞이지 않는다.
+
+남은 한계:
+
+- upstream이 idle 연결을 닫는 순간 proxy가 그 연결을 다시 쓰면 502다. 요청이 나갔을 수 있으면 `unknown`으로 남고 성공으로
+  기록되지 않는다. idle 1초 상한은 gunicorn 2초, Node `http`와 uvicorn 5초보다 짧게 잡았다(기본값은 공식 문서로 재확인하지 않음).
+- hyper의 readiness에는 드문 race가 있어 응답이 끝나기 전에 연결이 pool로 돌아갈 수 있다. 그때 다음 호출은 hyper queue에서
+  이전 응답이 끝나기를 기다리고, 응답 byte는 섞이지 않는다. hyper-util의 pool도 같은 방식이다.
+- upstream이 응답 framing보다 긴 byte를 보내는 결함이 있으면, 그 꼬리가 같은 연결의 다음 요청(다른 principal일 수 있음)의
+  응답으로 읽힐 수 있다. upstream은 원래 모든 principal의 응답을 만드는 쪽이라 새 권한은 아니지만, 연결별 격리는 없어졌다.
+- 트래픽이 끊긴 route의 idle 연결은 다음 호출이 올 때까지 닫지 않는다. 수는 route 동시 호출 한도(기본 16) 이하다.
+- 세션 DELETE와 `initialize` 거절 뒤 cleanup은 지금처럼 호출마다 새 연결이다.
+
+시험: `tests/relay_pool.rs` 3개. principal 2개가 번갈아 한 순차 호출 40회가 upstream 연결 4개 이하를 쓰고(수정 전 42개,
+수정 후 1개) 각 호출이 자기 id의 응답을 받음, client가 읽기를 멈춘 SSE의 upstream 연결은 닫히고 다음 호출은 자기 응답 전체를
+받음, route를 다른 upstream으로 바꾼 table 적용 뒤 호출은 새 upstream에만 감. 기존 "재시도 안 함" 시험 2개는 upstream이 받은
+호출 수 1만 확인한다(연결 수는 pool 때문에 1 또는 2).
+
+로컬 측정(macOS 26.6.2 arm64, 12 core, release, load average 4.5–7.3, 다른 세션의 cargo test가 같이 돌았음, state는 APFS).
+수정 전(`1808577`)과 수정 후 바이너리를 run마다 번갈아 돌렸고 driver는 같은 바이너리다. TIME_WAIT는 1초마다
+`netstat -an -p tcp`에서 load server port(18090)의 TIME_WAIT를 센 최댓값이다.
+
+| 조건 | 수정 전 | 수정 후 |
+|---|---|---|
+| closed loop 동시성 8, 30초, run 3개씩 | 측정 116,101–121,032회 중 502 99,768–104,696회(86%), 성공 16,332–16,336회, TIME_WAIT 최대 16,331–16,336 | 오류 0, 5,559–5,965 calls/s, TIME_WAIT 최대 22–46 |
+| closed loop 동시성 32, 30초, run 3개씩 | 측정 124,324–124,960회 중 502 108,013–108,653회(87%), TIME_WAIT 최대 16,303–16,311 | 오류 0, 5,765–5,903 calls/s, TIME_WAIT 최대 47–52 |
+| open loop 100 calls/s, 동시성 32, 30초 × 3 round, run 2개씩 | 오류 0, 추가 p50 0.913 / 0.811 ms(round 0.726–0.923), p95 1.56 / 2.50 ms | 오류 0, 추가 p50 0.737 / 0.742 ms(round 0.729–0.752), p95 1.18 / 1.16 ms |
+
+위 수정 후 열은 리뷰 반영(idle 상한 2초 → 1초, 쓰지 않은 요청은 `not_sent`) 전 바이너리다. 반영한 최종 바이너리로 한 번씩
+다시 쟀다. closed loop 동시성 8은 오류 0, 5,566 calls/s, TIME_WAIT 최대 33. 동시성 32는 오류 0, 5,534 calls/s, 최대 67.
+open loop는 오류 0, 추가 p50 0.748 ms(round 0.727–0.760), 최대 45.
+
+모든 run에서 load server 호출 수 = 성공 응답 수. 수정 전의 성공 수가 run마다 약 16,330인 것은 macOS ephemeral port 범위
+(49152–65535, 16,384개)와 맞는다. 포트가 차면 그 뒤 호출은 거의 다 실패한다. 수정 후 closed loop 처리량은 동시성 8과 32에서
+같고 p50만 0.90 ms에서 3.7 ms로 늘어, 직렬 구간 하나가 상한이다. 호출마다 하는 start record의 내구 commit으로 추정하며
+프로파일하지 않았다. proxy CPU는 run당 약 47초(약 1.3 core)라 CPU 한계는 아니다. open loop 추가 p50 차이 약 0.1 ms는 round
+범위가 거의 맞닿아 작은 차이이고, loopback TCP 연결 비용만큼이다. 두 쪽 모두 driver send lag p99가 3–6 ms라 경고가 났다.
+loopback이 아닌 upstream과 https upstream의 연결·TLS 비용 절감은 재지 않았다.
 
 ## 2026-11-07 성능 측정 도구 (`feat/proxy-loadgen`)
 
@@ -42,7 +102,7 @@ principal 하나에 closed loop 동시성 16을 걸면 429 `too_many_requests` 1
 관찰(macOS): closed loop 고속 run에서 proxy는 호출마다 upstream 연결을 새로 연다. 약 2초 만에 load server 쪽 TIME_WAIT가 16,332개로
 macOS ephemeral port 범위(16,384)를 채웠고, 그 뒤 호출은 502 `upstream_unavailable`이었다(동시성 8, 8초, 35,708회 중 19,400회).
 Linux loopback은 `tcp_tw_reuse` 기본값 2로 TIME_WAIT를 재사용하므로 아래 AWS run에서는 나지 않았다. loopback이 아닌 upstream에서
-같은 상한이 걸리는지는 측정하지 않았다.
+같은 상한이 걸리는지는 측정하지 않았다. 이 문제는 `fix/proxy-upstream-pool`(위 절)에서 고쳤다.
 
 AWS(노드 A만, t4g.small 2 vCPU, AL2023 aarch64, kernel 6.18.54, Neoverse-N1, gp3 xfs, rustc 1.99.1, `cb55a10`): server, proxy,
 load server, driver를 A 한 대에. proxy는 `systemd-run --scope`(MemoryMax 512M, MemorySwapMax 0, AllowedCPUs 0), 나머지는 `taskset -c 1`.
