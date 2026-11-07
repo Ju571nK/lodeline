@@ -7,6 +7,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-07
+
+**Upgrade order.** The agent and the server can be upgraded in either order. This release
+adds no event kind and no reason kind, and the agent's events are unchanged on the wire. If
+you run the web console, upgrade the server first and then the console. A console of this
+release against an older server shows no "not assessed" notice on the Risk tab, and an older
+console ignores the new `not_assessed_host_count` field. The console is now a release asset.
+Before you start it, check `.env` for a `JWT_SECRET`, `LODELINE_SERVER_READ_TOKEN` or
+`ADMIN_PASSWORD_BCRYPT` copied from an earlier `.env.example`. The console refuses to start
+with those values. The server now writes a `.received-YYYY-MM-DD.jsonl.recv` file beside each
+event file, and a v0.13 server ignores these files if you roll back. `lodeline-proxy` is still
+not a release asset. Its changes here do not change what it sends to the server.
+
 ### Added
 
 - `lodeline doctor` now starts each hook exe that `lodeline-hook install` registered, with
@@ -53,8 +66,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   is forwarded. A process crash loses nothing. A power loss or OS crash can drop the completion,
   cancel and acknowledgement records written since the last start commit or checkpoint. A call
   whose completion is dropped shows as a start-only call. A dropped acknowledgement makes the
-  proxy send those events again, and the server counts them as duplicates. The proxy sends the server only spool rows
-  that an fsync covers, so a sequence number the server has seen is never assigned again. SQLite
+  proxy send those events again, and the server counts them as duplicates. The proxy sends the
+  server only spool rows that an fsync covers, so a sequence number the server has seen is never
+  assigned again. SQLite
   checkpoints no longer run inside a commit. They run in the maintenance pass, when the ingest
   client finds only rows that are not yet durable, and after every 512 spool commands, which
   bounds the WAL (18 MiB high-water on the test node). On an AWS t4g.small with gp3 storage, the
@@ -84,6 +98,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-proxy` no longer refuses a `tools/call` with HTTP 503 `audit_unavailable` when
+  more than four registry lookups overlap on a healthy registry. Each call start reads the
+  registry in one of four lookup slots. A start that found all four taken was refused at once,
+  as if the registry could not be read. On an AWS node at 8 concurrent clients, 4 to 13 of
+  every 800 `tools/call` were refused this way. A lookup now waits for a slot within its
+  2-second lookup timeout. It fails at once only when every slot is held by a read past its own
+  deadline, so a stuck registry still ties up at most four threads. The audit writer's lookup
+  for refusal records uses the same path, so overlap no longer drops those records either.
 - `lodeline-proxy` no longer refuses healthy calls with HTTP 503 `audit_unavailable` under
   sustained concurrent load. The audit writer stored one completion at a time and waited for
   each before the next, while the call starts committed side by side, so its queue of 1024
