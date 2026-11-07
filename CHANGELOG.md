@@ -41,9 +41,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   call is still forwarded only after the fsync that covers its start record returns, and a lone
   call commits as before with no added wait. If that fsync fails, every start record in the
   group is refused. On a busy shared local machine at 64 concurrent clients, proxied throughput
-  rose from 222 to 756 calls/s (median of 3 alternating runs). Treat that as indicative only,
-  because the gain on AWS gp3 is not measured yet. See
-  `docs/specs/lodeline-proxy/decisions.md` (2026-11-07).
+  rose from 222 to 756 calls/s (median of 3 alternating runs). Treat that as indicative only.
+  On an AWS t4g.small (2 vCPU, aarch64, Amazon Linux 2023) with the spool on a 3,000 IOPS gp3
+  volume, proxied throughput at 64 concurrent clients rose from 471 to 752 calls/s and at 32
+  from 468 to 742, and a single client stayed at about 355 calls/s (median of 3 alternating
+  rounds, no errors). In those closed-loop runs the added p50 latency fell (117 to 27 ms at 64
+  clients) and the added p99 rose (212 to 557 ms). At 100 calls/s on a fresh stack the added
+  latency did not change (p99 about 15 ms). See `docs/specs/lodeline-proxy/decisions.md` and
+  `docs/specs/lodeline-proxy/execution.md` (2026-11-07).
 
 ## [0.14.0] - 2026-11-07
 
