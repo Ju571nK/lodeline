@@ -29,33 +29,47 @@ pub fn system_dir() -> PathBuf {
 ///
 /// `pin` is the parsed `requirements.toml`, `configs` the parsed
 /// `config.toml` layers from low to high. Returns the label of the input that
-/// turns hooks off and the key it set.
+/// turns hooks off and the key it set. `Err` names the input whose winning
+/// value is not a bool: Codex reads `[features]` as a map of bools
+/// (`FeaturesToml`, `FeatureRequirementsToml`) and refuses to load such a
+/// config (`config_toml_from_layers`, `parse_layer_requirements`).
 pub fn hooks_disabled_by<T: Copy>(
     pin: Option<(T, &Value)>,
     configs: &[(T, &Value)],
-) -> Option<(T, &'static str)> {
+) -> Result<Option<(T, &'static str)>, (T, &'static str)> {
+    // Codex merges the layers first, so each key takes the highest layer's value.
     let winner = |tables: &[(T, &Value)]| {
-        ["hooks", "codex_hooks"].into_iter().find_map(|key| {
-            tables
+        let mut found = None;
+        for key in ["hooks", "codex_hooks"] {
+            let Some((label, value)) = tables
                 .iter()
                 .rev()
-                .find_map(|(label, t)| Some((t.get(key)?.as_bool()?, *label, key)))
-        })
+                .find_map(|(label, t)| Some((*label, t.get(key)?)))
+            else {
+                continue;
+            };
+            let on = value.as_bool().ok_or((label, key))?;
+            found = found.or(Some((on, label, key)));
+        }
+        Ok(found)
     };
     let pin = pin.and_then(|(label, r)| {
-        let features = r
-            .get("features")
-            .or_else(|| r.get("feature_requirements"))?;
-        winner(&[(label, features)])
+        Some((
+            label,
+            r.get("features")
+                .or_else(|| r.get("feature_requirements"))?,
+        ))
     });
+    let pin = winner(pin.as_slice())?;
     let configs: Vec<_> = configs
         .iter()
         .filter_map(|(label, c)| Some((*label, c.get("features")?)))
         .collect();
-    match pin.or_else(|| winner(&configs)) {
+    let config = winner(&configs)?;
+    Ok(match pin.or(config) {
         Some((false, label, key)) => Some((label, key)),
         _ => None,
-    }
+    })
 }
 
 /// Whether Codex runs hooks for the user whose Codex folder is `codex_home`.
@@ -63,8 +77,24 @@ pub fn hooks_disabled_by<T: Copy>(
 #[derive(Debug, PartialEq, Eq)]
 pub enum HooksFeature {
     On,
-    Off { path: PathBuf, key: &'static str },
-    Unreadable { path: PathBuf, error: String },
+    Off {
+        path: PathBuf,
+        key: &'static str,
+    },
+    /// Off by a pin in the system `requirements.toml`, which the user cannot change.
+    Pinned {
+        path: PathBuf,
+        key: &'static str,
+    },
+    /// `key` is not `true` or `false`, so Codex does not load its config.
+    Invalid {
+        path: PathBuf,
+        key: &'static str,
+    },
+    Unreadable {
+        path: PathBuf,
+        error: String,
+    },
 }
 
 impl HooksFeature {
@@ -104,11 +134,19 @@ impl HooksFeature {
             .filter_map(|(p, v)| Some((p, v.as_ref()?)))
             .collect();
         match hooks_disabled_by(pin, &configs) {
-            Some((path, key)) => Self::Off {
+            Ok(None) => Self::On,
+            Ok(Some((path, key))) if path == req_path => Self::Pinned {
                 path: path.clone(),
                 key,
             },
-            None => Self::On,
+            Ok(Some((path, key))) => Self::Off {
+                path: path.clone(),
+                key,
+            },
+            Err((path, key)) => Self::Invalid {
+                path: path.clone(),
+                key,
+            },
         }
     }
 
@@ -120,6 +158,17 @@ impl HooksFeature {
                 "Codex does not run hooks, so it never runs this one: {} sets `{key} = false` \
                  under [features]. To turn Codex hooks on, set `hooks = true` under [features] \
                  in that file.",
+                path.display()
+            )),
+            Self::Pinned { path, key } => Some(format!(
+                "Codex does not run hooks, so it never runs this one: the administrator's \
+                 requirements file {} pins `{key} = false`. A change to your \
+                 own Codex config does not take effect while that pin is set.",
+                path.display()
+            )),
+            Self::Invalid { path, key } => Some(format!(
+                "Codex does not load its config, so it runs no hooks: {} sets `{key}` under \
+                 [features] to a value that is not true or false.",
                 path.display()
             )),
             Self::Unreadable { path, error } => Some(format!(
@@ -201,12 +250,26 @@ mod tests {
             "",
             "[features]\nhooks = true\n",
         );
+        let path = root.path().join("etc").join("requirements.toml");
         assert_eq!(
             got,
-            HooksFeature::Off {
-                path: root.path().join("etc").join("requirements.toml"),
+            HooksFeature::Pinned {
+                path: path.clone(),
                 key: "hooks"
             }
+        );
+        let msg = got.warning().unwrap();
+        assert!(
+            msg.contains(&format!(
+                "the administrator's requirements file {} pins `hooks = false`",
+                path.display()
+            )),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("A change to your own Codex config does not take effect")
+                && !msg.contains("set `hooks = true`"),
+            "{msg}"
         );
         let (_root, got) = feature(
             "[features]\nhooks = true\n",
@@ -214,6 +277,80 @@ mod tests {
             "[features]\nhooks = false\n",
         );
         assert_eq!(got, HooksFeature::On);
+    }
+
+    #[test]
+    fn feature_requirements_alias_pin_is_named() {
+        let (_root, got) = feature("[feature_requirements]\ncodex_hooks = false\n", "", "");
+        assert!(
+            matches!(
+                got,
+                HooksFeature::Pinned {
+                    key: "codex_hooks",
+                    ..
+                }
+            ),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn system_config_off_keeps_the_config_advice() {
+        let (root, got) = feature("", "[features]\nhooks = false\n", "");
+        let path = root.path().join("etc").join("config.toml");
+        assert_eq!(got, HooksFeature::Off { path, key: "hooks" });
+        assert!(got
+            .warning()
+            .unwrap()
+            .contains("set `hooks = true` under [features]"));
+    }
+
+    /// Codex merges layers before it reads `[features]` as bools, so a non-bool
+    /// in the highest layer fails the load even over a lower `false`.
+    #[test]
+    fn non_bool_value_is_invalid_not_skipped() {
+        for (requirements, system, user, file, key) in [
+            (
+                "",
+                "[features]\nhooks = false\n",
+                "[features]\nhooks = \"no\"\n",
+                "home",
+                "hooks",
+            ),
+            (
+                "",
+                "",
+                "[features]\ncodex_hooks = 0\nhooks = true\n",
+                "home",
+                "codex_hooks",
+            ),
+            ("[features]\nhooks = \"off\"\n", "", "", "etc", "hooks"),
+        ] {
+            let (root, got) = feature(requirements, system, user);
+            let name = if requirements.is_empty() {
+                "config.toml"
+            } else {
+                "requirements.toml"
+            };
+            let path = root.path().join(file).join(name);
+            assert_eq!(
+                got,
+                HooksFeature::Invalid {
+                    path: path.clone(),
+                    key
+                },
+                "{user:?}"
+            );
+            let msg = got.warning().unwrap();
+            assert_eq!(
+                msg,
+                format!(
+                    "Codex does not load its config, so it runs no hooks: {} sets `{key}` under \
+                     [features] to a value that is not true or false.",
+                    path.display()
+                )
+            );
+        }
     }
 
     #[test]

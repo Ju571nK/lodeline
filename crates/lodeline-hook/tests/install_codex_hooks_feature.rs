@@ -1,6 +1,7 @@
 //! `install` and `verify` for Codex warn, without failing, when Codex's
 //! `[features] hooks` is off and so never runs the registered hook.
-//! Assumes no `/etc/codex` config on the test host.
+//! The binary reads the system config in `/etc/codex`, so each test skips on a
+//! host that has that folder.
 #![cfg(unix)]
 use std::path::Path;
 use std::process::{Command, Output};
@@ -17,8 +18,13 @@ fn hook(home: &Path, args: &[&str]) -> Output {
     out
 }
 
-/// stderr of `install --write`, stdout of `verify`, with `config` as the user config.toml.
-fn install_and_verify(config: Option<&str>) -> (tempfile::TempDir, String, String) {
+/// stderr of `install --write`, stdout of `verify`, with `config` as the user
+/// config.toml. `None` when the host has a Codex system config.
+fn install_and_verify(config: Option<&str>) -> Option<(tempfile::TempDir, String, String)> {
+    if Path::new("/etc/codex").exists() {
+        eprintln!("skipped: /etc/codex exists, so the result depends on this host's Codex config");
+        return None;
+    }
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("codex")).unwrap();
     if let Some(config) = config {
@@ -27,12 +33,15 @@ fn install_and_verify(config: Option<&str>) -> (tempfile::TempDir, String, Strin
     let install = hook(home.path(), &["install", "--agent", "codex", "--write"]);
     let verify = hook(home.path(), &["verify", "--agent", "codex"]);
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    (home, text(&install.stderr), text(&verify.stdout))
+    Some((home, text(&install.stderr), text(&verify.stdout)))
 }
 
 #[test]
 fn hooks_false_warns_on_install_and_verify() {
-    let (home, install, verify) = install_and_verify(Some("[features]\nhooks = false\n"));
+    let Some((home, install, verify)) = install_and_verify(Some("[features]\nhooks = false\n"))
+    else {
+        return;
+    };
     let file = home.path().join("codex/config.toml").display().to_string();
     assert!(
         install.contains("warning: Codex does not run hooks"),
@@ -63,7 +72,9 @@ fn hooks_true_or_absent_does_not_warn() {
         Some("model = \"o3\"\n"),
         None,
     ] {
-        let (_home, install, verify) = install_and_verify(config);
+        let Some((_home, install, verify)) = install_and_verify(config) else {
+            return;
+        };
         assert!(!install.contains("warning:"), "{config:?}: {install}");
         assert!(!verify.contains("[WARN]"), "{config:?}: {verify}");
     }
@@ -71,8 +82,26 @@ fn hooks_true_or_absent_does_not_warn() {
 
 #[test]
 fn malformed_config_warns_and_still_installs() {
-    let (home, install, verify) = install_and_verify(Some("[features\nhooks = false\n"));
+    let Some((home, install, verify)) = install_and_verify(Some("[features\nhooks = false\n"))
+    else {
+        return;
+    };
     assert!(install.contains("warning: cannot read "), "{install}");
     assert!(verify.contains("[WARN]  cannot read "), "{verify}");
     assert!(home.path().join("codex/hooks.json").exists());
+}
+
+#[test]
+fn non_bool_hooks_warns_that_codex_does_not_load() {
+    let Some((home, install, verify)) = install_and_verify(Some("[features]\nhooks = \"no\"\n"))
+    else {
+        return;
+    };
+    let file = home.path().join("codex/config.toml").display().to_string();
+    let want = format!(
+        "Codex does not load its config, so it runs no hooks: {file} sets `hooks` under \
+         [features] to a value that is not true or false."
+    );
+    assert!(install.contains(&format!("warning: {want}")), "{install}");
+    assert!(verify.contains(&want), "{verify}");
 }
