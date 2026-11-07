@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -146,7 +146,7 @@ proxied 성공 호출/s, 3 round 중앙값(범위):
 - 표의 closed 값은 앞 run이 남긴 쓰기 위에서 쟀다. 새 stack(빈 spool)에서 동시성 64 단일 run은 기준 502, 변경 1,415 calls/s였다
   (변경 CPU 0 busy 73%, 1 run씩이라 참고값).
 
-closed loop의 꼬리: 변경은 p50이 줄고 p95·p99가 커졌다(동시성 64 p99 212 → 557 ms). 원인은 계측하지 않았다.
+closed loop의 꼬리: 변경은 p50이 줄고 p95·p99가 커졌다(동시성 64 p99 212 → 557 ms). 이 run에서는 원인을 계측하지 않았다. 로컬 계측은 아래 절.
 
 open loop의 꼬리: closed 뒤 같은 stack에서는 변경의 p95·p99가 컸지만 run 순서 때문이다. 볼륨의 분당 VolumeWriteOps(CloudWatch)를
 보면 open run의 direct 절반(proxy에 호출이 없음)에서도 디스크가 3,000 IOPS 한도에 붙어 있었다. 기준은 약 3.5분 뒤 풀려 proxied
@@ -158,6 +158,76 @@ local collector `lodeline-server`였다(write syscall 13,020/s, 26.6 MB/s, proxy
 수치(281 / 313 / 378 / 416 calls/s)는 #503 전이고 principal 8 × route 4라 이 run과 직접 비교하지 않는다.
 
 미검증: tmpfs 전후, closed loop 꼬리의 원인, collector를 다른 디스크나 호스트에 둔 구성, 실제 전원 차단(모사만 함), Rocky 9·목표 VM.
+
+### closed loop 꼬리 로컬 계측 (2026-11-07, `perf/proxy-gc-tail`)
+
+위 AWS run에서 커진 closed loop p95·p99의 원인을 로컬에서 찾으려 했다. 로컬에서는 그 꼬리 모양이 재현되지 않았고, AWS의 원인은
+확정하지 못했다. 코드는 바꾸지 않았다.
+
+환경: macOS arm64 12코어, APFS, release, `lodeline-proxy-loadgen`·`stack.sh`, principal 16 × route 8, round 1. 기준 `c24bd16`과
+main `08a9167`의 proxy만 바꾸고 server와 driver는 같은 바이너리를 썼다. stack 단위로 교대했다. 모든 run에서 오류 0, upstream 호출 수 =
+성공 응답 수였다. 다른 작업과 함께 돌아 load average가 6–13이었다. 절대값은 참고값이다.
+
+기본 설정(warm-up 5초 + 20초, 기준, 변경, 변경, 기준, 기준, 변경 순서로 3 round씩). proxied 성공 호출/s와 전체 지연 ms, 중앙값(범위):
+
+| 조건 | 기준 | 변경 |
+|---|---|---|
+| 동시성 32 calls/s | 6,124 (5,874–6,130) | 7,002 (6,860–7,113) |
+| 동시성 32 p50 / p95 / p99 | 3.7 / 14.5 / 17.8 (17.0–23.0) | 3.0 / 15.7 / 17.9 (17.4–18.2) |
+| 동시성 64 calls/s | 5,758 (5,652–5,832) | 6,460 (4,633–6,658) |
+| 동시성 64 p50 / p95 / p99 | 7.6 / 21.2 / 29.0 (28.8–37.9) | 6.4 / 21.8 / 30.2 (27.3–48.8) |
+
+p95·p99는 범위가 겹쳐 차이가 없다. 기준도 초당 약 6,000회라 fsync 직렬에 묶이지 않는다. macOS `fsync(2)`는 장치에 넘길 뿐 장치 cache를
+비우지 않고(man page, 그 용도는 F_FULLFSYNC), 이 환경의 fsync는 gp3보다 훨씬 쌀 것으로 추정한다(직접 재지 않음). AWS 기준의 상한(fsync 직렬, 약 470
+calls/s)과 다른 영역이다.
+
+계측: 임시 계측(커밋하지 않음)을 기준과 변경 양쪽에 넣어 호출마다 start append의 spool 대기(호출부터 응답까지)와 그중 채널 대기,
+`record_start` 전체, relay handler 전체를 기록했다. writer에서는 묶음 시간, 묶음 FULL commit, checkpoint 시간을 기록했다. 계측은 처리량을
+낮추지 않았다(계측 빌드 동시성 64 7,567 calls/s, 1 run). 아래 수치는 warm-up을 포함한다. 변경, 동시성 64, 기본 설정 1 run(warm-up 3초 + 10초):
+
+- client가 잰 지연 p50 / p90 / p99는 6.1 / 16.7 / 20.3 ms다. handler 시간은 5.2 / 15.1 / 19.0 ms, 그중 spool 대기가 4.3 / 14.1 /
+  17.9 ms다. 지연의 거의 전부가 spool writer를 기다린 시간이다. registry lookup·admission·upstream(handler − spool 대기)과 proxy 밖
+  (client − handler)은 분위마다 1–2 ms다.
+- writer는 run 내내 바빴다. 묶음 시간 합 9.3초와 checkpoint 시간 합 3.5초가 proxied 약 13초를 채운다. 로컬 처리량의 상한은 writer
+  thread다.
+- 512 명령마다 하는 PASSIVE checkpoint가 writer thread에서 한 번에 약 10 ms(p50) 걸렸다. 그동안 대기열의 append가 모두 기다리는 것으로 추정한다.
+  start 채널 대기 p90 11.3 ms가 이 길이와 맞는다. 기준도 같은 주기로 checkpoint를 해서 같은 mode가 있다(기준 동시성 32 p90 13.1–13.7 ms,
+  p50 3.7 ms).
+
+비싼 fsync 모사: 계측 빌드에서 환경 변수로 `PRAGMA fullfsync`와 `checkpoint_fullfsync`를 켰다(F_FULLFSYNC, 묶음 FULL commit 약 4 ms).
+gp3 fsync(약 2 ms)와 같은 차수지만 gp3의 IOPS·대역 한도는 모사하지 않는다. 동시성 64 1 run씩: 기준 233 calls/s, p50 / p99 273 / 301 ms,
+변경 3,683 calls/s, 13.8 / 42.9 ms. 변경이 모든 분위에서 낮아 AWS 꼬리 모양은 여기서도 재현되지 않았다. 로컬에서는 group commit 뒤에도
+writer thread가 상한이다. AWS에서는 변경 뒤 gp3 쓰기 I/O가 상한이었다(위 절).
+
+같은 모사에서 변경만 바꿔 쟀다(warm-up 3초 + 15초, 변형을 round마다 차례로 돌려 3 round씩). 동시성 64, 중앙값:
+
+| 변경 동시성 64 | calls/s (범위) | p50 | p90 | p99 |
+|---|---|---|---|---|
+| 묶음 상한 64(현재) | 3,838 (3,830–3,907) | 12.9 | 33.1 | 39.5 |
+| 묶음 상한 1024 | 3,787 (3,768–3,833) | 13.1 | 32.5 | 39.5 |
+| checkpoint 끔 | 3,642 (3,220–3,686) | 17.8 | 20.1 | 24.2 |
+| 별도 세트: checkpoint 512 명령마다(현재) | 3,987 (3,946–4,001) | 12.8 | 30.6 | 37.9 |
+| 별도 세트: checkpoint 128 명령마다 | 2,591 (2,399–2,623) | 23.1 | 32.1 | 43.6 |
+
+- 묶음 상한(늦게 온 start가 묶음 여러 개를 기다린다는 가설, 묶음이 클수록 FULL commit이 길다는 가설): 차이가 없다. 상한 1024에서도 묶음
+  길이 p90이 126이라 대기열이 두 묶음을 넘는 일이 드물다.
+- checkpoint를 끄면 p90·p99가 준다. 로컬의 p90 위 mode는 writer thread에서 도는 checkpoint 대기다. 끄면 WAL이 run마다 약 5 GB로 커지고
+  다음 maintenance checkpoint 하나가 약 0.55초 걸려(최대 지연 576 ms) 쓸 수 있는 설정이 아니다. 128 명령마다로 자주 하면 checkpoint마다
+  fsync 2번이 붙어 처리량이 35% 줄고 p99도 커진다.
+
+결론: 로컬에서 꼬리는 spool writer 대기에서 오고, 그중 p90 위 mode는 writer thread의 checkpoint다(측정). AWS p99 557 ms가 같은 원인인지는
+측정하지 않았다. 같은 원인이라면 gp3에서 checkpoint 하나가 수백 ms 걸려야 한다. 변경 뒤 볼륨이 3,000 IOPS 한도에 붙어 checkpoint의 DB 쓰기와
+fsync가 느려졌다는 설명과 맞지만 추정이다. checkpoint를 다른 연결로 옮겨 writer를 막지 않게 하는 수정은 `durable_seq` 갱신 규칙을 건드리는
+작은 변경이 아니라서 AWS 측정 전에는 하지 않았다.
+
+AWS 측정 계획(노드 A, 위 절과 같은 구성과 순서):
+
+- 이번 로컬 run과 같은 임시 계측 patch(저장소에 커밋하지 않음, 다시 만들어 넣어야 함)를 넣은 기준·변경 빌드로 closed loop 동시성 32·64를 stack 단위로 교대해 3 round씩 잰다.
+- checkpoint 시간 p50이 수백 ms이고 handler 시간의 p95 위가 그만큼 떨어져 있으면 writer thread의 checkpoint가 원인이다.
+- 묶음 안 NORMAL commit 시간이 ms 단위로 튀면 writeback 중인 page를 기다리는 쓰기가 원인이다(위 절의 `folio_wait_bit_common`).
+- handler 시간이 client 지연보다 크게 작으면 원인은 proxy 밖이다.
+- 같은 시간에 `iostat -x 1`(w/s, w_await)과 CloudWatch VolumeWriteOps를 남긴다. collector state를 tmpfs에 둔 대조 run 1개로 collector 쓰기의
+  영향을 가른다.
 
 ## 2026-11-07 upstream 연결 재사용 (`fix/proxy-upstream-pool`)
 
