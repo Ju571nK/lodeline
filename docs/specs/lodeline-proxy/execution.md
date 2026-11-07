@@ -330,7 +330,7 @@ start spool 대기를 분위 구간으로 나누고, 각 대기가 writer의 che
 계획의 판정 규칙:
 
 - checkpoint: 변경의 checkpoint는 p50 75 ms, p95 272 ms, p99 333 ms다. p50은 수백 ms가 아니지만 p90 위의 대기는 거의 모두 checkpoint와
-  겹치고, 겹친 시간이 대기의 76–87%다. 원인은 writer thread의 checkpoint다(측정).
+  겹치고, 겹친 시간이 대기의 76–87%다. 원인은 writer thread의 checkpoint로 읽는다(겹침은 측정, 인과는 그 겹침과 tmpfs 대조에서 따른 해석).
 - 묶음 안 NORMAL commit: p99 0.6 ms, max 21 ms라 꼬리를 설명하지 못한다. writeback 대기 가설은 기각한다.
 - proxy 밖: client와 handler의 차이가 분위마다 5 ms 이하다. 기각한다.
 
