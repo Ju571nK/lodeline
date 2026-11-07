@@ -8,6 +8,7 @@
 
 pub mod assess;
 pub mod audit;
+pub mod codex;
 #[cfg(feature = "control-client")]
 pub mod control_client;
 pub mod control_proto;

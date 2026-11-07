@@ -325,6 +325,10 @@ pub fn run(
         &lodeline_core::paths::hook_state_dir(),
         HOOK_START_TIMEOUT,
     ));
+    checks.extend(check_codex_hooks_feature(
+        &lodeline_core::paths::hook_state_dir(),
+        &lodeline_core::codex::system_dir(),
+    ));
     for r in checks {
         let prefix = match r.level {
             CheckLevel::Ok => "[OK]  ",
@@ -450,6 +454,21 @@ fn check_hook_launch(
             }
         })
         .collect()
+}
+
+/// A Codex hook that `lodeline-hook install` registered never runs while
+/// Codex's `[features] hooks` is off. The Codex folder is the one install wrote.
+fn check_codex_hooks_feature(state_dir: &Path, system_dir: &Path) -> Option<CheckResult> {
+    let baseline: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state_dir.join("hook-registration-codex.json")).ok()?,
+    )
+    .ok()?;
+    let codex_home = Path::new(baseline.get("settings_path")?.as_str()?).parent()?;
+    let feature = lodeline_core::codex::HooksFeature::read(system_dir, codex_home);
+    Some(match feature.warning() {
+        Some(w) => CheckResult::warn(format!("hook codex: {w}")),
+        None => CheckResult::ok("hook codex: Codex hooks feature is on"),
+    })
 }
 
 /// Run `exe --version` with null stdio. `Ok(false)` means it was still running
@@ -1213,6 +1232,70 @@ mod linux_tests {
             assert_eq!(r.level, CheckLevel::Warn, "{r:?}");
             assert!(r.message.contains("uid="), "{:?}", r);
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_hooks_feature_tests {
+    use super::*;
+
+    /// A Codex registration whose hooks.json sits in `<root>/codex`, with `user`
+    /// as that folder's config.toml.
+    fn doctor(user: Option<&str>) -> (tempfile::TempDir, Option<CheckResult>) {
+        let root = tempfile::tempdir().unwrap();
+        let (state, codex) = (root.path().join("state"), root.path().join("codex"));
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(
+            state.join("hook-registration-codex.json"),
+            serde_json::json!({ "settings_path": codex.join("hooks.json") }).to_string(),
+        )
+        .unwrap();
+        if let Some(user) = user {
+            std::fs::write(codex.join("config.toml"), user).unwrap();
+        }
+        let r = check_codex_hooks_feature(&state, &root.path().join("etc"));
+        (root, r)
+    }
+
+    #[test]
+    fn hooks_false_warns_with_file_and_key() {
+        let (root, r) = doctor(Some("[features]\nhooks = false\n"));
+        let r = r.unwrap();
+        assert_eq!(r.level, CheckLevel::Warn);
+        let file = root.path().join("codex").join("config.toml");
+        assert!(
+            r.message.contains(&file.display().to_string()),
+            "{}",
+            r.message
+        );
+        assert!(r.message.contains("`hooks = false`"), "{}", r.message);
+    }
+
+    #[test]
+    fn hooks_true_or_absent_is_ok() {
+        for user in [Some("[features]\nhooks = true\n"), Some(""), None] {
+            let (_root, r) = doctor(user);
+            assert_eq!(r.unwrap().level, CheckLevel::Ok, "{user:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_config_warns() {
+        let (_root, r) = doctor(Some("[features\n"));
+        let r = r.unwrap();
+        assert_eq!(r.level, CheckLevel::Warn);
+        assert!(
+            r.message.starts_with("hook codex: cannot read "),
+            "{}",
+            r.message
+        );
+    }
+
+    #[test]
+    fn no_codex_registration_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(check_codex_hooks_feature(dir.path(), dir.path()), None);
     }
 }
 

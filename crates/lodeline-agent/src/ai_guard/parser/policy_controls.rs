@@ -10,22 +10,7 @@ use std::path::{Path, PathBuf};
 const MAX_POLICY_BYTES: u64 = 1024 * 1024;
 const MAX_DROP_INS: usize = 128;
 
-/// Codex's system config folder, which holds `config.toml`, `hooks.json`, and
-/// `requirements.toml`.
-pub(super) fn codex_system_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-            .join("OpenAI")
-            .join("Codex")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        PathBuf::from("/etc/codex")
-    }
-}
+pub(super) use lodeline_core::codex::system_dir as codex_system_dir;
 
 pub(super) fn codex_requirements_path() -> PathBuf {
     codex_system_dir().join("requirements.toml")
