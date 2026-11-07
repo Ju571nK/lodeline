@@ -101,7 +101,7 @@ collector를 tmpfs에 둔 동시성 64 대조(1 run씩, 측정): 기준 1,440 ca
 현재 계획(되돌릴 수 있음): 별도 checkpoint 설계(아래 "수정안과 계약 영향"의 1)는 지금 시작하지 않는다.
 
 1. 측정이 가리키는 한계가 쓰기 횟수라면 checkpoint를 writer thread 밖으로 옮겨도 용량은 늘지 않는다. 별도 연결의 DB fsync가 쓰기 횟수를 더할 수
-   있다(추정). PASSIVE checkpoint가 따라가지 못하면 WAL이 커진다. checkpoint를 끈 run이 2026-11-07에 state 약 2.1 GB와 memory.max 512 MiB에 닿았다(측정). 그 run은 checkpoint를 아예 껐으므로 PASSIVE가 뒤처지는 경우와는 비유일 뿐이다.
+   있다(추정). PASSIVE checkpoint가 따라가지 못하면 WAL이 커진다. checkpoint를 끈 run이 2026-11-07에 state 약 2.1 GB와 memory.max 512 MiB에 닿았다(측정). 그 run은 512 명령 주기 checkpoint를 껐으므로 PASSIVE가 뒤처지는 경우와는 비유일 뿐이다.
 2. closed loop 포화의 처리량과 꼬리는 보고 값이고 합격 목표가 아니다([validation.md](validation.md)의 후보 합격 목표). 합격 판단은 open loop
    100 calls/s로 한다. 이번 open loop 결과는 회귀가 없다(1 run씩).
 
