@@ -8,7 +8,10 @@
 //! Guarantees:
 //!
 //! * [`Spool::append`] of an `invocation.started` returns only after the row is
-//!   committed and fsynced. Completions, cancel records and acknowledgements
+//!   committed and fsynced. Appends already queued share one fsync (group
+//!   commit): each commits in order, then one FULL commit fsyncs the WAL for all
+//!   of them, and only then does any of those starts return. Nothing waits for
+//!   more appends to arrive. Completions, cancel records and acknowledgements
 //!   commit with `synchronous=NORMAL` (decisions.md 2026-11-06): they survive a
 //!   process crash, and they become durable at the next start commit or
 //!   checkpoint, whose fsync covers every earlier WAL frame. A power loss can drop
@@ -188,7 +191,9 @@ pub enum SpoolError {
     Unavailable,
 }
 
-/// Why an append was refused. Nothing was stored in any of these cases.
+/// Why an append was refused. Nothing was stored in any of these cases, except
+/// a start refused with [`AppendError::Storage`] because its group's fsync failed:
+/// its row can stay, a start-only record like the one a crash leaves.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AppendError {
     /// The event does not fit under `capacity - gap_reserve` (see [`admits`]). The
@@ -353,8 +358,10 @@ impl<T> Reply<T> {
     }
 }
 
+type AppendReply = Reply<Result<Appended, AppendError>>;
+
 enum Cmd {
-    Append(Box<ProxyEvent>, Reply<Result<Appended, AppendError>>),
+    Append(Box<ProxyEvent>, AppendReply),
     Next(usize, HashSet<String>, Reply<Vec<ProxyEvent>>),
     Ack(Vec<String>, Reply<Result<u64, SpoolError>>),
     Quarantine(Vec<String>, String, Reply<Result<u64, SpoolError>>),
@@ -364,6 +371,9 @@ enum Cmd {
     HandedOff(Vec<String>, Reply<Result<(), SpoolError>>),
     RegistryConflict(String, Reply<Result<Vec<String>, SpoolError>>),
     OldestHeld(Reply<Result<Option<i64>, SpoolError>>),
+    /// Test knob: the writer waits until the sender is dropped.
+    #[cfg(test)]
+    Hold(mpsc::Receiver<()>),
     Shutdown,
 }
 
@@ -920,6 +930,10 @@ struct Writer {
 /// Commands between two checkpoints at most. An append writes about 8 WAL
 /// pages, so the WAL stays near 16 MiB (18 MiB high-water on AWS, 2026-11-06).
 const CHECKPOINT_EVERY: u32 = 512;
+/// Most queued appends one group commit takes: bounds how long the first
+/// start of a group waits for the others (the proxy admits 64 calls in flight).
+/// A group can run the checkpoint up to this many commands late.
+const APPEND_GROUP_MAX: usize = 64;
 
 const ADDITIVE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS rewrite_originals (
@@ -1209,6 +1223,8 @@ impl Writer {
         // commands (the ingest loop polls about once a second) must not starve it.
         // It also runs once at start.
         let mut next_maintenance = std::time::Instant::now();
+        // The command that ended the last append group, run next.
+        let mut held = None;
         loop {
             let now = std::time::Instant::now();
             if now >= next_maintenance {
@@ -1229,25 +1245,31 @@ impl Writer {
                 self.checkpoint();
             }
             let wait = next_maintenance.saturating_duration_since(std::time::Instant::now());
-            let cmd = match rx.recv_timeout(wait) {
-                Ok(c) => c,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            let cmd = match held.take() {
+                Some(c) => c,
+                None => match rx.recv_timeout(wait) {
+                    Ok(c) => c,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                },
             };
             self.since_checkpoint += 1;
             match cmd {
-                Cmd::Append(ev, r) if matches!(ev.payload, EventPayload::Started(_)) => {
-                    let res = self.append(*ev);
-                    if let Ok(a) = &res {
-                        // FULL commit: its fsync covers every earlier WAL frame.
-                        self.durable_seq = a.sequence;
-                    }
-                    r.send(res)
-                }
                 Cmd::Append(ev, r) => {
-                    let (res, restored) = self.deferred(|w| w.append(*ev));
-                    r.send(res);
-                    if !restored {
+                    // Only appends already queued join: nothing waits for more.
+                    let mut group = vec![(ev, r)];
+                    while group.len() < APPEND_GROUP_MAX {
+                        match rx.try_recv() {
+                            Ok(Cmd::Append(ev, r)) => group.push((ev, r)),
+                            Ok(other) => {
+                                held = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    self.since_checkpoint += group.len() as u32 - 1;
+                    if !self.append_group(group) {
                         return;
                     }
                 }
@@ -1280,7 +1302,66 @@ impl Writer {
                         .query_row(OLDEST_HELD, [], |r| r.get(0))
                         .map_err(|e| SpoolError::Storage(code_name(&e))),
                 ),
+                #[cfg(test)]
+                Cmd::Hold(rx) => {
+                    let _ = rx.recv();
+                }
                 Cmd::Shutdown => return,
+            }
+        }
+    }
+
+    /// Group commit of queued appends. A lone start commits FULL, as before.
+    /// Otherwise each append commits NORMAL, in order, and then one FULL commit
+    /// fsyncs the WAL for all of them. A start hears Ok only after that fsync
+    /// returns; if it fails, every start of the group is refused. Completions
+    /// and cancel records keep their NORMAL result. False when FULL could not
+    /// be restored; the caller then stops the writer.
+    fn append_group(&mut self, group: Vec<(Box<ProxyEvent>, AppendReply)>) -> bool {
+        let is_start = |ev: &ProxyEvent| matches!(ev.payload, EventPayload::Started(_));
+        if let [(ev, _)] = group.as_slice() {
+            if is_start(ev) {
+                let (ev, r) = group.into_iter().next().expect("one append");
+                let res = self.append(*ev);
+                if let Ok(a) = &res {
+                    // FULL commit: its fsync covers every earlier WAL frame.
+                    self.durable_seq = a.sequence;
+                }
+                r.send(res);
+                return true;
+            }
+        }
+        let (events, replies): (Vec<_>, Vec<_>) = group.into_iter().unzip();
+        let (results, restored) = self.deferred(|w| {
+            events
+                .into_iter()
+                .map(|ev| (is_start(&ev), w.append(*ev)))
+                .collect::<Vec<_>>()
+        });
+        let started = results.iter().any(|(start, res)| *start && res.is_ok());
+        let synced = restored && (!started || self.sync_wal());
+        for (r, (start, res)) in replies.into_iter().zip(results) {
+            r.send(match res {
+                Ok(_) if start && !synced => Err(AppendError::Storage),
+                res => res,
+            });
+        }
+        restored
+    }
+
+    /// A FULL commit that changes nothing, for its fsync: it covers every
+    /// earlier WAL frame. `user_version` is unused and stays 0; setting it
+    /// always writes page 1, where an unchanged row would write nothing.
+    fn sync_wal(&mut self) -> bool {
+        match self.conn.execute_batch("PRAGMA user_version = 0;") {
+            Ok(_) => {
+                let last = self.counters().last_seq;
+                self.durable_seq = last;
+                true
+            }
+            Err(_) => {
+                self.set_degraded(true);
+                false
             }
         }
     }
@@ -2514,6 +2595,71 @@ mod tests {
             db0,
             "no checkpoint inside a commit"
         );
+    }
+
+    /// Commands sent after this queue until the returned sender is dropped.
+    fn hold_writer(s: &Spool) -> mpsc::Sender<()> {
+        let (tx, rx) = mpsc::channel();
+        s.inner.tx.send(Cmd::Hold(rx)).unwrap();
+        tx
+    }
+
+    #[tokio::test]
+    async fn queued_starts_share_one_fsync() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        // The first commit after open may also sync a fresh WAL header.
+        s.append(event(1)).unwrap();
+        let wal0 = crate::sync_vfs::syncs(&wal);
+        let hold = hold_writer(&s);
+        let mut queued: Vec<_> = (2..=6).map(|n| s.append_async(event(n))).collect();
+        queued.push(s.append_async(completed(7)));
+        queued.extend((8..=11).map(|n| s.append_async(event(n))));
+        drop(hold);
+        for q in queued {
+            q.await.unwrap();
+        }
+        assert_eq!(
+            crate::sync_vfs::syncs(&wal),
+            wal0 + 1,
+            "one fsync for the queued group"
+        );
+        // Power loss after that fsync: every start that heard Ok is kept.
+        let (mut p, _) = open(power_loss_copy(d.path()).path());
+        assert_eq!(
+            ids(&p.next_events(100, &HashSet::new())),
+            (1..=11).map(uid).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_group_fsync_refuses_every_start() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        s.append(event(1)).unwrap();
+        let hold = hold_writer(&s);
+        let starts: Vec<_> = (2..=5).map(|n| s.append_async(event(n))).collect();
+        let done = s.append_async(completed(6));
+        crate::sync_vfs::fail_syncs(&wal, true);
+        drop(hold);
+        for q in starts {
+            assert_eq!(q.await, Err(AppendError::Storage), "Ok before an fsync");
+        }
+        assert!(done.await.is_ok(), "a completion never waited for an fsync");
+        crate::sync_vfs::fail_syncs(&wal, false);
+        assert_eq!(
+            sequences(&mut s),
+            vec![(1, uid(1))],
+            "a row not yet durable is not handed out"
+        );
+        // Power loss before the shared fsync: none of the refused starts was
+        // forwarded, and none is kept.
+        let (mut p, _) = open(power_loss_copy(d.path()).path());
+        assert_eq!(ids(&p.next_events(100, &HashSet::new())), vec![uid(1)]);
     }
 
     #[test]

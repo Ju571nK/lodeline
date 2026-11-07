@@ -193,4 +193,8 @@ M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 �
 - line 146과 다른 점: 이전에는 spool의 모든 기록이 fsync 뒤 local ack였다. 이제 start만 그렇고, completion·cancel·ACK 표시는 commit 뒤 응답한다.
 - 함께 바꾼 것(계약 안): `wal_autocheckpoint=0`. checkpoint는 commit 안이 아니라 writer의 명령 사이에서 돈다. maintenance pass마다, 수집 client가
   durable하지 않은 행만 찾았을 때, 그리고 512 명령마다 한 번(WAL 상한) 한다.
-- 나중에 따로: group commit(여러 start를 한 fsync로). 이번 범위가 아니다.
+- 2026-11-07 group commit(`perf/proxy-group-commit`, 위 계약 안의 구현이며 새 결정이 아니다): writer는 이미 queue에 있는 append를 최대 64개까지
+  한 묶음으로 처리한다. 묶음의 기록은 차례로 NORMAL commit하고, 이어서 바꾸는 값 없는 FULL commit 하나(`PRAGMA user_version = 0`)의 fsync가
+  모두를 덮는다. start는 그 fsync가 끝난 뒤에만 local ack를 받으므로 upstream 전달 전 durable 조건은 그대로다. 혼자 온 start는 전처럼 자기 FULL
+  commit을 한다. 더 올 append를 기다리는 타이머는 없다. 그 fsync가 실패하면 묶음의 start는 모두 거절되고, 이미 commit된 행은 crash 뒤와 같은
+  start만 있는 기록으로 남을 수 있다(전달은 없음).
