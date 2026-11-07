@@ -377,3 +377,29 @@ pub fn mgmt_identity(pki: &Pki, t_id: &str, t_cfg: &str) -> (PathBuf, PathBuf) {
     std::fs::set_permissions(&vpath, std::fs::Permissions::from_mode(0o600)).unwrap();
     mgmt_cert
 }
+
+/// Runs `start` again while it fails only because the `state_dir` lock is
+/// still held, every 20 ms for at most 1 s. Any other error returns at once.
+// A child another test forks keeps a copy of the lock fd until its exec, so a
+// flock this process released can stay held for that window.
+#[allow(dead_code)]
+pub async fn retry_locked<T, F, Fut>(mut start: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match start().await {
+            Err(e)
+                if matches!(
+                    e.downcast_ref(),
+                    Some(lodeline_proxy::state_dir::StateError::Locked)
+                ) && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await
+            }
+            r => return r,
+        }
+    }
+}
