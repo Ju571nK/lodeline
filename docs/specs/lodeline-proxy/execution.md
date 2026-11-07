@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,28 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 event 424 뒤 entry 재업로드 (`fix/proxy-event-424-reupload`)
+
+문제: event batch의 424 `metadata_ref_pending`은 event만 보류했다. inventory 424는 이름 붙은 ref를 `mark_unacked`로 다시 올리지만,
+event 경로에는 그 처리가 없었다. proxy가 acked로 아는 entry를 server가 갖고 있지 않으면, 그 ref를 쓰는 start는 R이 지날 때까지 보류됐다가
+`spool_expired`로 잃는다. 계약은 [README "Not-yet-synced refs"](contracts/README.md)다: "The producer uploads the pending entries from local state
+and retries with backoff".
+
+도달 경로: server가 `proxy-metadata.sqlite` 없이 재시작하면 metadata store를 빈 파일로 새로 만든다. proxy registry(`proxies.json`)와
+ledger는 남아 proxy는 그대로 인증된다. 파일 손실, 오래된 백업 복원, `metadata_path` 변경이 이 상태를 만든다.
+
+재현(`c0af6e5`, 이 수정보다 먼저 커밋): `inventory_e2e.rs` `an_event_424_uploads_an_entry_the_server_lost`. 실제 `run_tuned`, 실제 server,
+가짜 MCP upstream으로 tool 1개를 baseline까지 올린 뒤, server를 멈추고 metadata 파일을 지우고 같은 port로 다시 띄운다. tool call의 start는
+수정 전 30초 동안 `unsent_events=1`, server metadata 0건, status `sync_stalled: true`로 남아 `timed out waiting for: the entry is uploaded again
+and the start accepted`로 실패했다.
+
+수정(`ingest_client.rs`, `registry_client.rs`): `IngestOutcome::Pending`이 `pending_metadata_refs`를 함께 가진다. ingest client는 424마다
+`EventSource::metadata_pending(refs)`를 부른다(기본은 아무것도 안 함). `CheckedSource`가 이를 `RegistryStore::mark_unacked`로 받아, 다음
+registry sync가 entry를 다시 올린다. inventory 424와 같은 함수다. `mark_unacked`는 이 proxy의 acked entry만 pending으로 돌린다. proxy가 모르는
+ref, pending·poisoned·quarantined entry는 바뀌지 않는다. 재업로드는 event 424 한 번에 최대 한 번이고, event 재시도는 기존 보류 backoff(최대
+`max_backoff`)를 따르므로 반복이 늘어나지 않는다. server는 같은 entry의 재업로드를 200으로 받는다. 수정 뒤 같은 시험은 1.05초에 통과한다.
+mutation(`metadata_pending` 호출 제거)으로 같은 시험이 다시 실패함을 확인했다.
 
 ## 2026-11-07 spool fsync 실패 뒤 fail-stop (`fix/spool-fsync-failure`)
 

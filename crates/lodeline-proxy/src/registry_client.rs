@@ -450,6 +450,15 @@ impl<S: crate::ingest_client::EventSource> crate::ingest_client::EventSource for
         self.inner.quarantined(event_ids, code)
     }
 
+    /// Mirrors the inventory 424: an entry the server lost (or never stored)
+    /// though it was acked here is uploaded on the next sync. Unknown refs and
+    /// entries that are not acked are left as they are.
+    fn metadata_pending(&mut self, refs: &[String]) {
+        if self.conflicts.store.mark_unacked(refs).is_err() {
+            tracing::warn!("registry: a pending ref could not be queued for upload");
+        }
+    }
+
     fn next_events_async<'a>(
         &'a mut self,
         max: usize,

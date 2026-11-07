@@ -9,6 +9,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-proxy` now uploads a registry entry again when the server answers an event batch
+  with 424 `metadata_ref_pending` for it. Before, only an inventory 424 did that, and an event
+  424 only held the events. When the server lacked an entry the proxy held as acknowledged, for
+  example after the server restarted without its `proxy-metadata.sqlite`, starts that named the
+  entry stayed held until the offline retry age passed and were then lost as `spool_expired`.
+  Now the next registry sync uploads the entry and the held starts are accepted.
 - `lodeline-proxy` now stops its event spool for good when a storage sync (fsync) fails, and
   refuses every call until you restart it. Before, the spool kept running after a failed fsync,
   and the next successful fsync cleared its degraded state. On Linux the kernel reports a
