@@ -304,8 +304,13 @@ impl Lifecycle {
         if self.status.spool == Some(v) {
             return Ok(());
         }
-        self.status.spool = Some(v);
-        self.publish()
+        let prev = self.status.spool.replace(v);
+        let r = self.publish();
+        if r.is_err() {
+            // Not written: forget the view so the next poll retries.
+            self.status.spool = prev;
+        }
+        r
     }
 
     /// Persist a new status-sequence bound before sequences up to it are used.
@@ -1408,6 +1413,29 @@ mod tests {
             )),
             None
         );
+        assert_eq!(read(Some(serde_json::json!({"state": "later"}))), None);
+    }
+
+    /// A spool view whose status write failed is written by the next poll.
+    #[test]
+    fn a_failed_spool_status_write_is_retried_by_the_next_poll() {
+        use crate::spool::{DegradedReason, SpoolState};
+        use crate::status_report::SpoolView;
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        let degraded = SpoolView {
+            state: SpoolState::Degraded,
+            reason: Some(DegradedReason::FsyncFailed),
+        };
+        // a non-empty directory in the way makes the rename fail
+        let p = b.state_dir.join(STATUS_FILE);
+        std::fs::remove_file(&p).unwrap();
+        std::fs::create_dir_all(p.join("x")).unwrap();
+        assert!(lc.set_spool(degraded).is_err());
+        std::fs::remove_dir_all(&p).unwrap();
+        lc.set_spool(degraded).unwrap();
+        assert_eq!(read_status(&b.state_dir).unwrap().spool, Some(degraded));
     }
 
     /// #512 follow-up: the local status file shows the spool state, and after a

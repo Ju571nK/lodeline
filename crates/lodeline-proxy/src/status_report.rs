@@ -2858,7 +2858,6 @@ mod tests {
         assert_eq!(v["spool"]["quarantined_bytes"], snap.quarantined_bytes);
     }
 
-    /// A builder without a spool still validates (unit-test path only).
     /// A stopped ingest turns `ok` into `degraded`, and keeps the spool's own
     /// reason or `full`.
     #[test]
@@ -2900,6 +2899,7 @@ mod tests {
         );
     }
 
+    /// A builder without a spool still validates (unit-test path only).
     #[test]
     fn builder_without_a_spool_reports_the_empty_placeholder() {
         let mut b = StatusBuilder::new("px-1", &uid(5000));
