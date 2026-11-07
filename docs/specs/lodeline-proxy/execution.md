@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · spool group commit(`perf/proxy-group-commit`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -57,9 +57,63 @@ maintenance는 명령 사이에서 그대로 돌고, 묶음 하나는 checkpoint
 동시성 64는 3 round 모두 변경이 높았다(2.2–3.7배). 동시성 32는 2/3 round에서 높았다. 동시성 1은 묶을 start가 없으므로 차이가 없어야 하며,
 범위가 겹쳐 측정된 차이는 없다. open loop 지연은 잡음 때문에 결론 없음이다. due 기준 지연도 같은 방향이다(보고서 `latency_from_due_ms`).
 
-AWS 노드 A 측정은 하지 못했다. AWS 로그인 세션이 만료돼 노드를 켜지 않았다(비용 $0). gp3에서 상한이 얼마나 오르는지는 미검증이다.
+### AWS gp3 전후 측정 (2026-11-07)
 
-미검증: AWS gp3·tmpfs 전후, Linux에서 실제 fsync 횟수(strace), 실제 전원 차단(모사만 함), Rocky 9·목표 VM.
+환경: 노드 A만(t4g.small 2 vCPU, Neoverse-N1, AL2023 aarch64, kernel 6.18.54, rustc 1.99.1, CPU credit unlimited). state는 gp3 루트 볼륨
+(xfs, 3,000 IOPS, 125 MB/s). 기준 `c24bd16`(merge의 부모)과 변경 `0fcacf6`을 노드에서 release로 빌드해 두 벌로 두었다. 한 호스트에
+`lodeline-server`(local collector), proxy, load server, driver가 있다. proxy는 `systemd-run --scope`(MemoryMax 512M, AllowedCPUs 0)로
+CPU 0, 나머지는 `taskset -c 1`. 모든 동시성에서 principal 16 × route 8. stack 하나에서 closed loop 동시성 1 → 8 → 32 → 64(각 warm-up
+10초 + 30초)와 open loop 100 calls/s 동시성 32(warm-up 30초 + 300초)를 차례로 돌렸다. 바이너리는 stack 단위로 기준, 변경, 변경, 기준,
+기준, 변경 순서로 교대했다(측정 3 round씩). 모든 run에서 오류 0, upstream 호출 수 = 성공 응답 수였다.
+
+proxied 성공 호출/s, 3 round 중앙값(범위):
+
+| 조건 | 기준 | 변경 |
+|---|---|---|
+| closed 동시성 1 | 355 (335–359) | 356 (354–359) |
+| closed 동시성 8 | 432 (424–440) | 639 (638–643) |
+| closed 동시성 32 | 468 (467–473) | 742 (737–748) |
+| closed 동시성 64 | 471 (457–475) | 752 (743–756) |
+
+추가 지연(proxied - direct), ms, p50 / p95 / p99, round 중앙값. closed loop는 due 기준 값도 같다. open loop는 양쪽 모두 proxied send lag p99가
+1 ms를 넘어(4.0–5.8 ms) due 기준 값을 함께 적는다.
+
+| 조건 | 기준 | 변경 |
+|---|---|---|
+| closed 동시성 1 | 2.24 / 4.18 / 10.8 | 2.24 / 4.05 / 10.3 |
+| closed 동시성 8 | 16.0 / 25.9 / 43.9 | 7.31 / 40.0 / 77.7 |
+| closed 동시성 32 | 58.8 / 92.6 / 124 | 15.8 / 157 / 338 |
+| closed 동시성 64 | 117 / 178 / 212 | 27.0 / 340 / 557 |
+| open, closed 뒤 같은 stack, 300초 × 3 round | 3.30 / 8.33 / 20.9 (due 3.09 / 9.01 / 17.1) | 3.40 / 31.6 / 115 (due 3.10 / 31.4 / 113) |
+| open, 새 stack, 120초 × 2 round(변경, 기준, 기준, 변경 순) | 3.29 / 7.12–7.36 / 14.9–15.5 (due 2.61–2.98 / 7.08–7.59 / 14.2–14.8) | 3.25–3.29 / 7.06–7.11 / 13.9–15.0 (due 3.41–3.55 / 7.97–8.13 / 13.8–14.9) |
+
+한계 요인(strace는 보고하지 않는 별도 run에서, `strace -f -T -y -e trace=fsync,fdatasync`):
+
+- 동시성 1은 묶을 start가 없어 같다. WAL fsync/proxied 호출은 기준 1.01, 변경 1.01이고 처리량 범위가 겹친다.
+- 기준은 start fsync 직렬이 상한이다. WAL fsync/proxied 호출이 동시성 1, 64, open 모두 1.01이고 fsync 중앙값은 1.3–2.5 ms다.
+  fsync 하나가 호출 하나를 덮으므로 동시성 32·64의 평탄값 468–471 calls/s는 호출당 약 2.1 ms이고, 이 fsync 범위 안이다. 보고 run에서
+  CPU 0 busy 35–37%, iowait 53–55%.
+- 변경은 동시성 64에서 WAL fsync 335번에 호출 8,622회(0.039/호출, 묶음 평균 약 26)이고 fsync 시간 합은 run 약 25초 중 1.45초다.
+  fsync는 더 이상 상한이 아니다. open 100 calls/s에서는 0.98/호출로 묶음이 거의 생기지 않는다. 보고 run(동시성 32·64)에서 CPU 0 busy 28–32%,
+  iowait 58–65%, proxy CPU 0.43–0.45 ms/호출(기준 0.77–0.79), CPU 1(driver, load server, collector) busy 14–16%라 CPU도 driver도
+  상한이 아니다. 0.1초 간격 thread 표본에서 proxy thread가 D 상태로 `rq_qos_wait`(block 계층 쓰기 throttle),
+  `folio_wait_bit_common`(writeback 중인 page), `xlog_wait_on_iclog`(xfs log)에 있었다. 그래서 변경 뒤 상한은 gp3 쓰기 I/O로 본다
+  (추정이다. 같은 볼륨을 collector도 쓰고, 한 자원으로 확정하지 못했다).
+- 표의 closed 값은 앞 run이 남긴 쓰기 위에서 쟀다. 새 stack(빈 spool)에서 동시성 64 단일 run은 기준 502, 변경 1,415 calls/s였다
+  (변경 CPU 0 busy 73%, 1 run씩이라 참고값).
+
+closed loop의 꼬리: 변경은 p50이 줄고 p95·p99가 커졌다(동시성 64 p99 212 → 557 ms). 원인은 계측하지 않았다.
+
+open loop의 꼬리: closed 뒤 같은 stack에서는 변경의 p95·p99가 컸지만 run 순서 때문이다. 볼륨의 분당 VolumeWriteOps(CloudWatch)를
+보면 open run의 direct 절반(proxy에 호출이 없음)에서도 디스크가 3,000 IOPS 한도에 붙어 있었다. 기준은 약 3.5분 뒤 풀려 proxied
+절반이 약 2,120 IOPS였다. 변경은 closed 단계 네 개에서 upstream 호출을 약 48–50% 더 처리했고(warm-up 포함, 3 round, 이 stack의 spool이 더 커졌다) 330초 내내 약 3,015 IOPS였다. 호출이 없을 때 쓰는 프로세스는
+local collector `lodeline-server`였다(write syscall 13,020/s, 26.6 MB/s, proxy는 314/s). 앞 run 없는 새 stack에서는 차이가 없다(위 표).
+
+그 밖: proxy VmHWM 기준 16.3–16.7 MiB, 변경 18.6–19.2 MiB. cgroup memory.peak 172 MB → 221 MB(spool page cache 포함, 변경이 이 stack에서 호출을
+더 처리함. closed 네 단계와 open 단계를 합친 upstream 호출이 3 round에서 33–34% 많았다). FD 25–26. 인스턴스 EBSIOBalance%는 100에서 57%로 줄었고(고갈 아님) EBSByteBalance%는 90% 이상이었다. 앞 절의
+수치(281 / 313 / 378 / 416 calls/s)는 #503 전이고 principal 8 × route 4라 이 run과 직접 비교하지 않는다.
+
+미검증: tmpfs 전후, closed loop 꼬리의 원인, collector를 다른 디스크나 호스트에 둔 구성, 실제 전원 차단(모사만 함), Rocky 9·목표 VM.
 
 ## 2026-11-07 upstream 연결 재사용 (`fix/proxy-upstream-pool`)
 
