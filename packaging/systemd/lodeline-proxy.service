@@ -23,7 +23,9 @@ ExecStart=/usr/bin/lodeline-proxy run --config /etc/lodeline/proxy.yaml
 Restart=on-failure
 RestartSec=5
 # SIGTERM starts a graceful drain (limits.shutdown_grace_secs, default 30 s).
+# The grace bounds the whole shutdown, not each step of it.
 # TimeoutStopSec = grace + margin so systemd does not SIGKILL mid-drain.
+# If you raise shutdown_grace_secs, raise TimeoutStopSec by the same amount.
 KillSignal=SIGTERM
 TimeoutStopSec=45
 # Exit 2 = invalid config: do not restart-loop on it.

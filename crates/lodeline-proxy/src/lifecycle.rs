@@ -410,7 +410,7 @@ pub async fn run_with_shutdown(
     table: crate::route::TableHandle,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    run_inner(b, table, shutdown, Pacing::default(), None, None).await
+    run_inner(b, table, shutdown, Pacing::default(), None, None, None).await
 }
 
 /// Pacing and an optional pre-bound listener. TEST-ONLY (feature `test-util`, or
@@ -419,7 +419,7 @@ pub async fn run_with_shutdown(
 /// a real server observe a revision change within seconds and avoid a
 /// bind-then-release port race.
 #[cfg(any(test, feature = "test-util"))]
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct RunTuning {
     pub sync: crate::config_sync::SyncParams,
     pub report: crate::status_report::ReporterParams,
@@ -430,6 +430,8 @@ pub struct RunTuning {
     /// Receives a handle to the spool once it is open, so a test can inject
     /// events and read the snapshot.
     pub spool_out: Option<tokio::sync::oneshot::Sender<crate::spool::Spool>>,
+    /// Receives a clone of the gap queue, so a test can hold it past shutdown.
+    pub gaps_out: Option<tokio::sync::oneshot::Sender<crate::status_report::GapQueue>>,
 }
 
 /// [`run_with_shutdown`] with explicit pacing. Tests only.
@@ -452,6 +454,7 @@ pub async fn run_tuned(
         },
         tuning.listener,
         tuning.spool_out,
+        tuning.gaps_out,
     )
     .await
 }
@@ -469,6 +472,9 @@ struct Pacing {
 const SPOOL_GAP_PUMP_INTERVAL: Duration = Duration::from_secs(5);
 /// Registry entry retention pass, as often as the spool's maintenance.
 const ENTRY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
+/// Least time the audit drain gets after the relay drain used the grace: a
+/// drain that ends in milliseconds appends its completions instead of counting them.
+const AUDIT_DRAIN_FLOOR: Duration = Duration::from_millis(500);
 
 async fn run_inner(
     b: &Bootstrap,
@@ -477,6 +483,7 @@ async fn run_inner(
     pacing: Pacing,
     pre_bound: Option<std::net::TcpListener>,
     spool_out: Option<tokio::sync::oneshot::Sender<crate::spool::Spool>>,
+    gaps_out: Option<tokio::sync::oneshot::Sender<crate::status_report::GapQueue>>,
 ) -> anyhow::Result<()> {
     let Pacing {
         sync: sync_params,
@@ -593,6 +600,9 @@ async fn run_inner(
             // The audit producer appends through the admission handle; records
             // it cannot store become `local_record_failed` gaps in this queue.
             invocation_gaps = Some(gaps.clone());
+            if let Some(out) = gaps_out {
+                let _ = out.send(gaps.clone());
+            }
             let (isink, ihandle) = crate::invocation_sink::InvocationSink::start(
                 admission.clone(),
                 b.proxy_id.as_str(),
@@ -801,20 +811,34 @@ async fn run_inner(
     };
     proxy = proxy.with_sink(sink, hasher);
     let lc3 = lc.clone();
+    // One grace from the signal bounds the whole shutdown (systemd's
+    // TimeoutStopSec counts from there): each phase after the relay drain gets
+    // only what is left.
+    let signaled = std::sync::OnceLock::new();
     let served = proxy
         .serve(listener, acceptor, async {
             shutdown.await;
+            let _ = signaled.set(tokio::time::Instant::now());
             let _ = lock(&lc3).set_run_state(RunState::Stopping);
         })
         .await;
+    let deadline = signaled
+        .get()
+        .copied()
+        .unwrap_or_else(tokio::time::Instant::now)
+        + Duration::from_secs(b.limits.shutdown_grace_secs);
     // NOTE: Signal handlers stay installed during drain, so a second SIGTERM is
     // swallowed and only SIGKILL ends the process. Fine under systemd
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
     // The relay stopped: drain the audit producer first (its completions and
     // cancels reach the spool, or are counted as a gap), before any task stops.
     let invocation_accounted = if let Some(h) = invocation_handle.take() {
-        h.shutdown(Duration::from_secs(b.limits.shutdown_grace_secs))
-            .await
+        h.shutdown(
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(AUDIT_DRAIN_FLOOR),
+        )
+        .await
     } else {
         true
     };
@@ -846,12 +870,15 @@ async fn run_inner(
     // clone of the gap queue (whose persister holds this state_dir lock) or of
     // the registry. Wait for it, so no write lands after `stopped` and a restart
     // in this process finds the lock free.
-    let settle = tokio::time::Instant::now() + Duration::from_secs(b.limits.shutdown_grace_secs);
     while invocation_gaps.as_ref().is_some_and(|g| g.handles() > 1)
         || registry.as_ref().is_some_and(|r| r.handles() > 1)
     {
-        if tokio::time::Instant::now() >= settle {
-            tracing::warn!("blocking work still holds the proxy state after the grace");
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                gap_queue_handles = invocation_gaps.as_ref().map(|g| g.handles()),
+                registry_handles = registry.as_ref().map(|r| r.handles()),
+                "blocking work still holds the proxy state after the grace"
+            );
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1408,5 +1435,58 @@ mod tests {
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// The shutdown after the signal has one grace budget. A client stuck in its
+    /// request head holds the relay drain and blocking work holds the gap queue:
+    /// together they still end within one grace, not one grace each.
+    #[tokio::test]
+    async fn shutdown_phases_share_one_grace() {
+        let t = tempfile::tempdir().unwrap();
+        let mut b = bootstrap(t.path());
+        b.control_plane_url = "https://127.0.0.1:1".into();
+        b.limits.shutdown_grace_secs = 2;
+        let grace = Duration::from_secs(2);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (gaps_tx, gaps_rx) = tokio::sync::oneshot::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let tuning = RunTuning {
+            listener: Some(listener),
+            gaps_out: Some(gaps_tx),
+            ..RunTuning::default()
+        };
+        let run = run_tuned(
+            &b,
+            crate::route::TableHandle::new(),
+            async {
+                let _ = stop_rx.await;
+            },
+            tuning,
+        );
+        let drive = async {
+            let held = gaps_rx.await.unwrap();
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut client, b"POST /mcp/a HTTP/1.1\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            stop_tx.send(()).unwrap();
+            (tokio::time::Instant::now(), held, client)
+        };
+        let (ran, (signaled, _held, _client)) = tokio::join!(run, drive);
+        let took = signaled.elapsed();
+        ran.unwrap();
+        // Holds while `server::HEADER_READ_TIMEOUT` is longer than grace.
+        assert!(
+            took >= grace,
+            "the relay drain waited for the client: {took:?}"
+        );
+        // Room for the audit drain floor and slow CI runners; one grace each
+        // (before the fix) is about 2 x grace.
+        assert!(
+            took < grace + Duration::from_millis(1500),
+            "shutdown took {took:?}, more than one grace of {grace:?}"
+        );
     }
 }
