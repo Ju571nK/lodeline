@@ -272,10 +272,30 @@ pub struct Appended {
 
 pub use lodeline_proxy_api::status::SpoolState;
 
+/// Why `spool.state` is `degraded`. Local only (the status file and `health`):
+/// the status report sends the state alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradedReason {
+    /// A failed fsync stopped the writer until the process restarts.
+    FsyncFailed,
+    /// The writer thread is not running (it panicked or is unreachable).
+    WriterStopped,
+    /// A gap record did not fit the reserve (see `gap_reserve_exhausted`).
+    GapReserveExhausted,
+    /// The last storage operation failed; the next success clears it.
+    StorageFailed,
+    /// Set by the status report, not the spool: ingest is stopped, so the
+    /// events are not draining (ledger-and-query.md L5).
+    IngestStopped,
+}
+
 /// What T-14b puts into the status report (`spool.*`, `last_assigned_sequence`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpoolSnapshot {
     pub state: SpoolState,
+    /// Set exactly when `state` is `Degraded`.
+    pub degraded_reason: Option<DegradedReason>,
     pub unsent_events: u64,
     /// Serialized bytes of the unsent events.
     pub unsent_bytes: u64,
@@ -338,6 +358,8 @@ fn admits(unsent_bytes: u64, size: u64, limit: u64) -> bool {
 struct Shared {
     counters: Mutex<Counters>,
     degraded: AtomicBool,
+    /// Set on the first failed fsync, never cleared (the writer stops).
+    sync_failed: AtomicBool,
     /// Set when the writer thread has exited (also by a panic).
     dead: AtomicBool,
     capacity: AtomicU64,
@@ -441,6 +463,7 @@ impl Spool {
         let shared = Arc::new(Shared {
             counters: Mutex::new(Counters::default()),
             degraded: AtomicBool::new(false),
+            sync_failed: AtomicBool::new(false),
             dead: AtomicBool::new(false),
             capacity: AtomicU64::new(cfg.capacity_bytes),
             reserve: AtomicU64::new(cfg.gap_reserve_bytes),
@@ -618,10 +641,18 @@ impl Spool {
         let cap = sh.capacity.load(Ordering::Relaxed);
         let reserve = sh.reserve.load(Ordering::Relaxed);
         let now = (self.inner.clock)();
-        let state = if sh.degraded.load(Ordering::Relaxed)
-            || sh.dead.load(Ordering::SeqCst)
-            || sh.gap_exhausted.load(Ordering::SeqCst)
-        {
+        let degraded_reason = if sh.sync_failed.load(Ordering::SeqCst) {
+            Some(DegradedReason::FsyncFailed)
+        } else if sh.dead.load(Ordering::SeqCst) {
+            Some(DegradedReason::WriterStopped)
+        } else if sh.gap_exhausted.load(Ordering::SeqCst) {
+            Some(DegradedReason::GapReserveExhausted)
+        } else if sh.degraded.load(Ordering::Relaxed) {
+            Some(DegradedReason::StorageFailed)
+        } else {
+            None
+        };
+        let state = if degraded_reason.is_some() {
             SpoolState::Degraded
         } else if !admits(
             c.unsent_bytes,
@@ -634,6 +665,7 @@ impl Spool {
         };
         SpoolSnapshot {
             state,
+            degraded_reason,
             unsent_events: c.unsent_events,
             unsent_bytes: c.unsent_bytes,
             gap_bytes: c.gap_bytes,
@@ -1254,9 +1286,13 @@ impl Writer {
 
     fn set_degraded(&self, on: bool) {
         // Never cleared after a failed fsync: replies go out before the writer stops.
+        let sync_failed = SYNC_FAILED.get();
+        if sync_failed {
+            self.shared.sync_failed.store(true, Ordering::SeqCst);
+        }
         self.shared
             .degraded
-            .store(on || SYNC_FAILED.get(), Ordering::Relaxed);
+            .store(on || sync_failed, Ordering::Relaxed);
     }
 
     fn run(&mut self, rx: mpsc::Receiver<Cmd>) {
@@ -2741,7 +2777,9 @@ mod tests {
             "nothing is handed out"
         );
         s.acknowledged(&[uid(1)]);
-        assert_eq!(s.snapshot().state, SpoolState::Degraded);
+        let snap = s.snapshot();
+        assert_eq!(snap.state, SpoolState::Degraded);
+        assert_eq!(snap.degraded_reason, Some(DegradedReason::FsyncFailed));
         s.close().await;
     }
 
@@ -2842,6 +2880,11 @@ mod tests {
             s.snapshot().state,
             SpoolState::Degraded,
             "a later commit in the group cleared degraded"
+        );
+        assert_eq!(
+            s.snapshot().degraded_reason,
+            Some(DegradedReason::FsyncFailed),
+            "named before the writer stops"
         );
         drop(exit);
         assert_stopped(s).await;
@@ -3211,6 +3254,10 @@ mod tests {
         j.join().unwrap();
         assert!(s.next_events(5, &HashSet::new()).is_empty());
         assert_eq!(s.snapshot().state, SpoolState::Degraded);
+        assert_eq!(
+            s.snapshot().degraded_reason,
+            Some(DegradedReason::WriterStopped)
+        );
         assert_eq!(s.append(event(2)), Err(AppendError::Unavailable));
     }
 
@@ -3221,6 +3268,7 @@ mod tests {
         let sh = Arc::new(Shared {
             counters: Mutex::new(Counters::default()),
             degraded: AtomicBool::new(false),
+            sync_failed: AtomicBool::new(false),
             dead: AtomicBool::new(false),
             capacity: AtomicU64::new(1 << 30),
             reserve: AtomicU64::new(1 << 20),

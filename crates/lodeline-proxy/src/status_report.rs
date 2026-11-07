@@ -40,7 +40,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::config_sync::ConfigView;
-use crate::spool::Spool;
+use crate::spool::{DegradedReason, Spool, SpoolSnapshot};
 use crate::state_dir::{GapQueueState, OpenOutage};
 
 /// Largest answer read from the server. A 200 body lists at most 200 ids.
@@ -740,6 +740,28 @@ pub struct RegistrySnapshot {
     pub discarded_reports: u64,
 }
 
+/// `spool.state` as the status report sends it, with the reason when it is
+/// `degraded`. The local status file shows the same view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpoolView {
+    pub state: SpoolState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DegradedReason>,
+}
+
+impl SpoolView {
+    pub fn of(s: &SpoolSnapshot, ingest_stopped: bool) -> SpoolView {
+        match (s.state, s.degraded_reason) {
+            // Events are not draining, so the list view must not say ok.
+            (SpoolState::Ok, _) if ingest_stopped => SpoolView {
+                state: SpoolState::Degraded,
+                reason: Some(DegradedReason::IngestStopped),
+            },
+            (state, reason) => SpoolView { state, reason },
+        }
+    }
+}
+
 /// Source of the `registry` section; see `RegistryClient::health_probe`.
 pub type RegistryProbe = Arc<dyn Fn() -> Option<RegistrySnapshot> + Send + Sync>;
 
@@ -913,11 +935,7 @@ impl StatusBuilder {
         let (spool_section, last_assigned) = match self.spool.as_ref().map(Spool::snapshot) {
             Some(s) => (
                 json!({
-                    // Events are not draining, so the list view must not say ok.
-                    "state": match s.state {
-                        SpoolState::Ok if ingest_stopped => SpoolState::Degraded,
-                        state => state,
-                    },
+                    "state": SpoolView::of(&s, ingest_stopped).state,
                     "depth_events": s.unsent_events.saturating_add(s.retained_acked_events),
                     "unsent_events": s.unsent_events,
                     "bytes": s.unsent_bytes.saturating_add(s.retained_acked_bytes),
@@ -2838,6 +2856,47 @@ mod tests {
         let v = built(&mut b);
         assert_eq!(v["spool"]["quarantined_events"], snap.quarantined_events);
         assert_eq!(v["spool"]["quarantined_bytes"], snap.quarantined_bytes);
+    }
+
+    /// A stopped ingest turns `ok` into `degraded`, and keeps the spool's own
+    /// reason or `full`.
+    #[test]
+    fn spool_view_follows_the_ingest_stop() {
+        use crate::spool::DegradedReason as R;
+        let mut snap = crate::spool::SpoolSnapshot {
+            state: SpoolState::Ok,
+            degraded_reason: None,
+            unsent_events: 0,
+            unsent_bytes: 0,
+            gap_bytes: 0,
+            retained_acked_bytes: 0,
+            quarantined_bytes: 0,
+            capacity_bytes: 1,
+            gap_reserve_bytes: 0,
+            oldest_unsent_age_seconds: None,
+            last_assigned_sequence: 0,
+            quarantined_events: 0,
+            retained_acked_events: 0,
+            pending_gaps: 0,
+            gap_reserve_exhausted: false,
+        };
+        let view = |s: &crate::spool::SpoolSnapshot, stopped| {
+            let v = SpoolView::of(s, stopped);
+            (v.state, v.reason)
+        };
+        assert_eq!(view(&snap, false), (SpoolState::Ok, None));
+        assert_eq!(
+            view(&snap, true),
+            (SpoolState::Degraded, Some(R::IngestStopped))
+        );
+        snap.state = SpoolState::Full;
+        assert_eq!(view(&snap, true), (SpoolState::Full, None));
+        snap.state = SpoolState::Degraded;
+        snap.degraded_reason = Some(R::FsyncFailed);
+        assert_eq!(
+            view(&snap, true),
+            (SpoolState::Degraded, Some(R::FsyncFailed))
+        );
     }
 
     /// A builder without a spool still validates (unit-test path only).

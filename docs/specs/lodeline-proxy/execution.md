@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,43 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 로컬 status의 spool 상태 (`feat/proxy-status-spool`)
+
+#512 리뷰 후속 A. 문제: fsync 실패로 writer가 멈춰도 호스트의 운영자는 그것을 볼 수 없었다. status report만 `spool.state: degraded`를
+보냈고, 로컬 `status.json`과 `lodeline-proxy health`에는 spool 칸이 없었다(멈춘 writer 전체가 같았다).
+
+수정: 새 원천을 만들지 않고 status report의 값을 그대로 쓴다. `status_report::SpoolView::of(snapshot, ingest_stopped)`가 report의
+`spool.state`와 로컬 view를 함께 만든다(ingest가 멈추면 `ok`가 `degraded`가 되는 규칙도 한 곳). `SpoolSnapshot`은 `degraded_reason`을
+가지며 `state`는 그 값에서 정해진다(reason이 있을 때만 `degraded`). reason 우선순위: `fsync_failed`(`Shared::sync_failed`, 첫 fsync 실패에
+`set_degraded`가 켜고 끄지 않음, writer가 멈추기 전의 응답부터 보인다) > `writer_stopped`(`dead`) > `gap_reserve_exhausted` >
+`storage_failed`(`degraded`, 다음 성공에 지워짐). `ingest_stopped`는 report 쪽 이유다. reason은 로컬에만 있고 wire `SpoolStatus`는 바뀌지
+않는다. lifecycle의 `follow_spool_view`가 1초마다 snapshot을 읽어 바뀌었을 때만 `status.json`을 다시 쓴다(종료 신호에서 멈춘다).
+
+`status.json` 예(fsync 실패 뒤): `"spool": {"state": "degraded", "reason": "fsync_failed"}`. 정상은 `{"state": "ok"}`. 칸은 선택이다.
+이전 proxy의 파일과 시작 직후(첫 읽기 전)에는 없다. 이 build가 모르는 값(새 proxy의 reason)은 칸이 없는 것으로 읽어 파일의 나머지는 그대로
+읽힌다(`absent_if_unreadable`). `health` 출력에는 `ingest_stopped` 다음 줄이 하나 는다: `spool: Ok`, `spool: Full`,
+`spool: Degraded (FsyncFailed)`, 칸이 없으면 `spool: unknown`. 종료 코드는 그대로다. 계약이 상태별 종료 코드를 정하지 않으며, `health`는
+"프로세스가 살아 있고 status를 읽을 수 있음"만 본다.
+
+`status.json` 독자(확인): `lodeline-proxy`(`read_status`: 시작 시 이전 config state, `health`), e2e 시험(`read_status`), loadgen
+`stack.sh`(`health`에서 `^forwarding: true`만 grep), [aws-smoke-test.md](aws-smoke-test.md)의 `health` 기대값. packaging·systemd·
+`apps/manager`는 읽지 않는다.
+
+시험: `lifecycle.rs` `a_failed_spool_fsync_is_shown_in_the_local_status`(실제 `run_tuned`, `health`가 먼저 `ok`, 시험 VFS
+`fail_next_sync`로 WAL fsync를 실패시킨 뒤 `degraded`/`fsync_failed`), `a_status_file_with_an_absent_or_unknown_spool_section_reads`,
+`status_report.rs` `spool_view_follows_the_ingest_stop`, `spool.rs`의 `assert_stopped`·`a_failed_fsync_reports_degraded_before_the_writer_stops`
+(reason `fsync_failed`)·`dead_writer_is_reported_degraded`(`writer_stopped`), `tests/cli.rs` `run_lock_signal_and_health`(실행 중 binary의
+`spool: Ok`)와 `health_prints_the_spool_state`(fsync_failed·full·칸 없음 파일). mutation(한 번에 하나씩, 각각 하나 이상 실패): snapshot의
+`fsync_failed` 분기 제거(7), `set_degraded`의 `sync_failed` 기록 제거(7), `set_spool`이 쓰지 않음(1), 관대한 decode 제거(1), `SpoolView::of`의
+ingest 규칙 제거(2), reason 버림(2), `health`의 reason 출력 제거(1).
+
+후속 B(fail-stop 코드 추가)는 하지 않았다. bundled SQLite 3.45.0(`libsqlite3-sys` 0.28.0 `sqlite3/sqlite3.c`)에서 fsync 실패가 나오는
+곳은 `unixSync`의 `SQLITE_IOERR_FSYNC`(41757), `unixDelete`의 dirSync `SQLITE_IOERR_DIR_FSYNC`(44517), `winSync`의 `SQLITE_IOERR_FSYNC`(49318)다.
+`unixSync`의 디렉터리 fsync 실패는 무시된다(41770). 다른 코드로 나오는 경로는 `winSync`의 `FlushViewOfFile` 실패 `SQLITE_IOERR_MMAP`(49303)
+하나인데, mmap 영역이 있을 때만이다. `SQLITE_DEFAULT_MMAP_SIZE`는 0(15052)이고 spool은 `mmap_size`를 설정하지 않는다. proxy-locking의
+conch fsync(45572)는 결과를 버리고 이 build에서 쓰지 않는다. 그래서 지금 두 코드가 동기화 실패를 모두 덮는다. `SQLITE_IOERR`나
+`SQLITE_IOERR_TRUNCATE`는 쓰기·자르기 실패로, 그 commit이 실패로 돌아오므로 이미 성공한 것으로 믿는 데이터가 없다.
 
 ## 2026-11-07 e2e 시험의 state_dir lock 재시도 (`test/proxy-e2e-lock-retry`)
 
@@ -81,7 +118,7 @@ writer thread의 표시(`SYNC_FAILED`)를 켜고 끄지 않는다. writer의 SQL
 | 닫을 때 SQLite의 checkpoint | `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`로 끈다. 재시작이 WAL을 복구한다 |
 
 운영자가 보는 것: relay는 새 호출에 503 `audit_unavailable`, 서버로 가는 status report는 `spool.state: degraded`, 로그에는 writer가 멈출 때
-`spool fsync failed` error 한 줄. 로컬 `status.json`과 `lodeline-proxy status`에는 spool 상태 칸이 없다(기존 멈춘 writer와 같음). 종료는 그대로 끝난다
+`spool fsync failed` error 한 줄. 로컬 `status.json`과 `lodeline-proxy health`에는 spool 상태 칸이 없다(기존 멈춘 writer와 같음, `feat/proxy-status-spool`에서 더함). 종료는 그대로 끝난다
 (`spool.close()`는 이미 끝난 thread를 join한다). 재시작은 WAL을 복구하고, 실패한 묶음의 행은 start만 있는 기록으로 남는다(전달 없음, 과다 기록 방향).
 
 시험(`spool.rs`, `sync_vfs.rs`에 한 번만 실패하는 `fail_next_sync`를 더함): `a_failed_group_fsync_refuses_every_start`(뒤 호출 거절·전달 없음·

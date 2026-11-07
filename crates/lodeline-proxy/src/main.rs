@@ -52,6 +52,13 @@ fn main() -> ExitCode {
                     println!("config_state: {:?}", s.config_state);
                     println!("forwarding: {}", s.forwarding);
                     println!("ingest_stopped: {}", s.ingest_stopped);
+                    match s.spool {
+                        Some(v) => match v.reason {
+                            Some(r) => println!("spool: {:?} ({r:?})", v.state),
+                            None => println!("spool: {:?}", v.state),
+                        },
+                        None => println!("spool: unknown"),
+                    }
                     println!("updated_at: {}", s.updated_at);
                 }
                 None => println!("alive: {}\nstatus: unavailable", h.alive),
