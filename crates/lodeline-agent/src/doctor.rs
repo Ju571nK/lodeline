@@ -1281,6 +1281,37 @@ mod codex_hooks_feature_tests {
     }
 
     #[test]
+    fn requirements_pin_names_the_administrator_file() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, codex, etc) = (
+            root.path().join("state"),
+            root.path().join("codex"),
+            root.path().join("etc"),
+        );
+        for dir in [&state, &codex, &etc] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            state.join("hook-registration-codex.json"),
+            serde_json::json!({ "settings_path": codex.join("hooks.json") }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(codex.join("config.toml"), "[features]\nhooks = true\n").unwrap();
+        std::fs::write(etc.join("requirements.toml"), "[features]\nhooks = false\n").unwrap();
+        let r = check_codex_hooks_feature(&state, &etc).unwrap();
+        assert_eq!(r.level, CheckLevel::Warn);
+        assert_eq!(
+            r.message,
+            format!(
+                "hook codex: Codex does not run hooks, so it never runs this one: the \
+                 administrator's requirements file {} pins `hooks = false`. A change to your own \
+                 Codex config does not take effect while that pin is set.",
+                etc.join("requirements.toml").display()
+            )
+        );
+    }
+
+    #[test]
     fn malformed_config_warns() {
         let (_root, r) = doctor(Some("[features\n"));
         let r = r.unwrap();

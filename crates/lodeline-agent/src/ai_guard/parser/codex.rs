@@ -291,8 +291,11 @@ fn hooks_feature_enabled<'a>(
         .ok()
         .and_then(|text| toml::from_str::<Value>(&text).ok());
     let configs: Vec<_> = configs.into_iter().flatten().map(|c| ((), c)).collect();
-    lodeline_core::codex::hooks_disabled_by(requirements.as_ref().map(|r| ((), r)), &configs)
-        .is_none()
+    // A non-bool value stops Codex from loading at all; like a malformed file, it keeps the hooks.
+    !matches!(
+        lodeline_core::codex::hooks_disabled_by(requirements.as_ref().map(|r| ((), r)), &configs),
+        Ok(Some(_))
+    )
 }
 
 /// Codex merges config layers with the higher layer winning: tables merge key

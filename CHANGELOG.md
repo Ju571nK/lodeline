@@ -13,7 +13,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   Codex's `[features] hooks` is `false`, or the older `codex_hooks` is `false`. Codex then runs
   no hooks, so the registered hook never runs. Before, both commands reported success and said
   nothing. The warning names the file and the key and says to set `hooks = true` under
-  `[features]`. It reads the user `config.toml` (`$CODEX_HOME` or `~/.codex`), the system
+  `[features]`. For a pin in the system `requirements.toml`, which an administrator manages, it
+  says instead that the pin is set there and that a change to the user's own Codex config does
+  not take effect. A `hooks` or `codex_hooks` value that is not `true` or `false` stops Codex
+  from loading its config, and the warning says so. It reads the user `config.toml` (`$CODEX_HOME` or `~/.codex`), the system
   `config.toml`, and a pin in the system `requirements.toml`, as AI Guard does. A config that
   does not parse gets a warning too. The install still writes the hook, and exit codes do not
   change. `lodeline doctor` reports the same check for a registered Codex hook and, as for any
