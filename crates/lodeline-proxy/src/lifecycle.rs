@@ -808,19 +808,29 @@ async fn run_inner(
     };
     proxy = proxy.with_sink(sink, hasher);
     let lc3 = lc.clone();
+    // One grace from the signal bounds the whole shutdown (systemd's
+    // TimeoutStopSec counts from there): each phase after the relay drain gets
+    // only what is left.
+    let signaled = std::sync::OnceLock::new();
     let served = proxy
         .serve(listener, acceptor, async {
             shutdown.await;
+            let _ = signaled.set(tokio::time::Instant::now());
             let _ = lock(&lc3).set_run_state(RunState::Stopping);
         })
         .await;
+    let deadline = signaled
+        .get()
+        .copied()
+        .unwrap_or_else(tokio::time::Instant::now)
+        + Duration::from_secs(b.limits.shutdown_grace_secs);
     // NOTE: Signal handlers stay installed during drain, so a second SIGTERM is
     // swallowed and only SIGKILL ends the process. Fine under systemd
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
     // The relay stopped: drain the audit producer first (its completions and
     // cancels reach the spool, or are counted as a gap), before any task stops.
     let invocation_accounted = if let Some(h) = invocation_handle.take() {
-        h.shutdown(Duration::from_secs(b.limits.shutdown_grace_secs))
+        h.shutdown(deadline.saturating_duration_since(tokio::time::Instant::now()))
             .await
     } else {
         true
@@ -853,12 +863,15 @@ async fn run_inner(
     // clone of the gap queue (whose persister holds this state_dir lock) or of
     // the registry. Wait for it, so no write lands after `stopped` and a restart
     // in this process finds the lock free.
-    let settle = tokio::time::Instant::now() + Duration::from_secs(b.limits.shutdown_grace_secs);
     while invocation_gaps.as_ref().is_some_and(|g| g.handles() > 1)
         || registry.as_ref().is_some_and(|r| r.handles() > 1)
     {
-        if tokio::time::Instant::now() >= settle {
-            tracing::warn!("blocking work still holds the proxy state after the grace");
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                gap_queue_handles = invocation_gaps.as_ref().map(|g| g.handles()),
+                registry_handles = registry.as_ref().map(|r| r.handles()),
+                "blocking work still holds the proxy state after the grace"
+            );
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

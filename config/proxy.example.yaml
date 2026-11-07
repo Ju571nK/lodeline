@@ -52,6 +52,9 @@ limits:
   connect_timeout_secs: 5
   response_idle_timeout_secs: 30
   call_timeout_secs: 120
+  # One budget for the whole shutdown after SIGTERM. Keep it below the
+  # service's TimeoutStopSec (45 in the shipped unit), or systemd kills the
+  # proxy before it records `stopped`.
   shutdown_grace_secs: 30
   inventory_max_pages: 100
   inventory_max_tools: 10000

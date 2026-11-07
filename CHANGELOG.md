@@ -9,6 +9,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-proxy run` now finishes its shutdown within one `limits.shutdown_grace_secs` after
+  the stop signal. Before, the relay drain, the audit producer drain and the wait for cancelled
+  blocking work each had a full grace of their own. With the default 30 seconds a stalled
+  shutdown could take about 90 seconds, past the shipped unit's `TimeoutStopSec=45`, and systemd
+  killed the proxy before it recorded `stopped`. The grace now counts once from the signal, and
+  each later step gets only the time left. Only the audit producer's gap handover keeps its own
+  5-second bound, so the default still fits in 45 seconds. What each step does when its time
+  runs out is unchanged. When the wait for blocking work times out, the warning now names how
+  many handles of the gap queue and the registry are still held. If you raise
+  `shutdown_grace_secs`, raise `TimeoutStopSec` too.
 - `lodeline-hook install --agent codex` and `lodeline-hook verify --agent codex` now warn when
   Codex's `[features] hooks` is `false`, or the older `codex_hooks` is `false`. Codex then runs
   no hooks, so the registered hook never runs. Before, both commands reported success and said

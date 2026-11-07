@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,20 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 종료 grace 하나로 묶기 (`fix/proxy-shutdown-deadline`)
+
+#507 리뷰 후속 N1·N2. 문제: `run_inner`의 종료 단계가 grace를 각자 새로 받았다. relay drain(`serve`, grace), 감사 producer drain
+(`InvocationHandle::shutdown(grace)`), #507의 blocking 작업 대기(grace)가 이어져 최악 약 3 × grace(기본 90초)였다. 배포 유닛의
+`TimeoutStopSec=45`를 넘으면 systemd가 SIGKILL하고 `stopped`와 durable 집계가 기록되지 않는다.
+
+수정(`lifecycle.rs`): shutdown future가 끝난 시각(신호)을 `OnceLock`에 남기고 `deadline = 신호 + grace`를 한 번 계산한다. 감사 drain은
+남은 시간만 받고, blocking 작업 대기도 같은 deadline에서 끝난다. 각 단계의 시간 초과 동작(손실 집계, `invocation_accounted=false` 등)은
+그대로다. 감사 producer의 gap handover 5초 상한은 grace 밖에 그대로 남는다(기본 30 + 5초 < 45초). blocking 작업 대기가 끝날 때 경고에
+gap queue·registry handle 수를 남긴다(N2). 유닛 주석과 `config/proxy.example.yaml`에 grace를 올리면 `TimeoutStopSec`도 올리라고 적었다.
+
+시험: `lifecycle::tests::shutdown_phases_share_one_grace`(grace 2초, 요청 head 중간에 멈춘 client가 relay drain을 잡고, 시험 전용
+`RunTuning::gaps_out`으로 받은 gap queue 사본이 blocking 작업 대기를 잡음). 수정 전 4.05초(2 × grace)로 실패, 수정 후 통과(시험 전체 2.3초).
 
 ## 2026-11-07 spool start 기록 group commit (`perf/proxy-group-commit`)
 
