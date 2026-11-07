@@ -198,3 +198,22 @@ M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 �
   모두를 덮는다. start는 그 fsync가 끝난 뒤에만 local ack를 받으므로 upstream 전달 전 durable 조건은 그대로다. 혼자 온 start는 전처럼 자기 FULL
   commit을 한다. 더 올 append를 기다리는 타이머는 없다. 그 fsync가 실패하면 묶음의 start는 모두 거절되고, 이미 commit된 행은 crash 뒤와 같은
   start만 있는 기록으로 남을 수 있다(전달은 없음).
+
+## spool fsync 실패 뒤 fail-stop (2026-11-07, orchestrator)
+
+[execution.md](execution.md) `fix/spool-fsync-failure` 절의 재현에서, WAL이나 DB fsync가 한 번 실패한 뒤 writer가 계속 돌며 다음 fsync 성공을 믿었다.
+Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시할 수 있어서([PostgreSQL wiki "Fsync Errors"](https://wiki.postgresql.org/wiki/Fsync_Errors)),
+그 성공은 실패한 page가 디스크에 있다는 뜻이 아니다. 전원 손실 뒤 Ok를 받은 start가 사라지고 넘긴 sequence가 다시 배정될 수 있었다.
+
+- fsync 실패(`SQLITE_IOERR_FSYNC`, `SQLITE_IOERR_DIR_FSYNC`)는 재시도하지 않는다. spool writer는 그 프로세스에서 영구히 멈춘다(fail-stop).
+  뒤의 append, ACK, quarantine, checkpoint, `next_events` 전달은 모두 거절되거나 일어나지 않는다. 실패한 묶음의 start는 전처럼 모두 `Storage`로
+  거절되고, 뒤의 호출은 `Unavailable`이다(relay는 둘 다 503). spool은 재시작까지 `degraded`로 보고한다. 기존의 멈춘 writer와 같은 경로이며 새 상태나
+  reason은 없다.
+- 닫을 때 SQLite가 하는 checkpoint를 끈다. 실패한 page를 DB로 복사하지 않고, 재시작이 checksum으로 WAL을 복구하게 둔다.
+- 근거: 같은 파일의 fsync 재시도는 Linux에서 성공을 보고하지만 아무것도 증명하지 않는다. PostgreSQL도 2018년 이후 fsync 실패에 PANIC하고
+  재시작 때 WAL에서 복구한다. degraded로 계속 받는 안이나 재시도 안은 이 증명 공백을 남긴다.
+- 실패한 묶음에서 이미 NORMAL commit된 행은 재시작 뒤 start만 있는 기록으로 남아 서버로 간다(전달 없음, 과다 기록 방향). 2026-11-07 group commit
+  항목의 과다 기록과 같다.
+- 남는 한계: 재시작의 WAL 복구와 첫 checkpoint는 WAL을 page cache로 읽는다. 실패한 page가 cache에 남아 있으면 디스크에 실제로 있었는지 모른 채
+  DB로 복사된다. 재시작 전 전원 손실이나 OS crash는 그 구간을 잃는다. 그 구간의 start는 Ok를 받지 않았으므로 전달된 호출은 없다. 완전히 안전하지는
+  않으며, 운영자는 재시작 전에 디스크를 확인해야 한다.
