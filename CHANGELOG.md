@@ -42,12 +42,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   call commits as before with no added wait. If that fsync fails, every start record in the
   group is refused. On a busy shared local machine at 64 concurrent clients, proxied throughput
   rose from 222 to 756 calls/s (median of 3 alternating runs). Treat that as indicative only.
-  On an AWS t4g.small (2 vCPU, aarch64, Amazon Linux 2023) with the spool on a 3,000 IOPS gp3
-  volume, proxied throughput at 64 concurrent clients rose from 471 to 752 calls/s and at 32
-  from 468 to 742, and a single client stayed at about 355 calls/s (median of 3 alternating
-  rounds, no errors). In those closed-loop runs the added p50 latency fell (117 to 27 ms at 64
-  clients) and the added p99 rose (212 to 557 ms). At 100 calls/s on a fresh stack the added
-  latency did not change (p99 about 15 ms). See `docs/specs/lodeline-proxy/decisions.md` and
+  On one AWS t4g.small (2 vCPU, aarch64, Amazon Linux 2023; spool and local collector on the
+  same 3,000 IOPS gp3 volume), proxied throughput at 64 concurrent clients rose from 471 to 752
+  calls/s and at 32 from 468 to 742. A single client stayed at about 355 calls/s (median of 3
+  alternating rounds, no errors). Under that closed-loop load the median added latency fell
+  (p50 117 to 27 ms at 64 clients), but the tail grew: p95 178 to 340 ms and p99 212 to 557 ms
+  at 64 clients, and p99 124 to 338 ms at 32. The cause of the tail growth was not measured.
+  At 100 calls/s on a fresh stack (2 rounds per side) added p99 did not change (about 15 ms).
+  Right after a heavy closed-loop run on the same disk it was higher.
+  See `docs/specs/lodeline-proxy/decisions.md` and
   `docs/specs/lodeline-proxy/execution.md` (2026-11-07).
 
 ## [0.14.0] - 2026-11-07

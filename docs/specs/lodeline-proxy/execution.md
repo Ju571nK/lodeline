@@ -106,11 +106,11 @@ closed loop의 꼬리: 변경은 p50이 줄고 p95·p99가 커졌다(동시성 6
 
 open loop의 꼬리: closed 뒤 같은 stack에서는 변경의 p95·p99가 컸지만 run 순서 때문이다. 볼륨의 분당 VolumeWriteOps(CloudWatch)를
 보면 open run의 direct 절반(proxy에 호출이 없음)에서도 디스크가 3,000 IOPS 한도에 붙어 있었다. 기준은 약 3.5분 뒤 풀려 proxied
-절반이 약 2,120 IOPS였다. 변경은 closed 단계에서 기록을 약 30% 더 남겨 330초 내내 약 3,015 IOPS였다. 호출이 없을 때 쓰는 프로세스는
+절반이 약 2,120 IOPS였다. 변경은 closed 단계 네 개에서 upstream 호출을 약 48–50% 더 처리했고(warm-up 포함, 3 round, 이 stack의 spool이 더 커졌다) 330초 내내 약 3,015 IOPS였다. 호출이 없을 때 쓰는 프로세스는
 local collector `lodeline-server`였다(write syscall 13,020/s, 26.6 MB/s, proxy는 314/s). 앞 run 없는 새 stack에서는 차이가 없다(위 표).
 
-그 밖: proxy VmHWM 기준 16.3–16.7 MiB, 변경 18.6–19.2 MiB. cgroup memory.peak 172 MB → 221 MB(spool page cache 포함, 변경이 호출을
-약 30% 더 처리함). FD 25–26. 인스턴스 EBSIOBalance%는 100에서 57%로 줄었고(고갈 아님) EBSByteBalance%는 90% 이상이었다. 앞 절의
+그 밖: proxy VmHWM 기준 16.3–16.7 MiB, 변경 18.6–19.2 MiB. cgroup memory.peak 172 MB → 221 MB(spool page cache 포함, 변경이 이 stack에서 호출을
+더 처리함. closed 네 단계와 open 단계를 합친 upstream 호출이 3 round에서 33–34% 많았다). FD 25–26. 인스턴스 EBSIOBalance%는 100에서 57%로 줄었고(고갈 아님) EBSByteBalance%는 90% 이상이었다. 앞 절의
 수치(281 / 313 / 378 / 416 calls/s)는 #503 전이고 principal 8 × route 4라 이 run과 직접 비교하지 않는다.
 
 미검증: tmpfs 전후, closed loop 꼬리의 원인, collector를 다른 디스크나 호스트에 둔 구성, 실제 전원 차단(모사만 함), Rocky 9·목표 VM.
