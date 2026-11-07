@@ -27,12 +27,13 @@ ledger는 남아 proxy는 그대로 인증된다. 파일 손실, 오래된 백�
 수정 전 30초 동안 `unsent_events=1`, server metadata 0건, status `sync_stalled: true`로 남아 `timed out waiting for: the entry is uploaded again
 and the start accepted`로 실패했다.
 
-수정(`ingest_client.rs`, `registry_client.rs`): `IngestOutcome::Pending`이 `pending_metadata_refs`를 함께 가진다. ingest client는 424마다
-`EventSource::metadata_pending(refs)`를 부른다(기본은 아무것도 안 함). `CheckedSource`가 이를 `RegistryStore::mark_unacked`로 받아, 다음
-registry sync가 entry를 다시 올린다. inventory 424와 같은 함수다. `mark_unacked`는 이 proxy의 acked entry만 pending으로 돌린다. proxy가 모르는
+수정(`ingest_client.rs`, `registry_client.rs`): `IngestOutcome::Pending`이 `pending_metadata_refs`를 함께 가진다. ref는 보낸 event가 쓰는
+ref만 남기고 중복을 없앤다(event id를 보낸 batch로 거르는 것과 같다). ingest client는 424마다 `EventSource::metadata_pending_async(refs)`를
+부른다(기본은 동기 `metadata_pending`, 그 기본은 아무것도 안 함). `CheckedSource`가 이를 `spawn_blocking` 안의 `RegistryStore::mark_unacked`로
+받아(`next_events_async`처럼 SQLite를 async worker 밖에서), 다음 registry sync가 entry를 다시 올린다. inventory 424와 같은 함수다. `mark_unacked`는 이 proxy의 acked entry만 pending으로 돌린다. proxy가 모르는
 ref, pending·poisoned·quarantined entry는 바뀌지 않는다. 재업로드는 event 424 한 번에 최대 한 번이고, event 재시도는 기존 보류 backoff(최대
 `max_backoff`)를 따르므로 반복이 늘어나지 않는다. server는 같은 entry의 재업로드를 200으로 받는다. 수정 뒤 같은 시험은 1.05초에 통과한다.
-mutation(`metadata_pending` 호출 제거)으로 같은 시험이 다시 실패함을 확인했다.
+mutation(`metadata_pending_async` 호출 제거)으로 같은 시험이 다시 실패함을 확인했다.
 
 ## 2026-11-07 spool fsync 실패 뒤 fail-stop (`fix/spool-fsync-failure`)
 

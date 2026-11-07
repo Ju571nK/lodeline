@@ -120,6 +120,9 @@ pub trait EventSource: Send {
     ) -> SourceFuture<'a, ()> {
         Box::pin(async move { self.quarantined(event_ids, code) })
     }
+    fn metadata_pending_async<'a>(&'a mut self, refs: &'a [String]) -> SourceFuture<'a, ()> {
+        Box::pin(async move { self.metadata_pending(refs) })
+    }
 }
 
 /// Boxed future returned by the async [`EventSource`] methods.
@@ -186,8 +189,13 @@ fn quarantine_code(c: &ErrorCode) -> QuarantineCode {
 }
 
 /// Reduce an answer to an outcome. `sent` are the event ids in the request, in
-/// order (the `index` of a 422 item refers to this order). Pure.
-pub fn classify_ingest(reply: Option<&StatusReply>, sent: &[String]) -> IngestOutcome {
+/// order (the `index` of a 422 item refers to this order); `sent_refs` are the
+/// metadata refs those events use. Pure.
+pub fn classify_ingest(
+    reply: Option<&StatusReply>,
+    sent: &[String],
+    sent_refs: &[String],
+) -> IngestOutcome {
     let Some(r) = reply else {
         return IngestOutcome::Unreachable;
     };
@@ -268,13 +276,15 @@ pub fn classify_ingest(reply: Option<&StatusReply>, sent: &[String]) -> IngestOu
                 if ids.is_empty() {
                     ids = sent.to_vec();
                 }
-                let refs = e
+                let mut refs: Vec<String> = e
                     .error
                     .pending_metadata_refs
                     .unwrap_or_default()
                     .iter()
                     .map(|m| m.as_str().to_string())
+                    .filter(|m| sent_refs.contains(m))
                     .collect();
+                dedup(&mut refs);
                 IngestOutcome::Pending { ids, refs }
             }
             _ => IngestOutcome::Retry,
@@ -691,8 +701,14 @@ impl IngestClient {
         }
 
         let sent = batch.ids;
+        let in_batch: HashSet<&str> = sent.iter().map(String::as_str).collect();
+        let sent_refs = crate::registry_client::metadata_refs(
+            events
+                .iter()
+                .filter(|e| in_batch.contains(e.event_id.as_str())),
+        );
         let reply = transport.post_events(batch.body).await;
-        let outcome = classify_ingest(reply.as_ref(), &sent);
+        let outcome = classify_ingest(reply.as_ref(), &sent, &sent_refs);
         let progressed = self.apply(source, &outcome, &sent, now).await;
         tracing::info!(
             outcome = outcome_label(&outcome),
@@ -826,7 +842,7 @@ impl IngestClient {
                 }
             }
             IngestOutcome::Pending { ids, refs } => {
-                source.metadata_pending(refs);
+                source.metadata_pending_async(refs).await;
                 let mut held = false;
                 for id in ids {
                     if !self.holds.contains_key(id) && self.holds.len() >= MAX_HELD_EVENTS {
@@ -1135,7 +1151,9 @@ mod tests {
     #[test]
     fn classify_every_answer_class() {
         let sent = ids(&[1, 2, 3]);
-        let c = |r: Option<StatusReply>| classify_ingest(r.as_ref(), &sent);
+        let r900 = "00000000-0000-8000-8000-000000000900".to_string();
+        let sent_refs = vec![r900.clone()];
+        let c = |r: Option<StatusReply>| classify_ingest(r.as_ref(), &sent, &sent_refs);
         assert_eq!(
             c(ok(&[1, 99], &[2])),
             IngestOutcome::Done { ids: ids(&[1, 2]) }
@@ -1196,6 +1214,19 @@ mod tests {
             IngestOutcome::Pending {
                 ids: ids(&[2]),
                 refs: vec!["00000000-0000-8000-8000-000000000900".into()]
+            }
+        );
+        // a ref no sent event uses is dropped; duplicates collapse
+        assert_eq!(
+            c(reply(
+                424,
+                json!({"error": {"code": "metadata_ref_pending", "message": "x",
+                    "items": [{"index": 1, "event_id": uid(2), "code": "metadata_ref_pending"}],
+                    "pending_metadata_refs": [r900, r900, "00000000-0000-8000-8000-000000000999"]}})
+            )),
+            IngestOutcome::Pending {
+                ids: ids(&[2]),
+                refs: vec![r900.clone()]
             }
         );
         assert_eq!(
