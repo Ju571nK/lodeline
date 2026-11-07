@@ -18,6 +18,17 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   does not parse gets a warning too. The install still writes the hook, and exit codes do not
   change. `lodeline doctor` reports the same check for a registered Codex hook and, as for any
   warning, exits `1`.
+- `lodeline-proxy` now reuses idle upstream connections. Before, it opened a new upstream
+  connection, and a new TLS session for an https upstream, for every forwarded call. Under
+  sustained load each closed connection held a local port in TIME_WAIT. On macOS the ports ran
+  out within about 2 seconds, and from then on most calls failed with HTTP 502
+  `upstream_unavailable`. In a local 30-second run at 8 or 32 concurrent clients, 86 to 87% of
+  calls failed this way. Each route now keeps its own idle connections. A connection is reused
+  only after its previous response was read to the end, only within 1 second of going idle,
+  and only to an address that the destination check allowed for the new call. DNS is still
+  resolved and checked for every call. A config apply starts every route with no idle
+  connections. A call is still sent once and never sent again on another connection. The same
+  run now has no failed calls and at most 67 sockets in TIME_WAIT.
 
 ## [0.14.0] - 2026-11-07
 

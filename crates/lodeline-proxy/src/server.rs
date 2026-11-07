@@ -932,28 +932,35 @@ async fn handle_inner(req: Request<Incoming>, sh: &Arc<Shared>) -> Response<Resp
     *up_req.uri_mut() = uri;
     *up_req.headers_mut() = headers;
 
-    let connect_for = Duration::from_secs(lim.connect_timeout_secs);
-    let io = match connect(sh, route, &addrs, connect_for).await {
-        Ok(io) => io,
-        Err(ConnectError::Timeout) => bail!(
-            fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
-            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectTimeout)
-        ),
-        Err(ConnectError::Io) => bail!(
-            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
-            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectFailed)
-        ),
+    let (mut sender, peer) = match route.upstream_pool.take(&addrs) {
+        Some(c) => c,
+        None => {
+            let connect_for = Duration::from_secs(lim.connect_timeout_secs);
+            let (io, peer) = match connect(sh, route, &addrs, connect_for).await {
+                Ok(c) => c,
+                Err(ConnectError::Timeout) => bail!(
+                    fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+                    Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectTimeout)
+                ),
+                Err(ConnectError::Io) => bail!(
+                    fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+                    Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectFailed)
+                ),
+            };
+            let (sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(io)).await
+            {
+                Ok(p) => p,
+                Err(_) => bail!(
+                    fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+                    Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectFailed)
+                ),
+            };
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            (sender, peer)
+        }
     };
-    let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(io)).await {
-        Ok(p) => p,
-        Err(_) => bail!(
-            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
-            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectFailed)
-        ),
-    };
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
 
     // M3: the dispatch decision. A cancel that got here first wins and the
     // request is never written; otherwise the request is dispatched and any
@@ -966,12 +973,12 @@ async fn handle_inner(req: Request<Incoming>, sh: &Arc<Shared>) -> Response<Resp
         c.mark_dispatched();
     }
 
-    // One fresh connection per exchange and one send: a failed exchange is never
-    // retried (PX-015). First byte = response headers, bounded by the idle limit
-    // and the call deadline.
+    // One send: a failed exchange is never retried, on this connection or a new
+    // one (PX-015). First byte = response headers, bounded by the idle limit and
+    // the call deadline.
     let first_byte =
         (Instant::now() + Duration::from_secs(lim.response_idle_timeout_secs)).min(call_deadline);
-    let resp = match tokio::time::timeout_at(first_byte, sender.send_request(up_req)).await {
+    let resp = match tokio::time::timeout_at(first_byte, sender.try_send_request(up_req)).await {
         Err(_) => bail!(
             fixed(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
             Resolution::after_dispatch(
@@ -980,6 +987,12 @@ async fn handle_inner(req: Request<Incoming>, sh: &Arc<Shared>) -> Response<Resp
                 Cause::FirstByteTimeout,
                 None
             )
+        ),
+        // hyper hands the request back only when no byte of it was written: a
+        // pooled connection that closed first.
+        Ok(Err(e)) if e.message().is_some() => bail!(
+            fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
+            Resolution::not_sent(Outcome::TransportFailure, Cause::ConnectFailed)
         ),
         Ok(Err(_)) => bail!(
             fixed(StatusCode::BAD_GATEWAY, "upstream_unavailable"),
@@ -992,6 +1005,7 @@ async fn handle_inner(req: Request<Incoming>, sh: &Arc<Shared>) -> Response<Resp
         ),
         Ok(Ok(r)) => r,
     };
+    route.upstream_pool.put_when_idle(sender, peer);
 
     let (rparts, rbody) = resp.into_parts();
     let status = rparts.status;
@@ -1349,7 +1363,7 @@ async fn upstream_delete(
         .path
         .parse::<http::Uri>()
         .map_err(|_| ConnectError::Io)?;
-    let io = connect(sh, route, &addrs, connect_for).await?;
+    let (io, _) = connect(sh, route, &addrs, connect_for).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
         .await
         .map_err(|_| ConnectError::Io)?;
@@ -1534,19 +1548,20 @@ fn cancelled_before_dispatch(sh: &Shared, mut ctx: CallCtx) -> Response<RespBody
 
 /// Connect to one of the CHECKED addresses (in order, never re-resolving), and
 /// complete the TLS handshake for https. The whole step is bounded by `limit`.
+/// Returns the address it connected to.
 async fn connect(
     sh: &Shared,
     route: &Route,
     addrs: &[SocketAddr],
     limit: Duration,
-) -> Result<Box<dyn Io>, ConnectError> {
+) -> Result<(Box<dyn Io>, SocketAddr), ConnectError> {
     let attempt = async {
         let mut last = io::Error::from(io::ErrorKind::NotFound);
         for a in addrs {
             match TcpStream::connect(a).await {
                 Ok(tcp) => {
                     let _ = tcp.set_nodelay(true);
-                    return wrap_tls(sh, route, tcp).await;
+                    return wrap_tls(sh, route, tcp).await.map(|io| (io, *a));
                 }
                 Err(e) => last = e,
             }

@@ -749,9 +749,8 @@ async fn lost_response_is_unknown_and_not_retried() {
         (c.outcome, c.delivery, c.cause),
         (Outcome::Unknown, Delivery::Unknown, Cause::SendFailed)
     );
+    // sent once, on the pooled initialize connection or a new one, never again
     assert_eq!(up.count(), 1);
-    // one connection for the harness's initialize, one for the call
-    assert_eq!(up.conns(), 2);
 }
 
 /// Upstream unreachable: nothing was sent.

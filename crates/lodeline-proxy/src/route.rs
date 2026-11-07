@@ -20,6 +20,7 @@ use lodeline_proxy_api::event::{Actor, ActorKind, AuthenticationMethod, Evidence
 
 use crate::bootstrap::{normalize_origin, split_host_port, Credential};
 use crate::limits::{Limits, RemoteLimits};
+use crate::upstream_pool::UpstreamPool;
 
 /// One principal as the later config slice will describe it. The token itself
 /// never appears here, only SHA-256 verifiers (control-plane.md §5.2).
@@ -184,6 +185,7 @@ pub struct Route {
     pub(crate) limits: Limits,
     pub(crate) scope: Option<Arc<RouteScope>>,
     pub(crate) binding: Arc<Binding>,
+    pub(crate) upstream_pool: Arc<UpstreamPool>,
 }
 
 impl std::fmt::Debug for Route {
@@ -403,6 +405,7 @@ impl RouteTable {
                     limits: limits.lowered_by(&spec.limits),
                     scope: spec.scope.clone().map(Arc::new),
                     binding,
+                    upstream_pool: Arc::default(),
                 },
             );
         }

@@ -191,9 +191,8 @@ async fn failed_exchange_is_not_retried() {
     let r = px.post("/mcp/a", Some("tok-a"), &[], PING).await;
     assert_eq!(r.status, 502);
     assert_eq!(r.text(), "{\"error\":\"upstream_unavailable\"}");
+    // sent once, on the pooled initialize connection or a new one: never a second try
     assert_eq!(up.count(), 1);
-    // one connection for the initialize, one for the call: never a second try
-    assert_eq!(up.conns(), 2);
 }
 
 // ------------------------------------------------------------ M3: request rows

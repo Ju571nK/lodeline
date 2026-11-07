@@ -34,3 +34,4 @@ pub mod status_report;
 mod sync_vfs;
 pub mod tls;
 pub mod token;
+mod upstream_pool;
