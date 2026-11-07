@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-08 · spool 묶음 transaction 하나(`perf/proxy-group-tx`), 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-08 · spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -45,6 +45,69 @@ mutation(한 번에 하나씩 되돌림): savepoint 제거(1개 실패), start�
 기록마다 commit(4). 살아남은 것 하나: commit 앞 `SYNC_FAILED` 확인 제거. 묶음 안에서 commit 전에 fsync가 일어나는 길은 page cache spill뿐인데,
 event schema가 id 길이를 제한해 시험 event로는 묶음이 cache(기본 약 2 MB)를 넘지 못했다. 실패한 fsync 뒤의 fsync를 믿지 않는다는
 fail-stop 규칙을 지키려고 남겼다.
+
+### AWS 전후 측정 (기준 `1f8f3f4`, 변경 `4737b7c`)
+
+환경: t4g.small aarch64, AL2023. proxy는 CPU 1개와 512 MiB scope, state는 gp3, principal 16개 × route 8개, local collector는 같은 호스트다.
+run마다 새 stack을 쓴다. closed loop 동시성 32와 64(warm-up 10초 + 30초)를 기준·변경·변경·기준·기준·변경 순으로 교대해 쪽마다 3 run, 새 stack open loop
+100 calls/s 한 번씩(10 + 120초), collector를 tmpfs에 둔 동시성 64 대조 한 번씩 쟀다. 16 run 모두 오류 0이고 upstream 호출 수가 일치했다(측정).
+t4g.small이라 [validation.md](validation.md)의 목표 환경(Rocky 9, 4 vCPU x86)이 아니다.
+
+판정 기준은 run 전에 정했다. 동시성 64에서 p99 160 ms 이하이고 calls/s 1,183 이상이다. 두 값은 2026-11-07 측정의 기준 c64 p99와 변경 c64 처리량에서 가져온 이 실험의 기준이며 제품 합격 목표가 아니다. 반증 조건은 호출당 proxy 쓰기 bytes가 50% 넘게 줄지 않는 것이다.
+결과는 처리량 충족, p99 미충족이다. 반증 조건은 걸리지 않아 bytes 예측은 맞았다.
+
+동시성 64, 3 run 중앙값(범위, 측정):
+
+| 항목 | 기준 | 변경 |
+|---|---|---|
+| calls/s | 1,176 (1,175–1,190) | 1,216 (1,214–1,219) |
+| client p99 (ms) | 330 (324–335) | 237 (223–278) |
+| checkpoint p50 / p99 (ms) | 77 / 333 | 103 / 279 |
+| writer 시간 중 checkpoint | 0.389 | 0.509 |
+| p99 초과 spool 대기 중 checkpoint와 겹친 비율 | 100% | 100% |
+| 호출당 proxy write_bytes (KB) | 76.8 | 24.5 (-68%) |
+| 호출당 디스크 쓰기 수 | 2.17 | 1.95 |
+| 디스크 w/s p50 | 3,039 | 3,039 |
+| 쓰기 하나의 크기 (KB) | 39.0 | 15.0 |
+| wkB/s p90 | 128,533 | 44,930 |
+| w_await p50 (ms) | 3.0 | 3.5 |
+| WAL 최대 (MiB) | 19.1 | 4.8 |
+| cgroup memory.peak (MiB) | 118 | 119 |
+
+동시성 32(측정): client p99 175 (166–179) → 266 (262–270) ms로 변경이 나쁘다. calls/s는 1,129 → 1,197, checkpoint p50은 59 → 87 ms,
+writer 시간 중 checkpoint는 0.30 → 0.48이다.
+
+open loop 100 calls/s(1 run씩, 측정): client p99 13.7 → 11.8 ms. 호출당 proxy 쓰기 73.8 대 73.4 KB로 같다. 이 속도에서는 묶음이 기록 하나라
+transaction 하나로 묶을 것이 없다.
+
+collector를 tmpfs에 둔 동시성 64 대조(1 run씩, 측정): 기준 1,440 calls/s, p99 131 ms. 변경 1,472 calls/s, p99 140 ms. 디스크 w/s p50은
+여전히 약 3,000이다(기준 3,093, 변경 3,016).
+
+해석(추정):
+
+- #518 뒤 디스크의 한계는 쓰기 바이트가 아니라 쓰기 횟수(ops)다(추정). w/s p50이 양쪽 모두 gp3 기준 3,000 IOPS 근처다. 기준 쪽은 wkB/s p90도 gp3 기준 처리량 125 MiB/s 근처라 바이트와 횟수가 함께 한도 가까이였고, 변경 쪽은 바이트만 한도에서 멀어졌다. #518은 쓰기 하나의 크기를 약 39 KB에서
+  15 KB로 줄였을 뿐 횟수는 거의 그대로(호출당 2.17 → 1.95)다. 그래서 같은 w/s에서 calls/s가 3% 오르는 데 그쳤다.
+- checkpoint가 복사하는 DB page 쓰기는 줄지 않는다. 설계가 처음부터 그렇게 예측했다(묶음의 WAL frame만 준다). checkpoint가 writer 시간의
+  절반을 쓰는 구조는 그대로다.
+- IOPS 한도 가설은 확정이 아니다. CloudWatch의 IOPS·Throughput ExceededCheck는 이번에도 데이터점이 없었다(측정). 한도는 w/s 값에서 추정했다.
+
+설명하지 못한 것:
+
+- 변경에서 checkpoint가 더 길어졌다(p50 77 → 103 ms). 이유를 확인하지 못했다.
+- 동시성 32의 p99는 나빠지고 동시성 64의 p99는 좋아졌다. 이유를 확인하지 못했다.
+
+재지 않은 것: checkpoint 한 번이 쓰는 서로 다른 page 수, 호출당 약 2회의 쓰기가 어떤 쓰기인지, checkpoint 쓰기가 임의 4 KiB 쓰기인지.
+
+현재 계획(되돌릴 수 있음): 별도 checkpoint 설계(아래 "수정안과 계약 영향"의 1)는 지금 시작하지 않는다.
+
+1. 측정이 가리키는 한계가 쓰기 횟수라면 checkpoint를 writer thread 밖으로 옮겨도 용량은 늘지 않는다. 별도 연결의 DB fsync가 쓰기 횟수를 더할 수
+   있다(추정). PASSIVE checkpoint가 따라가지 못하면 WAL이 커진다. checkpoint를 끈 run이 2026-11-07에 state 약 2.1 GB와 memory.max 512 MiB에 닿았다(측정). 그 run은 512 명령 주기 checkpoint를 껐으므로 PASSIVE가 뒤처지는 경우와는 비유일 뿐이다.
+2. closed loop 포화의 처리량과 꼬리는 보고 값이고 합격 목표가 아니다([validation.md](validation.md)의 후보 합격 목표). 합격 판단은 open loop
+   100 calls/s로 한다. 이번 open loop 결과는 회귀가 없다(1 run씩).
+
+#518은 유지한다. 동시성 64의 꼬리와 처리량이 좋아졌고 WAL이 약 4배 작다. 열린 항목은 동시성 32의 p99 악화와 길어진 checkpoint의 원인이다.
+spool 성능을 더 바꾸기 전에 할 측정은 checkpoint 한 번의 서로 다른 page 수와 쓰기 횟수를 세는 것이다. 목표 환경(Rocky 9, 4 vCPU x86)이 생기면
+같은 harness로 다시 잰다.
 
 ## 2026-11-07 로컬 status의 spool 상태 (`feat/proxy-status-spool`)
 
@@ -492,7 +555,9 @@ proxy cgroup memory.peak가 memory.max(512 MiB)에 닿았다. 묶음 안 NORMAL 
    운영 문서 사항이다.
 5. admission 상한을 낮춰 볼륨 한도 밑에서 돌게 한다. 처리량을 내준다. 계약 변경은 없다.
 
-판단: 1이 꼬리의 직접 원인을 없애고, 2가 한계 요인인 쓰기 양을 줄인다. 1 다음 2를 이 harness로 하나씩 재는 순서를 권한다. open loop 100
+갱신(2026-11-08): 2는 구현해(#518) 쟀다. 결과와 1을 지금 시작하지 않는 현재 계획은 위 "2026-11-08 spool 묶음을 transaction 하나로"의 AWS 절이다.
+
+(2026-11-07 판단) 1이 꼬리의 직접 원인을 없애고, 2가 한계 요인인 쓰기 양을 줄인다. 1 다음 2를 이 harness로 하나씩 재는 순서를 권한다. open loop 100
 calls/s의 새 stack에서는 앞 절에서 차이가 없었으므로, 이 꼬리는 gp3 기준 한도에서 포화로 돌 때의 문제다.
 
 미검증: 계측 부하, 볼륨 throttle의 직접 지표, 수정안의 효과, 목표 VM.
