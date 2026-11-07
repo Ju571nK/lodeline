@@ -178,7 +178,7 @@ main `08a9167`의 proxy만 바꾸고 server와 driver는 같은 바이너리를 
 | 동시성 64 p50 / p95 / p99 | 7.6 / 21.2 / 29.0 (28.8–37.9) | 6.4 / 21.8 / 30.2 (27.3–48.8) |
 
 p95·p99는 범위가 겹쳐 차이가 없다. 기준도 초당 약 6,000회라 fsync 직렬에 묶이지 않는다. macOS `fsync(2)`는 장치에 넘길 뿐 장치 cache를
-비우지 않고(man page, 그 용도는 F_FULLFSYNC), 이 환경의 fsync는 gp3보다 훨씬 싸다. AWS 기준의 상한(fsync 직렬, 약 470
+비우지 않고(man page, 그 용도는 F_FULLFSYNC), 이 환경의 fsync는 gp3보다 훨씬 쌀 것으로 추정한다(직접 재지 않음). AWS 기준의 상한(fsync 직렬, 약 470
 calls/s)과 다른 영역이다.
 
 계측: 임시 계측(커밋하지 않음)을 기준과 변경 양쪽에 넣어 호출마다 start append의 spool 대기(호출부터 응답까지)와 그중 채널 대기,
@@ -190,7 +190,7 @@ calls/s)과 다른 영역이다.
   (client − handler)은 분위마다 1–2 ms다.
 - writer는 run 내내 바빴다. 묶음 시간 합 9.3초와 checkpoint 시간 합 3.5초가 proxied 약 13초를 채운다. 로컬 처리량의 상한은 writer
   thread다.
-- 512 명령마다 하는 PASSIVE checkpoint가 writer thread에서 한 번에 약 10 ms(p50) 걸렸다. 그동안 대기열의 모든 append가 기다린다.
+- 512 명령마다 하는 PASSIVE checkpoint가 writer thread에서 한 번에 약 10 ms(p50) 걸렸다. 그동안 대기열의 append가 모두 기다리는 것으로 추정한다.
   start 채널 대기 p90 11.3 ms가 이 길이와 맞는다. 기준도 같은 주기로 checkpoint를 해서 같은 mode가 있다(기준 동시성 32 p90 13.1–13.7 ms,
   p50 3.7 ms).
 
@@ -222,7 +222,7 @@ fsync가 느려졌다는 설명과 맞지만 추정이다. checkpoint를 다른 
 
 AWS 측정 계획(노드 A, 위 절과 같은 구성과 순서):
 
-- 같은 계측을 넣은 기준·변경 빌드로 closed loop 동시성 32·64를 stack 단위로 교대해 3 round씩 잰다.
+- 이번 로컬 run과 같은 임시 계측 patch(저장소에 커밋하지 않음, 다시 만들어 넣어야 함)를 넣은 기준·변경 빌드로 closed loop 동시성 32·64를 stack 단위로 교대해 3 round씩 잰다.
 - checkpoint 시간 p50이 수백 ms이고 handler 시간의 p95 위가 그만큼 떨어져 있으면 writer thread의 checkpoint가 원인이다.
 - 묶음 안 NORMAL commit 시간이 ms 단위로 튀면 writeback 중인 page를 기다리는 쓰기가 원인이다(위 절의 `folio_wait_bit_common`).
 - handler 시간이 client 지연보다 크게 작으면 원인은 proxy 밖이다.
