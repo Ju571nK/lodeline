@@ -16,6 +16,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,8 +27,10 @@ use lodeline_proxy::lifecycle::{run_tuned, Lifecycle, RunTuning};
 use lodeline_proxy::limits::Limits;
 use lodeline_proxy::route::TableHandle;
 use lodeline_proxy::spool::{AppendError, Spool};
+use lodeline_proxy::state_dir::{StateDir, StateError};
 use lodeline_proxy_api::status::SpoolState;
 use lodeline_proxy_api::verifier::verifier_for;
+use lodeline_proxy_api::Id;
 use lodeline_server::config::ProxyConfig;
 use lodeline_server::proxy::identity::proxy_san;
 use lodeline_server::proxy::ledger::GapKind;
@@ -329,33 +332,40 @@ struct Running {
 }
 
 async fn start_proxy(h: &H) -> Running {
-    let b = h.bootstrap();
-    let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let (spool_tx, spool_rx) = oneshot::channel();
-    let (stop, rx) = oneshot::channel::<()>();
-    let tune = tuning(sock, spool_tx);
-    let state_dir = b.state_dir.clone();
-    let mut task = tokio::spawn(async move {
-        run_tuned(
-            &b,
-            TableHandle::new(),
-            async move {
-                let _ = rx.await;
+    common::retry_locked(|| async move {
+        let b = h.bootstrap();
+        let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (spool_tx, spool_rx) = oneshot::channel();
+        let (stop, rx) = oneshot::channel::<()>();
+        let tune = tuning(sock, spool_tx);
+        let state_dir = b.state_dir.clone();
+        let task = tokio::spawn(async move {
+            run_tuned(
+                &b,
+                TableHandle::new(),
+                async move {
+                    let _ = rx.await;
+                },
+                tune,
+            )
+            .await
+        });
+        let spool = match spool_rx.await {
+            Ok(s) => s,
+            Err(_) => match task.await {
+                Ok(Err(e)) => return Err(e),
+                r => panic!("the proxy stopped before opening its spool: {r:?}"),
             },
-            tune,
-        )
-        .await
-    });
-    let spool = tokio::select! {
-        s = spool_rx => s.expect("the lifecycle opened the spool"),
-        r = &mut task => panic!("the proxy stopped before opening its spool: {r:?}"),
-    };
-    Running {
-        spool,
-        stop,
-        task,
-        state_dir,
-    }
+        };
+        Ok(Running {
+            spool,
+            stop,
+            task,
+            state_dir,
+        })
+    })
+    .await
+    .expect("the proxy starts")
 }
 
 impl Running {
@@ -486,7 +496,9 @@ async fn events_the_server_already_has_are_deduplicated_after_restart() {
     // learns of it.
     let b = h.bootstrap();
     {
-        let lc = Lifecycle::start(&b).unwrap();
+        let lc = common::retry_locked(|| async { Ok(Lifecycle::start(&b)?) })
+            .await
+            .unwrap();
         let spool = lc.open_spool(&Limits::default()).unwrap();
         let mut src = spool.clone();
         let events = lodeline_proxy::ingest_client::EventSource::next_events(
@@ -747,7 +759,9 @@ async fn real_lodeline_proxy_process_drains_the_spool_to_the_server() {
     let b = h.bootstrap();
     // Fill the spool the way a previous run would have left it.
     {
-        let lc = Lifecycle::start(&b).unwrap();
+        let lc = common::retry_locked(|| async { Ok(Lifecycle::start(&b)?) })
+            .await
+            .unwrap();
         let spool = lc.open_spool(&Limits::default()).unwrap();
         for _ in 0..3 {
             spool.inject_test_event_blocking(UP).unwrap();
@@ -802,4 +816,104 @@ async fn real_lodeline_proxy_process_drains_the_spool_to_the_server() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert!(st.success(), "clean exit, got {st}");
+}
+
+/// `retry_locked` waits out a lock another handle releases inside its window,
+/// gives up after about a second, and returns any other error at once.
+#[tokio::test]
+async fn retry_locked_waits_only_for_a_held_state_dir_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("state");
+    let id = Id::new("px-1").unwrap();
+    let attempts = AtomicUsize::new(0);
+    let open = || async {
+        attempts.fetch_add(1, Ordering::Relaxed);
+        Ok(StateDir::open(&dir, &id)?)
+    };
+
+    let held = StateDir::open(&dir, &id).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(held);
+    });
+    let reopened = common::retry_locked(&open)
+        .await
+        .expect("opens once the holder lets go");
+    release.join().unwrap();
+    assert!(
+        attempts.load(Ordering::Relaxed) > 1,
+        "the first open met the lock"
+    );
+
+    let start = Instant::now();
+    let Err(e) = common::retry_locked(&open).await else {
+        panic!("opened while the lock is still held");
+    };
+    assert!(matches!(e.downcast_ref(), Some(StateError::Locked)), "{e}");
+    let waited = start.elapsed();
+    assert!(
+        (Duration::from_secs(1)..Duration::from_secs(5)).contains(&waited),
+        "gave up after {waited:?}"
+    );
+    drop(reopened);
+
+    attempts.store(0, Ordering::Relaxed);
+    let other = Id::new("px-2").unwrap();
+    let Err(e) = common::retry_locked(|| async {
+        attempts.fetch_add(1, Ordering::Relaxed);
+        Ok(StateDir::open(&dir, &other)?)
+    })
+    .await
+    else {
+        panic!("opened a state_dir bound to px-1 as px-2");
+    };
+    assert!(
+        matches!(e.downcast_ref(), Some(StateError::BoundToDifferentProxy)),
+        "{e}"
+    );
+    assert_eq!(
+        attempts.load(Ordering::Relaxed),
+        1,
+        "no retry on other errors"
+    );
+}
+
+/// Children spawned on other threads (as other tests here spawn openssl and
+/// cargo) briefly hold a state_dir lock this process released. Every reopen
+/// through `retry_locked` still succeeds.
+#[tokio::test]
+async fn reopening_a_state_dir_while_children_spawn_succeeds_through_retry_locked() {
+    const OPENS: usize = 300;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("state");
+    let id = Id::new("px-1").unwrap();
+    drop(StateDir::open(&dir, &id).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawners: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = Command::new("/usr/bin/true").status();
+                }
+            })
+        })
+        .collect();
+    let attempts = AtomicUsize::new(0);
+    let mut failed = 0;
+    for _ in 0..OPENS {
+        let r = common::retry_locked(|| async {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Ok(StateDir::open(&dir, &id)?)
+        })
+        .await;
+        failed += usize::from(r.is_err());
+    }
+    stop.store(true, Ordering::Relaxed);
+    for s in spawners {
+        s.join().unwrap();
+    }
+    let retries = attempts.load(Ordering::Relaxed) - OPENS;
+    eprintln!("{retries} retries over {OPENS} opens");
+    assert_eq!(failed, 0);
 }

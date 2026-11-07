@@ -375,43 +375,48 @@ struct Running {
 /// The proxy through `lifecycle::run_tuned`, which is the production `run_inner`.
 /// The registry client idles for `registry_poll` between steps.
 async fn start_proxy(h: &H, registry_poll: Duration) -> Running {
-    let b = Bootstrap::from_yaml(&h.bootstrap_yaml("127.0.0.1:0"), h.pki.dir.path())
-        .expect("bootstrap loads");
-    let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let listen = sock.local_addr().unwrap().port();
-    let (stop, rx) = tokio::sync::oneshot::channel::<()>();
-    let mut tune = tuning(sock, registry_poll);
-    let (spool_tx, spool_rx) = tokio::sync::oneshot::channel();
-    tune.spool_out = Some(spool_tx);
-    let task = tokio::spawn(async move {
-        run_tuned(
-            &b,
-            TableHandle::new(),
-            async move {
-                let _ = rx.await;
+    let px = common::retry_locked(|| async move {
+        let b = Bootstrap::from_yaml(&h.bootstrap_yaml("127.0.0.1:0"), h.pki.dir.path())
+            .expect("bootstrap loads");
+        let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listen = sock.local_addr().unwrap().port();
+        let (stop, rx) = tokio::sync::oneshot::channel::<()>();
+        let mut tune = tuning(sock, registry_poll);
+        let (spool_tx, spool_rx) = tokio::sync::oneshot::channel();
+        tune.spool_out = Some(spool_tx);
+        let task = tokio::spawn(async move {
+            run_tuned(
+                &b,
+                TableHandle::new(),
+                async move {
+                    let _ = rx.await;
+                },
+                tune,
+            )
+            .await
+        });
+        let spool = match tokio::time::timeout(WAIT, spool_rx).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(_)) => match task.await {
+                Ok(Err(e)) => return Err(e),
+                Ok(Ok(())) => panic!("the proxy stopped before its spool opened"),
+                Err(e) => panic!("the proxy task failed before its spool opened: {e}"),
             },
-            tune,
-        )
-        .await
-    });
-    let spool = match tokio::time::timeout(WAIT, spool_rx).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(_)) => match task.await {
-            Ok(r) => panic!("the proxy stopped before its spool opened: {r:?}"),
-            Err(e) => panic!("the proxy task failed before its spool opened: {e}"),
-        },
-        Err(_) => {
-            task.abort();
-            panic!("the proxy did not open its spool within {WAIT:?}")
-        }
-    };
-    let px = Running {
-        listen,
-        session: tokio::sync::Mutex::new(None),
-        spool: Some(spool),
-        stop: Some(stop),
-        task: Some(task),
-    };
+            Err(_) => {
+                task.abort();
+                panic!("the proxy did not open its spool within {WAIT:?}")
+            }
+        };
+        Ok(Running {
+            listen,
+            session: tokio::sync::Mutex::new(None),
+            spool: Some(spool),
+            stop: Some(stop),
+            task: Some(task),
+        })
+    })
+    .await
+    .expect("the proxy starts");
     eventually("the proxy forwards", || async {
         px.call(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
             .await
@@ -918,7 +923,11 @@ async fn real_invocations_replay_deduplicate_and_refuse_before_dispatch() {
     // running. This also proves stop drained the invocation writer.
     let bootstrap =
         Bootstrap::from_yaml(&h.bootstrap_yaml("127.0.0.1:0"), h.pki.dir.path()).unwrap();
-    let lifecycle = lodeline_proxy::lifecycle::Lifecycle::start(&bootstrap).unwrap();
+    let lifecycle = common::retry_locked(|| async {
+        Ok(lodeline_proxy::lifecycle::Lifecycle::start(&bootstrap)?)
+    })
+    .await
+    .unwrap();
     let mut source = lifecycle.open_spool(&Default::default()).unwrap();
     let events = source.next_events(100, &Default::default());
     let raw = serde_json::to_string(&events).unwrap();

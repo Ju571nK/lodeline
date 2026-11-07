@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,23 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 e2e 시험의 state_dir lock 재시도 (`test/proxy-e2e-lock-retry`)
+
+문제: e2e 시험이 같은 시험 프로세스 안에서 같은 state_dir로 proxy를 다시 시작하면 가끔 `StateError::Locked`로 실패했다(CI macos-15에서
+`inventory_e2e.rs`의 invocation 중복 제거 시험 1회). 같은 binary의 다른 시험이 openssl·cargo·proxy binary를 자식
+프로세스로 띄운다. fork와 exec 사이에 자식이 lock fd 사본을 잠깐 가지므로, 부모가 푼 flock이 그동안 남는다. 운영 재시작은 새 프로세스이고
+proxy는 자식을 띄우지 않으므로 제품 코드는 바꾸지 않았다.
+
+수정(시험만): `tests/common/mod.rs`의 `retry_locked`가 `StateError::Locked`일 때만 20 ms마다, 최대 1초 다시 시도한다. 다른 오류는
+바로 돌려준다. `inventory_e2e.rs`와 `spool_ingest_e2e.rs`의 `start_proxy`, 직접 `Lifecycle::start` 세 곳이 이것을 쓴다. 다른 e2e
+binary는 시험마다 한 번만 시작한다. spool 실제 binary 시험은 in-process lifecycle을 놓은 뒤 `cargo build`를 거쳐 binary를 띄우므로
+그 사이에 자식의 exec가 끝난다.
+
+시험(`spool_ingest_e2e.rs`): `retry_locked_waits_only_for_a_held_state_dir_lock`은 100 ms 뒤 풀리는 lock을 기다려 열고, 계속 잡힌
+lock에는 약 1초 뒤 `Locked`를, 다른 proxy_id에는 재시도 없이 `BoundToDifferentProxy`를 돌려줌을 확인한다.
+`reopening_a_state_dir_while_children_spawn_succeeds_through_retry_locked`는 4개 thread가 `/usr/bin/true`를 계속 띄우는 동안 300번
+다시 연다. 재시도를 끈 mutation에서는 300번 중 79, 86, 41번 실패했고, 재시도로는 0번이다.
 
 ## 2026-11-07 event 424 뒤 entry 재업로드 (`fix/proxy-event-424-reupload`)
 
