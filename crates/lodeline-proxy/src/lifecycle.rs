@@ -410,7 +410,7 @@ pub async fn run_with_shutdown(
     table: crate::route::TableHandle,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    run_inner(b, table, shutdown, Pacing::default(), None, None).await
+    run_inner(b, table, shutdown, Pacing::default(), None, None, None).await
 }
 
 /// Pacing and an optional pre-bound listener. TEST-ONLY (feature `test-util`, or
@@ -419,7 +419,7 @@ pub async fn run_with_shutdown(
 /// a real server observe a revision change within seconds and avoid a
 /// bind-then-release port race.
 #[cfg(any(test, feature = "test-util"))]
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct RunTuning {
     pub sync: crate::config_sync::SyncParams,
     pub report: crate::status_report::ReporterParams,
@@ -430,6 +430,8 @@ pub struct RunTuning {
     /// Receives a handle to the spool once it is open, so a test can inject
     /// events and read the snapshot.
     pub spool_out: Option<tokio::sync::oneshot::Sender<crate::spool::Spool>>,
+    /// Receives a clone of the gap queue, so a test can hold it past shutdown.
+    pub gaps_out: Option<tokio::sync::oneshot::Sender<crate::status_report::GapQueue>>,
 }
 
 /// [`run_with_shutdown`] with explicit pacing. Tests only.
@@ -452,6 +454,7 @@ pub async fn run_tuned(
         },
         tuning.listener,
         tuning.spool_out,
+        tuning.gaps_out,
     )
     .await
 }
@@ -477,6 +480,7 @@ async fn run_inner(
     pacing: Pacing,
     pre_bound: Option<std::net::TcpListener>,
     spool_out: Option<tokio::sync::oneshot::Sender<crate::spool::Spool>>,
+    gaps_out: Option<tokio::sync::oneshot::Sender<crate::status_report::GapQueue>>,
 ) -> anyhow::Result<()> {
     let Pacing {
         sync: sync_params,
@@ -593,6 +597,9 @@ async fn run_inner(
             // The audit producer appends through the admission handle; records
             // it cannot store become `local_record_failed` gaps in this queue.
             invocation_gaps = Some(gaps.clone());
+            if let Some(out) = gaps_out {
+                let _ = out.send(gaps.clone());
+            }
             let (isink, ihandle) = crate::invocation_sink::InvocationSink::start(
                 admission.clone(),
                 b.proxy_id.as_str(),
@@ -1408,5 +1415,55 @@ mod tests {
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// The shutdown after the signal has one grace budget. A client stuck in its
+    /// request head holds the relay drain and blocking work holds the gap queue:
+    /// together they still end within one grace, not one grace each.
+    #[tokio::test]
+    async fn shutdown_phases_share_one_grace() {
+        let t = tempfile::tempdir().unwrap();
+        let mut b = bootstrap(t.path());
+        b.control_plane_url = "https://127.0.0.1:1".into();
+        b.limits.shutdown_grace_secs = 2;
+        let grace = Duration::from_secs(2);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (gaps_tx, gaps_rx) = tokio::sync::oneshot::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let tuning = RunTuning {
+            listener: Some(listener),
+            gaps_out: Some(gaps_tx),
+            ..RunTuning::default()
+        };
+        let run = run_tuned(
+            &b,
+            crate::route::TableHandle::new(),
+            async {
+                let _ = stop_rx.await;
+            },
+            tuning,
+        );
+        let drive = async {
+            let held = gaps_rx.await.unwrap();
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut client, b"POST /mcp/a HTTP/1.1\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            stop_tx.send(()).unwrap();
+            (tokio::time::Instant::now(), held, client)
+        };
+        let (ran, (signaled, _held, _client)) = tokio::join!(run, drive);
+        let took = signaled.elapsed();
+        ran.unwrap();
+        assert!(
+            took >= grace,
+            "the relay drain waited for the client: {took:?}"
+        );
+        assert!(
+            took < grace + Duration::from_millis(900),
+            "shutdown took {took:?}, more than one grace of {grace:?}"
+        );
     }
 }
