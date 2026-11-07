@@ -26,6 +26,8 @@ static SYNCED: LazyLock<Mutex<HashMap<PathBuf, Synced>>> = LazyLock::new(Default
 static REAL: AtomicPtr<ffi::sqlite3_vfs> = AtomicPtr::new(std::ptr::null_mut());
 /// Files whose `xSync` fails without syncing, as a dying disk's would.
 static FAILING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+/// Files whose next `xSync` fails once.
+static FAIL_ONCE: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
 
 /// Make every `xSync` on `path` fail (`on`) or work again.
 pub fn fail_syncs(path: &Path, on: bool) {
@@ -35,6 +37,11 @@ pub fn fail_syncs(path: &Path, on: bool) {
     } else {
         f.remove(path);
     }
+}
+
+/// Make only the next `xSync` on `path` fail.
+pub fn fail_next_sync(path: &Path) {
+    FAIL_ONCE.lock().unwrap().insert(path.to_path_buf());
 }
 
 /// Number of `xSync` calls on `path` so far.
@@ -109,7 +116,7 @@ fn real_methods(file: *mut ffi::sqlite3_file) -> (PathBuf, *const ffi::sqlite3_i
 
 unsafe extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
     let (path, real) = real_methods(file);
-    if FAILING.lock().unwrap().contains(&path) {
+    if FAILING.lock().unwrap().contains(&path) || FAIL_ONCE.lock().unwrap().remove(&path) {
         return ffi::SQLITE_IOERR_FSYNC;
     }
     let rc = unsafe { ((*real).xSync.unwrap())(file, flags) };

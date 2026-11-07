@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,53 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 spool fsync 실패 뒤 fail-stop (`fix/spool-fsync-failure`)
+
+문제: WAL이나 DB fsync가 실패한 뒤에도 spool writer가 계속 돌았다. `degraded`는 다음 append 성공에서 지워졌고, 다음 fsync 성공을 그대로 믿었다.
+Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시할 수 있다([PostgreSQL wiki "Fsync Errors"](https://wiki.postgresql.org/wiki/Fsync_Errors)).
+그래서 뒤의 fsync 성공은 실패한 page가 디스크에 있다는 뜻이 아니다. 전원 손실 뒤에는 Ok를 받은(전달된) start가 사라지고, 이미 넘긴 sequence가
+재시작 뒤 다시 배정될 수 있다. 실패 뒤의 checkpoint는 WAL의 빈 구간 앞뒤를 섞어 DB를 깨뜨릴 수도 있다.
+
+재현(`a0528b0`, 이 수정보다 먼저 커밋): `spool.rs` `no_later_fsync_is_trusted_after_a_failed_one`. 시험 VFS `fail_syncs`로 묶음의 공유 fsync를
+실패시키고, `power_loss_after_lost_writeback`이 Linux식 손실(실패한 fsync의 page는 디스크에 없고, 다음 fsync는 성공)을 전원 손실 사본으로 만든다.
+수정 전 `start 00000000-0000-4000-8000-000000000006 heard Ok and was lost`로 실패했다(SQLite 3.45.0 bundled).
+
+수정(`spool.rs`, 결정은 [decisions.md](decisions.md) "spool fsync 실패 뒤 fail-stop"): fsync 실패(`SQLITE_IOERR_FSYNC`, `SQLITE_IOERR_DIR_FSYNC`)를 보면
+writer thread의 표시(`SYNC_FAILED`)를 켜고 끄지 않는다. writer의 SQLite 오류는 모두 `note_sync_failure`를 거친다(`code_name`, `append_storage`,
+`sync_wal`, `checkpoint`). writer는 다음 명령을 받기 전에 그 표시를 보고 `run`에서 나온다. 기존 멈춘 writer와 같은 경로라 `dead`가 켜지고, 남은 명령과
+뒤의 호출은 `Unavailable`, `next_events`는 빈 목록, status의 `spool.state`는 재시작까지 `degraded`다(`dead_writer_is_reported_degraded`와 같음).
+표시가 켜진 뒤에는 `set_degraded`가 `degraded`를 지우지 않는다. 묶음의 응답은 writer가 멈추기 전에 나가고, 같은 묶음의 뒤 NORMAL commit 성공이
+그 사이 `degraded`를 지울 수 있었기 때문이다. 자기 checkpoint가 실패한 `next_events` 호출은 `durable_seq` 이하 행, 곧 앞서 성공한 fsync가 덮은
+행만 넘긴다.
+
+| fsync 경로 | 실패 뒤 |
+|---|---|
+| 혼자 온 start의 FULL commit | 그 start는 `Storage`. writer가 멈춘다 |
+| 묶음의 공유 FULL commit(`PRAGMA user_version = 0`) | 묶음의 start는 모두 `Storage`(전과 같음). writer가 멈춘다 |
+| 묶음 안 NORMAL commit의 새 WAL header fsync(checkpoint로 WAL이 처음부터 다시 시작될 때) | `sync_wal`이 fsync 없이 실패를 돌려 묶음의 start는 `Storage`. writer가 멈춘다 |
+| checkpoint(maintenance, 수집 poll, 512 명령마다)의 WAL·DB fsync | `durable_seq`가 오르지 않는다. 뒤의 checkpoint는 실행하지 않는다. writer가 멈춘다 |
+| maintenance·quarantine·gap·hand-off·registry conflict의 FULL commit | 그 명령은 오류. writer가 멈춘다 |
+| 닫을 때 SQLite의 checkpoint | `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`로 끈다. 재시작이 WAL을 복구한다 |
+
+운영자가 보는 것: relay는 새 호출에 503 `audit_unavailable`, 서버로 가는 status report는 `spool.state: degraded`, 로그에는 writer가 멈출 때
+`spool fsync failed` error 한 줄. 로컬 `status.json`과 `lodeline-proxy status`에는 spool 상태 칸이 없다(기존 멈춘 writer와 같음). 종료는 그대로 끝난다
+(`spool.close()`는 이미 끝난 thread를 join한다). 재시작은 WAL을 복구하고, 실패한 묶음의 행은 start만 있는 기록으로 남는다(전달 없음, 과다 기록 방향).
+
+시험(`spool.rs`, `sync_vfs.rs`에 한 번만 실패하는 `fail_next_sync`를 더함): `a_failed_group_fsync_refuses_every_start`(뒤 호출 거절·전달 없음·
+degraded·close 뒤 재시작에서 행 1부터 6까지), `a_failed_start_fsync_stops_the_writer`(실패 뒤 512 명령째 checkpoint도, close checkpoint도 DB를 fsync하지
+않음, 재시작이 WAL을 복구), `a_failed_checkpoint_fsync_stops_the_writer`, `a_failed_maintenance_fsync_stops_the_writer`(gap 기록 commit),
+`a_failed_wal_header_fsync_refuses_the_group`, `a_failed_fsync_reports_degraded_before_the_writer_stops`(묶음 응답 뒤, writer가 멈추기 전의
+snapshot이 `degraded`, 시험 전용 `Cmd::Hold`로 멈춤 직전에 세움). 공통 확인은 `assert_stopped`(뒤 start는 `Unavailable`, `next_events` 없음, ACK는 아무것도 하지 않음,
+`degraded`, `close` 반환). 재현 시험은 이제 통과한다.
+
+mutation(한 번에 하나씩 되돌림, 각각 위 시험 중 하나 이상이 실패): 명령 전 멈춤 확인 제거(6개 실패), checkpoint 생략 제거(1), close checkpoint 끄기
+제거(2), `sync_wal` 앞 확인 제거(header 시험), `checkpoint`·`sync_wal`·`append_storage`·`code_name`의 `note_sync_failure` 각각 제거(1, 2, 2, 1), `set_degraded`의 표시 확인 제거
+(`a_failed_fsync_reports_degraded_before_the_writer_stops`가 `left: Ok`로 실패).
+
+남는 한계: 재시작의 WAL 복구와 첫 checkpoint는 WAL을 page cache로 읽는다. 실패한 fsync의 page가 cache에 남아 있으면 그 내용이 DB로 복사되고, 실제로
+디스크에 있었는지는 알 수 없다. 재시작 전에 전원 손실이나 OS crash가 오면 그 구간을 잃는다. 그 구간의 start는 Ok를 받지 않았으므로 전달된 호출은 없다.
+디스크 고장이 이어지면 재시작 뒤 다시 멈춘다. 실기(Linux 실제 writeback 오류)에서는 측정하지 않았고, 시험 VFS와 손실 모델로만 확인했다.
 
 ## 2026-11-07 종료 뒤 join 상한 확인 (`fix/proxy-shutdown-joins`)
 
@@ -75,7 +122,7 @@ commit을 한다. 같은 행을 바꾸지 않는 `UPDATE`는 SQLite가 page를 �
 계약이 지켜지는 이유: 전달은 start append의 Ok 뒤에만 일어나고(`invocation_sink.rs` `record_start`), Ok는 그 행을 덮는 fsync 뒤에만 나간다.
 fsync 전 process crash는 행을 page cache에 남기지만 응답이 없었으므로 전달된 호출이 없다(start만 있는 기록). fsync 전 전원 손실은 그 행을 잃지만
 역시 전달된 호출이 없고, 넘기지 않은 sequence라 다시 배정돼도 된다. fsync가 실패하면 묶음의 start는 모두 `Storage`로 거절되고 spool은 degraded다.
-이미 commit된 행은 다음 fsync 때 start만 있는 기록이 될 수 있다(전달 없음, 과다 기록 방향). completion·cancel은 원래 NORMAL이라 결과가 그대로다.
+이미 commit된 행은 재시작 뒤 start만 있는 기록이 될 수 있다(전달 없음, 과다 기록 방향). 실패 뒤 writer는 멈춘다(아래 `fix/spool-fsync-failure` 절). completion·cancel은 원래 NORMAL이라 결과가 그대로다.
 completion은 자기 start가 Ok를 받은 뒤에만 queue에 들어가므로(`settle_start`) 앞 묶음에서 이미 durable한 start 뒤에 온다. checkpoint와
 maintenance는 명령 사이에서 그대로 돌고, 묶음 하나는 checkpoint를 최대 63 명령 늦출 수 있다.
 

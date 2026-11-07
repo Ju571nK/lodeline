@@ -60,6 +60,10 @@
 //!   the wall clock.
 //! * A corrupt, foreign or unreadable database refuses to open
 //!   ([`SpoolError`]); it is never recreated or truncated.
+//! * A failed fsync stops the writer for good (decisions.md 2026-11-07): on
+//!   Linux the kernel reports a writeback error once and may drop the pages, so
+//!   no later fsync proves anything. Every later call is refused and the spool
+//!   reports degraded until the process restarts.
 //!
 //! The database stores only the serialized, already validated event envelope.
 //! Errors and logs carry SQLite result-code names, never event content.
@@ -67,6 +71,7 @@
 //! The sequence counter is the *event* sequence of the epoch. It is independent
 //! of the *status* sequence bound in `state_dir` (`sequence.json`).
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -76,7 +81,8 @@ use std::time::Duration;
 
 use lodeline_proxy_api::status::{QuarantineCode, SpoolExpiredGap};
 use lodeline_proxy_api::{EventPayload, GapReport, PositiveI64, ProxyEvent, Timestamp, Uuid};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::config::DbConfig;
+use rusqlite::{ffi, params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use tokio::sync::oneshot;
 
 use crate::boot_clock::{system_boot_clock, BootClock, BootInstant};
@@ -217,7 +223,23 @@ pub enum AppendError {
     Unavailable,
 }
 
+thread_local! {
+    /// Set on a writer thread by its first failed fsync, never cleared.
+    static SYNC_FAILED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Every SQLite error of the writer passes here, most through [`code_name`] or
+/// [`append_storage`], so no failed fsync goes unseen.
+fn note_sync_failure(e: &rusqlite::Error) {
+    if matches!(e, rusqlite::Error::SqliteFailure(f, _)
+        if matches!(f.extended_code, ffi::SQLITE_IOERR_FSYNC | ffi::SQLITE_IOERR_DIR_FSYNC))
+    {
+        SYNC_FAILED.set(true);
+    }
+}
+
 fn code_name(e: &rusqlite::Error) -> String {
+    note_sync_failure(e);
     match e {
         rusqlite::Error::SqliteFailure(f, _) => format!("{:?}", f.code),
         _ => "other".to_string(),
@@ -1044,6 +1066,22 @@ CREATE TABLE gaps (
 );
 ";
 
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if SYNC_FAILED.get() {
+            // Closing would checkpoint pages a failed fsync may have lost into
+            // the database. The next start recovers the WAL instead.
+            let _ = self
+                .conn
+                .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true);
+            tracing::error!(
+                "spool fsync failed: the spool writer stopped and every call is refused \
+                 until the proxy restarts; check the disk"
+            );
+        }
+    }
+}
+
 impl Writer {
     fn open(cfg: SpoolConfig, shared: Arc<Shared>) -> Result<Writer, SpoolError> {
         // NOFOLLOW below refuses a symlink in any component, so resolve the
@@ -1215,7 +1253,10 @@ impl Writer {
     }
 
     fn set_degraded(&self, on: bool) {
-        self.shared.degraded.store(on, Ordering::Relaxed);
+        // Never cleared after a failed fsync: replies go out before the writer stops.
+        self.shared
+            .degraded
+            .store(on || SYNC_FAILED.get(), Ordering::Relaxed);
     }
 
     fn run(&mut self, rx: mpsc::Receiver<Cmd>) {
@@ -1243,6 +1284,16 @@ impl Writer {
             // After the last reply, so no caller waits on it unless already queued.
             if self.since_checkpoint >= CHECKPOINT_EVERY {
                 self.checkpoint();
+            }
+            // Fail-stop: queued and later commands are refused unrun.
+            if SYNC_FAILED.get() {
+                // Test knob: a queued hold still waits here, after the replies.
+                #[cfg(test)]
+                if let Some(Cmd::Hold(rx)) = held.take() {
+                    let _ = rx.recv();
+                }
+                self.set_degraded(true);
+                return;
             }
             let wait = next_maintenance.saturating_duration_since(std::time::Instant::now());
             let cmd = match held.take() {
@@ -1353,13 +1404,18 @@ impl Writer {
     /// earlier WAL frame. `user_version` is unused and stays 0; setting it
     /// always writes page 1, where an unchanged row would write nothing.
     fn sync_wal(&mut self) -> bool {
+        // A failed fsync earlier in the group (a fresh WAL header) is not undone.
+        if SYNC_FAILED.get() {
+            return false;
+        }
         match self.conn.execute_batch("PRAGMA user_version = 0;") {
             Ok(_) => {
                 let last = self.counters().last_seq;
                 self.durable_seq = last;
                 true
             }
-            Err(_) => {
+            Err(e) => {
+                note_sync_failure(&e);
                 self.set_degraded(true);
                 false
             }
@@ -1384,6 +1440,10 @@ impl Writer {
     /// so far is durable. Only another connection's reader can stop it short.
     fn checkpoint(&mut self) {
         self.since_checkpoint = 0;
+        // It would copy WAL pages a failed fsync may have lost into the database.
+        if SYNC_FAILED.get() {
+            return;
+        }
         let res = self
             .conn
             .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
@@ -1399,7 +1459,10 @@ impl Writer {
                 self.durable_seq = last;
             }
             Ok(_) => {}
-            Err(_) => self.set_degraded(true),
+            Err(e) => {
+                note_sync_failure(&e);
+                self.set_degraded(true);
+            }
         }
     }
 
@@ -2029,6 +2092,7 @@ enum AppendTx {
 }
 
 fn append_storage(e: &rusqlite::Error) -> AppendError {
+    note_sync_failure(e);
     if is_disk_full(e) {
         AppendError::DiskFull
     } else {
@@ -2638,7 +2702,7 @@ mod tests {
     async fn a_failed_group_fsync_refuses_every_start() {
         crate::sync_vfs::install();
         let d = tempfile::tempdir().unwrap();
-        let (mut s, _) = open(d.path());
+        let (s, _) = open(d.path());
         let (_, wal) = spool_files(d.path());
         s.append(event(1)).unwrap();
         let hold = hold_writer(&s);
@@ -2651,15 +2715,136 @@ mod tests {
         }
         assert!(done.await.is_ok(), "a completion never waited for an fsync");
         crate::sync_vfs::fail_syncs(&wal, false);
-        assert_eq!(
-            sequences(&mut s),
-            vec![(1, uid(1))],
-            "a row not yet durable is not handed out"
-        );
+        assert_stopped(s).await;
         // Power loss before the shared fsync: none of the refused starts was
         // forwarded, and none is kept.
         let (mut p, _) = open(power_loss_copy(d.path()).path());
         assert_eq!(ids(&p.next_events(100, &HashSet::new())), vec![uid(1)]);
+        // Without a power loss the restart keeps them as start-only records.
+        let (mut s, _) = open(d.path());
+        assert_eq!(
+            ids(&s.next_events(100, &HashSet::new())),
+            (1..=6).map(uid).collect::<Vec<_>>()
+        );
+    }
+
+    /// After a failed fsync every call is refused and the spool reports
+    /// degraded until a restart, and closing still returns.
+    async fn assert_stopped(mut s: Spool) {
+        assert_eq!(
+            s.append_async(event(900)).await,
+            Err(AppendError::Unavailable),
+            "a later start is refused"
+        );
+        assert!(
+            s.next_events(100, &HashSet::new()).is_empty(),
+            "nothing is handed out"
+        );
+        s.acknowledged(&[uid(1)]);
+        assert_eq!(s.snapshot().state, SpoolState::Degraded);
+        s.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_fsync_stops_the_writer() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (db, wal) = spool_files(d.path());
+        // The failing start is command CHECKPOINT_EVERY: a checkpoint is due next.
+        for n in 1..CHECKPOINT_EVERY {
+            s.append(event(n)).unwrap();
+        }
+        let db0 = crate::sync_vfs::syncs(&db);
+        crate::sync_vfs::fail_next_sync(&wal);
+        assert_eq!(s.append(event(CHECKPOINT_EVERY)), Err(AppendError::Storage));
+        assert_stopped(s).await;
+        assert_eq!(
+            crate::sync_vfs::syncs(&db),
+            db0,
+            "no checkpoint after a failed fsync, not even on close"
+        );
+        let (mut s, _) = open(d.path());
+        assert_eq!(
+            s.next_events(1000, &HashSet::new()).len(),
+            CHECKPOINT_EVERY as usize,
+            "the restart recovers the WAL"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_checkpoint_fsync_stops_the_writer() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (db, _) = spool_files(d.path());
+        s.append(completed(1)).unwrap();
+        crate::sync_vfs::fail_next_sync(&db);
+        // Only a row not yet durable: the poll checkpoints, and that fails.
+        assert!(s.next_events(100, &HashSet::new()).is_empty());
+        assert_stopped(s).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_maintenance_fsync_stops_the_writer() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        s.append(event(1)).unwrap();
+        crate::sync_vfs::fail_next_sync(&wal);
+        assert!(s.record_gap(outage_gap(1)).is_err());
+        assert_stopped(s).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_wal_header_fsync_refuses_the_group() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        s.append(completed(1)).unwrap();
+        // The poll checkpoints the whole WAL, so the next commit starts it over
+        // and fsyncs its new header, even a NORMAL one.
+        assert_eq!(s.next_events(100, &HashSet::new()).len(), 1);
+        let hold = hold_writer(&s);
+        let done = s.append_async(completed(2));
+        let start = s.append_async(event(3));
+        crate::sync_vfs::fail_next_sync(&wal);
+        drop(hold);
+        let _ = done.await;
+        assert_eq!(
+            start.await,
+            Err(AppendError::Storage),
+            "Ok after a failed fsync"
+        );
+        assert_stopped(s).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_fsync_reports_degraded_before_the_writer_stops() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        s.append(completed(1)).unwrap();
+        assert_eq!(s.next_events(100, &HashSet::new()).len(), 1);
+        let hold = hold_writer(&s);
+        let done = s.append_async(completed(2));
+        let start = s.append_async(event(3));
+        // Keeps the writer from leaving its loop after the group's replies.
+        let exit = hold_writer(&s);
+        crate::sync_vfs::fail_next_sync(&wal);
+        drop(hold);
+        let _ = done.await;
+        assert_eq!(start.await, Err(AppendError::Storage));
+        assert_eq!(
+            s.snapshot().state,
+            SpoolState::Degraded,
+            "a later commit in the group cleared degraded"
+        );
+        drop(exit);
+        assert_stopped(s).await;
     }
 
     #[test]
@@ -4257,5 +4442,83 @@ mod tests {
             .query_row(OLDEST_UNSENT, [], |r| r.get(0))
             .unwrap();
         assert!(created > 0);
+    }
+
+    /// What a power loss leaves when the kernel dropped the WAL pages of a
+    /// failed fsync and reported later fsyncs as successful (Linux writeback
+    /// error semantics, https://wiki.postgresql.org/wiki/Fsync_Errors): bytes
+    /// written between the last good fsync (`before`) and the failure
+    /// (`unsynced`), and not rewritten since, keep their old content.
+    fn power_loss_after_lost_writeback(
+        dir: &Path,
+        before: &[u8],
+        unsynced: &[u8],
+    ) -> tempfile::TempDir {
+        let (db, wal) = spool_files(dir);
+        let mut disk = crate::sync_vfs::synced_image(&wal);
+        let old = |i: usize| before.get(i).copied().unwrap_or(0);
+        for i in 0..unsynced.len().min(disk.len()) {
+            if unsynced[i] != old(i) && disk[i] == unsynced[i] {
+                disk[i] = old(i);
+            }
+        }
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(
+            out.path().join(SPOOL_FILE),
+            crate::sync_vfs::synced_image(&db),
+        )
+        .unwrap();
+        std::fs::write(out.path().join(format!("{SPOOL_FILE}-wal")), disk).unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn no_later_fsync_is_trusted_after_a_failed_one() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (mut s, _) = open(d.path());
+        let (db, wal) = spool_files(d.path());
+        s.append(event(1)).unwrap();
+        let before = crate::sync_vfs::synced_image(&wal);
+        let hold = hold_writer(&s);
+        let refused: Vec<_> = (2..=5).map(|n| s.append_async(event(n))).collect();
+        crate::sync_vfs::fail_syncs(&wal, true);
+        drop(hold);
+        for q in refused {
+            assert_eq!(q.await, Err(AppendError::Storage));
+        }
+        crate::sync_vfs::fail_syncs(&wal, false);
+        let unsynced = std::fs::read(&wal).unwrap();
+
+        let kept = |p: &mut Spool, ok: &[String], handed: i64| {
+            let held = ids(&p.next_events(100, &HashSet::new()));
+            for id in ok {
+                assert!(held.contains(id), "start {id} heard Ok and was lost");
+            }
+            let next = p.append(event(999)).unwrap().sequence;
+            assert!(next > handed, "sequence {next} was already handed out");
+        };
+        let mut ok = vec![uid(1)];
+        if s.append(event(6)).is_ok() {
+            ok.push(uid(6));
+        }
+        let handed = sequences(&mut s).last().map_or(0, |(q, _)| *q);
+        let (mut p, _) = open(power_loss_after_lost_writeback(d.path(), &before, &unsynced).path());
+        kept(&mut p, &ok, handed);
+
+        // Read-only commands up to the next checkpoint, which copies the WAL into
+        // the database; a write after it would restart the WAL.
+        let db0 = crate::sync_vfs::syncs(&db);
+        for _ in 0..2 * CHECKPOINT_EVERY {
+            if crate::sync_vfs::syncs(&db) > db0 {
+                break;
+            }
+            let _ = s.oldest_held_sequence();
+        }
+        let copy = power_loss_after_lost_writeback(d.path(), &before, &unsynced);
+        let now = Arc::new(AtomicI64::new(1_800_000_000));
+        let mut p =
+            Spool::open(cfg(copy.path(), now)).expect("the spool opens after the power loss");
+        kept(&mut p, &ok, handed);
     }
 }

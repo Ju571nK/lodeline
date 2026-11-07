@@ -9,6 +9,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-proxy` now stops its event spool for good when a storage sync (fsync) fails, and
+  refuses every call until you restart it. Before, the spool kept running after a failed fsync,
+  and the next successful fsync cleared its degraded state. On Linux the kernel reports a
+  writeback error only once and can drop the data it did not write, so that later success
+  proved nothing. After a power loss, a call the proxy had forwarded could be missing from the
+  spool, and event sequences already sent to the server could be assigned again. Now, after a
+  failed fsync, the proxy answers new calls with HTTP 503 `audit_unavailable`, sends no more
+  events, reports `spool.state: degraded` in its status report until it restarts, and logs an
+  error that starts with `spool fsync failed`. To recover, check the disk that holds the state
+  directory (kernel log, device health, free space), fix or replace it, and then restart the
+  proxy. The restart recovers the spool from its write-ahead log. Starts of the failed batch,
+  which were refused, can appear as start-only records after the restart. They were never
+  forwarded.
 - `lodeline-proxy run` now finishes its shutdown within one `limits.shutdown_grace_secs` after
   the stop signal. Before, the relay drain, the audit producer drain and the wait for cancelled
   blocking work each had a full grace of their own. With the default 30 seconds a stalled
