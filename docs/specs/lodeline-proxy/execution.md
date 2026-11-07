@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,35 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-07 종료 뒤 join 상한 확인 (`fix/proxy-shutdown-joins`)
+
+#509 리뷰 후속. 질문: blocking 작업 대기 앞의 `inventory_handle.shutdown()`, 일곱 task join, 뒤의 `spool.close()`는 deadline 없이 기다린다.
+어느 하나가 멈추면 `TimeoutStopSec=45`를 넘을 수 있는가. 결론: 코드 변경 없음. 기다림은 모두 stop을 보고 끊기거나 한정된 로컬 디스크 작업이다.
+
+| 기다림 | 지금 무엇이 끝을 정하나 |
+|---|---|
+| `inventory_handle.shutdown()` | 큐 최대 256개(`QUEUE_DEPTH`)와 열린 chain 최대 8개(`MAX_COLLECTORS`)의 registry SQLite commit |
+| `sync_task` | `run_sync`가 대기와 fetch를 모두 stop과 `select!`한다. fetch 자체는 10초(`FETCH_TIMEOUT`) |
+| `report_task` | `run_status_reporter`가 대기와 `send_once`를 stop과 `select!`한다. 요청 자체는 10초 |
+| `ingest_task` | `run_ingest`가 `send_once`와 대기를 stop과 `select!`한다. 요청 자체는 10초 |
+| `pump_task` | 진행 중인 gap hand-off 한 번(spool 읽기, gap queue 기록, spool 삭제). 그 뒤 대기는 `select!` |
+| `retention_task` | 대기만 있고 `select!`한다 |
+| `registry_task` | `RegistryClient::run`이 `sync_once`와 대기를 stop과 `select!`한다. 요청 자체는 20초 |
+| `entry_retention_task` | 진행 중인 pass 한 번(최대 500행 삭제 transaction 하나). 그 뒤 대기는 `select!` |
+| `spool.close()` | writer가 받은 명령을 끝내고 `Shutdown`에서 나온다. maintenance는 500행 단위 |
+
+측정(로컬 macOS, 연결은 받고 응답하지 않는 control plane, 시험 전용 단계 시각 출력, 3회): 신호에서 relay drain 11 ms, 감사 drain까지 11 ms,
+inventory 종료까지 25–27 ms, 일곱 join은 합쳐 1 ms 미만, `spool.close()` 2 ms, 전체 38–40 ms. 대조: `run_sync`의 fetch `select!`에서
+stop 가지를 빼면 sync join이 9.6초를 기다렸다. 빠진 stop 하나가 요청 시간 제한만큼 종료를 잡는다는 뜻이고, 지금 코드에는 그런 기다림이 없다.
+
+디스크 작업은 개수로 한정된다. 앞 절의 AWS gp3 fsync 중앙값 2.12 ms로 추정하면 inventory는 1초 미만이고, 나머지는 commit 몇 개다.
+남은 여유(기본 약 9.5초) 안이다. 멈춘 디스크는 프로세스 안에서 끊을 수 없다. `spawn_blocking`은 취소되지 않고, tokio runtime drop은 blocking 작업을
+끝까지 기다리며, `stopped` 기록도 같은 디스크에 쓴다. join에 시간 제한을 걸어도 결과는 SIGKILL과 같다(`stopping`에 머물고 spool WAL은 FULL commit까지
+남는다). 그래서 제한을 추가하지 않았다.
+
+시험: `lodeline-proxy-e2e` `shutdown_stall_e2e::shutdown_does_not_wait_for_a_stalled_control_plane`. config fetch, status report, event post 세 연결이
+handshake에서 멈춘 상태로 종료하고 5초 안에 끝나는지 본다. sync, report, ingest 각각에서 stop 가지를 빼면 9.9–10.0초로 실패하고, 지금 코드는 0.3–0.5초(시험 전체)로 통과한다.
 
 ## 2026-11-07 종료 grace 하나로 묶기 (`fix/proxy-shutdown-deadline`)
 
