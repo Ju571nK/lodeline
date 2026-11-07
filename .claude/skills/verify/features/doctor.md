@@ -10,6 +10,7 @@
 - `doctor-override` marks a `--policy` rubric override with `*`.
 - `doctor-bad-policy` exits `2` on a policy that does not parse.
 - `doctor-hook-launch` starts each hook exe that `lodeline-hook install` registered and warns when one cannot start.
+- `doctor-codex-hooks-off` warns when a Codex hook is registered and Codex's `[features] hooks` is `false`.
 
 ## How to get to it (user POV)
 
@@ -30,6 +31,7 @@ Preconditions:
 - **No state created.** Run `drive.sh run "$RUN" doctor-side-effects -- find ../state -type f`. Stdout is empty.
 - **Hook starts.** Run `drive.sh run "$RUN" doctor-hook-install -- sh -c 'mkdir -p "$HOME/hook dir" && cp "$(command -v lodeline-hook)" "$HOME/hook dir/" && "$HOME/hook dir/lodeline-hook" install --agent claude-code --write'`, then `drive.sh run "$RUN" doctor-hook-ok -- lodeline doctor`. Stdout holds `[OK]   hook claude-code:` and a path that ends in `hook dir/lodeline-hook starts`.
 - **Hook cannot start.** Run `drive.sh run "$RUN" doctor-hook-chmod -- sh -c 'chmod -x "$HOME/hook dir/lodeline-hook"'`, then `drive.sh run "$RUN" doctor-hook-blocked -- lodeline doctor`. Exit code `1`, and stdout holds `[WARN] hook claude-code: cannot start` and `Permission denied (os error 13); hooks will not run`. The Windows Application Control text needs a Windows host where Smart App Control or WDAC blocks the exe, which this harness cannot drive.
+- **Codex hooks off.** Run `drive.sh run "$RUN" doctor-codex-install -- sh -c 'mkdir -p "$HOME/.codex" && printf "[features]\nhooks = false\n" > "$HOME/.codex/config.toml" && lodeline-hook install --agent codex --write'`. Stderr holds `warning: Codex does not run hooks` and the exit code is `0`. Then `drive.sh run "$RUN" doctor-codex-off -- lodeline doctor`. Exit code `1`, and stdout holds `[WARN] hook codex: Codex does not run hooks`, with the path of `config.toml`.
 
 ## Gotchas
 

@@ -560,6 +560,9 @@ fn cmd_install(
         } else {
             print!("{}", install::render_block(&exe, agent, capture_str));
         }
+        if agent == "codex" {
+            warn_if_codex_hooks_off(|w| eprintln!("warning: {w}"));
+        }
         return;
     }
 
@@ -690,6 +693,22 @@ fn cmd_install(
     }
     if agent == "codex" {
         eprintln!("lodeline-hook: {}", install::CODEX_TRUST_NOTE);
+        warn_if_codex_hooks_off(|w| eprintln!("warning: {w}"));
+    }
+}
+
+/// A registered hook still never runs when Codex's `[features] hooks` is off,
+/// so say so. Measure, don't block: this never changes the exit code.
+fn warn_if_codex_hooks_off(report: impl FnOnce(&str)) {
+    let Some(codex_home) =
+        install::settings_path("codex").and_then(|p| Some(p.parent()?.to_owned()))
+    else {
+        return;
+    };
+    let feature =
+        lodeline_core::codex::HooksFeature::read(&lodeline_core::codex::system_dir(), &codex_home);
+    if let Some(w) = feature.warning() {
+        report(&w);
     }
 }
 
@@ -958,6 +977,9 @@ fn cmd_verify(agent: &str) -> i32 {
         }
     };
 
+    if agent == "codex" {
+        warn_if_codex_hooks_off(|w| println!("[WARN]  {w}"));
+    }
     let Some(report) = verify::check(agent) else {
         println!("[OK]    hook registration matches baseline");
         return 0;

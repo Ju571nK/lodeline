@@ -9,6 +9,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-hook install --agent codex` and `lodeline-hook verify --agent codex` now warn when
+  Codex's `[features] hooks` is `false`, or the older `codex_hooks` is `false`. Codex then runs
+  no hooks, so the registered hook never runs. Before, both commands reported success and said
+  nothing. The warning names the file and the key and says to set `hooks = true` under
+  `[features]`. It reads the user `config.toml` (`$CODEX_HOME` or `~/.codex`), the system
+  `config.toml`, and a pin in the system `requirements.toml`, as AI Guard does. A config that
+  does not parse gets a warning too. The install still writes the hook, and exit codes do not
+  change. `lodeline doctor` reports the same check for a registered Codex hook and, as for any
+  warning, exits `1`.
 - `lodeline-proxy` now reuses idle upstream connections. Before, it opened a new upstream
   connection, and a new TLS session for an https upstream, for every forwarded call. Under
   sustained load each closed connection held a local port in TIME_WAIT. On macOS the ports ran
