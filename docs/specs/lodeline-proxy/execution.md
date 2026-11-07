@@ -15,7 +15,7 @@
 ## 2026-11-07 e2e 시험의 state_dir lock 재시도 (`test/proxy-e2e-lock-retry`)
 
 문제: e2e 시험이 같은 시험 프로세스 안에서 같은 state_dir로 proxy를 다시 시작하면 가끔 `StateError::Locked`로 실패했다(CI macos-15에서
-`real_invocations_replay_deduplicate_and_refuse_before_dispatch` 1회). 같은 binary의 다른 시험이 openssl·cargo·proxy binary를 자식
+`inventory_e2e.rs`의 invocation 중복 제거 시험 1회). 같은 binary의 다른 시험이 openssl·cargo·proxy binary를 자식
 프로세스로 띄운다. fork와 exec 사이에 자식이 lock fd 사본을 잠깐 가지므로, 부모가 푼 flock이 그동안 남는다. 운영 재시작은 새 프로세스이고
 proxy는 자식을 띄우지 않으므로 제품 코드는 바꾸지 않았다.
 
