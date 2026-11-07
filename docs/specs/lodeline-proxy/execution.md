@@ -278,14 +278,14 @@ AWS 측정 계획(노드 A, 위 절과 같은 구성과 순서):
 
 ### closed loop 꼬리 AWS 계측 (2026-11-07)
 
-위 계획대로 노드 A에서 쟀다. 원인은 writer thread에서 도는 PASSIVE checkpoint다(측정). group commit 뒤 처리량이 두 배를 넘자 spool 쓰기가
-gp3 기준 한도(3,000 IOPS, 125 MiB/s) 근처에 붙었고, 그 상태에서 checkpoint 하나가 수십에서 수백 ms 걸렸다. 그동안 writer는 묶음을
-처리하지 않으므로 대기열의 start가 모두 기다린다. 코드는 바꾸지 않았다.
+위 계획대로 노드 A에서 쟀다. 꼬리 대기의 거의 전부가 writer thread에서 도는 PASSIVE checkpoint와 겹친다(측정). group commit 뒤 처리량이 두 배를 넘자 spool 쓰기가
+gp3 기준 한도(3,000 IOPS, 125 MiB/s) 근처에 붙었다(측정). 이 때문에 checkpoint 하나가 수십에서 수백 ms로 길어졌다는 설명은 추정이다.
+checkpoint 중 writer는 묶음을 처리하지 않으므로 대기열의 start가 모두 기다린다. 코드는 바꾸지 않았다.
 
 환경은 위 AWS 절과 같다(노드 A만, t4g.small, gp3 xfs 루트 볼륨, proxy는 CPU 0·512 MiB scope, 나머지는 CPU 1, principal 16 × route 8).
 기준 `c24bd16`과 main `2ab6f4e`에 임시 계측 patch(커밋하지 않음, 로컬 절과 같은 측정점에 기록 시각을 더함)를 넣어 노드에서 release로
-빌드했다. 앞 절과 달리 run마다 새 stack(빈 spool, 새 collector)을 띄웠다. closed loop 동시성 32와 64, warm-up 10초 + 30초, 1 round.
-바이너리는 stack 단위로 기준, 변경, 변경, 기준, 기준, 변경 순서로 교대했다(동시성마다 3 round). 모든 run에서 오류 0, upstream 호출 수 =
+빌드했다. 앞 절과 달리 run마다 새 stack(빈 spool, 새 collector)을 띄웠다. closed loop 동시성 32와 64, warm-up 10초 + 30초 run 하나가 1 round다.
+바이너리는 stack 단위로 기준, 변경, 변경, 기준, 기준, 변경 순서로 교대했다(동시성마다 기준 3 round, 변경 3 round). 모든 run에서 오류 0, upstream 호출 수 =
 성공 응답 수였다. 계측 값은 proxied 측정 30초 창 안의 기록만 쓴다. 디스크는 `/proc/diskstats`를 1초마다 읽어 `iostat -x`의 열을
 계산했다(sysstat는 설치하지 않음). 계측 자체의 부하는 따로 재지 않았다.
 
@@ -299,7 +299,7 @@ proxied 성공 호출/s와 client가 잰 지연(ms), 3 round 중앙값(범위):
 | p99 | 99.6 (96.3–104.4) | 165.2 (153.2–168.7) | 160.0 (159.1–167.8) | 323.8 (311.8–341.0) |
 | max | 133.5 | 356.4 | 226.9 | 381.7 |
 
-새 stack에서도 앞 절과 같은 모양이다. p50은 줄고 p99는 두 배가 됐다. 앞 절의 p99 557 ms는 앞 run이 남긴 collector 쓰기 위에서 쟀다.
+새 stack에서도 앞 절과 같은 모양이다. p50은 줄고 p99는 두 배가 됐다. 앞 절의 p99 557 ms는 앞 run이 남긴 collector 쓰기 위에서 쟀다는 것이 앞 절의 설명이며, 이번에 다시 확인하지는 않았다.
 
 변경 동시성 64의 분위별 분해(ms, 3 round 중앙값). 열마다 따로 정렬한 분위라 한 호출을 따라간 값이 아니다. checkpoint와 묶음 열은 writer가
 한 번 하는 일의 길이다.
@@ -324,7 +324,7 @@ start spool 대기를 분위 구간으로 나누고, 각 대기가 writer의 che
 | p90–p99 | 156.7 | 118.6 | 37.6 | 99.7% |
 | p99 초과 | 347.0 | 300.4 | 44.7 | 100% |
 
-변경 동시성 32도 같다. p99 초과 구간 평균 210.8 ms 중 185.4 ms가 checkpoint와 겹쳤다. 기준 동시성 64의 p99 초과 구간은 183.1 ms 중
+변경 동시성 32도 같다. p99 초과 구간 평균 210.8 ms 중 185.3 ms가 checkpoint와 겹쳤다. 기준 동시성 64의 p99 초과 구간은 183.1 ms 중
 22.0 ms다.
 
 계획의 판정 규칙:
@@ -336,15 +336,16 @@ start spool 대기를 분위 구간으로 나누고, 각 대기가 writer의 che
 
 checkpoint가 왜 길어졌나: 주기는 양쪽 모두 512 명령이다. 30초에 기준 60회(평균 20.6 ms), 변경 132회(평균 89.8 ms)였다. 변경에서
 writer thread의 시간은 checkpoint 39.5%(37.8–39.6%), 묶음 59.6%, 나머지 0.7%로 쉬는 틈이 없다. 기준은 checkpoint 4.1%, append 87.6%다.
-디스크(1초 표본, run 3개 범위): 변경 w/s p50 3,019–3,085, wkB/s p90 128,669–135,344(125 MiB/s 근처), w_await p50 2.8–3.1 ms. 기준 w/s p50
-1,666–1,851, wkB/s p50 48,492–50,821, w_await p50 1.1 ms. proxy의 write_bytes를 upstream 호출 수로 나누면 호출당 기준 78.8 KB, 변경 76.8 KB로
-같다(round 1). 변경은 같은 쓰기를 2.3배의 호출에 하므로 볼륨 기준 한도에 닿는다(측정). 1,183 calls/s × 76.8 KB는 약 91 MB/s이고 디스크가
+디스크(1초 표본, 동시성 64의 run 3개 범위): 변경 w/s p50 3,019–3,085, wkB/s p90 128,669–129,048(125 MiB/s 근처), w_await p50 2.9–3.1 ms.
+기준 w/s p50 1,666–1,713, wkB/s p50 48,492–49,491, w_await p50 1.1 ms. proxy의 write_bytes를 upstream 호출 수로 나누면 호출당 기준 78.8 KB, 변경 76.8 KB로
+같다(round 1). 변경은 같은 호출당 쓰기를 2.3배의 호출에 하므로 w/s와 wkB/s가 gp3 기준값 근처에 있다(측정). 1,183 calls/s × 76.8 KB는 약 91 MB/s이고 디스크가
 본 쓰기 약 95 MB/s와 맞는다(collector 포함). checkpoint의 DB 쓰기와 fsync가 한도에 묶인 대기열 뒤에 서서 길어진다는 설명은 추정이다.
 CloudWatch VolumeWriteOps(분당 합)는 변경 run이 든 분에 최대 126,971(분 평균 2,116/s, run 하나가 약 100초 주기 중 proxied 약 40초)이었고,
 VolumeIOPSExceededCheck와 VolumeThroughputExceededCheck는 이번에도 데이터점이 없었다. 그래서 볼륨이 실제로 throttle했다는 직접 증거는 없다.
 
-처리량의 상한: 변경은 writer thread가 늘 바쁘고 CPU 0 busy 46–48%, iowait 43–48%라 writer가 디스크를 기다린다. 디스크는 위처럼 gp3
-기준값에 붙어 있다. 그래서 상한은 gp3 쓰기이고, writer 시간의 약 40%가 checkpoint다.
+처리량의 상한: 변경은 writer thread에 쉬는 틈이 없고(측정) CPU 0 busy 46–48%, iowait 46–48%(동시성 64, 측정)다. 디스크는 위처럼 gp3
+기준값 근처에 있다. 그래서 상한은 gp3 쓰기라고 추정한다. throttle 지표가 없고, 아래 tmpfs 대조에서 변경이 1,441 calls/s까지 올랐는데
+디스크 w/s p50은 3,040으로 그대로여서 상한이 증명되지는 않았다. writer 시간의 약 40%가 checkpoint다(측정).
 
 collector를 tmpfs에 둔 대조(stack 디렉터리를 `/dev/shm`에, proxy state는 gp3 그대로, 동시성 64, 1 run씩):
 
