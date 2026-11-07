@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-07 · spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-07 · invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`), upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -439,7 +439,15 @@ tail 끝은 전원 손실 뒤에도 남는 sequence만 가리킨다. `min(last_s
 6,400회 중 5,246회 거절, 3/3회), e2e `sustained_concurrent_calls_are_not_refused`(relay 경유 8 × 400 `ping`과 `tools/call`. 수정 전 `ping`
 1,295–1,330회 거절, 3/3회), `the_tail_a_status_names_survives_a_power_loss`. `only_a_start_commit_fsyncs`,
 `power_loss_never_reissues_a_handed_out_sequence` 등 #498 시험은 그대로 통과한다. mutation 7개 중 5개가 실패했다. 살아남은 둘(거절 쌍에서 start
-실패 뒤 completion append, 종료로 포기한 writer의 submit)은 이 PR이 옮기기만 한 분기이고 main에도 시험이 없다(추론, main에서 돌리지 않음).
+실패 뒤 completion append, 종료로 포기한 writer의 submit)은 이 PR이 옮기기만 한 분기였고, 뒤에 시험을 더했다(`test/proxy-sink-fault-paths`).
+`a_refusal_whose_start_is_not_stored_stores_no_completion`: spool이 거절 쌍의 start를 `Full`로 거절하고 더 작은 completion은 들어갈 자리가
+남은 상태(`set_capacity_for_test`). spool에는 completion만 남는 행이 없고, 그 호출은 `local_record_failed` gap 1건으로 센다. fsync 실패 주입은
+쓰지 않았다. #512 뒤에는 writer가 멈춰 completion도 `Unavailable`이 되므로 이 분기를 가르지 못한다.
+`a_record_left_to_an_abandoned_writer_is_counted_not_stored`: writer가 queue의 completion을 꺼내 append 직전(시험 전용 `append_gate`)에 있을 때
+`InvocationHandle`을 drop한다. writer는 그 completion을 spool에 쓰지 않고 gap 1건으로 센 뒤 멈춘다. `shutdown`의 abandon 뒤에는 `join.abort()`가
+writer를 곧바로 취소하므로, `submit`의 확인이 보이는 경로는 이 drop뿐이다(`shutdown`에서는 다른 worker thread와의 경합만 막는다).
+mutation(한 번에 하나씩): completion을 start 결과와 상관없이 append(앞 시험이 세 번째 행 `invocation.completed`로 실패), `submit`의
+abandon 확인 제거(뒤 시험이 `lost_records` `left: 0, right: 1`로 실패). 두 시험은 100회 반복에서 실패 0.
 
 AWS 측정(노드 A, t4g.small, AL2023 aarch64, gp3 xfs, 기준 `db9e804`과 브랜치 바이너리를 같은 노드에서, 운영자의 로컬 harness, Python client가
 호출마다 새 연결, proxy 하나에 principal 하나):
