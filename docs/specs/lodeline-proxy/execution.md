@@ -24,7 +24,8 @@
 - route마다 idle 연결 pool(`upstream_pool.rs`)을 둔다. pool은 `RouteTable::build_carrying`이 route를 만들 때 새로 만들므로
   config apply(새 revision)마다 비어서 시작한다. 같은 revision의 TTL refresh는 table을 다시 만들지 않으므로 pool이 유지된다.
 - 연결은 hyper `SendRequest::ready()`가 끝난 뒤에만 pool에 돌아간다. 응답 body를 끝까지 읽은 뒤다. 끝까지 읽지 않은 응답,
-  `Connection: close`, 오류는 연결을 닫고 pool에 넣지 않는다.
+  `Connection: close`, 오류는 연결을 닫고 pool에 넣지 않는다. route마다 idle 연결은 route 동시 호출 한도
+  (`max_calls_per_route`, 기본 16) 이하로 두고, 넘으면 가장 오래된 것을 닫는다.
 - DNS 해석과 목적지 검사는 지금처럼 호출마다 한다(AC-08). pool에서 꺼내는 연결은 이번 호출의 검사를 통과한 주소로 연결된
   것뿐이다. idle 1초가 지난 연결과 닫힌 연결은 버린다.
 - 호출은 한 번만 보낸다(PX-015). pool 연결이 실패해도 새 연결로 다시 보내지 않는다. hyper가 요청을 한 byte도 쓰지 않고
@@ -39,16 +40,22 @@ HTTP/1.1이라 연결 하나에 동시에 한 요청만 있고, 다음 요청은
 
 - upstream이 idle 연결을 닫는 순간 proxy가 그 연결을 다시 쓰면 502다. 요청이 나갔을 수 있으면 `unknown`으로 남고 성공으로
   기록되지 않는다. idle 1초 상한은 gunicorn 2초, Node `http`와 uvicorn 5초보다 짧게 잡았다(기본값은 공식 문서로 재확인하지 않음).
-- hyper의 readiness에는 드문 race가 있어 응답이 끝나기 전에 연결이 pool로 돌아갈 수 있다. 그때 다음 호출은 hyper queue에서
-  이전 응답이 끝나기를 기다리고, 응답 byte는 섞이지 않는다. hyper-util의 pool도 같은 방식이다.
-- upstream이 응답 framing보다 긴 byte를 보내는 결함이 있으면, 그 꼬리가 같은 연결의 다음 요청(다른 principal일 수 있음)의
-  응답으로 읽힐 수 있다. upstream은 원래 모든 principal의 응답을 만드는 쪽이라 새 권한은 아니지만, 연결별 격리는 없어졌다.
-- 트래픽이 끊긴 route의 idle 연결은 다음 호출이 올 때까지 닫지 않는다. 수는 route 동시 호출 한도(기본 16) 이하다.
+- 응답이 끝나기 전에 연결이 pool로 돌아가는 경우는 없다(hyper 1.9.0 소스로 확인). `ready()`는 dispatcher가 다음 요청을
+  queue에서 꺼내려다 비어 있을 때만 끝나고(`client/dispatch.rs` `Receiver::poll_recv`), dispatcher는 연결의 쓰기 상태가
+  `Writing::Init`일 때만 꺼내려 한다(`proto/h1/dispatch.rs` `poll_write`, `proto/h1/conn.rs` `can_write_head`). 첫 요청 뒤
+  `Writing::Init`으로 돌아가는 곳은 요청 쓰기와 응답 읽기가 모두 끝난 뒤의 `try_keep_alive`/`idle()`뿐이다.
+- 남는 경우는 하나다. upstream이 응답 framing보다 긴 byte를 보내면, idle 상태에서 hyper가 그 byte를 보고 연결을 닫는다
+  (`require_empty_read`: 이미 받은 byte는 `ready()` 전에, idle 중 도착한 byte는 `force_io_read`로). 그래서 그 byte가 다른
+  호출(다른 principal일 수 있음)에 닿는 것은, 결함 있는 upstream이 proxy가 다음 요청 head를 쓴 뒤에 요청하지 않은 응답을 보낼
+  때뿐이고, 그 byte는 다음 요청의 응답으로 읽힌다. upstream은 원래 모든 principal의 data를 다루는 쪽이라 새 권한은 아니다.
+- 트래픽이 끊긴 route의 idle 연결은 다음 호출이 올 때까지 닫지 않는다(sweep timer 없음). 수는 위 상한 이하다.
 - 세션 DELETE와 `initialize` 거절 뒤 cleanup은 지금처럼 호출마다 새 연결이다.
 
-시험: `tests/relay_pool.rs` 3개. principal 2개가 번갈아 한 순차 호출 40회가 upstream 연결 4개 이하를 쓰고(수정 전 42개,
+시험: `tests/relay_pool.rs` 6개. principal 2개가 번갈아 한 순차 호출 40회가 upstream 연결 4개 이하를 쓰고(수정 전 42개,
 수정 후 1개) 각 호출이 자기 id의 응답을 받음, client가 읽기를 멈춘 SSE의 upstream 연결은 닫히고 다음 호출은 자기 응답 전체를
-받음, route를 다른 upstream으로 바꾼 table 적용 뒤 호출은 새 upstream에만 감. 기존 "재시도 안 함" 시험 2개는 upstream이 받은
+받음, route를 다른 upstream으로 바꾼 table 적용 뒤 호출은 새 upstream에만 감, `Connection: close` 응답의 연결은 다시 쓰지 않음,
+idle 1초가 지난 연결은 다시 쓰지 않음, DNS 답이 바뀌어 이번 호출의 검사 목록에 없는 주소로의 pool 연결은 쓰지 않음.
+`upstream_pool.rs` unit test 1개는 idle 상한을 넘긴 연결을 닫는지 본다. 기존 "재시도 안 함" 시험 2개는 upstream이 받은
 호출 수 1만 확인한다(연결 수는 pool 때문에 1 또는 2).
 
 로컬 측정(macOS 26.6.2 arm64, 12 core, release, load average 4.5–7.3, 다른 세션의 cargo test가 같이 돌았음, state는 APFS).
