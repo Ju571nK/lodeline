@@ -390,7 +390,9 @@ impl<S> CheckedSource<S> {
 /// Reads of the spool after a conflict rewrote events.
 const CHECK_ROUNDS: usize = 3;
 
-fn metadata_refs(events: &[lodeline_proxy_api::ProxyEvent]) -> Vec<String> {
+pub(crate) fn metadata_refs<'a>(
+    events: impl IntoIterator<Item = &'a lodeline_proxy_api::ProxyEvent>,
+) -> Vec<String> {
     use lodeline_proxy_api::event::{EventPayload, Tool};
     let mut refs: Vec<String> = Vec::new();
     for e in events {
@@ -448,6 +450,30 @@ impl<S: crate::ingest_client::EventSource> crate::ingest_client::EventSource for
         code: lodeline_proxy_api::status::QuarantineCode,
     ) {
         self.inner.quarantined(event_ids, code)
+    }
+
+    /// Mirrors the inventory 424: an entry the server lost (or never stored)
+    /// though it was acked here is uploaded on the next sync. Unknown refs and
+    /// entries that are not acked are left as they are.
+    fn metadata_pending(&mut self, refs: &[String]) {
+        if self.conflicts.store.mark_unacked(refs).is_err() {
+            tracing::warn!("registry: a pending ref could not be queued for upload");
+        }
+    }
+
+    fn metadata_pending_async<'a>(
+        &'a mut self,
+        refs: &'a [String],
+    ) -> crate::ingest_client::SourceFuture<'a, ()> {
+        let store = self.conflicts.store.clone();
+        let refs = refs.to_vec();
+        Box::pin(async move {
+            // SQLite: off the async workers.
+            let r = tokio::task::spawn_blocking(move || store.mark_unacked(&refs)).await;
+            if !matches!(r, Ok(Ok(()))) {
+                tracing::warn!("registry: a pending ref could not be queued for upload");
+            }
+        })
     }
 
     fn next_events_async<'a>(
