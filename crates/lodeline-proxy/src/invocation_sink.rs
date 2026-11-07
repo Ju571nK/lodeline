@@ -1543,6 +1543,50 @@ mod tests {
         assert_eq!(sink.refused_starts(), 1);
     }
 
+    /// The spool refuses a refusal pair's start as full while its smaller
+    /// completion would still fit. The completion must not be stored without
+    /// its start; the invocation is counted as one lost record instead.
+    #[tokio::test]
+    async fn a_refusal_whose_start_is_not_stored_stores_no_completion() {
+        let d = tempfile::tempdir().unwrap();
+        let sp = spool(d.path());
+        let (g, got) = gaps();
+        let (sink, h) =
+            InvocationSink::start(Admission::new(sp.clone()), "px-1", sp.epoch_id(), None, g)
+                .unwrap();
+        let refuse = |seq| {
+            sink.observe(Observation::Refused(RequestRefused {
+                call: call(seq, Some(1)),
+                reason: RefusalKind::VersionHeader,
+                method: Method::Ping,
+                request_id: None,
+                tool: ToolField::NotApplicable,
+                http_status: 400,
+                request_bytes: 0,
+                received_at: SystemTime::now(),
+            }))
+        };
+        refuse(1);
+        wait_for(|| sp.snapshot().unsent_events == 2).await;
+        let size = |e: &serde_json::Value| serde_json::to_vec(e).unwrap().len() as u64;
+        let first = events(d.path());
+        let (start, done) = (size(&first[0]), size(&first[1]));
+        assert!(start > done + 64, "start {start} B, completion {done} B");
+        // Room for another completion, not for another start.
+        sp.set_capacity_for_test(sp.snapshot().unsent_bytes + (start + done) / 2, 0);
+        refuse(2);
+        wait_for(|| sink.lost_records() == 1).await;
+        h.shutdown(Duration::from_secs(5)).await;
+        let ev = events(d.path());
+        assert_eq!(ev, first, "the refused start's completion was stored alone");
+        let gaps = got.lock().unwrap();
+        let v = serde_json::to_value(&gaps[0]).unwrap();
+        assert_eq!(v["kind"], "local_record_failed");
+        assert_eq!(v["count"], 1);
+        let lost = &v["invocation_ids"][0];
+        assert!(ev.iter().all(|e| &e["payload"]["invocation_id"] != lost));
+    }
+
     #[tokio::test]
     async fn a_stuck_registry_holds_a_bounded_number_of_lookups() {
         let d = tempfile::tempdir().unwrap();
@@ -1769,6 +1813,46 @@ mod tests {
         wait_for(|| !got.lock().unwrap().is_empty()).await;
         let v = serde_json::to_value(&got.lock().unwrap()[0]).unwrap();
         assert_eq!(v["kind"], "local_record_failed");
+    }
+
+    /// The handle goes away while the writer is about to append a queued
+    /// completion. The abandoned writer counts it as a gap and stores nothing.
+    #[tokio::test]
+    async fn a_record_left_to_an_abandoned_writer_is_counted_not_stored() {
+        let d = tempfile::tempdir().unwrap();
+        let sp = spool(d.path());
+        let (g, got) = gaps();
+        let (sink, h) =
+            InvocationSink::start(Admission::new(sp.clone()), "px-1", sp.epoch_id(), None, g)
+                .unwrap();
+        assert_eq!(
+            sink.request_started(&started(1, Method::Ping, ToolField::NotApplicable))
+                .await,
+            StartVerdict::Proceed
+        );
+        let gate = sink.shared.append_gate.clone().write_owned().await;
+        sink.observe(Observation::Completed(completed(
+            1,
+            Outcome::Success,
+            Delivery::Sent,
+            Cause::None,
+            false,
+        )));
+        // The writer took the completion and waits at the gate.
+        wait_for(|| sink.tx.capacity() == QUEUE_DEPTH).await;
+        drop(h);
+        drop(gate);
+        wait_for(|| sink.tx.is_closed()).await;
+        assert_eq!(sink.lost_records(), 1);
+        let kinds: Vec<String> = events(d.path())
+            .iter()
+            .map(|e| e["event_type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, ["invocation.started"]);
+        wait_for(|| !got.lock().unwrap().is_empty()).await;
+        let v = serde_json::to_value(&got.lock().unwrap()[0]).unwrap();
+        assert_eq!(v["kind"], "local_record_failed");
+        assert_eq!(v["count"], 1);
     }
 
     #[tokio::test]
