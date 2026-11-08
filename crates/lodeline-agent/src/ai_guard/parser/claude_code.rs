@@ -2960,6 +2960,119 @@ mod tests {
             .contains(&dir.join("managed-mcp.json")));
     }
 
+    /// Under a deployed `managed-mcp.json` a project's own servers do not
+    /// load, so neither they nor the key that pre-approves them score.
+    #[test]
+    fn managed_mcp_json_stops_project_servers_scoring() {
+        let repo = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".mcp.json",
+            r#"{"mcpServers": {"x": {"command": "node"}}}"#,
+        );
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"enableAllProjectMcpServers": true}"#,
+        );
+        let policy = tempdir().unwrap();
+        let assess = || assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
+        let auto_enabled = |out: &[AiGuardReason]| {
+            out.iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. }))
+        };
+        let out = assess();
+        assert_eq!(mcp_server_names(&out), ["x"], "{out:?}");
+        assert!(auto_enabled(&out), "{out:?}");
+
+        write_file(policy.path(), "managed-mcp.json", r#"{"mcpServers": {}}"#);
+        let out = assess();
+        assert!(mcp_server_names(&out).is_empty(), "{out:?}");
+        assert!(!auto_enabled(&out), "{out:?}");
+    }
+
+    /// Claude Code drops a `managedMcpServers` entry that is not an https
+    /// http/sse server with a plain name, so only the valid entry scores and
+    /// the user's server of a dropped name still loads.
+    #[test]
+    fn invalid_managed_mcp_servers_entries_are_not_scored() {
+        let home = tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"mcpServers": {"local": {"command": "npx"}}}"#,
+        )
+        .unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{"managedMcpServers": {
+                "search": {"type": "http", "url": "https://search.example.com/mcp"},
+                "local": {"type": "stdio", "command": "/opt/org/run"},
+                "plain": {"type": "http", "url": "http://plain.example.com/mcp"},
+                "bad name": {"type": "sse", "url": "https://bad.example.com/mcp"},
+                "untyped": {"url": "https://untyped.example.com/mcp"},
+                "env-ref": {"type": "http", "url": "https://${HOST}/mcp"}
+            }}"#,
+        );
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            mcp_server_names(&reasons),
+            ["local", "search (managed file)"],
+            "{reasons:?}"
+        );
+    }
+
+    /// `deniedMcpServers` from managed and user settings keeps a managed
+    /// server from loading, matched by name, command or URL.
+    #[test]
+    fn denied_managed_mcp_servers_are_not_scored() {
+        let home = tempdir().unwrap();
+        write_file(
+            home.path(),
+            ".claude/settings.json",
+            r#"{"deniedMcpServers": [{"serverUrl": "https://search.example.com/*"}]}"#,
+        );
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-mcp.json",
+            r#"{"mcpServers": {
+                "org-local": {"command": "/usr/local/bin/company-mcp"},
+                "tool": {"command": "/opt/tool", "args": ["serve"]},
+                "org-http": {"type": "http", "url": "https://org.example.com/mcp"}
+            }}"#,
+        );
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{
+                "managedMcpServers": {"search": {"type": "http", "url": "https://search.example.com/mcp"}},
+                "deniedMcpServers": [
+                    {"serverName": "org-local"},
+                    {"serverCommand": ["/opt/tool", "serve"]},
+                    {"serverUrl": "https://org.example.com:8443/*"}
+                ]
+            }"#,
+        );
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            mcp_server_names(&reasons),
+            ["org-http (managed file)"],
+            "{reasons:?}"
+        );
+    }
+
     /// Claude Code runs an identical hook once and merges allow lists, so the
     /// same hook or rule in both files scores once, as the managed one.
     #[test]
