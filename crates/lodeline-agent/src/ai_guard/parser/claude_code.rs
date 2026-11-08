@@ -708,7 +708,7 @@ fn home_relative<'a>(word: &'a str, script: &'a str) -> Option<&'a str> {
     if cfg!(windows) {
         return None;
     }
-    let quotes = &word[..word.len() - script.len()];
+    let quotes = word.strip_suffix(script).unwrap_or("");
     match word.chars().next() {
         Some('\'') => None,
         // `"'$HOME/x.sh'"` keeps the single quotes in the file name.
