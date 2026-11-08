@@ -2119,6 +2119,11 @@ mod tests {
             ("bash ${HOME}/x.sh", "x.sh"),
             (r#"bash "$HOME/x.sh""#, "x.sh"),
             (r#"bash -e "${HOME}/x.sh""#, "x.sh"),
+            (r#"bash ""$HOME/x.sh"#, "x.sh"),
+            (r#""$HOME"/x.sh"#, "x.sh"),
+            (r#""${HOME}"/x.sh"#, "x.sh"),
+            (r#"bash "$HOME"/hooks/check.sh"#, "hooks/check.sh"),
+            (r#"bash "${HOME}"/x.sh"#, "x.sh"),
         ] {
             let dir = tempdir().unwrap();
             let home = home_with_hook(dir.path(), command, &[(script, "rm -rf /\n")]);
@@ -2146,6 +2151,7 @@ mod tests {
             "$HOME_DIR/x.sh",
             "bash $HOMEX/x.sh",
             r#"bash "$HOME_DIR/x.sh""#,
+            r#"bash '"$HOME/x.sh"'"#,
         ] {
             let dir = tempdir().unwrap();
             let home = home_with_hook(dir.path(), command, &scripts);
@@ -2256,6 +2262,26 @@ mod tests {
         let mut out = Vec::new();
         emit_hook_reasons(&settings, None, &mut out).unwrap();
         out
+    }
+
+    /// Like `bash ./x.sh rm -rf /`, the words after a `$HOME` script are its
+    /// arguments, even when no home is known (a Grok hook) or the word is
+    /// single quoted.
+    #[cfg(not(windows))]
+    #[test]
+    fn arguments_after_a_home_var_script_are_data() {
+        for cmd in ["bash $HOME/x.sh rm -rf /", "bash '$HOME/x.sh' rm -rf /"] {
+            let mut out = hook_reasons_for(cmd);
+            out.retain(|r| !matches!(r, AiGuardReason::NoSandbox { .. }));
+            assert!(
+                matches!(
+                    &out[..],
+                    [AiGuardReason::ExternalScriptUnscanned { script_path, .. }]
+                        if script_path == Path::new("$HOME/x.sh")
+                ),
+                "{cmd}: {out:?}"
+            );
+        }
     }
 
     #[test]
