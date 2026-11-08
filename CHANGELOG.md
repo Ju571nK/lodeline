@@ -21,6 +21,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- Codex sandbox scoring now resolves paths against the home folder and the config folder as Codex
+  does. A `writable_roots` entry or a `write` path in a `[permissions]` profile that names the home
+  folder or a parent of it, such as `/home` or `~/../alice` for the home `/home/alice`, was missed
+  and now scores `sandbox_disabled`. A relative `writable_roots` entry resolves against the folder
+  of the config that set it, so `..` in the user config names the home folder with the default
+  `CODEX_HOME` and now scores. A profile path now drops `.` and folds `..`, so `/.` and `~/.`
+  score too. On macOS and Linux, a drive root such as `C:\` in a profile no longer scores, because
+  Codex refuses the profile there.
 - Codex `[sandbox_workspace_write] writable_roots` scoring now folds `.` and `..` as Codex does.
   An absolute or `~` entry that resolves to the root, the home folder or a parent of it, such as
   `/.`, `/..` or `~/.`, was missed and now scores `sandbox_disabled`. On macOS and Linux,
