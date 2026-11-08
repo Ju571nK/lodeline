@@ -80,11 +80,12 @@ fn hooks_of(path: PathBuf) -> Option<ComponentHooks> {
 /// added at most once across settings and component hooks.
 pub(crate) fn emit_component_hook_reasons(
     components: &[ComponentHooks],
+    home: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) {
     for component in components {
         let mut found = Vec::new();
-        if let Err(e) = emit_hook_reasons(&component.settings, &mut found) {
+        if let Err(e) = emit_hook_reasons(&component.settings, home, &mut found) {
             tracing::warn!(path = %component.path.display(), error = %e,
                 "claude components: hook classification failed");
             continue;
@@ -332,7 +333,7 @@ mod tests {
 
     fn reasons(claude_dir: &Path) -> Vec<AiGuardReason> {
         let mut out = Vec::new();
-        emit_component_hook_reasons(&component_hooks(claude_dir), &mut out);
+        emit_component_hook_reasons(&component_hooks(claude_dir), None, &mut out);
         out
     }
 
@@ -417,7 +418,7 @@ mod tests {
         let mut out = vec![AiGuardReason::NoSandbox {
             executor: "host_shell".into(),
         }];
-        emit_component_hook_reasons(&component_hooks(d.path()), &mut out);
+        emit_component_hook_reasons(&component_hooks(d.path()), None, &mut out);
         let sandbox = out
             .iter()
             .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))

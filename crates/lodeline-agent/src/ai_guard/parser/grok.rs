@@ -99,10 +99,12 @@ fn emit_mcp_reasons(config: &toml::Value, out: &mut Vec<AiGuardReason>) {
 /// does not load.
 fn assess_dir(grok: &Path, config_hooks: bool) -> Result<Vec<AiGuardReason>, AssessError> {
     let mut out = Vec::new();
-    super::claude_code::emit_hook_reasons(&hooks_in_dir(&grok.join("hooks")), &mut out)?;
+    // shortcut: the shell Grok runs hooks through is unchecked, so `~` stays as
+    // written; pass the home once that is verified.
+    super::claude_code::emit_hook_reasons(&hooks_in_dir(&grok.join("hooks")), None, &mut out)?;
     if let Some(config) = read_config(&grok.join("config.toml"))? {
         if config_hooks {
-            super::codex::emit_hook_reasons(&config, |_, _, _| true, &mut out);
+            super::codex::emit_hook_reasons(&config, |_, _, _| true, None, &mut out);
         }
         emit_mcp_reasons(&config, &mut out);
     }

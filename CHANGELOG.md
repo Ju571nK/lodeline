@@ -21,6 +21,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- On macOS and Linux, a Claude Code, Codex or Cursor hook command that runs a script under `~`,
+  such as `~/x.sh` or `bash ~/hooks/check.sh`, now has that script's content scanned. Before, the
+  script was reported as unscanned and a destructive command in it was missed. `~` is read as the
+  home whose settings name the hook, so a root agent scanning alice's hooks reads alice's home. A
+  quoted `"~/x.sh"`, a Claude Code exec-form hook (`args` set), and every hook on Windows keep `~`
+  as written, because the shell those run through does not read it as the home.
 - The Codex project scan now reads the system config (`/etc/codex/config.toml`,
   `%ProgramData%\OpenAI\Codex\config.toml`) under the user and project layers for sandbox
   settings. A project `default_permissions` profile that only the system config defines, with a

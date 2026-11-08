@@ -86,17 +86,19 @@ impl AiGuardParser for ClaudeCodeParser {
             &claude,
             &claude_json,
             &super::policy_controls::claude_policy_dir(),
+            Some(home_dir),
         )
     }
 }
 
 /// The user-global assessment of the config folder `claude` and the
 /// `.claude.json` file. `policy_dir` is the managed-settings folder, passed in
-/// so tests do not depend on the host's real one.
+/// so tests do not depend on the host's real one. `home` is the user's home.
 fn assess_user(
     claude: &Path,
     claude_json: &Path,
     policy_dir: &Path,
+    home: Option<&Path>,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let base_path = claude.join("settings.json");
     let local_path = claude.join("settings.local.json");
@@ -168,8 +170,8 @@ fn assess_user(
 
     let mut out = Vec::new();
     if !hooks_off {
-        emit_hook_reasons(&merged, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&components, &mut out);
+        emit_hook_reasons(&merged, home, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, home, &mut out);
     }
     // Managed deny rules apply to every session, so the deny list is the
     // combined one.
@@ -185,7 +187,7 @@ fn assess_user(
         let mut found = Vec::new();
         // Only a managed `disableAllHooks` reaches managed hooks.
         if !hooks_disabled(&[Some(managed)]) {
-            emit_hook_reasons(managed, &mut found)?;
+            emit_hook_reasons(managed, home, &mut found)?;
         }
         if let Some(perms) = managed.get("permissions") {
             emit_broad_allow_reasons(perms, &mut found);
@@ -427,6 +429,7 @@ pub(crate) fn merge_overlay(mut base: Value, overlay: Option<Value>) -> Value {
 
 pub(crate) fn emit_hook_reasons(
     settings: &Value,
+    home: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) -> Result<(), AssessError> {
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
@@ -496,7 +499,9 @@ pub(crate) fn emit_hook_reasons(
                     // command hook.
                     Some("command") | None => {
                         if let Some(cmd) = h.get("command").and_then(Value::as_str) {
-                            classify_command(cmd, event_name, out);
+                            // Exec form (`args` set) spawns `command` with no shell.
+                            let home = home.filter(|_| h.get("args").is_none());
+                            classify_command(cmd, event_name, home, out);
                         }
                     }
                     // `prompt` and `agent` hand the payload to the model the
@@ -638,8 +643,14 @@ fn destination_is_loopback(url: &str) -> bool {
 }
 
 /// Decide whether `cmd` is inline shell, a convention-dir script (we read it),
-/// or an external script (we mark unscanned). Codex hooks share it.
-pub(crate) fn classify_command(cmd: &str, event_name: &str, out: &mut Vec<AiGuardReason>) {
+/// or an external script (we mark unscanned). Codex hooks share it. `home` is
+/// the home whose settings hold `cmd`; `None` leaves a leading `~` as written.
+pub(crate) fn classify_command(
+    cmd: &str,
+    event_name: &str,
+    home: Option<&Path>,
+    out: &mut Vec<AiGuardReason>,
+) {
     // First token whitespace-separated. Treat as path candidate iff it looks
     // path-like cross-platform (Unix absolute / tilde / any separator, OR a
     // Windows absolute path like `C:\...` which `Path::is_absolute()` catches,
@@ -654,7 +665,7 @@ pub(crate) fn classify_command(cmd: &str, event_name: &str, out: &mut Vec<AiGuar
             let own = crate::ai_guard::own_entries::is_own_hook_command(cmd);
             out.extend(
                 crate::ai_guard::ext_script::scan_hook_script(
-                    std::path::Path::new(script),
+                    &script_file(cmd, script, home),
                     event_name,
                 )
                 .into_iter()
@@ -673,6 +684,23 @@ pub(crate) fn classify_command(cmd: &str, event_name: &str, out: &mut Vec<AiGuar
             hook_event: event_name.to_string(),
             snippet: truncate_for_snippet(inline),
         });
+    }
+}
+
+/// The file `script`, a word of `cmd`, names. On Unix every supported tool
+/// runs `cmd` through a POSIX shell, which reads a leading `~` or `~/` of an
+/// unquoted word as `home`. On Windows the shell may be `cmd.exe` or
+/// PowerShell, so `~` is left as written.
+fn script_file(cmd: &str, script: &str, home: Option<&Path>) -> PathBuf {
+    let start = script.as_ptr() as usize - cmd.as_ptr() as usize;
+    let quoted = cmd[..start].ends_with(['"', '\'']);
+    match (home, script.strip_prefix('~')) {
+        (Some(home), Some(rest))
+            if !cfg!(windows) && !quoted && (rest.is_empty() || rest.starts_with('/')) =>
+        {
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(script),
     }
 }
 
@@ -1484,8 +1512,8 @@ fn assess_project(
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
     let mut out = Vec::new();
     if !hooks_off {
-        emit_hook_reasons(&merged, &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&components, &mut out);
+        emit_hook_reasons(&merged, Some(home), &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, Some(home), &mut out);
     }
     emit_permission_reasons(&merged, &mut out);
     emit_start_mode_reason(start, &mut out);
@@ -1614,6 +1642,7 @@ mod tests {
             &dir.path().join(".claude"),
             &dir.path().join(".claude.json"),
             &dir.path().join("no-policy"),
+            None,
         )
         .unwrap();
         assert_eq!(reasons, vec![built_in_auto()]);
@@ -1876,6 +1905,7 @@ mod tests {
             &dir.path().join(".claude"),
             &dir.path().join(".claude.json"),
             &dir.path().join("no-policy"),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1940,6 +1970,113 @@ mod tests {
         assert!(reasons
             .iter()
             .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. })));
+    }
+
+    /// A home whose settings run `command` as a `PreToolUse` hook, with each
+    /// `(path, contents)` script written under it.
+    fn home_with_hook(dir: &Path, command: &str, scripts: &[(&str, &str)]) -> PathBuf {
+        for (rel, contents) in scripts {
+            write_file(dir, rel, contents);
+        }
+        let hook = serde_json::json!({ "type": "command", "command": command });
+        write_settings(
+            dir,
+            &serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": [hook] }] } }).to_string(),
+        );
+        dunce::canonicalize(dir).unwrap()
+    }
+
+    fn scanned_script(reasons: &[AiGuardReason]) -> Option<&Path> {
+        reasons.iter().find_map(|r| match r {
+            AiGuardReason::DestructiveInHookScript { script_path, .. } => {
+                Some(script_path.as_path())
+            }
+            _ => None,
+        })
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_hook_script_under_tilde_is_scanned() {
+        for (command, script) in [
+            ("~/x.sh", "x.sh"),
+            ("bash ~/hooks/check.sh", "hooks/check.sh"),
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &[(script, "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(
+                scanned_script(&reasons),
+                Some(home.join(script).as_path()),
+                "{command}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_or_exec_form_tilde_is_not_the_home() {
+        let dir = tempdir().unwrap();
+        for command in [r#""~/x.sh""#, r#"bash "~/x.sh""#, "bash '~/x.sh'"] {
+            let home = home_with_hook(dir.path(), command, &[("x.sh", "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(scanned_script(&reasons), None, "{command}: {reasons:?}");
+        }
+        // Exec form spawns `command` with no shell, so nothing expands `~`.
+        let hook = serde_json::json!({ "type": "command", "command": "~/x.sh", "args": [] });
+        write_settings(
+            dir.path(),
+            &serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": [hook] }] } }).to_string(),
+        );
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
+        assert_eq!(scanned_script(&reasons), None, "exec form: {reasons:?}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn tilde_is_the_home_whose_settings_name_the_script() {
+        let homes = tempdir().unwrap();
+        let alice = home_with_hook(
+            &homes.path().join("alice"),
+            "~/x.sh",
+            &[("x.sh", "rm -rf /\n")],
+        );
+        let bob = home_with_hook(&homes.path().join("bob"), "~/x.sh", &[("x.sh", "true\n")]);
+        let parser = ClaudeCodeParser::default();
+        let reasons = parser.assess(&alice).unwrap();
+        assert_eq!(
+            scanned_script(&reasons),
+            Some(alice.join("x.sh").as_path()),
+            "{reasons:?}"
+        );
+        let reasons = parser.assess(&bob).unwrap();
+        assert!(
+            !reasons.iter().any(|r| matches!(
+                r,
+                AiGuardReason::DestructiveInHookScript { .. }
+                    | AiGuardReason::ExternalScriptUnscanned { .. }
+            )),
+            "{reasons:?}"
+        );
+    }
+
+    /// On Windows, Codex runs hooks through `cmd.exe`, Cursor through
+    /// PowerShell, and Claude Code through PowerShell when Git Bash is
+    /// missing, so `~` is not read as the home there.
+    #[cfg(windows)]
+    #[test]
+    fn tilde_is_not_expanded_on_windows() {
+        let dir = tempdir().unwrap();
+        let home = home_with_hook(dir.path(), "~/x.sh", &[("x.sh", "rm -rf /\n")]);
+        let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+        assert_eq!(scanned_script(&reasons), None, "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| matches!(
+                r,
+                AiGuardReason::ExternalScriptUnscanned { script_path, .. }
+                    if script_path == Path::new("~/x.sh")
+            )),
+            "{reasons:?}"
+        );
     }
 
     #[test]
@@ -2032,7 +2169,7 @@ mod tests {
             "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": cmd}]}]}
         });
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &mut out).unwrap();
+        emit_hook_reasons(&settings, None, &mut out).unwrap();
         out
     }
 
@@ -2255,7 +2392,7 @@ mod tests {
             }
         });
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &mut out).unwrap();
+        emit_hook_reasons(&settings, None, &mut out).unwrap();
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
@@ -2282,7 +2419,7 @@ mod tests {
             }
         });
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &mut out).unwrap();
+        emit_hook_reasons(&settings, None, &mut out).unwrap();
         assert!(
             !out.iter().any(|r| matches!(
                 r,
@@ -2306,7 +2443,7 @@ mod tests {
             }
         });
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &mut out).unwrap();
+        emit_hook_reasons(&settings, None, &mut out).unwrap();
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })),
@@ -2647,6 +2784,7 @@ mod tests {
             &dir.path().join(".claude"),
             &dir.path().join(".claude.json"),
             &dir.path().join("no-policy"),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2682,6 +2820,7 @@ mod tests {
                 &dir.path().join(".claude"),
                 &dir.path().join(".claude.json"),
                 empty_policy.path(),
+                None,
             )
             .unwrap();
             assert!(
@@ -2701,6 +2840,7 @@ mod tests {
             &dir.path().join(".claude"),
             &dir.path().join(".claude.json"),
             managed.path(),
+            None,
         )
         .unwrap();
         assert!(auto_findings(&reasons).is_empty(), "{reasons:?}");
@@ -2731,6 +2871,7 @@ mod tests {
                 &dir.path().join(".claude"),
                 &dir.path().join(".claude.json"),
                 &dir.path().join("no-policy"),
+                None,
             )
             .unwrap();
             assert_eq!(auto_findings(&reasons), want, "{local}");
@@ -2768,6 +2909,7 @@ mod tests {
                 &dir.path().join(".claude"),
                 &dir.path().join(".claude.json"),
                 policy.path(),
+                None,
             )
             .unwrap();
             assert_eq!(auto_findings(&reasons), want, "{managed} over {user}");
@@ -2795,6 +2937,7 @@ mod tests {
             &user_home.path().join(".claude"),
             &user_home.path().join(".claude.json"),
             &user_home.path().join("no-policy"),
+            None,
         )
         .unwrap();
 
@@ -2809,6 +2952,7 @@ mod tests {
             &home.path().join(".claude"),
             &home.path().join(".claude.json"),
             policy.path(),
+            None,
         )
         .unwrap();
 
@@ -2864,6 +3008,7 @@ mod tests {
             &home.path().join(".claude"),
             &home.path().join(".claude.json"),
             policy.path(),
+            None,
         )
         .unwrap();
         assert!(reasons.contains(&AiGuardReason::AutoApprovalEnabled {
@@ -2896,6 +3041,7 @@ mod tests {
             &home.path().join(".claude"),
             &home.path().join(".claude.json"),
             policy.path(),
+            None,
         )
         .unwrap()
     }
@@ -2993,6 +3139,7 @@ mod tests {
             &home.path().join(".claude"),
             &home.path().join(".claude.json"),
             policy.path(),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -3028,6 +3175,7 @@ mod tests {
                 &home.path().join(".claude"),
                 &home.path().join(".claude.json"),
                 policy.path(),
+                None,
             )
             .unwrap()
         };
@@ -3136,6 +3284,7 @@ mod tests {
             &home.path().join(".claude"),
             &home.path().join(".claude.json"),
             policy.path(),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -3199,6 +3348,7 @@ mod tests {
             &home.path().join(".claude"),
             &home.path().join(".claude.json"),
             policy.path(),
+            None,
         )
         .unwrap();
         let mut names = mcp_server_names(&reasons);
@@ -4100,7 +4250,7 @@ mod tests {
 
     fn approvals(settings: &str) -> Vec<String> {
         let mut out = Vec::new();
-        emit_hook_reasons(&serde_json::from_str(settings).unwrap(), &mut out).unwrap();
+        emit_hook_reasons(&serde_json::from_str(settings).unwrap(), None, &mut out).unwrap();
         out.into_iter()
             .filter_map(|r| match r {
                 AiGuardReason::StandingCommandApproval { pattern } => Some(pattern),
@@ -4150,7 +4300,7 @@ mod tests {
             ))
             .unwrap();
             let mut out = Vec::new();
-            emit_hook_reasons(&settings, &mut out).unwrap();
+            emit_hook_reasons(&settings, None, &mut out).unwrap();
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
         };
@@ -4183,7 +4333,7 @@ mod tests {
             {"matcher": "*", "hooks": [{"command": "true", "if": rule}]}
         ]}});
         let mut out = Vec::new();
-        emit_hook_reasons(&settings, &mut out).unwrap();
+        emit_hook_reasons(&settings, None, &mut out).unwrap();
         out.iter()
             .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
     }
@@ -4310,6 +4460,7 @@ mod tests {
             &home.path().join(".claude"),
             &home.path().join(".claude.json"),
             policy.path(),
+            None,
         )
         .unwrap();
         assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
