@@ -421,7 +421,9 @@ pub(crate) fn emit_hook_reasons(
 
 /// The tool a handler's `if` permission rule narrows it to. Only `Tool(arg)`
 /// with an argument that is not all wildcards narrows: a bare tool name, `*`,
-/// `Bash(*)`, `Edit(**)` or an unparsable rule admits every call.
+/// `Bash(*)`, `Edit(**)`, `Edit(~/**)`, `WebFetch(domain:*)` or an unparsable
+/// rule admits every call. A tool-name glob such as `mcp__*(x)` narrows to
+/// nothing, because Claude Code matches the `if` tool name exactly.
 fn hook_condition(hook: &Value) -> Option<&str> {
     let (tool, arg) = hook
         .get("if")?
@@ -430,15 +432,25 @@ fn hook_condition(hook: &Value) -> Option<&str> {
         .strip_suffix(')')?
         .split_once('(')?;
     let tool = tool.trim();
+    let arg = arg.trim();
+    let arg = match tool {
+        "WebFetch" => arg.strip_prefix("domain:").unwrap_or(arg),
+        // `~/` and `./` anchor a path rule at home and the working directory.
+        _ => arg
+            .strip_prefix(['~', '.'])
+            .filter(|rest| rest.starts_with('/'))
+            .unwrap_or(arg),
+    };
     // The tool must look like a tool name: it reaches evidence, so free text
     // (`Bearer abc (x)`) must not. `**/*` matches every path, so `/` is a wildcard here.
     let narrows = !tool.is_empty()
         && tool
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        && !arg
-            .chars()
-            .all(|c| matches!(c, '*' | ':' | '/') || c.is_whitespace());
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '*'))
+        && (tool.contains('*')
+            || !arg
+                .chars()
+                .all(|c| matches!(c, '*' | ':' | '/') || c.is_whitespace()));
     narrows.then_some(tool)
 }
 
@@ -1225,6 +1237,8 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             cd.join("loop.md"),
             cd.join("skills"),
             cd.join("agents"),
+            // Its `disableAllHooks` reaches the project's hooks.
+            home_dir.join(".claude").join("settings.json"),
         ];
         paths.extend(shared_local_settings(&self.repo_root, home_dir));
         paths
@@ -1330,10 +1344,19 @@ fn assess_project(
         m.pointer("/permissions/defaultMode")
             .is_some_and(Value::is_string)
     });
-    // shortcut: the user's own file is not read here, so a user-level
-    // `disableAllHooks: true` the project leaves unset still scores the
-    // project's hooks; reading it needs the user config folder in this scope.
-    let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
+    // The user's file sits below the project files in precedence, so its
+    // `disableAllHooks` decides only when neither project file sets it.
+    // shortcut: `CLAUDE_CONFIG_DIR` is not known in this scope, so a user who
+    // sets it is read at `~/.claude`; pass the config dir here if that matters.
+    let user = super::read_json_optional(&home.join(".claude").join("settings.json"))
+        .ok()
+        .flatten();
+    let hooks_off = hooks_disabled(&[
+        managed.as_ref(),
+        local.as_ref(),
+        base.as_ref(),
+        user.as_ref(),
+    ]);
     // No built-in fallback here: the user scope already reports it, and a
     // project file cannot set `auto` or `bypassPermissions`.
     let start = if managed_sets_mode {

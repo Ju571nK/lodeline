@@ -531,12 +531,15 @@ fn grants_write_everywhere(path: &str, access: &Value) -> bool {
     }
 }
 
-/// A path naming the whole disk or the home dir.
+/// A path naming the whole disk or the home dir. A drive needs its separator:
+/// Codex rejects a bare `C:`, which `C:/**` becomes, as not absolute.
 fn writes_everywhere(p: &str) -> bool {
     let p = p.strip_suffix("/**").unwrap_or(p);
     let trimmed = p.trim_end_matches(['/', '\\']);
-    let drive_root =
-        trimmed.len() == 2 && trimmed.as_bytes()[0].is_ascii_alphabetic() && trimmed.ends_with(':');
+    let drive_root = trimmed.len() == 2
+        && trimmed.len() < p.len()
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && trimmed.ends_with(':');
     (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
 }
 
