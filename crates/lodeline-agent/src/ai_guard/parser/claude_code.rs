@@ -2061,22 +2061,90 @@ mod tests {
 
     /// On Windows, Codex runs hooks through `cmd.exe`, Cursor through
     /// PowerShell, and Claude Code through PowerShell when Git Bash is
-    /// missing, so `~` is not read as the home there.
+    /// missing, so neither `~` nor `$HOME` is read as the home there.
     #[cfg(windows)]
     #[test]
-    fn tilde_is_not_expanded_on_windows() {
+    fn home_is_not_expanded_on_windows() {
+        for command in ["~/x.sh", "$HOME/x.sh", "${HOME}/x.sh"] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &[("x.sh", "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(scanned_script(&reasons), None, "{command}: {reasons:?}");
+            assert!(
+                reasons.iter().any(|r| matches!(
+                    r,
+                    AiGuardReason::ExternalScriptUnscanned { script_path, .. }
+                        if script_path == Path::new(command)
+                )),
+                "{command}: {reasons:?}"
+            );
+        }
         let dir = tempdir().unwrap();
-        let home = home_with_hook(dir.path(), "~/x.sh", &[("x.sh", "rm -rf /\n")]);
+        let home = home_with_hook(dir.path(), "bash $HOME/x.sh", &[("x.sh", "rm -rf /\n")]);
         let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
-        assert_eq!(scanned_script(&reasons), None, "{reasons:?}");
         assert!(
-            reasons.iter().any(|r| matches!(
+            !reasons.iter().any(|r| matches!(
                 r,
-                AiGuardReason::ExternalScriptUnscanned { script_path, .. }
-                    if script_path == Path::new("~/x.sh")
+                AiGuardReason::DestructiveInHookScript { .. }
+                    | AiGuardReason::ExternalScriptUnscanned { .. }
             )),
-            "{reasons:?}"
+            "bash $HOME/x.sh: {reasons:?}"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_hook_script_under_home_var_is_scanned() {
+        for (command, script) in [
+            ("$HOME/x.sh", "x.sh"),
+            ("${HOME}/x.sh", "x.sh"),
+            ("bash $HOME/hooks/check.sh", "hooks/check.sh"),
+            ("bash ${HOME}/x.sh", "x.sh"),
+            (r#"bash "$HOME/x.sh""#, "x.sh"),
+            (r#"bash -e "${HOME}/x.sh""#, "x.sh"),
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &[(script, "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(
+                scanned_script(&reasons),
+                Some(home.join(script).as_path()),
+                "{command}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_quoted_or_other_var_is_not_the_home() {
+        // A wrong reading of `$HOMEX/` or `$HOME_DIR/` lands on one of these.
+        let scripts = [
+            ("x.sh", "rm -rf /\n"),
+            ("X/x.sh", "rm -rf /\n"),
+            ("_DIR/x.sh", "rm -rf /\n"),
+        ];
+        for command in [
+            "bash '$HOME/x.sh'",
+            "bash '${HOME}/x.sh'",
+            "$HOMEX/x.sh",
+            "$HOME_DIR/x.sh",
+            "bash $HOMEX/x.sh",
+            r#"bash "$HOME_DIR/x.sh""#,
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &scripts);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(scanned_script(&reasons), None, "{command}: {reasons:?}");
+        }
+        // Exec form spawns `command` with no shell, so nothing expands `$HOME`.
+        let dir = tempdir().unwrap();
+        home_with_hook(dir.path(), "true", &scripts);
+        let hook = serde_json::json!({ "type": "command", "command": "$HOME/x.sh", "args": [] });
+        write_settings(
+            dir.path(),
+            &serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": [hook] }] } }).to_string(),
+        );
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
+        assert_eq!(scanned_script(&reasons), None, "exec form: {reasons:?}");
     }
 
     #[test]
