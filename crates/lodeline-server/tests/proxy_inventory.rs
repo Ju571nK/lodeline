@@ -2444,6 +2444,167 @@ fn retention_keeps_latest_and_first_baseline_and_expires_the_rest() {
     assert_eq!(l2.len(), 2);
 }
 
+/// Event retention E of the chain end tests.
+const CHAIN_E: i64 = 1_000;
+
+fn snapshot_ids(l: &Ledger) -> BTreeSet<String> {
+    l.list_inventory_snapshots("px-a", &InvFilter::default(), None, 500)
+        .unwrap()
+        .items
+        .iter()
+        .map(|s| s.inventory_id.clone())
+        .collect()
+}
+
+fn ids(ns: &[u32]) -> BTreeSet<String> {
+    ns.iter().map(|n| inv_id(*n)).collect()
+}
+
+fn rows(d: &Path, table: &str, inv: u32) -> i64 {
+    let c = rusqlite::Connection::open(d.join("l.sqlite")).unwrap();
+    c.query_row(
+        &format!("SELECT COUNT(*) FROM {table} WHERE inventory_id = ?1"),
+        [inv_id(inv)],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// Key-1 chain S1 (first) <- S2 (latest), then `next` as snapshot 3 under key
+/// 2 received at 2000 and a key-2 snapshot 4 after it. The key-1 chain stays
+/// until 2000 + E and goes whole after it; the key-2 chain stays.
+fn assert_key_change_ends_the_old_chain(next: Value, links: i64) {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    let k1 =
+        |rid: u32, ms: &[u32], cmp: Value| rep("px-a", rid, rid, rid * 10, UP1, CS1, 1, 1, ms, cmp);
+    let k2 =
+        |rid: u32, ms: &[u32], cmp: Value| rep("px-a", rid, rid, rid * 10, UP1, CS1, 2, 1, ms, cmp);
+    ingest(&l, &k1(1, &[1, 2], initial()), 1000);
+    ingest(&l, &k1(2, &[1, 2, 3], compared(1, vec![added(3)])), 1100);
+    assert_eq!(
+        ingest(&l, &k2(3, &[11, 12], next), 2000),
+        InventoryOutcome::Accepted
+    );
+    ingest(&l, &k2(4, &[11, 12], compared(3, vec![])), 2100);
+
+    let st = l.sweep(2000 + CHAIN_E, &|_| CHAIN_E).unwrap();
+    assert_eq!(st.inventory_snapshots, 0, "{st:?}");
+    assert_eq!(snapshot_ids(&l), ids(&[1, 2, 3, 4]));
+    let st = l.sweep(2000 + CHAIN_E + 1, &|_| CHAIN_E).unwrap();
+    assert_eq!(st.inventory_snapshots, 2, "{st:?}");
+    assert_eq!(
+        snapshot_ids(&l),
+        ids(&[3, 4]),
+        "the ended key-1 chain goes whole"
+    );
+    for inv in [1, 2] {
+        assert_eq!(rows(d.path(), "inv_members", inv), 0);
+    }
+    assert_eq!(rows(d.path(), "inv_members", 3), 2);
+    assert_eq!(
+        rows(d.path(), "inv_links", 3),
+        links,
+        "the new chain keeps its links"
+    );
+}
+
+#[test]
+fn a_declared_rotation_ends_the_old_chain_e_after_the_new_snapshot() {
+    assert_key_change_ends_the_old_chain(rebase(2, "key_rotation", &[(1, 11), (2, 12)]), 2);
+}
+
+#[test]
+fn an_undeclared_key_change_ends_the_old_chain_the_same_way() {
+    assert_key_change_ends_the_old_chain(initial(), 0);
+}
+
+#[test]
+fn a_chain_that_resumes_after_another_key_has_not_ended() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    ingest(
+        &l,
+        &rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()),
+        1000,
+    );
+    ingest(
+        &l,
+        &rep("px-a", 2, 2, 20, UP1, CS1, 2, 1, &[2], initial()),
+        1100,
+    );
+    ingest(
+        &l,
+        &rep("px-a", 3, 3, 30, UP1, CS1, 1, 1, &[1], compared(1, vec![])),
+        1200,
+    );
+    l.sweep(1200 + 10 * CHAIN_E, &|_| CHAIN_E).unwrap();
+    assert_eq!(
+        snapshot_ids(&l),
+        ids(&[1, 3]),
+        "key 1 resumed after the key-2 snapshot; the key-2 chain is the one that ended"
+    );
+}
+
+#[test]
+fn a_later_snapshot_in_another_scope_key_does_not_end_a_chain() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    ingest(
+        &l,
+        &rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()),
+        1000,
+    );
+    ingest(
+        &l,
+        &rep("px-a", 2, 2, 20, UP1, CS2, 2, 1, &[2], initial()),
+        1100,
+    );
+    l.sweep(1100 + 10 * CHAIN_E, &|_| CHAIN_E).unwrap();
+    assert_eq!(snapshot_ids(&l), ids(&[1, 2]));
+}
+
+#[test]
+fn a_chain_ends_the_same_way_in_every_arrival_order() {
+    let reports = [
+        (rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()), 1000),
+        (
+            rep(
+                "px-a",
+                2,
+                2,
+                20,
+                UP1,
+                CS1,
+                1,
+                1,
+                &[1, 2],
+                compared(1, vec![added(2)]),
+            ),
+            3000,
+        ),
+        (rep("px-a", 3, 3, 30, UP1, CS1, 2, 1, &[3], initial()), 2000),
+    ];
+    let mut reference: Option<Value> = None;
+    for order in permutations(reports.len()) {
+        let d = tempfile::tempdir().unwrap();
+        let l = open_ledger(d.path());
+        for i in &order {
+            let (r, now) = &reports[*i];
+            assert_eq!(ingest(&l, r, *now), InventoryOutcome::Accepted, "{order:?}");
+        }
+        l.sweep(2000 + CHAIN_E, &|_| CHAIN_E).unwrap();
+        assert_eq!(snapshot_ids(&l), ids(&[1, 2, 3]), "order {order:?}");
+        l.sweep(2000 + CHAIN_E + 1, &|_| CHAIN_E).unwrap();
+        assert_eq!(snapshot_ids(&l), ids(&[3]), "order {order:?}");
+        let p = projection(&l);
+        match &reference {
+            None => reference = Some(p),
+            Some(r) => assert_eq!(&p, r, "order {order:?}"),
+        }
+    }
+}
+
 #[test]
 fn report_ids_are_remembered_for_the_longer_of_event_and_tombstone_retention() {
     let d = tempfile::tempdir().unwrap();
@@ -3239,11 +3400,12 @@ async fn a_rotation_link_keeps_its_entry_after_the_snapshot_is_gone() {
         judge_at(&fx, &k1(2, &[5, 1], compared(1, vec![added(1)])), b),
         200
     );
+    // Observed last, the rotation snapshot ends the key-1 chain.
     let rot = rep(
         "px-a",
         3,
         3,
-        3,
+        5,
         UP1,
         CS1,
         2,
@@ -3268,7 +3430,44 @@ async fn a_rotation_link_keeps_its_entry_after_the_snapshot_is_gone() {
     assert!(!inv.contains(&inv_id(2)), "snapshot 2 aged out: {inv:?}");
     assert!(fx.drift("px-a").await.is_empty());
     assert!(kept(&fx, 1), "only the link of snapshot 3 names ref 1");
-    assert!(kept(&fx, 2) && kept(&fx, 5));
+    assert!(kept(&fx, 2));
+    assert!(!kept(&fx, 5), "only the ended key-1 chain named ref 5");
+}
+
+#[tokio::test]
+async fn an_ended_chain_releases_its_entries_e_after_the_new_key_snapshot() {
+    let fx = Fx::new().await;
+    let b = parse_now(&at(0)) + 86_400;
+    reg_at(&fx, &[1, 2, 3], b);
+    let old = rep("px-a", 1, 1, 1, UP1, CS1, 1, 1, &[1, 2], initial());
+    assert_eq!(judge_at(&fx, &old, b), 200);
+    let rot = rep(
+        "px-a",
+        2,
+        2,
+        2,
+        UP1,
+        CS1,
+        2,
+        1,
+        &[3],
+        rebase(1, "key_rotation", &[(2, 3)]),
+    );
+    assert_eq!(judge_at(&fx, &rot, b + 10), 200);
+
+    sweep_at(&fx, b + 10 + E_SECS);
+    assert!(kept(&fx, 1), "the key-1 chain has not ended yet");
+    sweep_at(&fx, b + 10 + E_SECS + 1);
+    let inv: Vec<String> = fx
+        .snaps("px-a")
+        .await
+        .iter()
+        .map(|s| s["inventory_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(inv, [inv_id(2)], "the key-1 chain ended");
+    assert!(!kept(&fx, 1), "only the ended chain named ref 1");
+    assert!(kept(&fx, 2), "the link of snapshot 2 names ref 2");
+    assert!(kept(&fx, 3));
 }
 
 #[tokio::test]

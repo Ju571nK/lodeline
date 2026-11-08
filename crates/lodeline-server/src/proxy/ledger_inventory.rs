@@ -479,14 +479,21 @@ fn snap_of_report(r: &InventoryReport, received_at: i64) -> Option<SnapRow> {
     })
 }
 
-/// SQL: rows of the chain `(scope key, canon, key_id)` of `alias`.
-fn chain_pred(a: &str, b: &str) -> String {
+/// SQL: `b` is in the scope key of `a`.
+fn scope_pred(a: &str, b: &str) -> String {
     format!(
         "{b}.proxy_id = {a}.proxy_id AND {b}.upstream_id = {a}.upstream_id \
          AND {b}.credential_scope_id = {a}.credential_scope_id \
          AND {b}.protocol_version = {a}.protocol_version \
-         AND {b}.observation_source = {a}.observation_source \
-         AND {b}.canon = {a}.canon AND {b}.key_id = {a}.key_id"
+         AND {b}.observation_source = {a}.observation_source"
+    )
+}
+
+/// SQL: `b` is in the chain `(scope key, canon, key_id)` of `a`.
+fn chain_pred(a: &str, b: &str) -> String {
+    format!(
+        "{} AND {b}.canon = {a}.canon AND {b}.key_id = {a}.key_id",
+        scope_pred(a, b)
     )
 }
 
@@ -1218,7 +1225,9 @@ impl Ledger {
 /// transaction). Registry L1: the latest snapshot and the first baseline of a
 /// chain live as long as the chain; a superseded non-baseline snapshot lives E
 /// after it was superseded; drift records and markers live E from detection;
-/// report ids (the idempotency memory) live `max(E, T)`.
+/// report ids (the idempotency memory) live `max(E, T)`. A chain ends when a
+/// later snapshot of another chain in its scope key is not waiting for its
+/// previous; every snapshot of the chain goes E after that snapshot's receipt.
 pub(super) fn sweep_proxy(
     conn: &Connection,
     proxy_id: &str,
@@ -1253,17 +1262,40 @@ pub(super) fn sweep_proxy(
     let doomed = format!(
         "({doomed}) OR (d.proxy_id = ?1 AND d.state = 'pending_previous' AND d.received_at < ?2)"
     );
+    // `ended`: the chains whose scope key holds a snapshot `n`, later than the
+    // chain's latest snapshot, not waiting for its previous, and received
+    // before the cutoff. A chain that resumes after `n` has a new latest and
+    // has not ended. Materialized so the scan for `n` runs once per chain,
+    // not once per snapshot.
+    let ended = format!(
+        "WITH ended AS MATERIALIZED (
+           SELECT l.proxy_id, l.upstream_id, l.credential_scope_id, l.protocol_version,
+                  l.observation_source, l.canon, l.key_id
+           FROM inv_snapshots l
+           WHERE l.proxy_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM inv_snapshots m WHERE {} AND {})
+             AND EXISTS (SELECT 1 FROM inv_snapshots n WHERE {} AND {}
+                           AND n.state <> 'pending_previous' AND n.received_at < ?2))",
+        chain_pred("l", "m"),
+        earlier_pred("m", "l"),
+        scope_pred("l", "n"),
+        earlier_pred("n", "l")
+    );
+    let doomed = format!(
+        "d.proxy_id = ?1 AND (({doomed}) OR EXISTS (SELECT 1 FROM ended e WHERE {}))",
+        chain_pred("d", "e")
+    );
     for table in ["inv_members", "inv_links"] {
         conn.execute(
             &format!(
-                "DELETE FROM {table} WHERE proxy_id = ?1 AND inventory_id IN
+                "{ended} DELETE FROM {table} WHERE proxy_id = ?1 AND inventory_id IN
                  (SELECT d.inventory_id FROM inv_snapshots d WHERE {doomed})"
             ),
             params![proxy_id, cutoff],
         )?;
     }
     s.inventory_snapshots += conn.execute(
-        &format!("DELETE FROM inv_snapshots WHERE snap_seq IN (SELECT d.snap_seq FROM inv_snapshots d WHERE {doomed})"),
+        &format!("{ended} DELETE FROM inv_snapshots WHERE snap_seq IN (SELECT d.snap_seq FROM inv_snapshots d WHERE {doomed})"),
         params![proxy_id, cutoff],
     )?;
     conn.execute(
