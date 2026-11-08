@@ -687,21 +687,46 @@ pub(crate) fn classify_command(
     }
 }
 
-/// The file `script`, a word of `cmd`, names. On Unix every supported tool
-/// runs `cmd` through a POSIX shell, which reads a leading `~` or `~/` of an
-/// unquoted word as `home`. On Windows the shell may be `cmd.exe` or
-/// PowerShell, so `~` is left as written.
+/// The file `script`, a word of `cmd`, names.
 fn script_file(cmd: &str, script: &str, home: Option<&Path>) -> PathBuf {
+    // `hook_script_path` trims the quotes off an operand, so `script` is a
+    // subslice of `cmd` and the trimmed quotes sit just before it.
     let start = script.as_ptr() as usize - cmd.as_ptr() as usize;
-    let quoted = cmd[..start].ends_with(['"', '\'']);
-    match (home, script.strip_prefix('~')) {
-        (Some(home), Some(rest))
-            if !cfg!(windows) && !quoted && (rest.is_empty() || rest.starts_with('/')) =>
-        {
-            home.join(rest.trim_start_matches('/'))
-        }
+    let word = &cmd[cmd[..start].trim_end_matches(['"', '\'']).len()..start + script.len()];
+    match (home, home_relative(word, script)) {
+        (Some(home), Some(rest)) => home.join(rest.trim_start_matches('/')),
         _ => PathBuf::from(script),
     }
+}
+
+/// What follows the home in `script`, when the POSIX shell that runs hooks on
+/// Unix reads the start of `word`, the shell word `script` comes from, as the
+/// home: `~`, `~/`, `$HOME/` or `${HOME}/` unquoted, and only the `$HOME`
+/// forms (`"$HOME/x.sh"`, `"$HOME"/x.sh`) in double quotes. On Windows the
+/// shell may be `cmd.exe` or PowerShell, so this is `None`.
+fn home_relative<'a>(word: &'a str, script: &'a str) -> Option<&'a str> {
+    if cfg!(windows) {
+        return None;
+    }
+    let quotes = word.strip_suffix(script).unwrap_or("");
+    match word.chars().next() {
+        Some('\'') => None,
+        // `"'$HOME/x.sh'"` keeps the single quotes in the file name.
+        Some('"') if quotes.contains('\'') => None,
+        Some('"') => after_home_var(word).or_else(|| after_home_var(script)),
+        _ => after_home_var(script).or_else(|| {
+            script
+                .strip_prefix('~')
+                .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        }),
+    }
+}
+
+/// `word` after a leading `$HOME/`, `${HOME}/`, `"$HOME"/` or `"${HOME}"/`.
+fn after_home_var(word: &str) -> Option<&str> {
+    ["$HOME/", "${HOME}/", "\"$HOME\"/", "\"${HOME}\"/"]
+        .into_iter()
+        .find_map(|prefix| word.strip_prefix(prefix))
 }
 
 fn path_is_inside(candidate: &Path, root: &Path) -> bool {
@@ -780,11 +805,11 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
         return looks_pathish(first).then_some(first);
     }
     let mut takes_arg = false;
-    for token in tokens {
+    for word in tokens {
         if std::mem::take(&mut takes_arg) {
             continue;
         }
-        let token = token.trim_matches(['"', '\'']);
+        let token = word.trim_matches(['"', '\'']);
         if let Some(long) = token.strip_prefix("--") {
             takes_arg = matches!(long, "rcfile" | "init-file");
             continue;
@@ -797,8 +822,11 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
             takes_arg = flags.ends_with(['o', 'O']);
             continue;
         }
-        // An operand still holding `$VAR` names no readable file here.
-        return (!token.contains('$') && looks_pathish(token)).then_some(token);
+        // An operand still holding `$VAR` names no readable file here. A
+        // leading home is the exception on Unix: `script_file` reads it as
+        // the home, or, in single quotes, as a literal name.
+        let unread = home_relative(word.trim_start_matches('\''), token).unwrap_or(token);
+        return (!unread.contains('$') && looks_pathish(token)).then_some(token);
     }
     None
 }
@@ -2061,22 +2089,100 @@ mod tests {
 
     /// On Windows, Codex runs hooks through `cmd.exe`, Cursor through
     /// PowerShell, and Claude Code through PowerShell when Git Bash is
-    /// missing, so `~` is not read as the home there.
+    /// missing, so neither `~` nor `$HOME` is read as the home there.
     #[cfg(windows)]
     #[test]
-    fn tilde_is_not_expanded_on_windows() {
+    fn home_is_not_expanded_on_windows() {
+        for command in ["~/x.sh", "$HOME/x.sh", "${HOME}/x.sh"] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &[("x.sh", "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(scanned_script(&reasons), None, "{command}: {reasons:?}");
+            assert!(
+                reasons.iter().any(|r| matches!(
+                    r,
+                    AiGuardReason::ExternalScriptUnscanned { script_path, .. }
+                        if script_path == Path::new(command)
+                )),
+                "{command}: {reasons:?}"
+            );
+        }
         let dir = tempdir().unwrap();
-        let home = home_with_hook(dir.path(), "~/x.sh", &[("x.sh", "rm -rf /\n")]);
+        let home = home_with_hook(dir.path(), "bash $HOME/x.sh", &[("x.sh", "rm -rf /\n")]);
         let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
-        assert_eq!(scanned_script(&reasons), None, "{reasons:?}");
         assert!(
-            reasons.iter().any(|r| matches!(
+            !reasons.iter().any(|r| matches!(
                 r,
-                AiGuardReason::ExternalScriptUnscanned { script_path, .. }
-                    if script_path == Path::new("~/x.sh")
+                AiGuardReason::DestructiveInHookScript { .. }
+                    | AiGuardReason::ExternalScriptUnscanned { .. }
             )),
-            "{reasons:?}"
+            "bash $HOME/x.sh: {reasons:?}"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_hook_script_under_home_var_is_scanned() {
+        for (command, script) in [
+            ("$HOME/x.sh", "x.sh"),
+            ("${HOME}/x.sh", "x.sh"),
+            ("bash $HOME/hooks/check.sh", "hooks/check.sh"),
+            ("bash ${HOME}/x.sh", "x.sh"),
+            (r#"bash "$HOME/x.sh""#, "x.sh"),
+            (r#"bash -e "${HOME}/x.sh""#, "x.sh"),
+            (r#"bash ""$HOME/x.sh"#, "x.sh"),
+            (r#""$HOME"/x.sh"#, "x.sh"),
+            (r#""${HOME}"/x.sh"#, "x.sh"),
+            (r#"bash "$HOME"/hooks/check.sh"#, "hooks/check.sh"),
+            (r#"bash "${HOME}"/x.sh"#, "x.sh"),
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &[(script, "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(
+                scanned_script(&reasons),
+                Some(home.join(script).as_path()),
+                "{command}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_quoted_or_other_var_is_not_the_home() {
+        // A wrong reading of `$HOMEX/` or `$HOME_DIR/` lands on one of these.
+        let scripts = [
+            ("x.sh", "rm -rf /\n"),
+            ("X/x.sh", "rm -rf /\n"),
+            ("_DIR/x.sh", "rm -rf /\n"),
+        ];
+        for command in [
+            "bash '$HOME/x.sh'",
+            "bash '${HOME}/x.sh'",
+            "$HOMEX/x.sh",
+            "$HOME_DIR/x.sh",
+            "bash $HOMEX/x.sh",
+            r#"bash "$HOME_DIR/x.sh""#,
+            r#"bash '"$HOME/x.sh"'"#,
+            r#"bash "'$HOME/x.sh'""#,
+            // Mismatched quotes around a multibyte name must not panic.
+            r#"bash "é'"#,
+            r#"bash 'é""#,
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &scripts);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(scanned_script(&reasons), None, "{command}: {reasons:?}");
+        }
+        // Exec form spawns `command` with no shell, so nothing expands `$HOME`.
+        let dir = tempdir().unwrap();
+        home_with_hook(dir.path(), "true", &scripts);
+        let hook = serde_json::json!({ "type": "command", "command": "$HOME/x.sh", "args": [] });
+        write_settings(
+            dir.path(),
+            &serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": [hook] }] } }).to_string(),
+        );
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
+        assert_eq!(scanned_script(&reasons), None, "exec form: {reasons:?}");
     }
 
     #[test]
@@ -2171,6 +2277,26 @@ mod tests {
         let mut out = Vec::new();
         emit_hook_reasons(&settings, None, &mut out).unwrap();
         out
+    }
+
+    /// Like `bash ./x.sh rm -rf /`, the words after a `$HOME` script are its
+    /// arguments, even when no home is known (a Grok hook) or the word is
+    /// single quoted.
+    #[cfg(not(windows))]
+    #[test]
+    fn arguments_after_a_home_var_script_are_data() {
+        for cmd in ["bash $HOME/x.sh rm -rf /", "bash '$HOME/x.sh' rm -rf /"] {
+            let mut out = hook_reasons_for(cmd);
+            out.retain(|r| !matches!(r, AiGuardReason::NoSandbox { .. }));
+            assert!(
+                matches!(
+                    &out[..],
+                    [AiGuardReason::ExternalScriptUnscanned { script_path, .. }]
+                        if script_path == Path::new("$HOME/x.sh")
+                ),
+                "{cmd}: {out:?}"
+            );
+        }
     }
 
     #[test]
