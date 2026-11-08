@@ -3372,6 +3372,56 @@ command = "echo inline"
         );
     }
 
+    /// A rules file near the size cap with `//` all over one line still scans
+    /// in one pass.
+    #[test]
+    fn many_floor_divisions_on_one_line_scan() {
+        let rules = format!(
+            "x=1{}\nprefix_rule(pattern=[\"git\"])",
+            "//1".repeat(340_000)
+        );
+        assert!(rules.len() as u64 <= MAX_RULES_FILE_BYTES);
+        assert_eq!(approved_by(&rules), vec!["git"]);
+    }
+
+    /// `\` before a newline joins the lines, so the `//` after it is floor
+    /// division, not the start of a line. Codex loads the rule as an allow.
+    #[test]
+    fn floor_division_after_line_continuation_is_not_a_comment() {
+        assert_eq!(
+            approved_by("n = 1 \\\n // 2; prefix_rule(pattern=[\"git\"], decision=\"allow\")"),
+            vec!["git"]
+        );
+    }
+
+    /// `1.` is a float, so a rule on the next line is a call of its own. An
+    /// identifier ending in a digit still makes `x1.prefix_rule(` a method.
+    #[test]
+    fn rule_after_float_literal_is_a_rule() {
+        for rule in [
+            "x = 1.\nprefix_rule(pattern=[\"git\"], decision=\"allow\")",
+            "x = 1.5\nprefix_rule(pattern=[\"git\"], decision=\"allow\")",
+        ] {
+            assert_eq!(approved_by(rule), vec!["git"], "{rule}");
+        }
+        assert!(
+            approved_by("x1 = \"s\"\nx1.prefix_rule(pattern=[\"git\"], decision=\"allow\")")
+                .is_empty()
+        );
+    }
+
+    /// Starlark drops a bare CR inside a string, raw or not, so Codex reads
+    /// both decisions as `allow`.
+    #[test]
+    fn carriage_return_in_string_is_dropped() {
+        for rule in [
+            "prefix_rule(pattern=[\"git\"], decision=\"al\rlow\")",
+            "prefix_rule(pattern=[\"git\"], decision=r\"al\rlow\")",
+        ] {
+            assert_eq!(approved_by(rule), vec!["git"], "{rule:?}");
+        }
+    }
+
     #[test]
     fn disabled_mcp_server_is_not_assessed() {
         let server = "[mcp_servers.x]\nenabled = false\ncommand = \"/tmp/payload\"\ndefault_tools_approval_mode = \"approve\"\n";
