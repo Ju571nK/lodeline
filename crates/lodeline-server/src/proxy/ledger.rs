@@ -1016,8 +1016,19 @@ impl Ledger {
         tx.commit()?;
         // secure_delete zeroes freed pages in the database, but the WAL can
         // still hold older copies until it is checkpointed and truncated.
-        if let Err(e) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
-            tracing::warn!(error = %LedgerError::from(e), "proxy ledger WAL checkpoint after sweep failed");
+        // A busy checkpoint is a row with busy=1, not an error.
+        match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        }) {
+            Ok(0) => {}
+            Ok(_) => tracing::error!(
+                "proxy ledger WAL truncate after sweep did not complete (busy); \
+                 the WAL can hold swept rows until the next checkpoint"
+            ),
+            Err(e) => tracing::error!(
+                error = %LedgerError::from(e),
+                "proxy ledger WAL truncate after sweep failed"
+            ),
         }
         Ok(s)
     }

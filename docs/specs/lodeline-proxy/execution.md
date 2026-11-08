@@ -106,6 +106,17 @@ DB fsync 시간, start commit 시간. 예측(추정): 동시성 32 p99가 #518 �
 pass가 64 frame 초과) 상한 대기가 잦으면, checkpoint thread의 쓰기가 commit과 IOPS를 다투는 것이 지배적이다. 그때는 pass 수와 상한을
 바꿔 다시 잰다.
 
+## 2026-11-08 chain 끝 경계 시험과 sweep checkpoint 보고 (`test/proxy-retention-followups`, #279)
+
+위 두 절(chain 끝내기, 내용 삭제)의 독립 리뷰 후속이다.
+
+- 시험 셋(`proxy_inventory.rs`). 다른 chain의 `pending_previous` snapshot은 더 늦어도 chain을 끝내지 않는다. 한 proxy의 chain이
+  끝나도 같은 scope key와 key를 가진 다른 proxy의 chain은 남는다. 두 chain의 `observed_at`이 같으면 `inventory_id`가 정하고 한
+  chain만 끝난다(key 배치 두 가지, 도착 순서 두 가지). `n.state <> 'pending_previous'`를 빼거나, 끝 판정의 scope 비교에서
+  `proxy_id`를 빼거나, 순서를 `observed_at`만으로(`<`, `<=` 둘 다) 비교하면 해당 시험이 실패함을 확인했다.
+- metadata sweep과 ledger sweep의 `wal_checkpoint(TRUNCATE)`가 busy 열을 읽고, busy이거나 오류면 error 수준으로 남긴다(ref와
+  내용은 남기지 않음). 삭제는 그대로 commit된다. 내용 삭제의 checkpoint와 같은 방식이다.
+
 ## 2026-11-08 metadata entry의 내용 삭제 (`feat/proxy-content-delete`, #279)
 
 privacy 요청으로 entry 하나의 내용을 지우고 stub은 남긴다(registry.md R1, README N9 retention 행).
