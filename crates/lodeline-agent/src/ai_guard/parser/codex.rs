@@ -195,6 +195,8 @@ impl CodexLayer {
 /// `[hooks.state."<key>"]` holds a `trusted_hash` and does not set
 /// `enabled = false`. Codex also runs untrusted hooks for one invocation
 /// under `--dangerously-bypass-hook-trust`, which a config read cannot see.
+/// Codex reads hook state from the user layer alone, never the system or
+/// project one (`hook_states_from_stack`, rust-v0.166.0).
 /// A stored hash is not compared with the hook: Codex marks a changed hook
 /// `Modified` and skips it, but its normalized-hash input changes between
 /// releases, and a wrong mismatch would hide a hook that runs.
@@ -1787,12 +1789,12 @@ impl CodexProjectParser {
             super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
             return Ok(out);
         }
-        let system = CodexLayer::read_lenient(system_dir);
-        let both = [
+        let all = [
+            CodexLayer::read_lenient(system_dir),
             CodexLayer::read_lenient(codex_dir),
             CodexLayer::read(&self.repo_root.join(".codex"))?,
         ];
-        let [user, layer] = &both;
+        let [system, user, layer] = &all;
         let layers = std::slice::from_ref(layer);
         let mut out = Vec::new();
         // #200 — scored whatever `[projects."<path>"].trust_level` says: Codex
@@ -1800,16 +1802,16 @@ impl CodexProjectParser {
         // folder without listing these settings, so they are one keypress from
         // active (the same reasoning as project MCP servers, #154). The project
         // is the highest layer, so what it sets wins. Its profile name
-        // resolves in the user's `[permissions]` merged under the project's.
+        // resolves in the system, user and project `[permissions]` merged.
         let mut permissions = Value::Table(toml::Table::new());
-        for config in [&user.config, &layer.config].into_iter().flatten() {
+        for config in all.iter().filter_map(|l| l.config.as_ref()) {
             if let Some(table) = config.get("permissions") {
                 merge_layer(&mut permissions, table);
             }
         }
         emit_sandbox_reasons(layers, Some(&permissions), home_dir, &mut out);
-        // The user layer can still pick the mode the project's table needs.
-        emit_workspace_write_reasons(&both, layers, true, home_dir, &mut out);
+        // The system and user layers can still pick the mode the project's table needs.
+        emit_workspace_write_reasons(&all, layers, true, home_dir, &mut out);
         if let Some(val) = &layer.config {
             let inherited_policy = [&user.config, &system.config]
                 .into_iter()
@@ -4531,6 +4533,39 @@ base_url = "https://llm.corp.example/v1"
             .assess_layers(&system, &dir.path().join(".codex"), dir.path())
             .unwrap();
         assert!(auto_review(&reasons), "user overrides system: {reasons:?}");
+    }
+
+    #[test]
+    fn project_profile_resolves_against_system_permissions() {
+        let (dir, project) = project_with("default_permissions = \"open\"\n");
+        let system = dir.path().join("etc-codex");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(
+            system.join("config.toml"),
+            "[permissions.open.filesystem]\n\":root\" = \"write\"\n",
+        )
+        .unwrap();
+        let reasons = project
+            .assess_layers(&system, &dir.path().join(".codex"), dir.path())
+            .unwrap();
+        assert!(sandbox_disabled(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn project_workspace_table_follows_the_system_sandbox_mode() {
+        let (dir, project) = project_with("[sandbox_workspace_write]\nnetwork_access = true\n");
+        let system = dir.path().join("etc-codex");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(system.join("config.toml"), "sandbox_mode = \"read-only\"\n").unwrap();
+        let assess = || {
+            project
+                .assess_layers(&system, &dir.path().join(".codex"), dir.path())
+                .unwrap()
+        };
+        assert!(!workspace_network(&assess()), "system read-only");
+
+        write_config(dir.path(), "sandbox_mode = \"workspace-write\"\n");
+        assert!(workspace_network(&assess()), "user overrides system");
     }
 
     #[test]
