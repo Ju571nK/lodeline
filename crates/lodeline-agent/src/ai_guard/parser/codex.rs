@@ -3235,6 +3235,80 @@ command = "echo inline"
         assert_eq!(approvals(&reasons), vec!["curl", "deploy"], "{reasons:?}");
     }
 
+    /// Programs one project rules file approves.
+    fn approved_by(rules: &str) -> Vec<String> {
+        let (dir, p) = project_with("");
+        write_rules(&p.repo_root, "t.rules", rules);
+        let reasons = p.assess(dir.path()).unwrap();
+        approvals(&reasons)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Codex's Starlark decodes each of these escapes, so every rule is an
+    /// allow for `git` (checked with `codex execpolicy check`).
+    #[test]
+    fn escaped_strings_decode_as_starlark_does() {
+        for rule in [
+            r#"prefix_rule(pattern=["git"], decision="\x61llow")"#,
+            r#"prefix_rule(pattern=["git"], decision="\u0061llow")"#,
+            r#"prefix_rule(pattern=["git"], decision="\U00000061llow")"#,
+            r#"prefix_rule(pattern=["git"], decision="\141llow")"#,
+            "prefix_rule(pattern=[\"git\"], decision=\"allo\\\nw\")",
+            r#"prefix_rule(pattern=["\x67it"], decision="allow")"#,
+        ] {
+            assert_eq!(approved_by(rule), vec!["git"], "{rule}");
+        }
+        // `\U` needs eight hex digits, so Codex rejects this file.
+        assert!(approved_by(r#"prefix_rule(pattern=["C:\Users\alice"])"#).is_empty());
+    }
+
+    /// `x . prefix_rule(` looks up an attribute of `x`; Codex fails it with
+    /// "no attribute `prefix_rule`" and never calls the builtin.
+    #[test]
+    fn spaced_method_call_is_not_a_rule() {
+        for rule in [
+            "x = \"s\"\nx . prefix_rule(pattern=[\"git\"], decision=\"allow\")",
+            "x = \"s\"\n(x\n  .\n  prefix_rule(pattern=[\"git\"]))",
+        ] {
+            assert!(approved_by(rule).is_empty(), "{rule}");
+        }
+    }
+
+    /// A directory right under the root is a home folder as often as
+    /// `/home/alice` is, so it is redacted the same way. Bin folders are not.
+    #[test]
+    fn top_level_directory_name_is_redacted() {
+        for (rule, want) in [
+            (r#"prefix_rule(pattern=["/data/alice"])"#, "<redacted>"),
+            (r#"prefix_rule(pattern=["/data/alice/bin/tool"])"#, "tool"),
+            (r#"prefix_rule(pattern=["/bin/bash"])"#, "bash"),
+        ] {
+            assert_eq!(approved_by(rule), vec![want], "{rule}");
+        }
+    }
+
+    /// Starlark has only `#` comments; `//` is floor division. Codex loads the
+    /// first two rules as `prompt` and rejects the next three as a parse or
+    /// runtime error. It loads the last rule as an allow.
+    #[test]
+    fn floor_division_is_not_a_comment() {
+        for rule in [
+            "prefix_rule(pattern=[\"git\"], justification=\"x\" * (4 // 2), decision=\"prompt\")",
+            "prefix_rule(pattern=[\"git\"], justification=\"x\" * (4\n    // 2), decision=\"prompt\")",
+            "prefix_rule(\n    pattern=[\"git\"],\n    // decision=\"prompt\",\n)",
+            "x = 1 // prefix_rule(pattern=[\"git\"])",
+            "// prefix_rule(pattern=[\"git\"])",
+        ] {
+            assert!(approved_by(rule).is_empty(), "{rule}");
+        }
+        assert_eq!(
+            approved_by("n = 7 // 2; prefix_rule(pattern=[\"git\"])"),
+            vec!["git"]
+        );
+    }
+
     #[test]
     fn disabled_mcp_server_is_not_assessed() {
         let server = "[mcp_servers.x]\nenabled = false\ncommand = \"/tmp/payload\"\ndefault_tools_approval_mode = \"approve\"\n";
