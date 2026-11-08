@@ -868,9 +868,11 @@ fn broad_prefix(words: &[String]) -> Option<String> {
 /// Basename of the first token, so a path's directories (usernames) never
 /// leave the host. POSIX and Windows separators both count. A home directory
 /// itself (`/home/alice`, `C:\Users\alice`) names a user, not a program, and
-/// is redacted. An alternative list `{a|b}` fails the charset and is redacted,
-/// and so does a name shaped like a token (a known token prefix, or 20+
-/// characters mixing letters and digits).
+/// is redacted. So is a folder right under the POSIX root other than `/bin`
+/// and `/sbin`, where a home can live too (`/data/alice`). An alternative
+/// list `{a|b}` fails the charset and is redacted, and so does a name shaped
+/// like a token (a known token prefix, or 20+ characters mixing letters and
+/// digits).
 fn program_basename(word: &str) -> String {
     const TOKEN_PREFIXES: &[&str] = &[
         "ghp_",
@@ -888,9 +890,12 @@ fn program_basename(word: &str) -> String {
     let mut parts = word.rsplit(['/', '\\']);
     let name = parts.next().unwrap_or("");
     // Skip empty parts: `a//b`, or a raw string's doubled `\\`.
-    let home_dir = parts
-        .find(|p| !p.is_empty())
-        .is_some_and(|p| p.eq_ignore_ascii_case("home") || p.eq_ignore_ascii_case("Users"));
+    let mut dirs = parts.filter(|p| !p.is_empty());
+    let home_dir = match (dirs.next(), dirs.next()) {
+        (None, _) => false,
+        (Some(dir), None) if word.starts_with('/') => !matches!(dir, "bin" | "sbin"),
+        (Some(dir), _) => dir.eq_ignore_ascii_case("home") || dir.eq_ignore_ascii_case("Users"),
+    };
     let token_like = TOKEN_PREFIXES.iter().any(|p| name.starts_with(p))
         || (name.len() >= 20
             && name.chars().any(|c| c.is_ascii_digit())
@@ -940,19 +945,37 @@ fn rules_texts(rules_dir: &Path) -> Vec<String> {
     texts
 }
 
-/// Strip `#` and `//` comments that are outside string literals. Without this,
+/// Strip `#` comments that are outside string literals. Without this,
 /// `prefix_rule(pattern=["git"], decision="prompt")  # decision="allow"`
-/// reads as an approval.
+/// reads as an approval. Starlark has no `//` comment: `//` is floor division.
+/// A line outside brackets cannot start with it, so Codex rejects a file that
+/// has one; such a line is still dropped, so a rule it comments out is not
+/// reported. A `\` line continuation is whitespace, not a new line.
 fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
+    let mut depth = 0usize;
+    let mut line_start = true;
     while let Some(c) = rest.chars().next() {
-        let comment = c == '#' || rest.starts_with("//");
-        let len = if comment {
+        let comment = c == '#' || (depth == 0 && line_start && rest.starts_with("//"));
+        let continuation = ["\\\n", "\\\r\n"].into_iter().find(|j| rest.starts_with(j));
+        if c == '\n' {
+            line_start = true;
+        } else if !c.is_whitespace() && continuation.is_none() {
+            line_start = false;
+        }
+        let len = if let Some(j) = continuation {
+            j.len()
+        } else if comment {
             rest.find('\n').unwrap_or(rest.len())
         } else if c == '"' || c == '\'' {
             string_len(rest).unwrap_or(rest.len())
         } else {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
             c.len_utf8()
         };
         if !comment {
@@ -1005,7 +1028,9 @@ fn code_chars(s: &str) -> impl Iterator<Item = (usize, char)> + '_ {
 /// One `<name>( ... )` invocation's argument text. Scans the whole file
 /// rather than a line at a time: the documented form spans several lines.
 /// Only a call at the top level counts: not one inside a string literal, not
-/// a method call `x.prefix_rule(`, and not a longer name `my_prefix_rule(`.
+/// a method call `x.prefix_rule(` or `x . prefix_rule(`, and not a longer
+/// name `my_prefix_rule(`. Nor the right operand of `/` or `//`: the call
+/// returns None, so Codex fails the file at runtime.
 fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut prev: Option<char> = None;
@@ -1016,7 +1041,8 @@ fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
             continue;
         }
         if !text[i..].starts_with(name)
-            || before.is_some_and(|b| b.is_alphanumeric() || b == '_' || b == '.')
+            || before.is_some_and(|b| b.is_alphanumeric() || b == '_')
+            || operand_of_dot_or_slash(text[..i].trim_end())
         {
             continue;
         }
@@ -1034,6 +1060,19 @@ fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
         }
     }
     out
+}
+
+/// Whether code ending in `before` makes a following name an attribute or a
+/// division operand. The `.` that ends a float such as `1.` does neither.
+fn operand_of_dot_or_slash(before: &str) -> bool {
+    if before.ends_with('/') {
+        return true;
+    }
+    let Some(head) = before.strip_suffix('.') else {
+        return false;
+    };
+    let int = head.trim_end_matches(|c: char| c.is_ascii_digit());
+    int.len() == head.len() || int.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
 }
 
 /// Byte offset of the `close` that balances an already-consumed `open`.
@@ -1139,7 +1178,7 @@ fn split_top_level(s: &str) -> Vec<&str> {
 }
 
 /// The contents of a single string literal, raw or not, or None if `s` is not
-/// exactly one. Escapes stay as written.
+/// exactly one. A raw string stays as written, less any bare CR.
 fn quoted_string(s: &str) -> Option<String> {
     let s = s.trim();
     let raw = s.starts_with(['r', 'R']);
@@ -1152,20 +1191,68 @@ fn quoted_string(s: &str) -> Option<String> {
     }
     let body = &s[delim.len()..len - delim.len()];
     if raw {
-        return Some(body.to_string());
+        return Some(body.replace('\r', ""));
     }
-    // Other escapes (`\x2f`, `A`) become U+FFFD, which the basename
-    // charset redacts, so an encoded path cannot dodge the home-dir check.
+    decode_escapes(body)
+}
+
+/// `body` with its escapes decoded as Codex's Starlark does (`escape` in
+/// `starlark_syntax` 0.14.2 `lexer.rs`), so `"\x61llow"` reads as `allow` and
+/// an encoded path meets the home-dir check decoded. An invalid escape fails
+/// the file in Codex, so it reads as None. An unknown one keeps its `\`. A
+/// bare CR is dropped, as Starlark does.
+fn decode_escapes(body: &str) -> Option<String> {
     let mut out = String::with_capacity(body.len());
-    let mut chars = body.chars();
+    let mut chars = body.chars().peekable();
     while let Some(c) = chars.next() {
-        out.push(match c {
-            '\\' => match chars.next() {
-                Some(e @ ('\\' | '"' | '\'')) => e,
-                _ => char::REPLACEMENT_CHARACTER,
-            },
-            c => c,
-        });
+        if c != '\\' {
+            if c != '\r' {
+                out.push(c);
+            }
+            continue;
+        }
+        let e = chars.next()?;
+        let decoded = match e {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'a' => '\x07',
+            'b' => '\x08',
+            'f' => '\x0C',
+            'v' => '\x0B',
+            '"' | '\'' | '\\' => e,
+            '\n' => continue,
+            '\r' => {
+                if chars.next() != Some('\n') {
+                    return None;
+                }
+                continue;
+            }
+            'x' | 'u' | 'U' | '0'..='7' => {
+                let (radix, min, max, first) = match e {
+                    'x' => (16, 2, 2, None),
+                    'u' => (16, 4, 4, None),
+                    'U' => (16, 8, 8, None),
+                    _ => (8, 1, 3, Some(e)),
+                };
+                let mut num: String = first.into_iter().collect();
+                while num.len() < max {
+                    match chars.next_if(|d| d.is_digit(radix)) {
+                        Some(d) => num.push(d),
+                        None => break,
+                    }
+                }
+                if num.len() < min {
+                    return None;
+                }
+                char::from_u32(u32::from_str_radix(&num, radix).ok()?)?
+            }
+            _ => {
+                out.push('\\');
+                e
+            }
+        };
+        out.push(decoded);
     }
     Some(out)
 }
@@ -3136,7 +3223,7 @@ command = "echo inline"
         );
         let reasons = p.assess(dir.path()).unwrap();
         let got = approvals(&reasons);
-        assert_eq!(got, vec!["<redacted>", "path", "secretbin"]);
+        assert_eq!(got, vec!["<redacted>", "git", "path", "secretbin"]);
         for pattern in got {
             for bad in ["@", "/", "alice", "sk-live", "ghp_"] {
                 assert!(!pattern.contains(bad), "{pattern:?}");
@@ -3233,6 +3320,130 @@ command = "echo inline"
         );
         let reasons = assess_user_layers(&system, &home.join(".codex")).unwrap();
         assert_eq!(approvals(&reasons), vec!["curl", "deploy"], "{reasons:?}");
+    }
+
+    /// Programs one project rules file approves.
+    fn approved_by(rules: &str) -> Vec<String> {
+        let (dir, p) = project_with("");
+        write_rules(&p.repo_root, "t.rules", rules);
+        let reasons = p.assess(dir.path()).unwrap();
+        approvals(&reasons)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Codex's Starlark decodes each of these escapes, so every rule is an
+    /// allow for `git` (checked with `codex execpolicy check`).
+    #[test]
+    fn escaped_strings_decode_as_starlark_does() {
+        for rule in [
+            r#"prefix_rule(pattern=["git"], decision="\x61llow")"#,
+            r#"prefix_rule(pattern=["git"], decision="\u0061llow")"#,
+            r#"prefix_rule(pattern=["git"], decision="\U00000061llow")"#,
+            r#"prefix_rule(pattern=["git"], decision="\141llow")"#,
+            "prefix_rule(pattern=[\"git\"], decision=\"allo\\\nw\")",
+            r#"prefix_rule(pattern=["\x67it"], decision="allow")"#,
+        ] {
+            assert_eq!(approved_by(rule), vec!["git"], "{rule}");
+        }
+        // `\U` needs eight hex digits, so Codex rejects this file.
+        assert!(approved_by(r#"prefix_rule(pattern=["C:\Users\alice"])"#).is_empty());
+    }
+
+    /// `x . prefix_rule(` looks up an attribute of `x`; Codex fails it with
+    /// "no attribute `prefix_rule`" and never calls the builtin.
+    #[test]
+    fn spaced_method_call_is_not_a_rule() {
+        for rule in [
+            "x = \"s\"\nx . prefix_rule(pattern=[\"git\"], decision=\"allow\")",
+            "x = \"s\"\n(x\n  .\n  prefix_rule(pattern=[\"git\"]))",
+        ] {
+            assert!(approved_by(rule).is_empty(), "{rule}");
+        }
+    }
+
+    /// A directory right under the root is a home folder as often as
+    /// `/home/alice` is, so it is redacted the same way. Bin folders are not.
+    #[test]
+    fn top_level_directory_name_is_redacted() {
+        for (rule, want) in [
+            (r#"prefix_rule(pattern=["/data/alice"])"#, "<redacted>"),
+            (r#"prefix_rule(pattern=["/data/alice/bin/tool"])"#, "tool"),
+            (r#"prefix_rule(pattern=["/bin/bash"])"#, "bash"),
+        ] {
+            assert_eq!(approved_by(rule), vec![want], "{rule}");
+        }
+    }
+
+    /// Starlark has only `#` comments; `//` is floor division. Codex loads the
+    /// first two rules as `prompt` and rejects the next three as a parse or
+    /// runtime error. It loads the last rule as an allow.
+    #[test]
+    fn floor_division_is_not_a_comment() {
+        for rule in [
+            "prefix_rule(pattern=[\"git\"], justification=\"x\" * (4 // 2), decision=\"prompt\")",
+            "prefix_rule(pattern=[\"git\"], justification=\"x\" * (4\n    // 2), decision=\"prompt\")",
+            "prefix_rule(\n    pattern=[\"git\"],\n    // decision=\"prompt\",\n)",
+            "x = 1 // prefix_rule(pattern=[\"git\"])",
+            "// prefix_rule(pattern=[\"git\"])",
+        ] {
+            assert!(approved_by(rule).is_empty(), "{rule}");
+        }
+        assert_eq!(
+            approved_by("n = 7 // 2; prefix_rule(pattern=[\"git\"])"),
+            vec!["git"]
+        );
+    }
+
+    /// A rules file near the size cap with `//` all over one line still scans
+    /// in one pass. Codex loads the rule at its end as an allow.
+    #[test]
+    fn many_floor_divisions_on_one_line_scan() {
+        let rules = format!(
+            "{}prefix_rule(pattern=[\"git\"])",
+            "x=1//1;".repeat(149_000)
+        );
+        assert!(rules.len() as u64 <= MAX_RULES_FILE_BYTES);
+        assert_eq!(approved_by(&rules), vec!["git"]);
+    }
+
+    /// `\` before a newline joins the lines, so the `//` after it is floor
+    /// division, not the start of a line. Codex loads the rule as an allow.
+    #[test]
+    fn floor_division_after_line_continuation_is_not_a_comment() {
+        assert_eq!(
+            approved_by("n = 1 \\\n // 2; prefix_rule(pattern=[\"git\"], decision=\"allow\")"),
+            vec!["git"]
+        );
+    }
+
+    /// `1.` is a float, so a rule on the next line is a call of its own. An
+    /// identifier ending in a digit still makes `x1.prefix_rule(` a method.
+    #[test]
+    fn rule_after_float_literal_is_a_rule() {
+        for rule in [
+            "x = 1.\nprefix_rule(pattern=[\"git\"], decision=\"allow\")",
+            "x = 1.5\nprefix_rule(pattern=[\"git\"], decision=\"allow\")",
+        ] {
+            assert_eq!(approved_by(rule), vec!["git"], "{rule}");
+        }
+        assert!(
+            approved_by("x1 = \"s\"\nx1.prefix_rule(pattern=[\"git\"], decision=\"allow\")")
+                .is_empty()
+        );
+    }
+
+    /// Starlark drops a bare CR inside a string, raw or not, so Codex reads
+    /// both decisions as `allow`.
+    #[test]
+    fn carriage_return_in_string_is_dropped() {
+        for rule in [
+            "prefix_rule(pattern=[\"git\"], decision=\"al\rlow\")",
+            "prefix_rule(pattern=[\"git\"], decision=r\"al\rlow\")",
+        ] {
+            assert_eq!(approved_by(rule), vec!["git"], "{rule:?}");
+        }
     }
 
     #[test]

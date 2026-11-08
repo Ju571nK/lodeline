@@ -21,6 +21,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The Codex `.rules` scan now reads strings, comments and calls as Codex's Starlark does. A
+  `decision="\x61llow"` rule, or one using `\u`, `\U` or octal escapes, was a missed standing
+  approval. `//` is floor division, not a comment, so a rule after `n = 7 // 2;` on the same line
+  was missed and a rule with a `// decision="prompt"` line inside its call was reported as an
+  allow. `x . prefix_rule(...)` with spaces around the dot is an attribute call and is no longer
+  reported. A program path that is a folder right under the root other than `/bin` and `/sbin`,
+  such as `/data/alice`, is now reported as `<redacted>` like `/home/alice`.
 - `lodeline-proxy` now uploads a registry entry again when the server answers an event batch
   with 424 `metadata_ref_pending` for it. Before, only an inventory 424 did that, and an event
   424 only held the events. When the server lacked an entry the proxy held as acknowledged, for
