@@ -12,6 +12,17 @@
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
 
+## 2026-11-08 chain 끝 경계 시험과 sweep checkpoint 보고 (`test/proxy-retention-followups`, #279)
+
+위 두 절(chain 끝내기, 내용 삭제)의 독립 리뷰 후속이다.
+
+- 시험 셋(`proxy_inventory.rs`). 다른 chain의 `pending_previous` snapshot은 더 늦어도 chain을 끝내지 않는다. 한 proxy의 chain이
+  끝나도 같은 scope key와 key를 가진 다른 proxy의 chain은 남는다. 두 chain의 `observed_at`이 같으면 `inventory_id`가 정하고 한
+  chain만 끝난다(key 배치 두 가지, 도착 순서 두 가지). `n.state <> 'pending_previous'`를 빼거나, 끝 판정의 scope 비교에서
+  `proxy_id`를 빼거나, 순서를 `observed_at`만으로(`<`, `<=` 둘 다) 비교하면 해당 시험이 실패함을 확인했다.
+- metadata sweep과 ledger sweep의 `wal_checkpoint(TRUNCATE)`가 busy 열을 읽고, busy이거나 오류면 error 수준으로 남긴다(ref와
+  내용은 남기지 않음). 삭제는 그대로 commit된다. 내용 삭제의 checkpoint와 같은 방식이다.
+
 ## 2026-11-08 metadata entry의 내용 삭제 (`feat/proxy-content-delete`, #279)
 
 privacy 요청으로 entry 하나의 내용을 지우고 stub은 남긴다(registry.md R1, README N9 retention 행).

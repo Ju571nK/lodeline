@@ -2095,8 +2095,12 @@ fn open_ledger(dir: &Path) -> Ledger {
 }
 
 fn ingest(l: &Ledger, report: &Value, now: i64) -> InventoryOutcome {
+    ingest_as(l, "px-a", report, now)
+}
+
+fn ingest_as(l: &Ledger, proxy: &str, report: &Value, now: i64) -> InventoryOutcome {
     let r = parse_inventory_report(report.to_string().as_bytes()).expect("valid report");
-    l.ingest_inventory("px-a", &r, &report_digest(&r), &RefCheck::default(), now)
+    l.ingest_inventory(proxy, &r, &report_digest(&r), &RefCheck::default(), now)
         .unwrap()
 }
 
@@ -2602,6 +2606,85 @@ fn a_chain_ends_the_same_way_in_every_arrival_order() {
             None => reference = Some(p),
             Some(r) => assert_eq!(&p, r, "order {order:?}"),
         }
+    }
+}
+
+#[test]
+fn a_later_snapshot_waiting_for_its_previous_does_not_end_a_chain() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    ingest(
+        &l,
+        &rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()),
+        1000,
+    );
+    // key 2, compared against a snapshot 2 that never arrives
+    assert_eq!(
+        ingest(
+            &l,
+            &rep("px-a", 3, 3, 30, UP1, CS1, 2, 1, &[3], compared(2, vec![])),
+            1100,
+        ),
+        InventoryOutcome::Accepted
+    );
+    l.sweep(1100 + 10 * CHAIN_E, &|_| CHAIN_E).unwrap();
+    assert_eq!(
+        snapshot_ids(&l),
+        ids(&[1]),
+        "the waiting snapshot ages out; the key-1 chain has not ended"
+    );
+}
+
+#[test]
+fn ending_a_chain_leaves_other_proxies_alone() {
+    let d = tempfile::tempdir().unwrap();
+    let l = open_ledger(d.path());
+    ingest(
+        &l,
+        &rep("px-a", 1, 1, 10, UP1, CS1, 1, 1, &[1], initial()),
+        1000,
+    );
+    ingest(
+        &l,
+        &rep("px-a", 2, 2, 20, UP1, CS1, 2, 1, &[2], initial()),
+        2000,
+    );
+    // the same scope key and key as the px-a chain that ends
+    ingest_as(
+        &l,
+        "px-b",
+        &rep("px-b", 11, 11, 10, UP1, CS1, 1, 1, &[11], initial()),
+        1000,
+    );
+    l.sweep(2000 + 10 * CHAIN_E, &|_| CHAIN_E).unwrap();
+    assert_eq!(snapshot_ids(&l), ids(&[2]));
+    let px_b: BTreeSet<String> = l
+        .list_inventory_snapshots("px-b", &InvFilter::default(), None, 500)
+        .unwrap()
+        .items
+        .iter()
+        .map(|s| s.inventory_id.clone())
+        .collect();
+    assert_eq!(px_b, ids(&[11]));
+    assert_eq!(rows(d.path(), "inv_members", 11), 1);
+}
+
+#[test]
+fn an_observed_at_tie_between_chains_is_decided_by_inventory_id() {
+    // (key, inventory id) pairs, all observed at the same second
+    for (first, second) in [((1, 1), (2, 2)), ((2, 1), (1, 2)), ((1, 2), (2, 1))] {
+        let d = tempfile::tempdir().unwrap();
+        let l = open_ledger(d.path());
+        for (i, (key, inv)) in [first, second].into_iter().enumerate() {
+            let r = rep("px-a", inv, inv, 10, UP1, CS1, key, 1, &[inv], initial());
+            assert_eq!(ingest(&l, &r, 1000 + i as i64), InventoryOutcome::Accepted);
+        }
+        l.sweep(1000 + 10 * CHAIN_E, &|_| CHAIN_E).unwrap();
+        assert_eq!(
+            snapshot_ids(&l),
+            ids(&[2]),
+            "only the chain of the lower inventory id ends: {first:?} then {second:?}"
+        );
     }
 }
 
