@@ -102,7 +102,7 @@ DB fsync는 SQLite VFS로 한다(`sync_database`). 처음에는 `std::fs::File::
 fsync보다 훨씬 느렸다. 그 build로 잰 첫 교대 run(쪽마다 3번)에서는 변경의 동시성 32 p99가 나빴다(19.4 → 26.2 ms, 측정). 그 run은
 버렸다. VFS로 하면 SQLite 자신의 checkpoint와 같은 호출이 되고, 시험 VFS가 그 fsync를 세고 실패시킬 수 있다.
 
-AWS에서 확인할 것: 같은 노드 A harness(`aws-test-env/proxy-smoke/px-load.sh`, 위 `perf/proxy-group-tx` 절과 같은 환경)에서 기준 `40bca8d`와
+AWS에서 확인할 것: 노드 A에서 위 `perf/proxy-group-tx` 절과 같은 harness로 기준 `40bca8d`와
 변경을 새 stack 단위로 교대한다. 동시성 32는 쪽마다 7 run(회귀를 본 측정과 같은 수), 동시성 64는 쪽마다 3 run 이상, open loop
 100 calls/s는 쪽마다 1 run. 볼 값: client p50/p99, calls/s, 오류와 upstream 수, WAL 최대, `memory.peak`, 디스크 w/s·wkB/s·w_await.
 임시 계측 build로 따로: writer 마무리 시간, 상한 대기 횟수와 시간, pass 시간과 복사한 frame 수, 요청당 pass 수, checkpoint thread의
