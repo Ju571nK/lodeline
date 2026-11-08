@@ -43,7 +43,7 @@ c32는 calls/s 1,163에서 2,947, p99 84.8 ms에서 22.2 ms였다(측정, 순위
 11.85 ms와 12.86 ms로 범위가 겹쳐 차이를 재지 못했다. 34 run 모두 오류 0, upstream 수 일치. 기준은 쓰기 IOPS에 묶였고(w/s 약 3,040, gp3 상한 3,000,
 collector state를 tmpfs에 둔 run 하나씩에서도 같음), 변경은 proxy CPU에 묶였다(cpu0 busy 97%, iowait 2%). 계측 build(run 두 번씩)에서 WAL 상한 대기는 30초당 31.5번에서 기록 없음으로,
 checkpoint 요청당 pass는 4번에서 2번으로 줄었다. 120초 run(run 하나씩)에서 기준 calls/s는 1,090으로 떨어졌고 변경은 3,226으로 그대로였다. 다만 변경의 w/s는
-collector 쓰기가 늘면서 첫 사분위 약 1,400에서 마지막 사분위 약 2,300으로 올랐고(p90 2,711), proxy scope의 memory.peak는 spool page cache 때문에 512 MiB 상한에 닿았다(proxy RSS 약 19 MB, 오류 0).
+collector 쓰기가 늘면서 처음 4분의 1 구간 약 1,400에서 마지막 4분의 1 구간 약 2,300으로 올랐고(p90 2,711), proxy scope의 memory.peak는 spool page cache 때문에 512 MiB 상한에 닿았다(proxy RSS 약 19 MB, 오류 0).
 더 긴 부하에서는 collector 디스크 쓰기가 다음 한계가 될 것으로 본다(추정).
 
 계약: schema `$defs/uuid`는 소문자 hyphen 형식만 검사하고, `lodeline-proxy-api` `scalar::Uuid`는 버전을 보지 않는다. 계약 README는
