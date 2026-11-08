@@ -199,12 +199,12 @@ M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 �
   checkpoint thread가 시작하지 못하거나 멈추면 writer가 1,024 명령마다 전체를 직접 복사한다.
 - 주기 1,024 명령과 상한 2,048 명령(2026-11-08 AWS t4g.small, gp3 쓰기 3,000 IOPS가 한계): 512 명령 주기의 checkpoint thread는 동시성 32
   p99를 260 ms에서 142 ms로 줄였지만 calls/s가 11%(1,195 → 1,063) 줄었다. 요청마다 pass 4번을 다 돌았고 pass 하나가 복사한 frame은 중앙값 약
-로 일찍 끝나지 않았다. 임시 계측 build에서 주기 1,024는 동시성 32에서 1,179 calls/s, p99 84 ms(4 run), 동시성 64에서 1,270 calls/s, p99 227 ms(2 run,
+  335로, 일찍 끝난 요청이 없었다. 임시 계측 build에서 주기 1,024는 동시성 32에서 1,179 calls/s, p99 84 ms(4 run), 동시성 64에서 1,270 calls/s, p99 227 ms(2 run,
   기준은 1,218 calls/s, p99 213–273 ms)였다. 같은 1,024 주기를 writer 혼자 하면 calls/s는 1,445였지만 p99가 227 ms(동시성 32)와 306 ms(동시성 64)였다.
   상한은 2,048로 둔다. 잰 짝이 1,024와 2,048이다. 동시성 64에서 상한 대기가 30초에 31–34번, 합 약 5초(p50 160 ms)였지만 calls/s는 기준보다 높고
   p99는 기준 범위 안이었다. 이 한계에서 calls/s는 호출당 디스크 쓰기 수로 정해진다(w/s 약 3,046 ÷ 호출당 2.40 = 1,269, 측정 1,270). 상한 대기는
-  쓰기 예산을 쓰지 않고 호출이 줄 서는 곳만 writer 앞으로 옮긴다. 4,096으로 올리면 그 대기 대신 writer가 마지막 pass 동안 쌓인 frame(동시성 64에서
-  pass당 약 740 frame)을 직접 복사하고 WAL이 커진다. 그 효과는 재지 않았다. 설정 항목은 두지 않는다.
+  쓰기 예산을 쓰지 않고 호출이 줄 서는 곳만 writer 앞으로 옮긴다. 4,096으로 올리면 그 대기 대신 writer가 checkpoint thread의 마지막 pass 뒤에 남은 frame을
+  직접 복사하고(동시성 64에서 pass 하나가 복사한 frame의 중앙값 약 740으로 추정) WAL이 커진다. 그 효과는 재지 않았다. 설정 항목은 두지 않는다.
 - 2026-11-07 group commit(`perf/proxy-group-commit`, 위 계약 안의 구현), 2026-11-08 묶음 transaction 하나(`perf/proxy-group-tx`): writer는 이미
   queue에 있는 append를 최대 64개까지 한 transaction으로 commit한다. 기록마다 savepoint로 거절을 가둔다. 묶음에 start가 있으면 그 commit이
   FULL이고, 그 fsync 뒤에만 묶음의 응답이 나간다. start가 없으면 NORMAL이다. 혼자 온 append도 같은 길이다. 더 올 append를 기다리는 타이머는 없다.
