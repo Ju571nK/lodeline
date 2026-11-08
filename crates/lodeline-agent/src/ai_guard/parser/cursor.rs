@@ -51,11 +51,11 @@ fn hook_commands(hooks_json: &Value) -> Vec<(&str, &str)> {
 /// Cursor skips a `hooks.json` it cannot parse (it also accepts JSONC, which
 /// strict JSON rejects), so one is skipped here too rather than failing the
 /// MCP findings beside it, as Codex `hooks.json` is.
-fn emit_hook_reasons(path: &Path, out: &mut Vec<AiGuardReason>) {
+fn emit_hook_reasons(path: &Path, home: Option<&Path>, out: &mut Vec<AiGuardReason>) {
     match super::read_json_optional(path) {
         Ok(Some(val)) => {
             for (event, cmd) in hook_commands(&val) {
-                classify_command(cmd, event, out);
+                classify_command(cmd, event, home, out);
             }
         }
         Ok(None) => {}
@@ -79,8 +79,8 @@ fn assess_user(
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let cursor = home_dir.join(".cursor");
     let mut out = assess_path(cursor.join("mcp.json"))?;
-    emit_hook_reasons(&cursor.join("hooks.json"), &mut out);
-    emit_hook_reasons(enterprise_hooks, &mut out);
+    emit_hook_reasons(&cursor.join("hooks.json"), Some(home_dir), &mut out);
+    emit_hook_reasons(enterprise_hooks, Some(home_dir), &mut out);
     Ok(out)
 }
 
@@ -143,7 +143,7 @@ impl AiGuardParser for CursorProjectParser {
             self.repo_root.join(".cursor").join("rules"), // dir → starts_with matches child files
         ]
     }
-    fn assess(&self, _home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
         let mut out = assess_path(self.repo_root.join(".cursor").join("mcp.json"))?;
         // #145 Option B — amplify only when folder-trust autorun would launch
         // local/risky code on this host (not for benign remote-only configs).
@@ -153,7 +153,11 @@ impl AiGuardParser for CursorProjectParser {
             });
         }
         // #203 — a committed hooks.json runs in every trusted checkout.
-        emit_hook_reasons(&self.repo_root.join(".cursor").join("hooks.json"), &mut out);
+        emit_hook_reasons(
+            &self.repo_root.join(".cursor").join("hooks.json"),
+            Some(home),
+            &mut out,
+        );
         // #146 — instruction files.
         super::instruction_scan::scan_file_path(&self.repo_root.join(".cursorrules"), &mut out);
         super::instruction_scan::scan_rules_dir(

@@ -165,7 +165,12 @@ impl CodexLayer {
         self.config.iter().chain(self.json_hooks.iter())
     }
 
-    fn emit_hook_reasons(&self, trust: &HookTrust, out: &mut Vec<AiGuardReason>) {
+    fn emit_hook_reasons(
+        &self,
+        trust: &HookTrust,
+        home: Option<&Path>,
+        out: &mut Vec<AiGuardReason>,
+    ) {
         let sources = [
             (self.dir.join("config.toml"), self.config.as_ref()),
             (self.dir.join(HOOKS_JSON), self.json_hooks.as_ref()),
@@ -176,6 +181,7 @@ impl CodexLayer {
             emit_hook_reasons(
                 source,
                 |event, group, handler| trust.runs(&key_sources, event, group, handler),
+                home,
                 out,
             );
         }
@@ -359,8 +365,13 @@ fn assess_user_layers(
     }
     let [system, user] = &layers;
     if hooks_feature_enabled(system_dir, [&system.config, &user.config]) {
-        system.emit_hook_reasons(&HookTrust::Managed, &mut out);
-        user.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
+        let home = Some(home_dir);
+        system.emit_hook_reasons(&HookTrust::Managed, home, &mut out);
+        user.emit_hook_reasons(
+            &HookTrust::from_user_config(user.config.as_ref()),
+            home,
+            &mut out,
+        );
     }
     if let Some(val) = &effective {
         emit_mcp_reasons(val, &mut out);
@@ -1408,6 +1419,7 @@ fn network_host(raw: &str) -> Option<String> {
 pub(crate) fn emit_hook_reasons(
     val: &Value,
     runs: impl Fn(&str, usize, usize) -> bool,
+    home: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) {
     let Some(hooks_table) = val.get("hooks").and_then(Value::as_table) else {
@@ -1434,7 +1446,7 @@ pub(crate) fn emit_hook_reasons(
                 match handler.get("type").and_then(Value::as_str) {
                     Some("command") => {
                         if let Some(cmd) = hook_command(handler, cfg!(windows)) {
-                            claude_code::classify_command(cmd, event_name, out);
+                            claude_code::classify_command(cmd, event_name, home, out);
                         }
                     }
                     Some("mcp_tool") => emit_mcp_tool_hook_reason(handler, event_name, out),
@@ -1821,7 +1833,11 @@ impl CodexProjectParser {
             emit_shell_environment_reasons(val, &mut out);
         }
         if hooks_feature_enabled(system_dir, [&system.config, &user.config, &layer.config]) {
-            layer.emit_hook_reasons(&HookTrust::from_user_config(user.config.as_ref()), &mut out);
+            layer.emit_hook_reasons(
+                &HookTrust::from_user_config(user.config.as_ref()),
+                Some(home_dir),
+                &mut out,
+            );
         }
         if let Some(val) = &layer.config {
             // #154 Option B — Codex (current main) loads repo-local
@@ -2326,7 +2342,7 @@ command = "{}"
         );
         let cfg: toml::Value = toml::from_str(&cfg_str).unwrap();
         let mut out = Vec::new();
-        emit_hook_reasons(&cfg, |_, _, _| true, &mut out);
+        emit_hook_reasons(&cfg, |_, _, _| true, None, &mut out);
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
@@ -2361,7 +2377,7 @@ command = "{}"
         );
         let cfg: toml::Value = toml::from_str(&cfg_str).unwrap();
         let mut out = Vec::new();
-        emit_hook_reasons(&cfg, |_, _, _| true, &mut out);
+        emit_hook_reasons(&cfg, |_, _, _| true, None, &mut out);
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
@@ -2382,7 +2398,7 @@ command = "rm -rf /tmp/foo"
         )
         .unwrap();
         let mut out = Vec::new();
-        emit_hook_reasons(&cfg, |_, _, _| true, &mut out);
+        emit_hook_reasons(&cfg, |_, _, _| true, None, &mut out);
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
@@ -2406,7 +2422,7 @@ command = "/usr/bin/env bash -eu {script}"
         ))
         .unwrap();
         let mut out = Vec::new();
-        emit_hook_reasons(&cfg, |_, _, _| true, &mut out);
+        emit_hook_reasons(&cfg, |_, _, _| true, None, &mut out);
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
@@ -2430,7 +2446,7 @@ command = "/nonexistent/ok.sh && rm -rf ~"
         )
         .unwrap();
         let mut out = Vec::new();
-        emit_hook_reasons(&cfg, |_, _, _| true, &mut out);
+        emit_hook_reasons(&cfg, |_, _, _| true, None, &mut out);
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
