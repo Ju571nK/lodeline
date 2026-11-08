@@ -868,9 +868,11 @@ fn broad_prefix(words: &[String]) -> Option<String> {
 /// Basename of the first token, so a path's directories (usernames) never
 /// leave the host. POSIX and Windows separators both count. A home directory
 /// itself (`/home/alice`, `C:\Users\alice`) names a user, not a program, and
-/// is redacted. An alternative list `{a|b}` fails the charset and is redacted,
-/// and so does a name shaped like a token (a known token prefix, or 20+
-/// characters mixing letters and digits).
+/// is redacted. So is a folder right under the POSIX root other than `/bin`
+/// and `/sbin`, where a home can live too (`/data/alice`). An alternative
+/// list `{a|b}` fails the charset and is redacted, and so does a name shaped
+/// like a token (a known token prefix, or 20+ characters mixing letters and
+/// digits).
 fn program_basename(word: &str) -> String {
     const TOKEN_PREFIXES: &[&str] = &[
         "ghp_",
@@ -888,9 +890,12 @@ fn program_basename(word: &str) -> String {
     let mut parts = word.rsplit(['/', '\\']);
     let name = parts.next().unwrap_or("");
     // Skip empty parts: `a//b`, or a raw string's doubled `\\`.
-    let home_dir = parts
-        .find(|p| !p.is_empty())
-        .is_some_and(|p| p.eq_ignore_ascii_case("home") || p.eq_ignore_ascii_case("Users"));
+    let dirs: Vec<&str> = parts.filter(|p| !p.is_empty()).collect();
+    let home_dir = match dirs.as_slice() {
+        [] => false,
+        [dir] if word.starts_with('/') => !matches!(*dir, "bin" | "sbin"),
+        [dir, ..] => dir.eq_ignore_ascii_case("home") || dir.eq_ignore_ascii_case("Users"),
+    };
     let token_like = TOKEN_PREFIXES.iter().any(|p| name.starts_with(p))
         || (name.len() >= 20
             && name.chars().any(|c| c.is_ascii_digit())
@@ -940,19 +945,29 @@ fn rules_texts(rules_dir: &Path) -> Vec<String> {
     texts
 }
 
-/// Strip `#` and `//` comments that are outside string literals. Without this,
+/// Strip `#` comments that are outside string literals. Without this,
 /// `prefix_rule(pattern=["git"], decision="prompt")  # decision="allow"`
-/// reads as an approval.
+/// reads as an approval. Starlark has no `//` comment: `//` is floor division.
+/// A line outside brackets cannot start with it, so Codex rejects a file that
+/// has one; such a line is still dropped, so a rule it comments out is not
+/// reported.
 fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
+    let mut depth = 0usize;
     while let Some(c) = rest.chars().next() {
-        let comment = c == '#' || rest.starts_with("//");
+        let line_start = || out.rsplit('\n').next().is_some_and(|l| l.trim().is_empty());
+        let comment = c == '#' || (depth == 0 && rest.starts_with("//") && line_start());
         let len = if comment {
             rest.find('\n').unwrap_or(rest.len())
         } else if c == '"' || c == '\'' {
             string_len(rest).unwrap_or(rest.len())
         } else {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
             c.len_utf8()
         };
         if !comment {
@@ -1005,7 +1020,9 @@ fn code_chars(s: &str) -> impl Iterator<Item = (usize, char)> + '_ {
 /// One `<name>( ... )` invocation's argument text. Scans the whole file
 /// rather than a line at a time: the documented form spans several lines.
 /// Only a call at the top level counts: not one inside a string literal, not
-/// a method call `x.prefix_rule(`, and not a longer name `my_prefix_rule(`.
+/// a method call `x.prefix_rule(` or `x . prefix_rule(`, and not a longer
+/// name `my_prefix_rule(`. Nor the right operand of `/` or `//`: the call
+/// returns None, so Codex fails the file at runtime.
 fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut prev: Option<char> = None;
@@ -1016,7 +1033,8 @@ fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
             continue;
         }
         if !text[i..].starts_with(name)
-            || before.is_some_and(|b| b.is_alphanumeric() || b == '_' || b == '.')
+            || before.is_some_and(|b| b.is_alphanumeric() || b == '_')
+            || text[..i].trim_end().ends_with(['.', '/'])
         {
             continue;
         }
@@ -1139,7 +1157,7 @@ fn split_top_level(s: &str) -> Vec<&str> {
 }
 
 /// The contents of a single string literal, raw or not, or None if `s` is not
-/// exactly one. Escapes stay as written.
+/// exactly one. A raw string stays as written.
 fn quoted_string(s: &str) -> Option<String> {
     let s = s.trim();
     let raw = s.starts_with(['r', 'R']);
@@ -1154,18 +1172,63 @@ fn quoted_string(s: &str) -> Option<String> {
     if raw {
         return Some(body.to_string());
     }
-    // Other escapes (`\x2f`, `A`) become U+FFFD, which the basename
-    // charset redacts, so an encoded path cannot dodge the home-dir check.
+    decode_escapes(body)
+}
+
+/// `body` with its escapes decoded as Codex's Starlark does (`escape` in
+/// `starlark_syntax` 0.14.2 `lexer.rs`), so `"\x61llow"` reads as `allow` and
+/// an encoded path meets the home-dir check decoded. An invalid escape fails
+/// the file in Codex, so it reads as None. An unknown one keeps its `\`.
+fn decode_escapes(body: &str) -> Option<String> {
     let mut out = String::with_capacity(body.len());
-    let mut chars = body.chars();
+    let mut chars = body.chars().peekable();
     while let Some(c) = chars.next() {
-        out.push(match c {
-            '\\' => match chars.next() {
-                Some(e @ ('\\' | '"' | '\'')) => e,
-                _ => char::REPLACEMENT_CHARACTER,
-            },
-            c => c,
-        });
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let e = chars.next()?;
+        let decoded = match e {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'a' => '\x07',
+            'b' => '\x08',
+            'f' => '\x0C',
+            'v' => '\x0B',
+            '"' | '\'' | '\\' => e,
+            '\n' => continue,
+            '\r' => {
+                if chars.next() != Some('\n') {
+                    return None;
+                }
+                continue;
+            }
+            'x' | 'u' | 'U' | '0'..='7' => {
+                let (radix, min, max, first) = match e {
+                    'x' => (16, 2, 2, None),
+                    'u' => (16, 4, 4, None),
+                    'U' => (16, 8, 8, None),
+                    _ => (8, 1, 3, Some(e)),
+                };
+                let mut num: String = first.into_iter().collect();
+                while num.len() < max {
+                    match chars.next_if(|d| d.is_digit(radix)) {
+                        Some(d) => num.push(d),
+                        None => break,
+                    }
+                }
+                if num.len() < min {
+                    return None;
+                }
+                char::from_u32(u32::from_str_radix(&num, radix).ok()?)?
+            }
+            _ => {
+                out.push('\\');
+                e
+            }
+        };
+        out.push(decoded);
     }
     Some(out)
 }
@@ -3136,7 +3199,7 @@ command = "echo inline"
         );
         let reasons = p.assess(dir.path()).unwrap();
         let got = approvals(&reasons);
-        assert_eq!(got, vec!["<redacted>", "path", "secretbin"]);
+        assert_eq!(got, vec!["<redacted>", "git", "path", "secretbin"]);
         for pattern in got {
             for bad in ["@", "/", "alice", "sk-live", "ghp_"] {
                 assert!(!pattern.contains(bad), "{pattern:?}");
