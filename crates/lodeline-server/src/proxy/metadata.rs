@@ -3,21 +3,35 @@
 //!
 //! Spec: registry.md R1/R2, ledger-and-query.md L5 (SV-2..SV-5), contracts
 //! README N9/M2b. PX-005/010/011, AC-05/06. Not here: the read view, scoped
-//! content lookup (R6), content deletion and inventory (S5/later).
+//! content lookup (R6) and content deletion.
 //!
 //! # Store
 //!
 //! A SQLite file of its own (`proxy-metadata.sqlite` next to the state file),
 //! opened with the ledger's hardening (`ledger::open_hardened`: owner-only,
 //! no symlink, WAL, `synchronous=FULL`, `secure_delete`). Not tables inside
-//! the ledger DB: registry entries are append-only and retained at least as
-//! long as any event that references them, so the SV checks never race with a
-//! deletion and need no shared transaction with the event insert; keeping the
-//! file apart leaves `ledger.rs` (schema, caps, sweep) untouched and makes the
-//! entry content (untrusted `definition`, keyed fingerprint) a separate,
-//! separately-permissioned artifact (PX-010). There is no sweep: entries are
-//! never deleted in this slice, and growth is bounded by two caps (entries
-//! per proxy, total bytes) that answer 503 `storage_limit`.
+//! the ledger DB: keeping the file apart leaves `ledger.rs` (schema, caps,
+//! sweep) untouched and makes the entry content (untrusted `definition`, keyed
+//! fingerprint) a separate, separately-permissioned artifact (PX-010). Growth
+//! is bounded by two caps (entries per proxy, total bytes) that answer 503
+//! `storage_limit`.
+//!
+//! # Retention (README N9)
+//!
+//! [`MetadataStore::sweep`] runs after the ledger sweep. It deletes an entry
+//! when no retained row names it ([`LiveRefs`]) and its last upload is more
+//! than `G = R + M` ago (`R` the proxy's `max_offline_retry_age_seconds`, `M`
+//! the ack-loss margin). A byte-identical duplicate upload counts as an upload.
+//! Tombstones need no entry: a byte-identical resend matches its tombstone
+//! before any registry check. An event batch or inventory report that names a
+//! deleted ref gets 424 `metadata_ref_pending`, and the producer uploads the
+//! entry again.
+//! Event and inventory ingest hold [`MetadataStore::hold_refs`] from the ref
+//! lookup until their rows are stored; the sweep holds it exclusively from
+//! reading the live set until its delete commits, so a ref validated by ingest
+//! is never deleted before the row that names it lands. Like the ledger sweep,
+//! the pass ends with `wal_checkpoint(TRUNCATE)` so the WAL keeps no copy of
+//! freed pages.
 //!
 //! # Upload rules (R2)
 //!
@@ -45,8 +59,9 @@ use lodeline_proxy_api::{
     parse_upload, ApiError, ErrorCategory, ErrorCode, ErrorItem, MetadataRef, RegistryEntry,
     UploadResponse,
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -56,7 +71,7 @@ pub const MAX_UPLOAD_BODY: usize = 4 * 1024 * 1024;
 /// Largest `definition` of one entry (registry.md R2: 256 KiB).
 pub const MAX_DEFINITION_BYTES: usize = 256 * 1024;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = "
 CREATE TABLE entries (
     proxy_id            TEXT NOT NULL,
@@ -81,6 +96,17 @@ CREATE TABLE usage (
     bytes    INTEGER NOT NULL
 ) WITHOUT ROWID;
 ";
+/// v2: the retention clock. Applied on a fresh file and by the v1 -> v2
+/// migration, so the two cannot drift; a v1 entry's last upload is its
+/// registration.
+const V2_DDL: &str = "
+ALTER TABLE entries ADD COLUMN last_upload_at INTEGER NOT NULL DEFAULT 0;
+UPDATE entries SET last_upload_at = registered_at;
+";
+
+/// `(proxy_id, metadata_ref)` pairs named by retained rows (ledger events and
+/// inventory, proxy-reported `registry_conflict` gaps). The sweep keeps these.
+pub type LiveRefs = HashSet<(String, String)>;
 
 /// Serde text of a closed-enum value (`\"2025-11-25\"`, `\"proxy_live\"`, ...).
 pub(super) fn enum_text<T: serde::Serialize>(v: &T) -> String {
@@ -163,6 +189,8 @@ fn row_size(e: &RegistryEntry, def_len: usize) -> i64 {
 pub struct MetadataStore {
     conn: Mutex<Connection>,
     caps: MetadataCaps,
+    /// Shared: a lookup result in use by ingest. Exclusive: the sweep.
+    refs: RwLock<()>,
 }
 
 type Immutable = (String, String, String, String, String, String, String);
@@ -188,16 +216,78 @@ impl MetadataStore {
         match (version, tables) {
             (0, 0) => conn
                 .execute_batch(&format!(
-                    "BEGIN IMMEDIATE;{SCHEMA}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+                    "BEGIN IMMEDIATE;{SCHEMA}{V2_DDL}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
                 ))
                 .context("create metadata schema")?,
+            (1, _) => conn
+                .execute_batch(&format!(
+                    "BEGIN IMMEDIATE;{V2_DDL}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+                ))
+                .context("migrate metadata schema to v2")?,
             (SCHEMA_VERSION, _) => {}
             _ => bail!("metadata database has an unknown format version"),
         }
         Ok(Self {
             conn: Mutex::new(conn),
             caps,
+            refs: RwLock::new(()),
         })
+    }
+
+    /// Hold from [`Self::lookup`] until the rows naming the looked-up refs are
+    /// stored, so the sweep cannot delete a ref in between.
+    pub fn hold_refs(&self) -> RwLockReadGuard<'_, ()> {
+        self.refs.read()
+    }
+
+    /// Retention pass (module doc). `live` runs while the refs are held
+    /// exclusively. An entry of proxy `p` goes when `live` does not name it and
+    /// `now - last_upload_at > grace(p)`. Returns how many entries were deleted.
+    pub fn sweep(
+        &self,
+        now: i64,
+        grace: &dyn Fn(&str) -> i64,
+        live: impl FnOnce() -> Result<LiveRefs, super::ledger::LedgerError>,
+    ) -> Result<usize, UploadError> {
+        let _refs = self.refs.write();
+        let live = live().map_err(|_| UploadError::StorageUnavailable)?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old: Vec<(String, String, i64)> = {
+            let mut st =
+                tx.prepare("SELECT proxy_id, metadata_ref, last_upload_at FROM entries")?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut deleted = 0;
+        for (proxy_id, mref, last_upload) in old {
+            let expired = now.saturating_sub(last_upload) > grace(&proxy_id);
+            let key = (proxy_id, mref);
+            if expired && !live.contains(&key) {
+                deleted += tx.execute(
+                    "DELETE FROM entries WHERE proxy_id = ?1 AND metadata_ref = ?2",
+                    params![key.0, key.1],
+                )?;
+            }
+        }
+        if deleted == 0 {
+            return Ok(0);
+        }
+        tx.execute_batch(
+            "DELETE FROM usage;
+             INSERT INTO usage (proxy_id, entries, bytes)
+                 SELECT proxy_id, COUNT(*), SUM(size) FROM entries GROUP BY proxy_id;",
+        )?;
+        tx.commit()?;
+        // secure_delete zeroes freed pages in the database, but the WAL can
+        // still hold older copies until it is checkpointed and truncated.
+        if conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .is_err()
+        {
+            tracing::warn!("proxy metadata WAL checkpoint after sweep failed");
+        }
+        Ok(deleted)
     }
 
     /// Blocking. One result per input ref, in order.
@@ -269,6 +359,12 @@ impl MetadataStore {
             match stored {
                 Some(s) if s == mine => {
                     // First write wins: later `definition`/`observed_at` ignored.
+                    // The upload still counts for retention.
+                    tx.execute(
+                        "UPDATE entries SET last_upload_at = MAX(last_upload_at, ?3)
+                         WHERE proxy_id = ?1 AND metadata_ref = ?2",
+                        params![proxy_id, e.metadata_ref.as_str(), now],
+                    )?;
                     if !out.registered.contains(&e.metadata_ref)
                         && !out.duplicate.contains(&e.metadata_ref)
                     {
@@ -281,8 +377,9 @@ impl MetadataStore {
                     tx.execute(
                         "INSERT INTO entries (proxy_id, metadata_ref, upstream_id,
                              credential_scope_id, protocol_version, observation_source, canon,
-                             key_id, fingerprint, observed_at, definition, size, registered_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                             key_id, fingerprint, observed_at, definition, size, registered_at,
+                             last_upload_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
                         params![
                             proxy_id,
                             e.metadata_ref.as_str(),

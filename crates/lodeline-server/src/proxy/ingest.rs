@@ -225,7 +225,9 @@ pub fn handle(ctx: &ProxyContext, peer_id: &str, body: &[u8]) -> Response {
         Err(e) => return storage_error(&e),
     };
 
-    // SV-2..SV-5 over every start that names a ref.
+    // SV-2..SV-5 over every start that names a ref. The hold keeps every
+    // looked-up entry until the batch is stored (metadata retention).
+    let _held = ctx.metadata.hold_refs();
     let mut invalid: Vec<usize> = Vec::new();
     let mut pending: Vec<(usize, MetadataRef)> = Vec::new();
     {

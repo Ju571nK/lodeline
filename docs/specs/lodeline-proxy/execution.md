@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-08 · spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-08 · 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,47 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-08 서버 metadata store 보존 기간 (`feat/proxy-metadata-sweep`, #279)
+
+문제: 서버의 `proxy-metadata.sqlite`는 entry를 지우지 않았다(`metadata.rs` 모듈 문서 "There is no sweep"). 상한(proxy별 entry 수, 전체
+bytes)에 닿으면 새 entry가 503 `storage_limit`이 된다. 사용자가 고른 안은 B다. ledger sweep 뒤에 같은 E로 metadata pass를 돌린다.
+
+수정(`metadata.rs`, `ledger.rs`, `mod.rs`, `ingest.rs`, `inventory.rs`, `store.rs`): metadata schema v1 → v2. `entries.last_upload_at`을
+더하고 v1 행은 `registered_at`으로 채운다. 새 파일과 migration이 같은 DDL을 쓴다. byte가 같은 중복 upload도 `last_upload_at`을 갱신한다.
+`spawn_ledger_sweep`은 `ledger_sweep` 다음에 `metadata_sweep`을 부른다. pass는 보존 중인 행이 이름 붙인 `(proxy_id, metadata_ref)`
+집합(`LiveRefs`)을 만들고, 그 집합에 없고 마지막 upload가 G = R + M보다 오래된 entry를 지운다. R은 proxy의 저장된 config 값(없으면 기본
+30일), M은 `ack_loss_margin`이다. `now - last_upload_at <= G`이면 남는다(ledger sweep과 같은 경계). 지운 뒤 `usage`를 entries에서 다시
+계산하고 `wal_checkpoint(TRUNCATE)`로 끝낸다. `secure_delete`는 원래 켜져 있었다(`open_hardened`).
+
+참조 출처(코드에서 확인): start event의 `payload.tool.metadata_ref`(events 행 전체, `json_extract`), `inv_members`, `inv_links.from`,
+`inv_drift`의 ref와 previous ref, store가 가진 proxy 보고 `registry_conflict` gap. projection의 `tool_ref`는 쓰지 않는다. 한 invocation에
+서로 다른 start가 있으면 projection은 하나만 보이지만 events는 둘 다 가진다. 필요 없는 출처: tombstone(byte가 같은 재전송은 registry 확인
+전에 tombstone과 맞는다, `ledger.rs` `existing_equal`, `ingest.rs` 그 다음의 lookup), `inv_links.to`와 `inv_snapshots.pending`(자기
+snapshot 또는 이전 snapshot의 member이고, 이전 snapshot은 도착할 때 registry를 다시 확인한다), marker와 inventory gap `details`(ref 없음).
+
+동시성: `MetadataStore`의 `RwLock` 하나. event ingest와 inventory ingest는 metadata lookup 앞에서 shared로 잡고 ledger 저장이 끝날 때까지
+쥔다. pass는 exclusive로 잡고 live 집합을 읽는 것부터 delete commit까지 쥔다. 그래서 ingest가 확인한 ref가 그 행이 들어가기 전에 지워지지
+않는다. 이 lock을 쥔 채로 다른 lock(ledger writer, metadata 연결, store)을 잡는 쪽만 있고 그 반대는 없다. upload(`register`)는 metadata
+연결 mutex만 쓰고, pass의 후보 선택과 delete는 같은 transaction이라 중복 upload 갱신과 엇갈리지 않는다.
+
+proxy 쪽: 바꾸지 않았다. event 424는 이미 이름 붙은 ref를 `mark_unacked`로 다시 올린다(위 "event 424 뒤 entry 재업로드", #514).
+proxy는 snapshot이나 spool 행이 이름 붙인 entry를 지우지 않으므로 재업로드할 entry가 남아 있다(`registry_store.rs` `EntryRetention`).
+
+시험(`tests/proxy_inventory.rs`, `tests/proxy_ingest_e2e.rs`): G 경계(정확히 G는 남고 G+1에 지움), 참조 entry는 event가 E로 지워질 때까지
+남음, 중복 upload가 시계를 다시 시작함, 한 invocation의 두 start, snapshot이 지워진 뒤 drift 기록만 남은 ref(removed와 changed의 previous),
+rotation link의 `from`만 남은 ref, store의 `registry_conflict` gap, pass 도중 들어온 event·inventory는 기다렸다가 424, 확인을 마친
+ingest가 쥔 동안 pass는 live 집합을 읽지 않음, v1 파일 migration(전부 유지, `registered_at`으로 채움, 삭제 뒤 usage 재계산), mTLS e2e(지운
+entry가 quota를 풀고, 그 ref의 start는 424, 재업로드 200 `registered`, 그 뒤 start 200). 기다림 확인 두 시험은 300 ms 안에 진행하지 않음을
+본다(sleep 없음). mutation 13개(각 lock 생략, 중복 갱신 생략, 출처 하나씩 제거, `>`를 `>=`로, usage 재계산 생략, backfill 생략)가 모두
+적어도 한 시험에서 실패했다.
+
+측정(로컬 macOS, release, 측정): start event 200,000행에서 live 집합 계산이 약 175 ms. 기본 상한 500만 행이면 시간당 한 번 수 초 동안
+ingest가 기다린다(추정, 선형 외삽).
+
+남은 일(범위 밖): privacy 요청의 내용 삭제(`content_state`, stub), read view(R6), `stale_after` 90초 상수(`query.rs`). key rotation 뒤 옛
+key chain의 최신 snapshot과 첫 baseline은 chain이 끝나지 않는 한 남으므로(L1 "for the life of the chain"), 그 member entry도 남는다.
+rotation이 반복되면 이 pass만으로는 entry 수가 줄지 않는다.
 
 ## 2026-11-08 spool 묶음을 transaction 하나로 (`perf/proxy-group-tx`)
 

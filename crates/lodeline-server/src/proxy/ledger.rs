@@ -1022,6 +1022,33 @@ impl Ledger {
         Ok(s)
     }
 
+    /// `(proxy_id, metadata_ref)` named by a retained row: a start event's
+    /// tool (every start, not only the one the projection shows), an inventory
+    /// member, the `from` end of a rotation link (its `to` end is a member of
+    /// the link's own snapshot), a drift record. Inventory gap details and
+    /// markers name no ref; a tombstone needs none (module doc of `metadata`).
+    pub fn referenced_metadata_refs(&self) -> Result<super::metadata::LiveRefs, LedgerError> {
+        let conn = self.conn.lock();
+        let mut st = conn.prepare(
+            "SELECT proxy_id, json_extract(CAST(canonical AS TEXT), '$.payload.tool.metadata_ref')
+               FROM events WHERE event_type = 'invocation.started'
+             UNION SELECT proxy_id, metadata_ref FROM inv_members
+             UNION SELECT proxy_id, from_metadata_ref FROM inv_links
+             UNION SELECT proxy_id, metadata_ref FROM inv_drift
+             UNION SELECT proxy_id, previous_metadata_ref FROM inv_drift",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut out = super::metadata::LiveRefs::new();
+        for row in rows {
+            if let (p, Some(r)) = row? {
+                out.insert((p, r));
+            }
+        }
+        Ok(out)
+    }
+
     /// Server-derived gaps of a proxy in detection order.
     pub fn gaps(&self, proxy_id: &str) -> Result<Vec<GapRecord>, LedgerError> {
         let conn = self.conn.lock();
