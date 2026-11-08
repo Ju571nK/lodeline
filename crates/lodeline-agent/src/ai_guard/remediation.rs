@@ -24,6 +24,9 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         SandboxDisabled => {
             "The sandbox is disabled — restore a non-bypass sandbox mode in the tool's config."
         }
+        NoSandbox { executor } if executor == "workspace_write_network" => {
+            "Codex's workspace-write sandbox lets commands reach the network. Set network_access = false under [sandbox_workspace_write] unless the agent needs it."
+        }
         NoSandbox { .. } => {
             "The agent runs with no sandbox boundary — enable the tool's sandbox or limit what it can run."
         }
@@ -160,6 +163,19 @@ mod tests {
         });
         assert!(codex.contains("Codex rules file"), "{codex}");
         assert!(!claude.contains("Codex"), "{claude}");
+    }
+
+    #[test]
+    fn codex_network_access_hint_names_the_setting() {
+        let network = hint_for_reason(&AiGuardReason::NoSandbox {
+            executor: "workspace_write_network".into(),
+        });
+        let shell = hint_for_reason(&AiGuardReason::NoSandbox {
+            executor: "host_shell".into(),
+        });
+        assert!(network.contains("network_access"), "{network}");
+        assert!(!network.contains("enable the tool's sandbox"), "{network}");
+        assert!(shell.contains("enable the tool's sandbox"), "{shell}");
     }
 
     #[test]

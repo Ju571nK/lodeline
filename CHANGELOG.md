@@ -21,6 +21,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- Codex `[sandbox_workspace_write] writable_roots` scoring now folds `.` and `..` as Codex does.
+  An absolute or `~` entry that resolves to the root, the home folder or a parent of it, such as
+  `/.`, `/..` or `~/.`, was missed and now scores `sandbox_disabled`. On macOS and Linux,
+  `C:\`, `C:/`, `\` and `~\` are relative paths to Codex and no longer score as writing
+  everywhere; on Windows they still do. The hint for `workspace_write_network` now names
+  `network_access` instead of asking to enable the sandbox.
 - Claude Code managed MCP scoring no longer over-reports three cases. With a `managed-mcp.json`
   deployed, a project's `.mcp.json` servers and its `enableAllProjectMcpServers` or
   `enabledMcpjsonServers` key are no longer scored, because Claude Code loads only the managed set.

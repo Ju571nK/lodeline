@@ -543,17 +543,32 @@ fn writes_everywhere(p: &str) -> bool {
     (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
 }
 
-/// A `writable_roots` entry naming the whole disk or the home dir. Codex
-/// reads each as a plain path with only `~` and `~/` expanded, so `/**`,
-/// `~/**` and `:root` are ordinary relative or literal paths there
-/// (`AbsolutePathBuf`, rust-v0.166.0).
+/// A `writable_roots` entry naming the whole disk, the home dir or a parent
+/// of it. Codex expands a leading `~` or `~/` (`~\` too on Windows), then
+/// drops `.` and folds `..` without going above the root, so `/**`, `~/**`
+/// and `:root` are ordinary relative or literal paths there, and a drive root
+/// or `\` is a relative path on macOS and Linux (`AbsolutePathBuf`,
+/// `absolutize.rs`, rust-v0.166.0). A relative entry resolves against the
+/// config folder and is not scored.
 fn writable_root_everywhere(p: &str) -> bool {
-    let trimmed = p.trim_end_matches(['/', '\\']);
-    let drive_root = trimmed.len() == 2
-        && trimmed.len() < p.len()
-        && trimmed.as_bytes()[0].is_ascii_alphabetic()
-        && trimmed.ends_with(':');
-    (trimmed.is_empty() && !p.is_empty()) || trimmed == "~" || drive_root
+    let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    let drive = cfg!(windows)
+        && p.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && p.as_bytes().get(1) == Some(&b':');
+    let rest = match p.strip_prefix('~') {
+        Some(rest) => rest,
+        None if drive => &p[2..],
+        None => p,
+    };
+    if p != "~" && !rest.starts_with(sep) {
+        return false;
+    }
+    let depth = rest.split(sep).fold(0usize, |depth, part| match part {
+        "" | "." => depth,
+        ".." => depth.saturating_sub(1),
+        _ => depth + 1,
+    });
+    depth == 0
 }
 
 /// #200 — `approval_policy` decides whether a human is asked before a tool
@@ -3931,31 +3946,68 @@ command = "echo inline"
         assert!(!workspace_network(&p.assess(dir.path()).unwrap()));
     }
 
+    fn writable_roots_disable_the_sandbox(roots: &str) -> bool {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            &format!(
+                "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = {roots}\n"
+            ),
+        );
+        sandbox_disabled(&CodexParser::default().assess(dir.path()).unwrap())
+    }
+
     #[test]
     fn writable_root_on_the_whole_disk_or_home_disables_the_sandbox() {
         for (roots, disabled) in [
-            ("[\"/\"]", true),
-            ("[\"/opt/cache\", \"~\"]", true),
-            ("[\"/opt/cache\", \"~/work\"]", false),
-            ("[\"~/\"]", true),
-            ("[\"C:\\\\\"]", true),
+            (r#"["/"]"#, true),
+            (r#"["/opt/cache", "~"]"#, true),
+            (r#"["/opt/cache", "~/work"]"#, false),
+            (r#"["~/"]"#, true),
             // Codex expands only `~` and `~/`, and has no special paths here.
-            ("[\":root\"]", false),
-            ("[\"~/**\"]", false),
-            ("[\"/**\"]", false),
+            (r#"[":root"]"#, false),
+            (r#"["~/**"]"#, false),
+            (r#"["/**"]"#, false),
         ] {
-            let dir = tempdir().unwrap();
-            write_config(
-                dir.path(),
-                &format!(
-                    "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = {roots}\n"
-                ),
-            );
-            let reasons = CodexParser::default().assess(dir.path()).unwrap();
             assert_eq!(
-                sandbox_disabled(&reasons),
+                writable_roots_disable_the_sandbox(roots),
                 disabled,
-                "{roots} -> {reasons:?}"
+                "{roots}"
+            );
+        }
+    }
+
+    /// Codex drops `.` and folds `..` before it uses a root, never going
+    /// above `/`. The parent of the home dir holds the home dir.
+    #[test]
+    fn writable_root_with_dot_segments_is_normalized() {
+        for (roots, disabled) in [
+            (r#"["/."]"#, true),
+            (r#"["/.."]"#, true),
+            (r#"["/opt/.."]"#, true),
+            (r#"["~/."]"#, true),
+            (r#"["~/work/.."]"#, true),
+            (r#"["~/.."]"#, true),
+            (r#"["~/work/../cache"]"#, false),
+            (r#"["/opt/./cache"]"#, false),
+        ] {
+            assert_eq!(
+                writable_roots_disable_the_sandbox(roots),
+                disabled,
+                "{roots}"
+            );
+        }
+    }
+
+    /// A drive root, `\` and `~\` are relative paths to Codex on macOS and
+    /// Linux, so they name a folder under the config dir there.
+    #[test]
+    fn windows_style_writable_root_counts_only_on_windows() {
+        for roots in [r#"["C:\\"]"#, r#"["C:/"]"#, r#"["\\"]"#, r#"["~\\"]"#] {
+            assert_eq!(
+                writable_roots_disable_the_sandbox(roots),
+                cfg!(windows),
+                "{roots}"
             );
         }
     }
