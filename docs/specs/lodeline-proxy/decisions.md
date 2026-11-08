@@ -192,11 +192,19 @@ M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 �
   durable하지 않은 행 수만큼 작아져 실제 tail을 다음 fsync까지 덜 보고하므로 그렇게 하지 않는다.
 - line 146과 다른 점: 이전에는 spool의 모든 기록이 fsync 뒤 local ack였다. 이제 start만 그렇고, completion·cancel·ACK 표시는 commit 뒤 응답한다.
 - 함께 바꾼 것(계약 안): `wal_autocheckpoint=0`. checkpoint는 commit 안에서 돌지 않는다. maintenance pass마다, 수집 client가
-  durable하지 않은 행만 찾았을 때 writer가 명령 사이에서 한다. 2026-11-08(`perf/proxy-bg-checkpoint`)부터 512 명령마다 하던 checkpoint는
-  둘로 나뉜다. 자기 연결을 가진 checkpoint thread가 WAL page 대부분을 DB로 복사하고 DB를 fsync하는 동안 writer는 commit을 계속한다.
+  durable하지 않은 행만 찾았을 때 writer가 명령 사이에서 한다. 2026-11-08(`perf/proxy-bg-checkpoint`)부터 1,024 명령마다 하는 checkpoint는
+  둘로 나뉜다(전에는 writer가 512 명령마다 혼자 했다). 자기 연결을 가진 checkpoint thread가 WAL page 대부분을 DB로 복사하고 DB를 fsync하는 동안 writer는 commit을 계속한다.
   그 thread가 끝나면 writer가 명령 사이에서 남은 frame만 복사하고, 그 checkpoint가 WAL 전체를 덮으면 다음 commit이 WAL을 처음부터 다시 쓴다.
   WAL 상한은 2,048 명령이다. 거기에 닿으면 writer는 복사가 끝날 때까지 다음 명령을 받지 않는다. `durable_seq`는 writer만 올린다.
-  checkpoint thread가 시작하지 못하거나 멈추면 writer가 전처럼 512 명령마다 전체를 복사한다.
+  checkpoint thread가 시작하지 못하거나 멈추면 writer가 1,024 명령마다 전체를 직접 복사한다.
+- 주기 1,024 명령과 상한 2,048 명령(2026-11-08 AWS t4g.small, gp3 쓰기 3,000 IOPS가 한계): 512 명령 주기의 checkpoint thread는 동시성 32
+  p99를 260 ms에서 142 ms로 줄였지만 calls/s가 11%(1,195 → 1,063) 줄었다. 요청마다 pass 4번을 다 돌았고 마지막 pass도 약 335 frame을 복사해
+  끝나지 않았다. 임시 계측 build에서 주기 1,024는 동시성 32에서 1,179 calls/s, p99 84 ms(4 run), 동시성 64에서 1,270 calls/s, p99 227 ms(2 run,
+  기준은 1,218 calls/s, p99 213–273 ms)였다. 같은 1,024 주기를 writer 혼자 하면 calls/s는 1,445였지만 p99가 227 ms(동시성 32)와 306 ms(동시성 64)였다.
+  상한은 2,048로 둔다. 잰 짝이 1,024와 2,048이다. 동시성 64에서 상한 대기가 30초에 31–34번, 합 약 5초(p50 160 ms)였지만 calls/s는 기준보다 높고
+  p99는 기준 범위 안이었다. 이 한계에서 calls/s는 호출당 디스크 쓰기 수로 정해진다(w/s 약 3,046 ÷ 호출당 2.40 = 1,269, 측정 1,270). 상한 대기는
+  쓰기 예산을 쓰지 않고 호출이 줄 서는 곳만 writer 앞으로 옮긴다. 4,096으로 올리면 그 대기 대신 writer가 마지막 pass 동안 쌓인 frame(동시성 64에서
+  pass당 약 740 frame)을 직접 복사하고 WAL이 커진다. 그 효과는 재지 않았다. 설정 항목은 두지 않는다.
 - 2026-11-07 group commit(`perf/proxy-group-commit`, 위 계약 안의 구현), 2026-11-08 묶음 transaction 하나(`perf/proxy-group-tx`): writer는 이미
   queue에 있는 append를 최대 64개까지 한 transaction으로 commit한다. 기록마다 savepoint로 거절을 가둔다. 묶음에 start가 있으면 그 commit이
   FULL이고, 그 fsync 뒤에만 묶음의 응답이 나간다. start가 없으면 NORMAL이다. 혼자 온 append도 같은 길이다. 더 올 append를 기다리는 타이머는 없다.
@@ -218,6 +226,9 @@ Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시�
 - 2026-11-08(`perf/proxy-bg-checkpoint`): checkpoint thread의 fsync 실패도 같다. 그 thread는 spool의 공유 표시(`sync_failed`)를 켜고
   멈추며, writer는 다음 명령 전에 그 표시를 보고 멈춘다. 두 thread 모두 표시가 켜진 뒤에는 checkpoint하지 않는다. checkpoint thread의
   연결은 닫을 때 checkpoint하지 않고, writer가 그 thread를 join한 뒤 자기 연결을 마지막으로 닫는다.
+  checkpoint thread의 fsync 실패와 표시 저장 사이에 writer가 commit하고 응답할 수 있다. 그 틈은 OS가 같은 writeback 오류를 writer 자신의 fsync에도
+  보고한다는 것에 기댄다(Linux 4.13 이상은 열린 파일마다 errseq로 보고, macOS와 Windows는 보장하지 않음). writer 혼자일 때도 fsync 전에 난 writeback 오류를
+  OS가 그 fsync로 알려 준다고 믿으므로 같은 신뢰다.
 - 근거: 같은 파일의 fsync 재시도는 Linux에서 성공을 보고하지만 아무것도 증명하지 않는다. PostgreSQL도 2018년 이후 fsync 실패에 PANIC하고
   재시작 때 WAL에서 복구한다. degraded로 계속 받는 안이나 재시도 안은 이 증명 공백을 남긴다.
 - 실패한 묶음의 commit이 디스크에 남긴 frame은 재시작 뒤 commit으로 복구되어 서버로 갈 수 있다(start만 있는 기록, 거절된 completion의 행 포함.

@@ -21,8 +21,8 @@ gp3 3,000 IOPS에서 p50 86 ms(전 55 ms) 걸렸다(측정). 그동안 writer th
 
 수정(`spool.rs` `Checkpointer`, `copy_passes`, `copy_pass`, `sync_database`, `Writer::checkpoint_if_due`):
 
-- checkpoint thread(`lodeline-ckpt`)가 자기 연결로 WAL page를 DB로 복사한다. 512 명령이 차면 writer는 요청 하나를 보내고 commit을
-  계속한다. 요청은 한 번에 하나이고 답도 하나다.
+- checkpoint thread(`lodeline-ckpt`)가 자기 연결로 WAL page를 DB로 복사한다. 1,024 명령(`CHECKPOINT_EVERY`, 처음에는 512, 아래 AWS
+  측정 뒤 변경)이 차면 writer는 요청 하나를 보내고 commit을 계속한다. 요청은 한 번에 하나이고 답도 하나다.
 - 요청 하나에 PASSIVE checkpoint를 최대 4번(`CHECKPOINT_PASSES`) 한다. 뒤의 번은 앞 번 동안 commit된 것을 복사하므로 남는 양이 준다.
   64 frame(`CHECKPOINT_TAIL_FRAMES`) 이하만 복사한 번에서 멈춘다. 복사한 번마다 그 연결의 VFS로 DB 파일을 fsync한다. writer가 복사
   중에 commit하면 SQLite는 DB fsync를 건너뛰고(`sqlite3.c` `walCheckpoint`, 복사 끝이 그 순간의 WAL 끝일 때만 fsync), 그러면 writer의
@@ -30,13 +30,14 @@ gp3 3,000 IOPS에서 p50 86 ms(전 55 ms) 걸렸다(측정). 그동안 writer th
 - 답을 받으면 writer가 명령 사이에서 PASSIVE checkpoint를 한다. 남은 frame만 복사한다. 이것이 WAL 끝까지 덮으면 SQLite가 DB를
   fsync하고 다음 commit이 WAL을 처음부터 다시 쓴다. 이 마무리가 필요한 이유: SQLite는 writer의 read가 `nBackfill == mxFrame`일 때
   시작한 경우에만 WAL을 다시 시작한다. writer가 commit을 계속하는 동안 다른 연결의 PASSIVE만으로는 그 순간이 오지 않는다.
-- WAL 상한은 2,048 명령(`WAL_CAP_COMMANDS`)이다. 거기서 답이 아직 없으면 writer는 답이 올 때까지 다음 명령을 받지 않는다. 그동안
+- WAL 상한은 2,048 명령(`WAL_CAP_COMMANDS`, 주기의 2배)이다. 거기서 답이 아직 없으면 writer는 답이 올 때까지 다음 명령을 받지 않는다. 그동안
   호출은 기다린다. 기다림의 끝은 요청 하나의 pass 수(최대 4)로 정해진다.
 - `durable_seq`는 writer만 올린다. start(FULL) commit의 fsync 뒤 응답, NORMAL 묶음, 재시작 복구는 바뀌지 않는다.
 - fail-stop: checkpoint thread의 fsync 실패(복사 전 WAL fsync, 복사 뒤 DB fsync)는 `Shared::sync_failed`를 켜고 thread를 끝낸다.
   writer는 명령을 받기 전과 받은 직후, commit 직전에 그 표시를 본다(`Writer::sync_failed`). 받은 명령은 실행하지 않고 멈춘다
   (`Unavailable`). 두 thread 모두 표시가 켜진 뒤에는 checkpoint하지 않는다. fsync가 아닌 오류면 checkpoint thread만 끝나고, writer가
-  전처럼 512 명령마다 전체를 복사한다. thread나 연결이 시작하지 못해도 같다.
+  1,024 명령마다 전체를 직접 복사한다. thread나 연결이 시작하지 못해도 같다. 끝난 thread도 writer가 join한다. 그래야 그 연결이
+  writer 연결보다 먼저 닫혀, 닫을 때의 checkpoint와 WAL 삭제가 writer 연결에서 돈다.
 - 종료: writer는 Drop에서 checkpoint thread를 join한 뒤 자기 연결을 닫는다. 그래서 마지막 연결은 writer 것이고 close checkpoint도
   writer 연결이 한다. checkpoint 연결은 `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`다. join은 진행 중인 pass(최대 4번)를 기다린다.
 - 그대로 둔 것: maintenance pass(60초마다)와 수집 poll(durable 행이 없을 때)의 checkpoint는 writer에서 한다. checkpoint thread가 복사
@@ -62,6 +63,10 @@ gp3 3,000 IOPS에서 p50 86 ms(전 55 ms) 걸렸다(측정). 그동안 writer th
   손실 사본에 모든 start가 남는다.
 - `a_failed_checkpointer_fsync_stops_the_writer`: checkpoint thread의 WAL fsync와 DB fsync를 각각 한 번 실패시킨다. `fsync_failed`로
   보고되고, 뒤 호출은 `Unavailable`, 뒤의 DB fsync는 없고, 재시작이 WAL을 복구한다.
+- `a_failed_database_fsync_after_a_pass_a_commit_raced_stops_the_checkpointer`: DB 쓰기를 막아 첫 pass를 붙잡고 그사이 commit
+  하나를 넣는다. 그러면 SQLite는 그 pass 뒤 DB fsync를 건너뛰므로, 실패시킨 다음 DB fsync는 `copy_pass`의 `sync_database`다.
+  `fsync_failed`로 보고되고, 두 번째 pass(WAL fsync)는 없으며, 뒤 호출은 `Unavailable`이다. `sync_database` 호출을 지우면 이 시험만
+  실패했다(두 번째 pass가 돌고 그 끝의 SQLite fsync에서 실패, 3번 반복, 측정).
 - `close_joins_the_checkpointer_and_removes_the_wal`: checkpoint thread가 돈 뒤 `close`하면 WAL 파일이 없다(writer 연결의 close
   checkpoint가 돌았다). 재시작 뒤 행이 모두 있다.
 - 바꾼 시험: `checkpoints_bound_the_wal`(writer의 checkpoint 횟수를 세던 시험)을 위 두 번째 시험으로 바꿨다. 나머지 spool 시험은
@@ -70,7 +75,7 @@ gp3 3,000 IOPS에서 p50 86 ms(전 55 ms) 걸렸다(측정). 그동안 writer th
 mutation(한 번에 하나, 각각 하나 이상 실패, 측정): writer의 마무리 checkpoint 제거(WAL 135 MB로 상한 초과), 상한에서 기다리지 않음,
 공유 실패 표시를 writer가 보지 않음, 명령을 받은 직후 확인 제거, Drop에서 join하지 않음, checkpoint thread를 시작하지 않음.
 
-측정(로컬, 목표 환경 아님): 로컬 macOS aarch64 12코어, APFS. `lodeline-proxy-loadgen`·`stack.sh`,
+측정(로컬, 목표 환경 아님, 512 명령 주기): 로컬 macOS aarch64 12코어, APFS. `lodeline-proxy-loadgen`·`stack.sh`,
 principal 16 × route 8, closed loop, run마다 새 stack, warm-up 5초 + 20초. 기준 `40bca8d`와 변경을 기준, 변경, 변경, 기준, 기준, 변경,
 변경, 기준 순서로 교대해 쪽마다 4 run(load average 10–15, 대부분 같은 호스트의 loadgen). 16 run 모두 오류 0, upstream 수 불일치 0.
 WAL 최대는 `spool.db-wal` 크기를 20 ms마다 읽은 값이다. 중앙값(범위):
@@ -105,6 +110,31 @@ DB fsync 시간, start commit 시간. 예측(추정): 동시성 32 p99가 #518 �
 (c32 약 1,197, c64 약 1,216)에서 run 사이 차이 이상 떨어지지 않는다. 반증 조건: pass가 gp3에서도 수렴하지 않거나(요청마다 4번, 마지막
 pass가 64 frame 초과) 상한 대기가 잦으면, checkpoint thread의 쓰기가 commit과 IOPS를 다투는 것이 지배적이다. 그때는 pass 수와 상한을
 바꿔 다시 잰다.
+
+AWS 측정(2026-11-08, 512 명령 주기, 판정: 그대로는 확인 안 됨): 위 환경, t4g.small, gp3. 디스크 w/s p50이 양쪽 모두 3,030–3,060이라
+쓰기 3,000 IOPS가 한계다. run마다 새 stack, warm-up 10초 + 30초, 기준 `40bca8d`와 변경을 교대했다. 모든 run에서 오류 0, upstream 수
+불일치 0. 중앙값(범위):
+
+| 항목 | 기준 | 변경 |
+|---|---|---|
+| 동시성 32 calls/s (쪽마다 7 run) | 1,195 (1,176–1,209) | 1,063 (1,051–1,069) |
+| 동시성 32 p50 / p99 (ms) | 13.0 / 260 (242–271) | 22.1 / 142 (128–159) |
+| 동시성 64 calls/s (쪽마다 3 run) | 1,218 (1,215–1,224) | 1,184 (1,174–1,188) |
+| 동시성 64 p50 / p99 (ms) | 25.9 / 255 (213–273) | 48.7 / 226 (222–265) |
+| WAL 최대 (MiB), 동시성 32 / 64 | 5.4 / 4.7 | 12.8 / 15.5 |
+| open loop 100 calls/s p50 / p99 (ms, 쪽마다 1 run) | 3.6 / 12.3 | 3.6 / 14.3 |
+
+동시성 32에서 calls/s, p50, p99 모두 범위가 겹치지 않는다(순위합 p=0.0006). 꼬리는 고쳐졌지만 calls/s가 11% 줄었다. 동시성 64의
+3% 감소와 p99는 run 수가 적어 차이를 말할 수 없다(p=0.10, p=1.0). 호출당 디스크 쓰기가 2.54에서 2.87로 늘었고, 쓰기 한계에서는
+calls/s가 w/s ÷ 호출당 쓰기로 정해진다(측정에서 계산). 임시 계측 build(동시성 32, 쪽마다 2–3 run, 정상 build와 calls/s 차이 1% 안)는
+요청마다 pass 4번을 다 돌았고 마지막 pass도 약 335 frame(330–339)을 복사했다. 위의 반증 조건대로 pass가 수렴하지 않았다.
+
+계측 build로 바꿔 본 값(동시성 32, 같은 binary에 환경 변수, 측정): pass 1번 1,100 calls/s, p99 177 ms(2 run). pass 2번 1,058, p99 122 ms
+(2 run). 상한 1,024 명령 1,051, p99 224 ms(1 run). 주기 1,024 명령 1,179 (1,176–1,188), p99 84 ms (83–87)(4 run), 상한 대기는 run마다
+1–2번. 같은 주기 1,024를 동시성 64에서 재면 1,270 calls/s (1,254–1,285), p99 227 ms (220–234)(2 run), WAL 약 16 MiB, 상한 대기 30초에
+31–34번, 합 4.9–5.2초. 같은 주기 1,024를 checkpoint thread 없이 writer 혼자 하면 동시성 32에서 1,445 calls/s, p99 227 ms, 동시성 64에서
+1,520 calls/s, p99 306 ms였다(각 2 run). 이 결과로 주기를 1,024 명령으로 옮겼다. 상한 2,048은 그대로 두었다(이유는
+[decisions.md](decisions.md) spool 절). 정상 build로 다시 재는 AWS 측정은 아직이다.
 
 ## 2026-11-08 chain 끝 경계 시험과 sweep checkpoint 보고 (`test/proxy-retention-followups`, #279)
 
