@@ -3787,6 +3787,35 @@ mod tests {
         );
     }
 
+    /// A user-level `disableAllHooks: true` turns off project hooks unless a
+    /// project file sets it back to `false`.
+    #[test]
+    fn user_disable_all_hooks_turns_off_project_hooks() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let policy = tempdir().unwrap();
+        write_settings(home.path(), r#"{"disableAllHooks": true}"#);
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            &format!("{{{USER_HOOK}}}"),
+        );
+        let reasons = assess_project(repo.path(), home.path(), policy.path()).unwrap();
+        assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
+
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            &format!(r#"{{"disableAllHooks": false, {USER_HOOK}}}"#),
+        );
+        let reasons = assess_project(repo.path(), home.path(), policy.path()).unwrap();
+        assert_eq!(
+            hook_events(&reasons),
+            ["sandbox", "PreToolUse", "PreToolUse"],
+            "{reasons:?}"
+        );
+    }
+
     fn approvals(settings: &str) -> Vec<String> {
         let mut out = Vec::new();
         emit_hook_reasons(&serde_json::from_str(settings).unwrap(), &mut out).unwrap();
@@ -3865,6 +3894,48 @@ mod tests {
             let handlers = serde_json::json!([{"command": "true", "if": rule}]).to_string();
             assert!(broad(&handlers), "{rule:?} must not narrow the matcher");
         }
+    }
+
+    fn if_rule_is_broad(rule: &str) -> bool {
+        let settings = serde_json::json!({"hooks": {"PreToolUse": [
+            {"matcher": "*", "hooks": [{"command": "true", "if": rule}]}
+        ]}});
+        let mut out = Vec::new();
+        emit_hook_reasons(&settings, &mut out).unwrap();
+        out.iter()
+            .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
+    }
+
+    /// `WebFetch(domain:*)` matches every domain, and a path rule anchored at
+    /// home, root or the working directory covers what `Edit(**)` does.
+    #[test]
+    fn if_rule_matching_every_call_after_its_prefix_keeps_the_matcher_broad() {
+        for rule in [
+            "WebFetch(domain:*)",
+            "Edit(~/**)",
+            "Edit(//**)",
+            "Read(./**)",
+        ] {
+            assert!(
+                if_rule_is_broad(rule),
+                "{rule:?} must not narrow the matcher"
+            );
+        }
+        for rule in [
+            "WebFetch(domain:example.com)",
+            "Edit(~/notes/**)",
+            "Read(.*)",
+        ] {
+            assert!(!if_rule_is_broad(rule), "{rule:?} narrows the matcher");
+        }
+    }
+
+    /// Claude Code matches an `if` tool name exactly, so a glob such as
+    /// `mcp__*` names no tool and the handler never runs.
+    #[test]
+    fn if_rule_with_a_tool_name_glob_matches_no_call() {
+        assert!(!if_rule_is_broad("mcp__*(x)"));
+        assert!(!if_rule_is_broad("mcp__*(*)"));
     }
 
     /// The `if` argument can carry a credential, so only the tool name leaves

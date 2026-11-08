@@ -3574,6 +3574,30 @@ command = "echo inline"
         }
     }
 
+    /// Codex strips `/**` and then rejects the bare drive `C:` as not
+    /// absolute, so the profile grants nothing.
+    #[test]
+    fn drive_without_a_separator_keeps_the_sandbox() {
+        for (entry, disabled) in [
+            (r#""C:/**" = "write""#, false),
+            (r#""C:" = "write""#, false),
+            (r#""C://**" = "write""#, true),
+        ] {
+            let dir = tempdir().unwrap();
+            write_config(
+                dir.path(),
+                &format!(
+                    "default_permissions = \"open\"\n[permissions.open.filesystem]\n{entry}\n"
+                ),
+            );
+            assert_eq!(
+                sandbox_disabled(&CodexParser::default().assess(dir.path()).unwrap()),
+                disabled,
+                "{entry}"
+            );
+        }
+    }
+
     #[test]
     fn named_profile_inherits_write_everywhere_through_extends() {
         let config = "default_permissions = \"dev\"\n\
