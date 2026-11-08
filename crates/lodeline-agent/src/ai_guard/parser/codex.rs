@@ -104,6 +104,7 @@ impl AiGuardParser for CodexParser {
         assess_user_layers(
             &super::policy_controls::codex_system_dir(),
             &user_codex_dir(home_dir, self.codex_home.as_deref()),
+            home_dir,
         )
     }
 
@@ -321,6 +322,7 @@ fn merge_layer(base: &mut Value, overlay: &Value) {
 fn assess_user_layers(
     system_dir: &Path,
     codex_dir: &Path,
+    home_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let layers = [CodexLayer::read(system_dir)?, CodexLayer::read(codex_dir)?];
     let mut effective: Option<Value> = None;
@@ -333,7 +335,7 @@ fn assess_user_layers(
 
     let mut out = Vec::new();
     let permissions = effective.as_ref().and_then(|v| v.get("permissions"));
-    emit_sandbox_reasons(&layers, permissions, &mut out);
+    emit_sandbox_reasons(&layers, permissions, home_dir, &mut out);
     let get = |key| effective.as_ref().and_then(|v| v.get(key));
     // The daemon has no cwd, so a trust decision on any project stands in for the active one.
     let trust_decided = get("projects")
@@ -346,12 +348,7 @@ fn assess_user_layers(
                 )
             })
         });
-    emit_workspace_write_reasons(
-        &layers,
-        get("sandbox_workspace_write"),
-        trust_decided,
-        &mut out,
-    );
+    emit_workspace_write_reasons(&layers, &layers, trust_decided, home_dir, &mut out);
     if let Some(val) = &effective {
         // #200 — whether a human is asked before a tool runs.
         emit_approval_policy_reasons(val, None, &mut out);
@@ -405,10 +402,13 @@ const GLOBAL_AGENTS_MD: [&str; 2] = ["AGENTS.override.md", "AGENTS.md"];
 fn emit_sandbox_reasons(
     layers: &[CodexLayer],
     permissions: Option<&Value>,
+    home: &Path,
     out: &mut Vec<AiGuardReason>,
 ) {
     let disabled = match sandbox_setting(layers) {
-        Some(SandboxSetting::Profile(profile)) => profile_writes_everywhere(profile, permissions),
+        Some(SandboxSetting::Profile(profile)) => {
+            profile_writes_everywhere(profile, permissions, home)
+        }
         Some(SandboxSetting::Mode(mode)) => mode == "danger-full-access",
         None => false,
     };
@@ -439,14 +439,18 @@ fn sandbox_setting(layers: &[CodexLayer]) -> Option<SandboxSetting<'_>> {
 /// trust decision and `read-only` elsewhere (`derive_permission_profile`,
 /// rust-v0.166.0); a `default_permissions` profile ignores the table.
 /// `network_access = true` opens the network the mode otherwise blocks, so it
-/// scores as `NoSandbox`, below a disabled sandbox. A writable root on the
-/// whole disk or the home dir writes everywhere, as `:danger-full-access`
-/// does. Not modeled: Windows with its native sandbox off falls back to
-/// `read-only` (`effective_sandbox_mode`).
+/// scores as `NoSandbox`, below a disabled sandbox. A writable root that
+/// holds the home dir writes everywhere, as `:danger-full-access` does.
+/// Codex resolves a relative root against the folder of the layer that set
+/// it, before it merges the layers (`resolve_relative_paths_in_config_toml`,
+/// rust-v0.166.0). `settings_layers` is low to high. Not modeled: Windows
+/// with its native sandbox off falls back to `read-only`
+/// (`effective_sandbox_mode`).
 fn emit_workspace_write_reasons(
     mode_layers: &[CodexLayer],
-    settings: Option<&Value>,
+    settings_layers: &[CodexLayer],
     trust_decided: bool,
+    home: &Path,
     out: &mut Vec<AiGuardReason>,
 ) {
     let in_force = match sandbox_setting(mode_layers) {
@@ -454,20 +458,34 @@ fn emit_workspace_write_reasons(
         Some(SandboxSetting::Profile(_)) => false,
         None => trust_decided,
     };
-    let Some(settings) = settings.filter(|_| in_force) else {
+    if !in_force {
         return;
+    }
+    // A merge takes each key from the highest layer that sets it.
+    let setting = |key| {
+        settings_layers.iter().rev().find_map(|layer| {
+            let value = layer
+                .config
+                .as_ref()?
+                .get("sandbox_workspace_write")?
+                .get(key)?;
+            Some((layer, value))
+        })
     };
-    if settings.get("network_access").and_then(Value::as_bool) == Some(true) {
+    if setting("network_access").and_then(|(_, v)| v.as_bool()) == Some(true) {
         out.push(AiGuardReason::NoSandbox {
             executor: "workspace_write_network".to_string(),
         });
     }
-    let roots = settings.get("writable_roots").and_then(Value::as_array);
+    let Some((layer, roots)) = setting("writable_roots") else {
+        return;
+    };
     if roots
+        .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .any(writable_root_everywhere)
+        .any(|root| holds_home(root, Some(&layer.dir), home))
     {
         out.push(AiGuardReason::SandboxDisabled);
     }
@@ -480,7 +498,7 @@ fn emit_workspace_write_reasons(
 /// Codex accepts, write nowhere outside the workspace roots and temp dirs.
 /// Extra writable paths and `network.enabled = true` are not scored: no
 /// reason kind fits them.
-fn profile_writes_everywhere(name: &str, permissions: Option<&Value>) -> bool {
+fn profile_writes_everywhere(name: &str, permissions: Option<&Value>, home: &Path) -> bool {
     if name == ":danger-full-access" {
         return true;
     }
@@ -504,16 +522,21 @@ fn profile_writes_everywhere(name: &str, permissions: Option<&Value>) -> bool {
         .as_table()
         .into_iter()
         .flatten()
-        .any(|(path, access)| grants_write_everywhere(path, access))
+        .any(|(path, access)| grants_write_everywhere(path, access, home))
 }
 
 /// A `[permissions.<name>.filesystem]` entry that grants `write` on the whole
-/// disk or the home dir. A scoped entry's `.` is the path itself, and a
-/// `~` subpath under `:workspace_roots` is read as a home path, not a subtree.
+/// disk, the home dir or a parent of it. A scoped entry's `.` is the path
+/// itself, and a `~` subpath under `:workspace_roots` is read as a home path,
+/// not a subtree.
 /// A trailing `/**` on a key or subpath means the subtree, so it is dropped
 /// (`compile_read_write_glob_path`, rust-v0.166.0); a special path such as
 /// `:root` only matches exactly (`parse_special_path`).
-fn grants_write_everywhere(path: &str, access: &Value) -> bool {
+fn grants_write_everywhere(path: &str, access: &Value, home: &Path) -> bool {
+    let writes_everywhere = |p: &str| {
+        let p = p.strip_suffix("/**").unwrap_or(p);
+        p == ":root" || holds_home(p, None, home)
+    };
     match access {
         Value::String(access) => access == "write" && writes_everywhere(path),
         Value::Table(scoped) => scoped.iter().any(|(sub, access)| {
@@ -522,8 +545,10 @@ fn grants_write_everywhere(path: &str, access: &Value) -> bool {
                     // Codex compiles a scoped entry's own key as an exact path.
                     !path.ends_with("/**") && writes_everywhere(path)
                 } else {
+                    // Codex refuses a `..` in a subpath (`relative_subpath`).
                     matches!(path, ":workspace_roots" | ":project_roots")
                         && sub.starts_with('~')
+                        && !sub.split(is_separator).any(|part| part == "..")
                         && writes_everywhere(sub)
                 }
         }),
@@ -531,44 +556,51 @@ fn grants_write_everywhere(path: &str, access: &Value) -> bool {
     }
 }
 
-/// A path naming the whole disk or the home dir. A drive needs its separator:
-/// Codex rejects a bare `C:`, which `C:/**` becomes, as not absolute.
-fn writes_everywhere(p: &str) -> bool {
-    let p = p.strip_suffix("/**").unwrap_or(p);
-    let trimmed = p.trim_end_matches(['/', '\\']);
-    let drive_root = trimmed.len() == 2
-        && trimmed.len() < p.len()
-        && trimmed.as_bytes()[0].is_ascii_alphabetic()
-        && trimmed.ends_with(':');
-    (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
+/// Whether config path `p` names the whole disk, the home dir or a parent of
+/// it, resolved as Codex does. Codex expands a leading `~` or `~/` (`~\` too
+/// on Windows), then drops `.` and folds `..` without going above the root
+/// (`AbsolutePathBuf`, `absolutize.rs`; `PathUri::resolve_config_path_uri`
+/// for a permission profile, rust-v0.166.0). `base` is the folder a relative
+/// path resolves against, or `None` where Codex rejects a relative path, as
+/// in a profile. A drive root or `\` is relative on macOS and Linux, and a
+/// bare `C:` has no root.
+fn holds_home(p: &str, base: Option<&Path>, home: &Path) -> bool {
+    let path = match p.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(is_separator) => {
+            home.join(rest.trim_start_matches(is_separator))
+        }
+        _ => PathBuf::from(p),
+    };
+    let path = match base {
+        // `join` keeps an absolute path and puts a rooted one on the base drive.
+        Some(base) => base.join(path),
+        // shortcut: Codex on Windows rejects a profile path with no drive, such
+        // as `/`, but it scores here; check the drive once a Windows host shows it.
+        None if path.has_root() => path,
+        None => return false,
+    };
+    let path = lexical(&path);
+    path.has_root() && (path.parent().is_none() || lexical(home).starts_with(&path))
 }
 
-/// A `writable_roots` entry naming the whole disk, the home dir or a parent
-/// of it. Codex expands a leading `~` or `~/` (`~\` too on Windows), then
-/// drops `.` and folds `..` without going above the root, so `/**`, `~/**`
-/// and `:root` are ordinary relative or literal paths there, and a drive root
-/// or `\` is a relative path on macOS and Linux (`AbsolutePathBuf`,
-/// `absolutize.rs`, rust-v0.166.0). A relative entry resolves against the
-/// config folder and is not scored.
-fn writable_root_everywhere(p: &str) -> bool {
-    let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
-    let drive = cfg!(windows)
-        && p.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-        && p.as_bytes().get(1) == Some(&b':');
-    let rest = match p.strip_prefix('~') {
-        Some(rest) => rest,
-        None if drive => &p[2..],
-        None => p,
-    };
-    if p != "~" && !rest.starts_with(sep) {
-        return false;
+/// A path separator in a Codex config path: `/`, and `\` too on Windows.
+fn is_separator(c: char) -> bool {
+    c == '/' || (cfg!(windows) && c == '\\')
+}
+
+/// `path` with `.` dropped and `..` folded, never above the root.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            part => out.push(part),
+        }
     }
-    let depth = rest.split(sep).fold(0usize, |depth, part| match part {
-        "" | "." => depth,
-        ".." => depth.saturating_sub(1),
-        _ => depth + 1,
-    });
-    depth == 0
+    out
 }
 
 /// #200 — `approval_policy` decides whether a human is asked before a tool
@@ -1648,6 +1680,7 @@ impl AiGuardParser for CodexProjectParser {
         self.assess_layers(
             &super::policy_controls::codex_system_dir(),
             &home_dir.join(".codex"),
+            home_dir,
         )
     }
 
@@ -1687,6 +1720,7 @@ impl AiGuardParser for CodexHomeProjectParser {
         self.project.assess_layers(
             &super::policy_controls::codex_system_dir(),
             &self.user_dir(home_dir),
+            home_dir,
         )
     }
 
@@ -1746,6 +1780,7 @@ impl CodexProjectParser {
         &self,
         system_dir: &Path,
         codex_dir: &Path,
+        home_dir: &Path,
     ) -> Result<Vec<AiGuardReason>, AssessError> {
         if self.is_codex_home(codex_dir) {
             let mut out = Vec::new();
@@ -1772,13 +1807,9 @@ impl CodexProjectParser {
                 merge_layer(&mut permissions, table);
             }
         }
-        emit_sandbox_reasons(layers, Some(&permissions), &mut out);
+        emit_sandbox_reasons(layers, Some(&permissions), home_dir, &mut out);
         // The user layer can still pick the mode the project's table needs.
-        let workspace_write = layer
-            .config
-            .as_ref()
-            .and_then(|c| c.get("sandbox_workspace_write"));
-        emit_workspace_write_reasons(&both, workspace_write, true, &mut out);
+        emit_workspace_write_reasons(&both, layers, true, home_dir, &mut out);
         if let Some(val) = &layer.config {
             let inherited_policy = [&user.config, &system.config]
                 .into_iter()
@@ -2849,7 +2880,7 @@ command = "echo inline"
             "sandbox_mode = \"danger-full-access\"\napproval_policy = \"never\"\n",
         )
         .unwrap();
-        let reasons = assess_user_layers(&system, &home.join(".codex")).unwrap();
+        let reasons = assess_user_layers(&system, &home.join(".codex"), &home).unwrap();
         assert!(
             reasons.contains(&AiGuardReason::SandboxDisabled),
             "{reasons:?}"
@@ -2875,7 +2906,7 @@ command = "echo inline"
             "sandbox_mode = \"read-only\"\n",
         )
         .unwrap();
-        let reasons = assess_user_layers(&system, &home.join(".codex")).unwrap();
+        let reasons = assess_user_layers(&system, &home.join(".codex"), &home).unwrap();
         assert!(
             !reasons.contains(&AiGuardReason::SandboxDisabled),
             "{reasons:?}"
@@ -2895,7 +2926,7 @@ command = "echo inline"
             "[mcp_servers.mine]\nurl = \"https://mine.example/mcp\"\n",
         )
         .unwrap();
-        let reasons = assess_user_layers(&system, &home.join(".codex")).unwrap();
+        let reasons = assess_user_layers(&system, &home.join(".codex"), &home).unwrap();
         let remote: Vec<_> = reasons
             .iter()
             .filter_map(|r| match r {
@@ -2915,7 +2946,7 @@ command = "echo inline"
             "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"echo done\"\n",
         )
         .unwrap();
-        let reasons = assess_user_layers(&system, &home.join(".codex")).unwrap();
+        let reasons = assess_user_layers(&system, &home.join(".codex"), &home).unwrap();
         assert!(has_destructive_inline(&reasons), "{reasons:?}");
     }
 
@@ -2923,7 +2954,7 @@ command = "echo inline"
     fn corrupt_system_config_is_a_parse_error() {
         let (_root, system, home) = system_and_home();
         std::fs::write(system.join("config.toml"), "[unterminated").unwrap();
-        let err = assess_user_layers(&system, &home.join(".codex")).unwrap_err();
+        let err = assess_user_layers(&system, &home.join(".codex"), &home).unwrap_err();
         assert!(matches!(err, AssessError::Parse { .. }), "got {err:?}");
     }
 
@@ -3116,7 +3147,7 @@ command = "echo inline"
         let user = home.join(".codex").join("config.toml");
         std::fs::write(&user, "sandbox_mode = \"read-only\"\n").unwrap();
         assert!(!sandbox_disabled(
-            &assess_user_layers(&system, &home.join(".codex")).unwrap()
+            &assess_user_layers(&system, &home.join(".codex"), &home).unwrap()
         ));
 
         std::fs::write(
@@ -3126,7 +3157,7 @@ command = "echo inline"
         .unwrap();
         std::fs::write(&user, "default_permissions = \":workspace\"\n").unwrap();
         assert!(!sandbox_disabled(
-            &assess_user_layers(&system, &home.join(".codex")).unwrap()
+            &assess_user_layers(&system, &home.join(".codex"), &home).unwrap()
         ));
     }
 
@@ -3192,7 +3223,7 @@ command = "echo inline"
         );
         // The system `npm ci` redacts to `npm`, which dedupes with the user's `npm`.
         assert_eq!(
-            approvals(&assess_user_layers(&system, &home.join(".codex")).unwrap()),
+            approvals(&assess_user_layers(&system, &home.join(".codex"), &home).unwrap()),
             vec!["npm"]
         );
     }
@@ -3336,7 +3367,7 @@ command = "echo inline"
             "u.rules",
             "prefix_rule(pattern=[\"/Users/alice/bin/curl\", \"-H\", \"Authorization: Bearer t\"])\n",
         );
-        let reasons = assess_user_layers(&system, &home.join(".codex")).unwrap();
+        let reasons = assess_user_layers(&system, &home.join(".codex"), &home).unwrap();
         assert_eq!(approvals(&reasons), vec!["curl", "deploy"], "{reasons:?}");
     }
 
@@ -3549,7 +3580,6 @@ command = "echo inline"
             r#"":root" = "write""#,
             r#""/" = "write""#,
             r#""~" = "write""#,
-            r#""C:\\" = "write""#,
             r#""/" = { "." = "write" }"#,
             r#"":workspace_roots" = { "~" = "write" }"#,
             r#"":root/**" = "write""#,
@@ -3593,13 +3623,15 @@ command = "echo inline"
     }
 
     /// Codex strips `/**` and then rejects the bare drive `C:` as not
-    /// absolute, so the profile grants nothing.
+    /// absolute, so the profile grants nothing. A drive root is not absolute
+    /// on macOS and Linux, where Codex refuses the profile.
     #[test]
     fn drive_without_a_separator_keeps_the_sandbox() {
         for (entry, disabled) in [
             (r#""C:/**" = "write""#, false),
             (r#""C:" = "write""#, false),
-            (r#""C://**" = "write""#, true),
+            (r#""C://**" = "write""#, cfg!(windows)),
+            (r#""C:\\" = "write""#, cfg!(windows)),
         ] {
             let dir = tempdir().unwrap();
             write_config(
@@ -3610,6 +3642,40 @@ command = "echo inline"
             );
             assert_eq!(
                 sandbox_disabled(&CodexParser::default().assess(dir.path()).unwrap()),
+                disabled,
+                "{entry}"
+            );
+        }
+    }
+
+    /// Codex drops `.` and folds `..` in a profile path as it does in a
+    /// writable root, and a parent of the home dir holds the home dir.
+    #[test]
+    fn profile_path_with_dot_segments_or_above_home_disables_the_sandbox() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("alice");
+        for (entry, disabled) in [
+            (r#""/." = "write""#.to_string(), true),
+            (r#""/opt/.." = "write""#.to_string(), true),
+            (r#""/./**" = "write""#.to_string(), true),
+            (r#""~/." = "write""#.to_string(), true),
+            (r#""~/.." = "write""#.to_string(), true),
+            (r#""~/../alice" = "write""#.to_string(), true),
+            (format!("'{}' = \"write\"", dir.path().display()), true),
+            (format!("'{}' = \"write\"", home.join(".").display()), true),
+            (r#""~/../bob" = "write""#.to_string(), false),
+            (r#""/opt/./cache" = "write""#.to_string(), false),
+            (r#"":workspace_roots" = { "~/." = "write" }"#.into(), true),
+            (r#"":workspace_roots" = { "~/.." = "write" }"#.into(), false),
+        ] {
+            write_config(
+                &home,
+                &format!(
+                    "default_permissions = \"open\"\n[permissions.open.filesystem]\n{entry}\n"
+                ),
+            );
+            assert_eq!(
+                sandbox_disabled(&CodexParser::default().assess(&home).unwrap()),
                 disabled,
                 "{entry}"
             );
@@ -4012,6 +4078,92 @@ command = "echo inline"
         }
     }
 
+    /// Codex compares the resolved root with the home dir, so an absolute
+    /// parent of home, home itself and `~/../<home>` all hold home.
+    #[test]
+    fn writable_root_at_or_above_home_disables_the_sandbox() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("alice");
+        for (root, disabled) in [
+            (dir.path().display().to_string(), true),
+            (home.display().to_string(), true),
+            ("~/../alice".to_string(), true),
+            (home.join("work").display().to_string(), false),
+            (dir.path().join("bob").display().to_string(), false),
+            ("~/../bob".to_string(), false),
+        ] {
+            write_config(
+                &home,
+                &format!(
+                    "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = ['{root}']\n"
+                ),
+            );
+            assert_eq!(
+                sandbox_disabled(&CodexParser::default().assess(&home).unwrap()),
+                disabled,
+                "{root}"
+            );
+        }
+    }
+
+    /// Codex resolves a relative root against the folder of the config that
+    /// set it, so `..` in the user config names the home dir.
+    #[test]
+    fn relative_writable_root_resolves_against_its_config_folder() {
+        for (roots, disabled) in [
+            (r#"[".."]"#, true),
+            (r#"["../.."]"#, true),
+            (r#"["."]"#, false),
+            (r#"["../work"]"#, false),
+        ] {
+            assert_eq!(
+                writable_roots_disable_the_sandbox(roots),
+                disabled,
+                "{roots}"
+            );
+        }
+    }
+
+    /// An array is replaced, not merged, so the highest layer that sets
+    /// `writable_roots` decides. `..` in the system folder is the parent of home.
+    #[test]
+    fn highest_layer_setting_writable_roots_decides() {
+        for (system_roots, user_roots, disabled) in [
+            (r#"[".."]"#, r#"["x"]"#, false),
+            (r#"["x"]"#, r#"[".."]"#, true),
+        ] {
+            let (_root, system, home) = system_and_home();
+            let config = |roots| {
+                format!("sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = {roots}\n")
+            };
+            std::fs::write(system.join("config.toml"), config(system_roots)).unwrap();
+            write_config(&home, &config(user_roots));
+            assert_eq!(
+                sandbox_disabled(
+                    &assess_user_layers(&system, &home.join(".codex"), &home).unwrap()
+                ),
+                disabled,
+                "system {system_roots}, user {user_roots}"
+            );
+        }
+    }
+
+    /// A project root resolves against `<repo>/.codex`, so with the repo
+    /// directly under home `../..` is home and `..` is the repo.
+    #[test]
+    fn project_writable_root_resolves_against_its_codex_folder() {
+        for (roots, disabled) in [(r#"["../.."]"#, true), (r#"[".."]"#, false)] {
+            let (dir, p) = project_with(&format!(
+                "[sandbox_workspace_write]\nwritable_roots = {roots}\n"
+            ));
+            assert_eq!(
+                sandbox_disabled(&p.assess(dir.path()).unwrap()),
+                disabled,
+                "{roots}"
+            );
+        }
+    }
+
     /// Codex runs `commandWindows` (or `command_windows`) instead of
     /// `command` on Windows, and ignores it elsewhere.
     #[test]
@@ -4370,13 +4522,13 @@ base_url = "https://llm.corp.example/v1"
         std::fs::create_dir_all(&system).unwrap();
         std::fs::write(system.join("config.toml"), "approval_policy = \"never\"").unwrap();
         let reasons = project
-            .assess_layers(&system, &dir.path().join(".codex"))
+            .assess_layers(&system, &dir.path().join(".codex"), dir.path())
             .unwrap();
         assert!(reasons.is_empty(), "system never: {reasons:?}");
 
         write_config(dir.path(), "approval_policy = \"on-request\"");
         let reasons = project
-            .assess_layers(&system, &dir.path().join(".codex"))
+            .assess_layers(&system, &dir.path().join(".codex"), dir.path())
             .unwrap();
         assert!(auto_review(&reasons), "user overrides system: {reasons:?}");
     }
@@ -4573,7 +4725,7 @@ base_url = "https://llm.corp.example/v1"
         .unwrap();
         std::fs::write(system.join("config.toml"), system_config).unwrap();
         std::fs::write(system.join("requirements.toml"), requirements).unwrap();
-        assess_user_layers(&system, &codex).unwrap()
+        assess_user_layers(&system, &codex, &home).unwrap()
     }
 
     #[test]
@@ -4656,7 +4808,9 @@ base_url = "https://llm.corp.example/v1"
             )
             .unwrap();
             let p = CodexProjectParser { repo_root: repo };
-            let reasons = p.assess_layers(&system, &home.join(".codex")).unwrap();
+            let reasons = p
+                .assess_layers(&system, &home.join(".codex"), &home)
+                .unwrap();
             assert_eq!(
                 has_destructive_inline(&reasons),
                 runs,
