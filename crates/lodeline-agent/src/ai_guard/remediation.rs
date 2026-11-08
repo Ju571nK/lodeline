@@ -163,6 +163,19 @@ mod tests {
     }
 
     #[test]
+    fn codex_network_access_hint_names_the_setting() {
+        let network = hint_for_reason(&AiGuardReason::NoSandbox {
+            executor: "workspace_write_network".into(),
+        });
+        let shell = hint_for_reason(&AiGuardReason::NoSandbox {
+            executor: "host_shell".into(),
+        });
+        assert!(network.contains("network_access"), "{network}");
+        assert!(!network.contains("enable the tool's sandbox"), "{network}");
+        assert!(shell.contains("enable the tool's sandbox"), "{shell}");
+    }
+
+    #[test]
     fn built_in_auto_hint_names_the_cases_that_start_in_default_mode() {
         let hint = hint_for_reason(&AiGuardReason::AutoApprovalEnabled {
             mode: crate::ai_guard::parser::claude_code::BUILT_IN_AUTO_MODE.into(),
