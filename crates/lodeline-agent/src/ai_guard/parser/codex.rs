@@ -4534,6 +4534,39 @@ base_url = "https://llm.corp.example/v1"
     }
 
     #[test]
+    fn project_profile_resolves_against_system_permissions() {
+        let (dir, project) = project_with("default_permissions = \"open\"\n");
+        let system = dir.path().join("etc-codex");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(
+            system.join("config.toml"),
+            "[permissions.open.filesystem]\n\":root\" = \"write\"\n",
+        )
+        .unwrap();
+        let reasons = project
+            .assess_layers(&system, &dir.path().join(".codex"), dir.path())
+            .unwrap();
+        assert!(sandbox_disabled(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn project_workspace_table_follows_the_system_sandbox_mode() {
+        let (dir, project) = project_with("[sandbox_workspace_write]\nnetwork_access = true\n");
+        let system = dir.path().join("etc-codex");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(system.join("config.toml"), "sandbox_mode = \"read-only\"\n").unwrap();
+        let assess = || {
+            project
+                .assess_layers(&system, &dir.path().join(".codex"), dir.path())
+                .unwrap()
+        };
+        assert!(!workspace_network(&assess()), "system read-only");
+
+        write_config(dir.path(), "sandbox_mode = \"workspace-write\"\n");
+        assert!(workspace_network(&assess()), "user overrides system");
+    }
+
+    #[test]
     fn legacy_guardian_subagent_and_on_failure_route_to_the_reviewer() {
         let dir = tempdir().unwrap();
         for config in [
