@@ -688,20 +688,31 @@ pub(crate) fn classify_command(
 }
 
 /// The file `script`, a word of `cmd`, names. On Unix every supported tool
-/// runs `cmd` through a POSIX shell, which reads a leading `~` or `~/` of an
-/// unquoted word as `home`. On Windows the shell may be `cmd.exe` or
-/// PowerShell, so `~` is left as written.
+/// runs `cmd` through a POSIX shell, which reads a leading `~`, `~/`,
+/// `$HOME/` or `${HOME}/` of an unquoted word as `home`, and only the
+/// `$HOME` forms inside double quotes. On Windows the shell may be `cmd.exe`
+/// or PowerShell, so the word is left as written.
 fn script_file(cmd: &str, script: &str, home: Option<&Path>) -> PathBuf {
     let start = script.as_ptr() as usize - cmd.as_ptr() as usize;
-    let quoted = cmd[..start].ends_with(['"', '\'']);
-    match (home, script.strip_prefix('~')) {
-        (Some(home), Some(rest))
-            if !cfg!(windows) && !quoted && (rest.is_empty() || rest.starts_with('/')) =>
-        {
-            home.join(rest.trim_start_matches('/'))
-        }
+    let tilde = script
+        .strip_prefix('~')
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
+    let rest = match cmd[..start].chars().next_back() {
+        Some('\'') => None,
+        Some('"') => after_home_var(script),
+        _ => after_home_var(script).or(tilde),
+    };
+    match (home, rest) {
+        (Some(home), Some(rest)) if !cfg!(windows) => home.join(rest.trim_start_matches('/')),
         _ => PathBuf::from(script),
     }
+}
+
+/// `script` after a leading `$HOME/` or `${HOME}/`.
+fn after_home_var(script: &str) -> Option<&str> {
+    script
+        .strip_prefix("$HOME/")
+        .or_else(|| script.strip_prefix("${HOME}/"))
 }
 
 fn path_is_inside(candidate: &Path, root: &Path) -> bool {
@@ -797,8 +808,14 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
             takes_arg = flags.ends_with(['o', 'O']);
             continue;
         }
-        // An operand still holding `$VAR` names no readable file here.
-        return (!token.contains('$') && looks_pathish(token)).then_some(token);
+        // An operand still holding `$VAR` names no readable file here. A
+        // leading `$HOME` is the exception on Unix, where `script_file` reads
+        // it as the home.
+        let unread = match after_home_var(token) {
+            Some(rest) if !cfg!(windows) => rest,
+            _ => token,
+        };
+        return (!unread.contains('$') && looks_pathish(token)).then_some(token);
     }
     None
 }
