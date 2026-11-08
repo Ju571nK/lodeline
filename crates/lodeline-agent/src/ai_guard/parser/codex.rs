@@ -3549,7 +3549,6 @@ command = "echo inline"
             r#"":root" = "write""#,
             r#""/" = "write""#,
             r#""~" = "write""#,
-            r#""C:\\" = "write""#,
             r#""/" = { "." = "write" }"#,
             r#"":workspace_roots" = { "~" = "write" }"#,
             r#"":root/**" = "write""#,
@@ -3593,13 +3592,15 @@ command = "echo inline"
     }
 
     /// Codex strips `/**` and then rejects the bare drive `C:` as not
-    /// absolute, so the profile grants nothing.
+    /// absolute, so the profile grants nothing. A drive root is not absolute
+    /// on macOS and Linux, where Codex refuses the profile.
     #[test]
     fn drive_without_a_separator_keeps_the_sandbox() {
         for (entry, disabled) in [
             (r#""C:/**" = "write""#, false),
             (r#""C:" = "write""#, false),
-            (r#""C://**" = "write""#, true),
+            (r#""C://**" = "write""#, cfg!(windows)),
+            (r#""C:\\" = "write""#, cfg!(windows)),
         ] {
             let dir = tempdir().unwrap();
             write_config(
@@ -3610,6 +3611,38 @@ command = "echo inline"
             );
             assert_eq!(
                 sandbox_disabled(&CodexParser::default().assess(dir.path()).unwrap()),
+                disabled,
+                "{entry}"
+            );
+        }
+    }
+
+    /// Codex drops `.` and folds `..` in a profile path as it does in a
+    /// writable root, and a parent of the home dir holds the home dir.
+    #[test]
+    fn profile_path_with_dot_segments_or_above_home_disables_the_sandbox() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("alice");
+        for (entry, disabled) in [
+            (r#""/." = "write""#.to_string(), true),
+            (r#""/opt/.." = "write""#.to_string(), true),
+            (r#""/./**" = "write""#.to_string(), true),
+            (r#""~/." = "write""#.to_string(), true),
+            (r#""~/.." = "write""#.to_string(), true),
+            (r#""~/../alice" = "write""#.to_string(), true),
+            (format!("'{}' = \"write\"", dir.path().display()), true),
+            (format!("'{}' = \"write\"", home.join(".").display()), true),
+            (r#""~/../bob" = "write""#.to_string(), false),
+            (r#""/opt/./cache" = "write""#.to_string(), false),
+        ] {
+            write_config(
+                &home,
+                &format!(
+                    "default_permissions = \"open\"\n[permissions.open.filesystem]\n{entry}\n"
+                ),
+            );
+            assert_eq!(
+                sandbox_disabled(&CodexParser::default().assess(&home).unwrap()),
                 disabled,
                 "{entry}"
             );
@@ -4007,6 +4040,52 @@ command = "echo inline"
             assert_eq!(
                 writable_roots_disable_the_sandbox(roots),
                 cfg!(windows),
+                "{roots}"
+            );
+        }
+    }
+
+    /// Codex compares the resolved root with the home dir, so an absolute
+    /// parent of home, home itself and `~/../<home>` all hold home.
+    #[test]
+    fn writable_root_at_or_above_home_disables_the_sandbox() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("alice");
+        for (root, disabled) in [
+            (dir.path().display().to_string(), true),
+            (home.display().to_string(), true),
+            ("~/../alice".to_string(), true),
+            (home.join("work").display().to_string(), false),
+            (dir.path().join("bob").display().to_string(), false),
+            ("~/../bob".to_string(), false),
+        ] {
+            write_config(
+                &home,
+                &format!(
+                    "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = ['{root}']\n"
+                ),
+            );
+            assert_eq!(
+                sandbox_disabled(&CodexParser::default().assess(&home).unwrap()),
+                disabled,
+                "{root}"
+            );
+        }
+    }
+
+    /// Codex resolves a relative root against the folder of the config that
+    /// set it, so `..` in the user config names the home dir.
+    #[test]
+    fn relative_writable_root_resolves_against_its_config_folder() {
+        for (roots, disabled) in [
+            (r#"[".."]"#, true),
+            (r#"["../.."]"#, true),
+            (r#"["."]"#, false),
+            (r#"["../work"]"#, false),
+        ] {
+            assert_eq!(
+                writable_roots_disable_the_sandbox(roots),
+                disabled,
                 "{roots}"
             );
         }
