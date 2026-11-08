@@ -33,10 +33,18 @@ thread와 관계없이 만든 순서대로 증가한다. 시계가 뒤로 가도
 | checkpoint DB 연속 쓰기 구간 | 1,058 | 56 |
 
 checkpoint 주기는 v4가 약 2,066 명령(WAL 상한 2,048에 닿음, pass 4번), v7이 약 1,147 명령(pass 2번)이었다(측정). v4는 로컬에서 WAL 상한
-대기에 들어갔고 v7은 들어가지 않았다(주기 길이에서 추정). spool이 커질수록 v4 비용이 늘었다. 보유 행 10만–20만에서 1,024 명령당 서로 다른
-page 884, 40만 이상에서 1,251이었고, v7은 같은 구간에서 222로 그대로였다(측정). open loop 100 calls/s(쪽마다 1 run)에서는 서로 다른 page가
-273에서 188, DB 연속 쓰기 구간이 102에서 19로 줄었다(측정). 로컬 수치이며 처리량과 지연은 재지 않았다. AWS 측정은 아직 하지 않았다. gp3에서
-proxy는 쓰기 IOPS에 묶이므로 calls/s가 오르고 #524 뒤의 WAL 상한 대기가 사라질 것으로 본다(추정, AWS 측정 대기).
+대기에 들어갔고 v7은 들어가지 않았다(주기 길이에서 추정). spool이 커질수록 v4 비용이 늘었다. run 하나 기준으로 보유 행 10만–20만에서 1,024 명령당 서로 다른
+page 884, 40만 이상에서 1,251이었고, v7은 같은 구간에서 222로 그대로였다(측정, 중앙값 아님). open loop 100 calls/s(쪽마다 1 run)에서는 서로 다른 page가
+273에서 188, DB 연속 쓰기 구간이 102에서 19로 줄었다(측정). 로컬 수치이며 처리량과 지연은 재지 않았다.
+
+AWS 측정(노드 A, t4g.small, gp3, 일반 build, run마다 새 stack, 기준 `5a16b98`과 변경 `a2dbb19` 교대): closed loop c64(쪽마다 5 run) 중앙값은
+calls/s 1,277(1,268–1,291)에서 3,238(3,197–3,371)로, p99는 236 ms에서 34.9 ms로, 호출당 디스크 쓰기는 2.38에서 0.44로 바뀌었다(측정).
+c32는 calls/s 1,163에서 2,947, p99 84.8 ms에서 22.2 ms였다(측정, 순위합 p=0.0079, 범위 안 겹침). open loop 100 calls/s(쪽마다 3 run)의 p99는
+11.85 ms와 12.86 ms로 범위가 겹쳐 차이를 재지 못했다. 34 run 모두 오류 0, upstream 수 일치. 기준은 쓰기 IOPS에 묶였고(w/s 약 3,040, gp3 상한 3,000,
+collector state를 tmpfs에 둬도 같음), 변경은 proxy CPU에 묶였다(cpu0 busy 97%, iowait 2%). 계측 build에서 WAL 상한 대기는 30초당 31.5번에서 0번으로,
+checkpoint 요청당 pass는 4번에서 2번으로 줄었다. 120초 run에서 기준 calls/s는 1,090으로 떨어졌고 변경은 3,226으로 그대로였다. 다만 변경의 w/s는
+collector 쓰기가 늘면서 끝 무렵 3,000 가까이 올랐고, proxy scope의 memory.peak는 spool page cache 때문에 512 MiB 상한에 닿았다(proxy RSS 약 19 MB, 오류 0).
+더 긴 부하에서는 collector 디스크 쓰기가 다음 한계가 될 것으로 본다(추정).
 
 계약: schema `$defs/uuid`는 소문자 hyphen 형식만 검사하고, `lodeline-proxy-api` `scalar::Uuid`는 버전을 보지 않는다. 계약 README는
 재전송 시 같은 UUID만 요구하고 중앙은 `(proxy_id, event_id)`로 중복을 제거한다. proxy, server, manager, fixture 가운데 `event_id`의 버전이나
