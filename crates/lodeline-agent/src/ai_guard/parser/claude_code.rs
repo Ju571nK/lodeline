@@ -1942,6 +1942,113 @@ mod tests {
             .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. })));
     }
 
+    /// A home whose settings run `command` as a `PreToolUse` hook, with each
+    /// `(path, contents)` script written under it.
+    fn home_with_hook(dir: &Path, command: &str, scripts: &[(&str, &str)]) -> PathBuf {
+        for (rel, contents) in scripts {
+            write_file(dir, rel, contents);
+        }
+        let hook = serde_json::json!({ "type": "command", "command": command });
+        write_settings(
+            dir,
+            &serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": [hook] }] } }).to_string(),
+        );
+        dunce::canonicalize(dir).unwrap()
+    }
+
+    fn scanned_script(reasons: &[AiGuardReason]) -> Option<&Path> {
+        reasons.iter().find_map(|r| match r {
+            AiGuardReason::DestructiveInHookScript { script_path, .. } => {
+                Some(script_path.as_path())
+            }
+            _ => None,
+        })
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_hook_script_under_tilde_is_scanned() {
+        for (command, script) in [
+            ("~/x.sh", "x.sh"),
+            ("bash ~/hooks/check.sh", "hooks/check.sh"),
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(dir.path(), command, &[(script, "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(
+                scanned_script(&reasons),
+                Some(home.join(script).as_path()),
+                "{command}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_or_exec_form_tilde_is_not_the_home() {
+        let dir = tempdir().unwrap();
+        for command in [r#""~/x.sh""#, r#"bash "~/x.sh""#, "bash '~/x.sh'"] {
+            let home = home_with_hook(dir.path(), command, &[("x.sh", "rm -rf /\n")]);
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(scanned_script(&reasons), None, "{command}: {reasons:?}");
+        }
+        // Exec form spawns `command` with no shell, so nothing expands `~`.
+        let hook = serde_json::json!({ "type": "command", "command": "~/x.sh", "args": [] });
+        write_settings(
+            dir.path(),
+            &serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": [hook] }] } }).to_string(),
+        );
+        let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
+        assert_eq!(scanned_script(&reasons), None, "exec form: {reasons:?}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn tilde_is_the_home_whose_settings_name_the_script() {
+        let homes = tempdir().unwrap();
+        let alice = home_with_hook(
+            &homes.path().join("alice"),
+            "~/x.sh",
+            &[("x.sh", "rm -rf /\n")],
+        );
+        let bob = home_with_hook(&homes.path().join("bob"), "~/x.sh", &[("x.sh", "true\n")]);
+        let parser = ClaudeCodeParser::default();
+        let reasons = parser.assess(&alice).unwrap();
+        assert_eq!(
+            scanned_script(&reasons),
+            Some(alice.join("x.sh").as_path()),
+            "{reasons:?}"
+        );
+        let reasons = parser.assess(&bob).unwrap();
+        assert!(
+            !reasons.iter().any(|r| matches!(
+                r,
+                AiGuardReason::DestructiveInHookScript { .. }
+                    | AiGuardReason::ExternalScriptUnscanned { .. }
+            )),
+            "{reasons:?}"
+        );
+    }
+
+    /// On Windows, Codex runs hooks through `cmd.exe`, Cursor through
+    /// PowerShell, and Claude Code through PowerShell when Git Bash is
+    /// missing, so `~` is not read as the home there.
+    #[cfg(windows)]
+    #[test]
+    fn tilde_is_not_expanded_on_windows() {
+        let dir = tempdir().unwrap();
+        let home = home_with_hook(dir.path(), "~/x.sh", &[("x.sh", "rm -rf /\n")]);
+        let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+        assert_eq!(scanned_script(&reasons), None, "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| matches!(
+                r,
+                AiGuardReason::ExternalScriptUnscanned { script_path, .. }
+                    if script_path == Path::new("~/x.sh")
+            )),
+            "{reasons:?}"
+        );
+    }
+
     #[test]
     fn windows_style_backslash_path_is_classified_as_path_like() {
         // Regression test for issue #15: hook commands whose first token is a
