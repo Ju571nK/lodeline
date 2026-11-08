@@ -128,19 +128,15 @@ pub(crate) fn url_for_evidence(url: &str) -> String {
         .unwrap_or_else(|| "<unparseable-url>".into())
 }
 
-/// True iff the URL scheme (lowercased) is http/https. Lowercasing defeats
-/// `HTTP://` evasion. Shared with sibling parsers (`codex`, `continue_dev`)
-/// via `pub(crate)` so they don't duplicate this logic.
-pub(crate) fn scheme_is_http(u: &str) -> bool {
-    let lower = u.trim_start().to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://")
-}
-
-/// #145 — schemes that denote a *remote* MCP transport. Superset of
-/// `scheme_is_http`: Claude `type:"ws"` servers carry a `ws://`/`wss://` URL.
+/// #145: schemes that denote a *remote* MCP transport, http/https and the
+/// `ws://`/`wss://` URL of a Claude `type:"ws"` server. Lowercasing defeats
+/// `HTTP://` evasion, and the slashes are optional because `new URL()` and
+/// the `url` crate accept `https:host` and `https:\\host`.
 pub(crate) fn scheme_is_remote(u: &str) -> bool {
     let lower = u.trim_start().to_ascii_lowercase();
-    scheme_is_http(u) || lower.starts_with("ws://") || lower.starts_with("wss://")
+    ["http:", "https:", "ws:", "wss:"]
+        .iter()
+        .any(|s| lower.starts_with(s))
 }
 
 /// #145 — does this reason set indicate a *locally executing or risky* MCP

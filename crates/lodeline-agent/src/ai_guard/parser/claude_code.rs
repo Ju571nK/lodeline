@@ -212,9 +212,10 @@ fn assess_user(
             .collect();
         super::claude_json::emit_mcp_reasons(&user_servers, &merged, &mut out);
     }
-    // Deny lists from every file merge, and a match keeps even a managed
-    // server from loading.
-    let denied: Vec<&Value> = [managed.as_ref(), Some(&merged)]
+    // Deny lists from the managed and user files merge, and a match keeps even
+    // a managed server from loading. `settings.local.json` here is not a
+    // user-scope file, so its list is left out.
+    let denied: Vec<&Value> = [managed.as_ref(), Some(&base_settings)]
         .into_iter()
         .flatten()
         .filter_map(|s| s.get("deniedMcpServers").and_then(Value::as_array))
@@ -274,14 +275,23 @@ fn managed_mcp_servers<'a>(
 // shortcut: control and invisible format characters are not checked, so such
 // an entry still scores; add that check if it shows up as noise.
 fn managed_entry_loads(name: &str, def: &Value) -> bool {
-    fn literal(v: &Value) -> bool {
+    // Claude Code stops the scan below the fifth level.
+    fn literal(v: &Value, depth: usize) -> bool {
         match v {
             Value::String(s) => !has_var_ref(s),
-            Value::Array(a) => a.iter().all(literal),
-            Value::Object(o) => o.values().all(literal),
+            _ if depth > 4 => true,
+            Value::Array(a) => a.iter().all(|v| literal(v, depth + 1)),
+            Value::Object(o) => o.values().all(|v| literal(v, depth + 1)),
             _ => true,
         }
     }
+    // shortcut: looser than `new URL()` (a URL such as `https://?q` passes), so
+    // a few unparseable URLs still score; use a URL parser if the crate gets one.
+    let https = |u: &str| {
+        let u = u.trim_matches(|c: char| c <= ' ');
+        u.get(..6).is_some_and(|s| s.eq_ignore_ascii_case("https:"))
+            && !u[6..].trim_start_matches(['/', '\\']).is_empty()
+    };
     !name.is_empty()
         && name
             .chars()
@@ -293,12 +303,8 @@ fn managed_entry_loads(name: &str, def: &Value) -> bool {
             def.get("type").and_then(Value::as_str),
             Some("http" | "streamable-http" | "sse")
         )
-        && def
-            .get("url")
-            .and_then(Value::as_str)
-            .and_then(|u| u.strip_prefix("https://"))
-            .is_some_and(|rest| !rest.is_empty())
-        && literal(def)
+        && def.get("url").and_then(Value::as_str).is_some_and(https)
+        && literal(def, 0)
 }
 
 /// Does `s` hold a `${NAME}` or `${NAME:-default}` reference?
@@ -322,7 +328,9 @@ fn has_var_ref(s: &str) -> bool {
 // still score; add Claude Code's expansion and URL rules if that is noise.
 fn mcp_server_denied(denied: &[&Value], name: &str, def: &Value) -> bool {
     let literal = |s: &&str| !has_var_ref(s);
-    let command: Option<Vec<&str>> = def.get("command").and_then(Value::as_str).and_then(|c| {
+    let stdio = def.get("type").is_none_or(|t| t == "stdio");
+    let command = def.get("command").and_then(Value::as_str).filter(|_| stdio);
+    let command: Option<Vec<&str>> = command.and_then(|c| {
         let args = def
             .get("args")
             .and_then(Value::as_array)
@@ -3193,8 +3201,11 @@ mod tests {
             policy.path(),
         )
         .unwrap();
+        let mut names = mcp_server_names(&reasons);
+        // `typed` has a url and a command, so it scores both ways.
+        names.dedup();
         assert_eq!(
-            mcp_server_names(&reasons),
+            names,
             ["org-http (managed file)", "typed (managed file)"],
             "{reasons:?}"
         );

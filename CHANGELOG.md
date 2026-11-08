@@ -29,7 +29,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `headersHelper` member, or a `${VAR}` reference) is no longer scored, and a user server of the
   same name is scored again. A managed server that a `deniedMcpServers` entry in managed or user
   settings matches by `serverName`, by exact `serverCommand`, or by `serverUrl` (exact, or a full
-  host followed by `/*`) is no longer scored.
+  host followed by `/*`) is no longer scored. An MCP server URL without the slashes after the
+  scheme, such as `https:host`, which URL parsers accept, is now scored as remote.
 - Claude Code hook scoring is closer to what Claude Code runs. A `*` matcher whose handlers all
   have an `if` rule that matches every path under home or the working directory, such as
   `Edit(~/**)` or `Read(./**)`, is now reported as a broad matcher; before, it was a missed
