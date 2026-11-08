@@ -134,7 +134,37 @@ calls/s가 w/s ÷ 호출당 쓰기로 정해진다(측정에서 계산). 임시 
 1–2번. 같은 주기 1,024를 동시성 64에서 재면 1,270 calls/s (1,254–1,285), p99 227 ms (220–234)(2 run), WAL 약 16 MiB, 상한 대기 30초에
 31–34번, 합 4.9–5.2초. 같은 주기 1,024를 checkpoint thread 없이 writer 혼자 하면 동시성 32에서 1,445 calls/s, p99 227 ms, 동시성 64에서
 1,520 calls/s, p99 306 ms였다(각 2 run). 이 결과로 주기를 1,024 명령으로 옮겼다. 상한 2,048은 그대로 두었다(이유는
-[decisions.md](decisions.md) spool 절). 정상 build로 다시 재는 AWS 측정은 아직이다.
+[decisions.md](decisions.md) spool 절).
+
+AWS 재측정(2026-11-08, 주기 1,024 명령, 정상 build): 위 환경, t4g.small, gp3. 기준 `40bca8d`와 변경을 새 stack 단위로 교대했다. warm-up
+10초 + 30초. 동시성 32는 쪽마다 7 run, 동시성 64는 쪽마다 3 run, open loop 100 calls/s는 쪽마다 1 run이다. 정상 build 22 run 모두 오류 0,
+upstream 수 일치. 중앙값(범위):
+
+| 항목 | 기준 | 변경 |
+|---|---|---|
+| 동시성 32 calls/s (7 run) | 1,193 (1,183–1,204) | 1,163 (1,157–1,172) |
+| 동시성 32 p50 / p99 (ms) | 12.8 / 273 (261–279) | 19.4 / 86 (85–91) |
+| 동시성 32 호출당 쓰기 | 2.55 | 2.62 |
+| 동시성 64 calls/s (3 run) | 1,217 (1,215–1,221) | 1,276 (1,264–1,289) |
+| 동시성 64 p99 (ms) | 264 (249–273) | 235 (231–257) |
+| 동시성 64 호출당 쓰기 | 2.49 | 2.38 |
+| open loop 100 calls/s p99 (ms, 1 run) | 12.39 | 12.42 |
+| WAL 최대 (MiB), 동시성 32 / 64 | 5.1 / 4.9 | 16.9 / 15.9 |
+| WAL 최대 (MiB), open loop | 15.6 | 31.0 |
+| `memory.peak` (MiB), open loop / 동시성 64 (512 MiB scope) | 38 / 107 | 54 / 121 |
+
+동시성 32에서 calls/s, p50, p99 모두 순위합 p=0.0006이다. 동시성 64의 calls/s와 p99는 p=0.1과 0.2라 run 3개로는 차이를 말할 수 없다.
+한계는 디스크 쓰기다. 닫힌 loop run마다 w/s p50이 약 3,030–3,055였다(gp3 3,000 IOPS). 동시성 32의 calls/s 감소는 호출당 쓰기가 3%
+늘어난 것과 맞는다(측정).
+
+계측 build로 동시성 64를 따로 재면(2 run) 상한 대기가 30초에 32번(30–34), 한 번에 p50 150 ms, 합 약 4.7초였다. 요청마다 pass를 4번
+다 돌았고 마지막 pass에서도 약 728 frame이 남았다. writer의 checkpoint 시간은 30초에 0.75초였다. 상한 대기가 동시성 64의 꼬리를 정한다는
+것은 추정이고, 직접 재지 않았다.
+
+판정: 미리 정한 기준 "동시성 32 calls/s가 기준보다 run 사이 차이를 넘어 떨어지지 않는다"는 **충족하지 못했다**. 기준에서 30 calls/s
+(2.5%) 떨어졌고 기준 범위의 폭은 21이었다. 나머지 기준은 모두 충족했다. 그래도 받아들인다. 이 변경은 #518이 만든 동시성 32의 꼬리
+회귀를 고치려는 것이고 p99가 273 ms에서 86 ms로 내려갔다. 동시성 64는 calls/s와 p99 모두 나아졌다. 동시성 32의 calls/s 손실은 호출당 쓰기
+증가로 설명된다. 기준을 다시 쓰지 않는다.
 
 ## 2026-11-08 chain 끝 경계 시험과 sweep checkpoint 보고 (`test/proxy-retention-followups`, #279)
 
@@ -444,7 +474,7 @@ writer thread의 표시(`SYNC_FAILED`)를 켜고 끄지 않는다. writer의 SQL
 | fsync 경로 | 실패 뒤 |
 |---|---|
 | append 묶음 transaction의 commit(혼자 온 append 포함. start가 있으면 FULL. NORMAL이어도 checkpoint로 WAL이 처음부터 다시 시작되면 새 WAL header를 fsync) | 묶음의 기록은 모두 `Storage`(2026-11-08부터 completion·cancel 포함, `perf/proxy-group-tx`). writer가 멈춘다 |
-| checkpoint(maintenance, 수집 poll, 512 명령마다)의 WAL·DB fsync | `durable_seq`가 오르지 않는다. 뒤의 checkpoint는 실행하지 않는다. writer가 멈춘다 |
+| checkpoint(maintenance, 수집 poll, 1,024 명령마다)의 WAL·DB fsync | `durable_seq`가 오르지 않는다. 뒤의 checkpoint는 실행하지 않는다. writer가 멈춘다 |
 | maintenance·quarantine·gap·hand-off·registry conflict의 FULL commit | 그 명령은 오류. writer가 멈춘다 |
 | 닫을 때 SQLite의 checkpoint | `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`로 끈다. 재시작이 WAL을 복구한다 |
 
@@ -453,7 +483,7 @@ writer thread의 표시(`SYNC_FAILED`)를 켜고 끄지 않는다. writer의 SQL
 (`spool.close()`는 이미 끝난 thread를 join한다). 재시작은 WAL을 복구하고, 실패한 묶음의 행은 start만 있는 기록으로 남는다(전달 없음, 과다 기록 방향).
 
 시험(`spool.rs`, `sync_vfs.rs`에 한 번만 실패하는 `fail_next_sync`를 더함): `a_failed_group_fsync_refuses_every_start`(뒤 호출 거절·전달 없음·
-degraded·close 뒤 재시작에서 행 1부터 6까지), `a_failed_start_fsync_stops_the_writer`(실패 뒤 512 명령째 checkpoint도, close checkpoint도 DB를 fsync하지
+degraded·close 뒤 재시작에서 행 1부터 6까지), `a_failed_start_fsync_stops_the_writer`(실패 뒤 1,024 명령째 checkpoint도, close checkpoint도 DB를 fsync하지
 않음, 재시작이 WAL을 복구), `a_failed_checkpoint_fsync_stops_the_writer`, `a_failed_maintenance_fsync_stops_the_writer`(gap 기록 commit),
 `a_failed_wal_header_fsync_refuses_the_group`, `a_failed_fsync_reports_degraded_before_the_writer_stops`(묶음 응답 뒤, writer가 멈추기 전의
 snapshot이 `degraded`, 시험 전용 `Cmd::Hold`로 멈춤 직전에 세움). 공통 확인은 `assert_stopped`(뒤 start는 `Unavailable`, `next_events` 없음, ACK는 아무것도 하지 않음,
@@ -1002,7 +1032,7 @@ client는 끝나 버려 호출의 약 절반만 돌았다. 그 run의 503은 두
 completion·cancel_requested·수집 ACK 표시는 같은 writer 연결에서 그 transaction만 `synchronous=NORMAL`로 commit한다(`spool.rs` `Writer::deferred`).
 writer는 fsync로 덮인 가장 높은 sequence(`durable_seq`)를 기억한다. start commit이 끝나거나 checkpoint가 WAL을 모두 옮기면 올라간다.
 수집 client에는 `sequence <= durable_seq`인 행만 넘기고, 그런 행이 없는데 덮이지 않은 행이 있으면 먼저 checkpoint한다.
-`wal_autocheckpoint=0`이고 checkpoint는 명령 사이에서만 돈다: maintenance pass, 위의 poll, 512 명령마다(응답 뒤).
+`wal_autocheckpoint=0`이고 checkpoint는 명령 사이에서만 돈다: maintenance pass, 위의 poll, 1,024 명령마다(응답 뒤).
 
 시험(`spool.rs` tests, 시험 전용 VFS `sync_vfs.rs`가 파일별 `xSync`를 세고 마지막 `xSync` 때의 파일 내용을 보관해 전원 손실을 모사한다):
 `only_a_start_commit_fsyncs`, `power_loss_never_reissues_a_handed_out_sequence`(process crash 사본은 모두 유지, 전원 손실 사본은 start만 남고 sequence 2를 다시 배정하지만 넘긴 행은 모두 같은 sequence로 남음, idle poll이 checkpoint 뒤 나머지를 넘김),
