@@ -30,9 +30,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - On macOS and Linux, a hook command whose script starts with `$HOME/` or `${HOME}/`, such as
   `$HOME/x.sh` or `bash "$HOME/x.sh"`, now has that script's content scanned the same way. Before,
   `$HOME/x.sh` was reported as unscanned, and `bash "$HOME/x.sh"` added no hook finding at all. The
-  shell reads `$HOME` unquoted and inside double quotes, so both now read the home whose settings
-  name the hook. A single-quoted `'$HOME/x.sh'`, a different variable such as `$HOME_DIR/x.sh`, a
-  Claude Code exec-form hook, and every hook on Windows keep the word as written.
+  shell reads `$HOME` unquoted and inside double quotes, as in `"$HOME"/x.sh`, so these now read
+  the home whose settings name the hook. A single-quoted `'$HOME/x.sh'`, a different variable such
+  as `$HOME_DIR/x.sh`, a Claude Code exec-form hook, and every hook on Windows keep the word as
+  written. The words after a `$HOME` script are now treated as its arguments, which are data, as
+  for any script path, so `bash $HOME/x.sh rm -rf /` reports the script and not an inline command.
 - The Codex project scan now reads the system config (`/etc/codex/config.toml`,
   `%ProgramData%\OpenAI\Codex\config.toml`) under the user and project layers for sandbox
   settings. A project `default_permissions` profile that only the system config defines, with a

@@ -687,32 +687,43 @@ pub(crate) fn classify_command(
     }
 }
 
-/// The file `script`, a word of `cmd`, names. On Unix every supported tool
-/// runs `cmd` through a POSIX shell, which reads a leading `~`, `~/`,
-/// `$HOME/` or `${HOME}/` of an unquoted word as `home`, and only the
-/// `$HOME` forms inside double quotes. On Windows the shell may be `cmd.exe`
-/// or PowerShell, so the word is left as written.
+/// The file `script`, a word of `cmd`, names.
 fn script_file(cmd: &str, script: &str, home: Option<&Path>) -> PathBuf {
+    // `hook_script_path` trims the quotes off an operand, so `script` is a
+    // subslice of `cmd` and the trimmed quotes sit just before it.
     let start = script.as_ptr() as usize - cmd.as_ptr() as usize;
-    let tilde = script
-        .strip_prefix('~')
-        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
-    let rest = match cmd[..start].chars().next_back() {
-        Some('\'') => None,
-        Some('"') => after_home_var(script),
-        _ => after_home_var(script).or(tilde),
-    };
-    match (home, rest) {
-        (Some(home), Some(rest)) if !cfg!(windows) => home.join(rest.trim_start_matches('/')),
+    let word = &cmd[cmd[..start].trim_end_matches(['"', '\'']).len()..start + script.len()];
+    match (home, home_relative(word, script)) {
+        (Some(home), Some(rest)) => home.join(rest.trim_start_matches('/')),
         _ => PathBuf::from(script),
     }
 }
 
-/// `script` after a leading `$HOME/` or `${HOME}/`.
-fn after_home_var(script: &str) -> Option<&str> {
-    script
-        .strip_prefix("$HOME/")
-        .or_else(|| script.strip_prefix("${HOME}/"))
+/// What follows the home in `script`, when the POSIX shell that runs hooks on
+/// Unix reads the start of `word`, the shell word `script` comes from, as the
+/// home: `~`, `~/`, `$HOME/` or `${HOME}/` unquoted, and only the `$HOME`
+/// forms (`"$HOME/x.sh"`, `"$HOME"/x.sh`) in double quotes. On Windows the
+/// shell may be `cmd.exe` or PowerShell, so this is `None`.
+fn home_relative<'a>(word: &'a str, script: &'a str) -> Option<&'a str> {
+    if cfg!(windows) {
+        return None;
+    }
+    match word.chars().next() {
+        Some('\'') => None,
+        Some('"') => after_home_var(word).or_else(|| after_home_var(script)),
+        _ => after_home_var(script).or_else(|| {
+            script
+                .strip_prefix('~')
+                .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        }),
+    }
+}
+
+/// `word` after a leading `$HOME/`, `${HOME}/`, `"$HOME"/` or `"${HOME}"/`.
+fn after_home_var(word: &str) -> Option<&str> {
+    ["$HOME/", "${HOME}/", "\"$HOME\"/", "\"${HOME}\"/"]
+        .into_iter()
+        .find_map(|prefix| word.strip_prefix(prefix))
 }
 
 fn path_is_inside(candidate: &Path, root: &Path) -> bool {
@@ -791,11 +802,11 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
         return looks_pathish(first).then_some(first);
     }
     let mut takes_arg = false;
-    for token in tokens {
+    for word in tokens {
         if std::mem::take(&mut takes_arg) {
             continue;
         }
-        let token = token.trim_matches(['"', '\'']);
+        let token = word.trim_matches(['"', '\'']);
         if let Some(long) = token.strip_prefix("--") {
             takes_arg = matches!(long, "rcfile" | "init-file");
             continue;
@@ -809,12 +820,9 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
             continue;
         }
         // An operand still holding `$VAR` names no readable file here. A
-        // leading `$HOME` is the exception on Unix, where `script_file` reads
-        // it as the home.
-        let unread = match after_home_var(token) {
-            Some(rest) if !cfg!(windows) => rest,
-            _ => token,
-        };
+        // leading home is the exception on Unix: `script_file` reads it as
+        // the home, or, in single quotes, as a literal name.
+        let unread = home_relative(word.trim_start_matches('\''), token).unwrap_or(token);
         return (!unread.contains('$') && looks_pathish(token)).then_some(token);
     }
     None
