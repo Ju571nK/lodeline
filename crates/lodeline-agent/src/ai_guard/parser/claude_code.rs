@@ -3934,14 +3934,12 @@ mod tests {
             .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
     }
 
-    /// `WebFetch(domain:*)` matches every domain, and a file tool's path rule
-    /// anchored at root, home or the working directory matches every path
-    /// under it. Only file tools take path anchors: `Bash(./*)` runs only for
-    /// commands that start with `./`.
+    /// A file tool's path rule anchored at root, home or the working directory
+    /// matches every path under it. Only file tools take path anchors:
+    /// `Bash(./*)` runs only for commands that start with `./`.
     #[test]
     fn if_rule_matching_every_call_after_its_prefix_keeps_the_matcher_broad() {
         for rule in [
-            "WebFetch(domain:*)",
             "Edit(~/**)",
             "Edit(//**)",
             "Read(./**)",
@@ -3954,7 +3952,6 @@ mod tests {
             );
         }
         for rule in [
-            "WebFetch(domain:example.com)",
             "Edit(~/notes/**)",
             "Read(.*)",
             "Bash(./*)",
@@ -3973,6 +3970,26 @@ mod tests {
     fn if_rule_with_a_tool_name_glob_matches_no_call() {
         assert!(!if_rule_is_broad("mcp__*(x)"));
         assert!(!if_rule_is_broad("mcp__*(*)"));
+    }
+
+    /// WebFetch, Skill and MCP tools have no argument matcher on the `if`
+    /// path, so any argument but `*` keeps the handler from running.
+    #[test]
+    fn if_rule_argument_on_a_tool_without_an_argument_matcher_never_runs() {
+        for rule in [
+            "WebFetch(domain:*)",
+            "WebFetch(domain:example.com)",
+            "WebFetch(**)",
+            "Skill(**)",
+            "Skill(x)",
+            "mcp__a__b(**)",
+            "mcp__a__b(x)",
+        ] {
+            assert!(!if_rule_is_broad(rule), "{rule:?} never runs");
+        }
+        for rule in ["WebFetch", "WebFetch(*)", "Skill(*)", "mcp__a__b(*)"] {
+            assert!(if_rule_is_broad(rule), "{rule:?} runs for every call");
+        }
     }
 
     /// The `if` argument can carry a credential, so only the tool name leaves
