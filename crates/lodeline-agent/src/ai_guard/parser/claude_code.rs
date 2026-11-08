@@ -201,7 +201,7 @@ fn assess_user(
     emit_scheduled_task_reasons(claude, &mut out);
     // #199 — the other unattended-prompt surface, enumerated alongside.
     emit_loop_prompt_reason(claude, "user", &mut out);
-    // #199 — a deployed `managed-mcp.json` takes exclusive control, so no
+    // #199: a deployed `managed-mcp.json` takes exclusive control, so no
     // user server loads; otherwise a provided server replaces the user's
     // server of the same name.
     if managed_mcp.is_none() {
@@ -212,9 +212,20 @@ fn assess_user(
             .collect();
         super::claude_json::emit_mcp_reasons(&user_servers, &merged, &mut out);
     }
+    // Deny lists from the managed and user files merge, and a match keeps even
+    // a managed server from loading. `settings.local.json` here is not a
+    // user-scope file, so its list is left out.
+    let denied: Vec<&Value> = [managed.as_ref(), Some(&base_settings)]
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.get("deniedMcpServers").and_then(Value::as_array))
+        .flatten()
+        .collect();
     let mut found = Vec::new();
     for (name, def) in managed_servers {
-        super::mcp_scan::emit_one_server(name, def, &mut found);
+        if !mcp_server_denied(&denied, name, def) {
+            super::mcp_scan::emit_one_server(name, def, &mut found);
+        }
     }
     push_managed(found, &mut out);
     // #145 (codex C8) — a user-global `enableAllProjectMcpServers: true`
@@ -236,27 +247,120 @@ fn assess_user(
 
 /// #199 — the MCP servers the organization deploys: `managed-mcp.json`
 /// first, because its entry wins a name both define, then the managed
-/// `managedMcpServers` key.
+/// `managedMcpServers` entries Claude Code accepts.
 fn managed_mcp_servers<'a>(
     file: Option<&'a Value>,
     settings: Option<&'a Value>,
 ) -> Vec<(&'a str, &'a Value)> {
     let mut out: Vec<(&str, &Value)> = Vec::new();
-    let maps = [
-        file.and_then(|f| f.get("mcpServers")),
-        settings.and_then(|s| s.get("managedMcpServers")),
-    ];
-    for (name, def) in maps
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-        .flatten()
-    {
+    let servers = |doc: Option<&'a Value>, key| {
+        doc.and_then(|d| d.get(key))
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+    };
+    let provided =
+        servers(settings, "managedMcpServers").filter(|(name, def)| managed_entry_loads(name, def));
+    for (name, def) in servers(file, "mcpServers").chain(provided) {
         if !out.iter().any(|(n, _)| n == name) {
             out.push((name, def));
         }
     }
     out
+}
+
+/// Does Claude Code load this `managedMcpServers` entry? It drops one that is
+/// not an `https://` http or sse server under a plain name, or that names a
+/// program to run or holds a `${VAR}` reference.
+// shortcut: control and invisible format characters are not checked, so such
+// an entry still scores; add that check if it shows up as noise.
+fn managed_entry_loads(name: &str, def: &Value) -> bool {
+    // Claude Code stops the scan below the fifth level.
+    fn literal(v: &Value, depth: usize) -> bool {
+        match v {
+            Value::String(s) => !has_var_ref(s),
+            _ if depth > 4 => true,
+            Value::Array(a) => a.iter().all(|v| literal(v, depth + 1)),
+            Value::Object(o) => o.values().all(|v| literal(v, depth + 1)),
+            _ => true,
+        }
+    }
+    // shortcut: looser than `new URL()` (a URL such as `https://?q` passes), so
+    // a few unparseable URLs still score; use a URL parser if the crate gets one.
+    let https = |u: &str| {
+        let u = u.trim_matches(|c: char| c <= ' ');
+        u.get(..6).is_some_and(|s| s.eq_ignore_ascii_case("https:"))
+            && !u[6..].trim_start_matches(['/', '\\']).is_empty()
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && ["command", "args", "env", "headersHelper"]
+            .iter()
+            .all(|k| def.get(k).is_none())
+        && matches!(
+            def.get("type").and_then(Value::as_str),
+            Some("http" | "streamable-http" | "sse")
+        )
+        && def.get("url").and_then(Value::as_str).is_some_and(https)
+        && literal(def, 0)
+}
+
+/// Does `s` hold a `${NAME}` or `${NAME:-default}` reference?
+fn has_var_ref(s: &str) -> bool {
+    s.match_indices("${").any(|(i, _)| {
+        let rest = &s[i + 2..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        let (var, tail) = rest.split_at(end);
+        var.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && (tail.starts_with('}') || tail.strip_prefix(":-").is_some_and(|t| t.contains('}')))
+    })
+}
+
+/// Does a `deniedMcpServers` entry match the server `name` defined by `def`?
+/// An entry names exactly one of `serverName`, `serverCommand` or `serverUrl`;
+/// any other entry is ignored.
+// shortcut: entries and definitions with `${VAR}` are never matched, and of
+// the URL wildcards only a trailing `/*` after a full host is, so those servers
+// still score; add Claude Code's expansion and URL rules if that is noise.
+fn mcp_server_denied(denied: &[&Value], name: &str, def: &Value) -> bool {
+    let literal = |s: &&str| !has_var_ref(s);
+    let stdio = def.get("type").is_none_or(|t| t == "stdio");
+    let command = def.get("command").and_then(Value::as_str).filter(|_| stdio);
+    let command: Option<Vec<&str>> = command.and_then(|c| {
+        let args = def
+            .get("args")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        std::iter::once(Some(c))
+            .chain(args.map(Value::as_str))
+            .collect::<Option<Vec<_>>>()
+            .filter(|cmd| cmd.iter().all(literal))
+    });
+    let url = def.get("url").and_then(Value::as_str).filter(literal);
+    denied.iter().any(|entry| {
+        let keys = ["serverName", "serverCommand", "serverUrl"].map(|k| entry.get(k));
+        match keys {
+            [Some(n), None, None] => n.as_str().is_some_and(|n| n == name && n == n.trim()),
+            [None, Some(c), None] => command.as_ref().is_some_and(|cmd| {
+                c.as_array().is_some_and(|c| {
+                    c.len() == cmd.len() && c.iter().zip(cmd).all(|(c, a)| c.as_str() == Some(a))
+                })
+            }),
+            [None, None, Some(p)] => match (url, p.as_str().filter(literal)) {
+                (Some(url), Some(p)) => match p.strip_suffix("/*") {
+                    Some(host) if !host.contains('*') => url.starts_with(&format!("{host}/")),
+                    _ => url == p,
+                },
+                _ => false,
+            },
+            _ => false,
+        }
+    })
 }
 
 /// Hook scripts outside `<claude_dir>/hooks` that settings or skill/subagent
@@ -1146,8 +1250,6 @@ pub(crate) fn emit_mcp_reasons(settings: &Value, out: &mut Vec<AiGuardReason>) {
 /// name connects once in Claude Code, so it must be scored once; settings
 /// definitions take precedence (a `.mcp.json` server whose name already
 /// appears in settings is skipped).
-// shortcut: a deployed managed-mcp.json stops these servers loading, but they are
-// still scored (over-report); pass the managed set in if that shows up as noise.
 pub(crate) fn emit_project_mcp_reasons(
     settings: &Value,
     mcp_json: Option<&Value>,
@@ -1387,12 +1489,17 @@ fn assess_project(
     }
     emit_permission_reasons(&merged, &mut out);
     emit_start_mode_reason(start, &mut out);
-    emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
+    // #199: a deployed `managed-mcp.json` takes exclusive control, so no
+    // project server loads.
+    let exclusive = super::policy_controls::claude_managed_mcp(policy_dir).is_some();
+    if !exclusive {
+        emit_project_mcp_reasons(&merged, mcp_json.as_ref(), &mut out);
+    }
     super::claude_project_settings::emit_project_settings_reasons(&merged, hooks_off, &mut out);
     // #145 — auto-enable posture: emit ONLY when a server-enable key is
     // present AND the project actually ships `.mcp.json` servers for it
     // to launch (key-only with no payload -> no emit).
-    if has_project_mcp_servers(mcp_json.as_ref()) {
+    if !exclusive && has_project_mcp_servers(mcp_json.as_ref()) {
         if let Some(mechanism) = project_auto_enable_mechanism(&merged) {
             out.push(AiGuardReason::ProjectMcpAutoEnabled {
                 mechanism: mechanism.to_string(),
@@ -2958,6 +3065,150 @@ mod tests {
         let dir = Path::new("/policy");
         assert!(super::super::policy_controls::claude_paths(dir)
             .contains(&dir.join("managed-mcp.json")));
+    }
+
+    /// Under a deployed `managed-mcp.json` a project's own servers do not
+    /// load, so neither they nor the key that pre-approves them score.
+    #[test]
+    fn managed_mcp_json_stops_project_servers_scoring() {
+        let repo = tempdir().unwrap();
+        write_file(
+            repo.path(),
+            ".mcp.json",
+            r#"{"mcpServers": {"x": {"command": "node"}}}"#,
+        );
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"enableAllProjectMcpServers": true}"#,
+        );
+        let policy = tempdir().unwrap();
+        let assess = || assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
+        let auto_enabled = |out: &[AiGuardReason]| {
+            out.iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. }))
+        };
+        let out = assess();
+        assert_eq!(mcp_server_names(&out), ["x"], "{out:?}");
+        assert!(auto_enabled(&out), "{out:?}");
+
+        write_file(policy.path(), "managed-mcp.json", r#"{"mcpServers": {}}"#);
+        let out = assess();
+        assert!(mcp_server_names(&out).is_empty(), "{out:?}");
+        assert!(!auto_enabled(&out), "{out:?}");
+    }
+
+    /// Claude Code drops a `managedMcpServers` entry that is not an https
+    /// http/sse server with a plain name, so only the valid entry scores and
+    /// the user's server of a dropped name still loads. The URL is parsed the
+    /// way `new URL()` does, and the `${VAR}` scan stops five levels down.
+    #[test]
+    fn invalid_managed_mcp_servers_entries_are_not_scored() {
+        let home = tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"mcpServers": {"local": {"command": "npx"}}}"#,
+        )
+        .unwrap();
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{"managedMcpServers": {
+                "search": {"type": "http", "url": "https://search.example.com/mcp"},
+                "local": {"type": "stdio", "command": "/opt/org/run"},
+                "plain": {"type": "http", "url": "http://plain.example.com/mcp"},
+                "bad name": {"type": "sse", "url": "https://bad.example.com/mcp"},
+                "untyped": {"url": "https://untyped.example.com/mcp"},
+                "env-ref": {"type": "http", "url": "https://${HOST}/mcp"},
+                "upper": {"type": "http", "url": "HTTPS://upper.example.com/mcp"},
+                "noslash": {"type": "http", "url": "https:noslash.example.com/mcp"},
+                "backslash": {"type": "sse", "url": "https:\\\\backslash.example.com/mcp"},
+                "spaced": {"type": "http", "url": " https://spaced.example.com/mcp"},
+                "hostless": {"type": "http", "url": "HTTPS://"},
+                "deep5": {"type": "http", "url": "https://deep5.example.com/mcp",
+                    "x": {"a": {"b": {"c": {"d": "${HOME}"}}}}},
+                "deep6": {"type": "http", "url": "https://deep6.example.com/mcp",
+                    "x": {"a": {"b": {"c": {"d": {"e": "${HOME}"}}}}}}
+            }}"#,
+        );
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            mcp_server_names(&reasons),
+            [
+                "backslash (managed file)",
+                "deep6 (managed file)",
+                "local",
+                "noslash (managed file)",
+                "search (managed file)",
+                "spaced (managed file)",
+                "upper (managed file)",
+            ],
+            "{reasons:?}"
+        );
+    }
+
+    /// `deniedMcpServers` from managed and user settings keeps a managed
+    /// server from loading, matched by name, command or URL. A command entry
+    /// matches only a stdio server, and `<claude_dir>/settings.local.json` is
+    /// not a user-scope file, so its deny list does not apply.
+    #[test]
+    fn denied_managed_mcp_servers_are_not_scored() {
+        let home = tempdir().unwrap();
+        write_file(
+            home.path(),
+            ".claude/settings.json",
+            r#"{"deniedMcpServers": [{"serverUrl": "https://search.example.com/*"}]}"#,
+        );
+        write_file(
+            home.path(),
+            ".claude/settings.local.json",
+            r#"{"deniedMcpServers": [{"serverName": "org-http"}]}"#,
+        );
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-mcp.json",
+            r#"{"mcpServers": {
+                "org-local": {"command": "/usr/local/bin/company-mcp"},
+                "tool": {"command": "/opt/tool", "args": ["serve"]},
+                "tool-stdio": {"type": "stdio", "command": "/opt/tool", "args": ["serve"]},
+                "typed": {"type": "sse", "url": "https://typed.example.com/mcp",
+                    "command": "/opt/tool", "args": ["serve"]},
+                "org-http": {"type": "http", "url": "https://org.example.com/mcp"}
+            }}"#,
+        );
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{
+                "managedMcpServers": {"search": {"type": "http", "url": "https://search.example.com/mcp"}},
+                "deniedMcpServers": [
+                    {"serverName": "org-local"},
+                    {"serverCommand": ["/opt/tool", "serve"]},
+                    {"serverUrl": "https://org.example.com:8443/*"}
+                ]
+            }"#,
+        );
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+        )
+        .unwrap();
+        let mut names = mcp_server_names(&reasons);
+        // `typed` has a url and a command, so it scores both ways.
+        names.dedup();
+        assert_eq!(
+            names,
+            ["org-http (managed file)", "typed (managed file)"],
+            "{reasons:?}"
+        );
     }
 
     /// Claude Code runs an identical hook once and merges allow lists, so the
