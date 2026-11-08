@@ -548,9 +548,7 @@ fn grants_write_everywhere(path: &str, access: &Value, home: &Path) -> bool {
                     // Codex refuses a `..` in a subpath (`relative_subpath`).
                     matches!(path, ":workspace_roots" | ":project_roots")
                         && sub.starts_with('~')
-                        && !sub
-                            .split(|c| c == '/' || (cfg!(windows) && c == '\\'))
-                            .any(|part| part == "..")
+                        && !sub.split(is_separator).any(|part| part == "..")
                         && writes_everywhere(sub)
                 }
         }),
@@ -567,10 +565,9 @@ fn grants_write_everywhere(path: &str, access: &Value, home: &Path) -> bool {
 /// in a profile. A drive root or `\` is relative on macOS and Linux, and a
 /// bare `C:` has no root.
 fn holds_home(p: &str, base: Option<&Path>, home: &Path) -> bool {
-    let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
     let path = match p.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with(sep) => {
-            home.join(rest.trim_start_matches(sep))
+        Some(rest) if rest.is_empty() || rest.starts_with(is_separator) => {
+            home.join(rest.trim_start_matches(is_separator))
         }
         _ => PathBuf::from(p),
     };
@@ -584,6 +581,11 @@ fn holds_home(p: &str, base: Option<&Path>, home: &Path) -> bool {
     };
     let path = lexical(&path);
     path.has_root() && (path.parent().is_none() || lexical(home).starts_with(&path))
+}
+
+/// A path separator in a Codex config path: `/`, and `\` too on Windows.
+fn is_separator(c: char) -> bool {
+    c == '/' || (cfg!(windows) && c == '\\')
 }
 
 /// `path` with `.` dropped and `..` folded, never above the root.
@@ -4116,6 +4118,46 @@ command = "echo inline"
         ] {
             assert_eq!(
                 writable_roots_disable_the_sandbox(roots),
+                disabled,
+                "{roots}"
+            );
+        }
+    }
+
+    /// An array is replaced, not merged, so the highest layer that sets
+    /// `writable_roots` decides. `..` in the system folder is the parent of home.
+    #[test]
+    fn highest_layer_setting_writable_roots_decides() {
+        for (system_roots, user_roots, disabled) in [
+            (r#"[".."]"#, r#"["x"]"#, false),
+            (r#"["x"]"#, r#"[".."]"#, true),
+        ] {
+            let (_root, system, home) = system_and_home();
+            let config = |roots| {
+                format!("sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nwritable_roots = {roots}\n")
+            };
+            std::fs::write(system.join("config.toml"), config(system_roots)).unwrap();
+            write_config(&home, &config(user_roots));
+            assert_eq!(
+                sandbox_disabled(
+                    &assess_user_layers(&system, &home.join(".codex"), &home).unwrap()
+                ),
+                disabled,
+                "system {system_roots}, user {user_roots}"
+            );
+        }
+    }
+
+    /// A project root resolves against `<repo>/.codex`, so with the repo
+    /// directly under home `../..` is home and `..` is the repo.
+    #[test]
+    fn project_writable_root_resolves_against_its_codex_folder() {
+        for (roots, disabled) in [(r#"["../.."]"#, true), (r#"[".."]"#, false)] {
+            let (dir, p) = project_with(&format!(
+                "[sandbox_workspace_write]\nwritable_roots = {roots}\n"
+            ));
+            assert_eq!(
+                sandbox_disabled(&p.assess(dir.path()).unwrap()),
                 disabled,
                 "{roots}"
             );
