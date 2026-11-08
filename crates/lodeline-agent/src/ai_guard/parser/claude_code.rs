@@ -421,11 +421,13 @@ pub(crate) fn emit_hook_reasons(
 
 /// The tool a handler's `if` permission rule narrows it to. Only `Tool(arg)`
 /// with an argument that is not all wildcards narrows: a bare tool name, `*`,
-/// `Bash(*)`, `Edit(**)`, `WebFetch(domain:*)` or an unparsable rule admits
-/// every call, and `Edit(~/**)` or `Read(./**)` admits every path under home
-/// or the working directory, which this scores as broad too. A tool-name glob
-/// such as `mcp__*(x)` narrows to nothing, because Claude Code matches the
-/// `if` tool name exactly.
+/// `Bash(*)`, `Edit(**)` or an unparsable rule admits every call, and
+/// `Edit(~/**)` or `Read(./**)` admits every path under home or the working
+/// directory, which this scores as broad too. A tool-name glob such as
+/// `mcp__*(x)` narrows to nothing, because Claude Code matches the `if` tool
+/// name exactly. So does any argument but `*` on WebFetch, Skill or an MCP
+/// tool, such as `WebFetch(domain:*)`: Claude Code has no argument matcher
+/// for them on the `if` path, so the handler never runs.
 fn hook_condition(hook: &Value) -> Option<&str> {
     let (tool, arg) = hook
         .get("if")?
@@ -436,7 +438,6 @@ fn hook_condition(hook: &Value) -> Option<&str> {
     let tool = tool.trim();
     let arg = arg.trim();
     let arg = match tool {
-        "WebFetch" => arg.strip_prefix("domain:").unwrap_or(arg),
         // Only these tools match the argument as a path, where `~/` and `./`
         // anchor it at home and the working directory. Other tools match the
         // text, so `Bash(./*)` runs only for commands that start with `./`.
@@ -453,6 +454,8 @@ fn hook_condition(hook: &Value) -> Option<&str> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '*'))
         && (tool.contains('*')
+            || ((matches!(tool, "WebFetch" | "Skill") || tool.starts_with("mcp__"))
+                && !matches!(arg, "" | "*"))
             || !arg
                 .chars()
                 .all(|c| matches!(c, '*' | ':' | '/') || c.is_whitespace()));
