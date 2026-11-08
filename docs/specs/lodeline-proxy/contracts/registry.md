@@ -50,6 +50,10 @@ The ordinary read view (`entry_view`) carries every immutable field **except
   is right.
 - `protocol_version` and `canon` are closed enums. Adding a revision or a canon
   version is a contract update.
+- The server deletes an entry when no retained row names it and its last upload,
+  a byte-identical duplicate included, is more than R + M old (README retention row,
+  ledger-and-query L1). A later upload of the same ref is new, and a start or
+  inventory report that names the ref before it gets 424 `metadata_ref_pending`.
 - Deleted content (privacy request) keeps the immutable stub so that ingest still
   recognises the ref (README retention row). `content_state=deleted` renders as the
   fixed unavailable label plus the reference.

@@ -178,7 +178,9 @@ fn handle_inner(ctx: &ProxyContext, peer_id: &str, body: &[u8], now: i64) -> Res
         return fixed(ErrorCode::SemanticInvalid);
     }
 
-    // I-2: every ref the report names is registered for this proxy.
+    // I-2: every ref the report names is registered for this proxy. The hold
+    // keeps every looked-up entry until the report is stored.
+    let _held = ctx.metadata.hold_refs();
     let mut refs = RefCheck::default();
     if report.completeness == Completeness::Complete {
         let named = named_refs(&report);

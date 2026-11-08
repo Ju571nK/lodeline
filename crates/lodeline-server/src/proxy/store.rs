@@ -291,6 +291,21 @@ impl ProxyStore {
             .collect()
     }
 
+    /// `(proxy_id, metadata_ref)` of every held `registry_conflict` gap.
+    pub fn conflict_refs(&self) -> Vec<(String, String)> {
+        let g = self.inner.read();
+        g.iter()
+            .flat_map(|(id, e)| {
+                e.gaps.iter().filter_map(move |gap| match gap {
+                    GapReport::RegistryConflict(c) => {
+                        Some((id.clone(), c.metadata_ref.as_str().to_string()))
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
     /// SV-5 / registry R2: is `credential_scope_id` one the server assigned to
     /// `(proxy_id, upstream_id)` in the current revision's route set or in the
     /// previous revision's? `false` when the proxy has no config.

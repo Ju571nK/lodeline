@@ -73,17 +73,18 @@ Related lifetimes:
 
 - **Projection** (L2): kept while any constituent event row is kept. An invocation
   expires as one unit at `last_received_at + E`.
-- **Registry entry**: at least as long as every referencing event and its
-  tombstones (README N9 retention row). The scope-bound stub outlives deleted content.
+- **Registry entry**: while a retained row names it, and at least R + M after its
+  last upload (a byte-identical duplicate upload counts). Tombstones do not keep it
+  (README N9 retention row). The scope-bound stub outlives deleted content.
 - **Gap records** (L4): at least E from `detected_at`.
 - **Inventory snapshots** (registry.md R7): the latest complete snapshot and the
   immutable first baseline of a `(proxy_id, scope key, canon, key_id)` chain are kept
   for the life of the chain. A superseded non-baseline snapshot is kept at least E
   after it was superseded.
 - **Drift records and re-baseline markers**: at least E from `detected_at`.
-- **Registry entries** outlive every reference to them: events and tombstones (above),
-  snapshot membership, drift records, markers and rotation links. Deleting content
-  keeps the stub.
+- **Registry entries** outlive every reference to them: events (above), snapshot
+  membership, drift records, rotation links and held `registry_conflict` gaps. Markers
+  and tombstones name no entry. Deleting content keeps the stub.
 - **Heartbeat state**: latest report per proxy only; counters are cumulative (L6).
 - Retention uses server `received_at`, never `occurred_at`. Ledger lookup never
   depends on receipt date (survey T-00 finding on `find_by_id`).

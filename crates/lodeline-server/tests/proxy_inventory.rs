@@ -3023,3 +3023,467 @@ async fn an_old_observed_at_is_accepted() {
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(fx.snaps("px-a").await.len(), 1);
 }
+
+// ===== metadata retention (README N9 retention row) ===============================
+
+/// px-a's `event_retention_seconds` (E) in `config_with`.
+const E_SECS: i64 = 7_776_000;
+
+/// G = R + M for px-a: R from its stored config, M the server margin.
+fn grace(fx: &Fx) -> i64 {
+    fx.ctx
+        .store
+        .config("px-a")
+        .unwrap()
+        .config
+        .max_offline_retry_age_seconds
+        + i64::from(fx.ctx.ack_loss_margin)
+}
+
+/// The ledger sweep, then the metadata pass, as the scheduler runs them.
+fn sweep_at(fx: &Fx, now: i64) {
+    fx.ctx.ledger_sweep(now).unwrap();
+    fx.ctx.metadata_sweep(now).unwrap();
+}
+
+fn kept(fx: &Fx, n: u32) -> bool {
+    matches!(
+        fx.ctx.metadata.lookup("px-a", &[&mref(n)]).unwrap()[0],
+        lodeline_server::proxy::metadata::RefLookup::Own(_)
+    )
+}
+
+/// Upload px-a entries `ns` (up1, CS1, key 1) at server time `now`.
+fn reg_at(fx: &Fx, ns: &[u32], now: i64) -> lodeline_server::proxy::metadata::UploadOutcome {
+    let entries: Vec<RegistryEntry> = ns
+        .iter()
+        .map(|n| reg_entry("px-a", *n, UP1, CS1, 1))
+        .collect();
+    fx.ctx.metadata.register("px-a", &entries, now).unwrap()
+}
+
+fn unix_now() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// A px-a `tools/call` start naming ref `r` (event id and sequence `n`).
+fn start(n: u32, inv: u32, r: u32) -> Value {
+    json!({
+        "schema_version": 1,
+        "event_id": uuid(n),
+        "proxy_id": "px-a",
+        "epoch_id": epoch(1),
+        "sequence": n,
+        "occurred_at": "2026-10-10T00:00:00Z",
+        "event_type": "invocation.started",
+        "payload": {
+            "invocation_id": uuid(5000 + inv),
+            "upstream_id": UP1,
+            "route_revision": 1,
+            "protocol_version": "2025-11-25",
+            "method": "tools/call",
+            "actor": {
+                "actor_id": "actor-1",
+                "actor_kind": "non_human",
+                "authentication_method": "bearer",
+                "evidence_source": "proxy_credential_mapping"
+            },
+            "tool": {"status": "identified", "metadata_ref": mref(r)},
+        },
+    })
+}
+
+fn events_body(evs: &[Value]) -> String {
+    json!({ "events": evs }).to_string()
+}
+
+async fn post_events(fx: &Fx, evs: &[Value]) -> Resp {
+    fx.call(
+        "POST",
+        "/v1/proxy-events",
+        A,
+        None,
+        None,
+        Some(events_body(evs)),
+    )
+    .await
+}
+
+fn received_at(fx: &Fx, n: u32) -> Option<i64> {
+    fx.ctx
+        .ledger
+        .stored_event("px-a", &uuid(n))
+        .unwrap()
+        .map(|e| e.received_at)
+}
+
+fn judge_at(fx: &Fx, report: &Value, now: i64) -> u16 {
+    lodeline_server::proxy::inventory::handle_at(
+        &fx.ctx,
+        "px-a",
+        report.to_string().as_bytes(),
+        now,
+    )
+    .status()
+    .as_u16()
+}
+
+#[tokio::test]
+async fn an_unreferenced_entry_goes_once_its_last_upload_is_older_than_r_plus_m() {
+    let fx = Fx::new().await;
+    let g = grace(&fx);
+    let base = unix_now();
+    reg_at(&fx, &[1, 2], base);
+    reg_at(&fx, &[3], base + 10);
+    assert_eq!(post_events(&fx, &[start(1, 1, 1)]).await.status, 200);
+
+    sweep_at(&fx, base + g);
+    assert!(kept(&fx, 2), "exactly G after its upload, the entry stays");
+    sweep_at(&fx, base + g + 1);
+    assert!(!kept(&fx, 2), "unreferenced and older than G: deleted");
+    assert!(kept(&fx, 3), "younger than G: kept");
+    assert!(kept(&fx, 1), "named by a retained start: kept");
+
+    // The start lives E after receipt, and its entry with it, however old.
+    let received = received_at(&fx, 1).unwrap();
+    sweep_at(&fx, received + E_SECS);
+    assert!(kept(&fx, 1), "kept while the start is");
+    sweep_at(&fx, received + E_SECS + 1);
+    assert_eq!(received_at(&fx, 1), None, "the start aged out under E");
+    assert!(!kept(&fx, 1), "then its entry goes");
+}
+
+#[tokio::test]
+async fn a_duplicate_upload_restarts_the_retention_clock() {
+    let fx = Fx::new().await;
+    let g = grace(&fx);
+    let base = unix_now();
+    reg_at(&fx, &[4], base);
+    let again = reg_at(&fx, &[4], base + g);
+    let dup: Vec<&str> = again.duplicate.iter().map(|r| r.as_str()).collect();
+    assert_eq!(dup, [mref(4)]);
+    sweep_at(&fx, base + g + 1);
+    assert!(kept(&fx, 4), "the duplicate upload counts as an upload");
+    sweep_at(&fx, base + 2 * g + 1);
+    assert!(!kept(&fx, 4));
+}
+
+#[tokio::test]
+async fn every_start_of_an_invocation_keeps_its_entry() {
+    // Two different starts of one invocation: the projection shows one tool,
+    // the stored events name both refs.
+    let fx = Fx::new().await;
+    let base = unix_now();
+    reg_at(&fx, &[5, 6], base);
+    assert_eq!(
+        post_events(&fx, &[start(10, 7, 5), start(11, 7, 6)])
+            .await
+            .status,
+        200
+    );
+    sweep_at(&fx, base + grace(&fx) + 1);
+    assert!(kept(&fx, 5) && kept(&fx, 6));
+}
+
+#[tokio::test]
+async fn a_drift_record_keeps_its_entries_after_the_snapshot_is_gone() {
+    let fx = Fx::new().await;
+    let b = parse_now(&at(0)) + 86_400;
+    reg_at(&fx, &[1, 2, 3, 4], b);
+    let r = |rid: u32, ms: &[u32], cmp: Value| rep("px-a", rid, rid, rid, UP1, CS1, 1, 1, ms, cmp);
+    assert_eq!(judge_at(&fx, &r(1, &[1], initial()), b), 200);
+    let s2 = r(2, &[1, 2, 3], compared(1, vec![added(2), added(3)]));
+    assert_eq!(judge_at(&fx, &s2, b), 200);
+    // Snapshot 4 (observed after 3) arrives first: snapshot 2 is superseded now.
+    assert_eq!(judge_at(&fx, &r(4, &[1, 4], compared(3, vec![])), b), 200);
+    // Snapshot 3 removes ref 2 and replaces ref 3 by ref 4; its drift records
+    // are detected 100 s later.
+    let s3 = r(3, &[1, 4], compared(2, vec![removed(2), changed(4, 3)]));
+    assert_eq!(judge_at(&fx, &s3, b + 100), 200);
+
+    sweep_at(&fx, b + E_SECS + 50);
+    let inv: Vec<String> = fx
+        .snaps("px-a")
+        .await
+        .iter()
+        .map(|s| s["inventory_id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!inv.contains(&inv_id(2)), "snapshot 2 aged out: {inv:?}");
+    assert_eq!(drift_set(&fx.drift("px-a").await).len(), 2);
+    assert!(kept(&fx, 2), "the removed record names ref 2");
+    assert!(
+        kept(&fx, 3),
+        "the changed record names ref 3 as the previous ref"
+    );
+
+    sweep_at(&fx, b + 100 + E_SECS + 1);
+    assert!(fx.drift("px-a").await.is_empty());
+    assert!(
+        !kept(&fx, 2) && !kept(&fx, 3),
+        "no retained row names refs 2 and 3"
+    );
+    assert!(
+        kept(&fx, 1) && kept(&fx, 4),
+        "the latest snapshot's members stay"
+    );
+}
+
+#[tokio::test]
+async fn a_rotation_link_keeps_its_entry_after_the_snapshot_is_gone() {
+    let fx = Fx::new().await;
+    let b = parse_now(&at(0)) + 86_400;
+    reg_at(&fx, &[1, 2, 5], b);
+    let k1 = |rid: u32, ms: &[u32], cmp: Value| rep("px-a", rid, rid, rid, UP1, CS1, 1, 1, ms, cmp);
+    assert_eq!(judge_at(&fx, &k1(1, &[5], initial()), b), 200);
+    assert_eq!(
+        judge_at(&fx, &k1(2, &[5, 1], compared(1, vec![added(1)])), b),
+        200
+    );
+    let rot = rep(
+        "px-a",
+        3,
+        3,
+        3,
+        UP1,
+        CS1,
+        2,
+        1,
+        &[2],
+        rebase(2, "key_rotation", &[(1, 2)]),
+    );
+    assert_eq!(judge_at(&fx, &rot, b), 200);
+    // A later key-1 snapshot supersedes snapshot 2 (the link's `from` side).
+    assert_eq!(
+        judge_at(&fx, &k1(4, &[5], compared(2, vec![removed(1)])), b),
+        200
+    );
+
+    sweep_at(&fx, b + E_SECS + 1);
+    let inv: Vec<String> = fx
+        .snaps("px-a")
+        .await
+        .iter()
+        .map(|s| s["inventory_id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!inv.contains(&inv_id(2)), "snapshot 2 aged out: {inv:?}");
+    assert!(fx.drift("px-a").await.is_empty());
+    assert!(kept(&fx, 1), "only the link of snapshot 3 names ref 1");
+    assert!(kept(&fx, 2) && kept(&fx, 5));
+}
+
+#[tokio::test]
+async fn a_held_registry_conflict_gap_keeps_its_entry() {
+    let fx = Fx::new().await;
+    let base = unix_now();
+    reg_at(&fx, &[7], base);
+    let gap: lodeline_proxy_api::GapReport = serde_json::from_value(json!({
+        "kind": "registry_conflict", "gap_id": uuid(900), "detected_at": "2026-10-10T00:00:00Z",
+        "metadata_ref": mref(7), "key_id": kid(1), "event_ids": [uuid(901)],
+        "detected_by": "central_409", "affected_event_count": 1,
+    }))
+    .unwrap();
+    let mut e = fx.ctx.store.entry("px-a").unwrap();
+    e.gaps.push(gap);
+    fx.ctx.store.begin().commit("px-a", e.clone()).unwrap();
+    sweep_at(&fx, base + grace(&fx) + 1);
+    assert!(kept(&fx, 7), "the held gap names ref 7");
+    e.gaps.clear();
+    fx.ctx.store.begin().commit("px-a", e).unwrap();
+    sweep_at(&fx, base + grace(&fx) + 1);
+    assert!(!kept(&fx, 7));
+}
+
+#[tokio::test]
+async fn an_ingest_that_starts_during_the_pass_waits_and_sees_the_deletion() {
+    let fx = Fx::new().await;
+    let g = grace(&fx);
+    let base = unix_now();
+    reg_at(&fx, &[8], base);
+    let ctx = fx.ctx.clone();
+    let mut started = None;
+    let deleted = fx
+        .ctx
+        .metadata
+        .sweep(base + g + 1, &|_| g, || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let c = ctx.clone();
+            let body = events_body(&[start(20, 20, 8)]);
+            let h = std::thread::spawn(move || {
+                let r = lodeline_server::proxy::ingest::handle(&c, "px-a", body.as_bytes());
+                tx.send(r.status().as_u16()).unwrap();
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(300))
+                    .is_err(),
+                "an ingest cannot validate a ref while the pass holds the refs"
+            );
+            started = Some((h, rx));
+            ctx.live_metadata_refs()
+        })
+        .unwrap();
+    assert_eq!(deleted, 1);
+    let (h, rx) = started.unwrap();
+    h.join().unwrap();
+    assert_eq!(
+        rx.recv().unwrap(),
+        424,
+        "the start waits for the entry again"
+    );
+    assert_eq!(received_at(&fx, 20), None);
+}
+
+#[tokio::test]
+async fn an_inventory_report_that_arrives_during_the_pass_waits_and_sees_the_deletion() {
+    let fx = Fx::new().await;
+    let g = grace(&fx);
+    let b = parse_now(&at(0)) + 86_400;
+    reg_at(&fx, &[8], b);
+    let ctx = fx.ctx.clone();
+    let mut started = None;
+    fx.ctx
+        .metadata
+        .sweep(b + g + 1, &|_| g, || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let c = ctx.clone();
+            let body = rep("px-a", 1, 1, 1, UP1, CS1, 1, 1, &[8], initial()).to_string();
+            let h = std::thread::spawn(move || {
+                let r = lodeline_server::proxy::inventory::handle_at(
+                    &c,
+                    "px-a",
+                    body.as_bytes(),
+                    b + g + 1,
+                );
+                tx.send(r.status().as_u16()).unwrap();
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(300))
+                    .is_err(),
+                "a report cannot validate a ref while the pass holds the refs"
+            );
+            started = Some((h, rx));
+            ctx.live_metadata_refs()
+        })
+        .unwrap();
+    let (h, rx) = started.unwrap();
+    h.join().unwrap();
+    assert_eq!(
+        rx.recv().unwrap(),
+        424,
+        "the report waits for the entry again"
+    );
+    assert!(fx.snaps("px-a").await.is_empty());
+}
+
+#[tokio::test]
+async fn the_pass_waits_for_an_ingest_that_validated_a_ref() {
+    let fx = Fx::new().await;
+    let g = grace(&fx);
+    let base = unix_now();
+    reg_at(&fx, &[9], base);
+    let held = fx.ctx.metadata.hold_refs();
+    assert!(kept(&fx, 9), "validated");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = fx.ctx.clone();
+    let pass = std::thread::spawn(move || {
+        ctx.metadata
+            .sweep(base + g + 1, &|_| g, || {
+                tx.send(()).unwrap();
+                ctx.live_metadata_refs()
+            })
+            .unwrap()
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "the pass cannot read the live set while a validated ingest holds the refs"
+    );
+    let evs = lodeline_proxy_api::parse_event_batch(events_body(&[start(21, 21, 9)]).as_bytes())
+        .unwrap()
+        .events;
+    fx.ctx.ledger.insert_batch("px-a", &evs, base).unwrap();
+    drop(held);
+    assert_eq!(pass.join().unwrap(), 0);
+    assert!(
+        kept(&fx, 9),
+        "the stored start keeps the entry it was validated against"
+    );
+}
+
+#[test]
+fn a_v1_metadata_store_migrates_and_keeps_every_entry() {
+    use lodeline_server::proxy::metadata::{MetadataCaps, MetadataStore};
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("m.sqlite");
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE entries (
+                proxy_id TEXT NOT NULL, metadata_ref TEXT NOT NULL, upstream_id TEXT NOT NULL,
+                credential_scope_id TEXT NOT NULL, protocol_version TEXT NOT NULL,
+                observation_source TEXT NOT NULL, canon TEXT NOT NULL, key_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL, observed_at TEXT NOT NULL, definition BLOB NOT NULL,
+                size INTEGER NOT NULL, registered_at INTEGER NOT NULL,
+                PRIMARY KEY (proxy_id, metadata_ref)) WITHOUT ROWID;
+             CREATE INDEX entries_ref ON entries (metadata_ref);
+             CREATE TABLE usage (proxy_id TEXT PRIMARY KEY, entries INTEGER NOT NULL,
+                bytes INTEGER NOT NULL) WITHOUT ROWID;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        for (n, at) in [(1u32, 1_000i64), (2, 2_000)] {
+            c.execute(
+                "INSERT INTO entries VALUES ('px-a', ?1, 'up1', ?2, '2025-11-25', 'proxy_live',
+                     'sigil-tooldef-fp-v1', ?3, ?4, '2026-10-10T00:00:00Z', x'7b7d', 400, ?5)",
+                rusqlite::params![mref(n), CS1, kid(1), "f".repeat(64), at],
+            )
+            .unwrap();
+        }
+        c.execute("INSERT INTO usage VALUES ('px-a', 2, 800)", [])
+            .unwrap();
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let caps = MetadataCaps {
+        entries_per_proxy: 10,
+        bytes_per_proxy: 1 << 20,
+        bytes_total: 1 << 20,
+    };
+    let s = MetadataStore::open(&path, caps).unwrap();
+    assert_eq!(s.count("px-a").unwrap(), 2, "every v1 entry is kept");
+    let none = || Ok(Default::default());
+    // The last upload of a v1 entry is its registration: ref 1 is exactly G
+    // old at 1_100, ref 2 is younger.
+    let scanned = std::cell::Cell::new(false);
+    let live = || {
+        scanned.set(true);
+        Ok(Default::default())
+    };
+    assert_eq!(s.sweep(1_100, &|_| 100, live).unwrap(), 0);
+    assert!(
+        !scanned.get(),
+        "with nothing expired the pass does not scan the ledger"
+    );
+    assert_eq!(s.sweep(1_101, &|_| 100, none).unwrap(), 1);
+    let left = s.lookup("px-a", &[&mref(1), &mref(2)]).unwrap();
+    assert_eq!(
+        left[0],
+        lodeline_server::proxy::metadata::RefLookup::Unknown
+    );
+    assert!(matches!(
+        left[1],
+        lodeline_server::proxy::metadata::RefLookup::Own(_)
+    ));
+    drop(s);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let v: i64 = c
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 2);
+    let usage: (i64, i64) = c
+        .query_row(
+            "SELECT entries, bytes FROM usage WHERE proxy_id = 'px-a'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(usage, (1, 400), "usage is recomputed after the delete");
+}

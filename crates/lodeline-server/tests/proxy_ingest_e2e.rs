@@ -1631,3 +1631,48 @@ async fn zero_unsent_keeps_the_old_tail_gap_rule() {
     assert_eq!(r.status, 200);
     assert_eq!(seq_gaps(&env, "pxa"), [(3, 5, true, true)]);
 }
+
+#[tokio::test]
+async fn a_swept_entry_frees_its_quota_and_a_start_naming_it_waits_for_a_reupload() {
+    let env = Env::with(|p| p.metadata_max_entries_per_proxy = Some(2)).await;
+    let (fx, a) = (&env.fx, &env.a);
+    let base = time::OffsetDateTime::now_utc().unix_timestamp();
+    env.register(a, &mref(1)).await;
+    env.register(a, &mref(2)).await;
+    let sa = env.scope("pxa");
+    let third = upload_body("pxa", &[entry_json("pxa", &mref(3), &sa, 'a')]);
+    let r = upload(fx, a, &third).await;
+    assert_eq!((r.status, r.body), (503, err_body(ErrorCode::StorageLimit)));
+    assert_eq!(
+        events(fx, a, &batch(&[call("pxa", 1, &mref(1))]))
+            .await
+            .status,
+        200
+    );
+
+    // Past R + M after the uploads: ref 2 is named by no retained row.
+    let c = fx.ctx.store.config("pxa").unwrap().config;
+    let g = c.max_offline_retry_age_seconds + i64::from(fx.ctx.ack_loss_margin);
+    let later = base + g + 60;
+    fx.ctx.ledger_sweep(later).unwrap();
+    assert_eq!(fx.ctx.metadata_sweep(later).unwrap(), 1);
+    assert!(env.stored("pxa", 1));
+
+    // A start naming the swept ref is held (424), not refused.
+    let r = events(fx, a, &batch(&[call("pxa", 2, &mref(2))])).await;
+    assert_eq!(r.status, 424, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(ids(&r.json()["error"]["pending_metadata_refs"]), [mref(2)]);
+    assert!(!env.stored("pxa", 2));
+    // The re-upload is new again and fits the freed quota; then the start lands.
+    let again = upload_body("pxa", &[entry_json("pxa", &mref(2), &sa, 'a')]);
+    let r = upload(fx, a, &again).await;
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(ids(&r.json()["registered_metadata_refs"]), [mref(2)]);
+    assert_eq!(
+        events(fx, a, &batch(&[call("pxa", 2, &mref(2))]))
+            .await
+            .status,
+        200
+    );
+    assert!(env.stored("pxa", 2));
+}

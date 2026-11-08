@@ -204,6 +204,38 @@ impl ProxyContext {
         sweep_ledger(&self.ledger, &self.store, now)
     }
 
+    /// Metadata retention pass at `now` (README N9), run after
+    /// [`Self::ledger_sweep`]. An unreferenced entry goes once its last upload
+    /// is more than `R + M` old, `R` being the proxy's stored
+    /// `max_offline_retry_age_seconds` (the default when none is stored).
+    pub fn metadata_sweep(&self, now: i64) -> Result<usize, metadata::UploadError> {
+        let retry_age: HashMap<String, i64> = self
+            .store
+            .configs()
+            .into_iter()
+            .map(|(id, c)| (id, c.config.max_offline_retry_age_seconds))
+            .collect();
+        let margin = i64::from(self.ack_loss_margin);
+        self.metadata.sweep(
+            now,
+            &|id| {
+                retry_age
+                    .get(id)
+                    .copied()
+                    .unwrap_or(lodeline_proxy_api::config::DEFAULT_MAX_OFFLINE_RETRY_AGE_SECONDS)
+                    + margin
+            },
+            || self.live_metadata_refs(),
+        )
+    }
+
+    /// Every `(proxy_id, metadata_ref)` a retained row names.
+    pub fn live_metadata_refs(&self) -> Result<metadata::LiveRefs, ledger::LedgerError> {
+        let mut live = self.ledger.referenced_metadata_refs()?;
+        live.extend(self.store.conflict_refs());
+        Ok(live)
+    }
+
     /// Decide whether an auth denial gets its own audit record now. `Some(n)`:
     /// write one record standing for `n` denials, then call
     /// [`Self::deny_audited`]. `None`: coalesced into the next record.
@@ -388,11 +420,12 @@ pub fn check_store_against_audit(
     Ok(withheld)
 }
 
-/// Run [`ProxyContext::ledger_sweep`] every `period` on the blocking pool,
-/// starting with one sweep right away (clears what expired while the server was
-/// down). A failed or panicking sweep is logged and the loop continues; it
-/// never takes the server down. Call from inside the runtime; the task ends
-/// with the runtime (or when the returned handle is aborted).
+/// Run [`ProxyContext::ledger_sweep`], then [`ProxyContext::metadata_sweep`],
+/// every `period` on the blocking pool, starting with one sweep right away
+/// (clears what expired while the server was down). A failed or panicking
+/// sweep is logged and the loop continues; it never takes the server down.
+/// Call from inside the runtime; the task ends with the runtime (or when the
+/// returned handle is aborted).
 pub fn spawn_ledger_sweep(ctx: Arc<ProxyContext>, period: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(period);
@@ -412,6 +445,12 @@ pub fn spawn_ledger_sweep(ctx: Arc<ProxyContext>, period: Duration) -> tokio::ta
                 ),
                 Ok(Err(e)) => tracing::error!(error = %e, "proxy ledger sweep failed"),
                 Err(_) => tracing::error!("proxy ledger sweep task panicked"),
+            }
+            let c = ctx.clone();
+            match tokio::task::spawn_blocking(move || c.metadata_sweep(now)).await {
+                Ok(Ok(entries)) => tracing::info!(entries, "proxy metadata sweep"),
+                Ok(Err(_)) => tracing::error!("proxy metadata sweep failed"),
+                Err(_) => tracing::error!("proxy metadata sweep task panicked"),
             }
         }
     })
