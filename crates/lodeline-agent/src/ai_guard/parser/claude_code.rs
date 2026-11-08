@@ -2160,6 +2160,7 @@ mod tests {
             "bash $HOMEX/x.sh",
             r#"bash "$HOME_DIR/x.sh""#,
             r#"bash '"$HOME/x.sh"'"#,
+            r#"bash "'$HOME/x.sh'""#,
         ] {
             let dir = tempdir().unwrap();
             let home = home_with_hook(dir.path(), command, &scripts);
