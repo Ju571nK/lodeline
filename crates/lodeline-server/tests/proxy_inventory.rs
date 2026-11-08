@@ -3355,7 +3355,7 @@ fn deleted_content_is_in_neither_the_database_file_nor_its_wal() {
     let s = MetadataStore::open(&path, caps).unwrap();
     // A small definition lives in a b-tree page, a large one in overflow pages.
     let marker = |n: u32| format!("CONTENT-DELETE-MARKER-{n}");
-    let entries: Vec<RegistryEntry> = [(1u32, 10usize), (2, 100_000), (3, 10)]
+    let entries: Vec<RegistryEntry> = [(1u32, 10usize), (2, 100_000), (3, 10), (4, 10)]
         .iter()
         .map(|&(n, pad)| {
             let mut e = reg_entry("px-a", n, UP1, CS1, 1);
@@ -3382,6 +3382,24 @@ fn deleted_content_is_in_neither_the_database_file_nor_its_wal() {
     assert!(!has(&after, &marker(1)), "small definition left behind");
     assert!(!has(&after, &marker(2)), "large definition left behind");
     assert!(has(&after, &marker(3)), "other content is untouched");
+
+    // A reader on the file keeps the truncate from completing.
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        s.delete_content("px-a", &mref(4)).unwrap(),
+        "still a success"
+    );
+    assert!(has(&raw(), &marker(4)), "the reader held the old pages");
+    drop(reader);
+    assert!(s.delete_content("px-a", &mref(4)).unwrap());
+    assert!(
+        !has(&raw(), &marker(4)),
+        "a repeat call finishes the truncate"
+    );
 }
 
 #[test]

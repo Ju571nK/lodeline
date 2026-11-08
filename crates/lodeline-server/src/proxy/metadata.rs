@@ -338,11 +338,16 @@ impl MetadataStore {
             params![proxy_id],
         )?;
         tx.commit()?;
-        if conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-            .is_err()
-        {
-            tracing::warn!("proxy metadata WAL checkpoint after content deletion failed");
+        // A busy checkpoint is a row with busy=1, not an error. The deletion is
+        // committed either way, and a repeat call on the deleted entry retries it.
+        let busy = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        if !matches!(busy, Ok(0)) {
+            tracing::error!(
+                "proxy metadata WAL truncate after content deletion did not complete; \
+                 the WAL can hold the old content until a repeat call or the next checkpoint"
+            );
         }
         Ok(true)
     }

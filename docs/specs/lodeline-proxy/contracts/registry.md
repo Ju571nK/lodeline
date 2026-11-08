@@ -62,8 +62,10 @@ The ordinary read view (`entry_view`) carries every immutable field **except
   CLI `lodeline-server proxy delete-content`). It sets `content_state=deleted` and
   empties the stored `definition`. The immutable fields and `observed_at` stay. Freed
   pages are zeroed and the WAL is truncated after the commit, so the file keeps no
-  copy. The route is idempotent and answers 200 with `{request_id, metadata_ref,
-  content_state}`. An unknown proxy is 404 `proxy_unknown`, and a ref with no entry
+  copy. If a reader holds the WAL and the truncate does not complete, the old content
+  can stay in the WAL until the next checkpoint, and a repeat call retries the
+  truncate. The route is idempotent and answers 200 with `{request_id, metadata_ref,
+  content_state}`, also on a repeat call for content that is already deleted. An unknown proxy is 404 `proxy_unknown`, and a ref with no entry
   for that proxy is 404 `metadata_ref_unknown`. Every call is in the management audit
   as `proxy.metadata_content_delete` with the ref, never the definition.
 - After a deletion, an upload with equal immutable fields is a `duplicate`. It
