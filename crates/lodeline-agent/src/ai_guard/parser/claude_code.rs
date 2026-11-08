@@ -708,8 +708,11 @@ fn home_relative<'a>(word: &'a str, script: &'a str) -> Option<&'a str> {
     if cfg!(windows) {
         return None;
     }
+    let quotes = &word[..word.len() - script.len()];
     match word.chars().next() {
         Some('\'') => None,
+        // `"'$HOME/x.sh'"` keeps the single quotes in the file name.
+        Some('"') if quotes.contains('\'') => None,
         Some('"') => after_home_var(word).or_else(|| after_home_var(script)),
         _ => after_home_var(script).or_else(|| {
             script
