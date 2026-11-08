@@ -1,14 +1,15 @@
 //! Test-only SQLite VFS: the platform default with every `xSync` counted per
 //! file, and a copy of the file taken right after each `xSync`. That copy is
 //! what a power loss keeps when the disk persists nothing that was not synced.
+//! Writes to a file can be held back with [`block_writes`].
 //! [`install`] makes it the default VFS of the process; it only observes, so
 //! other tests' connections behave as before.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{LazyLock, Mutex, Once};
+use std::sync::{Condvar, LazyLock, Mutex, Once};
 
 use rusqlite::ffi;
 
@@ -28,6 +29,20 @@ static REAL: AtomicPtr<ffi::sqlite3_vfs> = AtomicPtr::new(std::ptr::null_mut());
 static FAILING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
 /// Files whose next `xSync` fails once.
 static FAIL_ONCE: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+/// Files whose `xWrite` waits until they leave the set.
+static BLOCKED: LazyLock<(Mutex<HashSet<PathBuf>>, Condvar)> = LazyLock::new(Default::default);
+
+/// Make every write to `path` wait (`on`) until it is called again with `off`.
+pub fn block_writes(path: &Path, on: bool) {
+    let (set, cv) = &*BLOCKED;
+    let mut b = set.lock().unwrap();
+    if on {
+        b.insert(path.to_path_buf());
+    } else {
+        b.remove(path);
+    }
+    cv.notify_all();
+}
 
 /// Make every `xSync` on `path` fail (`on`) or work again.
 pub fn fail_syncs(path: &Path, on: bool) {
@@ -99,6 +114,7 @@ unsafe extern "C" fn x_open(
         .or_insert_with(|| {
             let mut t = unsafe { *methods };
             t.xSync = Some(x_sync);
+            t.xWrite = Some(x_write);
             t.xClose = Some(x_close);
             Box::leak(Box::new(t)) as *const ffi::sqlite3_io_methods as usize
         });
@@ -128,6 +144,21 @@ unsafe extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int
         s.image = image;
     }
     rc
+}
+
+unsafe extern "C" fn x_write(
+    file: *mut ffi::sqlite3_file,
+    buf: *const c_void,
+    amt: c_int,
+    offset: ffi::sqlite3_int64,
+) -> c_int {
+    let (path, real) = real_methods(file);
+    let (set, cv) = &*BLOCKED;
+    drop(
+        cv.wait_while(set.lock().unwrap(), |b| b.contains(&path))
+            .unwrap(),
+    );
+    unsafe { ((*real).xWrite.unwrap())(file, buf, amt, offset) }
 }
 
 unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {

@@ -23,9 +23,14 @@
 //!   acknowledged rows). A power loss can roll back the sequence of a dropped
 //!   record, so [`EventSource::next_events`] hands out only rows covered by an
 //!   fsync: no sequence that leaves the process is ever reissued.
-//! * Checkpoints run on the writer thread between commands, never inside a
-//!   commit: in the maintenance pass, when the ingest client finds only rows not
-//!   yet durable, and after [`CHECKPOINT_EVERY`] commands, which bounds the WAL.
+//! * No checkpoint runs inside a commit. After [`CHECKPOINT_EVERY`] commands a
+//!   checkpointer thread with its own connection copies the WAL into the
+//!   database while the writer goes on committing; the writer then copies the
+//!   short rest between two commands, which lets the next commit start the WAL
+//!   over. Past [`WAL_CAP_COMMANDS`] the writer waits for the copy instead of
+//!   growing the WAL. The writer still checkpoints by itself in the maintenance
+//!   pass, when the ingest client finds only rows not yet durable, and whenever
+//!   the checkpointer is not running. Only the writer marks rows durable.
 //! * Events are delivered oldest sequence first. `acknowledged` marks rows
 //!   (kept for [`SpoolConfig::ack_retention`], then purged). `quarantined` moves
 //!   rows unchanged to the `quarantine` table; nothing is ever dropped silently.
@@ -236,11 +241,14 @@ thread_local! {
 /// Every SQLite error of the writer passes here, most through [`code_name`] or
 /// [`append_storage`], so no failed fsync goes unseen.
 fn note_sync_failure(e: &rusqlite::Error) {
-    if matches!(e, rusqlite::Error::SqliteFailure(f, _)
-        if matches!(f.extended_code, ffi::SQLITE_IOERR_FSYNC | ffi::SQLITE_IOERR_DIR_FSYNC))
-    {
+    if is_sync_failure(e) {
         SYNC_FAILED.set(true);
     }
+}
+
+fn is_sync_failure(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(f, _)
+        if matches!(f.extended_code, ffi::SQLITE_IOERR_FSYNC | ffi::SQLITE_IOERR_DIR_FSYNC))
 }
 
 fn code_name(e: &rusqlite::Error) -> String {
@@ -984,11 +992,28 @@ struct Writer {
     durable_seq: i64,
     /// Commands since the last checkpoint (see [`CHECKPOINT_EVERY`]).
     since_checkpoint: u32,
+    /// None if it could not start or has stopped: the writer then copies the
+    /// whole WAL itself.
+    checkpointer: Option<Checkpointer>,
+    /// The checkpointer was asked for passes and has not replied yet.
+    copying: bool,
 }
 
-/// Commands between two checkpoints at most. An append writes about 8 WAL
-/// pages, so the WAL stays near 16 MiB (18 MiB high-water on AWS, 2026-11-06).
-const CHECKPOINT_EVERY: u32 = 512;
+/// Commands after which the WAL is copied into the database and started over.
+/// The checkpointer copies while the writer commits, so the WAL grows past this
+/// by what the writer commits meanwhile. 1,024 rather than 512: on AWS gp3 it
+/// kept the checkpointer's tail gain and most of the calls/s (decisions.md).
+const CHECKPOINT_EVERY: u32 = 1024;
+/// Commands after which the writer stops taking commands until the
+/// checkpointer's passes are done, so a slow copy cannot grow the WAL without
+/// bound.
+const WAL_CAP_COMMANDS: u32 = 2 * CHECKPOINT_EVERY;
+/// Passes per request at most. Each copies what was committed during the one
+/// before, so the rest the writer copies shrinks with every pass.
+const CHECKPOINT_PASSES: u32 = 4;
+/// A pass that copied at most this many WAL frames ends the request: the rest
+/// is short enough for the writer.
+const CHECKPOINT_TAIL_FRAMES: i64 = 64;
 /// Most queued appends one group commit takes: bounds how long the first
 /// start of a group waits for the others (the proxy admits 64 calls in flight).
 /// A group can run the checkpoint up to this many commands late.
@@ -1103,9 +1128,136 @@ CREATE TABLE gaps (
 );
 ";
 
+/// The checkpointer thread as the writer sees it: one request at a time, one
+/// reply per request.
+struct Checkpointer {
+    wake: mpsc::Sender<()>,
+    done: mpsc::Receiver<()>,
+    join: JoinHandle<()>,
+}
+
+impl Checkpointer {
+    /// None if its connection or thread cannot start; the writer then copies
+    /// the whole WAL itself, as before the checkpointer existed.
+    fn start(path: &Path, shared: Arc<Shared>) -> Option<Checkpointer> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .and_then(|c| {
+            c.execute_batch("PRAGMA synchronous=FULL;")?;
+            // Only the writer's connection, closed last, may checkpoint on close.
+            c.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+            Ok(c)
+        });
+        let (wake, wake_rx) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let started = conn.ok().and_then(|conn| {
+            std::thread::Builder::new()
+                .name("lodeline-ckpt".into())
+                .spawn(move || copy_passes(&conn, &shared, &wake_rx, &done_tx))
+                .ok()
+        });
+        if started.is_none() {
+            tracing::warn!("spool checkpointer did not start; the writer copies the WAL itself");
+        }
+        started.map(|join| Checkpointer { wake, done, join })
+    }
+}
+
+/// The checkpointer thread. Each request runs PASSIVE checkpoints, each copying
+/// what was committed during the one before, until a pass copies at most
+/// [`CHECKPOINT_TAIL_FRAMES`] frames. A failed fsync, here or on the writer,
+/// ends the thread before the next pass; any other error hands the copying back
+/// to the writer.
+fn copy_passes(
+    conn: &Connection,
+    shared: &Shared,
+    wake: &mpsc::Receiver<()>,
+    done: &mpsc::Sender<()>,
+) {
+    while wake.recv().is_ok() {
+        let mut backfilled = 0;
+        for _ in 0..CHECKPOINT_PASSES {
+            // It would copy WAL pages a failed fsync may have lost into the database.
+            if shared.sync_failed.load(Ordering::SeqCst) {
+                return;
+            }
+            let (busy, now) = match copy_pass(conn, backfilled) {
+                Ok(v) => v,
+                Err(e) if is_sync_failure(&e) => {
+                    shared.sync_failed.store(true, Ordering::SeqCst);
+                    shared.degraded.store(true, Ordering::Relaxed);
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        code = %code_name(&e),
+                        "spool checkpointer stopped; the writer copies the WAL itself"
+                    );
+                    return;
+                }
+            };
+            let copied = now - backfilled;
+            backfilled = now;
+            if busy != 0 || copied <= CHECKPOINT_TAIL_FRAMES {
+                break;
+            }
+        }
+        if done.send(()).is_err() {
+            return;
+        }
+    }
+}
+
+/// One PASSIVE checkpoint: the busy flag and the WAL frames copied in total
+/// (-1 when busy, below `backfilled` once the writer started the WAL over).
+/// After a pass that copied, the database file is fsynced: SQLite skips that
+/// fsync when the writer committed during the pass, and the writer's own
+/// checkpoint would then flush every page copied here.
+fn copy_pass(conn: &Connection, backfilled: i64) -> rusqlite::Result<(i64, i64)> {
+    let (busy, now) = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(2)?))
+    })?;
+    if now > backfilled {
+        sync_database(conn)?;
+    }
+    Ok((busy, now))
+}
+
+/// fsync of the connection's database file through its VFS, the call SQLite's
+/// own checkpoint makes.
+fn sync_database(conn: &Connection) -> rusqlite::Result<()> {
+    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+    // SAFETY: the handle stays open for the call, and FILE_POINTER stores one
+    // pointer to the main database file, open as long as the connection is.
+    let mut rc = unsafe {
+        ffi::sqlite3_file_control(
+            conn.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            (&raw mut file).cast(),
+        )
+    };
+    if rc == ffi::SQLITE_OK {
+        // SAFETY: an open file has its methods table.
+        rc = match unsafe { file.as_ref().and_then(|f| f.pMethods.as_ref()?.xSync) } {
+            Some(sync) => unsafe { sync(file, ffi::SQLITE_SYNC_NORMAL) },
+            None => ffi::SQLITE_MISUSE,
+        };
+    }
+    match rc {
+        ffi::SQLITE_OK => Ok(()),
+        rc => Err(rusqlite::Error::SqliteFailure(ffi::Error::new(rc), None)),
+    }
+}
+
 impl Drop for Writer {
     fn drop(&mut self) {
-        if SYNC_FAILED.get() {
+        // The checkpointer is joined first, so the writer's connection is the
+        // last one and the only one that may checkpoint on close.
+        self.stop_checkpointer();
+        if self.sync_failed() {
             // Closing would checkpoint pages a failed fsync may have lost into
             // the database. The next start recovers the WAL instead.
             let _ = self
@@ -1182,6 +1334,8 @@ impl Writer {
             shared,
             durable_seq: 0,
             since_checkpoint: 0,
+            checkpointer: None,
+            copying: false,
         };
         if tables == 0 {
             w.init_schema().map_err(|e| classify_open(&e))?;
@@ -1196,6 +1350,7 @@ impl Writer {
             .execute_batch(ADDITIVE_SCHEMA)
             .map_err(|e| classify_open(&e))?;
         w.load_counters().map_err(|e| classify_open(&e))?;
+        w.checkpointer = Checkpointer::start(&path, w.shared.clone());
         Ok(w)
     }
 
@@ -1322,12 +1477,8 @@ impl Writer {
                 }
                 self.checkpoint();
             }
-            // After the last reply, so no caller waits on it unless already queued.
-            if self.since_checkpoint >= CHECKPOINT_EVERY {
-                self.checkpoint();
-            }
             // Fail-stop: queued and later commands are refused unrun.
-            if SYNC_FAILED.get() {
+            if self.sync_failed() {
                 // Test knob: a queued hold still waits here, after the replies.
                 #[cfg(test)]
                 if let Some(Cmd::Hold(rx)) = held.take() {
@@ -1336,6 +1487,8 @@ impl Writer {
                 self.set_degraded(true);
                 return;
             }
+            // After the last reply, so no caller waits on it unless already queued.
+            self.checkpoint_if_due();
             let wait = next_maintenance.saturating_duration_since(std::time::Instant::now());
             let cmd = match held.take() {
                 Some(c) => c,
@@ -1345,6 +1498,11 @@ impl Writer {
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 },
             };
+            // The checkpointer's fsync may have failed while the writer waited.
+            if self.sync_failed() {
+                held = Some(cmd);
+                continue;
+            }
             self.since_checkpoint += 1;
             match cmd {
                 Cmd::Append(ev, r) => {
@@ -1471,7 +1629,7 @@ impl Writer {
             .collect();
         // A failed fsync inside the group (a fresh WAL header) is not undone by a
         // later one that succeeds.
-        let commit = if tx.is_autocommit() || SYNC_FAILED.get() {
+        let commit = if tx.is_autocommit() || self.sync_failed() {
             Err(AppendError::Storage)
         } else {
             tx.commit().map_err(|e| append_storage(&e))
@@ -1516,13 +1674,72 @@ impl Writer {
         (out, restored)
     }
 
+    /// Ends the checkpointer and waits for it, also when it has ended by
+    /// itself: only the last connection to close checkpoints and removes the
+    /// WAL, and that must be the writer's.
+    fn stop_checkpointer(&mut self) {
+        if let Some(c) = self.checkpointer.take() {
+            drop(c.wake);
+            let _ = c.join.join();
+        }
+    }
+
+    /// Whether an fsync failed, on this thread or on the checkpointer's.
+    fn sync_failed(&self) -> bool {
+        if self.shared.sync_failed.load(Ordering::SeqCst) {
+            SYNC_FAILED.set(true);
+        }
+        SYNC_FAILED.get()
+    }
+
+    /// Between two commands. A due checkpoint goes to the checkpointer first;
+    /// the writer copies the rest once the checkpointer replies.
+    fn checkpoint_if_due(&mut self) {
+        let due = self.since_checkpoint >= CHECKPOINT_EVERY;
+        let Some(c) = &self.checkpointer else {
+            if due {
+                self.checkpoint();
+            }
+            return;
+        };
+        if !self.copying {
+            if !due {
+                return;
+            }
+            if c.wake.send(()).is_ok() {
+                self.copying = true;
+                return;
+            }
+            self.stop_checkpointer();
+            return self.checkpoint();
+        }
+        // At the cap, wait for the passes in flight rather than grow the WAL.
+        let reply = if self.since_checkpoint >= WAL_CAP_COMMANDS {
+            c.done.recv().map_err(|_| mpsc::TryRecvError::Disconnected)
+        } else {
+            c.done.try_recv()
+        };
+        match reply {
+            Ok(()) => {}
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => self.stop_checkpointer(),
+        }
+        self.copying = false;
+        // Not due if the writer checkpointed by itself since the request.
+        if due {
+            self.checkpoint();
+        }
+    }
+
     /// PASSIVE checkpoint. It fsyncs the WAL before copying it into the database
     /// and fsyncs the database after, so once every frame is copied, every commit
-    /// so far is durable. Only another connection's reader can stop it short.
+    /// so far is durable. Another connection's reader can stop it short. While
+    /// the checkpointer holds the checkpoint lock it does nothing, and the next
+    /// due check tries again.
     fn checkpoint(&mut self) {
-        self.since_checkpoint = 0;
         // It would copy WAL pages a failed fsync may have lost into the database.
-        if SYNC_FAILED.get() {
+        if self.sync_failed() {
+            self.since_checkpoint = 0;
             return;
         }
         let res = self
@@ -1535,6 +1752,7 @@ impl Writer {
                 ))
             });
         match res {
+            Ok((1, _, _)) => return,
             Ok((0, log, copied)) if log == copied => {
                 let last = self.counters().last_seq;
                 self.durable_seq = last;
@@ -1545,6 +1763,7 @@ impl Writer {
                 self.set_degraded(true);
             }
         }
+        self.since_checkpoint = 0;
     }
 
     fn counters(&self) -> std::sync::MutexGuard<'_, Counters> {
@@ -3017,7 +3236,7 @@ mod tests {
         );
         let (mut s, _) = open(d.path());
         assert_eq!(
-            s.next_events(1000, &HashSet::new()).len(),
+            s.next_events(10_000, &HashSet::new()).len(),
             CHECKPOINT_EVERY as usize,
             "the restart recovers the WAL"
         );
@@ -3214,28 +3433,163 @@ mod tests {
     }
 
     #[test]
-    fn checkpoints_bound_the_wal() {
+    fn the_wal_starts_over_under_sustained_appends() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        let n = 10 * CHECKPOINT_EVERY;
+        let appenders: Vec<_> = (0..4)
+            .map(|t| {
+                let s = s.clone();
+                std::thread::spawn(move || {
+                    for i in (1..=n).filter(|i| i % 4 == t) {
+                        s.append(event(i)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for a in appenders {
+            a.join().unwrap();
+        }
+        // The WAL file keeps its high-water size when it starts over. An append
+        // writes 8 pages of 4 KiB plus a 24-byte frame header each at most.
+        let bound = u64::from(WAL_CAP_COMMANDS + APPEND_GROUP_MAX as u32) * 8 * (4096 + 24) + 32;
+        let size = std::fs::metadata(&wal).unwrap().len();
+        assert!(size <= bound, "WAL {size} bytes, bound {bound}");
+        // Every start heard Ok after its fsync, so a power loss keeps them all.
+        let (mut p, _) = open(power_loss_copy(d.path()).path());
+        assert_eq!(p.next_events(n as usize, &HashSet::new()).len(), n as usize);
+    }
+
+    /// A checkpoint that crawls (every write to the database file waits, as on a
+    /// disk out of write budget) holds up no append until the WAL reaches its
+    /// cap: commits only write the WAL.
+    #[test]
+    fn appends_wait_for_a_running_checkpoint_only_at_the_cap() {
         crate::sync_vfs::install();
         let d = tempfile::tempdir().unwrap();
         let (s, _) = open(d.path());
         let (db, wal) = spool_files(d.path());
-        // The first command waits for the maintenance pass that runs at start.
         s.append(event(1)).unwrap();
-        let db0 = crate::sync_vfs::syncs(&db);
-        // The checkpoint after command 3 * CHECKPOINT_EVERY runs before the next.
-        let n = 3 * CHECKPOINT_EVERY + 1;
-        for i in 2..=n {
-            s.append(event(i)).unwrap();
-        }
-        let checkpoints = crate::sync_vfs::syncs(&db) - db0;
-        assert_eq!(
-            checkpoints, 3,
-            "one checkpoint per {CHECKPOINT_EVERY} commands"
-        );
-        // An append writes 8 pages of 4 KiB plus a 24-byte frame header each.
-        let bound = u64::from(CHECKPOINT_EVERY + 1) * 8 * (4096 + 24) + 32;
+        crate::sync_vfs::block_writes(&db, true);
+        let n = WAL_CAP_COMMANDS + 1;
+        let (tx, rx) = mpsc::channel();
+        let appender = {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                for i in 2..=n {
+                    if tx.send(s.append(event(i))).is_err() {
+                        return;
+                    }
+                }
+            })
+        };
+        let done = (2..n)
+            .take_while(|_| matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Ok(_))))
+            .count();
+        let at_cap = rx.recv_timeout(Duration::from_millis(300));
+        crate::sync_vfs::block_writes(&db, false);
+        assert_eq!(done, n as usize - 2, "appends waited for a checkpoint");
+        assert!(at_cap.is_err(), "the writer ran past the cap");
+        assert_eq!(rx.recv().unwrap(), Ok(Appended { sequence: n as i64 }));
+        appender.join().unwrap();
+        let bound = u64::from(WAL_CAP_COMMANDS + 1) * 8 * (4096 + 24) + 32;
         let size = std::fs::metadata(&wal).unwrap().len();
         assert!(size <= bound, "WAL {size} bytes, bound {bound}");
+    }
+
+    /// The checkpointer's fsync, of the WAL before a copy or of the database
+    /// after it, fails the same way as the writer's: the writer stops, no copy
+    /// counts as durable, and a restart recovers the WAL.
+    #[tokio::test]
+    async fn a_failed_checkpointer_fsync_stops_the_writer() {
+        crate::sync_vfs::install();
+        for on_db in [false, true] {
+            let d = tempfile::tempdir().unwrap();
+            let (s, _) = open(d.path());
+            let (db, wal) = spool_files(d.path());
+            // The first commit after open may sync a fresh WAL header. Completions
+            // sync nothing after it, so the next fsync is the checkpointer's.
+            s.append(completed(1)).unwrap();
+            let db0 = crate::sync_vfs::syncs(&db);
+            crate::sync_vfs::fail_next_sync(if on_db { &db } else { &wal });
+            for n in 2..=CHECKPOINT_EVERY {
+                s.append(completed(n)).unwrap();
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while s.snapshot().degraded_reason != Some(DegradedReason::FsyncFailed) {
+                assert!(std::time::Instant::now() < deadline, "no failure reported");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_stopped(s).await;
+            assert_eq!(
+                crate::sync_vfs::syncs(&db),
+                db0,
+                "no database fsync after it"
+            );
+            let (mut s, _) = open(d.path());
+            assert_eq!(
+                s.next_events(10_000, &HashSet::new()).len(),
+                CHECKPOINT_EVERY as usize,
+                "the restart recovers the WAL"
+            );
+        }
+    }
+
+    /// A commit that lands while a pass copies makes SQLite skip its database
+    /// fsync. The checkpointer's own fsync must then run and fail-stop before
+    /// any further pass.
+    #[tokio::test]
+    async fn a_failed_database_fsync_after_a_pass_a_commit_raced_stops_the_checkpointer() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (db, wal) = spool_files(d.path());
+        s.append(completed(1)).unwrap();
+        crate::sync_vfs::block_writes(&db, true);
+        let wal0 = crate::sync_vfs::syncs(&wal);
+        for n in 2..=CHECKPOINT_EVERY {
+            s.append(completed(n)).unwrap();
+        }
+        // The pass syncs the WAL first, then waits to write the database.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while crate::sync_vfs::syncs(&wal) == wal0 {
+            assert!(std::time::Instant::now() < deadline, "no pass started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let wal1 = crate::sync_vfs::syncs(&wal);
+        s.append(completed(CHECKPOINT_EVERY + 1)).unwrap();
+        crate::sync_vfs::fail_next_sync(&db);
+        crate::sync_vfs::block_writes(&db, false);
+        while s.snapshot().degraded_reason != Some(DegradedReason::FsyncFailed) {
+            assert!(std::time::Instant::now() < deadline, "no failure reported");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            crate::sync_vfs::syncs(&wal),
+            wal1,
+            "no pass after the failed database fsync"
+        );
+        assert_stopped(s).await;
+    }
+
+    /// Closing joins the checkpointer first, so the writer's connection is the
+    /// last one and its close copies the WAL into the database and removes it.
+    #[tokio::test]
+    async fn close_joins_the_checkpointer_and_removes_the_wal() {
+        crate::sync_vfs::install();
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = open(d.path());
+        let (_, wal) = spool_files(d.path());
+        for n in 1..=2 * CHECKPOINT_EVERY {
+            s.append(event(n)).unwrap();
+        }
+        s.close().await;
+        assert!(!wal.exists(), "the close checkpoint ran");
+        let (mut s, _) = open(d.path());
+        let n = 2 * CHECKPOINT_EVERY as usize;
+        assert_eq!(s.next_events(n, &HashSet::new()).len(), n);
     }
 
     #[test]
