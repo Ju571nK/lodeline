@@ -307,11 +307,15 @@ impl MetadataStore {
         tx.commit()?;
         // secure_delete zeroes freed pages in the database, but the WAL can
         // still hold older copies until it is checkpointed and truncated.
-        if conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-            .is_err()
-        {
-            tracing::warn!("proxy metadata WAL checkpoint after sweep failed");
+        // A busy checkpoint is a row with busy=1, not an error.
+        let busy = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        if !matches!(busy, Ok(0)) {
+            tracing::error!(
+                "proxy metadata WAL truncate after sweep did not complete; \
+                 the WAL can hold swept entries until the next checkpoint"
+            );
         }
         Ok(deleted)
     }
