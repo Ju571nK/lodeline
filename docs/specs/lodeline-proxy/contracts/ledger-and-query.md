@@ -81,6 +81,18 @@ Related lifetimes:
   immutable first baseline of a `(proxy_id, scope key, canon, key_id)` chain are kept
   for the life of the chain. A superseded non-baseline snapshot is kept at least E
   after it was superseded.
+- **End of a chain**: a chain ends when its scope key holds a snapshot of another
+  chain that is later in `(observed_at, inventory_id)` order than every snapshot of
+  the chain and is not `pending_previous`. A key rotation or a canon change ends the
+  old chain this way, declared or not. When that snapshot's `received_at` is more
+  than E old, every snapshot of the ended chain is deleted, with its members and
+  rotation links. A chain that has a snapshot later than that one has not ended.
+  The rule depends only on the stored rows and `received_at`, not on arrival order.
+- The first snapshot of the new chain keeps its rotation links while the new chain
+  lives, so the `from` entries of one rotation stay. Storage is therefore bounded
+  per rotation, not per proxy lifetime. A scope key that stops reporting (for
+  example, a removed upstream) does not end its chain. Its latest snapshot and first
+  baseline stay, bounded by the number of scope keys.
 - **Drift records and re-baseline markers**: at least E from `detected_at`.
 - **Registry entries** outlive every reference to them: events (above), snapshot
   membership, drift records, rotation links and held `registry_conflict` gaps. Markers

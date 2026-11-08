@@ -279,6 +279,9 @@ marker.
 
 - The **latest complete snapshot** and the **immutable first baseline** are kept
   separately per `(proxy_id, scope key, canon, key_id)` (T-00 and D-05 boundary).
+  After a key rotation or a canon change, the old chain ends. Its snapshots are
+  deleted E after the new chain's snapshot is received (ledger-and-query.md L1, end
+  of a chain).
 - `DriftRecord`: `{drift_id, proxy_id, scope key, inventory_id, previous_inventory_id,
   change (added|removed|changed), metadata_ref, previous_metadata_ref?, detected_at}`.
   It is created only from a `compared` complete report, never from an incomplete one.

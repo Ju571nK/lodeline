@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-08 · 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-08 · key·canon 변경 뒤 inventory chain 끝내기(`feat/proxy-chain-end`), 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -26,6 +26,51 @@ privacy 요청으로 entry 하나의 내용을 지우고 stub은 남긴다(regis
 - 시험: 관리 route e2e(200, 감사, 멱등, 403, 404 두 종류, 422), 재업로드·event·sweep, v2 → v3 이전,
   DB 파일과 WAL 원본 bytes에 지운 definition의 marker가 없음(작은 entry와 overflow page entry). checkpoint를 빼거나 usage
   재계산을 빼면 시험이 실패함을 확인했다.
+
+## 2026-11-08 key·canon 변경 뒤 inventory chain 끝내기 (`feat/proxy-chain-end`, #279)
+
+문제: L1은 chain의 최신 snapshot과 첫 baseline을 "for the life of the chain" 보존한다. 그런데 chain을 끝내는 규칙이 없었다. key
+rotation이나 canon 변경 뒤에도 옛 chain의 두 snapshot, 그 `inv_members`, 첫 snapshot의 `inv_links`가 계속 남았다. 이 행의 ref는 metadata
+pass(아래 절)의 live 집합에 들어가므로 그 entry도 지워지지 않았다. key를 바꿀 때마다 저장량이 늘어 결국 503 `storage_limit`에 닿는다.
+
+규칙(L1 "End of a chain"): chain C의 scope key에 다른 chain의 snapshot n이 있고, n이 `pending_previous`가 아니고,
+`(observed_at, inventory_id)` 순서로 C의 모든 snapshot보다 뒤면 C는 끝났다. n의 `received_at`이 E보다 오래되면(기존 sweep과 같은 cutoff)
+C의 snapshot 전부를 member, link와 함께 지운다. 최신 snapshot과 첫 baseline도 포함한다. C에 n보다 뒤인 snapshot이 있으면 끝나지 않았다.
+저장된 행과 `received_at`만으로 정해지므로 도착 순서와 무관하다(`ledger_inventory.rs` 모듈 문서의 order independence).
+
+수정(`ledger_inventory.rs` `sweep_proxy`): schema 변경 없음. `doomed`에 조건 하나를 더했다. `ended`는 `MATERIALIZED` CTE다. chain마다
+최신 snapshot l(같은 chain에 더 뒤인 행이 없음, `chain_pred`와 `earlier_pred`)을 찾는다. 같은 scope key에 l보다 뒤이고, 대기 중이 아니고,
+cutoff 전에 받은 snapshot이 있으면 그 chain을 담는다. snapshot d는 자기 chain이 `ended`에 있으면 지운다. `scope_pred`를 `chain_pred`에서
+떼어 냈다. l보다 뒤인 행은 정의상 C의 행이 아니므로 "다른 chain" 조건은 따로 두지 않는다.
+
+형태를 고른 근거(측정, 로컬 macOS, sqlite3 CLI 3.51, 각 한 번 실행, 크기 비교용): snapshot d마다 "d 뒤의 n이 있고 n 뒤에 같은 chain 행이
+없음"을 보는 첫 안은 끝나지 않은 chain 20,000행에서 20.6초였다. d마다 같은 chain의 뒤 행을 훑기 때문이다(이차). d마다 chain의 최신 행을
+찾는 correlated 형태는 그 경우 0.04초였지만, rotation 직후(옛 chain 20,000행, 아직 E가 지나지 않은 새 chain 20,000행)에는 27.4초였다.
+옛 chain의 d마다 새 chain을 훑는다. CTE 형태는 두 경우 모두 0.02에서 0.04초였다. sweep은 ledger 쓰기 transaction 안에서 돌므로 이차 형태는
+쓰지 않았다.
+
+EXPLAIN QUERY PLAN(bundled SQLite 3.45.0, `DELETE FROM inv_snapshots` 문): d는 `inv_snapshots_proxy (proxy_id=?)`. 기존 조건의 f는
+`inv_snapshots_chain`(chain key 전체와 `observed_at_s<?`). `ended`는 `MATERIALIZE`로 문마다 한 번 계산한다. 그 안의 l은
+`inv_snapshots_chain (proxy_id=?)`, m은 `inv_snapshots_chain`(chain key 전체와 `observed_at_s>?`), n은 `inv_snapshots_scope`(scope key와
+`observed_at_s>?`). d와 `ended`의 대조는 automatic covering index다. 처음에는 새 조건이 `d.proxy_id = ?1` 밖에 있어 d가 `SCAN`(모든
+proxy의 snapshot)이었다. 조건 전체를 `d.proxy_id = ?1 AND (...)`로 묶어 고쳤다.
+
+결과: 정상 상태에서 남는 것은 현재 chain, 새 chain 첫 snapshot의 link(`inv_links.from`, 한 번의 rotation 몫, 새 chain이 사는 동안), E 안에
+끝난 chain이다. 저장량은 rotation 한 번 몫으로 묶이고 proxy 수명 동안 쌓이지 않는다. 끝난 chain의 report가 행이 지워지고 report id 기억
+(max(E, T))도 지난 뒤 다시 오면, conflict가 아니라 새 행으로 받고 다음 sweep에서 다시 지운다.
+
+기존 시험 변경: `a_rotation_link_keeps_its_entry_after_the_snapshot_is_gone`은 key 1이 key-2 snapshot 뒤에 다시 보고했다. 새 규칙에서는
+key-2 chain이 끝나 그 link가 사라진다. rotation snapshot의 `observed_at`을 3에서 5로 옮겨 key 2를 현재 chain으로 두고, 끝난 key-1 chain에만
+있던 ref 5가 지워짐을 확인한다.
+
+시험(`tests/proxy_inventory.rs`): 선언한 rotation(`rebaseline`)으로 새 key가 되면 n 수신 + E에는 옛 chain이 남고 + E + 1에 전부 지워지며
+새 chain과 첫 snapshot의 link는 남음, 선언 없는 key 변경(`initial_baseline`)도 같음, 다른 key 뒤에 다시 보고한 chain은 끝나지 않음(끼어든
+chain이 끝남), 다른 scope key(다른 `credential_scope_id`)의 뒤 snapshot은 chain을 끝내지 않음, 세 report의 여섯 도착 순서 모두 같은 결과,
+metadata pass까지 이어서 끝난 chain에만 있고 link가 없는 entry는 chain이 지워지고 G가 지난 뒤 지워지고 그 전에는 남음. 새 시험 다섯 개와
+바꾼 시험 하나는 `sweep_proxy` 변경 없이 실패한다. 다른 scope key 시험은 변경 없이도 통과하는 회귀 방지 시험이다.
+
+범위 밖: 보고를 멈춘 scope key(upstream 제거)는 이 규칙으로 끝나지 않는다. 그 최신 snapshot과 첫 baseline은 남고 scope key 수로 묶인다.
+privacy 요청의 내용 삭제(`content_state`), `stale_after`도 이번 범위가 아니다.
 
 ## 2026-11-08 서버 metadata store 보존 기간 (`feat/proxy-metadata-sweep`, #279)
 
@@ -64,9 +109,9 @@ entry가 quota를 풀고, 그 ref의 start는 424, 재업로드 200 `registered`
 측정(로컬 macOS, release, 측정): start event 200,000행에서 live 집합 계산이 약 175 ms. 기본 상한 500만 행이면 시간당 한 번 수 초 동안
 ingest가 기다린다(추정, 선형 외삽).
 
-남은 일(범위 밖): privacy 요청의 내용 삭제(`content_state`, stub), read view(R6), `stale_after` 90초 상수(`query.rs`). key rotation 뒤 옛
-key chain의 최신 snapshot과 첫 baseline은 chain이 끝나지 않는 한 남으므로(L1 "for the life of the chain"), 그 member entry도 남는다.
-rotation이 반복되면 이 pass만으로는 entry 수가 줄지 않는다.
+남은 일(범위 밖): read view(R6), `stale_after` 90초 상수(`query.rs`). 이 pass를 넣을 때는 key rotation 뒤 옛 chain이 끝나지 않아
+그 member entry가 남았다. 이는 위 "key·canon 변경 뒤 inventory chain 끝내기" 절에서 처리했다. privacy 요청의 내용 삭제는 위
+"metadata entry의 내용 삭제" 절에서 처리했다.
 
 ## 2026-11-08 spool 묶음을 transaction 하나로 (`perf/proxy-group-tx`)
 
