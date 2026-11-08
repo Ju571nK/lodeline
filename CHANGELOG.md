@@ -22,8 +22,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 ### Fixed
 
 - Claude Code hook scoring is closer to what Claude Code runs. A `*` matcher whose handlers all
-  have an `if` rule that matches every call, such as `WebFetch(domain:*)` or `Edit(~/**)`, is now
-  reported as a broad matcher; before, it was a missed finding. An `if` rule with a tool-name glob,
+  have an `if` rule that matches every call, such as `WebFetch(domain:*)`, or every path under home
+  or the working directory, such as `Edit(~/**)` or `Read(./**)`, is now reported as a broad
+  matcher; before, it was a missed finding. Only file tools (Read, Edit, Write, NotebookEdit) take
+  these path anchors, so `Bash(./*)` stays narrowed. An `if` rule with a tool-name glob,
   such as `mcp__*(x)`, matches no call, so its group is no longer reported as broad. A user-level
   `disableAllHooks: true` now turns off project hooks when the project files leave it unset. In
   Codex, a permission profile entry `"C:/**" = "write"` is no longer reported as a disabled

@@ -421,9 +421,11 @@ pub(crate) fn emit_hook_reasons(
 
 /// The tool a handler's `if` permission rule narrows it to. Only `Tool(arg)`
 /// with an argument that is not all wildcards narrows: a bare tool name, `*`,
-/// `Bash(*)`, `Edit(**)`, `Edit(~/**)`, `WebFetch(domain:*)` or an unparsable
-/// rule admits every call. A tool-name glob such as `mcp__*(x)` narrows to
-/// nothing, because Claude Code matches the `if` tool name exactly.
+/// `Bash(*)`, `Edit(**)`, `WebFetch(domain:*)` or an unparsable rule admits
+/// every call, and `Edit(~/**)` or `Read(./**)` admits every path under home
+/// or the working directory, which this scores as broad too. A tool-name glob
+/// such as `mcp__*(x)` narrows to nothing, because Claude Code matches the
+/// `if` tool name exactly.
 fn hook_condition(hook: &Value) -> Option<&str> {
     let (tool, arg) = hook
         .get("if")?
@@ -435,11 +437,14 @@ fn hook_condition(hook: &Value) -> Option<&str> {
     let arg = arg.trim();
     let arg = match tool {
         "WebFetch" => arg.strip_prefix("domain:").unwrap_or(arg),
-        // `~/` and `./` anchor a path rule at home and the working directory.
-        _ => arg
+        // Only these tools match the argument as a path, where `~/` and `./`
+        // anchor it at home and the working directory. Other tools match the
+        // text, so `Bash(./*)` runs only for commands that start with `./`.
+        "Read" | "Edit" | "Write" | "NotebookEdit" => arg
             .strip_prefix(['~', '.'])
             .filter(|rest| rest.starts_with('/'))
             .unwrap_or(arg),
+        _ => arg,
     };
     // The tool must look like a tool name: it reaches evidence, so free text
     // (`Bearer abc (x)`) must not. `**/*` matches every path, so `/` is a wildcard here.
