@@ -12,6 +12,21 @@
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
 
+## 2026-11-08 metadata entry의 내용 삭제 (`feat/proxy-content-delete`, #279)
+
+privacy 요청으로 entry 하나의 내용을 지우고 stub은 남긴다(registry.md R1, README N9 retention 행).
+
+- 관리 route `POST /v1/proxies/{id}/metadata/{metadata_ref}/delete-content`, scope `identity`, CLI `lodeline-server proxy delete-content`.
+  감사 action은 `proxy.metadata_content_delete`이고 record에 ref를 남긴다. definition은 남기지 않는다.
+- metadata schema v3: `content_state TEXT NOT NULL DEFAULT 'present'`(`present`·`deleted`만). v1·v2 파일은 열 때 옮긴다.
+- 삭제는 `content_state='deleted'`, 빈 `definition`, 그 proxy의 usage 재계산, commit 뒤 `wal_checkpoint(TRUNCATE)`다.
+  `secure_delete`는 이미 켜져 있다(`open_hardened`). `observed_at`은 `NOT NULL`이고 proxy 시계 값이라 그대로 둔다.
+- 같은 불변 필드의 재업로드는 `duplicate`이고 definition을 되살리지 않는다. 그 ref의 event는 계속 200이고, sweep은 stub도 지운다.
+- 서버에는 definition을 읽는 경로가 없다(read view R6 미구현). 오류 코드 `metadata_ref_unknown`(404)을 더했다.
+- 시험: 관리 route e2e(200, 감사, 멱등, 403, 404 두 종류, 422), 재업로드·event·sweep, v2 → v3 이전,
+  DB 파일과 WAL 원본 bytes에 지운 definition의 marker가 없음(작은 entry와 overflow page entry). checkpoint를 빼거나 usage
+  재계산을 빼면 시험이 실패함을 확인했다.
+
 ## 2026-11-08 서버 metadata store 보존 기간 (`feat/proxy-metadata-sweep`, #279)
 
 문제: 서버의 `proxy-metadata.sqlite`는 entry를 지우지 않았다(`metadata.rs` 모듈 문서 "There is no sweep"). 상한(proxy별 entry 수, 전체

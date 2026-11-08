@@ -133,6 +133,7 @@ ledger-and-query L3/L5, registry R2)에서 [OPEN]이다. "동결"은 D-03 ingest
 | `forbidden` | 403 | 관리 route: scope 부족 | decided 2026-10-11 (#251) |
 | `already_exists` | 409 | 관리 route: 이미 있는 proxy_id, 다른 항목·관리 caller가 가진 fingerprint | decided 2026-10-11 (#251) |
 | `invalid_state` | 409 | 관리 route: 허용되지 않는 lifecycle 전이(예: retire 뒤 enable) | decided 2026-10-11 (#251) |
+| `metadata_ref_unknown` | 404 | 관리 route `delete-content`: 그 proxy에 이 `metadata_ref`의 entry가 없다 ([registry.md R1](registry.md)) | decided 2026-11-08 (#279) |
 | `disabled` / `retired` | 403 | 인증된 proxy 신원의 상태 거절(미등록·불일치는 404) | decided 2026-10-11 |
 | `audit_unavailable` | 503 | 관리 감사 기록 실패, 효과 없음 | server-only, 2026-10-11 (#251) |
 | `payload_too_large` | 413 | 요청 body 크기 상한 초과 | decided 2026-10-14 (S4, #271) |

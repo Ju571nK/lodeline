@@ -1727,3 +1727,148 @@ async fn sighup_reloads_the_verifier_file() {
         "SIGHUP did not reload (no request triggered a lazy refresh)"
     );
 }
+
+const CONTENT_MARKER: &str = "CONTENT-DELETE-MARKER-41d7";
+
+/// `(content_state, definition length, size)` of one stored entry and the
+/// proxy's usage bytes, read from the metadata file itself.
+fn stored(fx: &Fx, proxy: &str, mref: &str) -> (String, i64, i64, i64) {
+    let c = rusqlite::Connection::open(fx.p("proxy-metadata.sqlite")).unwrap();
+    let (state, len, size): (String, i64, i64) = c
+        .query_row(
+            "SELECT content_state, length(definition), size FROM entries
+             WHERE proxy_id = ?1 AND metadata_ref = ?2",
+            [proxy, mref],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    let bytes: i64 = c
+        .query_row(
+            "SELECT bytes FROM usage WHERE proxy_id = ?1",
+            [proxy],
+            |r| r.get(0),
+        )
+        .unwrap();
+    (state, len, size, bytes)
+}
+
+#[tokio::test]
+async fn delete_content_keeps_the_stub_is_audited_idempotent_and_identity_scoped() {
+    let fx = Fx::new().await;
+    let (mc, port) = (fx.mgmt_client(), fx.port);
+    assert_eq!(
+        send(
+            &mc,
+            port,
+            "POST",
+            "/v1/proxies",
+            Some(T_ID),
+            Some(&reg_body("px1"))
+        )
+        .await
+        .status,
+        201
+    );
+    let mref = "00000000-0000-8000-8000-000000000001";
+    let entry: lodeline_proxy_api::RegistryEntry = serde_json::from_value(serde_json::json!({
+        "proxy_id": "px1",
+        "metadata_ref": mref,
+        "upstream_id": "up1",
+        "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+        "protocol_version": "2025-11-25",
+        "observation_source": "proxy_live",
+        "canon": "sigil-tooldef-fp-v1",
+        "key_id": "kid-000000000000000000000001",
+        "fingerprint": "f".repeat(64),
+        "observed_at": "2026-10-10T00:00:00Z",
+        "definition": {"name": CONTENT_MARKER, "pad": "x".repeat(1000)},
+    }))
+    .unwrap();
+    fx.ctx.metadata.register("px1", &[entry], 1_000).unwrap();
+    let (state, def_len, size, bytes) = stored(&fx, "px1", mref);
+    assert_eq!((state.as_str(), size), ("present", bytes));
+    assert!(def_len > 1000);
+
+    let path = format!("/v1/proxies/px1/metadata/{mref}/delete-content");
+    let r = send(&mc, port, "POST", &path, Some(T_CFG), None).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "forbidden"));
+    assert_eq!(stored(&fx, "px1", mref).0, "present", "refused: no effect");
+
+    for round in 0..2 {
+        let r = send(&mc, port, "POST", &path, Some(T_ID), None).await;
+        assert_eq!(r.status, 200, "round {round}");
+        assert_eq!(r.json()["metadata_ref"], mref);
+        assert_eq!(r.json()["content_state"], "deleted");
+        assert_eq!(
+            stored(&fx, "px1", mref),
+            ("deleted".into(), 0, size - def_len, bytes - def_len),
+            "round {round}: definition empty, usage dropped by its length"
+        );
+    }
+    let lines = audit_lines(&fx);
+    let ok: Vec<_> = lines
+        .iter()
+        .filter(|l| l["action"] == "proxy.metadata_content_delete" && l["result"] == "ok")
+        .collect();
+    assert_eq!(ok.len(), 2, "every call is audited");
+    assert_eq!(ok[0]["metadata_ref"], mref);
+    assert_eq!(ok[0]["proxy_id"], "px1");
+    assert_eq!(ok[0]["scope"], "identity");
+
+    let other = "00000000-0000-8000-8000-000000000002";
+    let r = send(
+        &mc,
+        port,
+        "POST",
+        &format!("/v1/proxies/px1/metadata/{other}/delete-content"),
+        Some(T_ID),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (r.status, r.body),
+        (404, err_body(ErrorCode::MetadataRefUnknown))
+    );
+    let r = send(
+        &mc,
+        port,
+        "POST",
+        &format!("/v1/proxies/px9/metadata/{mref}/delete-content"),
+        Some(T_ID),
+        None,
+    )
+    .await;
+    assert_proxy_unknown(&r);
+    let r = send(
+        &mc,
+        port,
+        "POST",
+        "/v1/proxies/px1/metadata/not-a-ref/delete-content",
+        Some(T_ID),
+        None,
+    )
+    .await;
+    assert_eq!((r.status, r.code().as_str()), (422, "semantic_invalid"));
+
+    let lines = audit_lines(&fx);
+    let refused: Vec<_> = lines
+        .iter()
+        .filter(|l| l["action"] == "proxy.metadata_content_delete" && l["result"] != "ok")
+        .map(|l| (l["result"].as_str().unwrap(), l["metadata_ref"].as_str()))
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            ("forbidden", None),
+            ("metadata_ref_unknown", Some(other)),
+            ("proxy_unknown", None),
+            ("semantic_invalid", None),
+        ]
+    );
+    let audit = std::fs::read_to_string(fx.p(AUDIT_FILE)).unwrap();
+    assert!(
+        !audit.contains(CONTENT_MARKER),
+        "no definition in the audit"
+    );
+    assert!(!audit.contains("not-a-ref"), "an invalid ref is not echoed");
+}

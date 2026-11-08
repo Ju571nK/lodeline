@@ -3293,6 +3293,174 @@ async fn a_held_registry_conflict_gap_keeps_its_entry() {
     assert!(!kept(&fx, 7));
 }
 
+/// `(content_state, definition)` of a px-a entry, read from the file.
+fn content(fx: &Fx, n: u32) -> (String, Vec<u8>) {
+    let c = rusqlite::Connection::open(fx._dir.path().join("proxy-metadata.sqlite")).unwrap();
+    c.query_row(
+        "SELECT content_state, definition FROM entries
+         WHERE proxy_id = 'px-a' AND metadata_ref = ?1",
+        [mref(n)],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn deleted_content_keeps_the_stub_for_uploads_events_and_the_sweep() {
+    let fx = Fx::new().await;
+    let base = unix_now();
+    reg_at(&fx, &[8, 9], base);
+    for n in [8, 9] {
+        assert!(fx.ctx.metadata.delete_content("px-a", &mref(n)).unwrap());
+    }
+    assert!(!fx.ctx.metadata.delete_content("px-a", &mref(10)).unwrap());
+    assert!(
+        !fx.ctx.metadata.delete_content("px-b", &mref(8)).unwrap(),
+        "another proxy's ref is not found"
+    );
+    assert_eq!(content(&fx, 8), ("deleted".into(), Vec::new()));
+
+    let again = reg_at(&fx, &[8], base + 5);
+    let dup: Vec<&str> = again.duplicate.iter().map(|r| r.as_str()).collect();
+    assert_eq!(dup, [mref(8)], "an equal upload is a duplicate");
+    assert_eq!(
+        content(&fx, 8),
+        ("deleted".into(), Vec::new()),
+        "and does not restore the definition"
+    );
+    let differing = reg_entry("px-a", 8, UP1, CS1, 2);
+    assert_eq!(
+        fx.ctx.metadata.register("px-a", &[differing], base + 6),
+        Err(lodeline_server::proxy::metadata::UploadError::Conflicts(
+            vec![0]
+        ))
+    );
+    assert_eq!(post_events(&fx, &[start(1, 1, 8)]).await.status, 200);
+
+    sweep_at(&fx, base + grace(&fx) + 1);
+    assert!(kept(&fx, 8), "named by a retained start");
+    assert!(!kept(&fx, 9), "an unreferenced stub older than G goes");
+}
+
+#[test]
+fn deleted_content_is_in_neither_the_database_file_nor_its_wal() {
+    use lodeline_server::proxy::metadata::{MetadataCaps, MetadataStore};
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("m.sqlite");
+    let caps = MetadataCaps {
+        entries_per_proxy: 10,
+        bytes_per_proxy: 1 << 22,
+        bytes_total: 1 << 22,
+    };
+    let s = MetadataStore::open(&path, caps).unwrap();
+    // A small definition lives in a b-tree page, a large one in overflow pages.
+    let marker = |n: u32| format!("CONTENT-DELETE-MARKER-{n}");
+    let entries: Vec<RegistryEntry> = [(1u32, 10usize), (2, 100_000), (3, 10)]
+        .iter()
+        .map(|&(n, pad)| {
+            let mut e = reg_entry("px-a", n, UP1, CS1, 1);
+            e.definition = json!({"name": marker(n), "pad": "x".repeat(pad)});
+            e
+        })
+        .collect();
+    s.register("px-a", &entries, 1_000).unwrap();
+    let raw = || {
+        let mut b = std::fs::read(&path).unwrap();
+        b.extend(std::fs::read(path.with_extension("sqlite-wal")).unwrap_or_default());
+        b
+    };
+    let has = |b: &[u8], m: &str| b.windows(m.len()).any(|w| w == m.as_bytes());
+    let before = raw();
+    assert!(
+        (1..=3).all(|n| has(&before, &marker(n))),
+        "the search sees stored content"
+    );
+    for n in [1, 2] {
+        assert!(s.delete_content("px-a", &mref(n)).unwrap());
+    }
+    let after = raw();
+    assert!(!has(&after, &marker(1)), "small definition left behind");
+    assert!(!has(&after, &marker(2)), "large definition left behind");
+    assert!(has(&after, &marker(3)), "other content is untouched");
+}
+
+#[test]
+fn a_v2_metadata_store_migrates_to_v3_with_every_entry_present() {
+    use lodeline_server::proxy::metadata::{MetadataCaps, MetadataStore};
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("m.sqlite");
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE entries (
+                proxy_id TEXT NOT NULL, metadata_ref TEXT NOT NULL, upstream_id TEXT NOT NULL,
+                credential_scope_id TEXT NOT NULL, protocol_version TEXT NOT NULL,
+                observation_source TEXT NOT NULL, canon TEXT NOT NULL, key_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL, observed_at TEXT NOT NULL, definition BLOB NOT NULL,
+                size INTEGER NOT NULL, registered_at INTEGER NOT NULL,
+                last_upload_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (proxy_id, metadata_ref)) WITHOUT ROWID;
+             CREATE INDEX entries_ref ON entries (metadata_ref);
+             CREATE TABLE usage (proxy_id TEXT PRIMARY KEY, entries INTEGER NOT NULL,
+                bytes INTEGER NOT NULL) WITHOUT ROWID;
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        for n in [1u32, 2] {
+            c.execute(
+                "INSERT INTO entries VALUES ('px-a', ?1, 'up1', ?2, '2025-11-25', 'proxy_live',
+                     'sigil-tooldef-fp-v1', ?3, ?4, '2026-10-10T00:00:00Z', x'7b7d', 400, 1000,
+                     1000)",
+                rusqlite::params![mref(n), CS1, kid(1), "f".repeat(64)],
+            )
+            .unwrap();
+        }
+        c.execute("INSERT INTO usage VALUES ('px-a', 2, 800)", [])
+            .unwrap();
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let caps = MetadataCaps {
+        entries_per_proxy: 10,
+        bytes_per_proxy: 1 << 20,
+        bytes_total: 1 << 20,
+    };
+    let s = MetadataStore::open(&path, caps).unwrap();
+    assert_eq!(s.count("px-a").unwrap(), 2, "every v2 entry is kept");
+    assert!(s.delete_content("px-a", &mref(2)).unwrap());
+    drop(s);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let v: i64 = c
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 3);
+    let states: Vec<(String, Vec<u8>)> = c
+        .prepare("SELECT content_state, definition FROM entries ORDER BY metadata_ref")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        states,
+        [
+            ("present".into(), b"{}".to_vec()),
+            ("deleted".into(), Vec::new())
+        ],
+        "a migrated entry has its content until it is deleted"
+    );
+    let usage: i64 = c
+        .query_row("SELECT bytes FROM usage WHERE proxy_id = 'px-a'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(usage, 798, "usage drops by the deleted definition");
+    assert!(
+        c.execute("UPDATE entries SET content_state = 'gone'", [])
+            .is_err(),
+        "only present or deleted"
+    );
+}
+
 #[tokio::test]
 async fn an_ingest_that_starts_during_the_pass_waits_and_sees_the_deletion() {
     let fx = Fx::new().await;
@@ -3477,7 +3645,7 @@ fn a_v1_metadata_store_migrates_and_keeps_every_entry() {
     let v: i64 = c
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
     let usage: (i64, i64) = c
         .query_row(
             "SELECT entries, bytes FROM usage WHERE proxy_id = 'px-a'",
