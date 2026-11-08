@@ -78,6 +78,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- `lodeline-proxy` now creates proxy event ids (`event_id`) as time-ordered UUIDv7 instead of
+  random UUIDv4, so the spool's unique index on them grows at one end. In local measurements this
+  cut the distinct spool pages written per 1,024 commands from about 1,006 to 225. The id format
+  and the contract do not change, and ids already stored stay as they are. A v7 id carries its
+  creation time to the millisecond, which the event already records in `occurred_at`. AWS
+  measurement is pending. See `docs/specs/lodeline-proxy/execution.md` (2026-11-08).
 - `lodeline-proxy` now commits spool records that are already queued together and covers them
   with one fsync (group commit). Before, every concurrent `invocation.started` record waited for
   its own fsync, which capped proxied throughput at about 400 calls/s on an AWS gp3 volume. A
