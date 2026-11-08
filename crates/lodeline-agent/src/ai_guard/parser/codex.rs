@@ -890,11 +890,11 @@ fn program_basename(word: &str) -> String {
     let mut parts = word.rsplit(['/', '\\']);
     let name = parts.next().unwrap_or("");
     // Skip empty parts: `a//b`, or a raw string's doubled `\\`.
-    let dirs: Vec<&str> = parts.filter(|p| !p.is_empty()).collect();
-    let home_dir = match dirs.as_slice() {
-        [] => false,
-        [dir] if word.starts_with('/') => !matches!(*dir, "bin" | "sbin"),
-        [dir, ..] => dir.eq_ignore_ascii_case("home") || dir.eq_ignore_ascii_case("Users"),
+    let mut dirs = parts.filter(|p| !p.is_empty());
+    let home_dir = match (dirs.next(), dirs.next()) {
+        (None, _) => false,
+        (Some(dir), None) if word.starts_with('/') => !matches!(dir, "bin" | "sbin"),
+        (Some(dir), _) => dir.eq_ignore_ascii_case("home") || dir.eq_ignore_ascii_case("Users"),
     };
     let token_like = TOKEN_PREFIXES.iter().any(|p| name.starts_with(p))
         || (name.len() >= 20
@@ -950,15 +950,23 @@ fn rules_texts(rules_dir: &Path) -> Vec<String> {
 /// reads as an approval. Starlark has no `//` comment: `//` is floor division.
 /// A line outside brackets cannot start with it, so Codex rejects a file that
 /// has one; such a line is still dropped, so a rule it comments out is not
-/// reported.
+/// reported. A `\` line continuation is whitespace, not a new line.
 fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     let mut depth = 0usize;
+    let mut line_start = true;
     while let Some(c) = rest.chars().next() {
-        let line_start = || out.rsplit('\n').next().is_some_and(|l| l.trim().is_empty());
-        let comment = c == '#' || (depth == 0 && rest.starts_with("//") && line_start());
-        let len = if comment {
+        let comment = c == '#' || (depth == 0 && line_start && rest.starts_with("//"));
+        let continuation = ["\\\n", "\\\r\n"].into_iter().find(|j| rest.starts_with(j));
+        if c == '\n' {
+            line_start = true;
+        } else if !c.is_whitespace() && continuation.is_none() {
+            line_start = false;
+        }
+        let len = if let Some(j) = continuation {
+            j.len()
+        } else if comment {
             rest.find('\n').unwrap_or(rest.len())
         } else if c == '"' || c == '\'' {
             string_len(rest).unwrap_or(rest.len())
@@ -1034,7 +1042,7 @@ fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
         }
         if !text[i..].starts_with(name)
             || before.is_some_and(|b| b.is_alphanumeric() || b == '_')
-            || text[..i].trim_end().ends_with(['.', '/'])
+            || operand_of_dot_or_slash(text[..i].trim_end())
         {
             continue;
         }
@@ -1052,6 +1060,19 @@ fn rule_invocations<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
         }
     }
     out
+}
+
+/// Whether code ending in `before` makes a following name an attribute or a
+/// division operand. The `.` that ends a float such as `1.` does neither.
+fn operand_of_dot_or_slash(before: &str) -> bool {
+    if before.ends_with('/') {
+        return true;
+    }
+    let Some(head) = before.strip_suffix('.') else {
+        return false;
+    };
+    let int = head.trim_end_matches(|c: char| c.is_ascii_digit());
+    int.len() == head.len() || int.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
 }
 
 /// Byte offset of the `close` that balances an already-consumed `open`.
@@ -1157,7 +1178,7 @@ fn split_top_level(s: &str) -> Vec<&str> {
 }
 
 /// The contents of a single string literal, raw or not, or None if `s` is not
-/// exactly one. A raw string stays as written.
+/// exactly one. A raw string stays as written, less any bare CR.
 fn quoted_string(s: &str) -> Option<String> {
     let s = s.trim();
     let raw = s.starts_with(['r', 'R']);
@@ -1170,7 +1191,7 @@ fn quoted_string(s: &str) -> Option<String> {
     }
     let body = &s[delim.len()..len - delim.len()];
     if raw {
-        return Some(body.to_string());
+        return Some(body.replace('\r', ""));
     }
     decode_escapes(body)
 }
@@ -1178,13 +1199,16 @@ fn quoted_string(s: &str) -> Option<String> {
 /// `body` with its escapes decoded as Codex's Starlark does (`escape` in
 /// `starlark_syntax` 0.14.2 `lexer.rs`), so `"\x61llow"` reads as `allow` and
 /// an encoded path meets the home-dir check decoded. An invalid escape fails
-/// the file in Codex, so it reads as None. An unknown one keeps its `\`.
+/// the file in Codex, so it reads as None. An unknown one keeps its `\`. A
+/// bare CR is dropped, as Starlark does.
 fn decode_escapes(body: &str) -> Option<String> {
     let mut out = String::with_capacity(body.len());
     let mut chars = body.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
-            out.push(c);
+            if c != '\r' {
+                out.push(c);
+            }
             continue;
         }
         let e = chars.next()?;
@@ -3373,12 +3397,12 @@ command = "echo inline"
     }
 
     /// A rules file near the size cap with `//` all over one line still scans
-    /// in one pass.
+    /// in one pass. Codex loads the rule at its end as an allow.
     #[test]
     fn many_floor_divisions_on_one_line_scan() {
         let rules = format!(
-            "x=1{}\nprefix_rule(pattern=[\"git\"])",
-            "//1".repeat(340_000)
+            "{}prefix_rule(pattern=[\"git\"])",
+            "x=1//1;".repeat(149_000)
         );
         assert!(rules.len() as u64 <= MAX_RULES_FILE_BYTES);
         assert_eq!(approved_by(&rules), vec!["git"]);
