@@ -21,6 +21,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The Codex project scan now reads the system config (`/etc/codex/config.toml`,
+  `%ProgramData%\OpenAI\Codex\config.toml`) under the user and project layers for sandbox
+  settings. A project `default_permissions` profile that only the system config defines, with a
+  `write` entry on the whole disk or the home folder, was missed and now scores `sandbox_disabled`.
+  A system `sandbox_mode` such as `read-only` now keeps a project `[sandbox_workspace_write]` table
+  from scoring when no higher layer picks `workspace-write`, because Codex ignores the table then.
 - Codex sandbox scoring now resolves paths against the home folder and the config folder as Codex
   does. A `writable_roots` entry or a `write` path in a `[permissions]` profile that names the home
   folder or a parent of it, such as `/home` or `~/../alice` for the home `/home/alice`, was missed
