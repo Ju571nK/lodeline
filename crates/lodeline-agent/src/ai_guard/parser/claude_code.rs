@@ -421,7 +421,13 @@ pub(crate) fn emit_hook_reasons(
 
 /// The tool a handler's `if` permission rule narrows it to. Only `Tool(arg)`
 /// with an argument that is not all wildcards narrows: a bare tool name, `*`,
-/// `Bash(*)`, `Edit(**)` or an unparsable rule admits every call.
+/// `Bash(*)`, `Edit(**)` or an unparsable rule admits every call, and
+/// `Edit(~/**)` or `Read(./**)` admits every path under home or the working
+/// directory, which this scores as broad too. A tool-name glob such as
+/// `mcp__*(x)` narrows to nothing, because Claude Code matches the `if` tool
+/// name exactly. So does any argument but `*` on WebFetch, Skill or an MCP
+/// tool, such as `WebFetch(domain:*)`: Claude Code has no argument matcher
+/// for them on the `if` path, so the handler never runs.
 fn hook_condition(hook: &Value) -> Option<&str> {
     let (tool, arg) = hook
         .get("if")?
@@ -430,15 +436,29 @@ fn hook_condition(hook: &Value) -> Option<&str> {
         .strip_suffix(')')?
         .split_once('(')?;
     let tool = tool.trim();
+    let arg = arg.trim();
+    let arg = match tool {
+        // Only these tools match the argument as a path, where `~/` and `./`
+        // anchor it at home and the working directory. Other tools match the
+        // text, so `Bash(./*)` runs only for commands that start with `./`.
+        "Read" | "Edit" | "Write" | "NotebookEdit" => arg
+            .strip_prefix(['~', '.'])
+            .filter(|rest| rest.starts_with('/'))
+            .unwrap_or(arg),
+        _ => arg,
+    };
     // The tool must look like a tool name: it reaches evidence, so free text
     // (`Bearer abc (x)`) must not. `**/*` matches every path, so `/` is a wildcard here.
     let narrows = !tool.is_empty()
         && tool
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        && !arg
-            .chars()
-            .all(|c| matches!(c, '*' | ':' | '/') || c.is_whitespace());
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '*'))
+        && (tool.contains('*')
+            || ((matches!(tool, "WebFetch" | "Skill") || tool.starts_with("mcp__"))
+                && !matches!(arg, "" | "*"))
+            || !arg
+                .chars()
+                .all(|c| matches!(c, '*' | ':' | '/') || c.is_whitespace()));
     narrows.then_some(tool)
 }
 
@@ -1225,6 +1245,8 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             cd.join("loop.md"),
             cd.join("skills"),
             cd.join("agents"),
+            // Its `disableAllHooks` reaches the project's hooks.
+            home_dir.join(".claude").join("settings.json"),
         ];
         paths.extend(shared_local_settings(&self.repo_root, home_dir));
         paths
@@ -1330,10 +1352,19 @@ fn assess_project(
         m.pointer("/permissions/defaultMode")
             .is_some_and(Value::is_string)
     });
-    // shortcut: the user's own file is not read here, so a user-level
-    // `disableAllHooks: true` the project leaves unset still scores the
-    // project's hooks; reading it needs the user config folder in this scope.
-    let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
+    // The user's file sits below the project files in precedence, so its
+    // `disableAllHooks` decides only when neither project file sets it.
+    // shortcut: `CLAUDE_CONFIG_DIR` is not known in this scope, so a user who
+    // sets it is read at `~/.claude`; pass the config dir here if that matters.
+    let user = super::read_json_optional(&home.join(".claude").join("settings.json"))
+        .ok()
+        .flatten();
+    let hooks_off = hooks_disabled(&[
+        managed.as_ref(),
+        local.as_ref(),
+        base.as_ref(),
+        user.as_ref(),
+    ]);
     // No built-in fallback here: the user scope already reports it, and a
     // project file cannot set `auto` or `bypassPermissions`.
     let start = if managed_sets_mode {
@@ -3787,6 +3818,35 @@ mod tests {
         );
     }
 
+    /// A user-level `disableAllHooks: true` turns off project hooks unless a
+    /// project file sets it back to `false`.
+    #[test]
+    fn user_disable_all_hooks_turns_off_project_hooks() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let policy = tempdir().unwrap();
+        write_settings(home.path(), r#"{"disableAllHooks": true}"#);
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            &format!("{{{USER_HOOK}}}"),
+        );
+        let reasons = assess_project(repo.path(), home.path(), policy.path()).unwrap();
+        assert!(hook_events(&reasons).is_empty(), "{reasons:?}");
+
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            &format!(r#"{{"disableAllHooks": false, {USER_HOOK}}}"#),
+        );
+        let reasons = assess_project(repo.path(), home.path(), policy.path()).unwrap();
+        assert_eq!(
+            hook_events(&reasons),
+            ["sandbox", "PreToolUse", "PreToolUse"],
+            "{reasons:?}"
+        );
+    }
+
     fn approvals(settings: &str) -> Vec<String> {
         let mut out = Vec::new();
         emit_hook_reasons(&serde_json::from_str(settings).unwrap(), &mut out).unwrap();
@@ -3864,6 +3924,74 @@ mod tests {
         ] {
             let handlers = serde_json::json!([{"command": "true", "if": rule}]).to_string();
             assert!(broad(&handlers), "{rule:?} must not narrow the matcher");
+        }
+    }
+
+    fn if_rule_is_broad(rule: &str) -> bool {
+        let settings = serde_json::json!({"hooks": {"PreToolUse": [
+            {"matcher": "*", "hooks": [{"command": "true", "if": rule}]}
+        ]}});
+        let mut out = Vec::new();
+        emit_hook_reasons(&settings, &mut out).unwrap();
+        out.iter()
+            .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
+    }
+
+    /// A file tool's path rule anchored at root, home or the working directory
+    /// matches every path under it. Only file tools take path anchors:
+    /// `Bash(./*)` runs only for commands that start with `./`.
+    #[test]
+    fn if_rule_matching_every_call_after_its_prefix_keeps_the_matcher_broad() {
+        for rule in [
+            "Edit(~/**)",
+            "Edit(//**)",
+            "Read(./**)",
+            "Write(./**)",
+            "NotebookEdit(~/**)",
+        ] {
+            assert!(
+                if_rule_is_broad(rule),
+                "{rule:?} must not narrow the matcher"
+            );
+        }
+        for rule in [
+            "Edit(~/notes/**)",
+            "Read(.*)",
+            "Bash(./*)",
+            "Bash(~/*)",
+            "Skill(./**)",
+            "mcp__a__b(./*)",
+            "Grep(./**)",
+        ] {
+            assert!(!if_rule_is_broad(rule), "{rule:?} narrows the matcher");
+        }
+    }
+
+    /// Claude Code matches an `if` tool name exactly, so a glob such as
+    /// `mcp__*` names no tool and the handler never runs.
+    #[test]
+    fn if_rule_with_a_tool_name_glob_matches_no_call() {
+        assert!(!if_rule_is_broad("mcp__*(x)"));
+        assert!(!if_rule_is_broad("mcp__*(*)"));
+    }
+
+    /// WebFetch, Skill and MCP tools have no argument matcher on the `if`
+    /// path, so any argument but `*` keeps the handler from running.
+    #[test]
+    fn if_rule_argument_on_a_tool_without_an_argument_matcher_never_runs() {
+        for rule in [
+            "WebFetch(domain:*)",
+            "WebFetch(domain:example.com)",
+            "WebFetch(**)",
+            "Skill(**)",
+            "Skill(x)",
+            "mcp__a__b(**)",
+            "mcp__a__b(x)",
+        ] {
+            assert!(!if_rule_is_broad(rule), "{rule:?} never runs");
+        }
+        for rule in ["WebFetch", "WebFetch(*)", "Skill(*)", "mcp__a__b(*)"] {
+            assert!(if_rule_is_broad(rule), "{rule:?} runs for every call");
         }
     }
 
