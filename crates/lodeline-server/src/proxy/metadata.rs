@@ -250,6 +250,11 @@ impl MetadataStore {
         live: impl FnOnce() -> Result<LiveRefs, super::ledger::LedgerError>,
     ) -> Result<usize, UploadError> {
         let _refs = self.refs.write();
+        // `live` scans every stored start event while ingest waits, so skip it
+        // when nothing has expired.
+        if !self.any_expired(now, grace)? {
+            return Ok(0);
+        }
         let live = live().map_err(|_| UploadError::StorageUnavailable)?;
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -288,6 +293,19 @@ impl MetadataStore {
             tracing::warn!("proxy metadata WAL checkpoint after sweep failed");
         }
         Ok(deleted)
+    }
+
+    fn any_expired(&self, now: i64, grace: &dyn Fn(&str) -> i64) -> Result<bool, UploadError> {
+        let conn = self.conn.lock();
+        let mut st = conn.prepare("SELECT proxy_id, last_upload_at FROM entries")?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let proxy_id: String = r.get(0)?;
+            if now.saturating_sub(r.get::<_, i64>(1)?) > grace(&proxy_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Blocking. One result per input ref, in order.

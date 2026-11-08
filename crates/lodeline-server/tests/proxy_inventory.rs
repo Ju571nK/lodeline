@@ -3452,7 +3452,16 @@ fn a_v1_metadata_store_migrates_and_keeps_every_entry() {
     let none = || Ok(Default::default());
     // The last upload of a v1 entry is its registration: ref 1 is exactly G
     // old at 1_100, ref 2 is younger.
-    assert_eq!(s.sweep(1_100, &|_| 100, none).unwrap(), 0);
+    let scanned = std::cell::Cell::new(false);
+    let live = || {
+        scanned.set(true);
+        Ok(Default::default())
+    };
+    assert_eq!(s.sweep(1_100, &|_| 100, live).unwrap(), 0);
+    assert!(
+        !scanned.get(),
+        "with nothing expired the pass does not scan the ledger"
+    );
     assert_eq!(s.sweep(1_101, &|_| 100, none).unwrap(), 1);
     let left = s.lookup("px-a", &[&mref(1), &mref(2)]).unwrap();
     assert_eq!(
