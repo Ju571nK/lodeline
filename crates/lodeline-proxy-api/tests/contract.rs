@@ -1712,6 +1712,12 @@ fn new_error_codes_golden_table() {
             429,
             "Too many requests.",
         ),
+        (
+            "metadata_ref_unknown",
+            ErrorCode::MetadataRefUnknown,
+            404,
+            "Metadata reference not found.",
+        ),
     ];
     for (text, code, status, message) in table {
         assert_eq!(code.as_str(), text);

@@ -147,6 +147,9 @@ pub enum ErrorCode {
     /// `GET` config before any configuration was issued for the proxy. 404.
     /// Distinct from `proxy_unknown`: the identity is valid.
     ConfigUnavailable,
+    /// Management `delete-content`: no entry with this `metadata_ref` for the
+    /// proxy. 404.
+    MetadataRefUnknown,
     /// Ingest: the store refuses more data (capacity). 503.
     StorageLimit,
     /// Ingest: the store cannot be reached or written. 503.
@@ -159,7 +162,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    const KNOWN: [(&'static str, ErrorCode); 23] = [
+    const KNOWN: [(&'static str, ErrorCode); 24] = [
         ("proxy_unknown", ErrorCode::ProxyUnknown),
         ("conflict", ErrorCode::Conflict),
         ("sequence_conflict", ErrorCode::SequenceConflict),
@@ -182,6 +185,7 @@ impl ErrorCode {
         ("already_exists", ErrorCode::AlreadyExists),
         ("invalid_state", ErrorCode::InvalidState),
         ("config_unavailable", ErrorCode::ConfigUnavailable),
+        ("metadata_ref_unknown", ErrorCode::MetadataRefUnknown),
         ("storage_limit", ErrorCode::StorageLimit),
         ("storage_unavailable", ErrorCode::StorageUnavailable),
         ("payload_too_large", ErrorCode::PayloadTooLarge),
@@ -217,7 +221,9 @@ impl ErrorCode {
     /// `retired`) or the code is not an HTTP-level code of its own.
     pub fn http_status(&self) -> Option<u16> {
         match self {
-            ErrorCode::ProxyUnknown | ErrorCode::ConfigUnavailable => Some(404),
+            ErrorCode::ProxyUnknown
+            | ErrorCode::ConfigUnavailable
+            | ErrorCode::MetadataRefUnknown => Some(404),
             ErrorCode::Conflict
             | ErrorCode::SequenceConflict
             | ErrorCode::RegistryConflict
@@ -263,6 +269,7 @@ impl ErrorCode {
             ErrorCode::AlreadyExists => "Already registered.",
             ErrorCode::InvalidState => "Not allowed in the current state.",
             ErrorCode::ConfigUnavailable => "No configuration has been issued.",
+            ErrorCode::MetadataRefUnknown => "Metadata reference not found.",
             ErrorCode::StorageLimit => "Storage limit reached.",
             ErrorCode::StorageUnavailable => "Storage is unavailable.",
             ErrorCode::PayloadTooLarge => "Request body is too large.",

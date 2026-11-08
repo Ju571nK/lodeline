@@ -2,8 +2,8 @@
 //! slice B2).
 //!
 //! Spec: registry.md R1/R2, ledger-and-query.md L5 (SV-2..SV-5), contracts
-//! README N9/M2b. PX-005/010/011, AC-05/06. Not here: the read view, scoped
-//! content lookup (R6) and content deletion.
+//! README N9/M2b. PX-005/010/011, AC-05/06. Not here: the read view and
+//! scoped content lookup (R6).
 //!
 //! # Store
 //!
@@ -32,6 +32,16 @@
 //! is never deleted before the row that names it lands. Like the ledger sweep,
 //! the pass ends with `wal_checkpoint(TRUNCATE)` so the WAL keeps no copy of
 //! freed pages.
+//!
+//! # Content deletion (R1)
+//!
+//! [`MetadataStore::delete_content`] serves a privacy request for one entry.
+//! It sets `content_state = 'deleted'`, empties `definition`, recomputes the
+//! proxy's usage and truncates the WAL, as the sweep does. The immutable stub
+//! stays: ingest still recognises the ref, an equal upload is a duplicate that
+//! does not restore the definition (first write wins), and the retention sweep
+//! still removes the stub. `observed_at` stays: it is proxy clock metadata, and
+//! the column is `NOT NULL`.
 //!
 //! # Upload rules (R2)
 //!
@@ -71,7 +81,7 @@ pub const MAX_UPLOAD_BODY: usize = 4 * 1024 * 1024;
 /// Largest `definition` of one entry (registry.md R2: 256 KiB).
 pub const MAX_DEFINITION_BYTES: usize = 256 * 1024;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const SCHEMA: &str = "
 CREATE TABLE entries (
     proxy_id            TEXT NOT NULL,
@@ -102,6 +112,12 @@ CREATE TABLE usage (
 const V2_DDL: &str = "
 ALTER TABLE entries ADD COLUMN last_upload_at INTEGER NOT NULL DEFAULT 0;
 UPDATE entries SET last_upload_at = registered_at;
+";
+/// v3: content deletion (R1). Shared by a fresh file and the migrations like
+/// [`V2_DDL`]; every older entry still has its content.
+const V3_DDL: &str = "
+ALTER TABLE entries ADD COLUMN content_state TEXT NOT NULL DEFAULT 'present'
+    CHECK (content_state IN ('present', 'deleted'));
 ";
 
 /// `(proxy_id, metadata_ref)` pairs named by retained rows (ledger events and
@@ -216,14 +232,19 @@ impl MetadataStore {
         match (version, tables) {
             (0, 0) => conn
                 .execute_batch(&format!(
-                    "BEGIN IMMEDIATE;{SCHEMA}{V2_DDL}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+                    "BEGIN IMMEDIATE;{SCHEMA}{V2_DDL}{V3_DDL}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
                 ))
                 .context("create metadata schema")?,
             (1, _) => conn
                 .execute_batch(&format!(
-                    "BEGIN IMMEDIATE;{V2_DDL}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+                    "BEGIN IMMEDIATE;{V2_DDL}{V3_DDL}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
                 ))
-                .context("migrate metadata schema to v2")?,
+                .context("migrate metadata schema to v3")?,
+            (2, _) => conn
+                .execute_batch(&format!(
+                    "BEGIN IMMEDIATE;{V3_DDL}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+                ))
+                .context("migrate metadata schema to v3")?,
             (SCHEMA_VERSION, _) => {}
             _ => bail!("metadata database has an unknown format version"),
         }
@@ -293,6 +314,42 @@ impl MetadataStore {
             tracing::warn!("proxy metadata WAL checkpoint after sweep failed");
         }
         Ok(deleted)
+    }
+
+    /// Delete the content of one entry and keep its stub (module doc).
+    /// Idempotent. `Ok(false)`: no such entry for this proxy.
+    pub fn delete_content(&self, proxy_id: &str, metadata_ref: &str) -> Result<bool, UploadError> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // SET expressions read the old row, so `size` drops by the old length.
+        let found = tx.execute(
+            "UPDATE entries SET content_state = 'deleted', definition = x'',
+                 size = size - length(definition)
+             WHERE proxy_id = ?1 AND metadata_ref = ?2",
+            params![proxy_id, metadata_ref],
+        )?;
+        if found == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE usage SET bytes =
+                 (SELECT COALESCE(SUM(size), 0) FROM entries WHERE proxy_id = ?1)
+             WHERE proxy_id = ?1",
+            params![proxy_id],
+        )?;
+        tx.commit()?;
+        // A busy checkpoint is a row with busy=1, not an error. The deletion is
+        // committed either way, and a repeat call on the deleted entry retries it.
+        let busy = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        if !matches!(busy, Ok(0)) {
+            tracing::error!(
+                "proxy metadata WAL truncate after content deletion did not complete; \
+                 the WAL can hold the old content until a repeat call or the next checkpoint"
+            );
+        }
+        Ok(true)
     }
 
     fn any_expired(&self, now: i64, grace: &dyn Fn(&str) -> i64) -> Result<bool, UploadError> {
@@ -376,8 +433,9 @@ impl MetadataStore {
                 .optional()?;
             match stored {
                 Some(s) if s == mine => {
-                    // First write wins: later `definition`/`observed_at` ignored.
-                    // The upload still counts for retention.
+                    // First write wins: later `definition`/`observed_at` ignored,
+                    // so deleted content stays deleted. The upload still counts
+                    // for retention.
                     tx.execute(
                         "UPDATE entries SET last_upload_at = MAX(last_upload_at, ?3)
                          WHERE proxy_id = ?1 AND metadata_ref = ?2",

@@ -27,6 +27,7 @@
 use super::audit::{AuditEntry, MgmtAudit};
 use super::identity::{is_dns_label, PeerClass};
 use super::lifecycle::{self, Denied};
+use super::metadata::RefLookup;
 use super::registry::{ProxyRecord, ProxyState};
 use super::verifiers::{AuthOutcome, Principal, Scope};
 use super::ProxyContext;
@@ -40,7 +41,7 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use lodeline_proxy_api::{ApiError, ErrorCode};
+use lodeline_proxy_api::{ApiError, ErrorCode, MetadataRef};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -59,6 +60,8 @@ pub enum MgmtRoute {
     Retire,
     /// `PUT /v1/proxies/{id}/config` (`GET` on the same path is a proxy route).
     ConfigPut,
+    /// `POST /v1/proxies/{id}/metadata/{metadata_ref}/delete-content` (R1).
+    DeleteContent,
 }
 
 impl MgmtRoute {
@@ -77,6 +80,7 @@ impl MgmtRoute {
             MgmtRoute::Enable => "proxy.enable",
             MgmtRoute::Retire => "proxy.retire",
             MgmtRoute::ConfigPut => "proxy.config_put",
+            MgmtRoute::DeleteContent => "proxy.metadata_content_delete",
         }
     }
 }
@@ -94,7 +98,13 @@ pub fn route_of(path: &str) -> Option<(MgmtRoute, Option<&str>)> {
         "enable" => MgmtRoute::Enable,
         "retire" => MgmtRoute::Retire,
         "config" => MgmtRoute::ConfigPut,
-        _ => return None,
+        _ => match verb
+            .strip_prefix("metadata/")
+            .and_then(|r| r.strip_suffix("/delete-content"))
+        {
+            Some(r) if !r.is_empty() && !r.contains('/') => MgmtRoute::DeleteContent,
+            _ => return None,
+        },
     };
     Some((route, Some(id)))
 }
@@ -372,6 +382,11 @@ impl Actor<'_> {
         let status = code.http_status().unwrap_or(500);
         let mut e = self.entry(proxy_id, Some(code.clone()), status);
         e.from_state = from.map(|s| state_str(s).into());
+        self.refuse(e, code)
+    }
+
+    /// Append a refusal record, then answer `code`.
+    fn refuse(&self, e: AuditEntry, code: ErrorCode) -> Response {
         match audit_of(self.ctx).append(e) {
             Ok(_) => api_error(code),
             Err(err) => {
@@ -491,7 +506,7 @@ fn perform(
         MgmtRoute::Disable => (lifecycle::disable(&cur, &now), None),
         MgmtRoute::Enable => (lifecycle::enable(&cur, &now), None),
         MgmtRoute::Retire => (lifecycle::retire(&cur, &now), None),
-        MgmtRoute::Register | MgmtRoute::ConfigPut => unreachable!(),
+        MgmtRoute::Register | MgmtRoute::ConfigPut | MgmtRoute::DeleteContent => unreachable!(),
     };
     match result {
         Err(Denied::InvalidState) => actor.deny(id, ErrorCode::InvalidState, Some(cur.state)),
@@ -513,6 +528,68 @@ fn perform(
             actor.commit(txn, new, StatusCode::OK)
         }
     }
+}
+
+/// Content deletion of one registry entry (R1). The refs are held so the
+/// retention sweep cannot remove the entry between the check, the audit and
+/// the effect.
+fn delete_content(ctx: &ProxyContext, req: &MgmtRequest, id: &str, mref: &str) -> Response {
+    let actor = Actor {
+        ctx,
+        req,
+        route: MgmtRoute::DeleteContent,
+    };
+    if !is_dns_label(id) {
+        return actor.deny("", ErrorCode::ProxyUnknown, None);
+    }
+    if ctx.registry.get(id).is_none() {
+        return actor.deny(id, ErrorCode::ProxyUnknown, None);
+    }
+    let Ok(mref) = MetadataRef::new(mref) else {
+        return actor.deny(id, ErrorCode::SemanticInvalid, None);
+    };
+    let entry = |code: Option<ErrorCode>, status: u16| {
+        let mut e = actor.entry(id, code, status);
+        e.metadata_ref = Some(mref.as_str().into());
+        e
+    };
+    let refuse = |code: ErrorCode| {
+        let status = code.http_status().unwrap_or(500);
+        actor.refuse(entry(Some(code.clone()), status), code)
+    };
+    let _held = ctx.metadata.hold_refs();
+    match ctx.metadata.lookup(id, &[mref.as_str()]) {
+        Ok(found) if matches!(found.first(), Some(RefLookup::Own(_))) => {}
+        Ok(_) => return refuse(ErrorCode::MetadataRefUnknown),
+        Err(_) => return refuse(ErrorCode::StorageUnavailable),
+    }
+    if let Err(err) = audit_of(ctx).append(entry(None, 200)) {
+        tracing::error!(error = %err, "management audit append failed");
+        return audit_unavailable();
+    }
+    match ctx.metadata.delete_content(id, mref.as_str()) {
+        Ok(true) => Json(serde_json::json!({
+            "request_id": req.request_id,
+            "metadata_ref": mref,
+            "content_state": "deleted",
+        }))
+        .into_response(),
+        _ => {
+            tracing::error!("metadata content deletion failed after audit");
+            let _ = audit_of(ctx).append(entry(Some(ErrorCode::parse("persist_failed")), 500));
+            internal()
+        }
+    }
+}
+
+async fn delete_content_handler(
+    State(ctx): State<Arc<ProxyContext>>,
+    Extension(req): Extension<Arc<MgmtRequest>>,
+    Path((id, mref)): Path<(String, String)>,
+) -> Response {
+    tokio::task::spawn_blocking(move || delete_content(&ctx, &req, &id, &mref))
+        .await
+        .unwrap_or_else(|_| internal())
 }
 
 async fn run(
@@ -590,6 +667,10 @@ pub fn router(ctx: Arc<ProxyContext>, read_token: ReadToken) -> Router {
         .route("/v1/proxies/:proxy_id/disable", post(disable))
         .route("/v1/proxies/:proxy_id/enable", post(enable))
         .route("/v1/proxies/:proxy_id/retire", post(retire))
+        .route(
+            "/v1/proxies/:proxy_id/metadata/:metadata_ref/delete-content",
+            post(delete_content_handler),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(ctx.clone());
     let config = Router::new()
@@ -624,6 +705,17 @@ mod tests {
             Some((MgmtRoute::ConfigPut, Some("px")))
         );
         assert_eq!(route_of("/v1/proxies/px/disable/x"), None);
+        assert_eq!(
+            route_of("/v1/proxies/px/metadata/r1/delete-content"),
+            Some((MgmtRoute::DeleteContent, Some("px")))
+        );
+        for p in [
+            "/v1/proxies/px/metadata//delete-content",
+            "/v1/proxies/px/metadata/a/b/delete-content",
+            "/v1/proxies/px/metadata/r1",
+        ] {
+            assert_eq!(route_of(p), None, "{p}");
+        }
         assert_eq!(route_of("/v1/proxies/"), None);
         assert_eq!(route_of("/v1/proxy-config"), None);
         assert_eq!(MgmtRoute::Disable.required_scope(), Scope::Config);
@@ -634,6 +726,7 @@ mod tests {
             MgmtRoute::Fingerprints,
             MgmtRoute::Enable,
             MgmtRoute::Retire,
+            MgmtRoute::DeleteContent,
         ] {
             assert_eq!(r.required_scope(), Scope::Identity);
         }

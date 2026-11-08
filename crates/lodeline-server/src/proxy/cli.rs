@@ -14,7 +14,7 @@ use super::verifiers::{
 };
 use anyhow::{bail, ensure, Context, Result};
 use clap::{ArgGroup, Args, Subcommand};
-use lodeline_proxy_api::verifier;
+use lodeline_proxy_api::{verifier, MetadataRef};
 use rand_core::{OsRng, RngCore};
 use std::path::{Path, PathBuf};
 
@@ -88,6 +88,16 @@ pub enum ProxyCommand {
         #[arg(long)]
         proxy_id: String,
     },
+    /// Delete the content of one metadata registry entry and keep its stub
+    /// (identity scope).
+    DeleteContent {
+        #[command(flatten)]
+        conn: ConnArgs,
+        #[arg(long)]
+        proxy_id: String,
+        #[arg(long)]
+        metadata_ref: String,
+    },
     /// Read the management audit trail (the token file holds the READ bearer).
     Audit {
         #[command(flatten)]
@@ -155,6 +165,7 @@ impl ProxyCommand {
             | ProxyCommand::Disable { conn, .. }
             | ProxyCommand::Enable { conn, .. }
             | ProxyCommand::Retire { conn, .. }
+            | ProxyCommand::DeleteContent { conn, .. }
             | ProxyCommand::Audit { conn, .. } => Some(conn),
             ProxyCommand::VerifierNew { .. } => None,
         }
@@ -209,6 +220,23 @@ impl ProxyCommand {
             ProxyCommand::Retire { proxy_id, .. } => {
                 check_id(proxy_id)?;
                 post(format!("/v1/proxies/{proxy_id}/retire"), None)
+            }
+            ProxyCommand::DeleteContent {
+                proxy_id,
+                metadata_ref,
+                ..
+            } => {
+                check_id(proxy_id)?;
+                let r = MetadataRef::new(metadata_ref.as_str())
+                    .ok()
+                    .context("metadata_ref must be a lowercase version 8 UUID")?;
+                post(
+                    format!(
+                        "/v1/proxies/{proxy_id}/metadata/{}/delete-content",
+                        r.as_str()
+                    ),
+                    None,
+                )
             }
             ProxyCommand::Audit { cursor, limit, .. } => {
                 let mut query = Vec::new();
@@ -438,6 +466,33 @@ mod tests {
                 .unwrap();
             assert_eq!((p.method, p.path.as_str(), p.body), ("POST", path, None));
         }
+        let r = "018f9c1a-0000-8000-8000-000000000001";
+        let p = parse(&["delete-content", "--proxy-id", "px1", "--metadata-ref", r])
+            .unwrap()
+            .plan()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (p.method, p.path.as_str(), p.body),
+            (
+                "POST",
+                &*format!("/v1/proxies/px1/metadata/{r}/delete-content"),
+                None
+            )
+        );
+        assert!(
+            parse(&[
+                "delete-content",
+                "--proxy-id",
+                "px1",
+                "--metadata-ref",
+                "../x"
+            ])
+            .unwrap()
+            .plan()
+            .is_err(),
+            "a ref that is not a metadata_ref is refused before any I/O"
+        );
         let p = parse(&["audit", "--cursor", "4", "--limit", "10"])
             .unwrap()
             .plan()

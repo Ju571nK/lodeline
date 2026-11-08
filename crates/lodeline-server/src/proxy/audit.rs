@@ -41,7 +41,8 @@ pub struct MgmtAuditRecord {
     pub request_id: String,
     /// The action of the route that was called (`proxy.register`,
     /// `proxy.fingerprint_register`, `proxy.disable`, `proxy.enable`,
-    /// `proxy.retire`, `proxy.config_put`), or `proxy.fingerprint_promote` for the server's own
+    /// `proxy.retire`, `proxy.config_put`, `proxy.metadata_content_delete`), or
+    /// `proxy.fingerprint_promote` for the server's own
     /// promotion on first use of `fp_next`.
     pub action: String,
     /// Empty when the request named none (or none valid).
@@ -76,6 +77,10 @@ pub struct MgmtAuditRecord {
     /// (comma-separated: old current, old next).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_fingerprint: Option<String>,
+    /// Content deletion: the entry's `metadata_ref` (non-secret). Never the
+    /// definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_ref: Option<String>,
     /// VERIFIED: the management key that authenticated. Empty if none did.
     pub management_key_id: String,
     pub scope: String,
@@ -117,6 +122,7 @@ pub struct AuditEntry {
     pub config_hash: Option<String>,
     pub subject_fingerprint: Option<String>,
     pub replaced_fingerprint: Option<String>,
+    pub metadata_ref: Option<String>,
     pub management_key_id: String,
     pub scope: String,
     pub caller_fingerprint: String,
@@ -373,6 +379,7 @@ impl MgmtAudit {
             config_hash: e.config_hash,
             subject_fingerprint: e.subject_fingerprint,
             replaced_fingerprint: e.replaced_fingerprint,
+            metadata_ref: e.metadata_ref,
             management_key_id: e.management_key_id,
             scope: e.scope,
             caller_fingerprint: e.caller_fingerprint,

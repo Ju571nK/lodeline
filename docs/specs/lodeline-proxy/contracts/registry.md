@@ -57,6 +57,21 @@ The ordinary read view (`entry_view`) carries every immutable field **except
 - Deleted content (privacy request) keeps the immutable stub so that ingest still
   recognises the ref (README retention row). `content_state=deleted` renders as the
   fixed unavailable label plus the reference.
+- Content deletion is the management route
+  `POST /v1/proxies/{id}/metadata/{metadata_ref}/delete-content` (`identity` scope,
+  CLI `lodeline-server proxy delete-content`). It sets `content_state=deleted` and
+  empties the stored `definition`. The immutable fields and `observed_at` stay. Freed
+  pages are zeroed and the WAL is truncated after the commit, so the file keeps no
+  copy. If a reader holds the WAL and the truncate does not complete, the old content
+  can stay in the WAL until the next checkpoint, and a repeat call retries the
+  truncate. The route is idempotent and answers 200 with `{request_id, metadata_ref,
+  content_state}`, also on a repeat call for content that is already deleted. An unknown proxy is 404 `proxy_unknown`, and a ref with no entry
+  for that proxy is 404 `metadata_ref_unknown`. Every call is in the management audit
+  as `proxy.metadata_content_delete` with the ref, never the definition.
+- After a deletion, an upload with equal immutable fields is a `duplicate`. It
+  restarts the retention clock and does not restore the definition. An upload with
+  a different immutable field is still a 409. The retention rule above still removes
+  the stub.
 
 ## R2. Upload: POST /v1/proxy-metadata
 
