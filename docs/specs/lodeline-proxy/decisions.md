@@ -191,8 +191,12 @@ M2/m3 등록·health-check 판정은 여전히 미완료 P1 요구사항이며 �
   (2026-11-06 확인, 시험 `the_tail_a_status_names_survives_a_power_loss`). `last_assigned_sequence`만 `durable_seq`로 낮추면 이 차이가
   durable하지 않은 행 수만큼 작아져 실제 tail을 다음 fsync까지 덜 보고하므로 그렇게 하지 않는다.
 - line 146과 다른 점: 이전에는 spool의 모든 기록이 fsync 뒤 local ack였다. 이제 start만 그렇고, completion·cancel·ACK 표시는 commit 뒤 응답한다.
-- 함께 바꾼 것(계약 안): `wal_autocheckpoint=0`. checkpoint는 commit 안이 아니라 writer의 명령 사이에서 돈다. maintenance pass마다, 수집 client가
-  durable하지 않은 행만 찾았을 때, 그리고 512 명령마다 한 번(WAL 상한) 한다.
+- 함께 바꾼 것(계약 안): `wal_autocheckpoint=0`. checkpoint는 commit 안에서 돌지 않는다. maintenance pass마다, 수집 client가
+  durable하지 않은 행만 찾았을 때 writer가 명령 사이에서 한다. 2026-11-08(`perf/proxy-bg-checkpoint`)부터 512 명령마다 하던 checkpoint는
+  둘로 나뉜다. 자기 연결을 가진 checkpoint thread가 WAL page 대부분을 DB로 복사하고 DB를 fsync하는 동안 writer는 commit을 계속한다.
+  그 thread가 끝나면 writer가 명령 사이에서 남은 frame만 복사하고, 그 checkpoint가 WAL 전체를 덮으면 다음 commit이 WAL을 처음부터 다시 쓴다.
+  WAL 상한은 2,048 명령이다. 거기에 닿으면 writer는 복사가 끝날 때까지 다음 명령을 받지 않는다. `durable_seq`는 writer만 올린다.
+  checkpoint thread가 시작하지 못하거나 멈추면 writer가 전처럼 512 명령마다 전체를 복사한다.
 - 2026-11-07 group commit(`perf/proxy-group-commit`, 위 계약 안의 구현), 2026-11-08 묶음 transaction 하나(`perf/proxy-group-tx`): writer는 이미
   queue에 있는 append를 최대 64개까지 한 transaction으로 commit한다. 기록마다 savepoint로 거절을 가둔다. 묶음에 start가 있으면 그 commit이
   FULL이고, 그 fsync 뒤에만 묶음의 응답이 나간다. start가 없으면 NORMAL이다. 혼자 온 append도 같은 길이다. 더 올 append를 기다리는 타이머는 없다.
@@ -211,6 +215,9 @@ Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시�
   거절되고(completion·cancel은 2026-11-08부터), 뒤의 호출은 `Unavailable`이다(relay는 둘 다 503). spool은 재시작까지 `degraded`로 보고한다. 실패 뒤에는 `degraded`를 지우지 않으므로
   writer가 멈추기 전에 나간 응답 사이에도 `degraded`다. 기존의 멈춘 writer와 같은 경로이며 새 상태나 reason은 없다.
 - 닫을 때 SQLite가 하는 checkpoint를 끈다. 실패한 page를 DB로 복사하지 않고, 재시작이 checksum으로 WAL을 복구하게 둔다.
+- 2026-11-08(`perf/proxy-bg-checkpoint`): checkpoint thread의 fsync 실패도 같다. 그 thread는 spool의 공유 표시(`sync_failed`)를 켜고
+  멈추며, writer는 다음 명령 전에 그 표시를 보고 멈춘다. 두 thread 모두 표시가 켜진 뒤에는 checkpoint하지 않는다. checkpoint thread의
+  연결은 닫을 때 checkpoint하지 않고, writer가 그 thread를 join한 뒤 자기 연결을 마지막으로 닫는다.
 - 근거: 같은 파일의 fsync 재시도는 Linux에서 성공을 보고하지만 아무것도 증명하지 않는다. PostgreSQL도 2018년 이후 fsync 실패에 PANIC하고
   재시작 때 WAL에서 복구한다. degraded로 계속 받는 안이나 재시도 안은 이 증명 공백을 남긴다.
 - 실패한 묶음의 commit이 디스크에 남긴 frame은 재시작 뒤 commit으로 복구되어 서버로 갈 수 있다(start만 있는 기록, 거절된 completion의 행 포함.
