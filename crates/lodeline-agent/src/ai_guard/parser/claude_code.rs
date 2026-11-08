@@ -2164,6 +2164,9 @@ mod tests {
             r#"bash "$HOME_DIR/x.sh""#,
             r#"bash '"$HOME/x.sh"'"#,
             r#"bash "'$HOME/x.sh'""#,
+            // Mismatched quotes around a multibyte name must not panic.
+            r#"bash "é'"#,
+            r#"bash 'é""#,
         ] {
             let dir = tempdir().unwrap();
             let home = home_with_hook(dir.path(), command, &scripts);
