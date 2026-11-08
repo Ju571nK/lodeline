@@ -168,13 +168,13 @@ jobs:
           old=0.13.0
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
           dl=$(mktemp -d)
-          curl -fsSL -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
           upg=(lodeline lodeline-sender lodeline-server lodeline-signer)
           oldrpms=()
           newrpms=()
           for pkg in "${upg[@]}"; do
             f="${pkg}-${old}-1.$(uname -m).rpm"
-            curl -fsSL -o "$dl/$f" "$base/$f"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/$f" "$base/$f"
             awk -v f="$f" '$2 == f { found = 1; print } END { exit !found }' "$dl/SHA256SUMS" >> "$dl/sums"
             oldrpms+=("$dl/$f")
             newrpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)")
@@ -341,13 +341,13 @@ jobs:
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
           dl=$(mktemp -d)
           chmod 755 "$dl"  # apt's _apt user must be able to read the files
-          curl -fsSL -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
           upg=(lodeline lodeline-sender lodeline-server lodeline-signer)
           olddebs=()
           newdebs=()
           for pkg in "${upg[@]}"; do
             f="${pkg}_${old}-1_${arch}.deb"
-            curl -fsSL -o "$dl/$f" "$base/$f"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/$f" "$base/$f"
             awk -v f="$f" '$2 == f { found = 1; print } END { exit !found }' "$dl/SHA256SUMS" >> "$dl/sums"
             olddebs+=("$dl/$f")
             newdebs+=("./$(echo target/debian/${pkg}_[0-9]*.deb)")
