@@ -3929,8 +3929,10 @@ mod tests {
             .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
     }
 
-    /// `WebFetch(domain:*)` matches every domain, and a path rule anchored at
-    /// home, root or the working directory covers what `Edit(**)` does.
+    /// `WebFetch(domain:*)` matches every domain, and a file tool's path rule
+    /// anchored at root, home or the working directory matches every path
+    /// under it. Only file tools take path anchors: `Bash(./*)` runs only for
+    /// commands that start with `./`.
     #[test]
     fn if_rule_matching_every_call_after_its_prefix_keeps_the_matcher_broad() {
         for rule in [
@@ -3938,6 +3940,8 @@ mod tests {
             "Edit(~/**)",
             "Edit(//**)",
             "Read(./**)",
+            "Write(./**)",
+            "NotebookEdit(~/**)",
         ] {
             assert!(
                 if_rule_is_broad(rule),
@@ -3948,6 +3952,11 @@ mod tests {
             "WebFetch(domain:example.com)",
             "Edit(~/notes/**)",
             "Read(.*)",
+            "Bash(./*)",
+            "Bash(~/*)",
+            "Skill(./**)",
+            "mcp__a__b(./*)",
+            "Grep(./**)",
         ] {
             assert!(!if_rule_is_broad(rule), "{rule:?} narrows the matcher");
         }
