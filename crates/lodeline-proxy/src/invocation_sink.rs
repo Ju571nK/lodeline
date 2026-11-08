@@ -401,7 +401,9 @@ impl Shared {
     fn envelope(&self, occurred_at: Timestamp, payload: EventPayload) -> Option<ProxyEvent> {
         let ev = ProxyEvent {
             schema_version: lodeline_proxy_api::scalar::SchemaVersion,
-            event_id: new_uuid(),
+            // Time ordered, so the spool's unique index on it grows at one end
+            // instead of dirtying a random page per append.
+            event_id: Uuid::new(uuid::Uuid::now_v7().hyphenated().to_string()).expect("v7 uuid"),
             proxy_id: self.proxy_id.clone(),
             epoch_id: self.epoch_id.clone(),
             // The spool assigns the real sequence in its commit.
@@ -1337,6 +1339,46 @@ mod tests {
         assert_eq!(ev[0]["payload"]["actor"]["actor_kind"], "non_human");
         assert_eq!(ev[2]["payload"]["outcome"], "unknown");
         assert_eq!(ev[2]["payload"]["reason"], "cancel_no_response");
+    }
+
+    /// Event ids are UUIDv7, so a later start sorts after an earlier one and
+    /// the spool's unique index on `event_id` grows at one end.
+    #[tokio::test]
+    async fn event_ids_are_v7_and_sort_in_start_order() {
+        let d = tempfile::tempdir().unwrap();
+        let sp = spool(d.path());
+        let (g, _) = gaps();
+        let (sink, h) =
+            InvocationSink::start(Admission::new(sp.clone()), "px-1", sp.epoch_id(), None, g)
+                .unwrap();
+        for seq in 1..=32 {
+            let s = started(seq, Method::Ping, ToolField::NotApplicable);
+            assert_eq!(sink.request_started(&s).await, StartVerdict::Proceed);
+            sink.observe(Observation::Completed(completed(
+                seq,
+                Outcome::Success,
+                Delivery::Sent,
+                Cause::None,
+                false,
+            )));
+        }
+        assert!(h.shutdown(Duration::from_secs(5)).await);
+        let ev = events(d.path());
+        assert_eq!(ev.len(), 64);
+        let mut start_ids = Vec::new();
+        for e in &ev {
+            let text = e["event_id"].as_str().unwrap();
+            let id = uuid::Uuid::parse_str(text).unwrap();
+            assert_eq!(id.hyphenated().to_string(), text, "lowercase hyphenated");
+            assert_eq!(id.get_version_num(), 7, "{text}");
+            if e["event_type"] == "invocation.started" {
+                start_ids.push(id);
+            }
+        }
+        // Each start commits before the next is created, so the spool's
+        // sequence order is creation order for the starts.
+        assert_eq!(start_ids.len(), 32);
+        assert!(start_ids.is_sorted_by(|a, b| a < b), "{start_ids:?}");
     }
 
     /// Concurrent callers each run start, then completion, more calls than the

@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-08 · spool checkpoint를 writer thread 밖으로(`perf/proxy-bg-checkpoint`), key·canon 변경 뒤 inventory chain 끝내기(`feat/proxy-chain-end`), 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-08 · spool `event_id`를 UUIDv7로(`perf/proxy-event-id-v7`), spool checkpoint를 writer thread 밖으로(`perf/proxy-bg-checkpoint`), key·canon 변경 뒤 inventory chain 끝내기(`feat/proxy-chain-end`), 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,52 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-08 spool `event_id`를 UUIDv7로 (`perf/proxy-event-id-v7`)
+
+문제: invocation sink는 `event_id`를 UUIDv4로 만들었다. spool `events` 표의 `event_id` UNIQUE 색인(`sqlite_autoindex_events_1`)은
+무작위 키라서 append마다 다른 leaf page를 고쳤다. 로컬 page 계측에서 checkpoint 주기마다 고친 서로 다른 page의 약 80%가 이 색인이었다.
+
+수정(`invocation_sink.rs` `Shared::envelope`): `event_id`를 `uuid::Uuid::now_v7()`로 만든다. 다른 id(`invocation_id`, `gap_id`, `epoch_id`)는
+그대로 v4다. 이미 spool과 서버에 있는 v4 id도 그대로 둔다.
+`uuid` 1.23.1의 `now_v7`은 프로세스가 공유하는 context(mutex) 아래에서 밀리초 timestamp와 42 bit counter를 쓰므로, 한 프로세스 안에서는
+thread와 관계없이 만든 순서대로 증가한다. 시계가 뒤로 가도 마지막 밀리초를 유지한다. workspace는 이미 `v7` feature를 켰으므로 의존성 변경은 없다.
+
+로컬 측정(macOS, closed loop 동시성 64, 쪽마다 3 run, 1,024 명령당, 측정):
+
+| 항목 | v4 | v7 |
+|---|---|---|
+| WAL에 쓴 서로 다른 page | 1,006 | 225 |
+| 그 가운데 `event_id` 색인 leaf | 786 | 16 |
+| WAL frame / 명령 | 1.90 | 0.75 |
+| checkpoint DB page 쓰기 | 1,280 | 261 |
+| checkpoint DB 연속 쓰기 구간 | 1,058 | 56 |
+
+checkpoint 주기는 v4가 약 2,066 명령(WAL 상한 2,048에 닿음, pass 4번), v7이 약 1,147 명령(pass 2번)이었다(측정). v4는 로컬에서 WAL 상한
+대기에 들어갔고 v7은 들어가지 않았다(주기 길이에서 추정). spool이 커질수록 v4 비용이 늘었다. run 하나 기준으로 보유 행 10만–20만에서 1,024 명령당 서로 다른
+page 884, 40만 이상에서 1,251이었고, v7은 같은 구간에서 222로 그대로였다(측정, 중앙값 아님). open loop 100 calls/s(쪽마다 1 run)에서는 서로 다른 page가
+273에서 188, DB 연속 쓰기 구간이 102에서 19로 줄었다(측정). 로컬 수치이며 처리량과 지연은 재지 않았다.
+
+AWS 측정(노드 A, t4g.small, gp3, 일반 build, run마다 새 stack, 기준 `5a16b98`과 변경 `a2dbb19` 교대): closed loop c64(쪽마다 5 run) 중앙값은
+calls/s 1,277(1,268–1,291)에서 3,238(3,197–3,371)로, p99는 236 ms에서 34.9 ms로, 호출당 디스크 쓰기는 2.38에서 0.44로 바뀌었다(측정).
+c32는 calls/s 1,163에서 2,947, p99 84.8 ms에서 22.2 ms였다(측정, 순위합 p=0.0079, 범위 안 겹침). open loop 100 calls/s(쪽마다 3 run)의 p99는
+11.85 ms와 12.86 ms로 범위가 겹쳐 차이를 재지 못했다. 34 run 모두 오류 0, upstream 수 일치. 기준은 쓰기 IOPS에 묶였고(w/s 약 3,040, gp3 상한 3,000,
+collector state를 tmpfs에 둔 run 하나씩에서도 같음), 변경은 proxy CPU에 묶였다(cpu0 busy 97%, iowait 2%). 계측 build(run 두 번씩)에서 WAL 상한 대기는 30초당 31.5번에서 기록 없음으로,
+checkpoint 요청당 pass는 4번에서 2번으로 줄었다. 120초 run(run 하나씩)에서 기준 calls/s는 1,090으로 떨어졌고 변경은 3,226으로 그대로였다. 다만 변경의 w/s는
+collector 쓰기가 늘면서 처음 4분의 1 구간 약 1,400에서 마지막 4분의 1 구간 약 2,300으로 올랐고(p90 2,711), proxy scope의 memory.peak는 spool page cache 때문에 512 MiB 상한에 닿았다(proxy RSS 약 19 MB, 오류 0).
+더 긴 부하에서는 collector 디스크 쓰기가 다음 한계가 될 것으로 본다(추정).
+
+계약: schema `$defs/uuid`는 소문자 hyphen 형식만 검사하고, `lodeline-proxy-api` `scalar::Uuid`는 버전을 보지 않는다. 계약 README는
+재전송 시 같은 UUID만 요구하고 중앙은 `(proxy_id, event_id)`로 중복을 제거한다. proxy, server, manager, fixture 가운데 `event_id`의 버전이나
+무작위 순서에 기대는 곳은 찾지 못했다. registry conflict gap은 `event_ids`를 정렬해 `gap_id`를 만들지만 정렬은 결정성 때문이고 순서 의미는 없다.
+
+개인정보: v7 id는 만든 시각을 밀리초 단위로 담는다. event는 이미 `occurred_at`을 가지므로 서버가 새로 아는 것은 없다. event 본문 없이 id만
+나가는 곳은 status gap 보고(`registry_conflict`, `event_quarantined`의 `event_ids`), 수집 응답(`accepted_event_ids`, `duplicate_event_ids`),
+수집 오류 `items[].event_id`, 서버 tombstone이다. tombstone은 이미 `received_at`을 가진다.
+
+시험(`invocation_sink.rs` `event_ids_are_v7_and_sort_in_start_order`): 호출 32개를 차례로 기록하고 spool의 모든 `event_id`가 소문자
+hyphen 형식의 버전 7인지, start의 id가 sequence 순서로 엄격히 증가하는지 본다. start는 commit 뒤에야 다음 start가 만들어지므로 순서가
+정해진다. v4 코드에서 버전 검사와, 그 검사를 뺀 정렬 검사 모두 실패했다(확인).
 
 ## 2026-11-08 spool checkpoint를 writer thread 밖으로 (`perf/proxy-bg-checkpoint`)
 
