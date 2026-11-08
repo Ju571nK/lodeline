@@ -24,6 +24,9 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         SandboxDisabled => {
             "The sandbox is disabled — restore a non-bypass sandbox mode in the tool's config."
         }
+        NoSandbox { executor } if executor == "workspace_write_network" => {
+            "Codex's workspace-write sandbox lets commands reach the network. Set network_access = false under [sandbox_workspace_write] unless the agent needs it."
+        }
         NoSandbox { .. } => {
             "The agent runs with no sandbox boundary — enable the tool's sandbox or limit what it can run."
         }

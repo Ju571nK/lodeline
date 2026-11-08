@@ -543,17 +543,32 @@ fn writes_everywhere(p: &str) -> bool {
     (trimmed.is_empty() && !p.is_empty()) || p == ":root" || trimmed == "~" || drive_root
 }
 
-/// A `writable_roots` entry naming the whole disk or the home dir. Codex
-/// reads each as a plain path with only `~` and `~/` expanded, so `/**`,
-/// `~/**` and `:root` are ordinary relative or literal paths there
-/// (`AbsolutePathBuf`, rust-v0.166.0).
+/// A `writable_roots` entry naming the whole disk, the home dir or a parent
+/// of it. Codex expands a leading `~` or `~/` (`~\` too on Windows), then
+/// drops `.` and folds `..` without going above the root, so `/**`, `~/**`
+/// and `:root` are ordinary relative or literal paths there, and a drive root
+/// or `\` is a relative path on macOS and Linux (`AbsolutePathBuf`,
+/// `absolutize.rs`, rust-v0.166.0). A relative entry resolves against the
+/// config folder and is not scored.
 fn writable_root_everywhere(p: &str) -> bool {
-    let trimmed = p.trim_end_matches(['/', '\\']);
-    let drive_root = trimmed.len() == 2
-        && trimmed.len() < p.len()
-        && trimmed.as_bytes()[0].is_ascii_alphabetic()
-        && trimmed.ends_with(':');
-    (trimmed.is_empty() && !p.is_empty()) || trimmed == "~" || drive_root
+    let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    let drive = cfg!(windows)
+        && p.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && p.as_bytes().get(1) == Some(&b':');
+    let rest = match p.strip_prefix('~') {
+        Some(rest) => rest,
+        None if drive => &p[2..],
+        None => p,
+    };
+    if p != "~" && !rest.starts_with(sep) {
+        return false;
+    }
+    let depth = rest.split(sep).fold(0usize, |depth, part| match part {
+        "" | "." => depth,
+        ".." => depth.saturating_sub(1),
+        _ => depth + 1,
+    });
+    depth == 0
 }
 
 /// #200 — `approval_policy` decides whether a human is asked before a tool
