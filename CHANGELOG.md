@@ -84,7 +84,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   and the contract do not change, and ids already stored stay as they are. A v7 id carries its
   creation time to the millisecond, which the event already records in `occurred_at`. On an AWS
   t4g.small with gp3 storage at 64 concurrent clients, the median rose from 1,277 to 3,238 calls/s,
-  p99 fell from 236 ms to 34.9 ms, and disk writes per call fell from 2.38 to 0.44. See `docs/specs/lodeline-proxy/execution.md` (2026-11-08).
+  p99 fell from 236 ms to 34.9 ms, and disk writes per call fell from 2.38 to 0.44.
+  See `docs/specs/lodeline-proxy/execution.md` (2026-11-08).
 - `lodeline-proxy` now commits spool records that are already queued together and covers them
   with one fsync (group commit). Before, every concurrent `invocation.started` record waited for
   its own fsync, which capped proxied throughput at about 400 calls/s on an AWS gp3 volume. A
