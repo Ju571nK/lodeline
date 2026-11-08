@@ -3092,7 +3092,8 @@ mod tests {
 
     /// Claude Code drops a `managedMcpServers` entry that is not an https
     /// http/sse server with a plain name, so only the valid entry scores and
-    /// the user's server of a dropped name still loads.
+    /// the user's server of a dropped name still loads. The URL is parsed the
+    /// way `new URL()` does, and the `${VAR}` scan stops five levels down.
     #[test]
     fn invalid_managed_mcp_servers_entries_are_not_scored() {
         let home = tempdir().unwrap();
@@ -3111,7 +3112,16 @@ mod tests {
                 "plain": {"type": "http", "url": "http://plain.example.com/mcp"},
                 "bad name": {"type": "sse", "url": "https://bad.example.com/mcp"},
                 "untyped": {"url": "https://untyped.example.com/mcp"},
-                "env-ref": {"type": "http", "url": "https://${HOST}/mcp"}
+                "env-ref": {"type": "http", "url": "https://${HOST}/mcp"},
+                "upper": {"type": "http", "url": "HTTPS://upper.example.com/mcp"},
+                "noslash": {"type": "http", "url": "https:noslash.example.com/mcp"},
+                "backslash": {"type": "sse", "url": "https:\\\\backslash.example.com/mcp"},
+                "spaced": {"type": "http", "url": " https://spaced.example.com/mcp"},
+                "hostless": {"type": "http", "url": "HTTPS://"},
+                "deep5": {"type": "http", "url": "https://deep5.example.com/mcp",
+                    "x": {"a": {"b": {"c": {"d": "${HOME}"}}}}},
+                "deep6": {"type": "http", "url": "https://deep6.example.com/mcp",
+                    "x": {"a": {"b": {"c": {"d": {"e": "${HOME}"}}}}}}
             }}"#,
         );
         let reasons = assess_user(
@@ -3122,13 +3132,23 @@ mod tests {
         .unwrap();
         assert_eq!(
             mcp_server_names(&reasons),
-            ["local", "search (managed file)"],
+            [
+                "backslash (managed file)",
+                "deep6 (managed file)",
+                "local",
+                "noslash (managed file)",
+                "search (managed file)",
+                "spaced (managed file)",
+                "upper (managed file)",
+            ],
             "{reasons:?}"
         );
     }
 
     /// `deniedMcpServers` from managed and user settings keeps a managed
-    /// server from loading, matched by name, command or URL.
+    /// server from loading, matched by name, command or URL. A command entry
+    /// matches only a stdio server, and `<claude_dir>/settings.local.json` is
+    /// not a user-scope file, so its deny list does not apply.
     #[test]
     fn denied_managed_mcp_servers_are_not_scored() {
         let home = tempdir().unwrap();
@@ -3137,6 +3157,11 @@ mod tests {
             ".claude/settings.json",
             r#"{"deniedMcpServers": [{"serverUrl": "https://search.example.com/*"}]}"#,
         );
+        write_file(
+            home.path(),
+            ".claude/settings.local.json",
+            r#"{"deniedMcpServers": [{"serverName": "org-http"}]}"#,
+        );
         let policy = tempdir().unwrap();
         write_file(
             policy.path(),
@@ -3144,6 +3169,9 @@ mod tests {
             r#"{"mcpServers": {
                 "org-local": {"command": "/usr/local/bin/company-mcp"},
                 "tool": {"command": "/opt/tool", "args": ["serve"]},
+                "tool-stdio": {"type": "stdio", "command": "/opt/tool", "args": ["serve"]},
+                "typed": {"type": "sse", "url": "https://typed.example.com/mcp",
+                    "command": "/opt/tool", "args": ["serve"]},
                 "org-http": {"type": "http", "url": "https://org.example.com/mcp"}
             }}"#,
         );
@@ -3167,7 +3195,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             mcp_server_names(&reasons),
-            ["org-http (managed file)"],
+            ["org-http (managed file)", "typed (managed file)"],
             "{reasons:?}"
         );
     }
