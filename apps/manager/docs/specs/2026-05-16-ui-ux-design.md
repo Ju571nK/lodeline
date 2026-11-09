@@ -61,6 +61,8 @@ sigil-manager
 │   └── tab: Compliance
 ├── /proxies                  → Proxy list (read only, added 2026-11)
 │   └── /proxies/:proxy_id    → Proxy detail
+├── /proxy-invocations        → Invocation list (read only, added 2026-11)
+│   └── /proxy-invocations/:invocation_id → Invocation detail
 └── /settings
 ```
 
@@ -122,6 +124,24 @@ no screen has a control that registers, disables, retires or configures a proxy.
 - Detail: config, spool (depth, size, quarantined events and bytes), central ingest (including a
   stopped ingest, which makes a degraded spool not a storage fault), registry sync counters,
   route health, and the capped audit gap list with its total and dropped count.
+
+### 5.3b Proxy invocations (`/proxy-invocations`, `/proxy-invocations/:invocation_id`)
+
+Added 2026-11 for Ju571nK/lodeline#458. Reached from the Proxies list ("All invocations") and
+from a proxy's detail ("Invocations of this proxy"). Read only, like 5.3a.
+
+- List: newest first, one row per invocation with the received time, the invocation and proxy
+  IDs, method and upstream, status, duration and flags. Filters for proxy, lifecycle, outcome and
+  method live in the URL. Paging works as in 5.3a.
+- Status: only a `completed` invocation shows its outcome. `completion_without_start` and
+  `integrity_conflict` show as flagged, never as success. Their `reported_outcome`,
+  `reported_delivery_state` and `reported_reason` are the proxy's claim and show only as
+  secondary text marked as not corroborated. A `started` invocation reads "No completion
+  observed".
+- Detail: the request from the start (method, protocol, upstream, tool reference, actor, and the
+  credential owner labeled as the permission owner, not the executor), the completion, the
+  proxy-clock and server-clock times, the flags, and the event envelopes. When
+  `events_truncated` is true, a notice says how many events the server did not return.
 
 ### 5.4 Settings (`/settings`)
 
