@@ -22,7 +22,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `.claude/loop.md` changes. Before, no watch target covered these files, so the agent read an
   edit only at the next heartbeat or with a change to another watched file. The shipped Claude
   Code user-global target and the per-repository target now include them, so hosts also record
-  a `file_change` event for each edit, as for `settings.json`. (#550)
+  a `file_change` event for each edit, as for `settings.json`. These events carry hashes and
+  sizes, never file text, and a scheduled task's event path includes the task's folder name.
+  (#550)
 - A project row whose root is the home folder, such as the one `lodeline scan` adds when started
   there, no longer reads `~/.claude/loop.md`. Before, the user row and the project row both read
   that file, so one prompt's findings appeared twice. The user row still reports it. (#550)

@@ -1126,21 +1126,24 @@ targets:
             lodeline_rules_basic::DEFAULTS_WINDOWS,
         ] {
             let doc = parse(yaml).unwrap();
-            for leaf in [
-                "codex_apps_tools",
-                "codex_apps_server_info",
-                "managed-settings.json",
-                "managed-settings.d",
-                "requirements.toml",
-                "CLAUDE.md",
-                "loop.md",
-                "SKILL.md",
+            const CLAUDE_USER_GLOBAL: &str = "ai-guard-claude-code-user-global";
+            for (leaf, id_prefix) in [
+                ("codex_apps_tools", ""),
+                ("codex_apps_server_info", ""),
+                ("managed-settings.json", ""),
+                ("managed-settings.d", ""),
+                ("requirements.toml", ""),
+                ("CLAUDE.md", CLAUDE_USER_GLOBAL),
+                ("loop.md", CLAUDE_USER_GLOBAL),
+                ("SKILL.md", CLAUDE_USER_GLOBAL),
             ] {
                 let target = doc
                     .targets
                     .iter()
-                    .find(|t| t.paths.iter().any(|p| p.contains(leaf)))
-                    .unwrap_or_else(|| panic!("missing watcher: {leaf}"));
+                    .find(|t| {
+                        t.id.starts_with(id_prefix) && t.paths.iter().any(|p| p.contains(leaf))
+                    })
+                    .unwrap_or_else(|| panic!("missing watcher: {leaf} in {id_prefix}*"));
                 assert_eq!(target.tier, Tier::Critical);
                 assert!(!target.disabled);
                 assert!(!target.follow_symlinks);
