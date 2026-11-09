@@ -76,8 +76,18 @@ impl HttpClient {
             Request::Compliance(_) => ("/v1/fleet/compliance".to_owned(), false),
             Request::Proxies(_) => ("/v1/proxies".to_owned(), false),
             Request::ProxyById(id) => (format!("/v1/proxies/{}", path_escape(id)), true),
+            Request::Invocations(_) => ("/v1/proxy-invocations".to_owned(), false),
+            Request::InvocationById(id) => {
+                (format!("/v1/proxy-invocations/{}", path_escape(id)), true)
+            }
         };
-        let proxy = matches!(req, Request::Proxies(_) | Request::ProxyById(_));
+        let proxy = matches!(
+            req,
+            Request::Proxies(_)
+                | Request::ProxyById(_)
+                | Request::Invocations(_)
+                | Request::InvocationById(_)
+        );
         let mut url = format!("{}{path}", self.base_url);
         let query = req.query();
         if !query.is_empty() {
@@ -107,8 +117,9 @@ impl HttpClient {
                     .map_err(|e| FleetError::Transport(format!("decode {path}: {e}")))
             }
             401 => Err(FleetError::Unauthorized),
-            // The server answers an unknown proxy and one outside the caller's `proxy.read`
-            // range with the same `proxy_unknown`. Any other 404 is a route it does not serve.
+            // The server answers an unknown proxy or invocation, and one outside the caller's
+            // `proxy.read` range, with the same `proxy_unknown`. Any other 404 is a route it does
+            // not serve.
             404 | 403 | 422 if proxy => {
                 let body = read_capped(resp, ERROR_BODY_LIMIT)
                     .await
@@ -238,6 +249,8 @@ pub(super) fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response>
         // The proxy bodies keep the server's nulls and absent fields, so no Go rules apply.
         Request::Proxies(_) => Response::Proxies(serde_json::from_str(v.get())?),
         Request::ProxyById(_) => Response::Proxy(serde_json::from_str(v.get())?),
+        Request::Invocations(_) => Response::Invocations(serde_json::from_str(v.get())?),
+        Request::InvocationById(_) => Response::Invocation(serde_json::from_str(v.get())?),
     })
 }
 

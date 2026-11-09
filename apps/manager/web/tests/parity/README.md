@@ -6,7 +6,7 @@ at `Ju571nK/lodeline-manager@e4fb077`, except the ones listed under "Goldens rec
 Rust build" below. The Rust port does not have to match Go; the suite is a regression check, so a
 run shows every place where the port answers differently from the recorded behavior.
 
-The table has 246 cases over 21 routes: the 18 API routes of the Go router, the 2 proxy read
+The table has 262 cases over 23 routes: the 18 API routes of the Go router, the 4 proxy read
 routes this console added, and the SPA catch-all. The suite prints the count per route on every
 run.
 
@@ -29,6 +29,8 @@ run.
 | 14 | `GET /api/v1/fleet/hosts/{host_id}` |
 | 9 | `GET /api/v1/fleet/proxies` |
 | 7 | `GET /api/v1/fleet/proxies/{proxy_id}` |
+| 10 | `GET /api/v1/fleet/proxy-invocations` |
+| 6 | `GET /api/v1/fleet/proxy-invocations/{invocation_id}` |
 | 15 | `POST /api/v1/triage/upsert` |
 | 12 | `POST /api/v1/triage/note` |
 | 6 | `GET /api/v1/triage/{host_id}/{event_id}` |
@@ -117,6 +119,7 @@ difference in the PR. These goldens hold Rust behavior:
 | `fleet-meta`, `fleet-host`, `fleet-hosts`, `fleet-hosts-duplicate-limit`, `fleet-hosts-filters`, `fleet-hosts-limit-empty`, `fleet-hosts-limit-negative`, `fleet-risk`, `fleet-risk-filters`, `fleet-risk-limit-empty`, `fleet-risk-limit-zero`, `fleet-risk-page`, `fleet-compliance`, `fleet-compliance-limit-over-max`, `fleet-events`, `fleet-events-comma-spaces`, `fleet-events-empty-values` | The mock fleet has fixtures that Go's does not: a `source` on alice's and carol's scores, carol's stale score with `unassessed_since` and `ai_guard_unassessed`, a sixth host `frank-ci` with only a failing source, and its `ai_guard_assess_failed` event as `EVT#32`. Go drops the new fields. |
 | `fleet-risk`, `fleet-risk-filters`, `fleet-risk-limit-empty`, `fleet-risk-limit-zero`, `fleet-risk-page`, `fleet-risk-semicolon-pair` | The body also carries `not_assessed_host_count: 1`, which counts `frank-ci`, the host with a failing source and no score. Go drops the field. |
 | `fleet-proxies`, `fleet-proxies-filtered-page`, `fleet-proxies-bad-limit`, `fleet-proxies-no-session`, `fleet-proxy`, `fleet-proxy-older`, `fleet-proxy-not-found`, `fleet-proxy-no-session`, `live-proxies-cursor`, `live-proxies-invalid-cursor`, `live-proxies-invalid-filter`, `live-proxies-forbidden`, `live-proxies-not-mounted`, `live-proxy-unknown`, `live-proxy-not-mounted`, `live-proxy-host-unknown` | New cases: the Go console had no proxy reads. The mock serves `testdata/mock-proxies.json`. |
+| `fleet-invocations`, `fleet-invocations-filtered-page`, `fleet-invocations-flagged`, `fleet-invocations-bad-limit`, `fleet-invocations-invalid-cursor`, `fleet-invocations-no-session`, `fleet-invocation-flagged`, `fleet-invocation-truncated`, `fleet-invocation-not-found`, `fleet-invocation-no-session`, `live-invocations-cursor`, `live-invocations-invalid-cursor`, `live-invocations-invalid-filter`, `live-invocations-not-mounted`, `live-invocation-unknown`, `live-invocation-not-mounted` | New cases: the Go console had no invocation reads. The mock serves `testdata/mock-proxy-invocations.json`. |
 | `fleet-hosts-cursor-past-end` | The cursor names `frank-ci`, the last mock host, which Go's mock fleet does not have. The page is still empty (`hosts: null`), and `total_estimated` is 6. |
 
 The parity managers run with `TRUSTED_PROXIES=127.0.0.1`, so the recorder is a trusted proxy and

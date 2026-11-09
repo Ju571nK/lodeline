@@ -1,0 +1,22 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxy-invocations?limit=x",
+    "server": "mock"
+  },
+  "status": 400,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "error": {
+      "code": "invalid_query",
+      "message": "limit must be an integer"
+    }
+  }
+}

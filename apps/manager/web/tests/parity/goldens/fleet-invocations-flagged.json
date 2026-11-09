@@ -1,0 +1,48 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxy-invocations?lifecycle=completion_without_start",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "items": [
+      {
+        "actor": null,
+        "cancel_observed": false,
+        "completed_at": "<seed-95s Z>",
+        "delivery_state": null,
+        "duration_ms": 41,
+        "epoch_superseded": false,
+        "first_received_at": "<seed-90s Z>",
+        "flags": [],
+        "invocation_id": "00000000-0000-4000-8000-000000000401",
+        "last_received_at": "<seed-90s Z>",
+        "lifecycle": "completion_without_start",
+        "method": null,
+        "outcome": null,
+        "protocol_version": null,
+        "proxy_id": "px-edge-02",
+        "reason": null,
+        "reported_delivery_state": "sent",
+        "reported_outcome": "success",
+        "reported_reason": null,
+        "response_bytes": 1820,
+        "route_revision": null,
+        "start_epoch_id": null,
+        "started_at": null,
+        "tool": null,
+        "upstream_id": null
+      }
+    ],
+    "next_cursor": null
+  }
+}

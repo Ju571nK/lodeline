@@ -368,17 +368,23 @@ async fn proxy_reads_have_keys_of_their_own() {
     let host = Request::HostById("same-id".into());
     let proxy = Request::ProxyById("same-id".into());
     let proxies = Request::Proxies(crate::fleet::ProxiesParams::default());
-    for req in [&host, &proxy, &proxies, &host, &proxy, &proxies] {
-        c.get(req.clone()).await.unwrap();
+    let invocation = Request::InvocationById("same-id".into());
+    let invocations = Request::Invocations(crate::fleet::InvocationsParams::default());
+    let reads = [&host, &proxy, &proxies, &invocation, &invocations];
+    for req in reads.iter().chain(reads.iter()) {
+        c.get((*req).clone()).await.unwrap();
     }
     assert_eq!(
-        (
-            up.count("host_by_id"),
-            up.count("proxy_by_id"),
-            up.count("proxies")
-        ),
-        (1, 1, 1),
+        [
+            "host_by_id",
+            "proxy_by_id",
+            "proxies",
+            "proxy_invocation_by_id",
+            "proxy_invocations"
+        ]
+        .map(|e| up.count(e)),
+        [1; 5],
         "each read is fetched once, under its own key"
     );
-    assert_eq!(c.len(), 3);
+    assert_eq!(c.len(), 5);
 }

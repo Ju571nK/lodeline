@@ -66,9 +66,9 @@ impl AppState {
     }
 }
 
-/// Every API route of the Go router, plus the proxy reads, in chi pattern syntax. Session routes sit behind
-/// `require_auth`. The parity table must list each one (see the route test).
-pub const ROUTES: [(Method, &str, Access); 20] = [
+/// Every API route of the Go router, plus the proxy reads, in chi pattern syntax. Session routes
+/// sit behind `require_auth`. The parity table must list each one (see the route test).
+pub const ROUTES: [(Method, &str, Access); 22] = [
     (Method::GET, "/api/health", Access::Public),
     (Method::POST, "/api/v1/auth/login", Access::Public),
     (Method::GET, "/api/v1/auth/methods", Access::Public),
@@ -96,6 +96,16 @@ pub const ROUTES: [(Method, &str, Access); 20] = [
     (
         Method::GET,
         "/api/v1/fleet/proxies/{proxy_id}",
+        Access::Session,
+    ),
+    (
+        Method::GET,
+        "/api/v1/fleet/proxy-invocations",
+        Access::Session,
+    ),
+    (
+        Method::GET,
+        "/api/v1/fleet/proxy-invocations/{invocation_id}",
         Access::Session,
     ),
     (Method::POST, "/api/v1/triage/upsert", Access::Session),
@@ -162,6 +172,10 @@ fn endpoint(
         "/api/v1/fleet/hosts/{host_id}" => only(method, api::fleet::host.layer(auth)),
         "/api/v1/fleet/proxies" => only(method, api::fleet::proxies.layer(auth)),
         "/api/v1/fleet/proxies/{proxy_id}" => only(method, api::fleet::proxy.layer(auth)),
+        "/api/v1/fleet/proxy-invocations" => only(method, api::fleet::invocations.layer(auth)),
+        "/api/v1/fleet/proxy-invocations/{invocation_id}" => {
+            only(method, api::fleet::invocation.layer(auth))
+        }
         "/api/v1/triage/upsert" => only(method, api::triage::upsert.layer(auth)),
         "/api/v1/triage/note" => only(method, api::triage::note.layer(auth)),
         "/api/v1/triage/{host_id}/{event_id}" => only(method, api::triage::get.layer(auth)),

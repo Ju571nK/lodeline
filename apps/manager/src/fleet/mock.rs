@@ -6,8 +6,10 @@
 //! are hex (`ipv4:c0000201` for the dotted form of 0xc0000201), so the file holds no literal
 //! addresses. Event IDs come from the seed as Go derives them.
 //!
-//! The proxies are `testdata/mock-proxies.json`, written for this console: 5 proxy details whose
-//! times are second offsets from the seed. Their cursor is the last proxy ID of a page.
+//! The proxies are `testdata/mock-proxies.json` and their invocations
+//! `testdata/mock-proxy-invocations.json`, both written for this console: 5 proxy details and 10
+//! invocation details whose times are second offsets from the seed. A list cursor is the last ID
+//! of a page.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -17,13 +19,14 @@ use serde_json::Value;
 
 use super::{
     go_decode, BoxFuture, Client, CompliancePage, ComplianceParams, ComplianceRow, Event,
-    EventsPage, EventsParams, FleetError, GoTime, HostDetail, HostsPage, HostsParams, Meta,
-    ProxiesPage, ProxiesParams, ProxyDetail, Reply, Request, Response, RiskPage, RiskParams,
-    RiskRow,
+    EventsPage, EventsParams, FleetError, GoTime, HostDetail, HostsPage, HostsParams,
+    InvocationDetail, InvocationSummary, InvocationsPage, InvocationsParams, Meta, ProxiesPage,
+    ProxiesParams, ProxyDetail, Reply, Request, Response, RiskPage, RiskParams, RiskRow,
 };
 
 const FIXTURES: &str = include_str!("../../testdata/mock-fleet.json");
 const PROXY_FIXTURES: &str = include_str!("../../testdata/mock-proxies.json");
+const INVOCATION_FIXTURES: &str = include_str!("../../testdata/mock-proxy-invocations.json");
 
 pub struct Mock {
     seed: GoTime,
@@ -34,6 +37,8 @@ pub struct Mock {
     events: Vec<Event>,
     /// In `proxy_id` order, the server's list order.
     proxies: Vec<ProxyDetail>,
+    /// Newest first, the server's list order.
+    invocations: Vec<InvocationDetail>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +72,11 @@ impl Mock {
         // `from_str`, not `from_value`: gap details are raw JSON, which only a text decode keeps.
         let proxies =
             serde_json::from_str(&proxies.to_string()).expect("mock-proxies.json has the types");
+        let mut invocations: Value =
+            serde_json::from_str(INVOCATION_FIXTURES).expect("mock-proxy-invocations.json is JSON");
+        expand_proxy_times(&mut invocations, "", seed);
+        let invocations =
+            serde_json::from_value(invocations).expect("mock-proxy-invocations.json has the types");
         Self {
             seed: GoTime::from_unix(seed),
             meta: f.meta,
@@ -74,6 +84,7 @@ impl Mock {
             hosts: f.hosts,
             events: f.events,
             proxies,
+            invocations,
         }
     }
 
@@ -99,27 +110,76 @@ impl Mock {
                         || p.config_in_sync == s.config_in_sync.to_string())
             })
             .collect();
-        let start = match p.cursor.as_str() {
-            "" => 0,
-            c => {
-                rows.iter()
-                    .position(|s| s.proxy_id == c)
-                    .ok_or(FleetError::InvalidCursor)?
-                    + 1
-            }
+        let (items, next_cursor) = cursor_page(&rows, &p.cursor, p.limit, |s| &s.proxy_id)?;
+        Ok(ProxiesPage { items, next_cursor })
+    }
+
+    /// The server's filter and limit checks, and a cursor that must name a listed invocation.
+    fn invocations(&self, p: &InvocationsParams) -> Result<InvocationsPage, FleetError> {
+        let known = |v: &str, allowed: &[&str]| v.is_empty() || allowed.contains(&v);
+        let time = |v: &str| match v {
+            "" => Ok(None),
+            v => GoTime::parse(v).map(Some).ok_or(FleetError::InvalidFilter),
         };
-        let limit = if p.limit > 0 { p.limit as usize } else { 100 };
-        let items: Vec<_> = rows
+        let (from, to) = (time(&p.from)?, time(&p.to)?);
+        if !known(
+            &p.method,
+            &["initialize", "ping", "tools/list", "tools/call", "unknown"],
+        ) || !known(
+            &p.outcome,
+            &[
+                "success",
+                "tool_error",
+                "protocol_error",
+                "timeout",
+                "unknown",
+                "denied",
+            ],
+        ) || !known(
+            &p.lifecycle,
+            &[
+                "started",
+                "completed",
+                "completion_without_start",
+                "cancel_without_start",
+                "integrity_conflict",
+            ],
+        ) || !known(&p.time_basis, &["received", "occurred"])
+            || p.limit > 500
+        {
+            return Err(FleetError::InvalidFilter);
+        }
+        let is = |want: &str, got: Option<&str>| want.is_empty() || got == Some(want);
+        let wire = |v: Value| v.as_str().map(str::to_owned);
+        let rows: Vec<&InvocationSummary> = self
+            .invocations
             .iter()
-            .skip(start)
-            .take(limit)
-            .map(|&s| s.clone())
+            .map(|d| &d.invocation)
+            .filter(|i| {
+                let at = if p.time_basis == "occurred" {
+                    i.started_at.as_deref().or(i.completed_at.as_deref())
+                } else {
+                    Some(i.first_received_at.as_str())
+                }
+                .and_then(GoTime::parse);
+                let outcome = i.outcome.and_then(|o| wire(serde_json::json!(o)));
+                let lifecycle = wire(serde_json::json!(i.lifecycle));
+                is(&p.proxy_id, Some(&i.proxy_id))
+                    && is(&p.upstream_id, i.upstream_id.as_deref())
+                    && is(&p.actor_id, i.actor.as_ref().map(|a| a.actor_id.as_str()))
+                    && is(&p.method, i.method.as_deref())
+                    && is(&p.outcome, outcome.as_deref())
+                    && is(&p.lifecycle, lifecycle.as_deref())
+                    && is(
+                        &p.tool_ref,
+                        i.tool.as_ref().and_then(|t| t.metadata_ref.as_deref()),
+                    )
+                    && from.is_none_or(|f| at.is_some_and(|t| t >= f))
+                    && to.is_none_or(|e| at.is_some_and(|t| t < e))
+            })
             .collect();
-        let more = rows.len() > start + items.len();
-        Ok(ProxiesPage {
-            next_cursor: items.last().filter(|_| more).map(|s| s.proxy_id.clone()),
-            items,
-        })
+        let (items, next_cursor) = cursor_page(&rows, &p.cursor, p.limit, |i| &i.invocation_id)?;
+        Ok(InvocationsPage { items, next_cursor })
     }
 
     fn events(&self, p: &EventsParams) -> EventsPage {
@@ -284,6 +344,14 @@ impl Mock {
                     .cloned()
                     .ok_or(FleetError::NotFound)?,
             ),
+            Request::Invocations(p) => Response::Invocations(self.invocations(&p)?),
+            Request::InvocationById(id) => Response::Invocation(
+                self.invocations
+                    .iter()
+                    .find(|d| d.invocation.invocation_id == id)
+                    .cloned()
+                    .ok_or(FleetError::NotFound)?,
+            ),
         })
     }
 }
@@ -293,6 +361,35 @@ impl Client for Mock {
         let reply = self.answer(req).map(Arc::new);
         Box::pin(async move { reply })
     }
+}
+
+/// A page of a proxy read: the cursor is the last ID of the previous page and must name a row,
+/// as a real server refuses a cursor it did not issue for these filters. The limit defaults to 100.
+fn cursor_page<T: Clone>(
+    rows: &[&T],
+    cursor: &str,
+    limit: i64,
+    id: impl Fn(&T) -> &String,
+) -> Result<(Vec<T>, Option<String>), FleetError> {
+    let start = match cursor {
+        "" => 0,
+        c => {
+            rows.iter()
+                .position(|r| id(r) == c)
+                .ok_or(FleetError::InvalidCursor)?
+                + 1
+        }
+    };
+    let limit = if limit > 0 { limit as usize } else { 100 };
+    let items: Vec<T> = rows
+        .iter()
+        .skip(start)
+        .take(limit)
+        .map(|&r| r.clone())
+        .collect();
+    let more = rows.len() > start + items.len();
+    let next = items.last().filter(|_| more).map(|r| id(r).clone());
+    Ok((items, next))
 }
 
 /// Turns the fixture offsets into times after `seed` and the hex addresses into dotted ones.
@@ -513,6 +610,85 @@ mod tests {
             Some(GoTime::from_unix(seed - 7200).to_string().as_str())
         );
         assert_eq!(lab.spool.as_ref().unwrap().quarantined_bytes, None);
+    }
+
+    #[test]
+    fn invocations_page_filter_and_refuse_a_cursor_they_did_not_issue() {
+        let seed = 1_767_225_600;
+        let m = Mock::new(seed);
+        let list = |p: InvocationsParams| m.invocations(&p);
+        let ids = |page: &InvocationsPage| -> Vec<String> {
+            let id = |i: &InvocationSummary| i.invocation_id[33..].to_owned();
+            page.items.iter().map(id).collect()
+        };
+        let all = list(InvocationsParams::default()).unwrap();
+        assert_eq!(
+            ids(&all),
+            ["401", "402", "403", "404", "405", "406", "409", "410", "408", "407"]
+        );
+        let first = list(InvocationsParams {
+            limit: 4,
+            ..Default::default()
+        })
+        .unwrap();
+        let second = list(InvocationsParams {
+            limit: 4,
+            cursor: first.next_cursor.clone().unwrap(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ids(&second), ["405", "406", "409", "410"]);
+        let edge2 = list(InvocationsParams {
+            proxy_id: "px-edge-02".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ids(&edge2), ["401", "402", "409"]);
+        let flagged = list(InvocationsParams {
+            lifecycle: "integrity_conflict".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ids(&flagged), ["402"]);
+        let success = list(InvocationsParams {
+            outcome: "success".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            ids(&success),
+            ["403"],
+            "a reported success is never matched"
+        );
+        let recent = list(InvocationsParams {
+            from: GoTime::from_unix(seed - 600).to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ids(&recent), ["401", "402", "403"]);
+        assert_eq!(
+            list(InvocationsParams {
+                proxy_id: "px-edge-02".into(),
+                cursor: first.next_cursor.clone().unwrap(),
+                ..Default::default()
+            }),
+            Err(FleetError::InvalidCursor),
+            "a cursor from other filters"
+        );
+        assert_eq!(
+            list(InvocationsParams {
+                lifecycle: "asleep".into(),
+                ..Default::default()
+            }),
+            Err(FleetError::InvalidFilter)
+        );
+        let truncated = &m.invocations[3];
+        assert_eq!((truncated.events_total, truncated.events.len()), (40, 32));
+        assert!(truncated.events_truncated);
+        assert_eq!(
+            truncated.invocation.first_received_at,
+            GoTime::from_unix(seed - 620).to_string()
+        );
     }
 
     #[test]

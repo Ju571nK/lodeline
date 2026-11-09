@@ -1,9 +1,12 @@
-//! The proxy reads against a real `lodeline-server` with a proxy section, in process.
+//! The proxy and invocation reads against a real `lodeline-server` with a proxy section, in
+//! process.
 //!
 //! The server's proxy DTOs only serialize, so there is no server type to decode with. Instead
 //! the console's body, encoded again, must equal the server's JSON minus the keys the console
 //! does not read. A field the server adds, renames or drops, or an enum value the console does
-//! not know, shows up as a difference here.
+//! not know, shows up as a difference here. The seed holds every lifecycle and outcome, and an
+//! open and a closed gap; `every_server_enum_value_decodes` covers the other enums, and fails to
+//! compile when the server adds a value.
 //!
 //! The TLS acceptor is replaced by a layer that sets the peer identity it would set, a
 //! host-class certificate, and narrows the read scope with the server's test hook.
@@ -14,6 +17,7 @@ use std::sync::Arc;
 
 use axum::extract::Request as HttpRequest;
 use axum::middleware::Next;
+use lodeline_proxy_api::ProxyEvent;
 use lodeline_server::app::build_router_with_proxy;
 use lodeline_server::config::ServerConfig;
 use lodeline_server::proxy::query::TestScope;
@@ -90,7 +94,9 @@ fn status(proxy: &str, older: bool) -> Value {
         "central": {"last_ingest_ack_at": "2026-11-09T00:00:00Z", "consecutive_failures": 9,
             "ingest_stopped": true},
         "routes": [{"upstream_id": "up1", "state": "degraded", "reason": "health_check_failed"},
-            {"upstream_id": "up2", "state": "supported"}],
+            {"upstream_id": "up2", "state": "supported"},
+            {"upstream_id": "up3", "state": "unsupported", "reason": "upstream_version_unsupported"},
+            {"upstream_id": "up4", "state": "disabled"}],
         "counters": {"auth_failures": [], "unmatched_cancels": []},
         "gaps": [], "last_assigned_sequence": 7,
     });
@@ -148,8 +154,99 @@ fn entry(proxy: &str, older: bool) -> ProxyEntry {
     .unwrap()
 }
 
+const EPOCH: &str = "11111111-1111-4111-8111-111111111111";
+
+fn uuid(n: u32) -> String {
+    format!("00000000-0000-4000-8000-{n:012}")
+}
+
+fn started(inv: u32, method: &str, tool: Option<Value>) -> (&'static str, Value) {
+    let protocol = if method == "tools/call" {
+        "2025-11-25"
+    } else {
+        "unknown"
+    };
+    let mut p = json!({
+        "invocation_id": uuid(inv), "upstream_id": "up1", "route_revision": 1,
+        "protocol_version": protocol, "method": method,
+        "actor": {"actor_id": "actor-1", "actor_kind": "non_human",
+            "authentication_method": "bearer", "evidence_source": "proxy_credential_mapping"},
+    });
+    if let Some(t) = tool {
+        p["tool"] = t;
+    }
+    ("invocation.started", p)
+}
+
+fn completed(inv: u32, outcome: &str, delivery: &str) -> (&'static str, Value) {
+    let p = json!({"invocation_id": uuid(inv), "outcome": outcome, "delivery_state": delivery,
+        "duration_ms": 12, "response_bytes": 34});
+    ("invocation.completed", p)
+}
+
+fn cancelled(inv: u32) -> (&'static str, Value) {
+    let p = json!({"invocation_id": uuid(inv)});
+    ("invocation.cancel_requested", p)
+}
+
+/// `payloads` as one proxy's events, numbered from sequence 1, with event IDs from `first_id`.
+fn events(proxy: &str, first_id: u32, payloads: Vec<(&str, Value)>) -> Vec<ProxyEvent> {
+    let mut seq = 0;
+    payloads
+        .into_iter()
+        .map(|(event_type, payload)| {
+            seq += 1;
+            let v = json!({
+                "schema_version": 1, "event_id": uuid(first_id + seq), "proxy_id": proxy,
+                "epoch_id": EPOCH, "sequence": seq,
+                "occurred_at": format!("2026-11-09T00:{:02}:{:02}Z", seq / 60, seq % 60),
+                "event_type": event_type, "payload": payload,
+            });
+            lodeline_proxy_api::parse_event(v.to_string().as_bytes()).unwrap()
+        })
+        .collect()
+}
+
+/// px-a's invocations: 1 started, 2 to 7 completed with each outcome, 8 a completion without its
+/// start, 9 a cancel without a start, 10 a success that contradicts its malformed start, and 11
+/// a ping with 32 cancels, more events than a detail lists.
+fn seed_invocations(ctx: &ProxyContext) {
+    let ident = json!({"status": "identified",
+        "metadata_ref": "00000000-0000-8000-8000-000000000001"});
+    let mut a = vec![started(1, "tools/list", None)];
+    let outcomes = [
+        ("success", "sent"),
+        ("tool_error", "sent"),
+        ("protocol_error", "not_sent"),
+        ("timeout", "unknown"),
+        ("unknown", "unknown"),
+        ("denied", "not_sent"),
+    ];
+    for (inv, (outcome, delivery)) in (2..).zip(outcomes) {
+        a.push(started(inv, "tools/call", Some(ident.clone())));
+        a.push(completed(inv, outcome, delivery));
+    }
+    a.push(completed(8, "success", "sent"));
+    a.push(cancelled(9));
+    let malformed = json!({"status": "unavailable", "reason": "malformed"});
+    a.push(started(10, "tools/call", Some(malformed)));
+    a.push(completed(10, "success", "sent"));
+    a.push(started(11, "ping", None));
+    a.extend((0..32).map(|_| cancelled(11)));
+    let mut a = events("px-a", 100, a);
+    let now = chrono::Utc::now().timestamp();
+    // Sequence 2 arrives last, so the server opens a sequence gap and then closes it.
+    let late = a.remove(1);
+    ctx.ledger.insert_batch("px-a", &a, now).unwrap();
+    ctx.ledger.insert_batch("px-a", &[late], now).unwrap();
+    for (proxy, first_id, inv) in [("px-b", 200, 12), ("px-d", 300, 13)] {
+        let e = events(proxy, first_id, vec![started(inv, "ping", None)]);
+        ctx.ledger.insert_batch(proxy, &e, now).unwrap();
+    }
+}
+
 /// A server with px-a (current proxy), px-b (outside the read scope), px-c (registered, never
-/// connected) and px-d (an older proxy).
+/// connected) and px-d (an older proxy), and the invocations of `seed_invocations`.
 async fn serve_with_proxies(dir: &Path) -> String {
     make_ca(dir, "hostca", "test-host-ca");
     make_ca(dir, "proxyca", "test-proxy-ca");
@@ -189,6 +286,7 @@ async fn serve_with_proxies(dir: &Path) -> String {
         let txn = ctx.store.begin();
         txn.commit(id, entry(id, older)).unwrap();
     }
+    seed_invocations(&ctx);
     let host_peer = Arc::new(PeerIdentity {
         fingerprint: "c".repeat(64),
         cn: Some("console".into()),
@@ -235,6 +333,22 @@ fn without_unread(mut v: Value, detail: bool) -> Value {
         o.remove("counters");
     }
     v
+}
+
+/// An invocation body without the reserved `decision`, which the console does not read.
+fn without_decision(mut v: Value) -> Value {
+    v.as_object_mut().unwrap().remove("decision");
+    v
+}
+
+fn invocations(cursor: &str, limit: i64, proxy_id: &str, lifecycle: &str) -> Request {
+    Request::Invocations(InvocationsParams {
+        cursor: cursor.into(),
+        limit,
+        proxy_id: proxy_id.into(),
+        lifecycle: lifecycle.into(),
+        ..Default::default()
+    })
 }
 
 fn list(cursor: &str, limit: i64, connection_state: &str) -> Request {
@@ -295,7 +409,19 @@ async fn the_http_client_reads_the_proxy_routes_of_a_real_server() {
         (Some(3), Some(2))
     );
     assert!(!a.summary.config_in_sync);
-    assert_eq!(a.audit_gaps[0].kind, "event_quarantined");
+    let gaps: Vec<_> = a
+        .audit_gaps
+        .iter()
+        .map(|g| (g.kind.as_str(), g.state))
+        .collect();
+    assert!(
+        gaps.contains(&("event_quarantined", GapState::Open)),
+        "{gaps:?}"
+    );
+    assert!(
+        gaps.contains(&("sequence_gap", GapState::Closed)),
+        "{gaps:?}"
+    );
     let Response::Proxy(d) = &*client.get(Request::ProxyById("px-d".into())).await.unwrap() else {
         panic!("not a proxy")
     };
@@ -333,11 +459,271 @@ async fn the_http_client_reads_the_proxy_routes_of_a_real_server() {
 }
 
 #[tokio::test]
+async fn the_http_client_reads_the_invocation_routes_of_a_real_server() {
+    let dir = temp_dir("invocations");
+    let url = serve_with_proxies(&dir.0).await;
+    let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
+
+    let (status, body) = raw(&url, "/v1/proxy-invocations").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let Response::Invocations(page) = &*client.get(invocations("", 0, "", "")).await.unwrap()
+    else {
+        panic!("not an invocation page")
+    };
+    let mut want: Value = serde_json::from_slice(&body).unwrap();
+    for item in want["items"].as_array_mut().unwrap() {
+        *item = without_decision(item.take());
+    }
+    assert_eq!(serde_json::to_value(page).unwrap(), want);
+    assert_eq!(page.next_cursor, None);
+    assert!(
+        page.items.iter().all(|i| i.proxy_id != "px-b"),
+        "px-b is outside the read scope"
+    );
+    let lifecycles: Vec<_> = page.items.iter().map(|i| i.lifecycle).collect();
+    let outcomes: Vec<_> = page.items.iter().filter_map(|i| i.outcome).collect();
+    for l in [
+        Lifecycle::Started,
+        Lifecycle::Completed,
+        Lifecycle::CompletionWithoutStart,
+        Lifecycle::CancelWithoutStart,
+        Lifecycle::IntegrityConflict,
+    ] {
+        assert!(lifecycles.contains(&l), "the seed has {l:?}");
+    }
+    for o in [
+        Outcome::Success,
+        Outcome::ToolError,
+        Outcome::ProtocolError,
+        Outcome::Timeout,
+        Outcome::Unknown,
+        Outcome::Denied,
+    ] {
+        assert!(outcomes.contains(&o), "the seed has {o:?}");
+    }
+
+    for item in &page.items {
+        let id = &item.invocation_id;
+        let (status, body) = raw(&url, &format!("/v1/proxy-invocations/{id}")).await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        let reply = client
+            .get(Request::InvocationById(id.clone()))
+            .await
+            .unwrap();
+        let want = without_decision(serde_json::from_slice(&body).unwrap());
+        assert_eq!(serde_json::to_value(&*reply).unwrap(), want, "{id}");
+    }
+    let detail = |n| {
+        let c = &client;
+        async move {
+            match &*c.get(Request::InvocationById(uuid(n))).await.unwrap() {
+                Response::Invocation(d) => d.clone(),
+                other => panic!("not an invocation: {other:?}"),
+            }
+        }
+    };
+    let without_start = detail(8).await.invocation;
+    assert_eq!(
+        (without_start.lifecycle, without_start.outcome),
+        (Lifecycle::CompletionWithoutStart, None)
+    );
+    assert_eq!(without_start.reported_outcome, Some(Outcome::Success));
+    let conflict = detail(10).await.invocation;
+    assert_eq!(
+        (conflict.lifecycle, conflict.outcome),
+        (Lifecycle::IntegrityConflict, None)
+    );
+    assert_eq!(conflict.reported_outcome, Some(Outcome::Success));
+    assert_eq!(conflict.flags, ["completion_contradicts_start"]);
+    let many = detail(11).await;
+    assert_eq!(
+        (many.events_total, many.events_truncated, many.events.len()),
+        (33, true, 32)
+    );
+
+    // Outside the scope, unknown, and not a UUID: the same bytes, and the same error.
+    let (b_status, b_body) = raw(&url, &format!("/v1/proxy-invocations/{}", uuid(12))).await;
+    let (z_status, z_body) = raw(&url, &format!("/v1/proxy-invocations/{}", uuid(99))).await;
+    assert_eq!((b_status, &b_body), (z_status, &z_body));
+    assert_eq!(b_status, 404);
+    for id in [uuid(12), uuid(99), "not-a-uuid".into()] {
+        let err = client.get(Request::InvocationById(id.clone())).await;
+        assert_eq!(err.unwrap_err(), FleetError::NotFound, "{id}");
+    }
+
+    // A proxy filter outside the scope reads as an unknown proxy: an empty list.
+    for (proxy, want) in [("px-b", 0), ("px-zz", 0), ("px-d", 1)] {
+        let reply = client.get(invocations("", 0, proxy, "")).await.unwrap();
+        let Response::Invocations(p) = &*reply else {
+            panic!("not an invocation page")
+        };
+        assert_eq!(p.items.len(), want, "{proxy}");
+    }
+
+    // The server's cursor goes back unchanged, and works only with the filters it came from.
+    let Response::Invocations(first) = &*client.get(invocations("", 2, "px-a", "")).await.unwrap()
+    else {
+        panic!("not an invocation page")
+    };
+    let cursor = first.next_cursor.clone().expect("a second page");
+    let Response::Invocations(second) = &*client
+        .get(invocations(&cursor, 2, "px-a", ""))
+        .await
+        .unwrap()
+    else {
+        panic!("not an invocation page")
+    };
+    assert_eq!(second.items.len(), 2);
+    assert!(second.items.iter().all(|i| first
+        .items
+        .iter()
+        .all(|f| f.invocation_id != i.invocation_id)));
+    for (req, want) in [
+        (
+            invocations(&cursor, 2, "px-a", "completed"),
+            FleetError::InvalidCursor,
+        ),
+        (invocations(&cursor, 2, "", ""), FleetError::InvalidCursor),
+        (
+            invocations("not-a-cursor", 2, "", ""),
+            FleetError::InvalidCursor,
+        ),
+        (invocations("", 2, "", "asleep"), FleetError::InvalidFilter),
+        (invocations("", 501, "", ""), FleetError::InvalidFilter),
+    ] {
+        assert_eq!(client.get(req.clone()).await.unwrap_err(), want, "{req:?}");
+    }
+}
+
+/// Each value of the server's enums decodes to the console's matching value, never `unknown`.
+/// The matches have no wildcard, so a value the server adds fails to compile here.
+#[test]
+fn every_server_enum_value_decodes() {
+    use lodeline_proxy_api::event::Outcome as SOutcome;
+    use lodeline_proxy_api::status::{
+        ConfigState as SConfig, RouteState as SRoute, SpoolState as SSpool,
+    };
+    use lodeline_server::proxy::projection::Lifecycle as SLifecycle;
+    use lodeline_server::proxy::query::ConnectionState as SConnection;
+
+    fn decodes<S: Serialize, C: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
+        server: S,
+        console: C,
+    ) {
+        let wire = serde_json::to_value(server).unwrap();
+        assert_eq!(
+            serde_json::from_value::<C>(wire.clone()).unwrap(),
+            console,
+            "{wire}"
+        );
+    }
+    for v in [
+        SConnection::Connected,
+        SConnection::Disconnected,
+        SConnection::NeverConnected,
+    ] {
+        decodes(
+            v,
+            match v {
+                SConnection::Connected => ConnectionState::Connected,
+                SConnection::Disconnected => ConnectionState::Disconnected,
+                SConnection::NeverConnected => ConnectionState::NeverConnected,
+            },
+        );
+    }
+    for v in [
+        SConfig::None,
+        SConfig::Valid,
+        SConfig::Expired,
+        SConfig::Disabled,
+    ] {
+        decodes(
+            v,
+            match v {
+                SConfig::None => ConfigState::None,
+                SConfig::Valid => ConfigState::Valid,
+                SConfig::Expired => ConfigState::Expired,
+                SConfig::Disabled => ConfigState::Disabled,
+            },
+        );
+    }
+    for v in [SSpool::Ok, SSpool::Degraded, SSpool::Full] {
+        decodes(
+            v,
+            match v {
+                SSpool::Ok => SpoolState::Ok,
+                SSpool::Degraded => SpoolState::Degraded,
+                SSpool::Full => SpoolState::Full,
+            },
+        );
+    }
+    for v in [
+        SRoute::Supported,
+        SRoute::Degraded,
+        SRoute::Unsupported,
+        SRoute::Disabled,
+    ] {
+        decodes(
+            v,
+            match v {
+                SRoute::Supported => RouteState::Supported,
+                SRoute::Degraded => RouteState::Degraded,
+                SRoute::Unsupported => RouteState::Unsupported,
+                SRoute::Disabled => RouteState::Disabled,
+            },
+        );
+    }
+    for v in [
+        SLifecycle::Started,
+        SLifecycle::Completed,
+        SLifecycle::CompletionWithoutStart,
+        SLifecycle::CancelWithoutStart,
+        SLifecycle::IntegrityConflict,
+    ] {
+        decodes(
+            v.as_str(),
+            match v {
+                SLifecycle::Started => Lifecycle::Started,
+                SLifecycle::Completed => Lifecycle::Completed,
+                SLifecycle::CompletionWithoutStart => Lifecycle::CompletionWithoutStart,
+                SLifecycle::CancelWithoutStart => Lifecycle::CancelWithoutStart,
+                SLifecycle::IntegrityConflict => Lifecycle::IntegrityConflict,
+            },
+        );
+    }
+    for v in [
+        SOutcome::Success,
+        SOutcome::ToolError,
+        SOutcome::ProtocolError,
+        SOutcome::Timeout,
+        SOutcome::Unknown,
+        SOutcome::Denied,
+    ] {
+        decodes(
+            v,
+            match v {
+                SOutcome::Success => Outcome::Success,
+                SOutcome::ToolError => Outcome::ToolError,
+                SOutcome::ProtocolError => Outcome::ProtocolError,
+                SOutcome::Timeout => Outcome::Timeout,
+                SOutcome::Unknown => Outcome::Unknown,
+                SOutcome::Denied => Outcome::Denied,
+            },
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_server_without_a_proxy_section_has_no_proxy_reads() {
     let dir = temp_dir("no-proxies");
     let url = serve(&dir.0).await;
     let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
-    for req in [list("", 0, ""), Request::ProxyById("px-a".into())] {
+    for req in [
+        list("", 0, ""),
+        Request::ProxyById("px-a".into()),
+        invocations("", 0, "", ""),
+        Request::InvocationById(uuid(1)),
+    ] {
         let err = client.get(req.clone()).await.unwrap_err();
         assert_eq!(err, FleetError::ProxyReadsUnavailable, "{req:?}");
     }

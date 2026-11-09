@@ -1,0 +1,74 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxy-invocations/00000000-0000-4000-8000-000000000402",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "actor": {
+      "actor_id": "svc-ci",
+      "actor_kind": "non_human",
+      "authentication_method": "bearer",
+      "credential_owner_id": null,
+      "evidence_source": "proxy_credential_mapping"
+    },
+    "cancel_observed": false,
+    "completed_at": "<seed-184s Z>",
+    "delivery_state": null,
+    "duration_ms": 230,
+    "epoch_superseded": false,
+    "events": [
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e2",
+        "event_id": "00000000-0000-4000-8000-000000000502",
+        "event_type": "invocation.started",
+        "occurred_at": "<seed-185s Z>",
+        "received_at": "<seed-3m Z>",
+        "sequence": 1
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e2",
+        "event_id": "00000000-0000-4000-8000-000000000503",
+        "event_type": "invocation.completed",
+        "occurred_at": "<seed-184s Z>",
+        "received_at": "<seed-179s Z>",
+        "sequence": 2
+      }
+    ],
+    "events_total": 2,
+    "events_truncated": false,
+    "first_received_at": "<seed-3m Z>",
+    "flags": [
+      "completion_contradicts_start"
+    ],
+    "invocation_id": "00000000-0000-4000-8000-000000000402",
+    "last_received_at": "<seed-179s Z>",
+    "lifecycle": "integrity_conflict",
+    "method": "tools/call",
+    "outcome": null,
+    "protocol_version": "2025-11-25",
+    "proxy_id": "px-edge-02",
+    "reason": null,
+    "reported_delivery_state": "sent",
+    "reported_outcome": "success",
+    "reported_reason": null,
+    "response_bytes": 5120,
+    "route_revision": 7,
+    "start_epoch_id": "00000000-0000-4000-8000-0000000000e2",
+    "started_at": "<seed-185s Z>",
+    "tool": {
+      "reason": "malformed",
+      "status": "unavailable"
+    },
+    "upstream_id": "github-mcp"
+  }
+}

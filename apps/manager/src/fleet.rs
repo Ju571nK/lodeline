@@ -36,6 +36,8 @@ pub enum Request {
     Compliance(ComplianceParams),
     Proxies(ProxiesParams),
     ProxyById(String),
+    Invocations(InvocationsParams),
+    InvocationById(String),
 }
 
 /// `GET /v1/events` filters. Empty and zero values are left out of the upstream query.
@@ -85,6 +87,23 @@ pub struct ProxiesParams {
     pub config_in_sync: String,
 }
 
+/// `GET /v1/proxy-invocations` filters, passed through as given like [`ProxiesParams`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InvocationsParams {
+    pub cursor: String,
+    pub limit: i64,
+    pub proxy_id: String,
+    pub upstream_id: String,
+    pub actor_id: String,
+    pub method: String,
+    pub outcome: String,
+    pub lifecycle: String,
+    pub tool_ref: String,
+    pub from: String,
+    pub to: String,
+    pub time_basis: String,
+}
+
 /// One fleet body, as the handlers relay it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -103,11 +122,13 @@ pub enum Response {
     Compliance(CompliancePage),
     Proxies(ProxiesPage),
     Proxy(ProxyDetail),
+    Invocations(InvocationsPage),
+    Invocation(InvocationDetail),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FleetError {
-    /// 404 from an ID lookup: no such event or host.
+    /// 404 from an ID lookup: no such event, host, proxy or invocation.
     NotFound,
     /// 404 from any other endpoint: the server runs without a read token.
     ReadApiDisabled,
@@ -117,9 +138,11 @@ pub enum FleetError {
     Unauthorized,
     /// 403 from a proxy read: the read credential has no `proxy.read` at all.
     Forbidden,
-    /// 422 `invalid_cursor` from a proxy list: the cursor is malformed or from another filter set.
+    /// 422 `invalid_cursor` from a proxy or invocation list: the cursor is malformed or from
+    /// another filter set.
     InvalidCursor,
-    /// 422 `invalid_filter` from a proxy list: an unknown filter or value, or a bad `limit`.
+    /// 422 `invalid_filter` from a proxy or invocation list: an unknown filter or value, or a bad
+    /// `limit`.
     InvalidFilter,
     /// 503 while the server rebuilds its index; `retry_after` from the header, 5 s by default.
     ServiceUnavailable {
@@ -275,6 +298,8 @@ impl Request {
             Self::Compliance(_) => "compliance",
             Self::Proxies(_) => "proxies",
             Self::ProxyById(_) => "proxy_by_id",
+            Self::Invocations(_) => "proxy_invocations",
+            Self::InvocationById(_) => "proxy_invocation_by_id",
         })
     }
 
@@ -330,11 +355,26 @@ impl Request {
                 set("connection_state", p.connection_state.clone());
                 set("config_in_sync", p.config_in_sync.clone());
             }
+            Self::Invocations(p) => {
+                set("cursor", p.cursor.clone());
+                set("limit", limit(p.limit));
+                set("proxy_id", p.proxy_id.clone());
+                set("upstream_id", p.upstream_id.clone());
+                set("actor_id", p.actor_id.clone());
+                set("method", p.method.clone());
+                set("outcome", p.outcome.clone());
+                set("lifecycle", p.lifecycle.clone());
+                set("tool_ref", p.tool_ref.clone());
+                set("from", p.from.clone());
+                set("to", p.to.clone());
+                set("time_basis", p.time_basis.clone());
+            }
             Self::Healthz
             | Self::Meta
             | Self::EventById(_)
             | Self::HostById(_)
-            | Self::ProxyById(_) => {}
+            | Self::ProxyById(_)
+            | Self::InvocationById(_) => {}
         }
         q.sort_by_key(|(k, _)| *k);
         q.iter()
@@ -346,7 +386,10 @@ impl Request {
     /// The cache key: endpoint plus its query, or plus the ID for a lookup.
     fn cache_key(&self) -> Option<String> {
         let suffix = match self {
-            Self::EventById(id) | Self::HostById(id) | Self::ProxyById(id) => id.clone(),
+            Self::EventById(id)
+            | Self::HostById(id)
+            | Self::ProxyById(id)
+            | Self::InvocationById(id) => id.clone(),
             _ => self.query(),
         };
         Some(format!("{}|{suffix}", self.endpoint()?))

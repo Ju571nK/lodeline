@@ -1,5 +1,6 @@
-//! The proxy read bodies, `GET /v1/proxies` and `GET /v1/proxies/{id}`, as `lodeline-server`'s
-//! `proxy::query` sends them (ledger-and-query.md L3 and L4).
+//! The proxy read bodies, `GET /v1/proxies`, `GET /v1/proxies/{id}`, `GET /v1/proxy-invocations`
+//! and `GET /v1/proxy-invocations/{id}`, as `lodeline-server`'s `proxy::query` sends them
+//! (ledger-and-query.md L2 to L4).
 //!
 //! No Go console read these, so they keep the server's shape instead of Go's: a field the server
 //! sends as `null` stays `null`, a field it leaves out stays out, and an enum value this build
@@ -160,4 +161,117 @@ pub struct AuditGap {
     pub detected_at: String,
     pub state: GapState,
     pub details: Raw,
+}
+
+/// L2 `lifecycle`. Only `completed` carries a corroborated outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    Started,
+    Completed,
+    CompletionWithoutStart,
+    CancelWithoutStart,
+    IntegrityConflict,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A completion's outcome. `unknown` is also a value that proxies report, so a value this build
+/// does not know reads as that same `unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Success,
+    ToolError,
+    ProtocolError,
+    Timeout,
+    Denied,
+    #[serde(other)]
+    Unknown,
+}
+
+/// `GET /v1/proxy-invocations`, newest first. `next_cursor` is opaque and bound to the filters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InvocationsPage {
+    pub items: Vec<InvocationSummary>,
+    pub next_cursor: Option<String>,
+}
+
+/// One invocation as the server projects it from its events (L2). The server's reserved
+/// `decision` is not read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InvocationSummary {
+    pub invocation_id: String,
+    pub proxy_id: String,
+    pub lifecycle: Lifecycle,
+    /// Set only when `lifecycle` is `completed`.
+    pub outcome: Option<Outcome>,
+    pub delivery_state: Option<String>,
+    pub reason: Option<String>,
+    /// What a completion claimed under `completion_without_start` or `integrity_conflict`. The
+    /// proxy reported it and nothing corroborates it, so it is never a headline value.
+    pub reported_outcome: Option<Outcome>,
+    pub reported_delivery_state: Option<String>,
+    pub reported_reason: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub response_bytes: Option<i64>,
+    pub method: Option<String>,
+    pub protocol_version: Option<String>,
+    pub upstream_id: Option<String>,
+    pub route_revision: Option<i64>,
+    pub actor: Option<Actor>,
+    pub tool: Option<Tool>,
+    pub cancel_observed: bool,
+    /// Proxy clock, unverified.
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    /// Server clock.
+    pub first_received_at: String,
+    pub last_received_at: String,
+    pub start_epoch_id: Option<String>,
+    pub epoch_superseded: bool,
+    pub flags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Actor {
+    pub actor_id: String,
+    pub actor_kind: String,
+    pub authentication_method: String,
+    pub evidence_source: String,
+    /// Who owns the credential's permissions, not who ran the call.
+    pub credential_owner_id: Option<String>,
+}
+
+/// The start's tool binding: a metadata reference or why there is none, never a tool name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Tool {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `GET /v1/proxy-invocations/{id}`: the summary plus the first 32 event envelopes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InvocationDetail {
+    #[serde(flatten)]
+    pub invocation: InvocationSummary,
+    pub events_total: i64,
+    /// True when more events exist than `events` lists.
+    pub events_truncated: bool,
+    pub events: Vec<InvocationEvent>,
+}
+
+/// Envelope identifiers only; the server never returns a payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InvocationEvent {
+    pub event_type: String,
+    pub event_id: String,
+    pub epoch_id: String,
+    pub sequence: i64,
+    /// Proxy clock, unverified.
+    pub occurred_at: String,
+    pub received_at: String,
 }

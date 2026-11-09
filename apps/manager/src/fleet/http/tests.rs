@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::fleet::{
-    retry, ActiveHosts, ConfigState, ConnectionState, EventsParams, GoTime, HostsParams, Meta,
-    ProxiesParams, RetryPolicy, RiskParams, DEFAULT_RETRY,
+    retry, ActiveHosts, ConfigState, ConnectionState, EventsParams, GoTime, HostsParams,
+    InvocationsParams, Lifecycle, Meta, Outcome, ProxiesParams, RetryPolicy, RiskParams,
+    DEFAULT_RETRY,
 };
 
 const TOKEN: &str = "test-bearer-secret";
@@ -438,6 +439,136 @@ async fn proxy_detail_keeps_nulls_absent_fields_and_reads_new_enum_values_as_unk
     for dropped in ["outages", "counters", "current_epoch_id"] {
         assert!(out.get(dropped).is_none(), "{dropped} is not relayed");
     }
+}
+
+const INVOCATION: &str = "00000000-0000-4000-8000-000000000401";
+
+fn invocation_detail_body() -> Value {
+    json!({
+        "invocation_id": INVOCATION, "proxy_id": "px-a", "lifecycle": "superseded_later",
+        "outcome": null, "delivery_state": null, "reason": null,
+        "reported_outcome": "cancelled", "reported_delivery_state": "sent",
+        "reported_reason": null, "duration_ms": 41, "response_bytes": 1820, "method": null,
+        "protocol_version": null, "upstream_id": null, "route_revision": null, "actor": null,
+        "tool": {"status": "unavailable", "reason": "malformed"}, "cancel_observed": false,
+        "decision": null, "started_at": null, "completed_at": "2026-11-09T10:00:00Z",
+        "first_received_at": "2026-11-09T10:00:01Z", "last_received_at": "2026-11-09T10:00:01Z",
+        "start_epoch_id": null, "epoch_superseded": false, "flags": ["flag_from_later"],
+        "events_total": 33, "events_truncated": true,
+        "events": [{"event_type": "invocation.completed", "event_id": "e1", "epoch_id": "ep1",
+            "sequence": 1, "occurred_at": "2026-11-09T10:00:00Z",
+            "received_at": "2026-11-09T10:00:01Z"}],
+    })
+}
+
+#[tokio::test]
+async fn the_invocation_list_passes_the_cursor_and_every_filter_unchanged() {
+    let cursor = "eyJ2IjoxLCJrZXkiOjcsImZpbHRlcl9oYXNoIjoiYWIifQ";
+    let (c, calls) =
+        stub(move |_| json_answer(200, json!({"items": [], "next_cursor": cursor}))).await;
+    let reply = c
+        .get(Request::Invocations(InvocationsParams {
+            cursor: cursor.into(),
+            limit: 25,
+            proxy_id: "px-a".into(),
+            upstream_id: "up1".into(),
+            actor_id: "actor-1".into(),
+            method: "tools/call".into(),
+            outcome: "success".into(),
+            lifecycle: "completed".into(),
+            tool_ref: "00000000-0000-8000-8000-000000000001".into(),
+            from: "2026-11-09T00:00:00Z".into(),
+            to: "2026-11-10T00:00:00Z".into(),
+            time_basis: "occurred".into(),
+        }))
+        .await
+        .unwrap();
+    let Response::Invocations(page) = &*reply else {
+        panic!("not an invocation page: {reply:?}")
+    };
+    assert_eq!(page.next_cursor.as_deref(), Some(cursor));
+    let seen = calls.lock().unwrap()[0].clone();
+    assert_eq!(seen.path, "/v1/proxy-invocations");
+    assert_eq!(
+        seen.query,
+        format!(
+            "actor_id=actor-1&cursor={cursor}&from=2026-11-09T00%3A00%3A00Z&lifecycle=completed\
+             &limit=25&method=tools%2Fcall&outcome=success&proxy_id=px-a&time_basis=occurred\
+             &to=2026-11-10T00%3A00%3A00Z&tool_ref=00000000-0000-8000-8000-000000000001\
+             &upstream_id=up1"
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_invocation_404_is_unknown_only_with_proxy_unknown() {
+    let unknown = json!({"error": {"code": "proxy_unknown", "message": "proxy unknown"}});
+    let (c, calls) = stub(move |n| match n {
+        0 => json_answer(404, unknown.clone()),
+        _ => raw_answer(404, ""),
+    })
+    .await;
+    let get = |req| c.get(req);
+    assert_eq!(
+        get(Request::InvocationById(INVOCATION.into()))
+            .await
+            .unwrap_err(),
+        FleetError::NotFound
+    );
+    assert_eq!(
+        get(Request::InvocationById(INVOCATION.into()))
+            .await
+            .unwrap_err(),
+        FleetError::ProxyReadsUnavailable
+    );
+    assert_eq!(
+        get(Request::Invocations(InvocationsParams::default()))
+            .await
+            .unwrap_err(),
+        FleetError::ProxyReadsUnavailable
+    );
+    let path = calls.lock().unwrap()[0].path.clone();
+    assert_eq!(path, format!("/v1/proxy-invocations/{INVOCATION}"));
+}
+
+#[tokio::test]
+async fn invocation_403_and_422_are_typed_errors() {
+    let (c, _) = stub(|n| match n {
+        0 => json_answer(403, error_body("forbidden")),
+        1 => json_answer(422, error_body("invalid_cursor")),
+        _ => json_answer(422, error_body("invalid_filter")),
+    })
+    .await;
+    let list = || c.get(Request::Invocations(InvocationsParams::default()));
+    assert_eq!(list().await.unwrap_err(), FleetError::Forbidden);
+    assert_eq!(list().await.unwrap_err(), FleetError::InvalidCursor);
+    assert_eq!(list().await.unwrap_err(), FleetError::InvalidFilter);
+}
+
+#[tokio::test]
+async fn invocation_detail_keeps_nulls_and_reads_new_enum_values_as_unknown() {
+    let (c, _) = stub(|_| json_answer(200, invocation_detail_body())).await;
+    let reply = c
+        .get(Request::InvocationById(INVOCATION.into()))
+        .await
+        .unwrap();
+    let Response::Invocation(d) = &*reply else {
+        panic!("not an invocation: {reply:?}")
+    };
+    assert_eq!(d.invocation.lifecycle, Lifecycle::Unknown);
+    assert_eq!(d.invocation.outcome, None);
+    assert_eq!(d.invocation.reported_outcome, Some(Outcome::Unknown));
+    assert!(d.events_truncated);
+    let out = serde_json::to_value(&*reply).unwrap();
+    assert_eq!(out["lifecycle"], "unknown");
+    assert_eq!(out["flags"], json!(["flag_from_later"]));
+    assert_eq!(
+        out["tool"],
+        json!({"status": "unavailable", "reason": "malformed"})
+    );
+    assert_eq!(out["outcome"], Value::Null);
+    assert_eq!(out["events_total"], 33);
+    assert!(out.get("decision").is_none(), "decision is not relayed");
 }
 
 #[tokio::test]

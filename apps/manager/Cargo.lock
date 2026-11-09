@@ -1466,6 +1466,7 @@ dependencies = [
  "ipnet",
  "jsonwebtoken",
  "lodeline-fleet-api",
+ "lodeline-proxy-api",
  "lodeline-server",
  "p256",
  "p384",

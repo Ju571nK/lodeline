@@ -1,0 +1,95 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxy-invocations?proxy_id=px-edge-01&limit=2&cursor=00000000-0000-4000-8000-000000000403",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "items": [
+      {
+        "actor": {
+          "actor_id": "svc-ci",
+          "actor_kind": "non_human",
+          "authentication_method": "bearer",
+          "credential_owner_id": null,
+          "evidence_source": "proxy_credential_mapping"
+        },
+        "cancel_observed": true,
+        "completed_at": "<seed-630s Z>",
+        "delivery_state": "sent",
+        "duration_ms": 30000,
+        "epoch_superseded": false,
+        "first_received_at": "<seed-620s Z>",
+        "flags": [],
+        "invocation_id": "00000000-0000-4000-8000-000000000404",
+        "last_received_at": "<seed-581s Z>",
+        "lifecycle": "completed",
+        "method": "tools/call",
+        "outcome": "timeout",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-edge-01",
+        "reason": null,
+        "reported_delivery_state": null,
+        "reported_outcome": null,
+        "reported_reason": null,
+        "response_bytes": 0,
+        "route_revision": 7,
+        "start_epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "started_at": "<seed-11m Z>",
+        "tool": {
+          "metadata_ref": "00000000-0000-8000-8000-000000000702",
+          "status": "identified"
+        },
+        "upstream_id": "docs-search"
+      },
+      {
+        "actor": {
+          "actor_id": "alice",
+          "actor_kind": "non_human",
+          "authentication_method": "bearer",
+          "credential_owner_id": "team-platform",
+          "evidence_source": "proxy_credential_mapping"
+        },
+        "cancel_observed": false,
+        "completed_at": "<seed-904s Z>",
+        "delivery_state": "sent",
+        "duration_ms": 88,
+        "epoch_superseded": false,
+        "first_received_at": "<seed-15m Z>",
+        "flags": [
+          "duplicate_completion"
+        ],
+        "invocation_id": "00000000-0000-4000-8000-000000000405",
+        "last_received_at": "<seed-898s Z>",
+        "lifecycle": "completed",
+        "method": "tools/call",
+        "outcome": "tool_error",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-edge-01",
+        "reason": null,
+        "reported_delivery_state": null,
+        "reported_outcome": null,
+        "reported_reason": null,
+        "response_bytes": 640,
+        "route_revision": 7,
+        "start_epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "started_at": "<seed-905s Z>",
+        "tool": {
+          "metadata_ref": "00000000-0000-8000-8000-000000000701",
+          "status": "identified"
+        },
+        "upstream_id": "github-mcp"
+      }
+    ],
+    "next_cursor": "00000000-0000-4000-8000-000000000405"
+  }
+}

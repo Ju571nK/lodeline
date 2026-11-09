@@ -8,8 +8,8 @@ use serde::Serialize;
 
 use crate::api::{write_json, Query};
 use crate::fleet::{
-    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams, ProxiesParams,
-    Reply, Request, RiskParams,
+    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams,
+    InvocationsParams, ProxiesParams, Reply, Request, RiskParams,
 };
 use crate::server::{error_response, AppState};
 use crate::{config, triage};
@@ -98,7 +98,7 @@ pub async fn proxies(State(s): State<AppState>, uri: Uri) -> Response {
                 connection_state: q.get("connection_state").into(),
                 config_in_sync: q.get("config_in_sync").into(),
             };
-            relay_proxy(retried(&s, Request::Proxies(p)).await)
+            relay_proxy(retried(&s, Request::Proxies(p)).await, "proxy")
         }
         Err(msg) => invalid_query(msg),
     }
@@ -106,13 +106,47 @@ pub async fn proxies(State(s): State<AppState>, uri: Uri) -> Response {
 
 pub async fn proxy(State(s): State<AppState>, uri: Uri) -> Response {
     let id = last_segment(&route_path(uri.path()));
-    relay_proxy(retried(&s, Request::ProxyById(id)).await)
+    relay_proxy(retried(&s, Request::ProxyById(id)).await, "proxy")
 }
 
-/// The server cannot tell an unknown proxy from one outside the read range, so neither can this.
-fn relay_proxy(reply: Reply) -> Response {
+/// The invocation list. Every server filter and the cursor go to the server as given.
+pub async fn invocations(State(s): State<AppState>, uri: Uri) -> Response {
+    let q = Query::parse(uri.query());
+    match q.limit() {
+        Ok(limit) => {
+            let p = InvocationsParams {
+                cursor: q.get("cursor").into(),
+                limit,
+                proxy_id: q.get("proxy_id").into(),
+                upstream_id: q.get("upstream_id").into(),
+                actor_id: q.get("actor_id").into(),
+                method: q.get("method").into(),
+                outcome: q.get("outcome").into(),
+                lifecycle: q.get("lifecycle").into(),
+                tool_ref: q.get("tool_ref").into(),
+                from: q.get("from").into(),
+                to: q.get("to").into(),
+                time_basis: q.get("time_basis").into(),
+            };
+            relay_proxy(retried(&s, Request::Invocations(p)).await, "invocation")
+        }
+        Err(msg) => invalid_query(msg),
+    }
+}
+
+pub async fn invocation(State(s): State<AppState>, uri: Uri) -> Response {
+    let id = last_segment(&route_path(uri.path()));
+    relay_proxy(retried(&s, Request::InvocationById(id)).await, "invocation")
+}
+
+/// The server cannot tell an unknown target from one outside the read range, so neither can this.
+fn relay_proxy(reply: Reply, what: &str) -> Response {
     if matches!(reply, Err(FleetError::NotFound)) {
-        return error_response(StatusCode::NOT_FOUND, "not_found", "proxy not found");
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("{what} not found"),
+        );
     }
     relay(reply)
 }
