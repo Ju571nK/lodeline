@@ -59,10 +59,12 @@ sigil-manager
 │   ├── tab: Alerts (default)
 │   ├── tab: Events
 │   └── tab: Compliance
+├── /proxies                  → Proxy list (read only, added 2026-11)
+│   └── /proxies/:proxy_id    → Proxy detail
 └── /settings
 ```
 
-**Nav order** (D7, top nav): `◆ sigil` · Alerts · Fleet · Settings.
+**Nav order** (D7, top nav): `◆ sigil` · Alerts · Fleet · Proxies · Settings.
 `/hosts/:hostname` lives under Fleet conceptually (breadcrumb shows `Fleet / hostname`) but is reachable from both Fleet and the alert slide-over.
 
 ## 5. Key screens
@@ -106,6 +108,20 @@ Drilled-in view of one host.
   - Alerts tab: same queue UI as `/alerts` but filtered to this host.
   - Events tab: timeline scoped to host.
   - Compliance tab: policies + pass/fail + most recent violation.
+
+### 5.3a Proxies (`/proxies`, `/proxies/:proxy_id`)
+
+Added 2026-11 for Ju571nK/lodeline#458 (proxy scope M0). Read only against `lodeline-server`:
+no screen has a control that registers, disables, retires or configures a proxy.
+
+- List: one row per proxy with connection state, the report time (`status_as_of`) and the open
+  gap count beside it, config state with applied and desired revision, config expiry, spool
+  state and quarantine, last seen. Filters for connection state and config sync live in the URL.
+  Paging passes the server's opaque cursor back unchanged and starts again from the first page
+  when the server refuses it.
+- Detail: config, spool (depth, size, quarantined events and bytes), central ingest (including a
+  stopped ingest, which makes a degraded spool not a storage fault), registry sync counters,
+  route health, and the capped audit gap list with its total and dropped count.
 
 ### 5.4 Settings (`/settings`)
 
