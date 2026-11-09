@@ -395,6 +395,7 @@ function FactGrid({
       {ag && (
         <>
           <Fact label="Tool">{humanTool(ag.tool, ag.tool_label)}</Fact>
+          <Fact label="Source">{sourceLabel(ag)}</Fact>
           <Fact label="Score">
             <span className="font-mono">{ag.score.toFixed(1)}</span>{' '}
             <span className="text-text-subtle">/ 10</span>
@@ -527,8 +528,8 @@ function ToggleDriftFacts({ drift }: { drift: ToggleDriftEvidence }) {
       <Fact label="Toggle">
         <span className="text-sev-critical">{humanKind(drift.toggle)}</span>
       </Fact>
+      <Fact label="Source">{sourceLabel(drift)}</Fact>
       <Fact label="Scope">{scopeLabel(drift.scope)}</Fact>
-      {drift.rule_pack_id && <Fact label="Rule pack">{drift.rule_pack_id}</Fact>}
     </>
   );
 }
