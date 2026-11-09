@@ -23,6 +23,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // The CSP's `font-src 'self'` blocks a font inlined as a data: URL.
+    assetsInlineLimit: 0,
   },
   test: {
     environment: 'jsdom',

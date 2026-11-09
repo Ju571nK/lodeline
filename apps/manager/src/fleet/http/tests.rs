@@ -272,6 +272,37 @@ async fn status_404_on_host_by_id_is_not_found() {
     assert_eq!(err, FleetError::NotFound);
 }
 
+#[tokio::test]
+async fn a_fleet_404_is_a_refused_certificate_only_with_host_unknown() {
+    let (c, _) = stub(|n| match n % 2 {
+        // The server's read token is unset.
+        0 => json_answer(404, error_body("not_found")),
+        // The console's certificate is not host class.
+        _ => json_answer(404, json!({"error": "host_unknown"})),
+    })
+    .await;
+    for (req, read_api_off) in [
+        (Request::Meta, FleetError::ReadApiDisabled),
+        (
+            Request::Risk(RiskParams::default()),
+            FleetError::ReadApiDisabled,
+        ),
+        (Request::HostById("h-1".into()), FleetError::NotFound),
+        (Request::EventById("e-1".into()), FleetError::NotFound),
+    ] {
+        assert_eq!(
+            c.get(req.clone()).await.unwrap_err(),
+            read_api_off,
+            "{req:?}"
+        );
+        assert_eq!(
+            c.get(req.clone()).await.unwrap_err(),
+            FleetError::CertificateRefused,
+            "{req:?}"
+        );
+    }
+}
+
 fn raw_answer(status: u16, body: &str) -> Answer {
     Answer {
         status,
@@ -361,12 +392,16 @@ async fn a_proxy_404_is_unknown_only_with_proxy_unknown() {
         get(Request::ProxyById("px-a".into())).await.unwrap_err(),
         FleetError::ProxyReadsUnavailable
     );
-    for _ in 0..3 {
+    for want in [
+        FleetError::ProxyReadsUnavailable,
+        FleetError::ProxyReadsUnavailable,
+        FleetError::CertificateRefused,
+    ] {
         assert_eq!(
             get(Request::Proxies(ProxiesParams::default()))
                 .await
                 .unwrap_err(),
-            FleetError::ProxyReadsUnavailable
+            want
         );
     }
     let paths: Vec<_> = calls
@@ -652,7 +687,7 @@ async fn an_inventory_404_is_an_unknown_proxy_only_with_proxy_unknown() {
         for want in [
             FleetError::NotFound,
             FleetError::ProxyReadsUnavailable,
-            FleetError::ProxyReadsUnavailable,
+            FleetError::CertificateRefused,
         ] {
             let err = c.get(inventory(view, "px-a")).await.unwrap_err();
             assert_eq!(err, want, "{view:?}");

@@ -151,8 +151,11 @@ pub enum FleetError {
     /// 404 from any other endpoint: the server runs without a read token.
     ReadApiDisabled,
     /// 404 from a proxy read other than `proxy_unknown`: the server has no proxy section, so the
-    /// routes are not mounted, or it refuses the console's certificate on them.
+    /// routes are not mounted.
     ProxyReadsUnavailable,
+    /// 404 `host_unknown` from any read: a server with a proxy section serves the read routes only
+    /// to a host-class client certificate, and the console's is not one.
+    CertificateRefused,
     Unauthorized,
     /// 403 from a proxy read: the read credential has no `proxy.read` at all.
     Forbidden,
@@ -192,6 +195,9 @@ impl fmt::Display for FleetError {
             Self::ReadApiDisabled => f.write_str("fleet: read API disabled on lodeline-server"),
             Self::ProxyReadsUnavailable => {
                 f.write_str("fleet: proxy reads not available on lodeline-server")
+            }
+            Self::CertificateRefused => {
+                f.write_str("fleet: lodeline-server refused the console's client certificate")
             }
             Self::Unauthorized => f.write_str("fleet: unauthorized"),
             Self::Forbidden => f.write_str("fleet: forbidden"),

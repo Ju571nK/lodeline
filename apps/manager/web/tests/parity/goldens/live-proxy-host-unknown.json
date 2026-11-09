@@ -15,8 +15,8 @@
   "cookies": [],
   "body": {
     "error": {
-      "code": "proxy_reads_unavailable",
-      "message": "proxy reads are not available on this lodeline-server"
+      "code": "certificate_refused",
+      "message": "lodeline-server did not accept the client certificate in LODELINE_SERVER_CLIENT_CERT_PATH. Issue it from the host client CA (console README, Proxy reads, step 2)"
     }
   },
   "upstream": [

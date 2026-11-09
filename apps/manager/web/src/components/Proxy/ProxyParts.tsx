@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { ApiError, NotFoundError } from '@/api/client';
 import type { ProxySummary } from '@/api/proxies';
 import { connectionLabel, connectionTone, type Tone } from '@/lib/proxy';
+import { certificateRefused } from '@/lib/server-status';
 import { relativeAge, shortTime } from '@/lib/time';
 import { cn } from '@/lib/utils';
 
@@ -93,7 +94,7 @@ export function ConnectionCell({ proxy }: { proxy: ProxySummary }) {
 const proxyNotFound =
   'Proxy not found. It is not registered, or it is outside the read range of this console’s credential; the server answers both the same way.';
 const proxyReadsUnavailable =
-  'Proxy reads are not available on this lodeline-server. It runs without a proxy section, or it does not serve proxy reads to this console’s client certificate.';
+  'Proxy reads are not available on this lodeline-server. It runs without a proxy section.';
 
 /** The not-found and unavailable panels, by what the page reads. */
 const targetText = {
@@ -106,8 +107,7 @@ const targetText = {
   // Shown under a proxy that has loaded, so an unserved route most likely means an older server.
   inventory: {
     notFound: proxyNotFound,
-    unavailable:
-      'Inventory reads are not available on this lodeline-server. It predates them, or it does not serve proxy reads to this console’s client certificate.',
+    unavailable: 'Inventory reads are not available on this lodeline-server. It predates them.',
   },
 };
 
@@ -115,7 +115,7 @@ const targetText = {
 export const settled = (error: Error) =>
   error instanceof NotFoundError ||
   (error instanceof ApiError &&
-    ['proxy_reads_unavailable', 'upstream_forbidden'].includes(error.code));
+    ['proxy_reads_unavailable', 'upstream_forbidden', 'certificate_refused'].includes(error.code));
 
 /** The panel for a failed proxy or invocation read, by the console's error code. */
 export function ProxyReadError({
@@ -135,7 +135,9 @@ export function ProxyReadError({
         ? targetText[target].unavailable
         : code === 'upstream_forbidden'
           ? 'lodeline-server does not give this console’s read credential proxy reads.'
-          : `Could not load ${what}: ${error.message}`;
+          : code === 'certificate_refused'
+            ? certificateRefused
+            : `Could not load ${what}: ${error.message}`;
   return (
     <p role="alert" className="rounded-md border border-border bg-bg-surface p-6 text-sm">
       {text}

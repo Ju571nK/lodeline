@@ -262,6 +262,13 @@ fn map_err(e: &FleetError) -> Response {
             "proxy_reads_unavailable",
             "proxy reads are not available on this lodeline-server",
         ),
+        FleetError::CertificateRefused => error_response(
+            StatusCode::BAD_GATEWAY,
+            "certificate_refused",
+            "lodeline-server did not accept the client certificate in \
+             LODELINE_SERVER_CLIENT_CERT_PATH. Issue it from the host client CA \
+             (console README, Proxy reads, step 2)",
+        ),
         FleetError::Unauthorized => error_response(
             StatusCode::BAD_GATEWAY,
             "upstream_unauthorized",
