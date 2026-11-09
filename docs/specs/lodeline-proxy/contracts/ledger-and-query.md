@@ -314,7 +314,7 @@ must show `status_as_of` and `connection_state` together (PX-016, AC-12).
 | `central` | `{last_ingest_ack_at, consecutive_failures}` plus optional `ingest_stopped` (L5, #339; sent only when true, absent reads as false), proxy-reported |
 | `outages` | recent proxy-reported central outages (`central_outage` gaps), max 16 |
 | `counters` | L6 |
-| `audit_gaps` | newest-first, max 50, plus `audit_gaps_total` |
+| `audit_gaps` | open gaps first, then closed gaps, newest first within each, max 50, plus `audit_gaps_total`. With more than 50 open gaps the list holds 50 of them; `open_gap_count` and `open_gap_counts` are the full counts. Clients keep this order |
 | `audit_gaps_dropped` | count of inventory gap records (`inventory_incomplete`, `comparison_inconsistent`) dropped because the per-proxy gap cap was reached (registry.md R7) |
 | `open_gap_counts` | object kind → count |
 

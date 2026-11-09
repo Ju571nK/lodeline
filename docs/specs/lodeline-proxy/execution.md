@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-08 · spool `event_id`를 UUIDv7로(`perf/proxy-event-id-v7`), spool checkpoint를 writer thread 밖으로(`perf/proxy-bg-checkpoint`), key·canon 변경 뒤 inventory chain 끝내기(`feat/proxy-chain-end`), 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-09 · proxy 상세의 열린 gap 먼저(`fix/proxy-open-gaps-first`), spool `event_id`를 UUIDv7로(`perf/proxy-event-id-v7`), spool checkpoint를 writer thread 밖으로(`perf/proxy-bg-checkpoint`), key·canon 변경 뒤 inventory chain 끝내기(`feat/proxy-chain-end`), 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -11,6 +11,29 @@
 - 이전 회차 작업자 16명은 2026-10-11 모두 종료했다.
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
+
+## 2026-11-09 proxy 상세에서 열린 gap을 닫힌 gap보다 먼저 (`fix/proxy-open-gaps-first`)
+
+문제: `GET /v1/proxies/{id}`의 `audit_gaps`는 최신순 최대 50개였다. `Ledger::gaps_page`는 `open`과 관계없이 `ORDER BY rowid_seq DESC LIMIT 50`으로
+골랐고, route는 proxy 보고 gap과 합쳐 `detected_at` 내림차순으로 정렬한 뒤 50개로 잘랐다. 별도 gap 목록 endpoint는 없다. 그래서 더 새로운 닫힌
+gap 50개가 오래된 열린 gap을 목록 밖으로 밀어냈다. `open_gap_count`는 따로 세므로 맞았고, 상세는 열린 gap 수를 말하는데 목록에는 그 gap이 없었다.
+순서가 바뀐 수집은 정상 부하에서도 닫힌 `sequence_gap` 기록을 남긴다.
+
+수정(`ledger.rs` `gaps_page`, `query.rs` `get_proxy`): `gaps_page`는 `ORDER BY open DESC, rowid_seq DESC`로 고른다. route의 병합 정렬은 열린 gap
+(`state == "open"`, proxy 보고 gap은 모두 열림)을 먼저, 그다음 `detected_at` 내림차순, `gap_id` 내림차순이다. 50개 상한, `audit_gaps_total`,
+`audit_gaps_dropped`는 그대로다. 열린 gap이 50개보다 많으면 목록은 그 가운데 50개만 담고, 전체 수는 `open_gap_count`와 `open_gap_counts`다.
+[ledger-and-query.md](contracts/ledger-and-query.md)의 `audit_gaps` 줄을 같이 고쳤다.
+
+질의 계획: SQLite는 `gaps_proxy_open_kind (proxy_id, open, kind)` 색인으로 `open` 순서를 얻고 `rowid_seq`만 임시 B-tree로 정렬한다. 색인과 schema는
+바꾸지 않았다. 한 proxy에 gap 20,000개를 둔 DB에서 이 질의는 0.64 ms, 같은 요청이 이미 하는 `COUNT(*)`는 0.32 ms였다(측정, 로컬 sqlite3 3.51 CLI,
+run 하나, 서버에 묶인 SQLite 아님).
+
+console: `ProxyDetailView`는 `audit_gaps`를 다시 정렬하지 않고 서버 순서대로 그린다. 목록 위 문구를 "open gaps first, then newest first"로 바꿨다.
+`testdata/mock-proxies.json`과 parity golden의 gap 순서는 이미 새 순서와 맞으므로 바꾸지 않았다.
+
+시험: `proxy_query_e2e.rs` `audit_gaps_list_open_gaps_before_newer_closed_ones`는 열린 gap 21개(sequence 6, 보고 outage 20개)와 더 새로운 닫힌
+sequence gap 55개를 만든다. 수정 전에는 목록 50개 가운데 열린 gap이 0개였다(실패 확인). SQL만 되돌리면 20개, 병합 정렬만 되돌리면 1개였다(확인).
+console `ProxyDetailView.test.tsx`는 오래된 열린 gap이 새로운 닫힌 gap 위에 남는지 보고, 시간순 재정렬을 넣으면 실패한다(확인).
 
 ## 2026-11-08 spool `event_id`를 UUIDv7로 (`perf/proxy-event-id-v7`)
 

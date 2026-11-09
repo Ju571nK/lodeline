@@ -7,6 +7,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /v1/proxies/{id}` now lists a proxy's open audit gaps before its closed ones in
+  `audit_gaps`, newest first within each group, still at most 50. Before, the list was newest
+  first only, so 50 newer closed gaps could push an older open gap out of it. Under steady
+  traffic, out-of-order ingest leaves closed `sequence_gap` records, and the proxy page then
+  showed a count of open gaps with none of them in the list. When more than 50 gaps are open,
+  the list shows 50 of them, and `open_gap_count` and `open_gap_counts` give the full count.
+  The web console shows the list in the server's order and says so above it.
+
 ## [0.14.2] - 2026-11-09
 
 **Upgrade order.** The agent, the server and the web console can be upgraded in any order.

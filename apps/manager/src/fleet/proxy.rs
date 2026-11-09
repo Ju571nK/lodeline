@@ -114,7 +114,7 @@ pub struct ProxyDetail {
     pub registry: Option<Registry>,
     pub routes: Vec<RouteHealth>,
     pub central: Option<Central>,
-    /// Newest first, at most 50; `audit_gaps_total` counts them all.
+    /// Open first, then newest first, at most 50; `audit_gaps_total` counts them all.
     pub audit_gaps: Vec<AuditGap>,
     pub audit_gaps_total: i64,
     /// Inventory gaps dropped at the per-proxy cap. Above zero, the gap list is incomplete.

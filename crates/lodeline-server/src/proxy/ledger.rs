@@ -574,7 +574,7 @@ CREATE INDEX projections_last_received ON projections (proxy_id, last_received_a
 CREATE INDEX projections_tool_ref ON projections (tool_ref) WHERE tool_ref IS NOT NULL;
 ";
 
-/// Indexes for the gap page (`ORDER BY rowid_seq DESC`) and the open counts.
+/// Indexes for the gap page (`ORDER BY open DESC, rowid_seq DESC`) and the open counts.
 const GAPS_INDEXES_DDL: &str = "
 CREATE INDEX gaps_proxy_rowid ON gaps (proxy_id, rowid_seq);
 CREATE INDEX gaps_proxy_open_kind ON gaps (proxy_id, open, kind);
@@ -1211,8 +1211,8 @@ impl Ledger {
         invocation_detail(&tx, &owner, invocation_id)
     }
 
-    /// Server-derived gaps of `proxy_id`, newest first, at most 50, plus the
-    /// total (L3 `audit_gaps` / `audit_gaps_total`).
+    /// Server-derived gaps of `proxy_id`, open first, then newest first, at
+    /// most 50, plus the total (L3 `audit_gaps` / `audit_gaps_total`).
     pub fn gaps_page(&self, proxy_id: &str, limit: usize) -> Result<GapPage, LedgerError> {
         let limit = limit.min(MAX_GAP_PAGE);
         let mut conn = self.read.acquire();
@@ -1226,7 +1226,7 @@ impl Ledger {
             let mut st = tx.prepare(
                 "SELECT gap_id, kind, detected_at, epoch_id, previous_epoch_id, from_sequence,
                         to_sequence, open, closed_at, tail, details FROM gaps
-                 WHERE proxy_id = ?1 ORDER BY rowid_seq DESC LIMIT ?2",
+                 WHERE proxy_id = ?1 ORDER BY open DESC, rowid_seq DESC LIMIT ?2",
             )?;
             let rows = st.query_map(params![proxy_id, limit as i64], gap_from_row)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?

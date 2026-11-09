@@ -85,7 +85,7 @@ export interface ProxyDetail extends ProxySummary {
   registry: Registry | null;
   routes: RouteHealth[];
   central: Central | null;
-  /** Newest first, at most 50. */
+  /** Open first, then newest first, at most 50. Render in this order. */
   audit_gaps: AuditGap[];
   audit_gaps_total: number;
   /** Inventory gaps dropped at the server's per-proxy cap; above zero the list is incomplete. */

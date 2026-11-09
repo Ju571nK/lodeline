@@ -155,8 +155,8 @@ export function ProxyDetailView({ proxy }: { proxy: ProxyDetail }) {
             {gapCounts.length
               ? `Open: ${gapCounts.map(([kind, n]) => `${gapKind(kind)} ${n}`).join(', ')}.`
               : 'No open gaps.'}{' '}
-            Showing {proxy.audit_gaps.length} of {proxy.audit_gaps_total}, newest first. A gap stays
-            listed after it closes.
+            Showing {proxy.audit_gaps.length} of {proxy.audit_gaps_total}, open gaps first, then
+            newest first. A gap stays listed after it closes.
           </p>
           {proxy.audit_gaps_dropped > 0 && (
             <p role="alert" className="text-status-degraded">
