@@ -17,7 +17,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   found, and the Proxies page said that proxy reads were not available. These pages now say that
   the server did not accept the console's client certificate, and to issue it from the host
   client CA as "Proxy reads" in `apps/manager/README.md` describes. The console relays this
-  answer with the code `certificate_refused`.
+  answer with the code `certificate_refused`. (#551)
+- The web console no longer logs three Content Security Policy errors on every page. The build
+  inlined the smallest JetBrains Mono subsets (Cyrillic extended and Vietnamese) as `data:`
+  URLs, which the console's `font-src 'self'` policy blocks, so the browser could not use them.
+  The build now writes every font as a file that the console serves. (#551)
 
 ## [0.14.2] - 2026-11-09
 
