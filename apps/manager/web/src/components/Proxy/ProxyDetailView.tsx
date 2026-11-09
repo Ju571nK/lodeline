@@ -14,7 +14,7 @@ import {
   spoolStatus,
 } from '@/lib/proxy';
 import { relativeAge } from '@/lib/time';
-import { ConnectionCell, TonePill, When } from './ProxyParts';
+import { ConnectionCell, Row, TonePill, When } from './ProxyParts';
 
 /** One proxy's last report and its audit gaps. Read only: it renders no control. */
 export function ProxyDetailView({ proxy }: { proxy: ProxyDetail }) {
@@ -188,15 +188,6 @@ export function ProxyDetailView({ proxy }: { proxy: ProxyDetail }) {
           </Table>
         )}
       </Card>
-    </div>
-  );
-}
-
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex gap-2">
-      <dt className="w-32 shrink-0 text-text-subtle">{label}</dt>
-      <dd className="text-text-body">{children}</dd>
     </div>
   );
 }

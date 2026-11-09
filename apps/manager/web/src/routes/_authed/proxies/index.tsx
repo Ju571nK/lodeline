@@ -49,7 +49,12 @@ function ProxiesPageView() {
   const inputClass = 'rounded border border-border bg-bg-surface px-2 py-1 text-sm';
   return (
     <div className="space-y-3">
-      <h1 className="text-lg font-semibold text-text-primary">Proxies</h1>
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <h1 className="text-lg font-semibold text-text-primary">Proxies</h1>
+        <Link to="/proxy-invocations" className="text-sm text-accent hover:underline">
+          All invocations
+        </Link>
+      </div>
       <p className="text-sm text-text-muted">
         Lodeline Proxy instances registered with lodeline-server, as of each proxy’s last report.
         This console only reads them: registering, disabling and config changes are done on the

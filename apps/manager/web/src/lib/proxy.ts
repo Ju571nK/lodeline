@@ -3,6 +3,9 @@ import type {
   ConfigState,
   ConnectionState,
   GapState,
+  InvocationSummary,
+  Lifecycle,
+  Outcome,
   RouteState,
   Spool,
   SpoolState,
@@ -141,4 +144,107 @@ export function gapDetails(details: Record<string, unknown> | null): string {
   return Object.entries(details)
     .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
     .join(' · ');
+}
+
+export const lifecycleLabel: Record<Lifecycle, string> = {
+  started: 'Started',
+  completed: 'Completed',
+  completion_without_start: 'Completion without start',
+  cancel_without_start: 'Cancel without start',
+  integrity_conflict: 'Integrity conflict',
+  unknown: NEWER,
+};
+
+export const outcomeLabel: Record<Outcome, string> = {
+  success: 'Success',
+  tool_error: 'Tool error',
+  protocol_error: 'Protocol error',
+  timeout: 'Timeout',
+  denied: 'Denied',
+  unknown: 'Unknown outcome',
+};
+
+const outcomeTone: Record<Outcome, Tone> = {
+  success: 'ok',
+  tool_error: 'bad',
+  protocol_error: 'bad',
+  timeout: 'warn',
+  denied: 'warn',
+  unknown: 'warn',
+};
+
+export interface InvocationStatus {
+  label: string;
+  tone: Tone;
+  /** The record holds a completion that nothing corroborates. It never reads as success. */
+  flagged: boolean;
+  note?: string;
+}
+
+/**
+ * The one place that decides an invocation's headline. Only `completed` shows its outcome.
+ * `completion_without_start` and `integrity_conflict` are flagged: their outcome is withheld, and
+ * the `reported_*` values stay the proxy's claim (see `reportedClaim`), never the headline.
+ */
+export function invocationStatus(
+  inv: Pick<InvocationSummary, 'lifecycle' | 'outcome' | 'epoch_superseded'>,
+): InvocationStatus {
+  switch (inv.lifecycle) {
+    case 'completed': {
+      const outcome = inv.outcome ?? 'unknown';
+      return { label: outcomeLabel[outcome], tone: outcomeTone[outcome], flagged: false };
+    }
+    case 'completion_without_start':
+      return {
+        label: 'Flagged: completion without start',
+        tone: 'bad',
+        flagged: true,
+        note: 'The server has no start for this completion, so it withholds the outcome.',
+      };
+    case 'integrity_conflict':
+      return {
+        label: 'Flagged: integrity conflict',
+        tone: 'bad',
+        flagged: true,
+        note: 'The events of this invocation contradict each other, so the server withholds the outcome.',
+      };
+    case 'started':
+      return {
+        label: 'No completion observed',
+        tone: 'neutral',
+        flagged: false,
+        note: inv.epoch_superseded
+          ? 'The proxy has since started a new epoch, so the completion may never arrive.'
+          : undefined,
+      };
+    case 'cancel_without_start':
+      return { label: 'Cancel only, no start', tone: 'neutral', flagged: false };
+    default:
+      return { label: lifecycleLabel.unknown, tone: 'neutral', flagged: false };
+  }
+}
+
+/** The proxy's uncorroborated claim about the completion, or `null` when it made none. */
+export function reportedClaim(
+  inv: Pick<InvocationSummary, 'reported_outcome' | 'reported_delivery_state' | 'reported_reason'>,
+): string | null {
+  const parts = [
+    inv.reported_outcome && `outcome ${inv.reported_outcome}`,
+    inv.reported_delivery_state && `delivery ${inv.reported_delivery_state}`,
+    inv.reported_reason && `reason ${inv.reported_reason}`,
+  ].filter(Boolean);
+  return parts.length ? `Proxy reported ${parts.join(', ')}. Not corroborated.` : null;
+}
+
+const flagLabel: Record<string, string> = {
+  completion_contradicts_start: 'Completion contradicts start',
+  duplicate_completion: 'Duplicate completion',
+  duplicate_start: 'Duplicate start',
+  event_limit: 'Event limit reached',
+  start_binding_conflict: 'Start binding conflict',
+};
+
+/** A known flag's name, or the server's own code for a flag this build does not know. */
+export function flagName(flag: string): string {
+  return Object.hasOwn(flagLabel, flag) ? flagLabel[flag] : flag;
 }
