@@ -7,6 +7,47 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-11-09
+
+**Upgrade order.** The agent, the server and the web console can be upgraded in any order.
+This release adds no event kind and no reason kind, and the agent's events are unchanged on the
+wire. AI Guard now scans more Claude Code files, so a host's score can rise after its agent is
+upgraded. The server changes only in its tests, so its fleet API and its proxy routes are the
+same as in v0.14.1. The console's new proxy pages read routes that a server serves only when
+`server.yaml` has a `proxy:` section. Such a server requires a client certificate on every
+connection, so a console that already shows its fleet needs no new setting. For a new setup,
+"Proxy reads" in `apps/manager/README.md` lists the certificate settings. Against a server
+without the section, the Proxies page says that proxy reads are not available, and the other
+pages work as before. `lodeline-proxy` is still not a release asset.
+
+### Added
+
+- The web console shows the server's Lodeline proxies on a new Proxies page. The list shows each
+  proxy's connection, config and spool state and when it was last seen, and filters by
+  connection state and config sync. A proxy's page shows its config revisions, spool, central
+  ingest, registry sync, route health and audit gaps. When the server has stopped a proxy's
+  ingest, its degraded spool reads as stopped ingest, not as a storage fault. Quarantined events
+  show next to the spool depth, and a non-zero `audit_gaps_dropped` marks the gap list
+  incomplete. Before, the console showed nothing about proxies. The console reads
+  `GET /v1/proxies` and `GET /v1/proxies/{id}` and relays them as `GET /api/v1/fleet/proxies`
+  and `GET /api/v1/fleet/proxies/{proxy_id}`. No page changes a proxy, and the console holds no
+  management credential. (#542)
+- The web console lists the MCP requests that went through a proxy on a new Proxy invocations
+  page, with method, status, duration and flags. The Proxies page links to all requests, and a
+  proxy's page links to its own. A request's page shows the request, timing, completion and
+  events, and says when the server truncated the event list. Only a completed request shows an
+  outcome. A completion without a start and an integrity conflict are flagged and never read as
+  success. An outcome that the proxy reported and the server could not corroborate shows only as
+  secondary text. Before, the console showed no requests. The console reads
+  `GET /v1/proxy-invocations` and `GET /v1/proxy-invocations/{id}` and passes every server
+  filter through. (#543)
+- A proxy's page in the web console ends with an Inventory card with three tabs: Snapshots,
+  Drift and Re-baseline markers. They list what the proxy's upstreams exposed over time, each
+  observed change, and each point where a baseline was reset. The rows show references and
+  counts only, never tool names or metadata content, and drift reads as an observed change,
+  never as an approval. Before, the console showed no inventory. The console reads
+  `GET /v1/proxies/{id}/inventory-snapshots`, `/drift` and `/rebaseline-markers`. (#544)
+
 ### Changed
 
 - AI Guard now scans the prompt of a Claude Code scheduled task
@@ -15,6 +56,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   download piped into a shell. Before, these files counted only as present. A matched line is the
   finding's snippet, as for `CLAUDE.md`. Scores can rise on upgrade, also for a task whose prompt
   runs destructive shell commands on purpose. No reason kind is new. (#191)
+
+### Fixed
+
+- The web console's event detail for `ai_guard_risk_assessed` and `ai_guard_toggle_drift` has a
+  Source row that names the assessed user, such as `user alice · built-in rules`, or
+  `agent's own home · built-in rules` when the event has no `user`. Before, the detail showed
+  `user` only in the raw evidence, so the readings that a root agent sends for two users looked
+  the same. For toggle drift, the Source row replaces the Rule pack row, because it names the
+  rule pack. (#537)
 
 ## [0.14.1] - 2026-11-09
 
