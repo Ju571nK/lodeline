@@ -2,9 +2,12 @@ import type {
   Central,
   ConfigState,
   ConnectionState,
+  DriftChange,
   GapState,
+  InventorySnapshot,
   InvocationSummary,
   Lifecycle,
+  MarkerCause,
   Outcome,
   RouteState,
   Spool,
@@ -266,3 +269,84 @@ const flagLabel: Record<string, string> = {
 export function flagName(flag: string): string {
   return Object.hasOwn(flagLabel, flag) ? flagLabel[flag] : flag;
 }
+
+export interface SnapshotComparison {
+  label: string;
+  tone: Tone;
+  note?: string;
+}
+
+/** How a snapshot relates to the one before it in its chain. A baseline is never an approval. */
+export function snapshotComparison(
+  s: Pick<InventorySnapshot, 'comparison_state' | 'is_first_baseline' | 'awaiting_inventory_id'>,
+): SnapshotComparison {
+  switch (s.comparison_state) {
+    case 'baseline':
+      return s.is_first_baseline
+        ? {
+            label: 'Initial baseline',
+            tone: 'neutral',
+            note: 'The first snapshot of this chain. A starting point, not an approval.',
+          }
+        : { label: 'Baseline restated', tone: 'neutral' };
+    case 'compared':
+      return { label: 'Compared', tone: 'neutral' };
+    case 'rebaseline':
+      return {
+        label: 'Re-baseline',
+        tone: 'neutral',
+        note: 'A new key or canon. No drift is derived across it.',
+      };
+    case 'pending_previous':
+      return {
+        label: 'Waiting for previous snapshot',
+        tone: 'neutral',
+        note: `No drift until ${s.awaiting_inventory_id ?? 'the previous snapshot'} arrives.`,
+      };
+    case 'inconsistent':
+      return {
+        label: 'Inconsistent',
+        tone: 'warn',
+        note: 'The deferred checks failed, so the server derived no drift.',
+      };
+    default:
+      return { label: NEWER, tone: 'neutral' };
+  }
+}
+
+/**
+ * How a reference changed between two snapshots. Drift is an observation, never an approval, so
+ * no change reads as accepted: none has the `ok` tone.
+ */
+export const driftChangeLabel: Record<DriftChange, string> = {
+  added: 'Added',
+  removed: 'Removed',
+  changed: 'Changed',
+  unknown: NEWER,
+};
+
+export const driftChangeTone: Record<DriftChange, Tone> = {
+  added: 'warn',
+  removed: 'warn',
+  changed: 'warn',
+  unknown: 'neutral',
+};
+
+export const markerCauseLabel: Record<MarkerCause, string> = {
+  declared_key_rotation: 'Declared key rotation',
+  declared_canon_change: 'Declared canon change',
+  epoch_change_detected: 'Producer epoch changed',
+  key_change_undeclared: 'Undeclared key change',
+  baseline_restated: 'Baseline restated',
+  unknown: NEWER,
+};
+
+/** The proxy declared the first two causes; the server only detected the next two. */
+export const markerCauseTone: Record<MarkerCause, Tone> = {
+  declared_key_rotation: 'neutral',
+  declared_canon_change: 'neutral',
+  epoch_change_detected: 'warn',
+  key_change_undeclared: 'warn',
+  baseline_restated: 'neutral',
+  unknown: 'neutral',
+};

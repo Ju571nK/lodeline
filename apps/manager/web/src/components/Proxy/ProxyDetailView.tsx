@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import type { ProxyDetail } from '@/api/proxies';
 import { Card, Empty } from '@/components/Host/HostMetaCard';
 import {
@@ -14,7 +13,7 @@ import {
   spoolStatus,
 } from '@/lib/proxy';
 import { relativeAge } from '@/lib/time';
-import { ConnectionCell, Row, TonePill, When } from './ProxyParts';
+import { ConnectionCell, Row, Table, TonePill, When } from './ProxyParts';
 
 /** One proxy's last report and its audit gaps. Read only: it renders no control. */
 export function ProxyDetailView({ proxy }: { proxy: ProxyDetail }) {
@@ -188,25 +187,6 @@ export function ProxyDetailView({ proxy }: { proxy: ProxyDetail }) {
           </Table>
         )}
       </Card>
-    </div>
-  );
-}
-
-function Table({ head, children }: { head: string[]; children: ReactNode }) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-xs">
-        <thead className="text-text-muted">
-          <tr>
-            {head.map((h) => (
-              <th key={h} className="px-2 py-1.5 font-medium">
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>{children}</tbody>
-      </table>
     </div>
   );
 }

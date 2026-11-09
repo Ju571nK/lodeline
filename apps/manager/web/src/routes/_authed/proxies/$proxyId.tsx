@@ -1,15 +1,22 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { fleetProxy } from '@/api/proxies';
+import { fleetProxy, type InventoryView } from '@/api/proxies';
+import { InventorySection, inventoryViews } from '@/components/Proxy/Inventory';
 import { ProxyDetailView } from '@/components/Proxy/ProxyDetailView';
 import { ProxyReadError, settled } from '@/components/Proxy/ProxyParts';
 import { useFleetQuery } from '@/hooks/useFleetQuery';
 
 export const Route = createFileRoute('/_authed/proxies/$proxyId')({
+  validateSearch: (raw: Record<string, unknown>): { inventory?: InventoryView } => ({
+    inventory: inventoryViews.includes(raw.inventory as InventoryView)
+      ? (raw.inventory as InventoryView)
+      : undefined,
+  }),
   component: ProxyDetailPage,
 });
 
 function ProxyDetailPage() {
   const { proxyId } = Route.useParams();
+  const { inventory = 'inventory-snapshots' } = Route.useSearch();
   const q = useFleetQuery(['proxies', 'detail', proxyId], () => fleetProxy(proxyId), {
     retry: (failureCount, error) => !settled(error) && failureCount < 2,
   });
@@ -32,7 +39,10 @@ function ProxyDetailPage() {
       </p>
       {q.error && <ProxyReadError error={q.error} what="the proxy" />}
       {proxy ? (
-        <ProxyDetailView proxy={proxy} />
+        <>
+          <ProxyDetailView proxy={proxy} />
+          <InventorySection proxy={proxy} view={inventory} />
+        </>
       ) : (
         !q.error && <div className="h-24 w-full animate-pulse rounded bg-bg-elevated" />
       )}
