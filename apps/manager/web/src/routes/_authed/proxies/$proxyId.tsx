@@ -1,19 +1,12 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { ApiError, NotFoundError } from '@/api/client';
 import { fleetProxy } from '@/api/proxies';
 import { ProxyDetailView } from '@/components/Proxy/ProxyDetailView';
-import { ProxyReadError } from '@/components/Proxy/ProxyParts';
+import { ProxyReadError, settled } from '@/components/Proxy/ProxyParts';
 import { useFleetQuery } from '@/hooks/useFleetQuery';
 
 export const Route = createFileRoute('/_authed/proxies/$proxyId')({
   component: ProxyDetailPage,
 });
-
-/** Answers that another try within the poll interval would not change. */
-const settled = (error: Error) =>
-  error instanceof NotFoundError ||
-  (error instanceof ApiError &&
-    ['proxy_reads_unavailable', 'upstream_forbidden'].includes(error.code));
 
 function ProxyDetailPage() {
   const { proxyId } = Route.useParams();
@@ -25,9 +18,18 @@ function ProxyDetailPage() {
   const proxy = q.data?.proxy_id === proxyId && !(q.error && settled(q.error)) ? q.data : undefined;
   return (
     <div className="space-y-3">
-      <Link to="/proxies" className="text-xs text-text-muted hover:text-text-primary">
-        ← Proxies
-      </Link>
+      <p className="flex flex-wrap gap-3 text-xs text-text-muted">
+        <Link to="/proxies" className="hover:text-text-primary">
+          ← Proxies
+        </Link>
+        <Link
+          to="/proxy-invocations"
+          search={{ proxy: proxyId }}
+          className="hover:text-text-primary"
+        >
+          Invocations of this proxy
+        </Link>
+      </p>
       {q.error && <ProxyReadError error={q.error} what="the proxy" />}
       {proxy ? (
         <ProxyDetailView proxy={proxy} />

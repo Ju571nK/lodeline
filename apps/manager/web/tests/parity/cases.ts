@@ -28,6 +28,8 @@ export const ROUTES = [
   'GET /api/v1/fleet/hosts/{host_id}',
   'GET /api/v1/fleet/proxies',
   'GET /api/v1/fleet/proxies/{proxy_id}',
+  'GET /api/v1/fleet/proxy-invocations',
+  'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
   'POST /api/v1/triage/upsert',
   'POST /api/v1/triage/note',
   'GET /api/v1/triage/{host_id}/{event_id}',
@@ -154,6 +156,8 @@ const LIVE_EVENT = {
   added_later: 'kept or dropped',
 };
 const PROXY_CURSOR = 'eyJ2IjoxLCJrZXkiOiJweC1hIiwiZmlsdGVyX2hhc2giOiJhYiJ9';
+const INVOCATION_CURSOR = 'eyJ2IjoxLCJrZXkiOjcsImZpbHRlcl9oYXNoIjoiYWIifQ';
+const MOCK_INVOCATION = (n: number) => `00000000-0000-4000-8000-000000000${n}`;
 const LIVE_ALERTS = {
   evidence_kinds: ['ai_guard_risk_assessed'],
   ai_guard_buckets: ['high', 'critical'],
@@ -1099,6 +1103,75 @@ export const CASES: Case[] = [
     'fleet-proxy-no-session',
   ),
 
+  {
+    name: 'fleet-invocations',
+    route: 'GET /api/v1/fleet/proxy-invocations',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxy-invocations',
+  },
+  {
+    name: 'fleet-invocations-filtered-page',
+    route: 'GET /api/v1/fleet/proxy-invocations',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/proxy-invocations?proxy_id=px-edge-01&limit=2&cursor=${MOCK_INVOCATION(403)}`,
+  },
+  {
+    name: 'fleet-invocations-flagged',
+    route: 'GET /api/v1/fleet/proxy-invocations',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxy-invocations?lifecycle=completion_without_start',
+  },
+  {
+    name: 'fleet-invocations-bad-limit',
+    route: 'GET /api/v1/fleet/proxy-invocations',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/proxy-invocations?limit=x',
+  },
+  {
+    name: 'fleet-invocations-invalid-cursor',
+    route: 'GET /api/v1/fleet/proxy-invocations',
+    outcome: 'error',
+    method: 'GET',
+    path: `/api/v1/fleet/proxy-invocations?proxy_id=px-edge-02&cursor=${MOCK_INVOCATION(403)}`,
+  },
+  noSession(
+    'GET /api/v1/fleet/proxy-invocations',
+    'GET',
+    '/api/v1/fleet/proxy-invocations',
+    'fleet-invocations-no-session',
+  ),
+  {
+    name: 'fleet-invocation-flagged',
+    route: 'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/proxy-invocations/${MOCK_INVOCATION(402)}`,
+  },
+  {
+    name: 'fleet-invocation-truncated',
+    route: 'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/proxy-invocations/${MOCK_INVOCATION(404)}`,
+  },
+  {
+    name: 'fleet-invocation-not-found',
+    route: 'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
+    outcome: 'error',
+    method: 'GET',
+    path: `/api/v1/fleet/proxy-invocations/${MOCK_INVOCATION(999)}`,
+  },
+  noSession(
+    'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
+    'GET',
+    `/api/v1/fleet/proxy-invocations/${MOCK_INVOCATION(403)}`,
+    'fleet-invocation-no-session',
+  ),
+
   // Triage write sequence on EVT#3 (an alice-mbp event in the mock), then reads.
   {
     name: 'triage-get-before-insert',
@@ -1738,6 +1811,83 @@ export const CASES: Case[] = [
     'GET /api/v1/fleet/proxies/{proxy_id}',
     '/api/v1/fleet/proxies/px-a',
     { status: 404, json: { error: 'host_unknown' } },
+  ),
+  // Every invocation filter and the opaque cursor go upstream unchanged.
+  upstream(
+    'live-invocations-cursor',
+    'GET /api/v1/fleet/proxy-invocations',
+    '/api/v1/fleet/proxy-invocations?proxy_id=px-a&upstream_id=up1&actor_id=actor-1' +
+      '&method=tools%2Fcall&outcome=success&lifecycle=completed' +
+      '&tool_ref=00000000-0000-8000-8000-000000000001&from=2026-01-01T00:00:00Z' +
+      `&to=2026-01-03T00:00:00Z&time_basis=occurred&limit=1&cursor=${INVOCATION_CURSOR}`,
+    {
+      status: 200,
+      json: {
+        items: [
+          {
+            invocation_id: '00000000-0000-4000-8000-000000000001',
+            proxy_id: 'px-a',
+            lifecycle: 'paused_later',
+            outcome: null,
+            delivery_state: null,
+            reason: null,
+            reported_outcome: 'success',
+            reported_delivery_state: 'sent',
+            reported_reason: null,
+            duration_ms: 12,
+            response_bytes: 34,
+            method: null,
+            protocol_version: null,
+            upstream_id: null,
+            route_revision: null,
+            actor: null,
+            tool: null,
+            cancel_observed: false,
+            decision: null,
+            started_at: null,
+            completed_at: LIVE_TS,
+            first_received_at: LIVE_TS,
+            last_received_at: LIVE_TS,
+            start_epoch_id: null,
+            epoch_superseded: false,
+            flags: [],
+            added_later: 'dropped',
+          },
+        ],
+        next_cursor: INVOCATION_CURSOR,
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-invocations-invalid-cursor',
+    'GET /api/v1/fleet/proxy-invocations',
+    `/api/v1/fleet/proxy-invocations?cursor=${INVOCATION_CURSOR}`,
+    { status: 422, json: { error: { code: 'invalid_cursor', message: 'invalid cursor' } } },
+  ),
+  upstream(
+    'live-invocations-invalid-filter',
+    'GET /api/v1/fleet/proxy-invocations',
+    '/api/v1/fleet/proxy-invocations?lifecycle=asleep',
+    { status: 422, json: { error: { code: 'invalid_filter', message: 'invalid filter' } } },
+  ),
+  upstream(
+    'live-invocations-not-mounted',
+    'GET /api/v1/fleet/proxy-invocations',
+    '/api/v1/fleet/proxy-invocations',
+    { status: 404, text: '' },
+  ),
+  upstream(
+    'live-invocation-unknown',
+    'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
+    '/api/v1/fleet/proxy-invocations/00000000-0000-4000-8000-000000000001',
+    { status: 404, json: { error: { code: 'proxy_unknown', message: 'proxy unknown' } } },
+  ),
+  upstream(
+    'live-invocation-not-mounted',
+    'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
+    '/api/v1/fleet/proxy-invocations/00000000-0000-4000-8000-000000000001',
+    { status: 404, text: '' },
   ),
   upstream('upstream-401', 'GET /api/v1/fleet/events', '/api/v1/fleet/events', {
     status: 401,

@@ -64,6 +64,9 @@ tokio = { version = "1", features = ["test-util"] }
 # The contract test runs the real server in process (src/fleet/tests.rs). test-support seeds its
 # proxy registry and narrows the proxy read scope (src/fleet/tests/proxies.rs).
 lodeline-server = { path = "../../crates/lodeline-server", features = ["test-support"] }
+# Builds the ledger events the invocation contract test seeds, and names the server's enums so a
+# value it adds fails to compile there (src/fleet/tests/proxies.rs).
+lodeline-proxy-api = { path = "../../crates/lodeline-proxy-api" }
 # An mTLS stand-in server for the client certificate tests (src/fleet/http/tests.rs).
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

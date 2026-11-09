@@ -61,6 +61,15 @@ five proxies cover a connected proxy in sync, a stopped ingest with a degraded s
 proxy (`quarantined_bytes` `null`, no registry counters) with dropped gaps, a proxy that never
 reported, and a disabled config.
 
+## mock-proxy-invocations.json
+
+The invocation details the mock fleet serves for `/api/v1/fleet/proxy-invocations*`, written for
+this console. Each object is a `GET /v1/proxy-invocations/{id}` body as `src/fleet/proxy.rs`
+reads it, newest first. Numbers under `*_at` keys are second offsets from the seed. The ten
+invocations cover every lifecycle and every outcome, a `completion_without_start` and an
+`integrity_conflict` that the proxy reported as success, a `started` invocation whose epoch was
+superseded, and a detail with 40 events of which the server lists 32 (`events_truncated`).
+
 ## jose-cases.json
 
 ID token headers and key sets, each with whether go-oidc v3.21.0 and go-jose v4.1.4 accept the

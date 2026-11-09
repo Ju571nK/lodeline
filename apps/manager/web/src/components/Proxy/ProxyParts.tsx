@@ -25,6 +25,15 @@ export function TonePill({ tone, children }: { tone: Tone; children: ReactNode }
   );
 }
 
+export function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="w-32 shrink-0 text-text-subtle">{label}</dt>
+      <dd className="text-text-body">{children}</dd>
+    </div>
+  );
+}
+
 /** A time as "Nov 5, 14:31 (3m ago)", or `none` when the server sent null. */
 export function When({ ts, none = 'none' }: { ts: string | null; none?: string }) {
   if (!ts) return <span className="text-text-muted">{none}</span>;
@@ -62,12 +71,33 @@ export function ConnectionCell({ proxy }: { proxy: ProxySummary }) {
   );
 }
 
-/** The panel for a failed proxy read, by the console's error code. */
-export function ProxyReadError({ error, what }: { error: Error; what: string }) {
+const notFoundText = {
+  proxy:
+    'Proxy not found. It is not registered, or it is outside the read range of this console’s credential; the server answers both the same way.',
+  invocation:
+    'Invocation not found. The server has no such invocation, or its proxy is outside the read range of this console’s credential; the server answers both the same way.',
+};
+
+/** Answers that another try within the poll interval would not change. */
+export const settled = (error: Error) =>
+  error instanceof NotFoundError ||
+  (error instanceof ApiError &&
+    ['proxy_reads_unavailable', 'upstream_forbidden'].includes(error.code));
+
+/** The panel for a failed proxy or invocation read, by the console's error code. */
+export function ProxyReadError({
+  error,
+  what,
+  target = 'proxy',
+}: {
+  error: Error;
+  what: string;
+  target?: keyof typeof notFoundText;
+}) {
   const code = error instanceof ApiError ? error.code : '';
   const text =
     error instanceof NotFoundError
-      ? 'Proxy not found. It is not registered, or it is outside the read range of this console’s credential; the server answers both the same way.'
+      ? notFoundText[target]
       : code === 'proxy_reads_unavailable'
         ? 'Proxy reads are not available on this lodeline-server. It runs without a proxy section, or it does not serve proxy reads to this console’s client certificate.'
         : code === 'upstream_forbidden'

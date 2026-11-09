@@ -1,0 +1,312 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxy-invocations/00000000-0000-4000-8000-000000000404",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "actor": {
+      "actor_id": "svc-ci",
+      "actor_kind": "non_human",
+      "authentication_method": "bearer",
+      "credential_owner_id": null,
+      "evidence_source": "proxy_credential_mapping"
+    },
+    "cancel_observed": true,
+    "completed_at": "<seed-630s Z>",
+    "delivery_state": "sent",
+    "duration_ms": 30000,
+    "epoch_superseded": false,
+    "events": [
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000506",
+        "event_type": "invocation.started",
+        "occurred_at": "<seed-11m Z>",
+        "received_at": "<seed-620s Z>",
+        "sequence": 1
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000507",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-659s Z>",
+        "received_at": "<seed-619s Z>",
+        "sequence": 2
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000508",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-658s Z>",
+        "received_at": "<seed-618s Z>",
+        "sequence": 3
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000509",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-657s Z>",
+        "received_at": "<seed-617s Z>",
+        "sequence": 4
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000510",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-656s Z>",
+        "received_at": "<seed-616s Z>",
+        "sequence": 5
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000511",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-655s Z>",
+        "received_at": "<seed-615s Z>",
+        "sequence": 6
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000512",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-654s Z>",
+        "received_at": "<seed-614s Z>",
+        "sequence": 7
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000513",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-653s Z>",
+        "received_at": "<seed-613s Z>",
+        "sequence": 8
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000514",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-652s Z>",
+        "received_at": "<seed-612s Z>",
+        "sequence": 9
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000515",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-651s Z>",
+        "received_at": "<seed-611s Z>",
+        "sequence": 10
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000516",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-650s Z>",
+        "received_at": "<seed-610s Z>",
+        "sequence": 11
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000517",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-649s Z>",
+        "received_at": "<seed-609s Z>",
+        "sequence": 12
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000518",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-648s Z>",
+        "received_at": "<seed-608s Z>",
+        "sequence": 13
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000519",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-647s Z>",
+        "received_at": "<seed-607s Z>",
+        "sequence": 14
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000520",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-646s Z>",
+        "received_at": "<seed-606s Z>",
+        "sequence": 15
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000521",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-645s Z>",
+        "received_at": "<seed-605s Z>",
+        "sequence": 16
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000522",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-644s Z>",
+        "received_at": "<seed-604s Z>",
+        "sequence": 17
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000523",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-643s Z>",
+        "received_at": "<seed-603s Z>",
+        "sequence": 18
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000524",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-642s Z>",
+        "received_at": "<seed-602s Z>",
+        "sequence": 19
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000525",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-641s Z>",
+        "received_at": "<seed-601s Z>",
+        "sequence": 20
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000526",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-640s Z>",
+        "received_at": "<seed-10m Z>",
+        "sequence": 21
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000527",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-639s Z>",
+        "received_at": "<seed-599s Z>",
+        "sequence": 22
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000528",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-638s Z>",
+        "received_at": "<seed-598s Z>",
+        "sequence": 23
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000529",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-637s Z>",
+        "received_at": "<seed-597s Z>",
+        "sequence": 24
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000530",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-636s Z>",
+        "received_at": "<seed-596s Z>",
+        "sequence": 25
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000531",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-635s Z>",
+        "received_at": "<seed-595s Z>",
+        "sequence": 26
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000532",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-634s Z>",
+        "received_at": "<seed-594s Z>",
+        "sequence": 27
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000533",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-633s Z>",
+        "received_at": "<seed-593s Z>",
+        "sequence": 28
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000534",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-632s Z>",
+        "received_at": "<seed-592s Z>",
+        "sequence": 29
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000535",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-631s Z>",
+        "received_at": "<seed-591s Z>",
+        "sequence": 30
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000536",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-630s Z>",
+        "received_at": "<seed-590s Z>",
+        "sequence": 31
+      },
+      {
+        "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+        "event_id": "00000000-0000-4000-8000-000000000537",
+        "event_type": "invocation.cancel_requested",
+        "occurred_at": "<seed-629s Z>",
+        "received_at": "<seed-589s Z>",
+        "sequence": 32
+      }
+    ],
+    "events_total": 40,
+    "events_truncated": true,
+    "first_received_at": "<seed-620s Z>",
+    "flags": [],
+    "invocation_id": "00000000-0000-4000-8000-000000000404",
+    "last_received_at": "<seed-581s Z>",
+    "lifecycle": "completed",
+    "method": "tools/call",
+    "outcome": "timeout",
+    "protocol_version": "2025-11-25",
+    "proxy_id": "px-edge-01",
+    "reason": null,
+    "reported_delivery_state": null,
+    "reported_outcome": null,
+    "reported_reason": null,
+    "response_bytes": 0,
+    "route_revision": 7,
+    "start_epoch_id": "00000000-0000-4000-8000-0000000000e1",
+    "started_at": "<seed-11m Z>",
+    "tool": {
+      "metadata_ref": "00000000-0000-8000-8000-000000000702",
+      "status": "identified"
+    },
+    "upstream_id": "docs-search"
+  }
+}

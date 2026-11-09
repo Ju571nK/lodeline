@@ -148,8 +148,9 @@ login seems to fail.
 
 ### Proxy reads
 
-The **Proxies** page reads the server's Lodeline Proxy status (`GET /v1/proxies` and
-`GET /v1/proxies/{id}`). The server serves these routes only when its `server.yaml` has a
+The **Proxies** pages read the server's Lodeline Proxy status and invocations (`GET /v1/proxies`,
+`GET /v1/proxies/{id}`, `GET /v1/proxy-invocations` and `GET /v1/proxy-invocations/{id}`). The
+server serves these routes only when its `server.yaml` has a
 `proxy:` section, and a server with that section always requires mTLS. To read them, configure
 the console as follows:
 
