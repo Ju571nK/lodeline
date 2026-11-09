@@ -140,3 +140,7 @@ policy_bundle_path: "/var/lib/lodeline-server/signed-policy.json"
 #   # ingest_max_concurrent: 16
 #   # Seconds between ledger retention sweeps (60..86400, default 3600).
 #   # ledger_sweep_interval_seconds: 3600
+#   # GET /v1/proxies{,/id} report a proxy as connected while its last contact is at most
+#   # this many seconds old (60..300, default 90). The floor is two 30 s heartbeat intervals,
+#   # so a healthy proxy does not read disconnected between heartbeats.
+#   # stale_after_seconds: 90

@@ -299,7 +299,10 @@ cursor `{v:1, after_proxy_id, filter_hash}` (unique key, no tie-breaker needed).
 | `open_gap_count` | open audit gaps (L4) |
 | `status_as_of` | server time at which the server applied the status report the status fields come from (not the proxy's `sent_at`); `null` when no report has been applied since the field was added |
 
-`stale_after` default 90 s = 3 × heartbeat interval (30 s; bounds 5–300 s). Initial
+The proxy heartbeat interval is 30 s, jittered to 24 to 36 s. `stale_after` defaults to
+90 s (3 heartbeat intervals), is set by the server's `proxy.stale_after_seconds`, and is
+bounded to 60 to 300 s. The 60 s floor is two heartbeat intervals, so a healthy proxy never
+reads `disconnected` between heartbeats and one late heartbeat is tolerated. Initial
 test values. Status fields describe the **last report**, not live state; clients
 must show `status_as_of` and `connection_state` together (PX-016, AC-12).
 

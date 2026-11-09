@@ -7,6 +7,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- `lodeline-server` has a new `proxy.stale_after_seconds` setting. It sets how long a proxy can
+  go without contact before `GET /v1/proxies` and `GET /v1/proxies/{id}` report it as
+  `disconnected`. Before, this time was fixed at 90 s. The default is still 90 s. A value outside
+  60 to 300 s stops the server at boot. The 60 s floor is two proxy heartbeat intervals, so a
+  healthy proxy does not read `disconnected` between two heartbeats. (#549)
+
 ### Fixed
 
 - AI Guard now reassesses Claude Code as soon as `~/.claude/CLAUDE.md`, `~/.claude/loop.md`, a
