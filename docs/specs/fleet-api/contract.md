@@ -1325,7 +1325,7 @@ this section records the surface for dedicated rendering.
 
 | `kind` | Shipped | Payload fields (JSON keys) |
 |---|---|---|
-| `ai_guard_toggle_drift` | `9eb1074` (#186, 2026-06-28) | `tool` (AiTool), `scope` (AiGuardScope — same `user_global`/`project`/`application` shapes as §14.2), `toggle` (str, e.g. `"auto_approval_enabled"`, `"sandbox_disabled"`), `rule_pack_id`? , `tool_label`? |
+| `ai_guard_toggle_drift` | `9eb1074` (#186, 2026-06-28) | `tool` (AiTool), `scope` (AiGuardScope, same `user_global`/`project`/`application` shapes as §14.2), `toggle` (str, e.g. `"auto_approval_enabled"`, `"sandbox_disabled"`), `rule_pack_id`? , `tool_label`? , `user`? (since v0.12.0, §14.14) |
 
 `rule_pack_id` and `tool_label` are `#[serde(default,
 skip_serializing_if)]` (absent when None); `tool_label` carries the
@@ -1590,3 +1590,34 @@ Validation: Go tests (incl. fleet, legacy mapping, precedence, absent),
 golangci-lint, web unit tests, lint, production build, and 37 Playwright
 tests (one new: header count from Mock Fleet). No live 0.9.0 server was
 exercised.
+
+### 14.14 Optional `user` on AI Guard readings (v0.12.0, #329, lodeline main `c5deb0f`)
+
+Producer PR #332 makes a root agent on Linux or macOS assess the home of
+every user, not only its own. It sends one reading per user for each
+user-level and application parser. `ai_guard_risk_assessed` and
+`ai_guard_toggle_drift` get one optional field:
+
+| Field | Shape / meaning |
+|---|---|
+| `user`? | String. The OS account whose home the agent assessed. Absent for the agent's own home, for project scopes, and from agents before v0.12.0. |
+
+The field is absent when unset, never `null`. A non-root agent sends the same
+events as before. `ai_guard_assess_failed` carries `user` with the same
+meaning. `rule_pack_id` is also optional on all three kinds, and is absent
+for the built-in parsers. §5.3 describes how the server copies both fields
+into `current_risk.by_tool.*.source`.
+
+A host with a root agent sends about one set of readings per user. The
+server counts each event, so `open_event_counts_24h` and
+`open_alert_count_24h` grow with the number of users. The console does not
+count events itself. It shows the counts from the server and lists each
+event as its own row.
+
+Consumer implementation:
+- The event detail shows a Source row for both kinds, with the label that the
+  host view uses: `user alice · built-in rules`, or `agent's own home · ...`
+  when `user` is absent. For `ai_guard_toggle_drift` this row replaces the
+  Rule pack row, because the label names the rule pack.
+- The console server relays `evidence` as raw JSON, so `user` reaches the SPA
+  unchanged.
