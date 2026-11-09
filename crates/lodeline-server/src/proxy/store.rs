@@ -69,8 +69,12 @@ fn scopes_of(c: &ProxyConfig) -> Vec<ScopePair> {
 
 /// An accepted ingest refreshes `last_seen` only when the stored value is at
 /// least this old, so ingest is not a heartbeat writer (every write fsyncs the
-/// whole state file). It must stay well below any sensible `stale_after`.
+/// whole state file). The assertion below keeps it under the `stale_after`
+/// floor.
 pub const LAST_SEEN_MIN_INTERVAL_SECS: i64 = 30;
+const _: () = assert!(
+    LAST_SEEN_MIN_INTERVAL_SECS < crate::config::ProxyConfig::MIN_STALE_AFTER_SECONDS as i64
+);
 
 /// Separator of the parts of a `counter_max` key.
 const COUNTER_KEY_SEP: char = '\u{1f}';

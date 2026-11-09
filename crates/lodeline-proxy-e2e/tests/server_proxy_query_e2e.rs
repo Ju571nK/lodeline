@@ -15,10 +15,11 @@
 //!
 //! Requirements: PX-006, PX-010, PX-011, PX-012, PX-016; acceptance AC-05,
 //! AC-06, AC-12. Real-time polling with tuned short intervals; no paused clock.
-//! The 90 s `STALE_AFTER_SECS` is a constant without a test knob, so the
-//! `connected -> disconnected` step ages the stored `last_seen` through the
-//! public store API instead of sleeping; the exact boundary stays with the unit
-//! test `connection_state_boundary`.
+//! `stale_after` (`proxy.stale_after_seconds`, at least 60 s) is too long to
+//! wait for, so the `connected -> disconnected` step ages the stored
+//! `last_seen` through the public store API instead of sleeping; the exact
+//! boundary stays with the unit test `connection_state_boundary` and the
+//! server test `connection_state_follows_the_configured_stale_after`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
@@ -1489,9 +1490,9 @@ async fn snapshot(h: &H, invs: &[u32]) -> BTreeMap<String, Vec<u8>> {
 /// `connected` once `last_seen` is older than `stale_after` and returns with
 /// the next accepted event.
 ///
-/// The 90 s `STALE_AFTER_SECS` has no test knob, so the age is applied to the
-/// stored `last_seen` through the public store API instead of sleeping; the
-/// exact boundary is the unit test `connection_state_boundary`.
+/// `stale_after` is at least 60 s, so the age is applied to the stored
+/// `last_seen` through the public store API instead of sleeping; the exact
+/// boundary is covered in `lodeline-server` (see the module docs).
 #[tokio::test]
 async fn projection_survives_restart_and_connection_goes_stale() {
     let Some(mut h) = H::new(false).await else {

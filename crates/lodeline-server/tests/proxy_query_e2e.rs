@@ -297,6 +297,11 @@ impl Fx {
     /// `management`: configure the management verifier file.
     /// `outages`: number of proxy-reported central_outage gaps on px-a.
     async fn new(management: bool, outages: u32) -> Fx {
+        Self::with(management, outages, "").await
+    }
+
+    /// [`Fx::new`] with `proxy_yaml` appended to the `proxy:` section.
+    async fn with(management: bool, outages: u32, proxy_yaml: &str) -> Fx {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
@@ -318,6 +323,7 @@ impl Fx {
             p("proxyca.crt"),
             p("proxies.json"),
         );
+        y.push_str(proxy_yaml);
         if management {
             let entry = VerifierEntry {
                 key_id: "idk".into(),
@@ -1345,6 +1351,51 @@ async fn connection_state_is_derived_at_read_time() {
         ),
         ["px-a", "px-b"]
     );
+}
+
+#[tokio::test]
+async fn connection_state_follows_the_configured_stale_after() {
+    let fx = Fx::with(false, 0, "  stale_after_seconds: 60\n").await;
+    let wall = || time::OffsetDateTime::now_utc().unix_timestamp();
+    let age_px_b = |secs: i64| {
+        let now = wall();
+        let txn = fx.ctx.store.begin();
+        let mut e = txn.entry("px-b");
+        e.last_seen = Some(rfc(now - secs));
+        txn.commit("px-b", e).unwrap();
+        now
+    };
+    let states = || {
+        let fx = &fx;
+        async move {
+            let list = fx.get("/v1/proxies").await.json();
+            let row = list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["proxy_id"] == "px-b")
+                .unwrap()["connection_state"]
+                .clone();
+            let detail = fx.get("/v1/proxies/px-b").await.json()["connection_state"].clone();
+            (row, detail)
+        }
+    };
+    // 61 s is inside the 90 s default, so only the configured 60 s makes it stale.
+    age_px_b(61);
+    assert_eq!(
+        states().await,
+        (json!("disconnected"), json!("disconnected"))
+    );
+    // The routes read the wall clock, so retry until no second boundary falls
+    // between writing `last_seen` and reading both routes.
+    loop {
+        let t0 = age_px_b(60);
+        let got = states().await;
+        if wall() == t0 {
+            assert_eq!(got, (json!("connected"), json!("connected")));
+            break;
+        }
+    }
 }
 
 #[tokio::test]
