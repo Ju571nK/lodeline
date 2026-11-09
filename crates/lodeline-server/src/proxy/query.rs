@@ -914,7 +914,7 @@ async fn get_proxy(
             .collect();
         outages.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.gap_id.cmp(&a.1.gap_id)));
 
-        // Newest first across both sources.
+        // Open first, then newest first, across both sources.
         let mut all: Vec<(i64, GapDto)> = gaps
             .items
             .iter()
@@ -927,7 +927,12 @@ async fn get_proxy(
                 )
             }))
             .collect();
-        all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.gap_id.cmp(&a.1.gap_id)));
+        all.sort_by(|a, b| {
+            (b.1.state == "open")
+                .cmp(&(a.1.state == "open"))
+                .then_with(|| b.0.cmp(&a.0))
+                .then_with(|| b.1.gap_id.cmp(&a.1.gap_id))
+        });
         all.truncate(MAX_GAP_PAGE);
 
         let status = entry.as_ref().and_then(|e| e.status.as_ref());

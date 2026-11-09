@@ -46,6 +46,33 @@ describe('proxy detail', () => {
     expect(screen.queryByText(/gap list is incomplete/)).not.toBeInTheDocument();
   });
 
+  it('keeps the server order of audit gaps, so an older open gap stays above a newer closed one', () => {
+    const gap = (gap_id: string, age: number, state: 'open' | 'closed') => ({
+      gap_id,
+      kind: 'sequence_gap',
+      source: 'server_derived',
+      detected_at: ago(age),
+      state,
+      details: { gap: gap_id },
+    });
+    render(
+      <ProxyDetailView
+        proxy={detail({
+          audit_gaps: [gap('older-open', 7200, 'open'), gap('newer-closed', 60, 'closed')],
+          audit_gaps_total: 2,
+        })}
+      />,
+    );
+    const table = screen
+      .getAllByRole('table')
+      .find((t) => within(t).queryByRole('columnheader', { name: 'Source' }));
+    const rows = within(table!).getAllByRole('row').slice(1);
+    expect(rows.map((r) => r.textContent)).toEqual([
+      expect.stringContaining('gap=older-open'),
+      expect.stringContaining('gap=newer-closed'),
+    ]);
+  });
+
   it('shows the registry counters a proxy reports and leaves out the ones it does not', () => {
     render(<ProxyDetailView proxy={detail()} />);
     expect(screen.queryByText('Discarded reports')).not.toBeInTheDocument();

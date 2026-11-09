@@ -1016,6 +1016,36 @@ async fn audit_gaps_page_is_capped_at_50() {
 }
 
 #[tokio::test]
+async fn audit_gaps_list_open_gaps_before_newer_closed_ones() {
+    // px-a has 21 open gaps: sequence 6 and 20 reported outages.
+    let fx = Fx::new(false, 20).await;
+    let ev = |seq: i64, n: u32| start("px-a", seq, n, n, "ping", None, "up1", "actor-1");
+    // 55 newer sequence gaps (8, 10, ..., 116), then the events that close them.
+    let odd: Vec<ProxyEvent> = (0..55).map(|i| ev(9 + 2 * i, 100 + i as u32)).collect();
+    let even: Vec<ProxyEvent> = (0..55).map(|i| ev(8 + 2 * i, 200 + i as u32)).collect();
+    fx.ctx.ledger.insert_batch("px-a", &odd, fx.now).unwrap();
+    fx.ctx.ledger.insert_batch("px-a", &even, fx.now).unwrap();
+
+    let j = fx.get("/v1/proxies/px-a").await.json();
+    assert_eq!(j["open_gap_count"], 21);
+    assert_eq!(j["audit_gaps_total"], 76);
+    let gaps = j["audit_gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 50);
+    let keys: Vec<(bool, &str)> = gaps
+        .iter()
+        .map(|g| (g["state"] == "open", g["detected_at"].as_str().unwrap()))
+        .collect();
+    assert_eq!(keys.iter().filter(|k| k.0).count(), 21, "{keys:?}");
+    assert!(
+        keys.windows(2).all(|w| w[0] >= w[1]),
+        "open first, then newest first: {keys:?}"
+    );
+    assert!(gaps
+        .iter()
+        .any(|g| g["kind"] == "sequence_gap" && g["state"] == "open"));
+}
+
+#[tokio::test]
 async fn cursor_binding_and_forgery() {
     let fx = Fx::new(false, 0).await;
     let first = |u: &'static str| {
