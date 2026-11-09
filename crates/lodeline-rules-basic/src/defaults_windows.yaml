@@ -32,13 +32,16 @@ targets:
     follow_symlinks: false
 
   - id: ai-guard-claude-code-user-global-windows
-    description: Claude Code CLI user-global guard surface (settings + hooks)
+    description: Claude Code CLI user-global guard surface (settings, hooks, prompt files)
     tier: critical
     platform: windows
     paths:
       - "%USERPROFILE%\\.claude\\settings.json"
       - "%USERPROFILE%\\.claude\\settings.local.json"
       - "%USERPROFILE%\\.claude\\hooks\\"
+      - "%USERPROFILE%\\.claude\\CLAUDE.md"
+      - "%USERPROFILE%\\.claude\\loop.md"
+      - "%USERPROFILE%\\.claude\\scheduled-tasks\\*\\SKILL.md"
       - "C:\\Program Files\\ClaudeCode\\managed-settings.json"
       - "C:\\Program Files\\ClaudeCode\\managed-settings.d\\"
     recursive: true

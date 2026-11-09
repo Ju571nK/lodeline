@@ -1779,6 +1779,7 @@ pub(crate) fn push_claude_code_synthetic_targets(
             repo_root.join(".mcp.json"),
             repo_root.join("CLAUDE.md"),
             repo_root.join("AGENTS.md"),
+            cd.join("loop.md"),
         ]
         .into_iter()
         // #199: the repository root's local file, which Claude Code reads

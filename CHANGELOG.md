@@ -17,6 +17,17 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- AI Guard now reassesses Claude Code as soon as `~/.claude/CLAUDE.md`, `~/.claude/loop.md`, a
+  scheduled task's `~/.claude/scheduled-tasks/<name>/SKILL.md` or a repository's
+  `.claude/loop.md` changes. Before, no watch target covered these files, so the agent read an
+  edit only at the next heartbeat or with a change to another watched file. The shipped Claude
+  Code user-global target and the per-repository target now include them, so hosts also record
+  a `file_change` event for each edit, as for `settings.json`. These events carry hashes and
+  sizes, never file text, and a scheduled task's event path includes the task's folder name.
+  (#550)
+- A project row whose root is the home folder, such as the one `lodeline scan` adds when started
+  there, no longer reads `~/.claude/loop.md`. Before, the user row and the project row both read
+  that file, so one prompt's findings appeared twice. The user row still reports it. (#550)
 - The web console names a client certificate that the server refuses. A server with a `proxy:`
   section answers every read with 404 `host_unknown` when the console's client certificate is
   not from the host client CA, for example when it is from the proxy CA. The Fleet, Alerts and
