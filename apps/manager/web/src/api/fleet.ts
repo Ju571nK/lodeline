@@ -110,7 +110,6 @@ export interface AiGuardEvidence extends Evidence {
    * its second arg so an "Other" match shows the operator's name.
    */
   tool_label?: string;
-  /** The account whose home a root agent assessed; absent for its own home and projects. */
   user?: string;
   rule_pack_id?: string;
   scope: ScopeUserGlobal | ScopeProject | ScopeApplication;

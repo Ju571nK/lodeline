@@ -48,7 +48,7 @@ function renderDetail(evidence: Evidence) {
     target_id: null,
     triage: null,
   };
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const client = new QueryClient();
   const noop = () => {};
   render(
     <QueryClientProvider client={client}>
