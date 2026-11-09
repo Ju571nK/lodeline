@@ -215,4 +215,53 @@ mod tests {
             .count();
         assert_eq!(n, 2);
     }
+
+    /// Exact file bytes for a fixed key and fixed inputs.
+    #[test]
+    fn golden_lines_for_fixed_key() {
+        let d = tempfile::tempdir().unwrap();
+        let k = crate::audit_key::AuditKey {
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]),
+            pubkey_id: "lodeline-audit-golden".into(),
+            pubkey_b64: String::new(),
+        };
+        let p = d.path().join("enrollment-audit.jsonl");
+        append(
+            &p,
+            &k,
+            "host-1",
+            "issued",
+            "ok",
+            "csrfp",
+            "certfp",
+            "0a",
+            "2026-07-01T00:00:00Z",
+            "callerfp",
+            "2026-06-23T00:00:00Z",
+        )
+        .unwrap();
+        append(
+            &p,
+            &k,
+            "host-2",
+            "denied",
+            "token_expired",
+            "csrfp2",
+            "",
+            "",
+            "",
+            "",
+            "2026-06-23T00:01:00Z",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            concat!(
+                r#"{"v":1,"seq":0,"ts":"2026-06-23T00:00:00Z","host_id":"host-1","decision":"issued","reason":"ok","csr_fingerprint":"csrfp","cert_fingerprint":"certfp","serial":"0a","not_after":"2026-07-01T00:00:00Z","caller_fingerprint":"callerfp","prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"3ec6321c36d41c2e05b588c26c7486a3520eecb2f54b19738fd7d56d080b5ac9","sig":"Wr08FYgTx16t0JLLzHTMPX8eDkmYySY5VDoQgAlthdLrbuWfmrAepAv6AuksiX6Q86hTBBe43Bg/oWBypqxPDA==","pubkey_id":"lodeline-audit-golden"}"#,
+                "\n",
+                r#"{"v":1,"seq":1,"ts":"2026-06-23T00:01:00Z","host_id":"host-2","decision":"denied","reason":"token_expired","csr_fingerprint":"csrfp2","cert_fingerprint":"","serial":"","not_after":"","caller_fingerprint":"","prev_hash":"3ec6321c36d41c2e05b588c26c7486a3520eecb2f54b19738fd7d56d080b5ac9","hash":"58c9109f6f60858707742c636e51a155fe583094fbb7d2753a64817a8d0facc8","sig":"lfwR0C2g4OXgd0CU4anVDq+9o55zPa8mvsx4qR4DtH796sIBzJoVkf1fR8SQd3Xixr1HSwMIPOsmNp8rdaYqBQ==","pubkey_id":"lodeline-audit-golden"}"#,
+                "\n",
+            )
+        );
+    }
 }

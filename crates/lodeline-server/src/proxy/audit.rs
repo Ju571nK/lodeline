@@ -581,6 +581,44 @@ mod tests {
         assert_eq!((r2.record.seq, r2.record.prev_hash), (2, r1.hash));
     }
 
+    /// Exact file bytes for a fixed key and fixed inputs. `occurred_at` comes
+    /// from the clock, so the hash and signature are derived here from the
+    /// literal canonical form.
+    #[test]
+    fn golden_lines_for_fixed_key() {
+        use ed25519_dalek::Signer;
+        let d = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let key = AuditKey {
+            signing_key: sk.clone(),
+            pubkey_id: "lodeline-audit-golden".into(),
+            pubkey_b64: String::new(),
+        };
+        let a = MgmtAudit::open(d.path(), key).unwrap();
+        a.append(entry("proxy.register")).unwrap();
+        a.append(entry("proxy.disable")).unwrap();
+        let got = std::fs::read_to_string(d.path().join(AUDIT_FILE)).unwrap();
+
+        let mut want = String::new();
+        let mut prev = GENESIS_PREV_HASH.to_string();
+        for (seq, action) in ["proxy.register", "proxy.disable"].into_iter().enumerate() {
+            let line: serde_json::Value =
+                serde_json::from_str(got.lines().nth(seq).unwrap()).unwrap();
+            let at = line["occurred_at"].as_str().unwrap();
+            let canonical = format!(
+                r#"{{"action":"{action}","caller_fingerprint":"cf","http_status":200,"management_key_id":"k","occurred_at":"{at}","prev_hash":"{prev}","proxy_id":"px","request_id":"r","requested_by":"alice","requested_by_assurance":"asserted_by_caller","result":"ok","scope":"identity","seq":{seq},"stream":"proxy-mgmt","v":1}}"#
+            );
+            let hash = blake3::hash(canonical.as_bytes()).to_hex().to_string();
+            let sig = data_encoding::BASE64.encode(&sk.sign(canonical.as_bytes()).to_bytes());
+            want += &format!(
+                r#"{{"v":1,"stream":"proxy-mgmt","seq":{seq},"occurred_at":"{at}","request_id":"r","action":"{action}","proxy_id":"px","result":"ok","http_status":200,"management_key_id":"k","scope":"identity","caller_fingerprint":"cf","requested_by":"alice","requested_by_assurance":"asserted_by_caller","prev_hash":"{prev}","hash":"{hash}","sig":"{sig}","pubkey_id":"lodeline-audit-golden"}}"#
+            );
+            want.push('\n');
+            prev = hash;
+        }
+        assert_eq!(got, want);
+    }
+
     /// An instance that skipped boot recovery (to exercise the runtime guard).
     fn open_no_recover(d: &Path) -> MgmtAudit {
         MgmtAudit {
