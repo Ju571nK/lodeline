@@ -110,6 +110,8 @@ export interface AiGuardEvidence extends Evidence {
    * its second arg so an "Other" match shows the operator's name.
    */
   tool_label?: string;
+  user?: string;
+  rule_pack_id?: string;
   scope: ScopeUserGlobal | ScopeProject | ScopeApplication;
   score: number | JsonNumber;
   bucket: 'low' | 'medium' | 'high' | 'critical';
@@ -237,6 +239,7 @@ export interface ToggleDriftEvidence extends Evidence {
   tool: string;
   scope: Scope;
   toggle: string;
+  user?: string;
   rule_pack_id?: string;
   tool_label?: string;
 }
