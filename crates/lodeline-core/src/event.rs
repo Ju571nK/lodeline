@@ -255,8 +255,9 @@ pub enum AiGuardReason {
     ProjectMcpAutoEnabled {
         mechanism: String,
     },
-    /// #146 — a repo-local agent instruction file (CLAUDE.md / AGENTS.md /
-    /// .cursorrules / .cursor/rules) contains a high-signal exec or
+    /// #146: an agent instruction file (CLAUDE.md / AGENTS.md /
+    /// .cursorrules / .cursor/rules) or, since #191, a Claude Code
+    /// scheduled-task or loop prompt contains a high-signal exec or
     /// prompt-injection directive. POSTURE only (advisory, never a hook block).
     InstructionFileDirective {
         path: PathBuf,

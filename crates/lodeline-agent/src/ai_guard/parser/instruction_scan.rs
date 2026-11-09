@@ -1,5 +1,6 @@
-//! #146 — shared static scanner for agent instruction files (CLAUDE.md /
-//! AGENTS.md / .cursorrules / .cursor/rules). Single source called by the
+//! #146: shared static scanner for agent instruction files (CLAUDE.md /
+//! AGENTS.md / .cursorrules / .cursor/rules) and, since #191, Claude Code
+//! scheduled-task and loop prompts. Single source called by the
 //! per-tool parsers. POSTURE only: emits InstructionFileDirective, never a
 //! hook block. Line-oriented; trailing-backslash continuation lines are joined.
 
