@@ -203,6 +203,7 @@ test('risk/compliance paging and host policy lookup reach row 101', async ({ pag
 for (const scenario of [
   { status: 502, code: 'upstream_unauthorized', message: 'Read API token rejected' },
   { status: 502, code: 'read_api_disabled', message: 'Read API disabled' },
+  { status: 502, code: 'certificate_refused', message: 'Client certificate refused' },
   { status: 503, code: 'service_unavailable', message: 'Rebuilding index' },
   { status: 502, code: 'upstream_error', message: 'Read API unavailable' },
 ]) {

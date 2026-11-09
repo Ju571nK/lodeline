@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { ApiError, NotFoundError } from '@/api/client';
 import type { ProxySummary } from '@/api/proxies';
 import { connectionLabel, connectionTone, type Tone } from '@/lib/proxy';
+import { certificateRefused } from '@/lib/server-status';
 import { relativeAge, shortTime } from '@/lib/time';
 import { cn } from '@/lib/utils';
 
@@ -115,7 +116,7 @@ const targetText = {
 export const settled = (error: Error) =>
   error instanceof NotFoundError ||
   (error instanceof ApiError &&
-    ['proxy_reads_unavailable', 'upstream_forbidden'].includes(error.code));
+    ['proxy_reads_unavailable', 'upstream_forbidden', 'certificate_refused'].includes(error.code));
 
 /** The panel for a failed proxy or invocation read, by the console's error code. */
 export function ProxyReadError({
@@ -135,7 +136,9 @@ export function ProxyReadError({
         ? targetText[target].unavailable
         : code === 'upstream_forbidden'
           ? 'lodeline-server does not give this console’s read credential proxy reads.'
-          : `Could not load ${what}: ${error.message}`;
+          : code === 'certificate_refused'
+            ? certificateRefused
+            : `Could not load ${what}: ${error.message}`;
   return (
     <p role="alert" className="rounded-md border border-border bg-bg-surface p-6 text-sm">
       {text}

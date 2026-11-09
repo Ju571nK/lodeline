@@ -151,7 +151,7 @@ Stops this run's server, removes `scratch/`, keeps `evidence/`, and lists what s
 `MOCK_FLEET=1` replaces the HTTP fleet client with the fixtures in `testdata/mock-fleet.json`, `testdata/mock-proxies.json`, `testdata/mock-proxy-invocations.json` and `testdata/mock-proxy-inventory.json` (`src/fleet/mock.rs`), so no run talks to a `lodeline-server`. A green run says nothing about these areas, which stay with `cargo test` (`src/fleet/tests.rs` runs a real `lodeline-server` in process, and `src/fleet/http/tests.rs` covers TLS) and the parity suite's live cases:
 
 - The bearer token, the custom CA, and mTLS to `lodeline-server`.
-- Retries and the mapping of upstream failures to `upstream_unauthorized`, `read_api_disabled`, `service_unavailable`, `upstream_error`, and for the proxy reads `proxy_reads_unavailable`, `upstream_forbidden`, `invalid_cursor` and `invalid_filter`. The browser specs for those states use `page.route`.
+- Retries and the mapping of upstream failures to `upstream_unauthorized`, `read_api_disabled`, `certificate_refused`, `service_unavailable`, `upstream_error`, and for the proxy reads `proxy_reads_unavailable`, `upstream_forbidden`, `invalid_cursor` and `invalid_filter`. The browser specs for those states use `page.route`.
 - Decoding of real responses, real paging cursors, real filter behavior, and real retention.
 - Fixture accuracy. The fixtures are a copy of the Go console's mock, written against the contract in `docs/specs/fleet-api/contract.md` at the repo root.
 

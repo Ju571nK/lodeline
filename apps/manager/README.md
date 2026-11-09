@@ -161,7 +161,8 @@ with that section always requires mTLS. To read them, configure the console as f
    ([docs/install-server.md](../../docs/install-server.md), section 3). Do not use a certificate
    from the proxy CA (`proxy.ca_path`), a certificate registered to a proxy, or a management
    caller's certificate. The server answers each of those with 404 on these routes, and on
-   every fleet route as well.
+   every fleet route as well, and the console then says that the server did not accept its
+   client certificate.
 3. Set `LODELINE_SERVER_CLIENT_CERT_PATH` and `LODELINE_SERVER_CLIENT_KEY_PATH` to that
    certificate and its key, and `LODELINE_SERVER_CA_PATH` if a private CA signed the server's
    certificate.

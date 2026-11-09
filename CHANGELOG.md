@@ -7,6 +7,18 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- The web console names a client certificate that the server refuses. A server with a `proxy:`
+  section answers every read with 404 `host_unknown` when the console's client certificate is
+  not from the host client CA, for example when it is from the proxy CA. The Fleet, Alerts and
+  Settings pages then said that the read API was disabled and to set
+  `LODELINE_SERVER_READ_TOKEN`, even with the token set. A host's page said that the host was not
+  found, and the Proxies page said that proxy reads were not available. These pages now say that
+  the server did not accept the console's client certificate, and to issue it from the host
+  client CA as "Proxy reads" in `apps/manager/README.md` describes. The console relays this
+  answer with the code `certificate_refused`.
+
 ## [0.14.2] - 2026-11-09
 
 **Upgrade order.** The agent, the server and the web console can be upgraded in any order.

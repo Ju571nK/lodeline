@@ -89,4 +89,19 @@ test.describe('proxy pages', () => {
       { timeout: 5_000 },
     );
   });
+
+  test('a refused client certificate is named as such', async ({ page }) => {
+    // The parity case live-proxy-host-unknown proves the binary sends this answer when the
+    // server refuses the console's certificate.
+    await page.route('**/api/v1/fleet/proxies**', (route) =>
+      route.fulfill({
+        status: 502,
+        json: { error: { code: 'certificate_refused', message: 'refused' } },
+      }),
+    );
+    await page.goto('/proxies');
+    await expect(page.getByRole('alert')).toContainText('Client certificate refused.', {
+      timeout: 5_000,
+    });
+  });
 });
