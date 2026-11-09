@@ -152,9 +152,8 @@ The **Proxies** pages read the server's Lodeline Proxy status and invocations (`
 `GET /v1/proxies/{id}`, `GET /v1/proxy-invocations` and `GET /v1/proxy-invocations/{id}`), and
 each proxy's inventory snapshots, drift and re-baseline markers
 (`GET /v1/proxies/{id}/inventory-snapshots`, `/drift` and `/rebaseline-markers`). The
-server serves these routes only when its `server.yaml` has a
-`proxy:` section, and a server with that section always requires mTLS. To read them, configure
-the console as follows:
+server serves these routes only when its `server.yaml` has a `proxy:` section, and a server
+with that section always requires mTLS. To read them, configure the console as follows:
 
 1. Set `LODELINE_SERVER_BASE_URL` to the server's `https://` URL.
 2. Issue the console a client certificate from the host client CA, the CA in the server's
@@ -171,9 +170,10 @@ the console as follows:
 
 Without a `proxy:` section, the Proxies page says that proxy reads are not available on the
 server, and the fleet pages work as before. A server that predates the inventory routes serves
-the proxy pages, and the Inventory section of a proxy says that it does not serve them. The console only reads proxies. Register, disable
-and config changes go through the server's operator CLI and its management credential, which
-the console never holds.
+the proxy pages, and the Inventory section of a proxy says that it does not serve them.
+
+The console only reads proxies. Register, disable and config changes go through the server's
+operator CLI and its management credential, which the console never holds.
 
 ## Sessions and the login limit
 
