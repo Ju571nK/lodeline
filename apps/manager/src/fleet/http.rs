@@ -129,33 +129,6 @@ impl HttpClient {
                     .map_err(|e| FleetError::Transport(format!("decode {path}: {e}")))
             }
             401 => Err(FleetError::Unauthorized),
-            // The server answers an unknown proxy or invocation, and one outside the caller's
-            // `proxy.read` range, with the same `proxy_unknown`. Any other 404 is a route it does
-            // not serve.
-            404 | 403 | 422 if proxy => {
-                let body = read_capped(resp, ERROR_BODY_LIMIT)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                Err(match (status, api_error(status, &body)) {
-                    (403, _) => FleetError::Forbidden,
-                    (404, FleetError::Api { code, .. }) if code == "proxy_unknown" && by_id => {
-                        FleetError::NotFound
-                    }
-                    (404, _) => FleetError::ProxyReadsUnavailable,
-                    (_, FleetError::Api { code, .. }) if code == "invalid_cursor" => {
-                        FleetError::InvalidCursor
-                    }
-                    (_, FleetError::Api { code, .. }) if code == "invalid_filter" => {
-                        FleetError::InvalidFilter
-                    }
-                    (_, other) => other,
-                })
-            }
-            // A lookup reaches its 404 only through an enabled read API.
-            404 if by_id => Err(FleetError::NotFound),
-            404 => Err(FleetError::ReadApiDisabled),
             503 => Err(FleetError::ServiceUnavailable {
                 retry_after: parse_retry_after(resp.headers().get(RETRY_AFTER)),
             }),
@@ -165,7 +138,29 @@ impl HttpClient {
                     .ok()
                     .flatten()
                     .unwrap_or_default();
-                Err(api_error(status, &body))
+                Err(match (status, api_error(status, &body)) {
+                    (404, _) if certificate_refused(&body) => FleetError::CertificateRefused,
+                    (403, _) if proxy => FleetError::Forbidden,
+                    // The server answers an unknown proxy or invocation, and one outside the
+                    // caller's `proxy.read` range, with the same `proxy_unknown`. Any other 404 is
+                    // a route it does not serve.
+                    (404, FleetError::Api { code, .. })
+                        if proxy && by_id && code == "proxy_unknown" =>
+                    {
+                        FleetError::NotFound
+                    }
+                    (404, _) if proxy => FleetError::ProxyReadsUnavailable,
+                    // A lookup reaches its 404 only through an enabled read API.
+                    (404, _) if by_id => FleetError::NotFound,
+                    (404, _) => FleetError::ReadApiDisabled,
+                    (422, FleetError::Api { code, .. }) if proxy && code == "invalid_cursor" => {
+                        FleetError::InvalidCursor
+                    }
+                    (422, FleetError::Api { code, .. }) if proxy && code == "invalid_filter" => {
+                        FleetError::InvalidFilter
+                    }
+                    (_, other) => other,
+                })
             }
         }
     }
@@ -306,6 +301,12 @@ fn parse_retry_after(v: Option<&reqwest::header::HeaderValue>) -> Duration {
         .and_then(|s| s.trim().parse::<i64>().ok())
         .and_then(|n| u64::try_from(n).ok())
         .map_or(DEFAULT_RETRY_AFTER, Duration::from_secs)
+}
+
+/// The server's 404 for a client certificate that is not host class, `{"error": "host_unknown"}`.
+/// Its "read API off" 404 is a `not_found` error object.
+fn certificate_refused(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|v| v["error"] == "host_unknown")
 }
 
 /// The `{"error": {"code", "message"}}` body, or code `unknown` with the body text.

@@ -11,7 +11,8 @@
 //! undeclared marker causes as text, with no enum to match, so only the seed covers those.
 //!
 //! The TLS acceptor is replaced by a layer that sets the peer identity it would set, a
-//! host-class certificate, and narrows the read scope with the server's test hook.
+//! host-class certificate unless a test names another issuer, and narrows the read scope with
+//! the server's test hook.
 
 use std::path::Path;
 use std::process::Command;
@@ -365,8 +366,8 @@ fn seed_inventory(ctx: &ProxyContext) {
 
 /// A server with px-a (current proxy), px-b (outside the read scope), px-c (registered, never
 /// connected) and px-d (an older proxy), the invocations of `seed_invocations` and the inventory
-/// of `seed_inventory`.
-async fn serve_with_proxies(dir: &Path) -> String {
+/// of `seed_inventory`, that sees each request carry a certificate issued by `issuer`.
+async fn serve_with_proxies(dir: &Path, issuer: &str) -> String {
     make_ca(dir, "hostca", "test-host-ca");
     make_ca(dir, "proxyca", "test-proxy-ca");
     let mut bundle = std::fs::read(dir.join("hostca.crt")).unwrap();
@@ -411,7 +412,7 @@ async fn serve_with_proxies(dir: &Path) -> String {
         fingerprint: "c".repeat(64),
         cn: Some("console".into()),
         san_dns: vec![],
-        issuer_dn: Some(HOST_CA.into()),
+        issuer_dn: Some(issuer.into()),
         issuer_aki: None,
     });
     let app = build_router_with_proxy(fleet_state(dir), Some(ctx)).layer(
@@ -483,7 +484,7 @@ fn list(cursor: &str, limit: i64, connection_state: &str) -> Request {
 #[tokio::test]
 async fn the_http_client_reads_the_proxy_routes_of_a_real_server() {
     let dir = temp_dir("proxies");
-    let url = serve_with_proxies(&dir.0).await;
+    let url = serve_with_proxies(&dir.0, HOST_CA).await;
     let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
 
     let (status, body) = raw(&url, "/v1/proxies").await;
@@ -581,7 +582,7 @@ async fn the_http_client_reads_the_proxy_routes_of_a_real_server() {
 #[tokio::test]
 async fn the_http_client_reads_the_invocation_routes_of_a_real_server() {
     let dir = temp_dir("invocations");
-    let url = serve_with_proxies(&dir.0).await;
+    let url = serve_with_proxies(&dir.0, HOST_CA).await;
     let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
 
     let (status, body) = raw(&url, "/v1/proxy-invocations").await;
@@ -740,7 +741,7 @@ fn next_cursor(r: &Response) -> Option<String> {
 #[tokio::test]
 async fn the_http_client_reads_the_inventory_routes_of_a_real_server() {
     let dir = temp_dir("inventory");
-    let url = serve_with_proxies(&dir.0).await;
+    let url = serve_with_proxies(&dir.0, HOST_CA).await;
     let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
     let views = [
         InventoryView::Snapshots,
@@ -1060,5 +1061,25 @@ async fn a_server_without_a_proxy_section_has_no_proxy_reads() {
     ] {
         let err = client.get(req.clone()).await.unwrap_err();
         assert_eq!(err, FleetError::ProxyReadsUnavailable, "{req:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_proxy_ca_certificate_is_refused_on_every_read() {
+    let dir = temp_dir("proxy-ca-console");
+    let url = serve_with_proxies(&dir.0, "CN=test-proxy-ca").await;
+    let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
+    for req in [
+        Request::Meta,
+        Request::Risk(RiskParams::default()),
+        Request::HostById("h-alice".into()),
+        list("", 0, ""),
+        Request::ProxyById("px-a".into()),
+        invocations("", 0, "", ""),
+        Request::InvocationById(uuid(1)),
+        view(InventoryView::Drift, "px-a", "", 0, ""),
+    ] {
+        let err = client.get(req.clone()).await.unwrap_err();
+        assert_eq!(err, FleetError::CertificateRefused, "{req:?}");
     }
 }

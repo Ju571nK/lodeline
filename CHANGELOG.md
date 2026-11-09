@@ -17,13 +17,26 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The web console names a client certificate that the server refuses. A server with a `proxy:`
+  section answers every read with 404 `host_unknown` when the console's client certificate is
+  not from the host client CA, for example when it is from the proxy CA. The Fleet, Alerts and
+  Settings pages then said that the read API was disabled and to set
+  `LODELINE_SERVER_READ_TOKEN`, even with the token set. A host's page said that the host was not
+  found, and the Proxies page said that proxy reads were not available. These pages now say that
+  the server did not accept the console's client certificate, and to issue it from the host
+  client CA as "Proxy reads" in `apps/manager/README.md` describes. The console relays this
+  answer with the code `certificate_refused`. (#551)
+- The web console no longer logs three Content Security Policy errors on every page. The build
+  inlined the smallest JetBrains Mono subsets (Cyrillic extended and Vietnamese) as `data:`
+  URLs, which the console's `font-src 'self'` policy blocks, so the browser could not use them.
+  The build now writes every font as a file that the console serves. (#551)
 - `GET /v1/proxies/{id}` now lists a proxy's open audit gaps before its closed ones in
   `audit_gaps`, newest first within each group, still at most 50. Before, the list was newest
   first only, so 50 newer closed gaps could push an older open gap out of it. Under steady
   traffic, out-of-order ingest leaves closed `sequence_gap` records, and the proxy page then
   showed a count of open gaps with none of them in the list. When more than 50 gaps are open,
   the list shows 50 of them, and `open_gap_count` and `open_gap_counts` give the full count.
-  The web console shows the list in the server's order and says so above it.
+  The web console shows the list in the server's order and says so above it. (#552)
 
 ## [0.14.2] - 2026-11-09
 
