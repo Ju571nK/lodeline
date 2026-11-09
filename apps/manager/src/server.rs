@@ -68,7 +68,7 @@ impl AppState {
 
 /// Every API route of the Go router, plus the proxy reads, in chi pattern syntax. Session routes
 /// sit behind `require_auth`. The parity table must list each one (see the route test).
-pub const ROUTES: [(Method, &str, Access); 22] = [
+pub const ROUTES: [(Method, &str, Access); 25] = [
     (Method::GET, "/api/health", Access::Public),
     (Method::POST, "/api/v1/auth/login", Access::Public),
     (Method::GET, "/api/v1/auth/methods", Access::Public),
@@ -96,6 +96,21 @@ pub const ROUTES: [(Method, &str, Access); 22] = [
     (
         Method::GET,
         "/api/v1/fleet/proxies/{proxy_id}",
+        Access::Session,
+    ),
+    (
+        Method::GET,
+        "/api/v1/fleet/proxies/{proxy_id}/inventory-snapshots",
+        Access::Session,
+    ),
+    (
+        Method::GET,
+        "/api/v1/fleet/proxies/{proxy_id}/drift",
+        Access::Session,
+    ),
+    (
+        Method::GET,
+        "/api/v1/fleet/proxies/{proxy_id}/rebaseline-markers",
         Access::Session,
     ),
     (
@@ -172,6 +187,13 @@ fn endpoint(
         "/api/v1/fleet/hosts/{host_id}" => only(method, api::fleet::host.layer(auth)),
         "/api/v1/fleet/proxies" => only(method, api::fleet::proxies.layer(auth)),
         "/api/v1/fleet/proxies/{proxy_id}" => only(method, api::fleet::proxy.layer(auth)),
+        "/api/v1/fleet/proxies/{proxy_id}/inventory-snapshots" => {
+            only(method, api::fleet::inventory_snapshots.layer(auth))
+        }
+        "/api/v1/fleet/proxies/{proxy_id}/drift" => only(method, api::fleet::drift.layer(auth)),
+        "/api/v1/fleet/proxies/{proxy_id}/rebaseline-markers" => {
+            only(method, api::fleet::rebaseline_markers.layer(auth))
+        }
         "/api/v1/fleet/proxy-invocations" => only(method, api::fleet::invocations.layer(auth)),
         "/api/v1/fleet/proxy-invocations/{invocation_id}" => {
             only(method, api::fleet::invocation.layer(auth))

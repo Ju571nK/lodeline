@@ -5,8 +5,10 @@
 //! the console's body, encoded again, must equal the server's JSON minus the keys the console
 //! does not read. A field the server adds, renames or drops, or an enum value the console does
 //! not know, shows up as a difference here. The seed holds every lifecycle and outcome, and an
-//! open and a closed gap; `every_server_enum_value_decodes` covers the other enums, and fails to
-//! compile when the server adds a value.
+//! open and a closed gap, and px-a's inventory holds every comparison state, change and marker
+//! cause the server writes today; `every_server_enum_value_decodes` covers the other enums, and
+//! fails to compile when the server adds a value. The server writes comparison states and the
+//! undeclared marker causes as text, with no enum to match, so only the seed covers those.
 //!
 //! The TLS acceptor is replaced by a layer that sets the peer identity it would set, a
 //! host-class certificate, and narrows the read scope with the server's test hook.
@@ -20,6 +22,7 @@ use axum::middleware::Next;
 use lodeline_proxy_api::ProxyEvent;
 use lodeline_server::app::build_router_with_proxy;
 use lodeline_server::config::ServerConfig;
+use lodeline_server::proxy::ledger_inventory::{report_digest, InventoryOutcome, RefCheck};
 use lodeline_server::proxy::query::TestScope;
 use lodeline_server::proxy::registry::{ProxyRecord, ProxyState};
 use lodeline_server::proxy::store::ProxyEntry;
@@ -245,8 +248,124 @@ fn seed_invocations(ctx: &ProxyContext) {
     }
 }
 
+fn mref(n: u32) -> String {
+    format!("00000000-0000-8000-8000-{n:012}")
+}
+
+/// One inventory report of px-a. `key` and `epoch` pick the key ID and the producer epoch;
+/// `comparison` `None` makes an incomplete report.
+fn report(
+    n: u32,
+    up: &str,
+    key: u32,
+    epoch: u32,
+    members: &[u32],
+    comparison: Option<Value>,
+) -> Value {
+    let mut r = json!({
+        "schema_version": 1, "report_id": uuid(2000 + n), "proxy_id": "px-a",
+        "epoch_id": uuid(3000 + epoch), "observed_at": format!("2026-11-09T01:00:{n:02}Z"),
+        "scope": {"upstream_id": up, "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+            "protocol_version": "2025-11-25", "observation_source": "proxy_live"},
+        "canon": "sigil-tooldef-fp-v1", "key_id": format!("kid-{key:024x}"),
+    });
+    let o = r.as_object_mut().unwrap();
+    match comparison {
+        Some(c) => {
+            o.insert("completeness".into(), "complete".into());
+            o.insert("pages_observed".into(), 1.into());
+            o.insert("inventory_id".into(), uuid(1000 + n).into());
+            o.insert("members".into(), members.iter().map(|m| mref(*m)).collect());
+            o.insert("comparison".into(), c);
+        }
+        None => {
+            o.insert("completeness".into(), "incomplete".into());
+            o.insert("pages_observed".into(), 3.into());
+            o.insert("incomplete_reason".into(), "page_error".into());
+        }
+    }
+    r
+}
+
+fn compared(prev: u32, changes: Value) -> Option<Value> {
+    Some(
+        json!({"kind": "compared", "previous_inventory_id": uuid(1000 + prev), "changes": changes}),
+    )
+}
+
+fn rebaseline(prev: u32, reason: &str, links: &[(u32, u32)]) -> Option<Value> {
+    let links: Vec<_> = links
+        .iter()
+        .map(|(a, b)| {
+            json!({"from_metadata_ref": mref(*a), "to_metadata_ref": mref(*b),
+                "definition_comparison": "identical"})
+        })
+        .collect();
+    Some(
+        json!({"kind": "rebaseline", "previous_inventory_id": uuid(1000 + prev),
+        "reason": reason, "links": links}),
+    )
+}
+
+/// px-a's inventory. On up1: a baseline, a comparison with each change, both declared
+/// re-baselines, an undeclared key change, an epoch change, a restated baseline, a comparison
+/// whose previous never arrives, and an incomplete report. On up2: a comparison that arrives
+/// before its previous and then fails the deferred check.
+fn seed_inventory(ctx: &ProxyContext) {
+    let initial = || Some(json!({"kind": "initial_baseline"}));
+    let changes = json!([
+        {"change": "added", "metadata_ref": mref(3)},
+        {"change": "removed", "metadata_ref": mref(2)},
+        {"change": "changed", "metadata_ref": mref(5), "previous_metadata_ref": mref(4)},
+    ]);
+    let reports = [
+        report(1, "up1", 1, 1, &[1, 2, 4], initial()),
+        report(2, "up1", 1, 1, &[1, 3, 5], compared(1, changes)),
+        report(
+            3,
+            "up1",
+            2,
+            1,
+            &[11, 13],
+            rebaseline(2, "key_rotation", &[(1, 11)]),
+        ),
+        report(
+            4,
+            "up1",
+            3,
+            1,
+            &[21, 23],
+            rebaseline(3, "canon_version_change", &[]),
+        ),
+        report(5, "up1", 4, 1, &[31], initial()),
+        report(6, "up1", 5, 2, &[41], initial()),
+        report(7, "up1", 5, 2, &[41], initial()),
+        report(8, "up1", 5, 2, &[41, 42], compared(99, json!([]))),
+        report(9, "up1", 5, 2, &[], None),
+        report(
+            21,
+            "up2",
+            1,
+            1,
+            &[1, 2, 4],
+            compared(20, json!([{"change": "added", "metadata_ref": mref(4)}])),
+        ),
+        report(20, "up2", 1, 1, &[1, 2, 3], initial()),
+    ];
+    let now = chrono::Utc::now().timestamp();
+    for r in reports {
+        let r = lodeline_proxy_api::parse_inventory_report(r.to_string().as_bytes()).unwrap();
+        let outcome = ctx
+            .ledger
+            .ingest_inventory("px-a", &r, &report_digest(&r), &RefCheck::default(), now)
+            .unwrap();
+        assert_eq!(outcome, InventoryOutcome::Accepted);
+    }
+}
+
 /// A server with px-a (current proxy), px-b (outside the read scope), px-c (registered, never
-/// connected) and px-d (an older proxy), and the invocations of `seed_invocations`.
+/// connected) and px-d (an older proxy), the invocations of `seed_invocations` and the inventory
+/// of `seed_inventory`.
 async fn serve_with_proxies(dir: &Path) -> String {
     make_ca(dir, "hostca", "test-host-ca");
     make_ca(dir, "proxyca", "test-proxy-ca");
@@ -287,6 +406,7 @@ async fn serve_with_proxies(dir: &Path) -> String {
         txn.commit(id, entry(id, older)).unwrap();
     }
     seed_invocations(&ctx);
+    seed_inventory(&ctx);
     let host_peer = Arc::new(PeerIdentity {
         fingerprint: "c".repeat(64),
         cn: Some("console".into()),
@@ -595,6 +715,189 @@ async fn the_http_client_reads_the_invocation_routes_of_a_real_server() {
     }
 }
 
+fn view(v: InventoryView, proxy_id: &str, cursor: &str, limit: i64, change: &str) -> Request {
+    Request::Inventory(
+        v,
+        InventoryParams {
+            proxy_id: proxy_id.into(),
+            cursor: cursor.into(),
+            limit,
+            change: change.into(),
+            ..Default::default()
+        },
+    )
+}
+
+fn next_cursor(r: &Response) -> Option<String> {
+    match r {
+        Response::Snapshots(p) => p.next_cursor.clone(),
+        Response::Drift(p) => p.next_cursor.clone(),
+        Response::Markers(p) => p.next_cursor.clone(),
+        other => panic!("not an inventory page: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_http_client_reads_the_inventory_routes_of_a_real_server() {
+    let dir = temp_dir("inventory");
+    let url = serve_with_proxies(&dir.0).await;
+    let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
+    let views = [
+        InventoryView::Snapshots,
+        InventoryView::Drift,
+        InventoryView::Markers,
+    ];
+
+    for v in views {
+        let path = format!("/v1/proxies/px-a/{}", v.segment());
+        let (status, body) = raw(&url, &path).await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        let reply = client.get(view(v, "px-a", "", 0, "")).await.unwrap();
+        let want: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(serde_json::to_value(&*reply).unwrap(), want, "{path}");
+        assert_eq!(next_cursor(&reply), None, "{path}");
+    }
+
+    let Response::Snapshots(snaps) = &*client
+        .get(view(InventoryView::Snapshots, "px-a", "", 0, ""))
+        .await
+        .unwrap()
+    else {
+        panic!("not a snapshot page")
+    };
+    let states: Vec<_> = snaps.items.iter().map(|s| s.comparison_state).collect();
+    for s in [
+        ComparisonState::Baseline,
+        ComparisonState::Compared,
+        ComparisonState::Rebaseline,
+        ComparisonState::PendingPrevious,
+        ComparisonState::Inconsistent,
+    ] {
+        assert!(states.contains(&s), "the seed has {s:?}: {states:?}");
+    }
+    assert_eq!(
+        snaps.items.len(),
+        10,
+        "the incomplete report is not a snapshot"
+    );
+    let pending = snaps
+        .items
+        .iter()
+        .find(|s| s.comparison_state == ComparisonState::PendingPrevious)
+        .unwrap();
+    assert_eq!(
+        pending.awaiting_inventory_id.as_deref(),
+        Some(uuid(1099).as_str())
+    );
+    let Response::Drift(drift) = &*client
+        .get(view(InventoryView::Drift, "px-a", "", 0, ""))
+        .await
+        .unwrap()
+    else {
+        panic!("not a drift page")
+    };
+    let changes: Vec<_> = drift.items.iter().map(|d| d.change).collect();
+    assert_eq!(changes.len(), 3, "{changes:?}");
+    for c in [
+        DriftChange::Added,
+        DriftChange::Removed,
+        DriftChange::Changed,
+    ] {
+        assert!(changes.contains(&c), "the seed has {c:?}");
+    }
+    let Response::Markers(markers) = &*client
+        .get(view(InventoryView::Markers, "px-a", "", 0, ""))
+        .await
+        .unwrap()
+    else {
+        panic!("not a marker page")
+    };
+    let causes: Vec<_> = markers.items.iter().map(|m| m.cause).collect();
+    for c in [
+        MarkerCause::DeclaredKeyRotation,
+        MarkerCause::DeclaredCanonChange,
+        MarkerCause::EpochChangeDetected,
+        MarkerCause::KeyChangeUndeclared,
+        MarkerCause::BaselineRestated,
+    ] {
+        assert!(causes.contains(&c), "the seed has {c:?}: {causes:?}");
+    }
+    assert!(markers.items.iter().all(|m| !m.drift_computed));
+
+    // The incomplete observation is an `inventory_incomplete` gap on the proxy instead.
+    let Response::Proxy(a) = &*client.get(Request::ProxyById("px-a".into())).await.unwrap() else {
+        panic!("not a proxy")
+    };
+    let kinds: Vec<_> = a.audit_gaps.iter().map(|g| g.kind.as_str()).collect();
+    assert!(kinds.contains(&"inventory_incomplete"), "{kinds:?}");
+    assert!(kinds.contains(&"comparison_inconsistent"), "{kinds:?}");
+
+    // Outside the scope and unknown: the same bytes, and the same error. In the scope without
+    // reports: an empty page.
+    for v in views {
+        let seg = v.segment();
+        let (b_status, b_body) = raw(&url, &format!("/v1/proxies/px-b/{seg}")).await;
+        let (z_status, z_body) = raw(&url, &format!("/v1/proxies/px-zz/{seg}")).await;
+        assert_eq!((b_status, &b_body), (z_status, &z_body), "{seg}");
+        assert_eq!(b_status, 404, "{seg}");
+        for id in ["px-b", "px-zz"] {
+            let err = client.get(view(v, id, "", 0, "")).await.unwrap_err();
+            assert_eq!(err, FleetError::NotFound, "{id} {seg}");
+        }
+        let empty = client.get(view(v, "px-c", "", 0, "")).await.unwrap();
+        let empty = serde_json::to_value(&*empty).unwrap();
+        assert_eq!(empty, json!({"items": [], "next_cursor": null}), "{seg}");
+    }
+
+    // The server's cursor goes back unchanged, and works only with the view, proxy and filters
+    // it came from.
+    let first = client
+        .get(view(InventoryView::Drift, "px-a", "", 1, ""))
+        .await
+        .unwrap();
+    let cursor = next_cursor(&first).expect("a second page");
+    let second = client
+        .get(view(InventoryView::Drift, "px-a", &cursor, 1, ""))
+        .await
+        .unwrap();
+    assert_ne!(
+        serde_json::to_value(&*first).unwrap()["items"],
+        serde_json::to_value(&*second).unwrap()["items"]
+    );
+    for (req, want) in [
+        (
+            view(InventoryView::Drift, "px-a", &cursor, 1, "added"),
+            FleetError::InvalidCursor,
+        ),
+        (
+            view(InventoryView::Markers, "px-a", &cursor, 1, ""),
+            FleetError::InvalidCursor,
+        ),
+        (
+            view(InventoryView::Drift, "px-d", &cursor, 1, ""),
+            FleetError::InvalidCursor,
+        ),
+        (
+            view(InventoryView::Drift, "px-a", "not-a-cursor", 1, ""),
+            FleetError::InvalidCursor,
+        ),
+        (
+            view(InventoryView::Snapshots, "px-a", "", 1, "added"),
+            FleetError::InvalidFilter,
+        ),
+        (
+            view(InventoryView::Drift, "px-a", "", 1, "approved"),
+            FleetError::InvalidFilter,
+        ),
+        (
+            view(InventoryView::Markers, "px-a", "", 501, ""),
+            FleetError::InvalidFilter,
+        ),
+    ] {
+        assert_eq!(client.get(req.clone()).await.unwrap_err(), want, "{req:?}");
+    }
+}
+
 /// Each value of the server's enums decodes to the console's matching value, never `unknown`.
 /// The matches have no wildcard, so a value the server adds fails to compile here.
 #[test]
@@ -603,6 +906,7 @@ fn every_server_enum_value_decodes() {
     use lodeline_proxy_api::status::{
         ConfigState as SConfig, RouteState as SRoute, SpoolState as SSpool,
     };
+    use lodeline_proxy_api::{Change as SChange, MetadataRef as SRef, RebaselineReason as SReason};
     use lodeline_server::proxy::projection::Lifecycle as SLifecycle;
     use lodeline_server::proxy::query::ConnectionState as SConnection;
 
@@ -711,6 +1015,33 @@ fn every_server_enum_value_decodes() {
             },
         );
     }
+    // A drift record's `change` is the report's change tag.
+    let r = |n: u32| SRef::new(mref(n)).unwrap();
+    for v in [
+        SChange::Added { metadata_ref: r(1) },
+        SChange::Removed { metadata_ref: r(1) },
+        SChange::Changed {
+            metadata_ref: r(1),
+            previous_metadata_ref: r(2),
+        },
+    ] {
+        let console = match v {
+            SChange::Added { .. } => DriftChange::Added,
+            SChange::Removed { .. } => DriftChange::Removed,
+            SChange::Changed { .. } => DriftChange::Changed,
+        };
+        decodes(serde_json::to_value(v).unwrap()["change"].clone(), console);
+    }
+    // Each declared reason has its own marker cause.
+    for v in [SReason::KeyRotation, SReason::CanonVersionChange] {
+        let (cause, console) = match v {
+            SReason::KeyRotation => ("declared_key_rotation", MarkerCause::DeclaredKeyRotation),
+            SReason::CanonVersionChange => {
+                ("declared_canon_change", MarkerCause::DeclaredCanonChange)
+            }
+        };
+        decodes(cause, console);
+    }
 }
 
 #[tokio::test]
@@ -723,6 +1054,9 @@ async fn a_server_without_a_proxy_section_has_no_proxy_reads() {
         Request::ProxyById("px-a".into()),
         invocations("", 0, "", ""),
         Request::InvocationById(uuid(1)),
+        view(InventoryView::Snapshots, "px-a", "", 0, ""),
+        view(InventoryView::Drift, "px-a", "", 0, ""),
+        view(InventoryView::Markers, "px-a", "", 0, ""),
     ] {
         let err = client.get(req.clone()).await.unwrap_err();
         assert_eq!(err, FleetError::ProxyReadsUnavailable, "{req:?}");

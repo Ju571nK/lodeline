@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use super::*;
 use crate::fleet::{
     retry, ActiveHosts, ConfigState, ConnectionState, EventsParams, GoTime, HostsParams,
-    InvocationsParams, Lifecycle, Meta, Outcome, ProxiesParams, RetryPolicy, RiskParams,
-    DEFAULT_RETRY,
+    InventoryParams, InventoryView, InvocationsParams, Lifecycle, Meta, Outcome, ProxiesParams,
+    RetryPolicy, RiskParams, DEFAULT_RETRY,
 };
 
 const TOKEN: &str = "test-bearer-secret";
@@ -569,6 +569,164 @@ async fn invocation_detail_keeps_nulls_and_reads_new_enum_values_as_unknown() {
     assert_eq!(out["outcome"], Value::Null);
     assert_eq!(out["events_total"], 33);
     assert!(out.get("decision").is_none(), "decision is not relayed");
+}
+
+const VIEWS: [InventoryView; 3] = [
+    InventoryView::Snapshots,
+    InventoryView::Drift,
+    InventoryView::Markers,
+];
+
+fn inventory(view: InventoryView, proxy_id: &str) -> Request {
+    Request::Inventory(
+        view,
+        InventoryParams {
+            proxy_id: proxy_id.into(),
+            ..Default::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn an_inventory_view_passes_the_cursor_and_every_filter_unchanged() {
+    let cursor = "eyJ2IjoxLCJrZXkiOjcsImZpbHRlcl9oYXNoIjoiYWIifQ";
+    let (c, calls) =
+        stub(move |_| json_answer(200, json!({"items": [], "next_cursor": cursor}))).await;
+    for view in VIEWS {
+        let reply = c
+            .get(Request::Inventory(
+                view,
+                InventoryParams {
+                    proxy_id: "px a".into(),
+                    cursor: cursor.into(),
+                    limit: 25,
+                    upstream_id: "up1".into(),
+                    credential_scope_id: "cs-1".into(),
+                    change: "added".into(),
+                    from: "2026-11-09T00:00:00Z".into(),
+                    to: "2026-11-10T00:00:00Z".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        let next = match &*reply {
+            Response::Snapshots(p) => &p.next_cursor,
+            Response::Drift(p) => &p.next_cursor,
+            Response::Markers(p) => &p.next_cursor,
+            other => panic!("not an inventory page: {other:?}"),
+        };
+        assert_eq!(next.as_deref(), Some(cursor));
+    }
+    let calls = calls.lock().unwrap();
+    let paths: Vec<_> = calls.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/v1/proxies/px%20a/inventory-snapshots",
+            "/v1/proxies/px%20a/drift",
+            "/v1/proxies/px%20a/rebaseline-markers"
+        ]
+    );
+    assert_eq!(
+        calls[1].query,
+        format!(
+            "change=added&credential_scope_id=cs-1&cursor={cursor}&from=2026-11-09T00%3A00%3A00Z\
+             &limit=25&to=2026-11-10T00%3A00%3A00Z&upstream_id=up1"
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_inventory_404_is_an_unknown_proxy_only_with_proxy_unknown() {
+    let unknown = json!({"error": {"code": "proxy_unknown", "message": "proxy unknown"}});
+    let (c, _) = stub(move |n| match n % 3 {
+        // An unknown proxy and one outside the read range get these same bytes.
+        0 => json_answer(404, unknown.clone()),
+        // A server without a proxy section, or one that predates these views.
+        1 => raw_answer(404, ""),
+        // The console's certificate is not host class.
+        _ => json_answer(404, json!({"error": "host_unknown"})),
+    })
+    .await;
+    for view in VIEWS {
+        for want in [
+            FleetError::NotFound,
+            FleetError::ProxyReadsUnavailable,
+            FleetError::ProxyReadsUnavailable,
+        ] {
+            let err = c.get(inventory(view, "px-a")).await.unwrap_err();
+            assert_eq!(err, want, "{view:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn inventory_403_and_422_are_typed_errors() {
+    let (c, _) = stub(|n| match n % 3 {
+        0 => json_answer(403, error_body("forbidden")),
+        1 => json_answer(422, error_body("invalid_cursor")),
+        _ => json_answer(422, error_body("invalid_filter")),
+    })
+    .await;
+    for view in VIEWS {
+        for want in [
+            FleetError::Forbidden,
+            FleetError::InvalidCursor,
+            FleetError::InvalidFilter,
+        ] {
+            let err = c.get(inventory(view, "px-a")).await.unwrap_err();
+            assert_eq!(err, want, "{view:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn inventory_rows_keep_absent_fields_and_read_new_enum_values_as_unknown() {
+    let scope = json!({"proxy_id": "px-a", "upstream_id": "up1", "credential_scope_id": "cs-1",
+        "protocol_version": "2026-01-01", "observation_source": "proxy_later"});
+    let mut snapshot = json!({"inventory_id": "i2", "canon": "canon-later", "key_id": "k1",
+        "member_count": 3, "observed_at": "2026-11-09T10:00:00Z",
+        "received_at": "2026-11-09T10:00:01Z", "is_latest": true, "is_first_baseline": false,
+        "comparison_state": "deferred_later", "awaiting_inventory_id": null});
+    let mut drift = json!({"drift_id": "d1", "inventory_id": "i2", "previous_inventory_id": "i1",
+        "change": "renamed_later", "metadata_ref": "r2", "detected_at": "2026-11-09T10:00:01Z"});
+    let mut marker = json!({"marker_id": "m1", "inventory_id": "i2",
+        "previous_inventory_id": null, "from_key_id": "k0", "to_key_id": "k1",
+        "from_canon": "c", "to_canon": "c", "cause": "cause_later", "links_present": false,
+        "drift_computed": false, "detected_at": "2026-11-09T10:00:01Z"});
+    for row in [&mut snapshot, &mut drift, &mut marker] {
+        row.as_object_mut()
+            .unwrap()
+            .extend(scope.as_object().unwrap().clone());
+    }
+    let rows = [snapshot.clone(), drift.clone(), marker.clone()];
+    let (c, _) =
+        stub(move |n| json_answer(200, json!({"items": [rows[n]], "next_cursor": null}))).await;
+    let got = |view| {
+        let c = &c;
+        async move {
+            let reply = c.get(inventory(view, "px-a")).await.unwrap();
+            serde_json::to_value(&*reply).unwrap()["items"][0].clone()
+        }
+    };
+    let (s, d, m) = (
+        got(InventoryView::Snapshots).await,
+        got(InventoryView::Drift).await,
+        got(InventoryView::Markers).await,
+    );
+    assert_eq!(s["comparison_state"], "unknown");
+    assert_eq!(d["change"], "unknown");
+    assert_eq!(m["cause"], "unknown");
+    assert!(!d.as_object().unwrap().contains_key("previous_metadata_ref"));
+    assert_eq!(m["previous_inventory_id"], Value::Null);
+    for (got, mut sent, key) in [
+        (s, snapshot, "comparison_state"),
+        (d, drift, "change"),
+        (m, marker, "cause"),
+    ] {
+        sent[key] = "unknown".into();
+        assert_eq!(got, sent, "every other field is relayed as sent");
+    }
 }
 
 #[tokio::test]

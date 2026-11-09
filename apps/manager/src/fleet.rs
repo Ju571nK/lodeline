@@ -38,6 +38,7 @@ pub enum Request {
     ProxyById(String),
     Invocations(InvocationsParams),
     InvocationById(String),
+    Inventory(InventoryView, InventoryParams),
 }
 
 /// `GET /v1/events` filters. Empty and zero values are left out of the upstream query.
@@ -104,6 +105,20 @@ pub struct InvocationsParams {
     pub time_basis: String,
 }
 
+/// `GET /v1/proxies/{proxy_id}/{view}` filters, passed through as given like [`ProxiesParams`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InventoryParams {
+    pub proxy_id: String,
+    pub cursor: String,
+    pub limit: i64,
+    pub upstream_id: String,
+    pub credential_scope_id: String,
+    /// The server takes it on the drift view only.
+    pub change: String,
+    pub from: String,
+    pub to: String,
+}
+
 /// One fleet body, as the handlers relay it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -124,6 +139,9 @@ pub enum Response {
     Proxy(ProxyDetail),
     Invocations(InvocationsPage),
     Invocation(InvocationDetail),
+    Snapshots(InventoryPage<InventorySnapshot>),
+    Drift(InventoryPage<DriftRecord>),
+    Markers(InventoryPage<RebaselineMarker>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -300,6 +318,9 @@ impl Request {
             Self::ProxyById(_) => "proxy_by_id",
             Self::Invocations(_) => "proxy_invocations",
             Self::InvocationById(_) => "proxy_invocation_by_id",
+            Self::Inventory(InventoryView::Snapshots, _) => "proxy_inventory_snapshots",
+            Self::Inventory(InventoryView::Drift, _) => "proxy_drift",
+            Self::Inventory(InventoryView::Markers, _) => "proxy_rebaseline_markers",
         })
     }
 
@@ -369,6 +390,15 @@ impl Request {
                 set("to", p.to.clone());
                 set("time_basis", p.time_basis.clone());
             }
+            Self::Inventory(_, p) => {
+                set("cursor", p.cursor.clone());
+                set("limit", limit(p.limit));
+                set("upstream_id", p.upstream_id.clone());
+                set("credential_scope_id", p.credential_scope_id.clone());
+                set("change", p.change.clone());
+                set("from", p.from.clone());
+                set("to", p.to.clone());
+            }
             Self::Healthz
             | Self::Meta
             | Self::EventById(_)
@@ -383,13 +413,15 @@ impl Request {
             .join("&")
     }
 
-    /// The cache key: endpoint plus its query, or plus the ID for a lookup.
+    /// The cache key: endpoint plus its query, or plus the ID for a lookup, or both for a
+    /// proxy's inventory view. The escaped ID holds no `|`.
     fn cache_key(&self) -> Option<String> {
         let suffix = match self {
             Self::EventById(id)
             | Self::HostById(id)
             | Self::ProxyById(id)
             | Self::InvocationById(id) => id.clone(),
+            Self::Inventory(_, p) => format!("{}|{}", path_escape(&p.proxy_id), self.query()),
             _ => self.query(),
         };
         Some(format!("{}|{suffix}", self.endpoint()?))

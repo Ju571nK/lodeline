@@ -1,6 +1,8 @@
 //! The proxy read bodies, `GET /v1/proxies`, `GET /v1/proxies/{id}`, `GET /v1/proxy-invocations`
 //! and `GET /v1/proxy-invocations/{id}`, as `lodeline-server`'s `proxy::query` sends them
-//! (ledger-and-query.md L2 to L4).
+//! (ledger-and-query.md L2 to L4), and a proxy's inventory views,
+//! `GET /v1/proxies/{id}/{inventory-snapshots,drift,rebaseline-markers}`, as its
+//! `proxy::inventory_query` sends them (registry.md R5, R7b).
 //!
 //! No Go console read these, so they keep the server's shape instead of Go's: a field the server
 //! sends as `null` stays `null`, a field it leaves out stays out, and an enum value this build
@@ -274,4 +276,136 @@ pub struct InvocationEvent {
     /// Proxy clock, unverified.
     pub occurred_at: String,
     pub received_at: String,
+}
+
+/// One of a proxy's three inventory read views.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InventoryView {
+    Snapshots,
+    Drift,
+    Markers,
+}
+
+impl InventoryView {
+    /// The path segment under `/v1/proxies/{id}/`, which the console's route uses too.
+    pub fn segment(self) -> &'static str {
+        match self {
+            Self::Snapshots => "inventory-snapshots",
+            Self::Drift => "drift",
+            Self::Markers => "rebaseline-markers",
+        }
+    }
+}
+
+/// The chain an inventory row belongs to. A different credential scope or protocol version is a
+/// separate chain, never compared with this one (R5 rule 4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InventoryScope {
+    pub proxy_id: String,
+    pub upstream_id: String,
+    pub credential_scope_id: String,
+    pub protocol_version: String,
+    pub observation_source: String,
+}
+
+/// R7b `comparison_state`. Only `compared` has drift records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonState {
+    /// An initial or a restated baseline.
+    Baseline,
+    Compared,
+    Rebaseline,
+    /// The previous snapshot has not arrived; no drift is shown yet.
+    PendingPrevious,
+    /// The deferred checks failed; no drift.
+    Inconsistent,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A complete observation of an upstream's tool list. An incomplete one is never a snapshot: the
+/// server lists it as an `inventory_incomplete` gap on the proxy detail.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InventorySnapshot {
+    pub inventory_id: String,
+    #[serde(flatten)]
+    pub scope: InventoryScope,
+    pub canon: String,
+    pub key_id: String,
+    pub member_count: i64,
+    /// Proxy clock, as the report wrote it.
+    pub observed_at: String,
+    pub received_at: String,
+    pub is_latest: bool,
+    pub is_first_baseline: bool,
+    pub comparison_state: ComparisonState,
+    /// Set only while `pending_previous`.
+    pub awaiting_inventory_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftChange {
+    Added,
+    Removed,
+    Changed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One change between two snapshots of a chain, by metadata reference. It records what the proxy
+/// observed; nothing reviewed or approved it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DriftRecord {
+    pub drift_id: String,
+    pub inventory_id: String,
+    pub previous_inventory_id: String,
+    #[serde(flatten)]
+    pub scope: InventoryScope,
+    pub change: DriftChange,
+    pub metadata_ref: String,
+    /// Sent only for `changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_metadata_ref: Option<String>,
+    pub detected_at: String,
+}
+
+/// Why a chain's comparison domain restarted (R5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerCause {
+    DeclaredKeyRotation,
+    DeclaredCanonChange,
+    EpochChangeDetected,
+    KeyChangeUndeclared,
+    BaselineRestated,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A baseline reset inside a chain. It never creates drift records.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RebaselineMarker {
+    pub marker_id: String,
+    #[serde(flatten)]
+    pub scope: InventoryScope,
+    pub inventory_id: String,
+    pub previous_inventory_id: Option<String>,
+    pub from_key_id: String,
+    pub to_key_id: String,
+    pub from_canon: String,
+    pub to_canon: String,
+    pub cause: MarkerCause,
+    pub links_present: bool,
+    pub drift_computed: bool,
+    pub detected_at: String,
+}
+
+/// An inventory view, newest commit first. `next_cursor` is opaque and bound to the view, the
+/// proxy and the filters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InventoryPage<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
 }
