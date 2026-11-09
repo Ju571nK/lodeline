@@ -1,9 +1,11 @@
 //! The read-only client for `lodeline-server`'s `/v1/*` API, Go's `internal/fleet`: the HTTP
-//! client, the built-in mock fleet, the read cache in front of either, and bounded retry.
+//! client, the built-in mock fleet, the read cache in front of either, and bounded retry. The
+//! proxy reads (`proxy.rs`) are new with this console and have no Go counterpart.
 
 pub mod cache;
 mod http;
 mod mock;
+mod proxy;
 pub mod wire;
 
 use std::fmt;
@@ -16,6 +18,7 @@ use serde::Serialize;
 
 pub use http::{env_proxy, read_capped, HttpClient};
 pub use mock::Mock;
+pub use proxy::*;
 pub use wire::*;
 
 use crate::config::Config;
@@ -31,6 +34,8 @@ pub enum Request {
     HostById(String),
     Risk(RiskParams),
     Compliance(ComplianceParams),
+    Proxies(ProxiesParams),
+    ProxyById(String),
 }
 
 /// `GET /v1/events` filters. Empty and zero values are left out of the upstream query.
@@ -70,6 +75,16 @@ pub struct ComplianceParams {
     pub limit: i64,
 }
 
+/// `GET /v1/proxies` filters, passed through as given: the server checks them and answers
+/// `invalid_filter`. The cursor is the server's, unchanged.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProxiesParams {
+    pub cursor: String,
+    pub limit: i64,
+    pub connection_state: String,
+    pub config_in_sync: String,
+}
+
 /// One fleet body, as the handlers relay it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -86,6 +101,8 @@ pub enum Response {
     Host(HostDetail),
     Risk(RiskPage),
     Compliance(CompliancePage),
+    Proxies(ProxiesPage),
+    Proxy(ProxyDetail),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,7 +111,16 @@ pub enum FleetError {
     NotFound,
     /// 404 from any other endpoint: the server runs without a read token.
     ReadApiDisabled,
+    /// 404 from a proxy read other than `proxy_unknown`: the server has no proxy section, so the
+    /// routes are not mounted, or it refuses the console's certificate on them.
+    ProxyReadsUnavailable,
     Unauthorized,
+    /// 403 from a proxy read: the read credential has no `proxy.read` at all.
+    Forbidden,
+    /// 422 `invalid_cursor` from a proxy list: the cursor is malformed or from another filter set.
+    InvalidCursor,
+    /// 422 `invalid_filter` from a proxy list: an unknown filter or value, or a bad `limit`.
+    InvalidFilter,
     /// 503 while the server rebuilds its index; `retry_after` from the header, 5 s by default.
     ServiceUnavailable {
         retry_after: Duration,
@@ -123,7 +149,13 @@ impl fmt::Display for FleetError {
         match self {
             Self::NotFound => f.write_str("fleet: not found"),
             Self::ReadApiDisabled => f.write_str("fleet: read API disabled on lodeline-server"),
+            Self::ProxyReadsUnavailable => {
+                f.write_str("fleet: proxy reads not available on lodeline-server")
+            }
             Self::Unauthorized => f.write_str("fleet: unauthorized"),
+            Self::Forbidden => f.write_str("fleet: forbidden"),
+            Self::InvalidCursor => f.write_str("fleet: invalid cursor"),
+            Self::InvalidFilter => f.write_str("fleet: invalid filter"),
             Self::ServiceUnavailable { retry_after } => {
                 write!(
                     f,
@@ -241,6 +273,8 @@ impl Request {
             Self::HostById(_) => "host_by_id",
             Self::Risk(_) => "risk",
             Self::Compliance(_) => "compliance",
+            Self::Proxies(_) => "proxies",
+            Self::ProxyById(_) => "proxy_by_id",
         })
     }
 
@@ -290,7 +324,17 @@ impl Request {
                 set("cursor", p.cursor.clone());
                 set("limit", limit(p.limit));
             }
-            Self::Healthz | Self::Meta | Self::EventById(_) | Self::HostById(_) => {}
+            Self::Proxies(p) => {
+                set("cursor", p.cursor.clone());
+                set("limit", limit(p.limit));
+                set("connection_state", p.connection_state.clone());
+                set("config_in_sync", p.config_in_sync.clone());
+            }
+            Self::Healthz
+            | Self::Meta
+            | Self::EventById(_)
+            | Self::HostById(_)
+            | Self::ProxyById(_) => {}
         }
         q.sort_by_key(|(k, _)| *k);
         q.iter()
@@ -302,7 +346,7 @@ impl Request {
     /// The cache key: endpoint plus its query, or plus the ID for a lookup.
     fn cache_key(&self) -> Option<String> {
         let suffix = match self {
-            Self::EventById(id) | Self::HostById(id) => id.clone(),
+            Self::EventById(id) | Self::HostById(id) | Self::ProxyById(id) => id.clone(),
             _ => self.query(),
         };
         Some(format!("{}|{suffix}", self.endpoint()?))

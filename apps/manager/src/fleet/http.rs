@@ -74,7 +74,10 @@ impl HttpClient {
             Request::HostById(id) => (format!("/v1/fleet/hosts/{}", path_escape(id)), true),
             Request::Risk(_) => ("/v1/fleet/risk".to_owned(), false),
             Request::Compliance(_) => ("/v1/fleet/compliance".to_owned(), false),
+            Request::Proxies(_) => ("/v1/proxies".to_owned(), false),
+            Request::ProxyById(id) => (format!("/v1/proxies/{}", path_escape(id)), true),
         };
+        let proxy = matches!(req, Request::Proxies(_) | Request::ProxyById(_));
         let mut url = format!("{}{path}", self.base_url);
         let query = req.query();
         if !query.is_empty() {
@@ -104,6 +107,29 @@ impl HttpClient {
                     .map_err(|e| FleetError::Transport(format!("decode {path}: {e}")))
             }
             401 => Err(FleetError::Unauthorized),
+            // The server answers an unknown proxy and one outside the caller's `proxy.read`
+            // range with the same `proxy_unknown`. Any other 404 is a route it does not serve.
+            404 | 403 | 422 if proxy => {
+                let body = read_capped(resp, ERROR_BODY_LIMIT)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                Err(match (status, api_error(status, &body)) {
+                    (403, _) => FleetError::Forbidden,
+                    (404, FleetError::Api { code, .. }) if code == "proxy_unknown" && by_id => {
+                        FleetError::NotFound
+                    }
+                    (404, _) => FleetError::ProxyReadsUnavailable,
+                    (_, FleetError::Api { code, .. }) if code == "invalid_cursor" => {
+                        FleetError::InvalidCursor
+                    }
+                    (_, FleetError::Api { code, .. }) if code == "invalid_filter" => {
+                        FleetError::InvalidFilter
+                    }
+                    (_, other) => other,
+                })
+            }
             // A lookup reaches its 404 only through an enabled read API.
             404 if by_id => Err(FleetError::NotFound),
             404 => Err(FleetError::ReadApiDisabled),
@@ -209,6 +235,9 @@ pub(super) fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response>
         Request::HostById(_) => Response::Host(go_decode(&v)?),
         Request::Risk(_) => Response::Risk(go_decode(&v)?),
         Request::Compliance(_) => Response::Compliance(go_decode(&v)?),
+        // The proxy bodies keep the server's nulls and absent fields, so no Go rules apply.
+        Request::Proxies(_) => Response::Proxies(serde_json::from_str(v.get())?),
+        Request::ProxyById(_) => Response::Proxy(serde_json::from_str(v.get())?),
     })
 }
 

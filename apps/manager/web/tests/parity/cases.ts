@@ -26,6 +26,8 @@ export const ROUTES = [
   'GET /api/v1/fleet/compliance',
   'GET /api/v1/fleet/hosts',
   'GET /api/v1/fleet/hosts/{host_id}',
+  'GET /api/v1/fleet/proxies',
+  'GET /api/v1/fleet/proxies/{proxy_id}',
   'POST /api/v1/triage/upsert',
   'POST /api/v1/triage/note',
   'GET /api/v1/triage/{host_id}/{event_id}',
@@ -151,6 +153,7 @@ const LIVE_EVENT = {
   target_id: null,
   added_later: 'kept or dropped',
 };
+const PROXY_CURSOR = 'eyJ2IjoxLCJrZXkiOiJweC1hIiwiZmlsdGVyX2hhc2giOiJhYiJ9';
 const LIVE_ALERTS = {
   evidence_kinds: ['ai_guard_risk_assessed'],
   ai_guard_buckets: ['high', 'critical'],
@@ -1040,6 +1043,62 @@ export const CASES: Case[] = [
     'fleet-host-no-session',
   ),
 
+  // Proxy reads. No Go console had them, so these goldens are from the Rust build.
+  {
+    name: 'fleet-proxies',
+    route: 'GET /api/v1/fleet/proxies',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies',
+  },
+  {
+    name: 'fleet-proxies-filtered-page',
+    route: 'GET /api/v1/fleet/proxies',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies?connection_state=connected&limit=1&cursor=px-edge-01',
+  },
+  {
+    name: 'fleet-proxies-bad-limit',
+    route: 'GET /api/v1/fleet/proxies',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies?limit=x',
+  },
+  noSession(
+    'GET /api/v1/fleet/proxies',
+    'GET',
+    '/api/v1/fleet/proxies',
+    'fleet-proxies-no-session',
+  ),
+  {
+    name: 'fleet-proxy',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-edge-02',
+  },
+  {
+    name: 'fleet-proxy-older',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-lab-03',
+  },
+  {
+    name: 'fleet-proxy-not-found',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-missing',
+  },
+  noSession(
+    'GET /api/v1/fleet/proxies/{proxy_id}',
+    'GET',
+    '/api/v1/fleet/proxies/px-edge-01',
+    'fleet-proxy-no-session',
+  ),
+
   // Triage write sequence on EVT#3 (an alice-mbp event in the mock), then reads.
   {
     name: 'triage-get-before-insert',
@@ -1611,6 +1670,75 @@ export const CASES: Case[] = [
       { status: 404, json: { error: { code: 'not_found', message: 'no such host' } } },
     ),
   ]),
+  // A server's proxy answers. The opaque cursor goes upstream unchanged.
+  upstream(
+    'live-proxies-cursor',
+    'GET /api/v1/fleet/proxies',
+    `/api/v1/fleet/proxies?limit=1&connection_state=connected&cursor=${PROXY_CURSOR}`,
+    {
+      status: 200,
+      json: {
+        items: [
+          {
+            proxy_id: 'px-a',
+            display_name: 'Proxy A',
+            connection_state: 'asleep',
+            last_seen: LIVE_TS,
+            desired_revision: 3,
+            applied_revision: null,
+            config_in_sync: false,
+            config_state: 'disabled',
+            config_expires_at: null,
+            current_epoch_id: null,
+            spool: null,
+            open_gap_count: 0,
+            status_as_of: null,
+            added_later: 'dropped',
+          },
+        ],
+        next_cursor: PROXY_CURSOR,
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-proxies-invalid-cursor',
+    'GET /api/v1/fleet/proxies',
+    `/api/v1/fleet/proxies?cursor=${PROXY_CURSOR}`,
+    { status: 422, json: { error: { code: 'invalid_cursor', message: 'invalid cursor' } } },
+  ),
+  upstream(
+    'live-proxies-invalid-filter',
+    'GET /api/v1/fleet/proxies',
+    '/api/v1/fleet/proxies?connection_state=asleep',
+    { status: 422, json: { error: { code: 'invalid_filter', message: 'invalid filter' } } },
+  ),
+  upstream('live-proxies-forbidden', 'GET /api/v1/fleet/proxies', '/api/v1/fleet/proxies', {
+    status: 403,
+    json: { error: { code: 'forbidden', message: 'forbidden' } },
+  }),
+  upstream('live-proxies-not-mounted', 'GET /api/v1/fleet/proxies', '/api/v1/fleet/proxies', {
+    status: 404,
+    text: '',
+  }),
+  upstream(
+    'live-proxy-unknown',
+    'GET /api/v1/fleet/proxies/{proxy_id}',
+    '/api/v1/fleet/proxies/px-a',
+    { status: 404, json: { error: { code: 'proxy_unknown', message: 'proxy unknown' } } },
+  ),
+  upstream(
+    'live-proxy-not-mounted',
+    'GET /api/v1/fleet/proxies/{proxy_id}',
+    '/api/v1/fleet/proxies/px-a',
+    { status: 404, text: '' },
+  ),
+  upstream(
+    'live-proxy-host-unknown',
+    'GET /api/v1/fleet/proxies/{proxy_id}',
+    '/api/v1/fleet/proxies/px-a',
+    { status: 404, json: { error: 'host_unknown' } },
+  ),
   upstream('upstream-401', 'GET /api/v1/fleet/events', '/api/v1/fleet/events', {
     status: 401,
     json: { error: { code: 'unauthorized', message: 'bad token' } },

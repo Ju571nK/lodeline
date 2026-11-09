@@ -1,0 +1,101 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxies/px-lab-03",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "applied_revision": 3,
+    "audit_gaps": [
+      {
+        "details": {
+          "epoch_id": "00000000-0000-4000-8000-0000000000e3",
+          "from_sequence": 9001,
+          "tail": true,
+          "to_sequence": 9040
+        },
+        "detected_at": "<seed-7205s Z>",
+        "gap_id": "00000000-0000-4000-8000-000000000303",
+        "kind": "sequence_gap",
+        "source": "server_derived",
+        "state": "open"
+      },
+      {
+        "details": {
+          "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+          "incomplete_reason": "page_error",
+          "observed_at": "<seed-9010s Z>",
+          "upstream_id": "local-files"
+        },
+        "detected_at": "<seed-150m Z>",
+        "gap_id": "00000000-0000-4000-8000-000000000302",
+        "kind": "inventory_incomplete",
+        "source": "server_derived",
+        "state": "open"
+      },
+      {
+        "details": {
+          "ended_at": null,
+          "started_at": "<seed-200m Z>"
+        },
+        "detected_at": "<seed-200m Z>",
+        "gap_id": "00000000-0000-4000-8000-000000000301",
+        "kind": "central_outage",
+        "source": "proxy_reported",
+        "state": "open"
+      }
+    ],
+    "audit_gaps_dropped": 3,
+    "audit_gaps_total": 3,
+    "central": {
+      "consecutive_failures": 2,
+      "last_ingest_ack_at": "<seed-7300s Z>"
+    },
+    "config_expires_at": "<seed-115m Z>",
+    "config_in_sync": false,
+    "config_state": "expired",
+    "connection_state": "disconnected",
+    "desired_revision": 4,
+    "display_name": "Lab proxy 03",
+    "last_seen": "<seed-2h Z>",
+    "open_gap_count": 3,
+    "open_gap_counts": {
+      "central_outage": 1,
+      "inventory_incomplete": 1,
+      "sequence_gap": 1
+    },
+    "proxy_id": "px-lab-03",
+    "registry": {
+      "pending_entries": 12,
+      "sync_stalled": false
+    },
+    "routes": [
+      {
+        "reason": "upstream_version_unsupported",
+        "state": "unsupported",
+        "upstream_id": "local-files"
+      }
+    ],
+    "spool": {
+      "as_of": "<seed-7210s Z>",
+      "bytes": 268435456,
+      "capacity_bytes": 268435456,
+      "depth_events": 50000,
+      "oldest_unsent_age_seconds": 86400,
+      "quarantined_bytes": null,
+      "quarantined_events": 4,
+      "state": "full",
+      "unsent_events": 50000
+    },
+    "status_as_of": "<seed-7210s Z>"
+  }
+}

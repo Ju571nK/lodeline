@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::fleet::{
-    retry, ActiveHosts, EventsParams, GoTime, HostsParams, Meta, RetryPolicy, RiskParams,
-    DEFAULT_RETRY,
+    retry, ActiveHosts, ConfigState, ConnectionState, EventsParams, GoTime, HostsParams, Meta,
+    ProxiesParams, RetryPolicy, RiskParams, DEFAULT_RETRY,
 };
 
 const TOKEN: &str = "test-bearer-secret";
@@ -269,6 +269,175 @@ async fn status_404_on_host_by_id_is_not_found() {
         .await
         .unwrap_err();
     assert_eq!(err, FleetError::NotFound);
+}
+
+fn raw_answer(status: u16, body: &str) -> Answer {
+    Answer {
+        status,
+        headers: vec![],
+        body: body.into(),
+        delay: Duration::ZERO,
+    }
+}
+
+fn proxy_detail_body() -> Value {
+    json!({
+        "proxy_id": "px-a", "display_name": "Proxy A", "connection_state": "paused",
+        "last_seen": "2026-11-09T10:00:00Z", "desired_revision": 3, "applied_revision": 2,
+        "config_in_sync": false, "config_state": "disabled", "config_expires_at": null,
+        "current_epoch_id": null,
+        "spool": {"state": "degraded", "depth_events": 4, "unsent_events": 3, "bytes": 99,
+            "capacity_bytes": 1000, "oldest_unsent_age_seconds": null, "quarantined_events": 1,
+            "quarantined_bytes": null, "as_of": null},
+        "open_gap_count": 1, "status_as_of": null,
+        "registry": {"pending_entries": 2, "sync_stalled": false},
+        "central": {"last_ingest_ack_at": null, "consecutive_failures": 0},
+        "routes": [{"upstream_id": "up1", "state": "supported"}],
+        "outages": [], "counters": {},
+        "audit_gaps": [{"gap_id": "g1", "kind": "sequence_gap", "source": "server_derived",
+            "detected_at": "2026-11-09T09:00:00Z", "state": "closed",
+            "details": {"from_sequence": 1, "to_sequence": 2, "tail": false}}],
+        "audit_gaps_total": 1, "audit_gaps_dropped": 0, "open_gap_counts": {"sequence_gap": 0},
+    })
+}
+
+#[tokio::test]
+async fn the_proxy_list_passes_the_cursor_and_filters_unchanged() {
+    let cursor = "eyJ2IjoxLCJrZXkiOiJweC1hIiwiZmlsdGVyX2hhc2giOiJhYiJ9";
+    let next = "eyJ2IjoxLCJrZXkiOiJweC1iIiwiZmlsdGVyX2hhc2giOiJhYiJ9";
+    let (c, calls) =
+        stub(move |_| json_answer(200, json!({"items": [], "next_cursor": next}))).await;
+    let reply = c
+        .get(Request::Proxies(ProxiesParams {
+            cursor: cursor.into(),
+            limit: 50,
+            connection_state: "connected".into(),
+            config_in_sync: "false".into(),
+        }))
+        .await
+        .unwrap();
+    let Response::Proxies(page) = &*reply else {
+        panic!("not a proxy page: {reply:?}")
+    };
+    assert_eq!(page.next_cursor.as_deref(), Some(next));
+    let seen = calls.lock().unwrap()[0].clone();
+    assert_eq!(seen.path, "/v1/proxies");
+    assert_eq!(
+        seen.query,
+        format!("config_in_sync=false&connection_state=connected&cursor={cursor}&limit=50")
+    );
+    assert_eq!(seen.auth.as_deref(), Some("Bearer test-bearer-secret"));
+}
+
+#[tokio::test]
+async fn a_proxy_404_is_unknown_only_with_proxy_unknown() {
+    let unknown = json!({"error": {"code": "proxy_unknown", "message": "proxy unknown"}});
+    let (c, calls) = stub(move |n| match n {
+        // An unknown proxy and one outside the read range get these same bytes.
+        0 | 1 => json_answer(404, unknown.clone()),
+        // No proxy section: the route is not mounted.
+        2 | 3 => raw_answer(404, ""),
+        // The server's read token is unset.
+        4 => json_answer(404, error_body("not_found")),
+        // The console's certificate is not host class.
+        _ => json_answer(404, json!({"error": "host_unknown"})),
+    })
+    .await;
+    let get = |req| c.get(req);
+    assert_eq!(
+        get(Request::ProxyById("px-other-scope".into()))
+            .await
+            .unwrap_err(),
+        FleetError::NotFound
+    );
+    assert_eq!(
+        get(Request::ProxyById("px-missing".into()))
+            .await
+            .unwrap_err(),
+        FleetError::NotFound
+    );
+    assert_eq!(
+        get(Request::ProxyById("px-a".into())).await.unwrap_err(),
+        FleetError::ProxyReadsUnavailable
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            get(Request::Proxies(ProxiesParams::default()))
+                .await
+                .unwrap_err(),
+            FleetError::ProxyReadsUnavailable
+        );
+    }
+    let paths: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.path.clone())
+        .collect();
+    assert_eq!(
+        paths[..3],
+        [
+            "/v1/proxies/px-other-scope",
+            "/v1/proxies/px-missing",
+            "/v1/proxies/px-a"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn proxy_403_and_422_are_typed_errors() {
+    let (c, _) = stub(|n| match n {
+        0 => json_answer(403, error_body("forbidden")),
+        1 => json_answer(422, error_body("invalid_cursor")),
+        2 => json_answer(422, error_body("invalid_filter")),
+        3 => json_answer(401, error_body("unauthorized")),
+        _ => json_answer(422, error_body("something_new")),
+    })
+    .await;
+    let list = || c.get(Request::Proxies(ProxiesParams::default()));
+    assert_eq!(list().await.unwrap_err(), FleetError::Forbidden);
+    assert_eq!(list().await.unwrap_err(), FleetError::InvalidCursor);
+    assert_eq!(list().await.unwrap_err(), FleetError::InvalidFilter);
+    assert_eq!(list().await.unwrap_err(), FleetError::Unauthorized);
+    assert_eq!(
+        list().await.unwrap_err(),
+        FleetError::Api {
+            status: 422,
+            code: "something_new".into(),
+            message: "nope".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn proxy_detail_keeps_nulls_absent_fields_and_reads_new_enum_values_as_unknown() {
+    let (c, _) = stub(|_| json_answer(200, proxy_detail_body())).await;
+    let reply = c.get(Request::ProxyById("px-a".into())).await.unwrap();
+    let Response::Proxy(d) = &*reply else {
+        panic!("not a proxy: {reply:?}")
+    };
+    assert_eq!(d.summary.connection_state, ConnectionState::Unknown);
+    assert_eq!(d.summary.config_state, ConfigState::Disabled);
+    assert_eq!(d.central.as_ref().unwrap().ingest_stopped, None);
+    let out = serde_json::to_value(&*reply).unwrap();
+    assert_eq!(out["connection_state"], "unknown");
+    assert_eq!(out["spool"]["quarantined_bytes"], Value::Null);
+    assert!(out["spool"]
+        .as_object()
+        .unwrap()
+        .contains_key("quarantined_bytes"));
+    assert!(!out["central"]
+        .as_object()
+        .unwrap()
+        .contains_key("ingest_stopped"));
+    assert!(!out["registry"]
+        .as_object()
+        .unwrap()
+        .contains_key("poisoned_entries"));
+    assert_eq!(out["audit_gaps"][0]["details"]["tail"], false);
+    for dropped in ["outages", "counters", "current_epoch_id"] {
+        assert!(out.get(dropped).is_none(), "{dropped} is not relayed");
+    }
 }
 
 #[tokio::test]

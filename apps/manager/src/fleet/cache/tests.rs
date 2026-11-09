@@ -360,3 +360,25 @@ async fn a_panicking_fetch_ends_its_flight() {
         .await
         .expect("the next call starts a new fetch");
 }
+
+#[tokio::test]
+async fn proxy_reads_have_keys_of_their_own() {
+    let up = Arc::new(Counting::default());
+    let c = cache(&up, test_config(), None);
+    let host = Request::HostById("same-id".into());
+    let proxy = Request::ProxyById("same-id".into());
+    let proxies = Request::Proxies(crate::fleet::ProxiesParams::default());
+    for req in [&host, &proxy, &proxies, &host, &proxy, &proxies] {
+        c.get(req.clone()).await.unwrap();
+    }
+    assert_eq!(
+        (
+            up.count("host_by_id"),
+            up.count("proxy_by_id"),
+            up.count("proxies")
+        ),
+        (1, 1, 1),
+        "each read is fetched once, under its own key"
+    );
+    assert_eq!(c.len(), 3);
+}
