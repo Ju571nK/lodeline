@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Drive the real lodeline-manager release binary and its embedded web console in a real browser with MOCK_FLEET=1, and capture screenshots, Playwright traces, and curl bodies. Use to prove a change to login, the alerts queue, triage, the fleet pages, host detail, settings, or the /api/v1 responses on the real binary, or to reproduce a console bug.
+description: Drive the real lodeline-manager release binary and its embedded web console in a real browser with MOCK_FLEET=1, and capture screenshots, Playwright traces, and curl bodies. Use to prove a change to login, the alerts queue, triage, the fleet pages, host detail, the proxy pages, settings, or the /api/v1 responses on the real binary, or to reproduce a console bug.
 ---
 
 # Verify lodeline-manager
@@ -82,6 +82,7 @@ A passing spec proves a server response only if the spec did not replace that re
 | `oidc.spec.ts` | Only `unconfigured provider leaves local login available`. |
 | `investigation.spec.ts` | Only the first step of `Settings labels stale...`. Every other test stubs the endpoint it asserts on. |
 | `devices.spec.ts` | Login only. The hosts endpoint is stubbed for the whole test. |
+| `proxies.spec.ts` | Everything, except `a server without proxy reads is named as such`, which stubs the proxy endpoints. |
 
 The stubbed specs prove how the SPA renders a response. Prove the matching server response with `drive.sh api`.
 
@@ -145,10 +146,10 @@ Stops this run's server, removes `scratch/`, keeps `evidence/`, and lists what s
 
 ## What the mock hides
 
-`MOCK_FLEET=1` replaces the HTTP fleet client with the fixtures in `testdata/mock-fleet.json` (`src/fleet/mock.rs`), so no run talks to a `lodeline-server`. A green run says nothing about these areas, which stay with `cargo test` (`src/fleet/tests.rs` runs a real `lodeline-server` in process, and `src/fleet/http/tests.rs` covers TLS) and the parity suite's live cases:
+`MOCK_FLEET=1` replaces the HTTP fleet client with the fixtures in `testdata/mock-fleet.json` and `testdata/mock-proxies.json` (`src/fleet/mock.rs`), so no run talks to a `lodeline-server`. A green run says nothing about these areas, which stay with `cargo test` (`src/fleet/tests.rs` runs a real `lodeline-server` in process, and `src/fleet/http/tests.rs` covers TLS) and the parity suite's live cases:
 
 - The bearer token, the custom CA, and mTLS to `lodeline-server`.
-- Retries and the mapping of upstream failures to `upstream_unauthorized`, `read_api_disabled`, `service_unavailable`, and `upstream_error`. The browser specs for those states use `page.route`.
+- Retries and the mapping of upstream failures to `upstream_unauthorized`, `read_api_disabled`, `service_unavailable`, `upstream_error`, and for the proxy reads `proxy_reads_unavailable`, `upstream_forbidden`, `invalid_cursor` and `invalid_filter`. The browser specs for those states use `page.route`.
 - Decoding of real responses, real paging cursors, real filter behavior, and real retention.
 - Fixture accuracy. The fixtures are a copy of the Go console's mock, written against the contract in `docs/specs/fleet-api/contract.md` at the repo root.
 

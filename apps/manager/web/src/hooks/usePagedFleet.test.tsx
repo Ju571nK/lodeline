@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { UnknownApiError } from '@/api/client';
 import { usePagedFleet } from './usePagedFleet';
 
 afterEach(cleanup);
@@ -103,5 +104,47 @@ describe('cursor pagination', () => {
     rerender({ filter: 'b' });
     await waitFor(() => expect(result.current.rows).toHaveLength(1));
     expect(fetch.mock.calls.at(-1)?.[0]).toBeUndefined();
+  });
+  it('starts again from the first page when the server refuses a cursor', async () => {
+    let refuse = true;
+    const fetch = vi.fn(async (cursor: string | undefined): Promise<Page> => {
+      if (cursor === 'c1' && refuse) {
+        refuse = false;
+        throw new UnknownApiError(422, 'invalid_cursor', 'the list cursor is no longer valid');
+      }
+      return cursor
+        ? { rows: [{ id: 2, value: 'second' }], next_cursor: null }
+        : { rows: [{ id: 1, value: 'first' }], next_cursor: 'c1' };
+    });
+    const { result } = renderHook(
+      () => usePagedFleet(['restart'], fetch, select, identity, { interval: false }),
+      { wrapper: setup() },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    expect(fetch.mock.calls.map((c) => c[0])).toEqual([undefined, 'c1', undefined]);
+    await waitFor(() => expect(result.current.error).toBeNull());
+    expect(result.current.rows.map((r) => r.value)).toEqual(['first']);
+    expect(result.current.hasMore).toBe(true);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(fetch.mock.calls.at(-1)?.[0]).toBe('c1');
+  });
+  it('shows a refused first page instead of starting it again', async () => {
+    const fetch = vi.fn(async (): Promise<Page> => {
+      throw new UnknownApiError(422, 'invalid_cursor', 'refused');
+    });
+    const { result } = renderHook(
+      () => usePagedFleet(['refused-first'], fetch, select, identity, { interval: false }),
+      { wrapper: setup() },
+    );
+    await waitFor(() => expect(result.current.error?.message).toBe('refused'));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

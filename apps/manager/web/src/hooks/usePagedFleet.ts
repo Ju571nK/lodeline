@@ -1,12 +1,16 @@
-import { type QueryKey, useInfiniteQuery } from '@tanstack/react-query';
-import { useCallback, useMemo } from 'react';
+import { type QueryKey, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo } from 'react';
+import { ApiError } from '@/api/client';
 import { FLEET_POLL_INTERVAL_MS } from './useFleetQuery';
 
 interface Page {
   next_cursor: string | null;
 }
 
-/** Poll all loaded pages from the first cursor; first occurrence wins at page boundaries. */
+/**
+ * Poll all loaded pages from the first cursor; first occurrence wins at page boundaries. A cursor
+ * the server refuses as `invalid_cursor` starts the list again from the first page.
+ */
 export function usePagedFleet<T, P extends Page>(
   key: QueryKey,
   fetchPage: (cursor: string | undefined, signal: AbortSignal) => Promise<P>,
@@ -25,6 +29,12 @@ export function usePagedFleet<T, P extends Page>(
     refetchIntervalInBackground: false,
     retry: false,
   });
+  const queryClient = useQueryClient();
+  const restart = q.error instanceof ApiError && q.error.code === 'invalid_cursor' && !!q.data;
+  useEffect(() => {
+    // Only a later page carries a cursor, so a refused first page is shown, never retried here.
+    if (restart) void queryClient.resetQueries({ queryKey: key, exact: true });
+  }, [restart, queryClient, key]);
   const rows = useMemo(() => {
     const seen = new Set<string>();
     return (q.data?.pages ?? [])
