@@ -7,8 +7,48 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-09
+
+**Upgrade order.** The agent and the server can be upgraded in either order. This release
+adds no event kind and no reason kind, and the agent's events are unchanged on the wire. The
+AI Guard fixes below change which findings a host reports, so a host's score can change after
+its agent is upgraded. The server's fleet API and the web console are unchanged, so the server
+and the console can also be upgraded in either order. If the server has a `proxy` section, its
+first start migrates `proxy-metadata.sqlite` to a new format, and a v0.14.0 server then refuses
+to start with that file. Back the file up before the upgrade if you might roll back.
+`lodeline-proxy` is still not a release asset. A proxy built from this release creates event
+ids as UUIDv7. A v0.14.0 server accepts them, and a spool written by an older proxy keeps
+working with its stored ids unchanged.
+
 ### Added
 
+- `lodeline-server proxy delete-content --proxy-id <id> --metadata-ref <ref>` deletes the stored
+  definition of one proxy registry entry, for example for a privacy request, and keeps the
+  entry's stub so ingest still recognises the ref. It calls the new management route
+  `POST /v1/proxies/{id}/metadata/{metadata_ref}/delete-content` (`identity` scope). Freed pages
+  are zeroed and the write-ahead log is truncated after the commit, so the file keeps no copy.
+  If a reader holds the log and the truncate does not complete, the server logs an error, the
+  old content can stay in the log until the next checkpoint, and running the command again
+  retries the truncate. The command can be repeated and answers 200 each time. A ref with no
+  entry for that proxy answers 404 with the new error code `metadata_ref_unknown`. Each call is
+  recorded in the management audit as `proxy.metadata_content_delete` with the ref, never the
+  definition. A later upload of the same entry does not restore the definition.
+- `lodeline-server` now deletes the inventory snapshots of a chain that a key rotation or a
+  canon change has ended. Before, the old chain's snapshots stayed forever, and the registry
+  entries they named were never deleted either, so a proxy that rotated keys grew until HTTP
+  503 `storage_limit`. A chain ends when a later snapshot of another chain for the same scope is
+  stored and does not wait for an earlier one. Once that snapshot was received more than
+  `event_retention_seconds` ago, the ended chain's snapshots, members and rotation links are
+  deleted. The result does not depend on the order in which snapshots arrived.
+- `lodeline-server` now deletes proxy registry entries that nothing it keeps names any more.
+  Before, `proxy-metadata.sqlite` never deleted an entry, so a proxy that kept uploading new
+  entries reached its storage cap and got HTTP 503 `storage_limit`. After each ledger sweep, an
+  entry is deleted when no stored start event, inventory member, rotation link, drift record or
+  held `registry_conflict` gap names it, and its last upload is older than the proxy's
+  `max_offline_retry_age_seconds` plus `ack_loss_margin_seconds`. A byte-identical upload
+  restarts that clock. A start or report that names a deleted entry gets 424
+  `metadata_ref_pending`, and the proxy uploads the entry again. The first start migrates the
+  file to a new format, which a v0.14.0 server does not open.
 - `lodeline-proxy health` and the local `status.json` now show the spool state that the status
   report sends to the server. Before, an operator on the host could not see that the proxy refused
   calls because its event spool had stopped. `status.json` has a new optional `spool` section, such
@@ -113,6 +153,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   systemd kills the proxy. When the wait for blocking work times out, the warning now names how
   many handles of the gap queue and the registry are still held. If you raise
   `shutdown_grace_secs`, raise `TimeoutStopSec` too.
+- `lodeline-proxy run` now records `stopped` only after the work its shutdown cancelled has let
+  go of the state directory. Before, a registry, ingest or status report step that was waiting
+  on blocking work when the shutdown cancelled it kept running and could still write the state
+  after `stopped` was recorded. A new run in the same process could then fail with `another
+  lodeline-proxy instance holds the lock on this state_dir`. The wait counts against
+  `limits.shutdown_grace_secs`.
 - `lodeline-hook install --agent codex` and `lodeline-hook verify --agent codex` now warn when
   Codex's `[features] hooks` is `false`, or the older `codex_hooks` is `false`. Codex then runs
   no hooks, so the registered hook never runs. Before, both commands reported success and said
@@ -133,9 +179,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   calls failed this way. Each route now keeps its own idle connections. A connection is reused
   only after its previous response was read to the end, only within 1 second of going idle,
   and only to an address that the destination check allowed for the new call. DNS is still
-  resolved and checked for every call. A config apply starts every route with no idle
-  connections. A call is still sent once and never sent again on another connection. The same
-  run now has no failed calls and at most 67 sockets in TIME_WAIT.
+  resolved and checked for every call. A route keeps at most as many idle connections as
+  its concurrent call limit (`max_calls_per_route`, 16 by default) and closes the oldest when
+  it has more. A config apply starts every route with no idle connections. A call is still
+  sent once and never sent again on another connection. The same run now has no failed calls
+  and at most 67 sockets in TIME_WAIT.
 
 ### Changed
 
@@ -146,6 +194,23 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   creation time to the millisecond, which the event already records in `occurred_at`. On an AWS
   t4g.small with gp3 storage at 64 concurrent clients, the median rose from 1,277 to 3,238 calls/s,
   p99 fell from 236 ms to 34.9 ms, and disk writes per call fell from 2.38 to 0.44.
+  See `docs/specs/lodeline-proxy/execution.md` (2026-11-08).
+- `lodeline-proxy` now copies its spool's write-ahead log into the database on a background
+  thread, so calls in flight no longer wait for each checkpoint. Before, the spool writer ran
+  the checkpoint itself every 512 commands, and every call in flight waited for it. The
+  background checkpoint runs every 1,024 commands, and the writer waits for it only when the
+  log reaches 2,048 commands. A failed fsync on the background thread stops the spool as a
+  failed fsync on the writer does. On an AWS t4g.small with gp3 storage at 32 concurrent
+  clients, p99 fell from 273 ms to 86 ms and throughput fell 2.5%, from 1,193 to 1,163 calls/s
+  (median of 7 alternating runs). The write-ahead log grows larger than before, up to about
+  31 MiB in that test. See `docs/specs/lodeline-proxy/execution.md` (2026-11-08).
+- `lodeline-proxy` now commits each group of queued spool records in one transaction. Before,
+  group commit shared one fsync, but each record still wrote the same pages to the write-ahead
+  log again, so the proxy wrote as much per call as before group commit. If a group commit
+  fails, its completion and cancel records are now refused too, not only its start records. On
+  an AWS t4g.small with gp3 storage at 64 concurrent clients, the proxy's writes per call fell
+  from 76.8 KB to 24.5 KB and p99 fell from 330 ms to 237 ms (median of 3 alternating runs).
+  At 32 clients p99 rose from 175 ms to 266 ms. The background checkpoint above addresses that.
   See `docs/specs/lodeline-proxy/execution.md` (2026-11-08).
 - `lodeline-proxy` now commits spool records that are already queued together and covers them
   with one fsync (group commit). Before, every concurrent `invocation.started` record waited for
