@@ -3762,11 +3762,12 @@ mod tests {
     #[test]
     fn scheduled_tasks_capped_at_20() {
         let dir = tempdir().unwrap();
+        let claude = dir.path().join(".claude");
         for i in 0..25 {
             write_file(
-                &dir.path().join(".claude"),
+                &claude,
                 &format!("scheduled-tasks/task{i:02}/SKILL.md"),
-                "# x\n",
+                FETCH_PIPE_PROMPT,
             );
         }
         let reasons = ClaudeCodeParser::default().assess(dir.path()).unwrap();
@@ -3775,6 +3776,18 @@ mod tests {
             .filter(|r| matches!(r, AiGuardReason::UnattendedScheduledTask { .. }))
             .count();
         assert_eq!(n, 20, "must cap at 20; got {n}");
+        let skill_md = |i: usize| {
+            claude
+                .join("scheduled-tasks")
+                .join(format!("task{i:02}"))
+                .join("SKILL.md")
+        };
+        for i in 0..20 {
+            assert_eq!(fetch_pipes_at(&reasons, &skill_md(i)), 1, "task{i:02}");
+        }
+        for i in 20..25 {
+            assert_eq!(fetch_pipes_at(&reasons, &skill_md(i)), 0, "task{i:02}");
+        }
     }
 
     // ---- #191 phase 2: unattended prompt content ----
