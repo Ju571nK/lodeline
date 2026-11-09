@@ -60,7 +60,7 @@ sigil-manager
 │   ├── tab: Events
 │   └── tab: Compliance
 ├── /proxies                  → Proxy list (read only, added 2026-11)
-│   └── /proxies/:proxy_id    → Proxy detail
+│   └── /proxies/:proxy_id    → Proxy detail, with the inventory views (?inventory=)
 ├── /proxy-invocations        → Invocation list (read only, added 2026-11)
 │   └── /proxy-invocations/:invocation_id → Invocation detail
 └── /settings
@@ -124,11 +124,27 @@ no screen has a control that registers, disables, retires or configures a proxy.
 - Detail: config, spool (depth, size, quarantined events and bytes), central ingest (including a
   stopped ingest, which makes a degraded spool not a storage fault), registry sync counters,
   route health, and the capped audit gap list with its total and dropped count.
+- Inventory: a card at the end of the detail with three link tabs, Snapshots, Drift and
+  Re-baseline markers, kept in the URL as `?inventory=inventory-snapshots|drift|rebaseline-markers`.
+  Each is a paged list, newest first, that works as the list above. Rows show references,
+  counts and identifiers only, never tool names, and the console fetches no metadata content.
+  Every row names its chain: upstream, credential scope, protocol version and observation source.
+  - Snapshots: received and observed times, the snapshot ID, member count, comparison state,
+    and the key and canon. An initial baseline reads as a starting point, not an approval. A
+    snapshot waiting for its previous one names the ID it waits for. Incomplete observations
+    are not snapshots: a line gives the open `inventory_incomplete` gap count and points to the
+    audit gap list, which shows them as the server reports them.
+  - Drift: the change (added, removed, changed) under the header "Observed change", the
+    reference (old and new for `changed`), and the two snapshots. No drift label or color reads
+    as approved or accepted.
+  - Re-baseline markers: the cause, the key and canon before and after, whether links exist,
+    and the two snapshots. No drift is derived across a marker.
 
 ### 5.3b Proxy invocations (`/proxy-invocations`, `/proxy-invocations/:invocation_id`)
 
 Added 2026-11 for Ju571nK/lodeline#458. Reached from the Proxies list ("All invocations") and
-from a proxy's detail ("Invocations of this proxy"). Read only, like 5.3a.
+from a proxy's detail ("Invocations of this proxy"). Read only, like 5.3a. The Proxies nav item
+stays active on these pages.
 
 - List: newest first, one row per invocation with the received time, the invocation and proxy
   IDs, method and upstream, status, duration and flags. Filters for proxy, lifecycle, outcome and

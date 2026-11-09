@@ -8,11 +8,18 @@ its UI text and docs.
 
 It also reads the server's Lodeline Proxy status and invocations: `GET /v1/proxies`,
 `GET /v1/proxies/{id}`, `GET /v1/proxy-invocations` and `GET /v1/proxy-invocations/{id}`
-([ledger-and-query.md L2 to L4](../../docs/specs/lodeline-proxy/contracts/ledger-and-query.md)).
+([ledger-and-query.md L2 to L4](../../docs/specs/lodeline-proxy/contracts/ledger-and-query.md)),
+and a proxy's inventory views: `GET /v1/proxies/{id}/inventory-snapshots`, `/drift` and
+`/rebaseline-markers` ([registry.md R5 and R7b](../../docs/specs/lodeline-proxy/contracts/registry.md)).
 That is the proxy scope M0 of #458: proxy reads only, still read-only against the server. Do not
 add a proxy write route, a control that changes a proxy (register, disable, enable, retire,
-config), or management credential settings. The operator CLI on the server does those. The
-inventory, drift and rebaseline-marker reads are not in the console yet.
+config), or management credential settings. The operator CLI on the server does those.
+
+The inventory views carry references, counts and identifiers, never a tool name or definition,
+and the console fetches no metadata content: a display permission for it (`proxy.metadata`) is
+still an open producer decision. A drift record is an observed change, never an approval. An
+incomplete observation is an `inventory_incomplete` audit gap on the proxy detail, not a
+snapshot.
 
 An invocation shows an outcome only when its lifecycle is `completed`. A
 `completion_without_start` or `integrity_conflict` record is flagged, and its `reported_*`
@@ -85,8 +92,9 @@ gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in pr
 `lodeline-fleet-api` types, so a change to a server route or that crate can fail `cargo test`
 here. The proxy bodies are `src/fleet/proxy.rs`, which keeps the server's nulls and absent
 fields, and `src/fleet/tests/proxies.rs` checks them against the server's proxy routes run in
-process. The mock fleet is `testdata/mock-fleet.json`, `testdata/mock-proxies.json` and
-`testdata/mock-proxy-invocations.json` (see `testdata/README.md`).
+process. The mock fleet is `testdata/mock-fleet.json`, `testdata/mock-proxies.json`,
+`testdata/mock-proxy-invocations.json` and `testdata/mock-proxy-inventory.json` (see
+`testdata/README.md`).
 
 `src/triage.rs` owns the console's SQLite file. It must stay readable by, and sortable with, the
 Go build's: keep the schema text, the pragmas and the fixed-width timestamp layout as they are.
