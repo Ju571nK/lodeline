@@ -179,7 +179,13 @@ export interface InvocationStatus {
   /** The record holds a completion that nothing corroborates. It never reads as success. */
   flagged: boolean;
   note?: string;
+  /** The text of the detail's Outcome row. */
+  outcome: string;
+  /** The corroborated completion's delivery and reason. Only a completed invocation has one. */
+  completion?: { delivery: string | null; reason: string | null };
 }
+
+const WITHHELD = 'withheld: no corroborated completion';
 
 /**
  * The one place that decides an invocation's headline. Only `completed` shows its outcome.
@@ -187,12 +193,21 @@ export interface InvocationStatus {
  * the `reported_*` values stay the proxy's claim (see `reportedClaim`), never the headline.
  */
 export function invocationStatus(
-  inv: Pick<InvocationSummary, 'lifecycle' | 'outcome' | 'epoch_superseded'>,
+  inv: Pick<
+    InvocationSummary,
+    'lifecycle' | 'outcome' | 'delivery_state' | 'reason' | 'epoch_superseded'
+  >,
 ): InvocationStatus {
   switch (inv.lifecycle) {
     case 'completed': {
       const outcome = inv.outcome ?? 'unknown';
-      return { label: outcomeLabel[outcome], tone: outcomeTone[outcome], flagged: false };
+      return {
+        label: outcomeLabel[outcome],
+        tone: outcomeTone[outcome],
+        flagged: false,
+        outcome: outcomeLabel[outcome],
+        completion: { delivery: inv.delivery_state, reason: inv.reason },
+      };
     }
     case 'completion_without_start':
       return {
@@ -200,6 +215,7 @@ export function invocationStatus(
         tone: 'bad',
         flagged: true,
         note: 'The server has no start for this completion, so it withholds the outcome.',
+        outcome: WITHHELD,
       };
     case 'integrity_conflict':
       return {
@@ -207,6 +223,7 @@ export function invocationStatus(
         tone: 'bad',
         flagged: true,
         note: 'The events of this invocation contradict each other, so the server withholds the outcome.',
+        outcome: WITHHELD,
       };
     case 'started':
       return {
@@ -216,11 +233,12 @@ export function invocationStatus(
         note: inv.epoch_superseded
           ? 'The proxy has since started a new epoch, so the completion may never arrive.'
           : undefined,
+        outcome: WITHHELD,
       };
     case 'cancel_without_start':
-      return { label: 'Cancel only, no start', tone: 'neutral', flagged: false };
+      return { label: 'Cancel only, no start', tone: 'neutral', flagged: false, outcome: WITHHELD };
     default:
-      return { label: lifecycleLabel.unknown, tone: 'neutral', flagged: false };
+      return { label: lifecycleLabel.unknown, tone: 'neutral', flagged: false, outcome: WITHHELD };
   }
 }
 

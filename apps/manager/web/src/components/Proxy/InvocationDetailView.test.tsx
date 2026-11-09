@@ -87,6 +87,18 @@ describe('invocation detail', () => {
     );
   });
 
+  it('gives a completed invocation without an outcome one answer in the pill and the row', () => {
+    render(
+      <InvocationDetailView
+        invocation={detail({ lifecycle: 'completed', outcome: null, delivery_state: 'sent' })}
+      />,
+    );
+    expect(screen.getByText('Outcome').nextSibling).toHaveTextContent(/^Unknown outcome$/);
+    expect(screen.getAllByText('Unknown outcome')).toHaveLength(2);
+    expect(screen.queryByText(/withheld/)).not.toBeInTheDocument();
+    expect(screen.getByText('Delivery').nextSibling).toHaveTextContent('sent');
+  });
+
   it('renders no control', () => {
     render(<InvocationDetailView invocation={detail()} />);
     expect(screen.queryAllByRole('button')).toHaveLength(0);

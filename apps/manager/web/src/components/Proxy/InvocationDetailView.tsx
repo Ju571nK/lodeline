@@ -5,7 +5,6 @@ import {
   formatBytes,
   invocationStatus,
   lifecycleLabel,
-  outcomeLabel,
   reportedClaim,
 } from '@/lib/proxy';
 import { Row, TonePill, When } from './ProxyParts';
@@ -72,15 +71,11 @@ export function InvocationDetailView({ invocation: inv }: { invocation: Invocati
 
         <Card title="Completion">
           <dl className="space-y-1 text-xs">
-            <Row label="Outcome">
-              {inv.lifecycle === 'completed' && inv.outcome
-                ? outcomeLabel[inv.outcome]
-                : 'withheld: no corroborated completion'}
-            </Row>
-            {inv.lifecycle === 'completed' && (
+            <Row label="Outcome">{status.outcome}</Row>
+            {status.completion && (
               <>
-                <Row label="Delivery">{inv.delivery_state ?? 'none'}</Row>
-                <Row label="Reason">{inv.reason ?? 'none'}</Row>
+                <Row label="Delivery">{status.completion.delivery ?? 'none'}</Row>
+                <Row label="Reason">{status.completion.reason ?? 'none'}</Row>
               </>
             )}
             {claim && <Row label="Proxy reported">{claim}</Row>}
