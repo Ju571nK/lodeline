@@ -116,6 +116,11 @@ pub struct ProxyConfig {
     /// Seconds between ledger retention sweeps (60 - 86400, default 3600).
     #[serde(default)]
     pub ledger_sweep_interval_seconds: Option<u32>,
+    /// `stale_after` (ledger L3): the read routes call a proxy `connected`
+    /// while `now - last_seen` is at most this many seconds. Default 90,
+    /// bounds 60 - 300.
+    #[serde(default)]
+    pub stale_after_seconds: Option<u32>,
 }
 
 impl ProxyConfig {
@@ -138,6 +143,13 @@ impl ProxyConfig {
     pub const DEFAULT_INGEST_MAX_CONCURRENT: u32 = 16;
     pub const MAX_INGEST_MAX_CONCURRENT: u32 = 256;
     pub const DEFAULT_LEDGER_SWEEP_INTERVAL_SECONDS: u32 = 3600;
+
+    pub const DEFAULT_STALE_AFTER_SECONDS: u32 = 90;
+    /// Two heartbeat intervals. Healthy heartbeats arrive up to 36 s apart
+    /// (30 s with 0.8 - 1.2 jitter), so a lower value would flap a healthy
+    /// proxy to `disconnected` between them.
+    pub const MIN_STALE_AFTER_SECONDS: u32 = 60;
+    pub const MAX_STALE_AFTER_SECONDS: u32 = 300;
 
     pub const DEFAULT_CONFIG_TTL_SECONDS: u32 = 300;
     pub const DEFAULT_ACK_LOSS_MARGIN_SECONDS: u32 = 7 * 24 * 3600;
@@ -205,6 +217,11 @@ impl ProxyConfig {
     pub fn ledger_sweep_interval(&self) -> u32 {
         self.ledger_sweep_interval_seconds
             .unwrap_or(Self::DEFAULT_LEDGER_SWEEP_INTERVAL_SECONDS)
+    }
+
+    pub fn stale_after(&self) -> u32 {
+        self.stale_after_seconds
+            .unwrap_or(Self::DEFAULT_STALE_AFTER_SECONDS)
     }
 
     /// Effective registry-entry store path.
@@ -471,6 +488,11 @@ impl ServerConfig {
                 return Err(bad(
                     "proxy.ledger_sweep_interval_seconds must be within 60..=86400",
                 ));
+            }
+            if !(ProxyConfig::MIN_STALE_AFTER_SECONDS..=ProxyConfig::MAX_STALE_AFTER_SECONDS)
+                .contains(&p.stale_after())
+            {
+                return Err(bad("proxy.stale_after_seconds must be within 60..=300"));
             }
         }
         Ok(())
