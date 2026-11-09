@@ -69,6 +69,8 @@ pub struct ProxyContext {
     pub ack_loss_margin: u32,
     /// `dedup_tombstone_retention` T (seconds) for the T >= R + M check.
     pub tombstone_retention: i64,
+    /// `stale_after` (seconds) for the read routes' `connection_state`.
+    pub stale_after: i64,
     /// `Some` only when `proxy.management_verifiers` is configured. `None`
     /// means every management route and the audit read route are absent.
     pub mgmt: Option<MgmtAuth>,
@@ -188,6 +190,7 @@ impl ProxyContext {
             config_ttl: pc.config_ttl(),
             ack_loss_margin: pc.ack_loss_margin(),
             tombstone_retention: i64::from(pc.dedup_tombstone_retention()),
+            stale_after: i64::from(pc.stale_after()),
             mgmt,
             audit,
             withheld: Mutex::new(withheld),

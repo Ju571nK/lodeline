@@ -1316,8 +1316,8 @@ fn ttl_and_margin_bounds_are_boot_checked() {
     };
     let ok = load("").unwrap().proxy.unwrap();
     assert_eq!(
-        (ok.config_ttl(), ok.ack_loss_margin()),
-        (300, 7 * 24 * 3600)
+        (ok.config_ttl(), ok.ack_loss_margin(), ok.stale_after()),
+        (300, 7 * 24 * 3600, 90)
     );
     assert_eq!(ok.state_path(), std::path::Path::new("/d/proxy-state.json"));
     assert!(!ok.state_init);
@@ -1330,6 +1330,13 @@ fn ttl_and_margin_bounds_are_boot_checked() {
     );
     assert!(load("  config_ttl_seconds: 60\n").is_ok());
     assert!(load("  config_ttl_seconds: 900\n").is_ok());
+    for (v, want) in [(59, false), (60, true), (300, true), (301, false)] {
+        let r = load(&format!("  stale_after_seconds: {v}\n"));
+        assert_eq!(r.is_ok(), want, "stale_after_seconds: {v}");
+        if let Err(e) = r {
+            assert!(e.to_string().contains("proxy.stale_after_seconds"), "{e}");
+        }
+    }
     for bad in [
         "  config_ttl_seconds: 59\n",
         "  config_ttl_seconds: 901\n",

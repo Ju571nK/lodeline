@@ -1,6 +1,6 @@
 # Lodeline Proxy 작업 상태
 
-갱신: 2026-11-09 · proxy 상세의 열린 gap 먼저(`fix/proxy-open-gaps-first`), spool `event_id`를 UUIDv7로(`perf/proxy-event-id-v7`), spool checkpoint를 writer thread 밖으로(`perf/proxy-bg-checkpoint`), key·canon 변경 뒤 inventory chain 끝내기(`feat/proxy-chain-end`), 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
+갱신: 2026-11-09 · proxy 상세의 열린 gap 먼저(`fix/proxy-open-gaps-first`), 읽기 API의 `stale_after`를 서버 설정으로(`feat/proxy-stale-after-538`, #538), 2026-11-08 · spool `event_id`를 UUIDv7로(`perf/proxy-event-id-v7`), spool checkpoint를 writer thread 밖으로(`perf/proxy-bg-checkpoint`), key·canon 변경 뒤 inventory chain 끝내기(`feat/proxy-chain-end`), 서버 metadata store 보존 기간(`feat/proxy-metadata-sweep`), spool 묶음 transaction 하나(`perf/proxy-group-tx`)와 AWS 전후 측정, 로컬 status의 spool 상태(`feat/proxy-status-spool`), e2e state_dir lock 재시도(`test/proxy-e2e-lock-retry`), event 424 뒤 entry 재업로드(`fix/proxy-event-424-reupload`), invocation sink 장애 분기 시험(`test/proxy-sink-fault-paths`), spool fsync 실패 뒤 fail-stop(`fix/spool-fsync-failure`), 종료 뒤 join 상한 확인(`fix/proxy-shutdown-joins`), 종료 grace 하나로 묶기(`fix/proxy-shutdown-deadline`), spool group commit(`perf/proxy-group-commit`)과 AWS gp3 전후 측정, closed loop 꼬리 로컬 계측(`perf/proxy-gc-tail`)과 AWS 계측, upstream 연결 재사용(`fix/proxy-upstream-pool`), 성능 측정 도구(`feat/proxy-loadgen`), 지속 부하 503 수정(`fix/proxy-writer-queue`), spool 기록별 내구성(`perf/proxy-spool-sync`), registry lookup 슬롯 503 수정(`fix/proxy-lookup-503`), AWS 실기 run I (기준 커밋 `3500adb`)
 
 ## 현재 상태
 
@@ -34,6 +34,22 @@ console: `ProxyDetailView`는 `audit_gaps`를 다시 정렬하지 않고 서버 
 시험: `proxy_query_e2e.rs` `audit_gaps_list_open_gaps_before_newer_closed_ones`는 열린 gap 21개(sequence 6, 보고 outage 20개)와 더 새로운 닫힌
 sequence gap 55개를 만든다. 수정 전에는 목록 50개 가운데 열린 gap이 0개였다(실패 확인). SQL만 되돌리면 20개, 병합 정렬만 되돌리면 1개였다(확인).
 console `ProxyDetailView.test.tsx`는 오래된 열린 gap이 새로운 닫힌 gap 위에 남는지 보고, 시간순 재정렬을 넣으면 실패한다(확인).
+
+## 2026-11-09 읽기 API의 `stale_after`를 서버 설정으로 (`feat/proxy-stale-after-538`, #538)
+
+`GET /v1/proxies`와 `GET /v1/proxies/{id}`의 `connection_state`가 쓰는 `stale_after`가 `query.rs`의 상수 `STALE_AFTER_SECS`(90초)에서
+서버 `proxy.stale_after_seconds`(정수 초, 기본 90, 범위 60..=300)로 바뀌었다. 범위 밖이면 boot가 실패한다. 값은 `ProxyContext::load`가
+`ProxyContext::stale_after`에 넣고 두 route가 `summary_of`로 넘긴다. 상수는 지웠다.
+
+하한: #538과 ledger-and-query.md는 5..300초라고 적었지만, proxy heartbeat가 30초(jitter 0.8..1.2, 즉 24..36초 간격)라서 36초보다
+작은 값은 정상 proxy를 heartbeat 사이에 `disconnected`로 보이게 한다. 5..300은 heartbeat 쪽 값을 잘못 옮긴 것으로 보고(추정) 하한을
+heartbeat 두 번인 60초로 정했다. ledger-and-query.md L3 문장도 이에 맞게 고쳤다. `store.rs`의 `LAST_SEEN_MIN_INTERVAL_SECS`(30초)는
+이 하한보다 작아야 하며, 이를 문장 대신 compile-time assertion으로 둔다(`ProxyConfig::MIN_STALE_AFTER_SECONDS`).
+
+시험: `proxy_config_e2e.rs`(59·301 거부, 60·300 허용, 없으면 90), `proxy_query_e2e.rs`
+`connection_state_follows_the_configured_stale_after`(설정값 60초에서 61초 전은 목록·상세 모두 `disconnected`, 정확히 60초 전은
+`connected`; 같은 초 안에서 읽힐 때까지 다시 시도하며 sleep 없음). mutation: context가 설정을 무시(90 고정), 목록만 무시, 상세만 무시,
+`<=`를 `<`로, 하한 검사 제거가 모두 실패했고, `LAST_SEEN_MIN_INTERVAL_SECS`를 60으로 올리면 compile이 실패했다.
 
 ## 2026-11-08 spool `event_id`를 UUIDv7로 (`perf/proxy-event-id-v7`)
 
@@ -343,7 +359,7 @@ entry가 quota를 풀고, 그 ref의 start는 424, 재업로드 200 `registered`
 측정(로컬 macOS, release, 측정): start event 200,000행에서 live 집합 계산이 약 175 ms. 기본 상한 500만 행이면 시간당 한 번 수 초 동안
 ingest가 기다린다(추정, 선형 외삽).
 
-남은 일(범위 밖): read view(R6), `stale_after` 90초 상수(`query.rs`). 이 pass를 넣을 때는 key rotation 뒤 옛 chain이 끝나지 않아
+남은 일(범위 밖): read view(R6). `stale_after` 90초 상수는 #538에서 설정값이 됐다. 이 pass를 넣을 때는 key rotation 뒤 옛 chain이 끝나지 않아
 그 member entry가 남았다. 이는 위 "key·canon 변경 뒤 inventory chain 끝내기" 절에서 처리했다. privacy 요청의 내용 삭제는 위
 "metadata entry의 내용 삭제" 절에서 처리했다.
 
@@ -1458,7 +1474,7 @@ report 제외·drop 동작은 이번 event rewrite 수정 범위 밖으로 유�
 | #291 | S5 B tail gap·`last_seen` | #289 |
 | #292 | S5 C 조회 API | #290 |
 
-후속: #279(registry 409 `metadata_ref`→T-13, metadata 보존, `stale_after` 설정값화), #260(proxy status 보고의 `last_assigned_sequence`·spool이 T-13/T-14 전까지 고정값 → 실제 proxy로는 tail gap이 아직 생기지 않음), #284(e2e helper 공유), #269.
+후속: #279(registry 409 `metadata_ref`→T-13, metadata 보존, `stale_after` 설정값화 → #538에서 완료), #260(proxy status 보고의 `last_assigned_sequence`·spool이 T-13/T-14 전까지 고정값 → 실제 proxy로는 tail gap이 아직 생기지 않음), #284(e2e helper 공유), #269.
 남은 P1: S2b(CSR 서명), T-12b(MCP protocol), T-13(registry entry 생성)·T-14(spool·이벤트 생성), T-15(manager, lodeline-manager#37), T-16.
 실기 미검증: 변화 없음. 조회 API의 실제 TLS 검증은 e2e(macOS 로컬·CI)까지이며 Rocky 실기·SELinux·systemd는 하지 않았다.
 교훈: 병렬 갈래가 같은 파일을 필요로 하면 먼저 끝난 갈래를 머지하고 rebase한 뒤 소유권을 넘긴다(C 2단계). 고정 날짜 fixture는 보존 정리가 있는 경로에서 시간이 지나면 깨진다(e2e L4).

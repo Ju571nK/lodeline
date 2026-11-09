@@ -51,9 +51,6 @@ pub const INVOCATIONS_PATH: &str = "/v1/proxy-invocations";
 
 pub const DEFAULT_LIMIT: usize = 100;
 pub const MAX_LIMIT: usize = 500;
-/// A proxy is `connected` while `now - last_seen <= stale_after` (L3). Three
-/// heartbeat intervals; initial test value (D-04). Not yet a config value.
-pub const STALE_AFTER_SECS: i64 = 90;
 /// `audit_gaps` page and `outages` list sizes (L3).
 pub const MAX_OUTAGES: usize = 16;
 /// Query-string limits (no value is ever echoed back).
@@ -543,7 +540,12 @@ fn invocation_dto(p: &Projection) -> InvocationSummary {
 
 /// Summary without ledger data; `open_gap_count` counts proxy-reported gaps
 /// only and is completed by the caller from the ledger.
-fn summary_of(rec: &ProxyRecord, st: Option<&StoreSummary>, now: i64) -> ProxySummary {
+fn summary_of(
+    rec: &ProxyRecord,
+    st: Option<&StoreSummary>,
+    now: i64,
+    stale_after: i64,
+) -> ProxySummary {
     let last_seen = st.and_then(|x| x.last_seen.clone());
     let desired = st.and_then(|x| x.desired_revision);
     let applied = st.and_then(|x| x.applied_revision);
@@ -551,7 +553,7 @@ fn summary_of(rec: &ProxyRecord, st: Option<&StoreSummary>, now: i64) -> ProxySu
     ProxySummary {
         proxy_id: rec.proxy_id.clone(),
         display_name: rec.display_name.clone(),
-        connection_state: connection_state(last_seen.as_deref(), now, STALE_AFTER_SECS),
+        connection_state: connection_state(last_seen.as_deref(), now, stale_after),
         last_seen,
         desired_revision: desired,
         applied_revision: applied,
@@ -830,7 +832,7 @@ async fn list_proxies_inner(
         }
         // One light store read per examined row (no deep clone of the entry).
         let st = ctx.store.summary(&rec.proxy_id);
-        let s = summary_of(&rec, st.as_ref(), now);
+        let s = summary_of(&rec, st.as_ref(), now, ctx.stale_after);
         if want_state.is_some_and(|w| w != s.connection_state)
             || want_sync.is_some_and(|w| w != s.config_in_sync)
         {
@@ -856,7 +858,7 @@ async fn list_proxies_inner(
         Ok(page
             .iter()
             .map(|(rec, st)| {
-                let mut s = summary_of(rec, st.as_ref(), now);
+                let mut s = summary_of(rec, st.as_ref(), now, ctx.stale_after);
                 s.open_gap_count += counts
                     .get(&rec.proxy_id)
                     .map_or(0, |m| m.values().sum::<i64>());
@@ -884,7 +886,7 @@ async fn get_proxy(
         let gaps = ctx.ledger.gaps_page(&rec.proxy_id, MAX_GAP_PAGE)?;
         let derived = ctx.ledger.open_gap_counts(&rec.proxy_id)?;
         let st = entry.as_ref().map(StoreSummary::of);
-        let mut summary = summary_of(&rec, st.as_ref(), now);
+        let mut summary = summary_of(&rec, st.as_ref(), now, ctx.stale_after);
         let reported: &[GapReport] = entry.as_ref().map_or(&[], |e| e.gaps.as_slice());
 
         let mut open_gap_counts = derived;
