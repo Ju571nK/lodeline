@@ -7,7 +7,7 @@ resolver = "3"
 [package]
 name = "lodeline-manager"
 # The root workspace version: bump both in a release prep. tests/test_release_manifest.py checks it.
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
