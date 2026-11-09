@@ -113,7 +113,9 @@ async fn session_routes_answer_401_forms() {
         .map(|(m, p, _)| {
             (
                 m.clone(),
-                p.replace("{event_id}", "e1").replace("{host_id}", "h1"),
+                p.replace("{event_id}", "e1")
+                    .replace("{host_id}", "h1")
+                    .replace("{proxy_id}", "px-edge-01"),
             )
         })
     {

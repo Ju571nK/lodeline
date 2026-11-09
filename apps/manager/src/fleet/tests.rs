@@ -175,10 +175,20 @@ fn assess_failed(tool: &str, user: Option<&str>, last_minutes_ago: Option<i64>) 
     e
 }
 
-async fn serve(dir: &Path) -> String {
+fn temp_dir(name: &str) -> TempDir {
+    let dir = TempDir(std::env::temp_dir().join(format!(
+        "lodeline-manager-{name}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap()
+    )));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    dir
+}
+
+fn fleet_state(dir: &Path) -> Arc<AppState> {
     let index = FleetIndex::new();
     index.replace(rebuild_from_jsonl(dir).unwrap());
-    let state = AppState {
+    Arc::new(AppState {
         events_out_dir: dir.to_path_buf(),
         policy_bundle_path: dir.join("signed-policy.json"),
         rule_packs_bundle_path: None,
@@ -194,10 +204,13 @@ async fn serve(dir: &Path) -> String {
         allowlist_path: None,
         enroll: None,
         events_require_cert_host_match: false,
-    };
+    })
+}
+
+async fn serve(dir: &Path) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let app = build_router(Arc::new(state));
+    let app = build_router(fleet_state(dir));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     url
 }
@@ -219,12 +232,7 @@ async fn server_body<T: DeserializeOwned>(url: &str, path: &str) -> (T, Vec<u8>)
 
 #[tokio::test]
 async fn the_http_client_reads_every_endpoint_of_a_real_server() {
-    let dir = TempDir(std::env::temp_dir().join(format!(
-        "lodeline-manager-contract-{}-{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap()
-    )));
-    std::fs::create_dir_all(&dir.0).unwrap();
+    let dir = temp_dir("contract");
     let ids = seed(&dir.0);
     let url = serve(&dir.0).await;
     let client = HttpClient::new(&url, READ_TOKEN, None, http::TIMEOUT).unwrap();
@@ -841,3 +849,5 @@ fn compliance_page(b: api::RowsPage<api::ComplianceRow>) -> CompliancePage {
         next_cursor,
     }
 }
+
+mod proxies;

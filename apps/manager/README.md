@@ -146,6 +146,31 @@ server's certificate. Leave `LODELINE_INSECURE_COOKIE` unset and put a TLS termi
 of the console. The session cookie carries `Secure`, so a browser drops it over plain HTTP and
 login seems to fail.
 
+### Proxy reads
+
+The **Proxies** page reads the server's Lodeline Proxy status (`GET /v1/proxies` and
+`GET /v1/proxies/{id}`). The server serves these routes only when its `server.yaml` has a
+`proxy:` section, and a server with that section always requires mTLS. To read them, configure
+the console as follows:
+
+1. Set `LODELINE_SERVER_BASE_URL` to the server's `https://` URL.
+2. Issue the console a client certificate from the host client CA, the CA in the server's
+   `client_ca_path` that also signs agent host certificates
+   ([docs/install-server.md](../../docs/install-server.md), section 3). Do not use a certificate
+   from the proxy CA (`proxy.ca_path`), a certificate registered to a proxy, or a management
+   caller's certificate. The server answers each of those with 404 on these routes, and on
+   every fleet route as well.
+3. Set `LODELINE_SERVER_CLIENT_CERT_PATH` and `LODELINE_SERVER_CLIENT_KEY_PATH` to that
+   certificate and its key, and `LODELINE_SERVER_CA_PATH` if a private CA signed the server's
+   certificate.
+4. Keep `LODELINE_SERVER_READ_TOKEN`. The proxy reads use the same read bearer token as the
+   fleet reads.
+
+Without a `proxy:` section, the Proxies page says that proxy reads are not available on the
+server, and the fleet pages work as before. The console only reads proxies. Register, disable
+and config changes go through the server's operator CLI and its management credential, which
+the console never holds.
+
 ## Sessions and the login limit
 
 - A session is a signed token in the `lodeline_session` cookie (`HttpOnly`, `SameSite=Lax`,

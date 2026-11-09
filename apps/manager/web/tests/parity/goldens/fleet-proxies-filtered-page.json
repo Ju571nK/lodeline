@@ -1,0 +1,45 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxies?connection_state=connected&limit=1&cursor=px-edge-01",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "items": [
+      {
+        "applied_revision": 7,
+        "config_expires_at": "<seed+3m Z>",
+        "config_in_sync": false,
+        "config_state": "valid",
+        "connection_state": "connected",
+        "desired_revision": 8,
+        "display_name": "Edge proxy 02",
+        "last_seen": "<seed-20s Z>",
+        "open_gap_count": 2,
+        "proxy_id": "px-edge-02",
+        "spool": {
+          "as_of": "<seed-25s Z>",
+          "bytes": 7340032,
+          "capacity_bytes": 1073741824,
+          "depth_events": 1840,
+          "oldest_unsent_age_seconds": 3600,
+          "quarantined_bytes": 40960,
+          "quarantined_events": 8,
+          "state": "degraded",
+          "unsent_events": 1835
+        },
+        "status_as_of": "<seed-25s Z>"
+      }
+    ],
+    "next_cursor": null
+  }
+}

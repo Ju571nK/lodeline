@@ -61,8 +61,9 @@ tower-http = { version = "0.6", features = ["catch-panic"] }
 [dev-dependencies]
 # start_paused: the body read timeout test (src/api/auth/tests.rs).
 tokio = { version = "1", features = ["test-util"] }
-# The contract test runs the real server in process (src/fleet/tests.rs).
-lodeline-server = { path = "../../crates/lodeline-server" }
+# The contract test runs the real server in process (src/fleet/tests.rs). test-support seeds its
+# proxy registry and narrows the proxy read scope (src/fleet/tests/proxies.rs).
+lodeline-server = { path = "../../crates/lodeline-server", features = ["test-support"] }
 # An mTLS stand-in server for the client certificate tests (src/fleet/http/tests.rs).
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

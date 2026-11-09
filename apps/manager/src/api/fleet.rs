@@ -8,8 +8,8 @@ use serde::Serialize;
 
 use crate::api::{write_json, Query};
 use crate::fleet::{
-    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams, Reply, Request,
-    RiskParams,
+    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams, ProxiesParams,
+    Reply, Request, RiskParams,
 };
 use crate::server::{error_response, AppState};
 use crate::{config, triage};
@@ -87,6 +87,36 @@ pub async fn host(State(s): State<AppState>, uri: Uri) -> Response {
     relay(retried(&s, Request::HostById(id)).await)
 }
 
+/// The proxy list. Filters and the cursor go to the server as given; it checks them.
+pub async fn proxies(State(s): State<AppState>, uri: Uri) -> Response {
+    let q = Query::parse(uri.query());
+    match q.limit() {
+        Ok(limit) => {
+            let p = ProxiesParams {
+                cursor: q.get("cursor").into(),
+                limit,
+                connection_state: q.get("connection_state").into(),
+                config_in_sync: q.get("config_in_sync").into(),
+            };
+            relay_proxy(retried(&s, Request::Proxies(p)).await)
+        }
+        Err(msg) => invalid_query(msg),
+    }
+}
+
+pub async fn proxy(State(s): State<AppState>, uri: Uri) -> Response {
+    let id = last_segment(&route_path(uri.path()));
+    relay_proxy(retried(&s, Request::ProxyById(id)).await)
+}
+
+/// The server cannot tell an unknown proxy from one outside the read range, so neither can this.
+fn relay_proxy(reply: Reply) -> Response {
+    if matches!(reply, Err(FleetError::NotFound)) {
+        return error_response(StatusCode::NOT_FOUND, "not_found", "proxy not found");
+    }
+    relay(reply)
+}
+
 async fn retried(s: &AppState, req: Request) -> Reply {
     fleet::retry(fleet::DEFAULT_RETRY, || s.fleet.get(req.clone())).await
 }
@@ -159,10 +189,30 @@ fn map_err(e: &FleetError) -> Response {
             "read_api_disabled",
             "lodeline-server has the read API disabled \u{2014} set LODELINE_SERVER_READ_TOKEN there",
         ),
+        FleetError::ProxyReadsUnavailable => error_response(
+            StatusCode::BAD_GATEWAY,
+            "proxy_reads_unavailable",
+            "proxy reads are not available on this lodeline-server",
+        ),
         FleetError::Unauthorized => error_response(
             StatusCode::BAD_GATEWAY,
             "upstream_unauthorized",
             "lodeline-server rejected our token \u{2014} check LODELINE_SERVER_READ_TOKEN",
+        ),
+        FleetError::Forbidden => error_response(
+            StatusCode::BAD_GATEWAY,
+            "upstream_forbidden",
+            "lodeline-server does not give this console's read credential proxy reads",
+        ),
+        FleetError::InvalidCursor => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_cursor",
+            "the list cursor is no longer valid, start from the first page",
+        ),
+        FleetError::InvalidFilter => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_filter",
+            "lodeline-server refused a filter or limit",
         ),
         FleetError::ServiceUnavailable { .. } => error_response(
             StatusCode::SERVICE_UNAVAILABLE,

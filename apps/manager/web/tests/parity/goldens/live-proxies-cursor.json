@@ -1,0 +1,57 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxies?limit=1&connection_state=connected&cursor=eyJ2IjoxLCJrZXkiOiJweC1hIiwiZmlsdGVyX2hhc2giOiJhYiJ9",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "items": [
+      {
+        "applied_revision": null,
+        "config_expires_at": null,
+        "config_in_sync": false,
+        "config_state": "disabled",
+        "connection_state": "unknown",
+        "desired_revision": 3,
+        "display_name": "Proxy A",
+        "last_seen": "2026-01-02T03:04:05Z",
+        "open_gap_count": 0,
+        "proxy_id": "px-a",
+        "spool": null,
+        "status_as_of": null
+      }
+    ],
+    "next_cursor": "eyJ2IjoxLCJrZXkiOiJweC1hIiwiZmlsdGVyX2hhc2giOiJhYiJ9"
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/proxies",
+      "query": [
+        [
+          "connection_state",
+          "connected"
+        ],
+        [
+          "cursor",
+          "eyJ2IjoxLCJrZXkiOiJweC1hIiwiZmlsdGVyX2hhc2giOiJhYiJ9"
+        ],
+        [
+          "limit",
+          "1"
+        ]
+      ],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

@@ -1,0 +1,269 @@
+[
+  {
+    "proxy_id": "px-edge-01",
+    "display_name": "Edge proxy 01",
+    "connection_state": "connected",
+    "last_seen": -12,
+    "desired_revision": 7,
+    "applied_revision": 7,
+    "config_in_sync": true,
+    "config_state": "valid",
+    "config_expires_at": 240,
+    "spool": {
+      "state": "ok",
+      "depth_events": 12,
+      "unsent_events": 3,
+      "bytes": 48213,
+      "capacity_bytes": 1073741824,
+      "oldest_unsent_age_seconds": 4,
+      "quarantined_events": 0,
+      "quarantined_bytes": 0,
+      "as_of": -15
+    },
+    "open_gap_count": 0,
+    "status_as_of": -15,
+    "registry": {
+      "pending_entries": 0,
+      "sync_stalled": false,
+      "quarantined_entries": 0,
+      "poisoned_entries": 0,
+      "discarded_reports": 0
+    },
+    "routes": [
+      { "upstream_id": "github-mcp", "state": "supported" },
+      { "upstream_id": "docs-search", "state": "supported" }
+    ],
+    "central": {
+      "last_ingest_ack_at": -14,
+      "consecutive_failures": 0
+    },
+    "audit_gaps": [
+      {
+        "gap_id": "00000000-0000-4000-8000-000000000101",
+        "kind": "sequence_gap",
+        "source": "server_derived",
+        "detected_at": -5400,
+        "state": "closed",
+        "details": {
+          "epoch_id": "00000000-0000-4000-8000-0000000000e1",
+          "from_sequence": 410,
+          "to_sequence": 412,
+          "tail": false
+        }
+      }
+    ],
+    "audit_gaps_total": 1,
+    "audit_gaps_dropped": 0,
+    "open_gap_counts": {}
+  },
+  {
+    "proxy_id": "px-edge-02",
+    "display_name": "Edge proxy 02",
+    "connection_state": "connected",
+    "last_seen": -20,
+    "desired_revision": 8,
+    "applied_revision": 7,
+    "config_in_sync": false,
+    "config_state": "valid",
+    "config_expires_at": 180,
+    "spool": {
+      "state": "degraded",
+      "depth_events": 1840,
+      "unsent_events": 1835,
+      "bytes": 7340032,
+      "capacity_bytes": 1073741824,
+      "oldest_unsent_age_seconds": 3600,
+      "quarantined_events": 8,
+      "quarantined_bytes": 40960,
+      "as_of": -25
+    },
+    "open_gap_count": 2,
+    "status_as_of": -25,
+    "registry": {
+      "pending_entries": 3,
+      "sync_stalled": true,
+      "quarantined_entries": 1,
+      "poisoned_entries": 2,
+      "discarded_reports": 0
+    },
+    "routes": [
+      { "upstream_id": "github-mcp", "state": "supported" },
+      { "upstream_id": "ticket-mcp", "state": "degraded", "reason": "health_check_failed" }
+    ],
+    "central": {
+      "last_ingest_ack_at": -3700,
+      "consecutive_failures": 9,
+      "ingest_stopped": true
+    },
+    "audit_gaps": [
+      {
+        "gap_id": "00000000-0000-4000-8000-000000000202",
+        "kind": "event_quarantined",
+        "source": "proxy_reported",
+        "detected_at": -1800,
+        "state": "open",
+        "details": {
+          "event_ids": ["00000000-0000-4000-8000-000000002001"],
+          "code": "semantic_invalid"
+        }
+      },
+      {
+        "gap_id": "00000000-0000-4000-8000-000000000201",
+        "kind": "event_quarantined",
+        "source": "proxy_reported",
+        "detected_at": -3500,
+        "state": "open",
+        "details": {
+          "event_ids": [
+            "00000000-0000-4000-8000-000000002002",
+            "00000000-0000-4000-8000-000000002003"
+          ],
+          "code": "semantic_invalid"
+        }
+      }
+    ],
+    "audit_gaps_total": 2,
+    "audit_gaps_dropped": 0,
+    "open_gap_counts": { "event_quarantined": 2 }
+  },
+  {
+    "proxy_id": "px-lab-03",
+    "display_name": "Lab proxy 03",
+    "connection_state": "disconnected",
+    "last_seen": -7200,
+    "desired_revision": 4,
+    "applied_revision": 3,
+    "config_in_sync": false,
+    "config_state": "expired",
+    "config_expires_at": -6900,
+    "spool": {
+      "state": "full",
+      "depth_events": 50000,
+      "unsent_events": 50000,
+      "bytes": 268435456,
+      "capacity_bytes": 268435456,
+      "oldest_unsent_age_seconds": 86400,
+      "quarantined_events": 4,
+      "quarantined_bytes": null,
+      "as_of": -7210
+    },
+    "open_gap_count": 3,
+    "status_as_of": -7210,
+    "registry": {
+      "pending_entries": 12,
+      "sync_stalled": false
+    },
+    "routes": [
+      { "upstream_id": "local-files", "state": "unsupported", "reason": "upstream_version_unsupported" }
+    ],
+    "central": {
+      "last_ingest_ack_at": -7300,
+      "consecutive_failures": 2
+    },
+    "audit_gaps": [
+      {
+        "gap_id": "00000000-0000-4000-8000-000000000303",
+        "kind": "sequence_gap",
+        "source": "server_derived",
+        "detected_at": -7205,
+        "state": "open",
+        "details": {
+          "epoch_id": "00000000-0000-4000-8000-0000000000e3",
+          "from_sequence": 9001,
+          "to_sequence": 9040,
+          "tail": true
+        }
+      },
+      {
+        "gap_id": "00000000-0000-4000-8000-000000000302",
+        "kind": "inventory_incomplete",
+        "source": "server_derived",
+        "detected_at": -9000,
+        "state": "open",
+        "details": {
+          "upstream_id": "local-files",
+          "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+          "incomplete_reason": "page_error",
+          "observed_at": -9010
+        }
+      },
+      {
+        "gap_id": "00000000-0000-4000-8000-000000000301",
+        "kind": "central_outage",
+        "source": "proxy_reported",
+        "detected_at": -12000,
+        "state": "open",
+        "details": {
+          "started_at": -12000,
+          "ended_at": null
+        }
+      }
+    ],
+    "audit_gaps_total": 3,
+    "audit_gaps_dropped": 3,
+    "open_gap_counts": { "central_outage": 1, "inventory_incomplete": 1, "sequence_gap": 1 }
+  },
+  {
+    "proxy_id": "px-new-04",
+    "display_name": "New proxy 04",
+    "connection_state": "never_connected",
+    "last_seen": null,
+    "desired_revision": 1,
+    "applied_revision": null,
+    "config_in_sync": false,
+    "config_state": "none",
+    "config_expires_at": null,
+    "spool": null,
+    "open_gap_count": 0,
+    "status_as_of": null,
+    "registry": null,
+    "routes": [],
+    "central": null,
+    "audit_gaps": [],
+    "audit_gaps_total": 0,
+    "audit_gaps_dropped": 0,
+    "open_gap_counts": {}
+  },
+  {
+    "proxy_id": "px-off-05",
+    "display_name": "Disabled proxy 05",
+    "connection_state": "disconnected",
+    "last_seen": -86400,
+    "desired_revision": 2,
+    "applied_revision": 2,
+    "config_in_sync": true,
+    "config_state": "disabled",
+    "config_expires_at": -86100,
+    "spool": {
+      "state": "ok",
+      "depth_events": 0,
+      "unsent_events": 0,
+      "bytes": 0,
+      "capacity_bytes": 1073741824,
+      "oldest_unsent_age_seconds": null,
+      "quarantined_events": 0,
+      "quarantined_bytes": 0,
+      "as_of": -86410
+    },
+    "open_gap_count": 0,
+    "status_as_of": -86410,
+    "registry": {
+      "pending_entries": 0,
+      "sync_stalled": false,
+      "quarantined_entries": 0,
+      "poisoned_entries": 0,
+      "discarded_reports": 0
+    },
+    "routes": [
+      { "upstream_id": "github-mcp", "state": "disabled" }
+    ],
+    "central": {
+      "last_ingest_ack_at": -86420,
+      "consecutive_failures": 0
+    },
+    "audit_gaps": [],
+    "audit_gaps_total": 0,
+    "audit_gaps_dropped": 0,
+    "open_gap_counts": {}
+  }
+]

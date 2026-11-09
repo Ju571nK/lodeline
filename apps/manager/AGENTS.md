@@ -6,6 +6,13 @@ read-only consumer of `lodeline-server`'s fleet read API, documented in
 own triage notes. Lodeline measures and does not block, and the console keeps that framing in
 its UI text and docs.
 
+It also reads the server's Lodeline Proxy status: `GET /v1/proxies` and `GET /v1/proxies/{id}`
+([ledger-and-query.md L3 and L4](../../docs/specs/lodeline-proxy/contracts/ledger-and-query.md)).
+That is the proxy scope M0 of #458: proxy reads only, still read-only against the server. Do not
+add a proxy write route, a control that changes a proxy (register, disable, enable, retire,
+config), or management credential settings. The operator CLI on the server does those. The
+invocation, inventory, drift and rebaseline-marker reads are not in the console yet.
+
 This folder is its own Cargo workspace. The root workspace does not build it,
 `.github/workflows/manager.yml` tests it, root `ci.yml` ignores `apps/**`, and
 `.github/workflows/release.yml` ships it. Its version is the root workspace version, and a
@@ -70,7 +77,10 @@ record it. `src/auth/tests.rs` and `src/auth/oidc/tests.rs` check both.
 `src/fleet/` reads the server's API. `src/fleet/wire.rs` holds the bodies in the shape the SPA
 gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in process and its
 `lodeline-fleet-api` types, so a change to a server route or that crate can fail `cargo test`
-here. The mock fleet is `testdata/mock-fleet.json` (see `testdata/README.md`).
+here. The proxy bodies are `src/fleet/proxy.rs`, which keeps the server's nulls and absent
+fields, and `src/fleet/tests/proxies.rs` checks them against the server's proxy routes run in
+process. The mock fleet is `testdata/mock-fleet.json` and `testdata/mock-proxies.json` (see
+`testdata/README.md`).
 
 `src/triage.rs` owns the console's SQLite file. It must stay readable by, and sortable with, the
 Go build's: keep the schema text, the pragmas and the fixed-width timestamp layout as they are.

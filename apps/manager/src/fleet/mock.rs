@@ -5,6 +5,9 @@
 //! `testdata/README.md`). Its times are second offsets from the seed, and its IPv4 addresses
 //! are hex (`ipv4:c0000201` for the dotted form of 0xc0000201), so the file holds no literal
 //! addresses. Event IDs come from the seed as Go derives them.
+//!
+//! The proxies are `testdata/mock-proxies.json`, written for this console: 5 proxy details whose
+//! times are second offsets from the seed. Their cursor is the last proxy ID of a page.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -14,11 +17,13 @@ use serde_json::Value;
 
 use super::{
     go_decode, BoxFuture, Client, CompliancePage, ComplianceParams, ComplianceRow, Event,
-    EventsPage, EventsParams, FleetError, GoTime, HostDetail, HostsPage, HostsParams, Meta, Reply,
-    Request, Response, RiskPage, RiskParams, RiskRow,
+    EventsPage, EventsParams, FleetError, GoTime, HostDetail, HostsPage, HostsParams, Meta,
+    ProxiesPage, ProxiesParams, ProxyDetail, Reply, Request, Response, RiskPage, RiskParams,
+    RiskRow,
 };
 
 const FIXTURES: &str = include_str!("../../testdata/mock-fleet.json");
+const PROXY_FIXTURES: &str = include_str!("../../testdata/mock-proxies.json");
 
 pub struct Mock {
     seed: GoTime,
@@ -27,6 +32,8 @@ pub struct Mock {
     hosts: Vec<MockHost>,
     /// Newest first, which is also descending event ID order.
     events: Vec<Event>,
+    /// In `proxy_id` order, the server's list order.
+    proxies: Vec<ProxyDetail>,
 }
 
 #[derive(Deserialize)]
@@ -54,13 +61,65 @@ impl Mock {
         for (i, e) in f.events.iter_mut().enumerate() {
             e.event_id = uuidv7_at(e.ts.unix_millis(), n - i as u64);
         }
+        let mut proxies: Value =
+            serde_json::from_str(PROXY_FIXTURES).expect("mock-proxies.json is JSON");
+        expand_proxy_times(&mut proxies, "", seed);
+        // `from_str`, not `from_value`: gap details are raw JSON, which only a text decode keeps.
+        let proxies =
+            serde_json::from_str(&proxies.to_string()).expect("mock-proxies.json has the types");
         Self {
             seed: GoTime::from_unix(seed),
             meta: f.meta,
             policy_version: f.policy_version,
             hosts: f.hosts,
             events: f.events,
+            proxies,
         }
+    }
+
+    /// The server's filters and limit checks, and a cursor that must name a listed proxy.
+    fn proxies(&self, p: &ProxiesParams) -> Result<ProxiesPage, FleetError> {
+        let known = |v: &str, allowed: &[&str]| v.is_empty() || allowed.contains(&v);
+        if !known(
+            &p.connection_state,
+            &["connected", "disconnected", "never_connected"],
+        ) || !known(&p.config_in_sync, &["true", "false"])
+            || p.limit > 500
+        {
+            return Err(FleetError::InvalidFilter);
+        }
+        let rows: Vec<_> = self
+            .proxies
+            .iter()
+            .map(|d| &d.summary)
+            .filter(|s| {
+                let state = serde_json::to_value(s.connection_state).expect("enum encodes");
+                (p.connection_state.is_empty() || state == p.connection_state.as_str())
+                    && (p.config_in_sync.is_empty()
+                        || p.config_in_sync == s.config_in_sync.to_string())
+            })
+            .collect();
+        let start = match p.cursor.as_str() {
+            "" => 0,
+            c => {
+                rows.iter()
+                    .position(|s| s.proxy_id == c)
+                    .ok_or(FleetError::InvalidCursor)?
+                    + 1
+            }
+        };
+        let limit = if p.limit > 0 { p.limit as usize } else { 100 };
+        let items: Vec<_> = rows
+            .iter()
+            .skip(start)
+            .take(limit)
+            .map(|&s| s.clone())
+            .collect();
+        let more = rows.len() > start + items.len();
+        Ok(ProxiesPage {
+            next_cursor: items.last().filter(|_| more).map(|s| s.proxy_id.clone()),
+            items,
+        })
     }
 
     fn events(&self, p: &EventsParams) -> EventsPage {
@@ -217,6 +276,14 @@ impl Mock {
             ),
             Request::Risk(p) => Response::Risk(self.risk(&p)),
             Request::Compliance(p) => Response::Compliance(self.compliance(&p)),
+            Request::Proxies(p) => Response::Proxies(self.proxies(&p)?),
+            Request::ProxyById(id) => Response::Proxy(
+                self.proxies
+                    .iter()
+                    .find(|d| d.summary.proxy_id == id)
+                    .cloned()
+                    .ok_or(FleetError::NotFound)?,
+            ),
         })
     }
 }
@@ -240,6 +307,24 @@ fn expand(v: &mut Value, key: &str, seed: i64) {
             *v = Value::String(GoTime::from_unix(seed + offset).to_string());
         }
         Value::String(s) => *s = expand_addresses(s),
+        _ => {}
+    }
+}
+
+/// Turns the proxy fixture's offsets, under `*_at`, `last_seen` and `*as_of` keys, into RFC 3339
+/// times after `seed`.
+fn expand_proxy_times(v: &mut Value, key: &str, seed: i64) {
+    match v {
+        Value::Object(m) => m
+            .iter_mut()
+            .for_each(|(k, e)| expand_proxy_times(e, k, seed)),
+        Value::Array(a) => a.iter_mut().for_each(|e| expand_proxy_times(e, key, seed)),
+        Value::Number(n)
+            if key.ends_with("_at") || key == "last_seen" || key.ends_with("as_of") =>
+        {
+            let offset = n.as_i64().expect("time offsets are whole seconds");
+            *v = Value::String(GoTime::from_unix(seed + offset).to_string());
+        }
         _ => {}
     }
 }
@@ -354,6 +439,80 @@ mod tests {
             expand_addresses("x ipv4:c0000201/24 ipv4:zz"),
             "x 192.0.2.1/24 ipv4:zz"
         );
+    }
+
+    #[test]
+    fn proxies_page_filter_and_refuse_a_cursor_they_did_not_issue() {
+        let seed = 1_767_225_600;
+        let m = Mock::new(seed);
+        let list = |p: ProxiesParams| m.proxies(&p);
+        let ids = |page: &ProxiesPage| -> Vec<String> {
+            page.items.iter().map(|s| s.proxy_id.clone()).collect()
+        };
+        let first = list(ProxiesParams {
+            limit: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ids(&first), ["px-edge-01", "px-edge-02"]);
+        let mut cursor = first.next_cursor.clone().unwrap();
+        let mut seen = ids(&first);
+        loop {
+            let page = list(ProxiesParams {
+                limit: 2,
+                cursor: cursor.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+            seen.extend(ids(&page));
+            match page.next_cursor {
+                Some(next) => cursor = next,
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                "px-edge-01",
+                "px-edge-02",
+                "px-lab-03",
+                "px-new-04",
+                "px-off-05"
+            ]
+        );
+        let disconnected = list(ProxiesParams {
+            connection_state: "disconnected".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ids(&disconnected), ["px-lab-03", "px-off-05"]);
+        assert_eq!(disconnected.next_cursor, None);
+        let behind = list(ProxiesParams {
+            config_in_sync: "false".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(ids(&behind), ["px-edge-02", "px-lab-03", "px-new-04"]);
+        assert_eq!(
+            list(ProxiesParams {
+                cursor: "px-unknown".into(),
+                ..Default::default()
+            }),
+            Err(FleetError::InvalidCursor)
+        );
+        assert_eq!(
+            list(ProxiesParams {
+                connection_state: "asleep".into(),
+                ..Default::default()
+            }),
+            Err(FleetError::InvalidFilter)
+        );
+        let lab = &m.proxies[2].summary;
+        assert_eq!(
+            lab.last_seen.as_deref(),
+            Some(GoTime::from_unix(seed - 7200).to_string().as_str())
+        );
+        assert_eq!(lab.spool.as_ref().unwrap().quarantined_bytes, None);
     }
 
     #[test]

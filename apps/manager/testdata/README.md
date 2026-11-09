@@ -51,6 +51,16 @@ The file differs from Go's encoded bodies in three ways, which `src/fleet/mock.r
 - IPv4 addresses are hex, `ipv4:` and eight digits, so the file holds no dotted addresses. The
   binary writes them dotted again, and the parity goldens compare the dotted form.
 
+## mock-proxies.json
+
+The proxy details the mock fleet serves for `/api/v1/fleet/proxies*`, written for this console:
+no Go console had proxy reads. Each object is a `GET /v1/proxies/{id}` body as
+`src/fleet/proxy.rs` reads it, in `proxy_id` order. Numbers under `*_at`, `last_seen` and
+`*as_of` keys are second offsets from the seed, which `src/fleet/mock.rs` turns into times. The
+five proxies cover a connected proxy in sync, a stopped ingest with a degraded spool, an older
+proxy (`quarantined_bytes` `null`, no registry counters) with dropped gaps, a proxy that never
+reported, and a disabled config.
+
 ## jose-cases.json
 
 ID token headers and key sets, each with whether go-oidc v3.21.0 and go-jose v4.1.4 accept the
