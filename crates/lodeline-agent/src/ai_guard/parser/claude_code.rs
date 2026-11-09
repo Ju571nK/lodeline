@@ -1449,7 +1449,10 @@ fn shared_local_settings(repo_root: &Path, home: &Path) -> Option<PathBuf> {
 // shortcut: only the agent's own home is compared, so a git repository at
 // another user's home is still read; pass every user's home if that matters.
 fn is_home(dir: &Path, home: &Path) -> bool {
-    dunce::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()) == dir
+    // Both sides, since a scan's root is the raw current folder (an 8.3 short
+    // name on Windows) while discovery hands over canonical paths.
+    let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canonical(home) == canonical(dir)
 }
 
 /// The project assessment. `policy_dir` is the managed-settings folder,
@@ -4290,6 +4293,25 @@ mod tests {
                 r,
                 AiGuardReason::UnattendedLoopPrompt { source } if source == "project"
             )),
+            "got {reasons:?}"
+        );
+    }
+
+    /// #539: the home folder spelled another way (an 8.3 short name on Windows,
+    /// a symlink) is still the home folder, so its `loop.md` stays in the user row.
+    #[test]
+    fn home_loop_prompt_is_skipped_in_the_project_row_under_any_spelling() {
+        let home = tempdir().unwrap();
+        write_file(home.path(), ".claude/loop.md", "keep running\n");
+        let reasons = ClaudeCodeProjectParser {
+            repo_root: home.path().join(".claude").join(".."),
+        }
+        .assess(home.path())
+        .unwrap();
+        assert!(
+            !reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::UnattendedLoopPrompt { .. })),
             "got {reasons:?}"
         );
     }
