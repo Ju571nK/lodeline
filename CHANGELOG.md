@@ -7,6 +7,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- AI Guard now scans the prompt of a Claude Code scheduled task
+  (`~/.claude/scheduled-tasks/<name>/SKILL.md`) and of a loop prompt (`.claude/loop.md` in a
+  project, `~/.claude/loop.md` for the user) for the same directives as `CLAUDE.md`, such as a
+  download piped into a shell. Before, these files counted only as present. A matched line is the
+  finding's snippet, as for `CLAUDE.md`. Scores can rise on upgrade, also for a task whose prompt
+  runs destructive shell commands on purpose. No reason kind is new. (#191)
+
 ## [0.14.1] - 2026-11-09
 
 **Upgrade order.** The agent and the server can be upgraded in either order. This release
