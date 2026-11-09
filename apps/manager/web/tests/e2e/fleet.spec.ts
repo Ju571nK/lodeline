@@ -303,3 +303,18 @@ test.describe('AI Guard score sources and unassessed parsers', () => {
     await page.screenshot({ path: test.info().outputPath('host-event.png'), fullPage: true });
   });
 });
+
+test('a refused client certificate is named on the fleet page', async ({ page }) => {
+  // The body the binary sends when the server refuses its certificate class (parity case
+  // live-proxy-host-unknown).
+  const message =
+    'lodeline-server did not accept the client certificate in LODELINE_SERVER_CLIENT_CERT_PATH. ' +
+    'Issue it from the host client CA (console README, Proxy reads, step 2)';
+  await page.route('**/api/v1/fleet/risk**', (route) =>
+    route.fulfill({ status: 502, json: { error: { code: 'certificate_refused', message } } }),
+  );
+  await page.goto('/fleet/risk');
+  await expect(page.getByText(`Could not load results: ${message}.`)).toBeVisible({
+    timeout: 5_000,
+  });
+});

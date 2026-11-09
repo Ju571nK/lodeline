@@ -209,7 +209,7 @@ describe('inventory views', () => {
     });
     await section('rebaseline-markers');
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Inventory reads are not available on this lodeline-server.',
+      'Inventory reads are not available on this lodeline-server. It predates them.',
     );
   });
 });
