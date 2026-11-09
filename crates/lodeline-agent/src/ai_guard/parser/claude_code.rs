@@ -1440,12 +1440,16 @@ impl AiGuardParser for ClaudeCodeProjectParser {
 /// #199: the `settings.local.json` Claude Code reads at the repository root
 /// for a session started at `repo_root`, if that is somewhere else. A root
 /// that is the user's home keeps the start directory's file.
-// shortcut: only the agent's own home is compared, so a git repository at
-// another user's home is still read; pass every user's home if that matters.
 fn shared_local_settings(repo_root: &Path, home: &Path) -> Option<PathBuf> {
     let root = super::claude_repo::local_settings_root(repo_root)?;
-    let home = dunce::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
-    (root != home).then(|| root.join(".claude").join("settings.local.json"))
+    (!is_home(&root, home)).then(|| root.join(".claude").join("settings.local.json"))
+}
+
+/// True when `dir` is the home folder `home`, whose `.claude` is the user scope.
+// shortcut: only the agent's own home is compared, so a git repository at
+// another user's home is still read; pass every user's home if that matters.
+fn is_home(dir: &Path, home: &Path) -> bool {
+    dunce::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()) == dir
 }
 
 /// The project assessment. `policy_dir` is the managed-settings folder,
@@ -1474,6 +1478,10 @@ fn assess_project(
         Some(local) => Some(merge_overlay(local, shared)),
         None => shared,
     };
+    // #539: at the home folder this is `~/.claude/loop.md`, which the user row reads.
+    // shortcut: a scan with `CLAUDE_CONFIG_DIR` set reads the user prompt there, so
+    // then no row reads this file; pass the config dir here if that matters.
+    let has_loop = !is_home(repo_root, home) && cd.join("loop.md").is_file();
     let mut components = super::claude_components::component_hooks(&cd);
     components.extend(super::claude_components::nested_skill_hooks(repo_root));
     // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
@@ -1498,7 +1506,7 @@ fn assess_project(
         && mcp_json.is_none()
         && !repo_root.join("CLAUDE.md").is_file()
         && !repo_root.join("AGENTS.md").is_file()
-        && !cd.join("loop.md").is_file()
+        && !has_loop
         && components.is_empty()
     {
         return Ok(Vec::new());
@@ -1566,7 +1574,9 @@ fn assess_project(
     // #199 — a committed loop prompt. `autoMode` is deliberately NOT read
     // here: since v2.1.207 the classifier ignores the repo-local copy, so
     // flagging one would report a control that is not in force.
-    emit_loop_prompt_reason(&cd, "project", &mut out);
+    if has_loop {
+        emit_loop_prompt_reason(&cd, "project", &mut out);
+    }
     // #146 — scan committed instruction files (defensive read each).
     super::instruction_scan::scan_file_path(&repo_root.join("CLAUDE.md"), &mut out);
     super::instruction_scan::scan_file_path(&repo_root.join("AGENTS.md"), &mut out);
@@ -3844,7 +3854,7 @@ mod tests {
         let reasons = ClaudeCodeProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new(NO_HOME))
         .unwrap();
         let loop_md = repo.path().join(".claude").join("loop.md");
         assert_eq!(fetch_pipes_at(&reasons, &loop_md), 1, "got {reasons:?}");
@@ -4273,7 +4283,7 @@ mod tests {
         let reasons = ClaudeCodeProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new(NO_HOME))
         .unwrap();
         assert!(
             reasons.iter().any(|r| matches!(

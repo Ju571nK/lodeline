@@ -31,13 +31,16 @@ targets:
     follow_symlinks: false
 
   - id: ai-guard-claude-code-user-global
-    description: Claude Code CLI user-global guard surface (settings + hooks)
+    description: Claude Code CLI user-global guard surface (settings, hooks, prompt files)
     tier: critical
     platform: macos
     paths:
       - "~/.claude/settings.json"
       - "~/.claude/settings.local.json"
       - "~/.claude/hooks/"
+      - "~/.claude/CLAUDE.md"
+      - "~/.claude/loop.md"
+      - "~/.claude/scheduled-tasks/*/SKILL.md"
       - "/Library/Application Support/ClaudeCode/managed-settings.json"
       - "/Library/Application Support/ClaudeCode/managed-settings.d/"
     recursive: true

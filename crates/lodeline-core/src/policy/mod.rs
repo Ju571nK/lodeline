@@ -1132,6 +1132,9 @@ targets:
                 "managed-settings.json",
                 "managed-settings.d",
                 "requirements.toml",
+                "CLAUDE.md",
+                "loop.md",
+                "SKILL.md",
             ] {
                 let target = doc
                     .targets
