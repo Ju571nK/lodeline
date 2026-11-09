@@ -34,6 +34,25 @@ export function Row({ label, children }: { label: string; children: ReactNode })
   );
 }
 
+export function Table({ head, children }: { head: string[]; children: ReactNode }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left text-xs">
+        <thead className="text-text-muted">
+          <tr>
+            {head.map((h) => (
+              <th key={h} className="px-2 py-1.5 font-medium">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>{children}</tbody>
+      </table>
+    </div>
+  );
+}
+
 /** A time as "Nov 5, 14:31 (3m ago)", or `none` when the server sent null. */
 export function When({ ts, none = 'none' }: { ts: string | null; none?: string }) {
   if (!ts) return <span className="text-text-muted">{none}</span>;
@@ -71,11 +90,25 @@ export function ConnectionCell({ proxy }: { proxy: ProxySummary }) {
   );
 }
 
-const notFoundText = {
-  proxy:
-    'Proxy not found. It is not registered, or it is outside the read range of this console’s credential; the server answers both the same way.',
-  invocation:
-    'Invocation not found. The server has no such invocation, or its proxy is outside the read range of this console’s credential; the server answers both the same way.',
+const proxyNotFound =
+  'Proxy not found. It is not registered, or it is outside the read range of this console’s credential; the server answers both the same way.';
+const proxyReadsUnavailable =
+  'Proxy reads are not available on this lodeline-server. It runs without a proxy section, or it does not serve proxy reads to this console’s client certificate.';
+
+/** The not-found and unavailable panels, by what the page reads. */
+const targetText = {
+  proxy: { notFound: proxyNotFound, unavailable: proxyReadsUnavailable },
+  invocation: {
+    notFound:
+      'Invocation not found. The server has no such invocation, or its proxy is outside the read range of this console’s credential; the server answers both the same way.',
+    unavailable: proxyReadsUnavailable,
+  },
+  // Shown under a proxy that has loaded, so an unserved route most likely means an older server.
+  inventory: {
+    notFound: proxyNotFound,
+    unavailable:
+      'Inventory reads are not available on this lodeline-server. It predates them, or it does not serve proxy reads to this console’s client certificate.',
+  },
 };
 
 /** Answers that another try within the poll interval would not change. */
@@ -92,14 +125,14 @@ export function ProxyReadError({
 }: {
   error: Error;
   what: string;
-  target?: keyof typeof notFoundText;
+  target?: keyof typeof targetText;
 }) {
   const code = error instanceof ApiError ? error.code : '';
   const text =
     error instanceof NotFoundError
-      ? notFoundText[target]
+      ? targetText[target].notFound
       : code === 'proxy_reads_unavailable'
-        ? 'Proxy reads are not available on this lodeline-server. It runs without a proxy section, or it does not serve proxy reads to this console’s client certificate.'
+        ? targetText[target].unavailable
         : code === 'upstream_forbidden'
           ? 'lodeline-server does not give this console’s read credential proxy reads.'
           : `Could not load ${what}: ${error.message}`;

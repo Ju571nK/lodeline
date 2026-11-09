@@ -1,8 +1,8 @@
 /**
- * Wraps the read-only proxy and invocation handlers. Types mirror `src/fleet/proxy.rs`, which
- * keeps `lodeline-server`'s shape: `null` stays `null` and absent stays absent. Every enum has an
- * `unknown` member, which the console sends for a value a newer server added. Status fields
- * describe the proxy's last report, not live state.
+ * Wraps the read-only proxy, invocation and inventory handlers. Types mirror `src/fleet/proxy.rs`,
+ * which keeps `lodeline-server`'s shape: `null` stays `null` and absent stays absent. Every enum
+ * has an `unknown` member, which the console sends for a value a newer server added. Status
+ * fields describe the proxy's last report, not live state.
  */
 
 import { api } from './client';
@@ -228,4 +228,110 @@ export function fleetInvocations(
 
 export function fleetInvocation(invocationId: string): Promise<InvocationDetail> {
   return api<InvocationDetail>(`/fleet/proxy-invocations/${encodeURIComponent(invocationId)}`);
+}
+
+/**
+ * The chain an inventory row belongs to. Another credential scope or protocol version is a
+ * separate chain, never compared with this one.
+ */
+export interface InventoryScope {
+  proxy_id: string;
+  upstream_id: string;
+  credential_scope_id: string;
+  protocol_version: string;
+  observation_source: string;
+}
+
+/** Only `compared` has drift records. */
+export type ComparisonState =
+  | 'baseline'
+  | 'compared'
+  | 'rebaseline'
+  | 'pending_previous'
+  | 'inconsistent'
+  | 'unknown';
+
+/** A complete observation of an upstream's tool list, by reference. Never a tool name. */
+export interface InventorySnapshot extends InventoryScope {
+  inventory_id: string;
+  canon: string;
+  key_id: string;
+  member_count: number;
+  /** Proxy clock, as the report wrote it. */
+  observed_at: string;
+  received_at: string;
+  is_latest: boolean;
+  is_first_baseline: boolean;
+  comparison_state: ComparisonState;
+  /** Set only while `pending_previous`. */
+  awaiting_inventory_id: string | null;
+}
+
+export type DriftChange = 'added' | 'removed' | 'changed' | 'unknown';
+
+/** A change the proxy observed between two snapshots of a chain. Nothing approved it. */
+export interface DriftRecord extends InventoryScope {
+  drift_id: string;
+  inventory_id: string;
+  previous_inventory_id: string;
+  change: DriftChange;
+  metadata_ref: string;
+  /** Sent only for `changed`. */
+  previous_metadata_ref?: string;
+  detected_at: string;
+}
+
+export type MarkerCause =
+  | 'declared_key_rotation'
+  | 'declared_canon_change'
+  | 'epoch_change_detected'
+  | 'key_change_undeclared'
+  | 'baseline_restated'
+  | 'unknown';
+
+/** A baseline reset inside a chain. It never creates drift records. */
+export interface RebaselineMarker extends InventoryScope {
+  marker_id: string;
+  inventory_id: string;
+  previous_inventory_id: string | null;
+  from_key_id: string;
+  to_key_id: string;
+  from_canon: string;
+  to_canon: string;
+  cause: MarkerCause;
+  links_present: boolean;
+  drift_computed: boolean;
+  detected_at: string;
+}
+
+/** The row type of each view, by its path segment. */
+export interface InventoryRows {
+  'inventory-snapshots': InventorySnapshot;
+  drift: DriftRecord;
+  'rebaseline-markers': RebaselineMarker;
+}
+
+export type InventoryView = keyof InventoryRows;
+
+export interface InventoryPage<V extends InventoryView> {
+  items: InventoryRows[V][];
+  /** Opaque; bound to the view, the proxy and the filters it came with. */
+  next_cursor: string | null;
+}
+
+/** One page of a proxy's inventory view, newest first. */
+export function fleetInventory<V extends InventoryView>(
+  proxyId: string,
+  view: V,
+  p: { cursor?: string; limit?: number },
+  signal?: AbortSignal,
+): Promise<InventoryPage<V>> {
+  const q = new URLSearchParams();
+  if (p.cursor) q.set('cursor', p.cursor);
+  if (p.limit) q.set('limit', String(p.limit));
+  const s = q.toString();
+  return api<InventoryPage<V>>(
+    `/fleet/proxies/${encodeURIComponent(proxyId)}/${view}${s ? `?${s}` : ''}`,
+    { signal },
+  );
 }

@@ -2,9 +2,12 @@ import type {
   Central,
   ConfigState,
   ConnectionState,
+  DriftChange,
   GapState,
+  InventorySnapshot,
   InvocationSummary,
   Lifecycle,
+  MarkerCause,
   Outcome,
   RouteState,
   Spool,
@@ -179,7 +182,13 @@ export interface InvocationStatus {
   /** The record holds a completion that nothing corroborates. It never reads as success. */
   flagged: boolean;
   note?: string;
+  /** The text of the detail's Outcome row. */
+  outcome: string;
+  /** The corroborated completion's delivery and reason. Only a completed invocation has one. */
+  completion?: { delivery: string | null; reason: string | null };
 }
+
+const WITHHELD = 'withheld: no corroborated completion';
 
 /**
  * The one place that decides an invocation's headline. Only `completed` shows its outcome.
@@ -187,12 +196,21 @@ export interface InvocationStatus {
  * the `reported_*` values stay the proxy's claim (see `reportedClaim`), never the headline.
  */
 export function invocationStatus(
-  inv: Pick<InvocationSummary, 'lifecycle' | 'outcome' | 'epoch_superseded'>,
+  inv: Pick<
+    InvocationSummary,
+    'lifecycle' | 'outcome' | 'delivery_state' | 'reason' | 'epoch_superseded'
+  >,
 ): InvocationStatus {
   switch (inv.lifecycle) {
     case 'completed': {
       const outcome = inv.outcome ?? 'unknown';
-      return { label: outcomeLabel[outcome], tone: outcomeTone[outcome], flagged: false };
+      return {
+        label: outcomeLabel[outcome],
+        tone: outcomeTone[outcome],
+        flagged: false,
+        outcome: outcomeLabel[outcome],
+        completion: { delivery: inv.delivery_state, reason: inv.reason },
+      };
     }
     case 'completion_without_start':
       return {
@@ -200,6 +218,7 @@ export function invocationStatus(
         tone: 'bad',
         flagged: true,
         note: 'The server has no start for this completion, so it withholds the outcome.',
+        outcome: WITHHELD,
       };
     case 'integrity_conflict':
       return {
@@ -207,6 +226,7 @@ export function invocationStatus(
         tone: 'bad',
         flagged: true,
         note: 'The events of this invocation contradict each other, so the server withholds the outcome.',
+        outcome: WITHHELD,
       };
     case 'started':
       return {
@@ -216,11 +236,12 @@ export function invocationStatus(
         note: inv.epoch_superseded
           ? 'The proxy has since started a new epoch, so the completion may never arrive.'
           : undefined,
+        outcome: WITHHELD,
       };
     case 'cancel_without_start':
-      return { label: 'Cancel only, no start', tone: 'neutral', flagged: false };
+      return { label: 'Cancel only, no start', tone: 'neutral', flagged: false, outcome: WITHHELD };
     default:
-      return { label: lifecycleLabel.unknown, tone: 'neutral', flagged: false };
+      return { label: lifecycleLabel.unknown, tone: 'neutral', flagged: false, outcome: WITHHELD };
   }
 }
 
@@ -248,3 +269,84 @@ const flagLabel: Record<string, string> = {
 export function flagName(flag: string): string {
   return Object.hasOwn(flagLabel, flag) ? flagLabel[flag] : flag;
 }
+
+export interface SnapshotComparison {
+  label: string;
+  tone: Tone;
+  note?: string;
+}
+
+/** How a snapshot relates to the one before it in its chain. A baseline is never an approval. */
+export function snapshotComparison(
+  s: Pick<InventorySnapshot, 'comparison_state' | 'is_first_baseline' | 'awaiting_inventory_id'>,
+): SnapshotComparison {
+  switch (s.comparison_state) {
+    case 'baseline':
+      return s.is_first_baseline
+        ? {
+            label: 'Initial baseline',
+            tone: 'neutral',
+            note: 'The first snapshot of this chain. A starting point, not an approval.',
+          }
+        : { label: 'Baseline restated', tone: 'neutral' };
+    case 'compared':
+      return { label: 'Compared', tone: 'neutral' };
+    case 'rebaseline':
+      return {
+        label: 'Re-baseline',
+        tone: 'neutral',
+        note: 'A new key or canon. No drift is derived across it.',
+      };
+    case 'pending_previous':
+      return {
+        label: 'Waiting for previous snapshot',
+        tone: 'neutral',
+        note: `No drift until ${s.awaiting_inventory_id ?? 'the previous snapshot'} arrives.`,
+      };
+    case 'inconsistent':
+      return {
+        label: 'Inconsistent',
+        tone: 'warn',
+        note: 'The deferred checks failed, so the server derived no drift.',
+      };
+    default:
+      return { label: NEWER, tone: 'neutral' };
+  }
+}
+
+/**
+ * How a reference changed between two snapshots. Drift is an observation, never an approval, so
+ * no change reads as accepted: none has the `ok` tone.
+ */
+export const driftChangeLabel: Record<DriftChange, string> = {
+  added: 'Added',
+  removed: 'Removed',
+  changed: 'Changed',
+  unknown: NEWER,
+};
+
+export const driftChangeTone: Record<DriftChange, Tone> = {
+  added: 'warn',
+  removed: 'warn',
+  changed: 'warn',
+  unknown: 'neutral',
+};
+
+export const markerCauseLabel: Record<MarkerCause, string> = {
+  declared_key_rotation: 'Declared key rotation',
+  declared_canon_change: 'Declared canon change',
+  epoch_change_detected: 'Producer epoch changed',
+  key_change_undeclared: 'Undeclared key change',
+  baseline_restated: 'Baseline restated',
+  unknown: NEWER,
+};
+
+/** The proxy declared the first two causes; the server only detected the next two. */
+export const markerCauseTone: Record<MarkerCause, Tone> = {
+  declared_key_rotation: 'neutral',
+  declared_canon_change: 'neutral',
+  epoch_change_detected: 'warn',
+  key_change_undeclared: 'warn',
+  baseline_restated: 'neutral',
+  unknown: 'neutral',
+};

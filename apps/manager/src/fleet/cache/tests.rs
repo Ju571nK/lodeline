@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::*;
-use crate::fleet::{Event, EventsPage, EventsParams, Healthz, Meta};
+use crate::fleet::{Event, EventsPage, EventsParams, Healthz, InventoryView, Meta};
 
 /// Counts upstream calls per endpoint, and answers with a generation marker so a test can tell
 /// a fresh body from a stale one. It can be slowed down or told to fail.
@@ -370,7 +370,30 @@ async fn proxy_reads_have_keys_of_their_own() {
     let proxies = Request::Proxies(crate::fleet::ProxiesParams::default());
     let invocation = Request::InvocationById("same-id".into());
     let invocations = Request::Invocations(crate::fleet::InvocationsParams::default());
-    let reads = [&host, &proxy, &proxies, &invocation, &invocations];
+    let view = |v, proxy_id: &str| {
+        Request::Inventory(
+            v,
+            crate::fleet::InventoryParams {
+                proxy_id: proxy_id.into(),
+                ..Default::default()
+            },
+        )
+    };
+    let snapshots = view(InventoryView::Snapshots, "same-id");
+    let drift = view(InventoryView::Drift, "same-id");
+    let markers = view(InventoryView::Markers, "same-id");
+    let other_drift = view(InventoryView::Drift, "other-id");
+    let reads = [
+        &host,
+        &proxy,
+        &proxies,
+        &invocation,
+        &invocations,
+        &snapshots,
+        &drift,
+        &markers,
+        &other_drift,
+    ];
     for req in reads.iter().chain(reads.iter()) {
         c.get((*req).clone()).await.unwrap();
     }
@@ -380,11 +403,14 @@ async fn proxy_reads_have_keys_of_their_own() {
             "proxy_by_id",
             "proxies",
             "proxy_invocation_by_id",
-            "proxy_invocations"
+            "proxy_invocations",
+            "proxy_inventory_snapshots",
+            "proxy_rebaseline_markers",
         ]
         .map(|e| up.count(e)),
-        [1; 5],
+        [1; 7],
         "each read is fetched once, under its own key"
     );
-    assert_eq!(c.len(), 5);
+    assert_eq!(up.count("proxy_drift"), 2, "one key per proxy");
+    assert_eq!(c.len(), 9);
 }

@@ -49,8 +49,8 @@ export function InvocationTable({ rows }: { rows: InvocationSummary[] }) {
               </td>
               <td className="px-3 py-2">
                 <TonePill tone={status.tone}>{status.label}</TonePill>
-                {inv.lifecycle === 'completed' && inv.delivery_state && (
-                  <span className="text-text-muted"> delivery {inv.delivery_state}</span>
+                {status.completion?.delivery && (
+                  <span className="text-text-muted"> delivery {status.completion.delivery}</span>
                 )}
                 {claim && <div className="mt-1 text-text-muted">{claim}</div>}
               </td>

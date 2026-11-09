@@ -40,7 +40,8 @@ test.describe('proxy pages', () => {
     await expect(page.getByRole('alert').first()).toContainText('Ingest stopped:');
     await expect(page.getByText('8 events, 40 KiB')).toBeVisible();
     await expect(page.getByText('health_check_failed')).toBeVisible();
-    await expect(page.locator('main').getByRole('button')).toHaveCount(0);
+    // Read only: the one button reloads the inventory list.
+    await expect(page.locator('main').getByRole('button')).toHaveText(['Refresh']);
     await page.screenshot({
       path: testInfo.outputPath('proxy-detail-ingest-stopped.png'),
       fullPage: true,
@@ -56,8 +57,9 @@ test.describe('proxy pages', () => {
     await expect(page.getByText(/This gap list is incomplete: the server dropped 3/)).toBeVisible();
     await expect(page.getByText('Expired', { exact: true })).toBeVisible();
     await expect(page.getByText('Discarded reports')).toHaveCount(0);
-    await expect(page.locator('main tbody tr')).toHaveCount(4);
-    await expect(page.locator('main').getByRole('button')).toHaveCount(0);
+    // One route, three gaps and the two inventory snapshots.
+    await expect(page.locator('main tbody tr')).toHaveCount(6);
+    await expect(page.locator('main').getByRole('button')).toHaveText(['Refresh']);
     await page.screenshot({ path: testInfo.outputPath('proxy-detail-older.png'), fullPage: true });
   });
 

@@ -43,5 +43,5 @@ If the fixtures lack a precondition that a journey needs, the journey reports a 
 - [Alerts queue and triage](./alerts-triage.md) covers the queue, the slide-over, assign and acknowledge, notes, and the stored triage row.
 - [Fleet pages](./fleet-views.md) covers the Risk, Events, Compliance, and Devices tabs.
 - [Host detail](./host-detail.md) covers the host page, its panels, and the not-found and null-heavy states.
-- [Proxies](./proxies.md) covers the read-only proxy and invocation lists and details, the filters and cursor, flagged invocations, truncated event lists, and the not-found and unavailable states.
+- [Proxies](./proxies.md) covers the read-only proxy and invocation lists and details, a proxy's inventory snapshots, drift and re-baseline markers, the filters and cursor, flagged invocations, truncated event lists, and the not-found and unavailable states.
 - [Settings](./settings.md) covers the connection state, the server metadata, and the audit status.

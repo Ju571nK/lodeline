@@ -1,0 +1,72 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxies/px-a/drift?upstream_id=up1&credential_scope_id=cs-0123456789abcdef0123456789abcdef&change=added&from=2026-01-01T00:00:00Z&to=2026-01-03T00:00:00Z&limit=1&cursor=eyJ2IjoxLCJrZXkiOjcsImZpbHRlcl9oYXNoIjoiYWIifQ",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "items": [
+      {
+        "change": "unknown",
+        "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+        "detected_at": "2026-01-02T03:04:05Z",
+        "drift_id": "00000000-0000-4000-8000-000000000601",
+        "inventory_id": "00000000-0000-4000-8000-000000000502",
+        "metadata_ref": "00000000-0000-8000-8000-000000000001",
+        "observation_source": "proxy_live",
+        "previous_inventory_id": "00000000-0000-4000-8000-000000000501",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-a",
+        "upstream_id": "up1"
+      }
+    ],
+    "next_cursor": "eyJ2IjoxLCJrZXkiOjcsImZpbHRlcl9oYXNoIjoiYWIifQ"
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/proxies/px-a/drift",
+      "query": [
+        [
+          "change",
+          "added"
+        ],
+        [
+          "credential_scope_id",
+          "cs-0123456789abcdef0123456789abcdef"
+        ],
+        [
+          "cursor",
+          "eyJ2IjoxLCJrZXkiOjcsImZpbHRlcl9oYXNoIjoiYWIifQ"
+        ],
+        [
+          "from",
+          "2026-01-01T00:00:00Z"
+        ],
+        [
+          "limit",
+          "1"
+        ],
+        [
+          "to",
+          "2026-01-03T00:00:00Z"
+        ],
+        [
+          "upstream_id",
+          "up1"
+        ]
+      ],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

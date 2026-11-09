@@ -1,0 +1,74 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxies/px-edge-01/drift",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "items": [
+      {
+        "change": "added",
+        "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+        "detected_at": "<seed-590s Z>",
+        "drift_id": "00000000-0000-4000-8000-000000000606",
+        "inventory_id": "00000000-0000-4000-8000-000000000506",
+        "metadata_ref": "00000000-0000-8000-8000-000000000811",
+        "observation_source": "proxy_live",
+        "previous_inventory_id": "00000000-0000-4000-8000-000000000504",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-edge-01",
+        "upstream_id": "github-mcp"
+      },
+      {
+        "change": "changed",
+        "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+        "detected_at": "<seed-1h Z>",
+        "drift_id": "00000000-0000-4000-8000-000000000605",
+        "inventory_id": "00000000-0000-4000-8000-000000000504",
+        "metadata_ref": "00000000-0000-8000-8000-000000000812",
+        "observation_source": "proxy_live",
+        "previous_inventory_id": "00000000-0000-4000-8000-000000000502",
+        "previous_metadata_ref": "00000000-0000-8000-8000-000000000802",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-edge-01",
+        "upstream_id": "github-mcp"
+      },
+      {
+        "change": "added",
+        "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+        "detected_at": "<seed-1h Z>",
+        "drift_id": "00000000-0000-4000-8000-000000000604",
+        "inventory_id": "00000000-0000-4000-8000-000000000504",
+        "metadata_ref": "00000000-0000-8000-8000-000000000813",
+        "observation_source": "proxy_live",
+        "previous_inventory_id": "00000000-0000-4000-8000-000000000502",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-edge-01",
+        "upstream_id": "github-mcp"
+      },
+      {
+        "change": "removed",
+        "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+        "detected_at": "<seed-1h Z>",
+        "drift_id": "00000000-0000-4000-8000-000000000603",
+        "inventory_id": "00000000-0000-4000-8000-000000000504",
+        "metadata_ref": "00000000-0000-8000-8000-000000000803",
+        "observation_source": "proxy_live",
+        "previous_inventory_id": "00000000-0000-4000-8000-000000000502",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-edge-01",
+        "upstream_id": "github-mcp"
+      }
+    ],
+    "next_cursor": null
+  }
+}

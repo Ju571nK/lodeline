@@ -70,6 +70,17 @@ invocations cover every lifecycle and every outcome, a `completion_without_start
 `integrity_conflict` that the proxy reported as success, a `started` invocation whose epoch was
 superseded, and a detail with 40 events of which the server lists 32 (`events_truncated`).
 
+## mock-proxy-inventory.json
+
+The inventory views the mock fleet serves for `/api/v1/fleet/proxies/{id}/inventory-snapshots`,
+`/drift` and `/rebaseline-markers`, written for this console. It maps a proxy ID to its
+`snapshots`, `drift` and `markers`, each newest first and each item as `src/fleet/proxy.rs`
+reads it. A listed proxy that has no entry has empty views. Numbers under `*_at` keys are second
+offsets from the seed. `px-edge-01` has two chains with drift of every change and a declared key
+rotation, `px-edge-02` has a snapshot waiting for its previous one, an inconsistent one, a chain
+under a second credential scope and an undeclared key change, and `px-lab-03` has an epoch change
+next to the `inventory_incomplete` gap in `mock-proxies.json`.
+
 ## jose-cases.json
 
 ID token headers and key sets, each with whether go-oidc v3.21.0 and go-jose v4.1.4 accept the

@@ -1,0 +1,39 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/proxies/px-edge-02/rebaseline-markers",
+    "server": "mock"
+  },
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "items": [
+      {
+        "cause": "key_change_undeclared",
+        "credential_scope_id": "cs-0123456789abcdef0123456789abcdef",
+        "detected_at": "<seed-150m Z>",
+        "drift_computed": false,
+        "from_canon": "sigil-tooldef-fp-v1",
+        "from_key_id": "kid-000000000000000000000001",
+        "inventory_id": "00000000-0000-4000-8000-000000000509",
+        "links_present": false,
+        "marker_id": "00000000-0000-4000-8000-000000000711",
+        "observation_source": "proxy_live",
+        "previous_inventory_id": "00000000-0000-4000-8000-000000000508",
+        "protocol_version": "2025-11-25",
+        "proxy_id": "px-edge-02",
+        "to_canon": "sigil-tooldef-fp-v1",
+        "to_key_id": "kid-000000000000000000000003",
+        "upstream_id": "github-mcp"
+      }
+    ],
+    "next_cursor": null
+  }
+}

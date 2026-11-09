@@ -8,7 +8,9 @@ use reqwest::header::{ACCEPT, RETRY_AFTER};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
-use super::{go_decode, path_escape, BoxFuture, Client, FleetError, Reply, Request, Response};
+use super::{
+    go_decode, path_escape, BoxFuture, Client, FleetError, InventoryView, Reply, Request, Response,
+};
 use crate::config::ServerTls;
 
 /// The whole exchange, body included, as Go's `http.Client.Timeout`.
@@ -80,6 +82,15 @@ impl HttpClient {
             Request::InvocationById(id) => {
                 (format!("/v1/proxy-invocations/{}", path_escape(id)), true)
             }
+            // A list, but of one proxy: `proxy_unknown` means that proxy.
+            Request::Inventory(view, p) => (
+                format!(
+                    "/v1/proxies/{}/{}",
+                    path_escape(&p.proxy_id),
+                    view.segment()
+                ),
+                true,
+            ),
         };
         let proxy = matches!(
             req,
@@ -87,6 +98,7 @@ impl HttpClient {
                 | Request::ProxyById(_)
                 | Request::Invocations(_)
                 | Request::InvocationById(_)
+                | Request::Inventory(..)
         );
         let mut url = format!("{}{path}", self.base_url);
         let query = req.query();
@@ -251,6 +263,15 @@ pub(super) fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response>
         Request::ProxyById(_) => Response::Proxy(serde_json::from_str(v.get())?),
         Request::Invocations(_) => Response::Invocations(serde_json::from_str(v.get())?),
         Request::InvocationById(_) => Response::Invocation(serde_json::from_str(v.get())?),
+        Request::Inventory(InventoryView::Snapshots, _) => {
+            Response::Snapshots(serde_json::from_str(v.get())?)
+        }
+        Request::Inventory(InventoryView::Drift, _) => {
+            Response::Drift(serde_json::from_str(v.get())?)
+        }
+        Request::Inventory(InventoryView::Markers, _) => {
+            Response::Markers(serde_json::from_str(v.get())?)
+        }
     })
 }
 

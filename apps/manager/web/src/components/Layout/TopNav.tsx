@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useRouter } from '@tanstack/react-router';
+import { Link, useRouter, useRouterState } from '@tanstack/react-router';
 import { LogOut } from 'lucide-react';
 import { logout } from '@/api/auth';
 import { ServiceUnavailableError, UnauthorizedError } from '@/api/client';
@@ -22,6 +22,8 @@ import { cn } from '@/lib/utils';
 export function TopNav() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  // The router's own active test sees only /proxies; the invocation pages belong to Proxies too.
+  const onProxyPage = proxySection(useRouterState({ select: (s) => s.location.pathname }));
 
   const healthz = useQuery({
     queryKey: ['fleet', 'healthz'],
@@ -75,9 +77,13 @@ export function TopNav() {
           </Link>
           <Link
             to="/proxies"
-            activeProps={{ className: 'text-text-primary bg-bg-elevated' }}
-            inactiveProps={{ className: 'text-text-muted hover:text-text-primary' }}
-            className="rounded px-2.5 py-1 transition-colors"
+            aria-current={onProxyPage ? 'page' : undefined}
+            className={cn(
+              'rounded px-2.5 py-1 transition-colors',
+              onProxyPage
+                ? 'text-text-primary bg-bg-elevated'
+                : 'text-text-muted hover:text-text-primary',
+            )}
           >
             Proxies
           </Link>
@@ -107,6 +113,10 @@ export function TopNav() {
     </header>
   );
 }
+
+/** The pages under the Proxies nav item: proxies and their invocations. */
+export const proxySection = (pathname: string) =>
+  /^\/(proxies|proxy-invocations)(\/|$)/.test(pathname);
 
 type ConnectionState = 'connected' | 'stale' | 'disconnected' | 'unknown' | 'read_error';
 

@@ -8,8 +8,8 @@ use serde::Serialize;
 
 use crate::api::{write_json, Query};
 use crate::fleet::{
-    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams,
-    InvocationsParams, ProxiesParams, Reply, Request, RiskParams,
+    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams, InventoryParams,
+    InventoryView, InvocationsParams, ProxiesParams, Reply, Request, RiskParams,
 };
 use crate::server::{error_response, AppState};
 use crate::{config, triage};
@@ -137,6 +137,40 @@ pub async fn invocations(State(s): State<AppState>, uri: Uri) -> Response {
 pub async fn invocation(State(s): State<AppState>, uri: Uri) -> Response {
     let id = last_segment(&route_path(uri.path()));
     relay_proxy(retried(&s, Request::InvocationById(id)).await, "invocation")
+}
+
+pub async fn inventory_snapshots(s: State<AppState>, uri: Uri) -> Response {
+    inventory(s, uri, InventoryView::Snapshots).await
+}
+
+pub async fn drift(s: State<AppState>, uri: Uri) -> Response {
+    inventory(s, uri, InventoryView::Drift).await
+}
+
+pub async fn rebaseline_markers(s: State<AppState>, uri: Uri) -> Response {
+    inventory(s, uri, InventoryView::Markers).await
+}
+
+/// A proxy's inventory view. Every server filter and the cursor go to the server as given.
+async fn inventory(State(s): State<AppState>, uri: Uri, view: InventoryView) -> Response {
+    let q = Query::parse(uri.query());
+    match q.limit() {
+        Ok(limit) => {
+            let path = route_path(uri.path());
+            let p = InventoryParams {
+                proxy_id: path.rsplit('/').nth(1).unwrap_or_default().to_owned(),
+                cursor: q.get("cursor").into(),
+                limit,
+                upstream_id: q.get("upstream_id").into(),
+                credential_scope_id: q.get("credential_scope_id").into(),
+                change: q.get("change").into(),
+                from: q.get("from").into(),
+                to: q.get("to").into(),
+            };
+            relay_proxy(retried(&s, Request::Inventory(view, p)).await, "proxy")
+        }
+        Err(msg) => invalid_query(msg),
+    }
 }
 
 /// The server cannot tell an unknown target from one outside the read range, so neither can this.

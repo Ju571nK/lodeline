@@ -28,6 +28,9 @@ export const ROUTES = [
   'GET /api/v1/fleet/hosts/{host_id}',
   'GET /api/v1/fleet/proxies',
   'GET /api/v1/fleet/proxies/{proxy_id}',
+  'GET /api/v1/fleet/proxies/{proxy_id}/inventory-snapshots',
+  'GET /api/v1/fleet/proxies/{proxy_id}/drift',
+  'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
   'GET /api/v1/fleet/proxy-invocations',
   'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
   'POST /api/v1/triage/upsert',
@@ -158,6 +161,14 @@ const LIVE_EVENT = {
 const PROXY_CURSOR = 'eyJ2IjoxLCJrZXkiOiJweC1hIiwiZmlsdGVyX2hhc2giOiJhYiJ9';
 const INVOCATION_CURSOR = 'eyJ2IjoxLCJrZXkiOjcsImZpbHRlcl9oYXNoIjoiYWIifQ';
 const MOCK_INVOCATION = (n: number) => `00000000-0000-4000-8000-000000000${n}`;
+const MOCK_INVENTORY = MOCK_INVOCATION;
+const LIVE_SCOPE = {
+  proxy_id: 'px-a',
+  upstream_id: 'up1',
+  credential_scope_id: 'cs-0123456789abcdef0123456789abcdef',
+  protocol_version: '2025-11-25',
+  observation_source: 'proxy_live',
+};
 const LIVE_ALERTS = {
   evidence_kinds: ['ai_guard_risk_assessed'],
   ai_guard_buckets: ['high', 'critical'],
@@ -1102,6 +1113,87 @@ export const CASES: Case[] = [
     '/api/v1/fleet/proxies/px-edge-01',
     'fleet-proxy-no-session',
   ),
+  {
+    name: 'fleet-inventory-snapshots',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/inventory-snapshots',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-edge-01/inventory-snapshots',
+  },
+  {
+    name: 'fleet-inventory-snapshots-filtered-page',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/inventory-snapshots',
+    outcome: 'ok',
+    method: 'GET',
+    path: `/api/v1/fleet/proxies/px-edge-01/inventory-snapshots?upstream_id=github-mcp&limit=1&cursor=${MOCK_INVENTORY(506)}`,
+  },
+  {
+    name: 'fleet-inventory-snapshots-not-found',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/inventory-snapshots',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-missing/inventory-snapshots',
+  },
+  noSession(
+    'GET /api/v1/fleet/proxies/{proxy_id}/inventory-snapshots',
+    'GET',
+    '/api/v1/fleet/proxies/px-edge-01/inventory-snapshots',
+    'fleet-inventory-snapshots-no-session',
+  ),
+  {
+    name: 'fleet-drift',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/drift',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-edge-01/drift',
+  },
+  {
+    name: 'fleet-drift-changed',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/drift',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-edge-01/drift?change=changed',
+  },
+  {
+    name: 'fleet-drift-bad-change',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/drift',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-edge-01/drift?change=approved',
+  },
+  noSession(
+    'GET /api/v1/fleet/proxies/{proxy_id}/drift',
+    'GET',
+    '/api/v1/fleet/proxies/px-edge-01/drift',
+    'fleet-drift-no-session',
+  ),
+  {
+    name: 'fleet-markers',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-edge-02/rebaseline-markers',
+  },
+  {
+    name: 'fleet-markers-cursor-of-another-proxy',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
+    outcome: 'error',
+    method: 'GET',
+    path: `/api/v1/fleet/proxies/px-edge-02/rebaseline-markers?cursor=${MOCK_INVENTORY(702)}`,
+  },
+  {
+    name: 'fleet-markers-bad-limit',
+    route: 'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/proxies/px-edge-02/rebaseline-markers?limit=x',
+  },
+  noSession(
+    'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
+    'GET',
+    '/api/v1/fleet/proxies/px-edge-02/rebaseline-markers',
+    'fleet-markers-no-session',
+  ),
 
   {
     name: 'fleet-invocations',
@@ -1811,6 +1903,79 @@ export const CASES: Case[] = [
     'GET /api/v1/fleet/proxies/{proxy_id}',
     '/api/v1/fleet/proxies/px-a',
     { status: 404, json: { error: 'host_unknown' } },
+  ),
+  // Every inventory filter and the opaque cursor go upstream unchanged, under the proxy's path.
+  upstream(
+    'live-drift-cursor',
+    'GET /api/v1/fleet/proxies/{proxy_id}/drift',
+    '/api/v1/fleet/proxies/px-a/drift?upstream_id=up1' +
+      '&credential_scope_id=cs-0123456789abcdef0123456789abcdef&change=added' +
+      `&from=2026-01-01T00:00:00Z&to=2026-01-03T00:00:00Z&limit=1&cursor=${INVOCATION_CURSOR}`,
+    {
+      status: 200,
+      json: {
+        items: [
+          {
+            drift_id: '00000000-0000-4000-8000-000000000601',
+            inventory_id: '00000000-0000-4000-8000-000000000502',
+            previous_inventory_id: '00000000-0000-4000-8000-000000000501',
+            ...LIVE_SCOPE,
+            change: 'renamed_later',
+            metadata_ref: '00000000-0000-8000-8000-000000000001',
+            detected_at: LIVE_TS,
+            added_later: 'dropped',
+          },
+        ],
+        next_cursor: INVOCATION_CURSOR,
+      },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-snapshots-unknown',
+    'GET /api/v1/fleet/proxies/{proxy_id}/inventory-snapshots',
+    '/api/v1/fleet/proxies/px-a/inventory-snapshots',
+    { status: 404, json: { error: { code: 'proxy_unknown', message: 'proxy unknown' } } },
+  ),
+  upstream(
+    'live-snapshots-invalid-cursor',
+    'GET /api/v1/fleet/proxies/{proxy_id}/inventory-snapshots',
+    `/api/v1/fleet/proxies/px-a/inventory-snapshots?cursor=${INVOCATION_CURSOR}`,
+    { status: 422, json: { error: { code: 'invalid_cursor', message: 'invalid cursor' } } },
+  ),
+  upstream(
+    'live-markers-not-mounted',
+    'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
+    '/api/v1/fleet/proxies/px-a/rebaseline-markers',
+    { status: 404, text: '' },
+  ),
+  upstream(
+    'live-markers',
+    'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
+    '/api/v1/fleet/proxies/px-a/rebaseline-markers',
+    {
+      status: 200,
+      json: {
+        items: [
+          {
+            marker_id: '00000000-0000-4000-8000-000000000701',
+            ...LIVE_SCOPE,
+            inventory_id: '00000000-0000-4000-8000-000000000502',
+            previous_inventory_id: null,
+            from_key_id: 'kid-000000000000000000000001',
+            to_key_id: 'kid-000000000000000000000002',
+            from_canon: 'sigil-tooldef-fp-v1',
+            to_canon: 'sigil-tooldef-fp-v1',
+            cause: 'key_change_undeclared',
+            links_present: false,
+            drift_computed: false,
+            detected_at: LIVE_TS,
+          },
+        ],
+        next_cursor: null,
+      },
+    },
+    'ok',
   ),
   // Every invocation filter and the opaque cursor go upstream unchanged.
   upstream(

@@ -9,8 +9,9 @@
 //! The proxies are `testdata/mock-proxies.json` and their invocations
 //! `testdata/mock-proxy-invocations.json`, both written for this console: 5 proxy details and 10
 //! invocation details whose times are second offsets from the seed. A list cursor is the last ID
-//! of a page.
+//! of a page. `testdata/mock-proxy-inventory.json` holds the inventory views of some of them.
 
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
@@ -18,15 +19,18 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    go_decode, BoxFuture, Client, CompliancePage, ComplianceParams, ComplianceRow, Event,
-    EventsPage, EventsParams, FleetError, GoTime, HostDetail, HostsPage, HostsParams,
+    go_decode, BoxFuture, Client, CompliancePage, ComplianceParams, ComplianceRow, DriftRecord,
+    Event, EventsPage, EventsParams, FleetError, GoTime, HostDetail, HostsPage, HostsParams,
+    InventoryPage, InventoryParams, InventoryScope, InventorySnapshot, InventoryView,
     InvocationDetail, InvocationSummary, InvocationsPage, InvocationsParams, Meta, ProxiesPage,
-    ProxiesParams, ProxyDetail, Reply, Request, Response, RiskPage, RiskParams, RiskRow,
+    ProxiesParams, ProxyDetail, RebaselineMarker, Reply, Request, Response, RiskPage, RiskParams,
+    RiskRow,
 };
 
 const FIXTURES: &str = include_str!("../../testdata/mock-fleet.json");
 const PROXY_FIXTURES: &str = include_str!("../../testdata/mock-proxies.json");
 const INVOCATION_FIXTURES: &str = include_str!("../../testdata/mock-proxy-invocations.json");
+const INVENTORY_FIXTURES: &str = include_str!("../../testdata/mock-proxy-inventory.json");
 
 pub struct Mock {
     seed: GoTime,
@@ -39,6 +43,16 @@ pub struct Mock {
     proxies: Vec<ProxyDetail>,
     /// Newest first, the server's list order.
     invocations: Vec<InvocationDetail>,
+    /// By proxy ID. A listed proxy that has none has empty views.
+    inventory: BTreeMap<String, MockInventory>,
+}
+
+/// One proxy's three inventory views, each newest first.
+#[derive(Default, Deserialize)]
+struct MockInventory {
+    snapshots: Vec<InventorySnapshot>,
+    drift: Vec<DriftRecord>,
+    markers: Vec<RebaselineMarker>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +91,11 @@ impl Mock {
         expand_proxy_times(&mut invocations, "", seed);
         let invocations =
             serde_json::from_value(invocations).expect("mock-proxy-invocations.json has the types");
+        let mut inventory: Value =
+            serde_json::from_str(INVENTORY_FIXTURES).expect("mock-proxy-inventory.json is JSON");
+        expand_proxy_times(&mut inventory, "", seed);
+        let inventory =
+            serde_json::from_value(inventory).expect("mock-proxy-inventory.json has the types");
         Self {
             seed: GoTime::from_unix(seed),
             meta: f.meta,
@@ -85,7 +104,67 @@ impl Mock {
             events: f.events,
             proxies,
             invocations,
+            inventory,
         }
+    }
+
+    /// The server's checks in its order: an unknown proxy first, then the filters and the limit,
+    /// then a cursor that must name a listed row.
+    fn inventory(&self, view: InventoryView, p: &InventoryParams) -> Result<Response, FleetError> {
+        if !self
+            .proxies
+            .iter()
+            .any(|d| d.summary.proxy_id == p.proxy_id)
+        {
+            return Err(FleetError::NotFound);
+        }
+        let time = |v: &str| match v {
+            "" => Ok(None),
+            v => GoTime::parse(v).map(Some).ok_or(FleetError::InvalidFilter),
+        };
+        let (from, to) = (time(&p.from)?, time(&p.to)?);
+        let change_known = match view {
+            InventoryView::Drift => {
+                ["", "added", "removed", "changed"].contains(&p.change.as_str())
+            }
+            _ => p.change.is_empty(),
+        };
+        if !change_known || p.limit > 500 {
+            return Err(FleetError::InvalidFilter);
+        }
+        let keep = |s: &InventoryScope, at: &str| {
+            let at = GoTime::parse(at);
+            (p.upstream_id.is_empty() || s.upstream_id == p.upstream_id)
+                && (p.credential_scope_id.is_empty()
+                    || s.credential_scope_id == p.credential_scope_id)
+                && from.is_none_or(|f| at.is_some_and(|t| t >= f))
+                && to.is_none_or(|e| at.is_some_and(|t| t < e))
+        };
+        let none = MockInventory::default();
+        let inv = self.inventory.get(&p.proxy_id).unwrap_or(&none);
+        Ok(match view {
+            InventoryView::Snapshots => Response::Snapshots(inventory_page(
+                &inv.snapshots,
+                p,
+                |r| keep(&r.scope, &r.received_at),
+                |r| &r.inventory_id,
+            )?),
+            InventoryView::Drift => Response::Drift(inventory_page(
+                &inv.drift,
+                p,
+                |r| {
+                    keep(&r.scope, &r.detected_at)
+                        && (p.change.is_empty() || serde_json::json!(r.change) == p.change.as_str())
+                },
+                |r| &r.drift_id,
+            )?),
+            InventoryView::Markers => Response::Markers(inventory_page(
+                &inv.markers,
+                p,
+                |r| keep(&r.scope, &r.detected_at),
+                |r| &r.marker_id,
+            )?),
+        })
     }
 
     /// The server's filters and limit checks, and a cursor that must name a listed proxy.
@@ -352,6 +431,7 @@ impl Mock {
                     .cloned()
                     .ok_or(FleetError::NotFound)?,
             ),
+            Request::Inventory(view, p) => self.inventory(view, &p)?,
         })
     }
 }
@@ -390,6 +470,18 @@ fn cursor_page<T: Clone>(
     let more = rows.len() > start + items.len();
     let next = items.last().filter(|_| more).map(|r| id(r).clone());
     Ok((items, next))
+}
+
+/// The rows of an inventory view that `keep` passes, paged as [`cursor_page`] does.
+fn inventory_page<T: Clone>(
+    rows: &[T],
+    p: &InventoryParams,
+    keep: impl Fn(&T) -> bool,
+    id: impl Fn(&T) -> &String,
+) -> Result<InventoryPage<T>, FleetError> {
+    let rows: Vec<&T> = rows.iter().filter(|r| keep(r)).collect();
+    let (items, next_cursor) = cursor_page(&rows, &p.cursor, p.limit, id)?;
+    Ok(InventoryPage { items, next_cursor })
 }
 
 /// Turns the fixture offsets into times after `seed` and the hex addresses into dotted ones.
@@ -610,6 +702,102 @@ mod tests {
             Some(GoTime::from_unix(seed - 7200).to_string().as_str())
         );
         assert_eq!(lab.spool.as_ref().unwrap().quarantined_bytes, None);
+    }
+
+    #[test]
+    fn inventory_views_filter_page_and_refuse_what_the_server_refuses() {
+        let seed = 1_767_225_600;
+        let m = Mock::new(seed);
+        let get = |view, p: InventoryParams| m.inventory(view, &p);
+        let of = |proxy: &str| InventoryParams {
+            proxy_id: proxy.into(),
+            ..Default::default()
+        };
+        let tail = |id: &str| id[33..].to_owned();
+        let Ok(Response::Snapshots(all)) = get(InventoryView::Snapshots, of("px-edge-01")) else {
+            panic!("not a snapshot page")
+        };
+        let ids: Vec<_> = all.items.iter().map(|s| tail(&s.inventory_id)).collect();
+        assert_eq!(ids, ["506", "505", "504", "503", "502"]);
+        assert_eq!(
+            all.items[0].received_at,
+            GoTime::from_unix(seed - 590).to_string()
+        );
+        let Ok(Response::Snapshots(first)) = get(
+            InventoryView::Snapshots,
+            InventoryParams {
+                limit: 2,
+                ..of("px-edge-01")
+            },
+        ) else {
+            panic!("not a snapshot page")
+        };
+        let cursor = first.next_cursor.expect("a second page");
+        let Ok(Response::Snapshots(second)) = get(
+            InventoryView::Snapshots,
+            InventoryParams {
+                limit: 2,
+                cursor: cursor.clone(),
+                ..of("px-edge-01")
+            },
+        ) else {
+            panic!("not a snapshot page")
+        };
+        assert_eq!(tail(&second.items[0].inventory_id), "504");
+        let Ok(Response::Drift(removed)) = get(
+            InventoryView::Drift,
+            InventoryParams {
+                change: "removed".into(),
+                ..of("px-edge-01")
+            },
+        ) else {
+            panic!("not a drift page")
+        };
+        let removed: Vec<_> = removed.items.iter().map(|d| tail(&d.drift_id)).collect();
+        assert_eq!(removed, ["603"]);
+        let Ok(Response::Markers(docs)) = get(
+            InventoryView::Markers,
+            InventoryParams {
+                upstream_id: "docs-search".into(),
+                ..of("px-edge-01")
+            },
+        ) else {
+            panic!("not a marker page")
+        };
+        assert_eq!(docs.items.len(), 1);
+        let Ok(Response::Drift(none)) = get(InventoryView::Drift, of("px-new-04")) else {
+            panic!("not a drift page")
+        };
+        assert_eq!((none.items.len(), none.next_cursor), (0, None));
+        for (view, p, want) in [
+            (InventoryView::Drift, of("px-missing"), FleetError::NotFound),
+            (
+                InventoryView::Snapshots,
+                InventoryParams {
+                    change: "added".into(),
+                    ..of("px-edge-01")
+                },
+                FleetError::InvalidFilter,
+            ),
+            (
+                InventoryView::Drift,
+                InventoryParams {
+                    change: "approved".into(),
+                    ..of("px-edge-01")
+                },
+                FleetError::InvalidFilter,
+            ),
+            (
+                InventoryView::Snapshots,
+                InventoryParams {
+                    cursor,
+                    ..of("px-edge-02")
+                },
+                FleetError::InvalidCursor,
+            ),
+        ] {
+            assert_eq!(get(view, p.clone()).unwrap_err(), want, "{view:?} {p:?}");
+        }
     }
 
     #[test]
