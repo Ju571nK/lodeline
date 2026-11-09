@@ -25,9 +25,10 @@ pages work as before. `lodeline-proxy` is still not a release asset.
 - The web console shows the server's Lodeline proxies on a new Proxies page. The list shows each
   proxy's connection, config and spool state and when it was last seen, and filters by
   connection state and config sync. A proxy's page shows its config revisions, spool, central
-  ingest, registry sync, route health and audit gaps. A degraded spool reads as stopped ingest,
-  quarantined events show next to the spool depth, and a non-zero `audit_gaps_dropped` marks the
-  gap list incomplete. Before, the console showed nothing about proxies. The console reads
+  ingest, registry sync, route health and audit gaps. When the server has stopped a proxy's
+  ingest, its degraded spool reads as stopped ingest, not as a storage fault. Quarantined events
+  show next to the spool depth, and a non-zero `audit_gaps_dropped` marks the gap list
+  incomplete. Before, the console showed nothing about proxies. The console reads
   `GET /v1/proxies` and `GET /v1/proxies/{id}` and relays them as `GET /api/v1/fleet/proxies`
   and `GET /api/v1/fleet/proxies/{proxy_id}`. No page changes a proxy, and the console holds no
   management credential. (#542)
