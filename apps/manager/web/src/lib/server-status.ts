@@ -1,7 +1,7 @@
 import { ApiError, ServiceUnavailableError } from '@/api/client';
 
 export const certificateRefused =
-  'Client certificate refused. lodeline-server serves reads only to a certificate from its host client CA.';
+  'Client certificate refused. Issue the certificate in LODELINE_SERVER_CLIENT_CERT_PATH from the host client CA of lodeline-server.';
 
 export function readAPIError(error: unknown): string {
   if (error instanceof ServiceUnavailableError) return 'Rebuilding index (503). Retry shortly.';

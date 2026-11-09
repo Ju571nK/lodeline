@@ -94,7 +94,7 @@ export function ConnectionCell({ proxy }: { proxy: ProxySummary }) {
 const proxyNotFound =
   'Proxy not found. It is not registered, or it is outside the read range of this console’s credential; the server answers both the same way.';
 const proxyReadsUnavailable =
-  'Proxy reads are not available on this lodeline-server. It runs without a proxy section, or it does not serve proxy reads to this console’s client certificate.';
+  'Proxy reads are not available on this lodeline-server. It runs without a proxy section.';
 
 /** The not-found and unavailable panels, by what the page reads. */
 const targetText = {
@@ -107,8 +107,7 @@ const targetText = {
   // Shown under a proxy that has loaded, so an unserved route most likely means an older server.
   inventory: {
     notFound: proxyNotFound,
-    unavailable:
-      'Inventory reads are not available on this lodeline-server. It predates them, or it does not serve proxy reads to this console’s client certificate.',
+    unavailable: 'Inventory reads are not available on this lodeline-server. It predates them.',
   },
 };
 

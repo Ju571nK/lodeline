@@ -85,7 +85,7 @@ test.describe('proxy pages', () => {
     );
     await page.goto('/proxies');
     await expect(page.getByRole('alert')).toContainText(
-      'Proxy reads are not available on this lodeline-server.',
+      'Proxy reads are not available on this lodeline-server. It runs without a proxy section.',
       { timeout: 5_000 },
     );
   });
@@ -100,8 +100,9 @@ test.describe('proxy pages', () => {
       }),
     );
     await page.goto('/proxies');
-    await expect(page.getByRole('alert')).toContainText('Client certificate refused.', {
-      timeout: 5_000,
-    });
+    await expect(page.getByRole('alert')).toContainText(
+      'Client certificate refused. Issue the certificate in LODELINE_SERVER_CLIENT_CERT_PATH',
+      { timeout: 5_000 },
+    );
   });
 });
