@@ -919,8 +919,9 @@ Continue.dev (note the latter drops the `_dev` that the tool enum carries
 A new `executor` string value `"mcp_command"` (in addition to the
 existing `"host_shell"`) appears in `NoSandbox` reasons emitted by
 app-form parsers, and `hook_event` may now take the values
-`"mcp_command"`, `"slash_command"`, or `"custom_command"` from the
-Continue.dev parser.
+`"mcp_command"` or `"custom_command"` from the Continue.dev parser.
+Agents before v0.11.0 also emitted `"slash_command"`, so stored events from
+those agents can still carry it.
 
 **Consumer impact when lodeline-manager builds the fleet UI:**
 - Render new tool strings with appropriate icons / labels — recommended:
