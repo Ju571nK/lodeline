@@ -158,6 +158,10 @@ sender's `server_ca_path` / `client_cert_path` / `client_key_path`). Keep
 so give it the key: `sudo install -o lodeline -g lodeline -m 0600 client-hostA.key
 /var/lib/lodeline-sender/client.key`.
 
+Once the files are on the host, remove the host's key and certificate from the
+server, so that no copy of the host's private key stays on it:
+`sudo rm -f /etc/lodeline/client-hostA.key /etc/lodeline/client-hostA.crt`.
+
 **Let the server read its key.** The packaged unit runs the server as `lodeline`,
 and `openssl` made `server.key` for root. Give the group `lodeline` read access, or
 the server cannot start with mTLS. The service can then read the key and cannot
@@ -564,7 +568,7 @@ need it.
 | 1 | Failed. Read the message |
 | 2 | The enrollment file is bad, or the usage is wrong |
 | 3 | This host has another host_id. `lodeline show host-id` prints it. An existing `sender.yaml` that names another host_id also exits 3, and is checked before the CA and the keystore |
-| 4 | A path enroll would write is not free: the file exists with other content, the path is a link or not a regular file, the file has another hard link, or it cannot be read (larger than 64 KiB, or a read failure). An existing key that is not P-256 also exits 4. Enroll never replaces one |
+| 4 | A path enroll would write is not free: the file exists with other content, the path is a link or not a regular file, the file has another hard link, or it cannot be read (larger than 64 KiB, or a read failure). An existing key that is not P-256 also exits 4, and so does an existing certificate that has no key beside it or that this host cannot use (it is for another key or host, has expired, does not chain to the file's CA, or is not valid for client authentication). Enroll never replaces one |
 | 5 | The token was refused or may be spent. Issue a new token |
 | 6 | The listener could not be reached or trusted, or stayed busy. The token was not used |
 
@@ -983,7 +987,7 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | `enroll-token` says the token directory is owned by another uid | It was run as root, and the directory belongs to `lodeline` | Run it with `sudo -u lodeline` (§3.1) |
 | `lodeline-sender enroll` exits 2 | The enrollment file is bad: not format 1, a field missing or malformed, or group or others can write it | Read the message, which names the field and never its value (§3.3) |
 | `lodeline-sender enroll` exits 3 | The host has another host_id | `lodeline show host-id`, then make a file for that id (§3.3) |
-| `lodeline-sender enroll` exits 4 | A path it would write exists with other content, is a link or not a regular file, has another hard link, cannot be read, or is a key that is not P-256 | Compare it with the enrollment file, move it aside, run again (§3.3) |
+| `lodeline-sender enroll` exits 4 | A path it would write exists with other content, is a link or not a regular file, has another hard link, cannot be read, is a key that is not P-256, or is a certificate without its key or one this host cannot use | Compare it with the enrollment file, move it aside, run again (§3.3) |
 | `lodeline-sender enroll` exits 5 | The server refused the token, or its certificate failed the checks | Issue a new token. For a rejected certificate, read `client.crt.rejected` and the reason (§3.3) |
 | `lodeline-sender enroll` exits 6 | The listener could not be reached or trusted | Check `enroll_url`, the firewall and the CA in the file; the token was not used (§3.3) |
 | `lodeline-sender enroll` says a `.tmp` file exists | An earlier run stopped half way, or another enroll is running | Make sure none is running, remove that file, run again |
