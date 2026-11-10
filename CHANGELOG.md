@@ -82,10 +82,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - `lodeline-sender csr` says `an existing file is never overwritten` only when the file exists.
   A link in the path, an unwritable directory or another failure now prints its own cause, and
   the `key stays root-owned` hint prints only after the key was written. (#568)
-- `docs/install-server.md` now gives the packaged server's private keys, `server.key` and the
-  enrollment CA key, to `lodeline` with mode 0600, as the unit's account needs. It also says the
-  unit runs as `lodeline`, lists every case of `enroll` exit 4, and shows the policy keystore
-  layout with a complete enrollment file. (#568)
+- `docs/install-server.md` now gives `server.key` to `root:lodeline` with mode 0640, as the
+  unit's comment says, and the enrollment CA key to `lodeline` with mode 0600. It adds a step
+  to take `ca.key` and `int.key` off the server, says the unit runs as `lodeline`, lists every
+  case of `enroll` exit 4, and shows the policy keystore layout with a complete enrollment
+  file. (#568)
 - Enrollment now works on a packaged Linux server. On a host with the packages installed and
   SELinux enforcing, it failed three ways. The SELinux module did not let `lodeline_server_t`
   run `openssl`, which signing uses, so enrollment was off and the log blamed the CA

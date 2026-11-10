@@ -154,4 +154,25 @@ mod as_root {
         assert_eq!(fs::metadata(&key).unwrap().uid(), 0, "stays root-owned");
         assert!(String::from_utf8_lossy(&out.stderr).contains("stays root-owned"));
     }
+
+    /// A failed write as root must not print the hint: the key was never written.
+    /// Printing it before the write passes every non-root test, so only this one,
+    /// which CI runs as root, catches that.
+    #[test]
+    #[ignore = "needs root"]
+    fn root_prints_no_stays_root_owned_hint_when_the_key_write_fails() {
+        let open = tempfile::Builder::new().tempdir_in("/root").unwrap();
+        fs::set_permissions(open.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let real = open.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = open.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let req = open.path().join("host.csr");
+        let out = csr(HOST_ID, &link.join("host.key"), &req);
+        assert!(!out.status.success(), "{out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("stays root-owned"), "{err}");
+        assert!(!real.join("host.key").exists());
+        assert!(!req.exists(), "no CSR is left behind");
+    }
 }

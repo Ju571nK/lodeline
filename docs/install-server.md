@@ -156,17 +156,18 @@ so give it the key: `sudo install -o lodeline -g lodeline -m 0600 client-hostA.k
 /var/lib/lodeline-sender/client.key`.
 
 **Let the server read its key.** The packaged unit runs the server as `lodeline`,
-and `openssl` made `server.key` for root. Give the key to that account, or the
-server cannot start with mTLS:
+and `openssl` made `server.key` for root. Give the group `lodeline` read access, or
+the server cannot start with mTLS. The service can then read the key and cannot
+change it:
 
 ```sh
-sudo chown lodeline:lodeline /etc/lodeline/server.key
-sudo chmod 0600 /etc/lodeline/server.key
+sudo chown root:lodeline /etc/lodeline/server.key
+sudo chmod 0640 /etc/lodeline/server.key
 ```
 
-Every private key the server reads gets this owner and mode: `lodeline`, group
-`lodeline`, 0600. Only `server.key` and the enrollment CA key (§3.1) are such
-keys. The server never reads `ca.key`, so keep it offline as above.
+The enrollment CA key (§3.1) is the exception: the server refuses it when group
+or others have any permission bit, so `lodeline` must own it, with mode 0600. The
+server never reads `ca.key`, so keep it offline as above.
 
 > **SAN is the #1 mTLS gotcha.** If agents dial `https://192.0.2.50:8443` but
 > the cert SAN only has a DNS name, the TLS handshake fails. Put the literal
@@ -189,6 +190,14 @@ openssl x509 -req -in int.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 182
   -extfile <(printf "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign") -out int.crt
 sudo install -o lodeline -g lodeline -m600 int.key /etc/lodeline/enroll-int.key
 sudo install -m644 int.crt /etc/lodeline/enroll-int.crt
+```
+
+The commands above ran in `/etc/lodeline`, so `ca.key` and `int.key` are still
+there. Move `ca.key` off the server to offline storage, and delete the copy
+`int.key`, which `enroll-int.key` now replaces:
+
+```sh
+sudo rm /etc/lodeline/int.key
 ```
 
 **2. Configure `server.yaml`** (requires a configured `host_allowlist_path` and
@@ -443,7 +452,7 @@ a server certificate.
 
 **Make the file** on the server host, from the CA that signed the server
 certificate and the keystore (the `policy_keystore` object above, saved as
-`policy-signing-pubkeys.pem`). `jq` 1.6 or later is needed:
+`policy-signing-pubkeys.pem`, a JSON file despite the name). `jq` 1.6 or later is needed:
 
 ```sh
 H=$(cat /proc/sys/kernel/random/uuid)    # macOS: uuidgen | tr 'A-Z' 'a-z'
@@ -484,7 +493,7 @@ On the packaged layout the files are:
 | client key | `/var/lib/lodeline-sender/client.key` | `lodeline:lodeline` 0600 |
 | client certificate (leaf, then chain) | `/var/lib/lodeline-sender/client.crt` | `lodeline:lodeline` 0644 |
 | server CA | `/etc/lodeline/server-ca.pem` | `root:root` 0644 |
-| policy keystore | `/etc/lodeline/policy-signing-pubkeys.pem` | `root:root` 0644 |
+| policy keystore (JSON, despite the name) | `/etc/lodeline/policy-signing-pubkeys.pem` | `root:root` 0644 |
 | sender config | `/etc/lodeline/sender.yaml` | `root:root` 0644 |
 
 A file takes the owner of its directory only when enroll created it in this run,
@@ -521,7 +530,7 @@ need it.
 | 1 | Failed. Read the message |
 | 2 | The enrollment file is bad, or the usage is wrong |
 | 3 | This host has another host_id. `lodeline show host-id` prints it. An existing `sender.yaml` that names another host_id also exits 3, and is checked before the CA and the keystore |
-| 4 | A path enroll would write is not free: the file exists with other content, the path is a link or not a regular file, or the file has another hard link. Enroll never replaces one |
+| 4 | A path enroll would write is not free: the file exists with other content, the path is a link or not a regular file, the file has another hard link, or it cannot be read (larger than 64 KiB, or a read failure). An existing key that is not P-256 also exits 4. Enroll never replaces one |
 | 5 | The token was refused or may be spent. Issue a new token |
 | 6 | The listener could not be reached or trusted, or stayed busy. The token was not used |
 
@@ -714,8 +723,8 @@ LODELINE_SERVER_READ_TOKEN=<token> lodeline-server serve --config /etc/lodeline/
 ```
 
 The unit runs as `lodeline` with `ProtectSystem=strict` and writes only to its
-state/log dirs. Make `tls_key_path` readable by that account (§3). See [`packaging/README.md`](../packaging/README.md) for the unit
-details.
+state/log dirs. Make `tls_key_path` readable by that account (§3). See
+[`packaging/README.md`](../packaging/README.md) for the unit details.
 
 `lodeline-server` and `lodeline-sender` log at `info` by default and write their logs
 to stderr, which the journal keeps. `RUST_LOG` sets
@@ -804,7 +813,7 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | `enroll-token` says the token directory is owned by another uid | It was run as root, and the directory belongs to `lodeline` | Run it with `sudo -u lodeline` (§3.1) |
 | `lodeline-sender enroll` exits 2 | The enrollment file is bad: not format 1, a field missing or malformed, or group or others can write it | Read the message, which names the field and never its value (§3.3) |
 | `lodeline-sender enroll` exits 3 | The host has another host_id | `lodeline show host-id`, then make a file for that id (§3.3) |
-| `lodeline-sender enroll` exits 4 | A path it would write exists with other content, is a link or not a regular file, or has another hard link | Compare it with the enrollment file, move it aside, run again (§3.3) |
+| `lodeline-sender enroll` exits 4 | A path it would write exists with other content, is a link or not a regular file, has another hard link, cannot be read, or is a key that is not P-256 | Compare it with the enrollment file, move it aside, run again (§3.3) |
 | `lodeline-sender enroll` exits 5 | The server refused the token, or its certificate failed the checks | Issue a new token. For a rejected certificate, read `client.crt.rejected` and the reason (§3.3) |
 | `lodeline-sender enroll` exits 6 | The listener could not be reached or trusted | Check `enroll_url`, the firewall and the CA in the file; the token was not used (§3.3) |
 | `lodeline-sender enroll` says a `.tmp` file exists | An earlier run stopped half way, or another enroll is running | Make sure none is running, remove that file, run again |
