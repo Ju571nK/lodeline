@@ -466,6 +466,7 @@ impl Fx {
             san_dns: vec![],
             issuer_dn: Some(issuer.into()),
             issuer_aki: None,
+            ..Default::default()
         };
         match who {
             Who::Host => Some(mk(HOST_FP, "CN=test-host-ca")),

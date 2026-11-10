@@ -130,6 +130,14 @@ pub fn build_router(state: SharedState) -> Router {
         // the body is the credential; mTLS still gates at the TLS layer. Feature
         // off (enroll == None) ⇒ handler returns 404.
         .route("/v1/enroll", post(crate::routes::enroll::post_enroll))
+        // #553: certificate renewal. The presented client certificate is the
+        // credential. Enrollment off (or its audit file unreadable) ⇒ 404.
+        .route(
+            lodeline_fleet_api::renewal::RENEW_PATH,
+            post(crate::routes::renew::post_renew).layer(axum::extract::DefaultBodyLimit::max(
+                crate::enroll::listener::MAX_BODY,
+            )),
+        )
         .with_state(state)
 }
 

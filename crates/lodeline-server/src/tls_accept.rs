@@ -57,6 +57,9 @@ pub struct PeerIdentity {
     pub issuer_dn: Option<String>,
     /// Authority Key Identifier (keyIdentifier, lowercase hex) when present.
     pub issuer_aki: Option<String>,
+    /// The leaf certificate DER as presented, for `POST /v1/renew` to verify
+    /// and read. Empty only in a hand-built identity.
+    pub der: Vec<u8>,
 }
 
 impl PeerIdentity {
@@ -73,6 +76,7 @@ impl PeerIdentity {
             san_dns,
             issuer_dn,
             issuer_aki,
+            der: der.to_vec(),
         }
     }
 }

@@ -183,7 +183,7 @@ the mTLS triple — both are enforced at boot, else enrollment stays off):
 enroll_ca_cert_path: "/etc/lodeline/enroll-int.crt"
 enroll_ca_key_path:  "/etc/lodeline/enroll-int.key"   # 0600 or enrollment disables
 enroll_tokens_path:  "/var/lib/lodeline-server/enroll-tokens.json"
-enroll_cert_days: 30                                # short — re-enroll is the revocation story
+enroll_cert_days: 30                                # lifetime of each issued certificate; hosts renew from half of it (§3.4)
 host_allowlist_path: "/var/lib/lodeline-server/host-allowlist.json"   # REQUIRED (restrictive set)
 ```
 
@@ -271,8 +271,8 @@ a fresh one). Every token failure returns a generic `403 enrollment_denied`.
 > §5.1) is separate. To bind each host's certificate to its host_id on
 > `POST /v1/events`, set `events_require_cert_host_match: true`; certificates
 > from `/v1/enroll` already match. The server has no CRL or OCSP revocation, and
-> it does not attest that a key was made on the host. Short certificate
-> lifetimes stand in for revocation.
+> it does not attest that a key was made on the host. §3.4 says what removes a
+> host and what keeps working until its certificate expires.
 
 ### 3.2 Enrollment listener (self-enrollment), optional
 
@@ -500,6 +500,88 @@ issue a new token. A certificate up to five minutes ahead of the clock is
 accepted with a warning.
 
 ---
+
+### 3.4 Certificate renewal (server side)
+
+A host that holds a certificate from `/v1/enroll` can get a new one without a
+token. `POST /v1/renew` is served on the main port, where the client certificate
+the host presents is its credential. It is on whenever enrollment is on, and it
+has no setting of its own. The sender does not call it yet, so today a host or
+its PMS makes the request.
+
+The host makes a CSR for a **new key** (`lodeline-sender csr` writes both) and
+posts it. The host id is the CN of the certificate it presents, so the body has
+no `host_id`:
+
+```sh
+lodeline-sender csr --host-id <host_id> --key-out client.key.new --csr-out renew.csr
+curl --cert client.crt --key client.key --cacert ca.crt \
+  -X POST https://lodeline.example.com:8443/v1/renew \
+  -H 'content-type: application/json' \
+  -d "{\"csr_pem\":\"$(awk '{printf "%s\\n",$0}' renew.csr)\"}"
+#  → {"ca_chain_pem":"...", "client_cert_pem":"...", "host_id":"...", "not_after":"...", "serial":"..."}
+```
+
+The answer has the fields `/v1/enroll` returns, and the certificate has the same
+fixed profile and `enroll_cert_days` lifetime. The checks run in this order:
+
+| Check | Answer |
+|---|---|
+| Enrollment is off, or the audit file could not be read at start | 404 `enroll_not_configured` |
+| No client certificate, or its CN is not a UUID | 403 `renewal_denied` |
+| The certificate does not verify against the CA in `enroll_ca_cert_path` alone, is expired, or is not for client authentication | 403 |
+| The host is not on the allowlist | 403 |
+| Less than half of the certificate's own validity has passed | 409 `too_early`, with `Retry-After` in seconds to the half point, at most 3600 |
+| The certificate is not the host's newest (below) | 403 |
+| The CSR is invalid, names another host, or carries the key of the presented certificate | 400 |
+| The body is over 17 KiB | 413 |
+| Signing or the audit write failed | 500 `sign_failed`, and no certificate is issued |
+
+Every 403 has the same body. The reason goes to the log, at most one line a
+minute for each reason. A certificate from your own PKI (§3 step 3) cannot renew
+here, because it does not verify against the enrollment CA. Such a host enrolls
+once, and renews from then on.
+
+**Which certificate may renew.** For each host id the server keeps the newest
+certificate it issued, from `/v1/enroll` or `/v1/renew`, and rebuilds that at
+start from `enrollment-audit.jsonl`. A host renews from that certificate. When an
+answer was lost, the one before it may ask again with the same CSR bytes. The
+server issues at most three certificates for one presented certificate and then
+answers 403. The first refusal for each presented certificate is written to the
+audit file as a signed `denied` line with the reason `renewal_superseded`. Later
+ones reach only the log. Each renewal is one signed `issued` line with the reason
+`renewed`, and its `caller_fingerprint` is the blake3 of the certificate the host
+presented.
+
+What follows from that:
+
+- **Re-enrolling supersedes.** A new enrollment makes a new newest certificate,
+  so every certificate of the older chain stops renewing at once. This is the
+  way to cut off a copy of a host's key and certificate. It does not end the
+  validity of a certificate already issued.
+- **A copy that renews first wins the race.** The real host then gets 403, and the
+  audit file shows two `renewed` lines from one `caller_fingerprint` with two CSR
+  fingerprints. Re-enroll the real host.
+- **A host with no entry** (an empty or missing audit file, or an enrollment from a
+  release before renewal whose line has no serial) renews once, and the server
+  records the result.
+
+**At start.** A missing audit file means no entries. Lines that do not parse are
+skipped, with one warning that counts them. A file that exists but cannot be read
+turns renewal off, with one `renew:` error line, until you fix it. Enrollment
+keeps working. Rotating or deleting the file breaks nothing, because the entries
+are rebuilt from what is left.
+
+**What renewal needs.** The enrollment CA key stays on the server, with the same
+boot checks as enrollment. An allowlist that cannot be rewritten turns enrollment
+off, and renewal with it, even though renewal never writes the allowlist.
+
+**Removing a host.** There is no CRL or OCSP. Remove the host id from
+`host_allowlist_path` and restart `lodeline-server`, because the file is read at
+start. From the restart, events, policy and rule packs answer 404 `host_unknown`
+and renewal answers 403. The certificate already issued keeps working for the
+host's TLS handshake until its `notAfter`, 30 days by default, and a connection
+opened before then can stay open past it until the next reconnect.
 
 ## 4. Signed policy bundle
 
