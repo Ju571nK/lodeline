@@ -10,7 +10,13 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const CA: &str = include_str!("data/test-ca.pem");
+/// Any CA certificate: the client only needs one to build, since these tests use plain HTTP.
+fn ca_pem() -> String {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+    p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    p.self_signed(&key).unwrap().pem()
+}
 
 /// Answers each connection with the next scripted `(status, extra header, body)`.
 async fn scripted(script: Vec<(u16, &'static str, String)>) -> (String, Arc<AtomicUsize>) {
@@ -46,7 +52,7 @@ fn issued() -> String {
 async fn run(url: &str, earlier_run: bool) -> Result<(String, String), (i32, String)> {
     let r = Request {
         enroll_url: url,
-        server_ca_pem: CA,
+        server_ca_pem: &ca_pem(),
         token: "tkn-9f8e7d6c",
         host_id: "3f2c6a1e-8b4d-4c2a-9e7f-1a2b3c4d5e6f",
         csr_pem: "csr",
