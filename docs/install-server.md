@@ -737,14 +737,17 @@ before you run `enroll` on a host that stopped in the middle of a renewal.
 | The new key is live and the old certificate is still live | Replaces the certificate with `client.crt.next` |
 | The new certificate is live and the old key is still live | Replaces the key with `client.key.next` |
 | `client.crt.next` alone, with no readable `client.key.next` | Removes it |
+| A `.next` file that is there and does not parse (a certificate, a key, or a CSR; an empty file included) | Removes it. A bad `client.key.next` or `client.csr.next` takes the other one with it, and a CSR made for another key counts as bad. The live pair is not touched and the next wake asks again |
 | `client.crt.next` does not expire later than the live certificate, or names another host (for example after `enroll` or a hand copy) | Removes the `.next` files and keeps the live pair |
 | `client.crt.next` does not fit `client.key.next`, or fails the chain or client-authentication check | Removes only `client.crt.next`, keeps `client.key.next` and `client.csr.next`, and sends the same CSR again |
-| A file the check needs cannot be read (for example `server_ca_path`) | Removes nothing, logs `cannot settle the renewal files`, and tries again at the next wake |
+| A file the check needs cannot be read (a `.next` file that is a link, has another hard link or is over 64 KiB, or `server_ca_path`) | Removes nothing, logs `cannot settle the renewal files`, and tries again at the next wake |
 | `client.key` or `client.crt` is missing | Logs an error that names the missing file and says to run `enroll`, and deletes nothing |
 | The live key and certificate do not match, and no `.next` file fits them | Logs an error that says to run `enroll`, deletes nothing, and the running sender keeps the client it has |
 
 In the last three rows the wake ends there: the sender sends no renewal request and
-renames nothing until the files are readable and consistent again. A new certificate
+renames nothing until the files are readable and consistent again. The sender still
+loads a live pair that was replaced on disk (an `enroll` run by hand), when the key and
+the certificate match. A new certificate
 from the server is held to the same rule as a stored one: it must be for the new key,
 name this host, chain to the CA, and expire later than the certificate in use.
 
@@ -759,7 +762,7 @@ sender never retries a refusal quickly.
 | Line | What to do |
 |---|---|
 | `renewed the client certificate and key` | Nothing. |
-| `the server refused to renew this host's certificate` with status 403 | This certificate is no longer the newest one issued for the host (a copy of the key renewed first, or the host was enrolled again elsewhere), or the host is not on the allowlist. Check the allowlist. Otherwise enroll the host again before the certificate expires. |
+| `the server refused to renew this host's certificate` with status 403 | Either this certificate is no longer the newest one issued for the host (the host was enrolled again, or a copy of its key renewed first), or the server already issued three certificates for it, or the host is not on the allowlist. Check the server's audit file for this host (§3.4): a `renewal_superseded` line means the certificate was replaced, so enroll the host again with a new token before the certificate expires. Without one, check the allowlist. |
 | The same line with status 404 | The server does not offer renewal: enrollment is off there, its audit file cannot be read, or it is older than this sender. Fix the server, or enroll the host again. |
 | `certificate renewal failed` | The server could not be reached or answered with an error. The sender retries. It is an error line, not a warning, when less than a tenth of the validity is left (3 days of 30). |
 | `certificate renewal is off: this account cannot create files in the directory of client.key or of client.crt` | The sender runs as its own account and must be able to create files beside `client.key` and beside `client.crt`. A directory that `enroll` made as root belongs to root. Give it to the sender account (`systemd-tmpfiles --create` does it for the packaged layout) and restart the sender. Events keep flowing meanwhile. |

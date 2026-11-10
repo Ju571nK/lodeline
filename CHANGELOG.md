@@ -39,7 +39,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   and each `.next` file is renamed in its own. A wake whose repair step was not clean sends no
   request and renames nothing; a stored answer that cannot be checked because an input cannot be
   read drops nothing, and one that fails its check is dropped alone, so the same request is sent
-  again. A new answer must expire later than the certificate in use, as a stored one must. `enroll`
+  again. A `.next` file that is there and does not parse, empty or for another key included,
+  is dropped, so it cannot stop renewal; one the sender will not read is named in the error
+  line, and a live pair replaced on disk is still loaded in a wake that is not clean. A new answer
+  must expire later than the certificate in use, as a stored one must. `enroll`
   names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
   does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
 - `lodeline-sender enroll <file>` enrolls a host from one enrollment file: a JSON document,

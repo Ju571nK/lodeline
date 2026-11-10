@@ -156,19 +156,22 @@ impl Renewer {
         let t = now.unix_timestamp();
         if self.enabled {
             let (p, host) = (&self.ctx.paths, &self.ctx.host_id);
-            // Not clean: no request and no rename until the next wake.
+            // Not clean: no request and no rename until the next wake. A live pair that
+            // was replaced on disk is still picked up, when it matches.
             match pair::settle(p, host, now) {
                 Ok(None) => {}
                 Ok(Some(why)) => {
                     if self.log.due("mismatch", t) {
                         tracing::error!("{why}");
                     }
+                    self.reload_if_matching(t);
                     return WAKE;
                 }
                 Err(e) => {
                     if self.log.due("settle", t) {
                         tracing::error!(error = %e, "cannot settle the renewal files");
                     }
+                    self.reload_if_matching(t);
                     return WAKE;
                 }
             }
@@ -229,10 +232,13 @@ impl Renewer {
                              is unreadable, or it is older than this sender. Fix the server, or \
                              enroll this host again with a new token before the certificate expires"
                         } else {
-                            "This certificate is no longer the newest one issued for the host, \
-                             or the host is not on the allowlist. Check the allowlist, or enroll \
-                             this host again with a new token (move client.crt and client.key \
-                             aside first)"
+                            "Either this certificate is no longer the newest one issued for the \
+                             host (the host was enrolled again, or a copy of its key renewed \
+                             first), or the server already issued three certificates for it, or \
+                             the host is not on the allowlist. Check the server's audit file for \
+                             this host: if the certificate was replaced, enroll this host again \
+                             with a new token (move client.crt and client.key aside first). \
+                             Otherwise check the allowlist"
                         }
                     );
                 }
@@ -292,6 +298,12 @@ impl Renewer {
         pair::commit(&ctx.paths).map_err(|e| fail(&e))?;
         tracing::info!(serial = %issued.serial, not_after = %issued.not_after, "renewed the client certificate and key");
         Ok(())
+    }
+
+    fn reload_if_matching(&mut self, t: i64) {
+        if pair::live_fits(&self.ctx.paths) {
+            self.reload(t);
+        }
     }
 
     /// Build a client from the live files when they differ from what the current one was

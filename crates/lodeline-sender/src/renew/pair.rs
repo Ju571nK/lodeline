@@ -89,25 +89,55 @@ struct Cert {
     leaf: Leaf,
 }
 
+/// [`write::read_existing`], with the file named in its error.
+fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    write::read_existing(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+}
+
+fn parse_key(b: &[u8]) -> Option<KeyPair> {
+    KeyPair::from_pem(std::str::from_utf8(b).ok()?).ok()
+}
+
+fn parse_cert(b: &[u8]) -> Option<Cert> {
+    let pem = String::from_utf8(b.to_vec()).ok()?;
+    Some(Cert {
+        leaf: leaf(pem.as_bytes())?,
+        pem,
+    })
+}
+
+/// The public key a CSR asks for, or `None` when `b` is not a CSR.
+fn csr_pubkey(b: &[u8]) -> Option<Vec<u8>> {
+    use x509_parser::prelude::FromDer;
+    let (_, pem) = x509_parser::pem::parse_x509_pem(b).ok()?;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(&pem.contents)
+            .ok()?;
+    Some(
+        csr.certification_request_info
+            .subject_pki
+            .subject_public_key
+            .data
+            .to_vec(),
+    )
+}
+
 fn read_key(path: &Path) -> io::Result<Option<KeyPair>> {
-    Ok(write::read_existing(path)?
-        .and_then(|b| String::from_utf8(b).ok())
-        .and_then(|s| KeyPair::from_pem(&s).ok()))
+    Ok(read(path)?.and_then(|b| parse_key(&b)))
 }
 
 fn read_cert(path: &Path) -> io::Result<Option<Cert>> {
-    Ok(write::read_existing(path)?
-        .and_then(|b| String::from_utf8(b).ok())
-        .and_then(|pem| {
-            Some(Cert {
-                leaf: leaf(pem.as_bytes())?,
-                pem,
-            })
-        }))
+    Ok(read(path)?.and_then(|b| parse_cert(&b)))
 }
 
 fn fits(key: &Option<KeyPair>, cert: &Option<Cert>) -> bool {
     matches!((key, cert), (Some(k), Some(c)) if c.leaf.pubkey == k.public_key_raw())
+}
+
+/// Whether the live key and certificate fit each other. Unreadable counts as no.
+pub fn live_fits(p: &Paths) -> bool {
+    matches!((read_key(&p.key), read_cert(&p.crt)), (Ok(k), Ok(c)) if fits(&k, &c))
 }
 
 /// The server CA file. Unreadable is an error, never an empty CA: an answer is not judged
@@ -180,6 +210,31 @@ pub fn commit(p: &Paths) -> io::Result<()> {
     remove(&p.csr_next)
 }
 
+/// Drop a `.next` file that is there and cannot be used, so it cannot block renewal for
+/// good: a certificate alone, or a key or a CSR with the other one (a CSR without its key
+/// is useless, and a key without its CSR is cheap to make again). A file that cannot be
+/// read is an error, not junk. True when something was dropped.
+fn drop_unparseable(p: &Paths) -> io::Result<bool> {
+    let mut dropped = false;
+    if read(&p.crt_next)?.is_some_and(|b| parse_cert(&b).is_none()) {
+        remove(&p.crt_next)?;
+        dropped = true;
+    }
+    let (key, csr) = (read(&p.key_next)?, read(&p.csr_next)?);
+    let key = key.map(|b| parse_key(&b));
+    let csr_bad = csr.is_some_and(|b| match (csr_pubkey(&b), &key) {
+        (None, _) => true,
+        (Some(c), Some(Some(k))) => c != k.public_key_raw(),
+        _ => false,
+    });
+    if csr_bad || matches!(key, Some(None)) {
+        remove(&p.key_next)?;
+        remove(&p.csr_next)?;
+        dropped = true;
+    }
+    Ok(dropped)
+}
+
 /// Bring the files in `p` to a live pair that fits, whatever a crash left. `Ok(Some(why))`
 /// is a state this cannot repair: nothing is deleted, and the caller tells the operator.
 pub fn settle(p: &Paths, host_id: &str, now: OffsetDateTime) -> io::Result<Option<String>> {
@@ -188,6 +243,9 @@ pub fn settle(p: &Paths, host_id: &str, now: OffsetDateTime) -> io::Result<Optio
         let mut tmp = n.file_name().unwrap_or_default().to_os_string();
         tmp.push(".tmp");
         remove(&n.with_file_name(tmp))?;
+    }
+    if drop_unparseable(p)? {
+        return settle(p, host_id, now);
     }
     let (key, crt) = (read_key(&p.key)?, read_cert(&p.crt)?);
     let (key_next, crt_next) = (read_key(&p.key_next)?, read_cert(&p.crt_next)?);
@@ -248,7 +306,7 @@ pub fn prepare(p: &Paths, host_id: &str) -> anyhow::Result<(KeyPair, String)> {
             k
         }
     };
-    let csr = match write::read_existing(&p.csr_next)? {
+    let csr = match read(&p.csr_next)? {
         Some(b) => String::from_utf8(b)?,
         None => {
             let c = crate::csr::csr_for(&key, host_id)?;
@@ -378,6 +436,10 @@ mod tests {
             std::fs::write(path, text).unwrap();
         }
 
+        fn put_csr(&self, key: &KeyPair) {
+            self.put(&self.p.csr_next, &crate::csr::csr_for(key, HOST).unwrap());
+        }
+
         fn put_key(&self, path: &Path, key: &KeyPair) {
             self.put(path, &key.serialize_pem());
         }
@@ -486,7 +548,7 @@ mod tests {
         let (_, _, k1) = w.start();
         let before = w.live_not_after();
         w.put_key(&w.p.key_next, &k1);
-        w.put(&w.p.csr_next, "csr");
+        w.put_csr(&k1);
         w.put(&w.p.crt_next, &w.new_cert(&k1));
         assert_eq!(w.settle(), None);
         assert!(w.live_fits());
@@ -522,7 +584,7 @@ mod tests {
         w.put_key(&w.p.key, &k1);
         w.put(&w.p.crt, &c0);
         w.put(&w.p.crt_next, &w.new_cert(&k1));
-        w.put(&w.p.csr_next, "csr");
+        w.put_csr(&k1);
         assert!(!w.live_fits(), "the pair is split until settle runs");
         assert_eq!(w.settle(), None);
         assert!(w.live_fits());
@@ -535,7 +597,7 @@ mod tests {
         let (_, _, k1) = w.start();
         w.put_key(&w.p.key, &k1);
         w.put(&w.p.crt, &w.new_cert(&k1));
-        w.put(&w.p.csr_next, "csr");
+        w.put_csr(&k1);
         assert_eq!(w.settle(), None);
         assert!(w.live_fits());
         assert!(!w.exists(&w.p.csr_next));
@@ -572,7 +634,7 @@ mod tests {
             w.put_key(&w.p.key, &k2);
             w.put(&w.p.crt, &w.cert_for(&k2, HOST, -1, 15));
             w.put_key(&w.p.key_next, &k1);
-            w.put(&w.p.csr_next, "csr");
+            w.put_csr(&k1);
             w.put(&w.p.crt_next, &make(&w, &k1));
             let live = std::fs::read(&w.p.crt).unwrap();
             assert_eq!(w.settle(), None, "{why}");
@@ -621,7 +683,7 @@ mod tests {
         let w = World::new();
         let (_, c0, k1) = w.start();
         w.put_key(&w.p.key_next, &k1);
-        w.put(&w.p.csr_next, "csr");
+        w.put_csr(&k1);
         w.put(&w.p.crt_next, &w.new_cert(&k1));
         std::fs::remove_file(&w.p.ca).unwrap();
         assert!(settle(&w.p, HOST, w.now).is_err());
@@ -661,6 +723,95 @@ mod tests {
             let (key, again) = prepare(&w.p, HOST).unwrap();
             assert_eq!(again, csr, "{why}: the same CSR bytes");
             assert_eq!(key.public_key_raw(), k1.public_key_raw(), "{why}");
+        }
+    }
+
+    /// The live pair stays, the next renewal can run, and its CSR is a real one.
+    fn assert_renewal_can_run(w: &World, c0: &str) {
+        assert_eq!(std::fs::read_to_string(&w.p.crt).unwrap(), c0);
+        assert!(w.live_fits());
+        let (key, csr) = prepare(&w.p, HOST).unwrap();
+        assert!(csr_pubkey(csr.as_bytes()).is_some(), "a CSR that parses");
+        assert!(store_cert(&w.p, &w.new_cert(&key)).is_ok());
+        assert_eq!(w.settle(), None);
+        assert!(
+            w.live_fits() && !w.exists(&w.p.crt_next),
+            "the answer was committed"
+        );
+    }
+
+    #[test]
+    fn a_crt_next_that_is_not_a_certificate_or_is_empty_is_dropped_and_renewal_runs() {
+        for junk in ["not a certificate", ""] {
+            let w = World::new();
+            let (_, c0, k1) = w.start();
+            w.put_key(&w.p.key_next, &k1);
+            w.put_csr(&k1);
+            w.put(&w.p.crt_next, junk);
+            assert_eq!(w.settle(), None, "{junk:?}");
+            assert!(!w.exists(&w.p.crt_next), "{junk:?}");
+            assert!(
+                w.exists(&w.p.key_next) && w.exists(&w.p.csr_next),
+                "{junk:?}"
+            );
+            assert_renewal_can_run(&w, &c0);
+        }
+    }
+
+    #[test]
+    fn a_key_next_that_does_not_parse_takes_the_csr_with_it() {
+        let w = World::new();
+        let (_, c0, k1) = w.start();
+        w.put(&w.p.key_next, "not a key");
+        w.put_csr(&k1);
+        assert_eq!(w.settle(), None);
+        for f in [&w.p.key_next, &w.p.csr_next] {
+            assert!(!w.exists(f), "{f:?}");
+        }
+        assert_renewal_can_run(&w, &c0);
+    }
+
+    #[test]
+    fn a_csr_next_that_does_not_parse_or_is_for_another_key_takes_the_key_with_it() {
+        let w = World::new();
+        let (_, c0, k1) = w.start();
+        for junk in [
+            "not a csr".to_string(),
+            crate::csr::csr_for(&KeyPair::generate().unwrap(), HOST).unwrap(),
+        ] {
+            w.put_key(&w.p.key_next, &k1);
+            w.put(&w.p.csr_next, &junk);
+            assert_eq!(w.settle(), None);
+            assert!(!w.exists(&w.p.key_next) && !w.exists(&w.p.csr_next));
+        }
+        assert_renewal_can_run(&w, &c0);
+    }
+
+    #[test]
+    fn an_error_for_a_next_file_that_is_not_read_names_the_file() {
+        let w = World::new();
+        let (_, _, k1) = w.start();
+        w.put_key(&w.p.key_next, &k1);
+        let hard = w.p.key_next.with_file_name("other-name");
+        #[cfg(unix)]
+        {
+            std::fs::hard_link(&w.p.key_next, &hard).unwrap();
+            let e = settle(&w.p, HOST, w.now).unwrap_err().to_string();
+            assert!(
+                e.contains("client.key.next") && e.contains("hard link"),
+                "{e}"
+            );
+            std::fs::remove_file(&hard).unwrap();
+        }
+        w.put(&w.p.crt_next, &"x".repeat(70 * 1024));
+        let e = settle(&w.p, HOST, w.now).unwrap_err().to_string();
+        assert!(e.contains("client.crt.next") && e.contains("64 KiB"), "{e}");
+        std::fs::remove_file(&w.p.crt_next).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&w.p.crt, &w.p.csr_next).unwrap();
+            let e = settle(&w.p, HOST, w.now).unwrap_err().to_string();
+            assert!(e.contains("client.csr.next") && e.contains("link"), "{e}");
         }
     }
 
@@ -810,7 +961,7 @@ mod tests {
         std::fs::write(&p.key, k0.serialize_pem()).unwrap();
         std::fs::write(&p.crt, w.old(&k0)).unwrap();
         std::fs::write(&p.key_next, k1.serialize_pem()).unwrap();
-        std::fs::write(&p.csr_next, "csr").unwrap();
+        std::fs::write(&p.csr_next, crate::csr::csr_for(&k1, HOST).unwrap()).unwrap();
         std::fs::write(&p.crt_next, w.new_cert(&k1)).unwrap();
         assert_eq!(settle(&p, HOST, w.now).unwrap(), None);
         let pair = (read_key(&p.key).unwrap(), read_cert(&p.crt).unwrap());

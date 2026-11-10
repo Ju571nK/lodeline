@@ -433,6 +433,95 @@ async fn a_file_settle_cannot_read_ends_the_wake_with_no_request_and_no_rename()
     assert!(!host.paths.key_next.exists(), "no new key was made");
 }
 
+#[tokio::test]
+async fn a_live_pair_replaced_on_disk_is_picked_up_in_a_wake_that_is_not_clean_but_nothing_is_sent()
+{
+    let pki = Pki::new();
+    let host = due_host(&pki);
+    let mock = Mock::start(issued(&pki, HOST)).await;
+    let (mut r, stats, _) = host.renewer(&mock.url);
+    // A link where `client.crt.next` goes keeps every wake from being clean.
+    std::os::unix::fs::symlink(&host.paths.crt, &host.paths.crt_next).unwrap();
+
+    // An `enroll` run by hand replaced the pair.
+    host.install(&pki, ago(1), ago(-29));
+    let (key1, crt1) = (host.key(), host.crt());
+    r.step(OffsetDateTime::now_utc()).await;
+    assert_eq!(mock.hits(), 0, "no request");
+    assert_eq!((host.key(), host.crt()), (key1, crt1), "no rename");
+    assert_eq!(
+        stats
+            .read()
+            .client_cert_expires_at
+            .map(|t| t.unix_timestamp()),
+        Some(host.not_after()),
+        "the new pair is in use"
+    );
+
+    // A pair that does not match is not picked up.
+    let before = stats.read().client_cert_expires_at;
+    std::fs::write(
+        &host.paths.key,
+        KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    host.install(&pki, ago(1), ago(-29));
+    std::fs::write(
+        &host.paths.key,
+        KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    r.step(OffsetDateTime::now_utc()).await;
+    assert_eq!(
+        stats.read().client_cert_expires_at,
+        before,
+        "the old client stays"
+    );
+    assert_eq!(mock.hits(), 0);
+}
+
+#[tokio::test]
+async fn a_next_file_that_is_not_read_is_named_in_the_error_line() {
+    let pki = Pki::new();
+    let host = due_host(&pki);
+    let mock = Mock::start(issued(&pki, HOST)).await;
+    let log = Log::default();
+    let _guard = log.capture();
+    let (mut r, _, _) = host.renewer(&mock.url);
+    std::os::unix::fs::symlink(&host.paths.crt, &host.paths.crt_next).unwrap();
+    r.step(OffsetDateTime::now_utc()).await;
+    assert_eq!(log.lines_with("client.crt.next"), 1);
+    assert_eq!(log.lines_with("cannot settle the renewal files"), 1);
+}
+
+#[tokio::test]
+async fn an_unparseable_next_file_does_not_stop_renewal_and_no_bad_bytes_are_sent() {
+    for junk in ["crt", "empty crt", "key", "csr"] {
+        let pki = Pki::new();
+        let host = due_host(&pki);
+        let mock = Mock::start(issued(&pki, HOST)).await;
+        let (mut r, _, _) = host.renewer(&mock.url);
+        let k1 = KeyPair::generate().unwrap();
+        let csr = lodeline_sender::csr::csr_for(&k1, HOST).unwrap();
+        std::fs::write(&host.paths.key_next, k1.serialize_pem()).unwrap();
+        std::fs::write(&host.paths.csr_next, &csr).unwrap();
+        match junk {
+            "crt" => std::fs::write(&host.paths.crt_next, "garbage").unwrap(),
+            "empty crt" => std::fs::write(&host.paths.crt_next, "").unwrap(),
+            "key" => std::fs::write(&host.paths.key_next, "garbage").unwrap(),
+            _ => std::fs::write(&host.paths.csr_next, "garbage").unwrap(),
+        }
+        let (key0, na0) = (host.key(), host.not_after());
+        r.step(OffsetDateTime::now_utc()).await;
+        assert_eq!(mock.hits(), 1, "{junk}");
+        let sent = mock.csrs.lock().unwrap()[0].clone();
+        assert!(sent.contains("CERTIFICATE REQUEST"), "{junk}: {sent}");
+        assert_ne!(host.key(), key0, "{junk}: renewed");
+        assert!(host.not_after() > na0, "{junk}");
+        assert_eq!(host.next_files(), [false; 3], "{junk}");
+    }
+}
+
 /// Collects what `tracing` prints.
 #[derive(Clone, Default)]
 struct Log(Arc<Mutex<Vec<u8>>>);
@@ -469,7 +558,7 @@ impl Log {
 #[tokio::test]
 async fn a_refusal_is_not_retried_quickly_and_is_logged_once_per_period() {
     for (status, needle) in [
-        (403u16, "no longer the newest"),
+        (403u16, "already issued three certificates"),
         (404, "does not offer renewal"),
     ] {
         let pki = Pki::new();
