@@ -27,7 +27,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -134,22 +134,33 @@ impl RateLimiter {
 
 /// One connection's deadline, shared by its I/O wrapper and its service.
 pub struct ConnLife {
-    /// The deadline, and whether a request is inside the handler.
-    state: Mutex<(tokio::time::Instant, bool)>,
+    state: Mutex<LifeState>,
     served: AtomicBool,
+}
+
+struct LifeState {
+    deadline: tokio::time::Instant,
+    in_handler: bool,
+    /// The I/O side's waker while it skips the deadline, so the guard's drop
+    /// makes it arm the new one even if nothing is written.
+    waker: Option<Waker>,
 }
 
 impl ConnLife {
     pub fn new(deadline: tokio::time::Instant) -> Arc<Self> {
         Arc::new(ConnLife {
-            state: Mutex::new((deadline, false)),
+            state: Mutex::new(LifeState {
+                deadline,
+                in_handler: false,
+                waker: None,
+            }),
             served: AtomicBool::new(false),
         })
     }
 
     /// The deadline does not cut the connection while the guard lives.
     pub fn enter(self: &Arc<Self>) -> InHandler {
-        self.state.lock().1 = true;
+        self.state.lock().in_handler = true;
         InHandler(self.clone())
     }
 }
@@ -158,9 +169,15 @@ pub struct InHandler(Arc<ConnLife>);
 
 impl Drop for InHandler {
     fn drop(&mut self) {
-        let mut s = self.0.state.lock();
-        s.1 = false;
-        s.0 = s.0.max(tokio::time::Instant::now() + WRITE_GRACE);
+        let waker = {
+            let mut s = self.0.state.lock();
+            s.in_handler = false;
+            s.deadline = s.deadline.max(tokio::time::Instant::now() + WRITE_GRACE);
+            s.waker.take()
+        };
+        if let Some(w) = waker {
+            w.wake();
+        }
     }
 }
 
@@ -175,7 +192,7 @@ pub struct Deadline<I> {
 
 impl<I> Deadline<I> {
     pub fn new(inner: I, life: Arc<ConnLife>, slot: OwnedSemaphorePermit) -> Self {
-        let deadline = life.state.lock().0;
+        let deadline = life.state.lock().deadline;
         Deadline {
             inner,
             sleep: Box::pin(tokio::time::sleep_until(deadline)),
@@ -185,10 +202,14 @@ impl<I> Deadline<I> {
     }
 
     fn expired(&mut self, cx: &mut Context<'_>) -> bool {
-        let (deadline, in_handler) = *self.life.state.lock();
-        if in_handler {
-            return false;
-        }
+        let deadline = {
+            let mut s = self.life.state.lock();
+            if s.in_handler {
+                s.waker = Some(cx.waker().clone());
+                return false;
+            }
+            s.deadline
+        };
         if self.sleep.deadline() != deadline {
             self.sleep.as_mut().reset(deadline);
         }
@@ -519,5 +540,21 @@ mod tests {
             d.write(b"x").await.unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
+    }
+
+    #[tokio::test]
+    async fn an_idle_read_times_out_after_a_handler_ends_without_writing() {
+        let (mut d, _peer, life) = deadline_pair(Duration::from_millis(100));
+        let read = tokio::spawn(async move { d.read(&mut [0u8; 8]).await.map(|_| ()) });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let guard = life.enter();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(guard);
+        let e = tokio::time::timeout(WRITE_GRACE + Duration::from_secs(1), read)
+            .await
+            .expect("idle read never timed out after the guard dropped")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
     }
 }
