@@ -62,6 +62,8 @@ test-support = []
 
 [dev-dependencies]
 lodeline-server = { path = ".", features = ["test-support"] }
+# #553: an HTTP/2 prior-knowledge client for the one-request-per-connection test.
+reqwest = { workspace = true, features = ["http2"] }
 http = { workspace = true }
 insta = { workspace = true }
 

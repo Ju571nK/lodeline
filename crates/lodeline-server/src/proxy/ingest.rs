@@ -51,6 +51,7 @@ use lodeline_proxy_api::{
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::TryAcquireError;
@@ -63,30 +64,57 @@ const LOG_WINDOW: Duration = Duration::from_secs(60);
 
 /// Rate-limited warning log: the first denial of a reason logs at once, later
 /// ones are counted and reported with the next line after the window.
-#[derive(Default)]
 pub struct DenyLog {
+    message: &'static str,
     seen: Mutex<HashMap<&'static str, (Instant, u32)>>,
 }
 
 impl DenyLog {
+    pub fn new(message: &'static str) -> Self {
+        DenyLog {
+            message,
+            seen: Mutex::default(),
+        }
+    }
+
     pub fn note(&self, route: &'static str, reason: &'static str) {
+        self.note_from(route, reason, None);
+    }
+
+    /// Like `note`, with the caller's address on the lines that are written.
+    /// True when this call wrote a line.
+    pub fn note_from(
+        &self,
+        route: &'static str,
+        reason: &'static str,
+        source: Option<IpAddr>,
+    ) -> bool {
+        // A `None` field is not recorded, so `note` lines keep their old text.
+        let source = source.map(tracing::field::display);
         let mut g = self.seen.lock();
         match g.get_mut(reason) {
             None => {
                 g.insert(reason, (Instant::now(), 0));
-                tracing::warn!(route, reason, "proxy request refused");
+                tracing::warn!(route, reason, source, "{}", self.message);
+                true
             }
             Some((t, suppressed)) if t.elapsed() >= LOG_WINDOW => {
                 tracing::warn!(
                     route,
                     reason,
                     suppressed = *suppressed,
-                    "proxy request refused (further refusals in the last minute counted)"
+                    source,
+                    "{} (further refusals in the last minute counted)",
+                    self.message
                 );
                 *t = Instant::now();
                 *suppressed = 0;
+                true
             }
-            Some((_, suppressed)) => *suppressed += 1,
+            Some((_, suppressed)) => {
+                *suppressed += 1;
+                false
+            }
         }
     }
 }
@@ -457,4 +485,70 @@ pub async fn post_events(
     })
     .await;
     r.unwrap_or_else(|_| fixed(ErrorCode::StorageUnavailable))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DenyLog;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture(f: impl FnOnce()) -> String {
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(move || w.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let out = buf.0.lock().unwrap().clone();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn proxy_lines_keep_their_text_and_sources_show_when_given() {
+        let new = capture(|| DenyLog::new("proxy request refused").note("/v1/x", "bad"));
+        let old = capture(|| {
+            let (route, reason) = ("/v1/x", "bad");
+            tracing::warn!(target: "lodeline_server::proxy::ingest", route, reason, "proxy request refused");
+        });
+        assert_eq!(new, old);
+        let with_source = capture(|| {
+            DenyLog::new("enroll request refused").note_from(
+                "/v1/enroll",
+                "rate_limited",
+                Some([192, 0, 2, 7].into()),
+            );
+        });
+        assert!(
+            with_source.ends_with(
+                "enroll request refused route=\"/v1/enroll\" reason=\"rate_limited\" source=192.0.2.7\n"
+            ),
+            "{with_source}"
+        );
+    }
+
+    #[test]
+    fn note_from_says_when_it_wrote_a_line() {
+        let log = DenyLog::new("enroll request refused");
+        assert!(log.note_from("/v1/enroll", "a", None), "first of a reason");
+        assert!(
+            !log.note_from("/v1/enroll", "a", None),
+            "counted in the window"
+        );
+        assert!(log.note_from("/v1/enroll", "b", None), "another reason");
+    }
 }

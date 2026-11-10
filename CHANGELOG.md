@@ -20,6 +20,24 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   empty, so the two never store different ids, and two processes that open a new `state.db` at
   once no longer fail with "database is locked". The deb and rpm install tests now check that
   the agent package installs disabled and stopped. (#557, #553)
+- `lodeline-server` can serve `POST /v1/enroll` on a second TLS port, `enroll_listener.bind`,
+  for hosts that have no client certificate yet. The port presents the main server certificate,
+  asks for no client certificate and serves only that route. Both ports share one token file,
+  one audit chain and one allowlist, so a token works once on either port. The port checks a
+  token against an in-memory copy of the token file before the mint lock and before any CSR
+  parse, and reads the file again only when its size, modification time or inode changes. Only
+  the request that redeems a token writes to `enrollment-audit.jsonl`. Every other denial on the
+  port is counted and logged with its source address. Per source address the port takes 10
+  connections, then 1 every 6 s (IPv6 counts per /64). It serves one request per connection on
+  HTTP/1.1 and HTTP/2, holds at most 64 connections, closes each one 15 s after accept unless
+  its request is being processed, and takes bodies up to 17 KiB. A host over its limit sees the
+  connection closed before the TLS handshake. A request that finds another enrollment running
+  gets `503 busy` with `Retry-After: 1`. The server refuses to start when the listener is set
+  without mTLS, with `enroll_issuer_fingerprints`, without
+  `events_require_cert_host_match: true`, on the `bind` address, or with enrollment off. The
+  main port, its answers and its audit lines do not change. The install guide now says to run
+  `enroll-token` as the service account, because a root run leaves files the server cannot
+  open. (#559, #553)
 
 ## [0.14.3] - 2026-11-10
 

@@ -257,6 +257,16 @@ impl ProxyConfig {
     }
 }
 
+/// #553: an enrollment-only listener for hosts without a client certificate.
+/// It presents the main server certificate (`tls_cert_path`/`tls_key_path`),
+/// requests no client certificate, and serves only `POST /v1/enroll`. Its
+/// limits are constants in `enroll::listener`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollListenerConfig {
+    pub bind: SocketAddr,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Address to bind. e.g. `0.0.0.0:8443`.
@@ -308,6 +318,9 @@ pub struct ServerConfig {
     /// re-enroll replaces revocation in the MVP).
     #[serde(default)]
     pub enroll_cert_days: Option<u32>,
+    /// #553: enrollment listener. Absent ⇒ no second socket.
+    #[serde(default)]
+    pub enroll_listener: Option<EnrollListenerConfig>,
     /// Optional allowlist of `host_id`s. Absent ⇒ accept all authenticated hosts.
     /// REQUIRED for enrollment (#184): without it, auto-add is meaningless, so
     /// enrollment stays off (404) when this is unset.
@@ -414,6 +427,38 @@ impl ServerConfig {
                          (tls_cert_path + tls_key_path + client_ca_path)"
                     .to_string(),
             });
+        }
+        if let Some(l) = &self.enroll_listener {
+            let bad = |reason: &str| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: reason.to_string(),
+            };
+            if !self.mtls_enabled() {
+                return Err(bad(
+                    "enroll_listener requires mTLS (tls_cert_path + tls_key_path + client_ca_path): \
+                     it presents the main server certificate, and enrollment is off without mTLS",
+                ));
+            }
+            if self.enroll_issuer_fingerprints.is_some() {
+                return Err(bad(
+                    "enroll_listener cannot be combined with enroll_issuer_fingerprints: \
+                     the enrollment listener takes no client certificate, so the issuer gate \
+                     would deny every caller. Remove enroll_issuer_fingerprints, or keep the \
+                     listener off and enroll through the main listener",
+                ));
+            }
+            if l.bind == self.bind {
+                return Err(bad("enroll_listener.bind must differ from bind"));
+            }
+            if !self.events_require_cert_host_match {
+                return Err(bad(
+                    "enroll_listener requires events_require_cert_host_match: true: without it \
+                     any fleet certificate can post events as any host, so one leaked token \
+                     would give a certificate that speaks for the whole fleet. Certificates \
+                     from /v1/enroll already match; reissue hand-made certificates whose CN \
+                     is not the host_id before you set it",
+                ));
+            }
         }
         if let Some(p) = &self.proxy {
             let bad = |reason: &str| ConfigError::Invalid {
@@ -578,6 +623,7 @@ mod tests {
         assert!(cfg.artifacts_dir.is_some());
         assert!(cfg.active_window_days.is_some());
         assert!(cfg.proxy.is_some());
+        assert!(cfg.enroll_listener.is_some());
         assert!(
             cfg.deprecated_license.is_none(),
             "example must not document `license:`"
@@ -738,6 +784,59 @@ events_require_cert_host_match: true
         );
         std::fs::write(&p, format!("{BASE}{mtls}")).unwrap();
         assert!(ServerConfig::load(&p).unwrap().proxy.is_none());
+    }
+
+    /// #553: the enrollment listener section and its boot refusals.
+    #[test]
+    fn enroll_listener_loads_and_refuses_bad_combinations() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("server.yaml");
+        let mtls = "tls_cert_path: /e/s.crt\ntls_key_path: /e/s.key\nclient_ca_path: /e/ca.pem\n";
+        let matched = "events_require_cert_host_match: true\n";
+        let listener = "enroll_listener:\n  bind: \"127.0.0.1:8444\"\n";
+        let load = |extra: &str| {
+            std::fs::write(&p, format!("{BASE}{extra}")).unwrap();
+            ServerConfig::load(&p)
+        };
+        let cfg = load(&format!("{mtls}{matched}{listener}")).expect("valid listener loads");
+        assert_eq!(
+            cfg.enroll_listener.unwrap().bind,
+            "127.0.0.1:8444".parse().unwrap()
+        );
+        assert!(load(&format!("{mtls}{matched}"))
+            .unwrap()
+            .enroll_listener
+            .is_none());
+
+        let refused = |extra: String, why: &str| match load(&extra) {
+            Err(ConfigError::Invalid { reason, .. }) => {
+                assert!(reason.contains(why), "{reason}")
+            }
+            other => panic!("expected a refusal naming {why:?}, got {other:?}"),
+        };
+        refused(listener.to_string(), "requires mTLS");
+        refused(
+            format!("{mtls}{matched}{listener}enroll_issuer_fingerprints: []\n"),
+            "enroll_issuer_fingerprints",
+        );
+        refused(
+            format!("{mtls}{matched}{listener}enroll_issuer_fingerprints:\n  - \"aa\"\n"),
+            "enroll_issuer_fingerprints",
+        );
+        refused(
+            format!("{mtls}{matched}enroll_listener:\n  bind: \"127.0.0.1:8443\"\n"),
+            "must differ from bind",
+        );
+        refused(
+            format!("{mtls}{listener}"),
+            "events_require_cert_host_match",
+        );
+        assert!(matches!(
+            load(&format!(
+                "{mtls}{matched}enroll_listener:\n  bind: \"127.0.0.1:8444\"\n  rate_limit: 5\n"
+            )),
+            Err(ConfigError::Parse { .. })
+        ));
     }
 
     #[test]

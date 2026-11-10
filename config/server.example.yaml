@@ -65,6 +65,19 @@ policy_bundle_path: "/var/lib/lodeline-server/signed-policy.json"
 # (CN = SAN = host_id) satisfy it immediately.
 # events_require_cert_host_match: true
 
+# Optional (#553). Enrollment listener for hosts that have no client cert yet.
+# A second TLS port that presents the server cert above, asks for no client
+# cert, and serves only POST /v1/enroll (the token is the credential). Off when
+# absent. The server refuses to start unless mTLS is configured,
+# events_require_cert_host_match is true, enroll_issuer_fingerprints is unset,
+# and this bind differs from `bind`; it also refuses when enrollment is off.
+# Per source address: 10 connections, then 1 every 6 s; one request per
+# connection; at most 64 connections at once, each closed 15 s after accept.
+# Open this port only to the networks hosts enroll from, with no load balancer
+# or TLS proxy in front (the limit keys on the TCP source address).
+# enroll_listener:
+#   bind: "0.0.0.0:8444"
+
 # Optional — rolling window (days) for counting a host as active. Reported by
 # GET /v1/meta under `fleet` (`active_host_count`, `active_window_days`).
 # Default 7. (The former `license:` block is deprecated: its
