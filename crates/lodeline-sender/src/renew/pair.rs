@@ -269,7 +269,7 @@ pub fn settle(p: &Paths, host_id: &str, now: OffsetDateTime) -> io::Result<Optio
                 .map(|(_, name)| name)
                 .collect();
             return Ok(Some(if gone.is_empty() && key.is_none() && crt.is_some() {
-                "client.key does not read as a PKCS#8 key (`BEGIN PRIVATE KEY`), so this sender \
+                "client.key does not read as a PKCS#8 key, so this sender \
                  does not renew the certificate. The sender may still connect with it. Convert \
                  the key (`openssl pkcs8 -topk8 -nocrypt -in client.key -out client.key.new`, \
                  then put client.key.new in place of client.key) or enroll this host again \
@@ -912,10 +912,7 @@ mod tests {
     fn a_live_key_that_does_not_read_as_pkcs8_gets_its_own_reason_and_nothing_is_deleted() {
         let w = World::new();
         let (_, c0, _) = w.start();
-        w.put(
-            &w.p.key,
-            "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n",
-        );
+        w.put(&w.p.key, "a key in a form this sender does not read");
         let why = w.settle().expect("an error text");
         assert!(
             why.contains("PKCS#8") && why.contains("does not renew"),
