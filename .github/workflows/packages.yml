@@ -29,7 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   # Release the upgrade tests start from. Also keys the download cache below.
-  OLD_RELEASE: 0.14.2
+  OLD_RELEASE: 0.14.3
 
 jobs:
   # RPM path in the rockylinux:9 container (glibc 2.34, dnf-installed toolchain).

@@ -7,6 +7,62 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-11-11
+
+**Upgrade order.** Upgrade the server first. The agent, the sender and the web console can stay at
+v0.14.3 against a v0.14.4 server, and a v0.14.4 server accepts v0.14.3 hosts and consoles. This
+release adds no event kind and no reason kind, no event changes on the wire, and no fleet API
+response changes. The new routes (`POST /v1/renew` on the main listener, and `POST /v1/enroll` on
+the enrollment listener) and the new types in `lodeline-fleet-api` are additions. The web console
+changes nothing at this version, so it shows the same against a v0.14.3 server and a v0.14.4 server.
+The one order that matters is for a new enrollment: `lodeline-sender enroll` needs a server at
+v0.14.4 with `enroll_listener` set, so upgrade the server before you enroll a host with it. The
+enrollment listener is off unless `enroll_listener` is set, and an existing `server.yaml` needs no
+change for it. No package or release asset is added or removed, and `lodeline-proxy` is still not a
+release asset.
+
+**Server operators.** A server with enrollment on whose `host_allowlist_path` is
+`/etc/lodeline/host-allowlist.json` needs this, in this order, after the package upgrade: move the
+file to `/var/lib/lodeline-server/` and give it to `lodeline`, run `restorecon -R
+/var/lib/lodeline-server` on an SELinux host, set `host_allowlist_path` to the new path in
+`server.yaml`, and restart `lodeline-server`. The rpm restarts a running service during the upgrade,
+before you have done this. If you do nothing, the server starts, logs an `enroll:` error that names
+the path, keeps serving events and the console API, and leaves enrollment off. Renewal is off with
+it. A server with `enroll_listener` set in `server.yaml` does not start. Hosts that are already
+enrolled keep working. A server without enrollment needs nothing. The server packages now depend on
+`openssl`, so the package manager installs it. The packaged unit now sets
+`TMPDIR=/var/lib/lodeline-server`, so a server that runs from a copy of the unit file needs that
+line. On an rpm host, the package scriptlet builds the SELinux module again and loads it during the
+upgrade only when `/usr/share/selinux/devel/Makefile` exists (the `selinux-policy-devel` package).
+That module lets the server run `openssl`. Without the Makefile the module that was loaded stays,
+and the server logs `enroll: cannot run openssl` and leaves enrollment off until you load the new
+module as `packaging/selinux/README.md` describes. The three rpm packages now remove the shared
+SELinux module together with the last of them.
+
+**Certificates.** The sender does not call `POST /v1/renew` in this release. A certificate that
+enrollment issues still lasts `enroll_cert_days` (30 by default), and the host must be enrolled
+again with a new token before it expires, unless a host or its PMS calls the route by hand
+(`docs/install-server.md` §3.4). Renewal is on whenever enrollment is on and has no setting. At
+start the server reads `enrollment-audit.jsonl`. A missing file means no entries, lines that do not
+parse are skipped with one warning, and a file that exists but cannot be read turns renewal off with
+a `renew:` error, while enrollment keeps working. A server whose `openssl` defaults to SHA-1 for an
+EC key, such as the LibreSSL that ships with macOS, issued host certificates that its own listener
+refuses. Such a host certificate, issued before the upgrade, never worked and must be issued again
+with a new token. A server on OpenSSL 3 sees no change.
+
+**Scripts and logs.** `lodeline-server enroll-token` now accepts only a lowercase, hyphenated
+version 4 host_id, and refuses to run as root when the token file's directory belongs to another
+account. A script that passes another form of the host_id, or runs it with plain `sudo` where that
+directory belongs to `lodeline`, fails: use `sudo -u lodeline`. `lodeline-server` and
+`lodeline-sender` now log at `info` on stderr when `RUST_LOG` is unset, so a default install writes
+more lines to the journal, and a script that reads their logs from stdout must read stderr. The
+sender's repeated read-failure warning is limited to one line a minute. The packaged sender now
+creates `/var/lib/lodeline-sender` at install or upgrade, owned by `lodeline:lodeline` with mode
+0750. As root, `lodeline-sender csr --key-out` gives the key to the owner of the key's directory
+only when the path has no link and every parent is a root-owned directory closed to group and
+others. `lodeline init-host-id` is new, and a host that already has a host_id is unchanged. The two
+changed messages and the install guide need nothing from you.
+
 ### Added
 
 - `lodeline-server` renews a host's client certificate. `POST /v1/renew` on the main (mutual
