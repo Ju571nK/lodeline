@@ -27,7 +27,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   type is in `lodeline-fleet-api`. The packaged sender now creates `/var/lib/lodeline-sender`
   as `lodeline:lodeline` 0750 at install. `enroll` is not supported on Windows yet. `lodeline-sender
   csr --key-out` writes its key through the same routine, so run as root into the sender's
-  directory it makes a key the sender can read. (#NNN, #553)
+  directory it makes a key the sender can read. (#564, #553)
 - `lodeline init-host-id <uuid>` gives a host its host_id before the agent's first run, so an
   operator can issue the host's enrollment token first. It writes only when the host's
   `state.db` has no host_id, follows the global `--state-db` (pass the same one as
@@ -65,7 +65,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   that account (`sudo -u lodeline`). A token file made by root there is one the server cannot
   write, so every enrollment answered `500 token store error`. It also accepts only a lowercase,
   hyphenated version 4 host_id, the form `lodeline init-host-id` stores, so it no longer issues a
-  token that the agent's host_id can never match. No file's owner is changed. (#NNN, #553)
+  token that the agent's host_id can never match. No file's owner is changed. (#564, #553)
 - `lodeline-server` and `lodeline-sender` log at `info` when `RUST_LOG` is unset, as
   `lodeline-proxy` does. Before, they wrote only errors, so a default install showed no startup
   line, no warning, and no sender retry in `journalctl`. `RUST_LOG` still sets the level,
