@@ -44,4 +44,5 @@ If the fixtures lack a precondition that a journey needs, the journey reports a 
 - [Fleet pages](./fleet-views.md) covers the Risk, Events, Compliance, and Devices tabs.
 - [Host detail](./host-detail.md) covers the host page, its panels, and the not-found and null-heavy states.
 - [Proxies](./proxies.md) covers the read-only proxy and invocation lists and details, a proxy's inventory snapshots, drift and re-baseline markers, the filters and cursor, flagged invocations, truncated event lists, and the not-found and unavailable states.
+- [Downloads](./downloads.md) covers the list of the server's release files, saving one in the browser, the not-configured state, and the refused file name.
 - [Settings](./settings.md) covers the connection state, the server metadata, and the audit status.

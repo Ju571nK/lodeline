@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Drive the real lodeline-manager release binary and its embedded web console in a real browser with MOCK_FLEET=1, and capture screenshots, Playwright traces, and curl bodies. Use to prove a change to login, the alerts queue, triage, the fleet pages, host detail, the proxy and invocation pages, settings, or the /api/v1 responses on the real binary, or to reproduce a console bug.
+description: Drive the real lodeline-manager release binary and its embedded web console in a real browser with MOCK_FLEET=1, and capture screenshots, Playwright traces, and curl bodies. Use to prove a change to login, the alerts queue, triage, the fleet pages, host detail, the proxy and invocation pages, the Downloads page, settings, or the /api/v1 responses on the real binary, or to reproduce a console bug.
 ---
 
 # Verify lodeline-manager
@@ -85,6 +85,7 @@ A passing spec proves a server response only if the spec did not replace that re
 | `proxies.spec.ts` | Everything, except `a server without proxy reads is named as such`, which stubs the proxy endpoints. |
 | `proxy-invocations.spec.ts` | Everything. No stubs. |
 | `proxy-inventory.spec.ts` | Everything. No stubs. |
+| `downloads.spec.ts` | Everything, except `a server without artifacts_dir is named as such`, which stubs the index. |
 
 The stubbed specs prove how the SPA renders a response. Prove the matching server response with `drive.sh api`.
 
@@ -148,11 +149,12 @@ Stops this run's server, removes `scratch/`, keeps `evidence/`, and lists what s
 
 ## What the mock hides
 
-`MOCK_FLEET=1` replaces the HTTP fleet client with the fixtures in `testdata/mock-fleet.json`, `testdata/mock-proxies.json`, `testdata/mock-proxy-invocations.json` and `testdata/mock-proxy-inventory.json` (`src/fleet/mock.rs`), so no run talks to a `lodeline-server`. A green run says nothing about these areas, which stay with `cargo test` (`src/fleet/tests.rs` runs a real `lodeline-server` in process, and `src/fleet/http/tests.rs` covers TLS) and the parity suite's live cases:
+`MOCK_FLEET=1` replaces the HTTP fleet client with the fixtures in `testdata/mock-fleet.json`, `testdata/mock-proxies.json`, `testdata/mock-proxy-invocations.json`, `testdata/mock-proxy-inventory.json` and four one-line release files (`src/fleet/mock.rs`), so no run talks to a `lodeline-server`. A green run says nothing about these areas, which stay with `cargo test` (`src/fleet/tests.rs` runs a real `lodeline-server` in process, and `src/fleet/http/tests.rs` covers TLS) and the parity suite's live cases:
 
 - The bearer token, the custom CA, and mTLS to `lodeline-server`.
-- Retries and the mapping of upstream failures to `upstream_unauthorized`, `read_api_disabled`, `certificate_refused`, `service_unavailable`, `upstream_error`, and for the proxy reads `proxy_reads_unavailable`, `upstream_forbidden`, `invalid_cursor` and `invalid_filter`. The browser specs for those states use `page.route`.
+- Retries and the mapping of upstream failures to `upstream_unauthorized`, `read_api_disabled`, `certificate_refused`, `service_unavailable`, `upstream_error`, for the proxy reads `proxy_reads_unavailable`, `upstream_forbidden`, `invalid_cursor` and `invalid_filter`, and for the release files `artifacts_not_configured`. The browser specs for those states use `page.route`.
 - Decoding of real responses, real paging cursors, real filter behavior, and real retention.
+- Streaming a large release file, and the 30 s stall limit of a download.
 - Fixture accuracy. The fixtures are a copy of the Go console's mock, written against the contract in `docs/specs/fleet-api/contract.md` at the repo root.
 
 The fleet read cache stays in the path. `FLEET_POLL_INTERVAL_SECONDS` (unset here, so 5) is how long a cached read stays fresh, not how often the SPA polls. Past that the cache still answers with the old read, up to 12 times that age, while it refreshes, and fleet metadata and single events stay fresh 12 times longer than other reads. So a read can be older than the SPA's poll interval suggests.

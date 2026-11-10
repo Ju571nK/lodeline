@@ -14,6 +14,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `disconnected`. Before, this time was fixed at 90 s. The default is still 90 s. A value outside
   60 to 300 s stops the server at boot. The 60 s floor is two proxy heartbeat intervals, so a
   healthy proxy does not read `disconnected` between two heartbeats. (#549)
+- The web console has a Downloads page. It lists the release files that the server's operator put
+  in `artifacts_dir`, and a signed-in user can save one in the browser. The console reads the
+  files from `lodeline-server` with its own read token and client certificate, and streams each
+  one as it arrives, so nobody has to put the read token on a host to fetch them. The console
+  does not check the files. A server without `artifacts_dir` gets a page that names the
+  `server.yaml` setting. The console API adds `GET /api/v1/fleet/artifacts` and
+  `GET /api/v1/fleet/artifacts/{filename}`. (#553)
 
 ### Fixed
 
