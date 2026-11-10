@@ -309,6 +309,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-vec"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1439,9 +1448,24 @@ dependencies = [
  "serde_yaml",
  "thiserror 1.0.69",
  "time",
+ "tokio",
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "lodeline-diag"
+version = "0.14.4"
+dependencies = [
+ "libc",
+ "lodeline-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "time",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1467,6 +1491,7 @@ dependencies = [
  "jsonwebtoken",
  "lodeline-fleet-api",
  "lodeline-proxy-api",
+ "lodeline-sender",
  "lodeline-server",
  "p256",
  "p384",
@@ -1480,6 +1505,7 @@ dependencies = [
  "sha2",
  "socket2",
  "subtle",
+ "time",
  "tokio",
  "tower",
  "tower-http",
@@ -1498,6 +1524,38 @@ dependencies = [
 [[package]]
 name = "lodeline-rules-basic"
 version = "0.14.4"
+
+[[package]]
+name = "lodeline-sender"
+version = "0.14.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "data-encoding",
+ "http",
+ "libc",
+ "lodeline-core",
+ "lodeline-diag",
+ "lodeline-fleet-api",
+ "parking_lot",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "x509-parser",
+]
 
 [[package]]
 name = "lodeline-server"
@@ -1767,6 +1825,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
+dependencies = [
+ "base64 0.23.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1981,6 +2049,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.14.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "x509-parser",
+ "yasna",
 ]
 
 [[package]]
@@ -2889,6 +2971,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
 name = "utf8_iter"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3228,8 +3316,19 @@ dependencies = [
  "lazy_static",
  "nom 7.1.3",
  "oid-registry",
+ "ring",
  "rusticata-macros",
  "thiserror 2.0.21",
+ "time",
+]
+
+[[package]]
+name = "yasna"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
+dependencies = [
+ "bit-vec",
  "time",
 ]
 

@@ -1,15 +1,20 @@
 # lodeline-manager
 
 `lodeline-manager` is the fleet web console: a Rust server with a React SPA in `web/`. It is a
-read-only consumer of `lodeline-server`'s fleet read API, documented in
-[`docs/specs/fleet-api/contract.md`](../../docs/specs/fleet-api/contract.md). It writes only its
-own triage notes. Lodeline measures and does not block, and the console keeps that framing in
-its UI text and docs.
+consumer of `lodeline-server`'s fleet read API, documented in
+[`docs/specs/fleet-api/contract.md`](../../docs/specs/fleet-api/contract.md). It writes its own
+triage notes and, for host enrollment files only, asks the server to mint a single-use
+enrollment token through a management credential that is separate from the read token
+(`POST /v1/enroll-tokens`, [`docs/install-server.md`](../../docs/install-server.md) section 3.6).
+The read token never gains write authority, the console never holds the policy signing key, a
+host private key or the enrollment CA key, and it keeps no enrollment file and no token.
+Lodeline measures and does not block, and the console keeps that framing in its UI text and
+docs.
 
 It also reads the release files in the server's `artifacts_dir`: `GET /v1/artifacts` and
 `GET /v1/artifacts/{filename}` (`crates/lodeline-server/src/routes/artifacts.rs`). The Downloads
 page lists them and streams one to a signed-in browser, so the read token never leaves the
-console. These are reads too, and the console stays read-only. It does not check the files, and
+console. These are reads too and need no write authority. It does not check the files, and
 its text must not say that they are signed or verified.
 
 It also reads the server's Lodeline Proxy status and invocations: `GET /v1/proxies`,
@@ -18,8 +23,19 @@ It also reads the server's Lodeline Proxy status and invocations: `GET /v1/proxi
 and a proxy's inventory views: `GET /v1/proxies/{id}/inventory-snapshots`, `/drift` and
 `/rebaseline-markers` ([registry.md R5 and R7b](../../docs/specs/lodeline-proxy/contracts/registry.md)).
 That is the proxy scope M0 of #458: proxy reads only, still read-only against the server. Do not
-add a proxy write route, a control that changes a proxy (register, disable, enable, retire,
-config), or management credential settings. The operator CLI on the server does those.
+add a proxy write route or a control that changes a proxy (register, disable, enable, retire,
+config). The operator CLI on the server does those. The only management credential the console
+holds is the enrollment mint credential (`LODELINE_ENROLL_MINT_*`). It has the scope `enroll`
+and cannot touch a proxy.
+
+The enrollment file route (#553) is `src/enroll.rs` (the settings, the file template and the
+mint client) and `src/api/enrollment.rs` (`GET /api/v1/enrollment` and
+`POST /api/v1/enrollment/files`, the two entries at the end of `ROUTES`). The POST runs an
+origin rule before anything else: `Origin` must equal `LODELINE_PUBLIC_ORIGIN`,
+`Sec-Fetch-Site`, when sent, must be `same-origin`, and the body must be JSON. The older POST
+routes do not have that rule yet. The mint client is its own `reqwest::Client` with its own
+certificate, follows no redirect and never retries. Do not log, print or put the token in an
+error. The bearer type has no `Display` and a `Debug` that prints a fixed word.
 
 The inventory views carry references, counts and identifiers, never a tool name or definition,
 and the console fetches no metadata content: a display permission for it (`proxy.metadata`) is

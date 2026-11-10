@@ -5,6 +5,7 @@ mod api;
 mod auth;
 mod config;
 mod conn;
+mod enroll;
 mod fleet;
 mod server;
 mod spa;
@@ -56,6 +57,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             cookie_secure: std::env::var("LODELINE_INSECURE_COOKIE").as_deref() != Ok("1"),
         }),
         oidc,
+        enroll: cfg.enroll.clone(),
         fleet: fleet::from_config(&cfg)?,
         triage: store,
         trusted_proxies: cfg.trusted_proxies.clone().into(),

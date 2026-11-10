@@ -1,6 +1,6 @@
 # lodeline-manager
 
-`lodeline-manager` is the read-only web console for a `lodeline-server` fleet. This binary has
+`lodeline-manager` is the web console for a `lodeline-server` fleet. This binary has
 the web UI built in, so it is the whole console. Run `lodeline-manager --version` to see its
 release.
 

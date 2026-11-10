@@ -38,6 +38,8 @@ export const ROUTES = [
   'POST /api/v1/triage/upsert',
   'POST /api/v1/triage/note',
   'GET /api/v1/triage/{host_id}/{event_id}',
+  'GET /api/v1/enrollment',
+  'POST /api/v1/enrollment/files',
   'GET /*',
 ] as const;
 
@@ -49,6 +51,8 @@ export const NO_SUCCESS_CASE: Partial<Record<Route, string>> = {
     'needs an HTTPS OIDC provider; the Rust port carries over the Go OIDC unit tests instead',
   'GET /api/v1/auth/oidc/callback':
     'needs an HTTPS OIDC provider; the Rust port carries over the Go OIDC unit tests instead',
+  'POST /api/v1/enrollment/files':
+    'no parity manager has an enrollment credential, so the route is off; the Rust tests make a file against a real lodeline-server',
 };
 
 /** Session cookie a case sends. Crafted forms are signed by the recorder with the test secret. */
@@ -2252,6 +2256,50 @@ export const CASES: Case[] = [
     method: 'GET',
     path: '/api/v1/fleet/events',
     server: 'down',
+  },
+
+  // Host enrollment files (#553). No parity manager sets an enrollment variable, so the route is
+  // off: the status names every variable and the POST answers 404.
+  {
+    name: 'enrollment-status-off',
+    route: 'GET /api/v1/enrollment',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/enrollment',
+  },
+  {
+    name: 'enrollment-status-off-live',
+    route: 'GET /api/v1/enrollment',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/enrollment',
+    server: 'live',
+  },
+  noSession('GET /api/v1/enrollment', 'GET', '/api/v1/enrollment', 'enrollment-status-no-session'),
+  noSession(
+    'GET /api/v1/enrollment',
+    'POST',
+    '/api/v1/enrollment',
+    'enrollment-status-wrong-method-no-session',
+  ),
+  {
+    name: 'enrollment-files-off',
+    route: 'POST /api/v1/enrollment/files',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/enrollment/files',
+    headers: { 'Content-Type': 'application/json' },
+    raw: '{}',
+  },
+  {
+    name: 'enrollment-files-no-session',
+    route: 'POST /api/v1/enrollment/files',
+    outcome: 'error',
+    method: 'POST',
+    path: '/api/v1/enrollment/files',
+    auth: 'none',
+    headers: { 'Content-Type': 'application/json' },
+    raw: '{}',
   },
 
   // Last, seconds after the first health case, so a cached timestamp shows.

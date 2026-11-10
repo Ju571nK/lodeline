@@ -1,0 +1,30 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/enrollment",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "no-store",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "enabled": false,
+    "missing": [
+      "LODELINE_ENROLL_MINT_TOKEN",
+      "LODELINE_ENROLL_MINT_CERT_PATH",
+      "LODELINE_ENROLL_MINT_KEY_PATH",
+      "LODELINE_ENROLL_FILE_SERVER_URL",
+      "LODELINE_ENROLL_FILE_ENROLL_URL",
+      "LODELINE_ENROLL_FILE_CA_PATH",
+      "LODELINE_ENROLL_FILE_POLICY_KEYSTORE_PATH",
+      "LODELINE_PUBLIC_ORIGIN"
+    ]
+  }
+}

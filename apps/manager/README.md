@@ -1,7 +1,8 @@
 # lodeline-manager
 
-Read-only web console for a `lodeline-server` fleet: a Rust server that embeds a React SPA. It
-reads the server's fleet read API and writes only its own triage notes. It replaces the Go
+Web console for a `lodeline-server` fleet: a Rust server that embeds a React SPA. It reads the
+server's fleet read API, writes its own triage notes, and makes host enrollment files through a
+separate credential ([Enroll a host](#enroll-a-host)). It replaces the Go
 console from [Ju571nK/lodeline-manager](https://github.com/Ju571nK/lodeline-manager), and it
 reads that console's session cookies and triage database (see [Moving from the Go
 console](#moving-from-the-go-console)).
@@ -96,6 +97,11 @@ unset. The console refuses to start while `JWT_SECRET`, `LODELINE_SERVER_READ_TO
 | `FLEET_CACHE_DISABLED` | `0` | `1` sends every fleet read to `lodeline-server`. |
 | `FLEET_CACHE_MAX_ENTRIES` | `512` | Most cached fleet reads kept. |
 | `OIDC_*` | unset | Optional organization login. See [docs/operations/oidc.md](docs/operations/oidc.md). |
+| `LODELINE_ENROLL_MINT_TOKEN`, `LODELINE_ENROLL_MINT_CERT_PATH`, `LODELINE_ENROLL_MINT_KEY_PATH` | unset | The enrollment mint credential: a bearer, and a client certificate and key that differ from the read identity. See [Enroll a host](#enroll-a-host). |
+| `LODELINE_ENROLL_FILE_SERVER_URL`, `LODELINE_ENROLL_FILE_ENROLL_URL` | unset | The `https` origins that go into a file: the server's main listener and its enrollment listener, as hosts reach them. |
+| `LODELINE_ENROLL_FILE_CA_PATH`, `LODELINE_ENROLL_FILE_POLICY_KEYSTORE_PATH` | unset | The CA bundle hosts will trust and the policy keystore JSON that goes into a file. Read again on each request. |
+| `LODELINE_PUBLIC_ORIGIN` | unset | The console's own origin as a browser sees it, such as `https://console.example.com`: scheme, host and an optional port, with no path and no trailing slash. |
+| `LODELINE_ENROLL_SUBJECTS` | unset | Optional JSON array of the session subjects that may make a file, like `OIDC_ALLOWED_SUBJECTS`. Unset lets every signed-in subject. |
 
 The process stops with an error that names every missing required variable, or an invalid
 one. It ignores `SIGIL_*` names from before the rename and warns about them. On start it prints
@@ -174,7 +180,8 @@ server, and the fleet pages work as before. A server that predates the inventory
 the proxy pages, and the Inventory section of a proxy says that it does not serve them.
 
 The console only reads proxies. Register, disable and config changes go through the server's
-operator CLI and its management credential, which the console never holds.
+operator CLI and its management credential. The console holds only the enrollment credential
+([Enroll a host](#enroll-a-host)), which cannot change a proxy.
 
 ### Downloads
 
@@ -198,6 +205,96 @@ arrived intact.
   the rule the server uses. The console answers any other name with 400 `bad_filename` and sends
   no request.
 - The console does not cache the list, so a reload shows the files that the server holds now.
+
+### Enroll a host
+
+A signed-in operator can ask the console for a host's enrollment file, the JSON file that
+`lodeline-sender enroll` reads ([docs/install-server.md](../../docs/install-server.md), section
+3.3). The console asks the server to mint a single-use token through its own mint credential,
+builds the file from its settings, and answers with the file's bytes. It stores nothing: the
+token and the file exist only in that one request. The console's enrollment route is
+`POST /api/v1/enrollment/files`. `GET /api/v1/enrollment` reports whether the route is on, who
+may use it, and what a file made now would hold: the CA certificates and the policy keys, with
+the fingerprints `lodeline-sender enroll` prints, so an operator can compare them with the
+host's output.
+
+**What the server needs.** Mutual TLS, enrollment with its enrollment listener, and the HTTP mint
+of section 3.6 of the install guide (`enroll_mint:` in `server.yaml`), with a mint credential
+made for this console: a client certificate from the host client CA, and a bearer with the scope
+`enroll` whose verifier is in the mint's own verifier file. Use a new certificate and key for
+it. The console refuses to start when that certificate is the one in
+`LODELINE_SERVER_CLIENT_CERT_PATH`. A server older than the mint ignores `enroll_mint:` without a
+word, and the console then answers `enroll_unavailable`.
+
+**What the console needs.** Set all eight of `LODELINE_ENROLL_MINT_TOKEN`,
+`LODELINE_ENROLL_MINT_CERT_PATH`, `LODELINE_ENROLL_MINT_KEY_PATH`,
+`LODELINE_ENROLL_FILE_SERVER_URL`, `LODELINE_ENROLL_FILE_ENROLL_URL`,
+`LODELINE_ENROLL_FILE_CA_PATH`, `LODELINE_ENROLL_FILE_POLICY_KEYSTORE_PATH` and
+`LODELINE_PUBLIC_ORIGIN`. None set keeps the feature off. A partial set stops the start and names
+every missing variable. The mint goes to `LODELINE_SERVER_BASE_URL`, which must be an `https`
+URL, and trusts the roots of `LODELINE_SERVER_CA_PATH`, as the read calls do. The two file URLs
+are what a host dials, so they can differ from the console's own address for the server. The CA
+file holds the certificates hosts trust, with no key, and the keystore is the JSON that
+[section 3.3](../../docs/install-server.md) makes. A mistake in any of them stops the start with
+a message that names the variable and never prints a value. With `MOCK_FLEET=1` the console uses
+built-in mock values and a mock mint that makes a token which works nowhere; only
+`LODELINE_PUBLIC_ORIGIN` is still read from the environment.
+
+**Who owns the credential.** The mint key, the mint certificate and the bearer belong to the
+account that runs the console, and nobody else needs to read them. Keep the key and the
+certificate at mode 0600 (the console refuses a key that group or others can read, on Unix).
+Give the bearer to the console from an owner-only environment file (mode 0600, for example a
+systemd `EnvironmentFile=`), not from an `Environment=` line in a unit file, because
+`systemctl show` prints those. The packaged archive has no service unit and no account of its
+own, so name the account yourself. To stop the credential, remove its entry from the server's
+mint verifier file; the server reads it at the next request. To end every console session as
+well, set a new `JWT_SECRET` and restart the console: a session is a signed cookie, and the
+console keeps no other session state.
+
+**The origin and the subject list.** The POST route needs `Origin` to be exactly
+`LODELINE_PUBLIC_ORIGIN`, compared as a scheme, a lower-case host and a port with a default port
+left out. A request with no `Origin`, a `null` one, another origin, a `Sec-Fetch-Site` other than
+`same-origin`, or a body that is not JSON gets 403 `origin_not_allowed` before the console
+calls the server. There is no `Referer` fallback. Behind a reverse proxy, set the origin the
+browser sees. One console reachable by two names needs one of them. The older POST routes (login,
+logout, triage) do not have this rule yet. `LODELINE_ENROLL_SUBJECTS` limits the route to the
+listed session subjects. An OIDC subject is an opaque `oidc:` value, so copy it from the
+`username` field of `GET /api/v1/auth/me` for that account. A subject outside the list gets 403
+`not_an_enroller`, and `can_enroll` is false for it.
+
+**The request.** The body is `{}`, or `{"host_id":"<canonical version 4 UUID>"}` to make a new
+file for a host id that already exists on the host. Any other field is refused. With no
+`host_id` the console makes one from the system's random source. The 200 answer is the file:
+`Content-Type: application/json`, `Content-Disposition: attachment`, `Cache-Control: no-store`,
+and the headers `X-Lodeline-Enroll-Host-Id` and `X-Lodeline-Enroll-Expires-At`, which repeat two
+values that are not secret. The server decides the expiry. The file is a secret until its token
+is spent or expires: copy it to the host at mode 0600, because `enroll` refuses a file that
+group or others can write. The console records one line on its stderr for each file, with the
+signed-in subject, the host id and the expiry, and never the token. The server's signed audit
+chain records who asked, as the console reported it.
+
+**The answers.** An error is `{"error":{"code","message"}}`.
+
+| Code | Status | What it means for the operator |
+|---|---|---|
+| `enrollment_not_configured` | 404 | The eight variables are not all set. |
+| `origin_not_allowed` | 403 | The request did not come from the console's own origin. |
+| `not_an_enroller` | 403 | The subject is not in `LODELINE_ENROLL_SUBJECTS`. |
+| `invalid_host_id` | 422 | The `host_id` is not a lowercase, hyphenated version 4 UUID. |
+| `host_exists` | 409 | The server already knows that host id (it is on the allowlist, or the server issued it a certificate). Make a token on the server with `lodeline-server enroll-token`, or use a new host id. |
+| `token_outstanding` | 409 | A token for that host id is still valid. Use the file made for it, wait until it expires, or make a token on the server with `lodeline-server enroll-token`, which has no such rule. |
+| `enrollment_limit_reached` | 429 | The server holds the most tokens it allows. Try again later. |
+| `enroll_unavailable` | 502 | The server has no mint endpoint, or does not accept the console's mint certificate. The two look the same. |
+| `enroll_refused` | 502 | The server refused the mint bearer. |
+| `enroll_failed` | 502 | Anything else: the server answered something unexpected, a setting file cannot be used (the message names the variable), the connection failed or timed out. No file was made. |
+
+The console never retries a mint, because a retry after a lost answer would make a second token.
+A lost answer leaves a token that nobody holds. The same host id then answers
+`token_outstanding` until that token expires. The ways on are the server's `enroll-token`
+subcommand, which has no such rule, or a new host id. If `lodeline-sender enroll` on a host
+stopped after it stored its host id, make a new file for that host id with the `host_id` field
+(`lodeline show host-id` prints it). A host that already has a certificate from this server stays
+a job for `lodeline-server enroll-token`.
 - A download has no total time limit. It fails when the server sends nothing for 30 s, and the
   browser then reports a failed download. A fleet read still fails after 5 s.
 

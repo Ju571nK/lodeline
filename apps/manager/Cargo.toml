@@ -13,7 +13,7 @@ rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["Lodeline contributors"]
 repository = "https://github.com/Ju571nK/lodeline"
-description = "Read-only web console for a lodeline-server fleet."
+description = "Web console for a lodeline-server fleet."
 publish = false
 
 [dependencies]
@@ -71,4 +71,7 @@ lodeline-proxy-api = { path = "../../crates/lodeline-proxy-api" }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
+# The round trip test reads a made enrollment file with the host's own reader (src/enroll/tests.rs).
+lodeline-sender = { path = "../../crates/lodeline-sender" }
+time = "0.3"
 

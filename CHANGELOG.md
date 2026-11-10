@@ -9,6 +9,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- The fleet console makes a host's enrollment file (`GET /api/v1/enrollment` and
+  `POST /api/v1/enrollment/files`). A signed-in operator asks; the console asks the server for a
+  single-use token with its own mint credential (`LODELINE_ENROLL_MINT_TOKEN`,
+  `LODELINE_ENROLL_MINT_CERT_PATH`, `LODELINE_ENROLL_MINT_KEY_PATH`), builds the file from its
+  settings (`LODELINE_ENROLL_FILE_*`) and answers with the file's bytes. It keeps no token and no
+  file. The POST accepts only a request whose `Origin` is `LODELINE_PUBLIC_ORIGIN`, and
+  `LODELINE_ENROLL_SUBJECTS` can limit it to some subjects. It is off unless all eight settings
+  are set (see "Enroll a host" in `apps/manager/README.md`) (#575, #553). The page in the web
+  console follows in a later change.
 - `POST /v1/enroll-tokens` makes a single-use enrollment token over HTTP, for the fleet console
   to use (`docs/install-server.md` section 3.6). It is off unless `enroll_mint:` is
   in `server.yaml`, and needs a pinned client certificate, a bearer with the new scope `enroll`
