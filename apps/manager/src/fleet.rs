@@ -1,7 +1,9 @@
 //! The read-only client for `lodeline-server`'s `/v1/*` API, Go's `internal/fleet`: the HTTP
 //! client, the built-in mock fleet, the read cache in front of either, and bounded retry. The
-//! proxy reads (`proxy.rs`) are new with this console and have no Go counterpart.
+//! proxy reads (`proxy.rs`) and the release file downloads (`artifacts.rs`) are new with this
+//! console and have no Go counterpart.
 
+mod artifacts;
 pub mod cache;
 mod http;
 mod mock;
@@ -16,6 +18,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+pub use artifacts::*;
 pub use http::{env_proxy, read_capped, HttpClient};
 pub use mock::Mock;
 pub use proxy::*;
@@ -39,6 +42,7 @@ pub enum Request {
     Invocations(InvocationsParams),
     InvocationById(String),
     Inventory(InventoryView, InventoryParams),
+    Artifacts,
 }
 
 /// `GET /v1/events` filters. Empty and zero values are left out of the upstream query.
@@ -142,11 +146,13 @@ pub enum Response {
     Snapshots(InventoryPage<InventorySnapshot>),
     Drift(InventoryPage<DriftRecord>),
     Markers(InventoryPage<RebaselineMarker>),
+    Artifacts(ArtifactsIndex),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FleetError {
-    /// 404 from an ID lookup: no such event, host, proxy or invocation.
+    /// 404 from an ID lookup: no such event, host, proxy or invocation. For a release file, 404
+    /// `artifact_not_found`.
     NotFound,
     /// 404 from any other endpoint: the server runs without a read token.
     ReadApiDisabled,
@@ -156,6 +162,8 @@ pub enum FleetError {
     /// 404 `host_unknown` from any read: a server with a proxy section serves the read routes only
     /// to a host-class client certificate, and the console's is not one.
     CertificateRefused,
+    /// 404 `artifacts_not_configured`: the server has no `artifacts_dir`.
+    ArtifactsNotConfigured,
     Unauthorized,
     /// 403 from a proxy read: the read credential has no `proxy.read` at all.
     Forbidden,
@@ -199,6 +207,9 @@ impl fmt::Display for FleetError {
             Self::CertificateRefused => {
                 f.write_str("fleet: lodeline-server refused the console's client certificate")
             }
+            Self::ArtifactsNotConfigured => {
+                f.write_str("fleet: lodeline-server has no artifacts_dir")
+            }
             Self::Unauthorized => f.write_str("fleet: unauthorized"),
             Self::Forbidden => f.write_str("fleet: forbidden"),
             Self::InvalidCursor => f.write_str("fleet: invalid cursor"),
@@ -225,6 +236,8 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// A source of fleet bodies. Implementations must be safe to share between requests.
 pub trait Client: Send + Sync {
     fn get(&self, req: Request) -> BoxFuture<'_, Reply>;
+    /// One release file, streamed and never cached.
+    fn artifact(&self, name: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>>;
 }
 
 /// Bounded retry around idempotent fleet reads (Go's `RetryPolicy`).
@@ -242,10 +255,10 @@ pub const DEFAULT_RETRY: RetryPolicy = RetryPolicy {
 /// Runs `fetch` until it succeeds, fails with an error that is not retried, or uses up the
 /// attempts. Between attempts it waits the upstream's `Retry-After`; zero or more than
 /// `max_delay` waits `max_delay`, as in Go.
-pub async fn retry<F, Fut>(policy: RetryPolicy, mut fetch: F) -> Reply
+pub async fn retry<T, F, Fut>(policy: RetryPolicy, mut fetch: F) -> Result<T, FleetError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Reply>,
+    Fut: Future<Output = Result<T, FleetError>>,
 {
     let mut attempt = 1;
     loop {
@@ -309,10 +322,10 @@ pub fn from_config(cfg: &Config) -> Result<Arc<dyn Client>, String> {
 
 impl Request {
     /// The endpoint's name in the cache, which also picks its freshness tier; `None` for
-    /// healthz, which is never cached.
+    /// healthz and the release file list, which are never cached.
     fn endpoint(&self) -> Option<&'static str> {
         Some(match self {
-            Self::Healthz => return None,
+            Self::Healthz | Self::Artifacts => return None,
             Self::Meta => "meta",
             Self::Events(_) => "events",
             Self::EventById(_) => "event_by_id",
@@ -407,6 +420,7 @@ impl Request {
             }
             Self::Healthz
             | Self::Meta
+            | Self::Artifacts
             | Self::EventById(_)
             | Self::HostById(_)
             | Self::ProxyById(_)

@@ -9,9 +9,9 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::fleet::{
-    retry, ActiveHosts, ConfigState, ConnectionState, EventsParams, GoTime, HostsParams,
-    InventoryParams, InventoryView, InvocationsParams, Lifecycle, Meta, Outcome, ProxiesParams,
-    RetryPolicy, RiskParams, DEFAULT_RETRY,
+    retry, ActiveHosts, ArtifactName, ConfigState, ConnectionState, EventsParams, GoTime,
+    HostsParams, InventoryParams, InventoryView, InvocationsParams, Lifecycle, Meta, Outcome,
+    ProxiesParams, RetryPolicy, RiskParams, DEFAULT_RETRY,
 };
 
 const TOKEN: &str = "test-bearer-secret";
@@ -993,6 +993,74 @@ async fn bodies_are_read_up_to_a_limit() {
         };
         assert_eq!(err, want, "{len} bytes");
     }
+}
+
+/// A server that answers every request with 200 and `parts` as the body, each part sent `gap`
+/// after the one before.
+fn trickle(parts: Vec<&'static str>, gap: Duration) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for sock in listener.incoming() {
+            let mut sock = sock.unwrap();
+            let _ = sock.read(&mut [0; 4096]);
+            let len: usize = parts.iter().map(|p| p.len()).sum();
+            let _ = write!(sock, "HTTP/1.1 200 OK\r\ncontent-length: {len}\r\n\r\n");
+            for p in &parts {
+                let _ = sock.write_all(p.as_bytes());
+                std::thread::sleep(gap);
+            }
+        }
+    });
+    url
+}
+
+/// The next part of `body`, or the error that ended it.
+async fn next_part(body: &mut axum::body::Body) -> Option<Result<String, axum::Error>> {
+    use hyper::body::Body as _;
+    let frame = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *body).poll_frame(cx)).await?;
+    Some(frame.map(|f| String::from_utf8(f.into_data().unwrap().to_vec()).unwrap()))
+}
+
+/// A download outlasts the JSON timeout while the server keeps sending, and each part reaches the
+/// caller as it arrives, not once the whole file is in.
+#[tokio::test]
+async fn a_download_streams_past_the_json_timeout() {
+    let url = trickle(vec!["ab", "cd", "ef"], Duration::from_millis(300));
+    let json_timeout = Duration::from_millis(200);
+    let c =
+        HttpClient::with_stall(&url, TOKEN, None, json_timeout, Duration::from_secs(2)).unwrap();
+    let started = Instant::now();
+    let mut file = c.artifact(ArtifactName::parse("f").unwrap()).await.unwrap();
+    assert_eq!(file.len, Some(6));
+    let mut parts = Vec::new();
+    while let Some(part) = next_part(&mut file.body).await {
+        parts.push(part.unwrap());
+    }
+    assert_eq!(parts, ["ab", "cd", "ef"]);
+    assert!(
+        started.elapsed() > 2 * json_timeout,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// A server that stops sending ends the download after the stall limit.
+#[tokio::test]
+async fn a_stalled_download_fails() {
+    let url = trickle(vec!["ab", "cd"], Duration::from_secs(3));
+    let stall = Duration::from_millis(300);
+    let c = HttpClient::with_stall(&url, TOKEN, None, Duration::from_secs(2), stall).unwrap();
+    let mut file = c.artifact(ArtifactName::parse("f").unwrap()).await.unwrap();
+    assert_eq!(next_part(&mut file.body).await.unwrap().unwrap(), "ab");
+    let started = Instant::now();
+    assert!(next_part(&mut file.body).await.unwrap().is_err());
+    let waited = started.elapsed();
+    assert!(
+        waited >= stall && waited < Duration::from_secs(2),
+        "{waited:?}"
+    );
 }
 
 #[tokio::test]

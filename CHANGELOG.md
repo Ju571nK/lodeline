@@ -21,6 +21,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   existing file. Before, this step needed the `openssl` binary, which Windows does not ship. The
   `openssl req` command still works. The sender now uses `rcgen` on the `ring` backend that its
   TLS client already links. (#554, #553)
+- The web console has a Downloads page. It lists the release files that the server's operator put
+  in `artifacts_dir`, and a signed-in user can save one in the browser. The console reads the
+  files from `lodeline-server` with its own read token and client certificate, and streams each
+  one as it arrives, so nobody has to put the read token on a host to fetch them. The console
+  does not check the files. A server without `artifacts_dir` gets a page that names the
+  `server.yaml` setting. The console API adds `GET /api/v1/fleet/artifacts` and
+  `GET /api/v1/fleet/artifacts/{filename}`. (#555, #553)
 
 ### Fixed
 

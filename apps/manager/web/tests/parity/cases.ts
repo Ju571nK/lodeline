@@ -33,6 +33,8 @@ export const ROUTES = [
   'GET /api/v1/fleet/proxies/{proxy_id}/rebaseline-markers',
   'GET /api/v1/fleet/proxy-invocations',
   'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
+  'GET /api/v1/fleet/artifacts',
+  'GET /api/v1/fleet/artifacts/{filename}',
   'POST /api/v1/triage/upsert',
   'POST /api/v1/triage/note',
   'GET /api/v1/triage/{host_id}/{event_id}',
@@ -1264,6 +1266,48 @@ export const CASES: Case[] = [
     'fleet-invocation-no-session',
   ),
 
+  // Release files. No Go console had them, so these goldens are from the Rust build.
+  {
+    name: 'fleet-artifacts',
+    route: 'GET /api/v1/fleet/artifacts',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/artifacts',
+  },
+  noSession(
+    'GET /api/v1/fleet/artifacts',
+    'GET',
+    '/api/v1/fleet/artifacts',
+    'fleet-artifacts-no-session',
+  ),
+  {
+    name: 'fleet-artifact',
+    route: 'GET /api/v1/fleet/artifacts/{filename}',
+    outcome: 'ok',
+    method: 'GET',
+    path: '/api/v1/fleet/artifacts/SHA256SUMS',
+  },
+  {
+    name: 'fleet-artifact-not-found',
+    route: 'GET /api/v1/fleet/artifacts/{filename}',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/artifacts/missing.tar.gz',
+  },
+  {
+    name: 'fleet-artifact-bad-name',
+    route: 'GET /api/v1/fleet/artifacts/{filename}',
+    outcome: 'error',
+    method: 'GET',
+    path: '/api/v1/fleet/artifacts/..%2Fserver.yaml',
+  },
+  noSession(
+    'GET /api/v1/fleet/artifacts/{filename}',
+    'GET',
+    '/api/v1/fleet/artifacts/SHA256SUMS',
+    'fleet-artifact-no-session',
+  ),
+
   // Triage write sequence on EVT#3 (an alice-mbp event in the mock), then reads.
   {
     name: 'triage-get-before-insert',
@@ -2053,6 +2097,84 @@ export const CASES: Case[] = [
     'GET /api/v1/fleet/proxy-invocations/{invocation_id}',
     '/api/v1/fleet/proxy-invocations/00000000-0000-4000-8000-000000000001',
     { status: 404, text: '' },
+  ),
+  upstream(
+    'live-artifacts',
+    'GET /api/v1/fleet/artifacts',
+    '/api/v1/fleet/artifacts',
+    {
+      status: 200,
+      json: { artifacts: ['SHA256SUMS', 'lodeline-0.14.2-x86_64-pc-windows-msvc.zip'] },
+    },
+    'ok',
+  ),
+  upstream(
+    'live-artifacts-not-configured',
+    'GET /api/v1/fleet/artifacts',
+    '/api/v1/fleet/artifacts',
+    {
+      status: 404,
+      json: {
+        error: { code: 'artifacts_not_configured', message: 'artifact serving is not enabled' },
+      },
+    },
+  ),
+  upstream(
+    'live-artifacts-read-api-off',
+    'GET /api/v1/fleet/artifacts',
+    '/api/v1/fleet/artifacts',
+    {
+      status: 404,
+      json: { error: { code: 'not_found', message: 'endpoint not found' } },
+    },
+  ),
+  upstream(
+    'live-artifacts-host-unknown',
+    'GET /api/v1/fleet/artifacts',
+    '/api/v1/fleet/artifacts',
+    {
+      status: 404,
+      json: { error: 'host_unknown' },
+    },
+  ),
+  // The console sets its own type and disposition from the checked name, whatever the server sent.
+  upstream(
+    'live-artifact',
+    'GET /api/v1/fleet/artifacts/{filename}',
+    '/api/v1/fleet/artifacts/SHA256SUMS',
+    {
+      status: 200,
+      headers: { 'Content-Type': 'text/html', 'Content-Disposition': 'inline; filename="x.html"' },
+      text: 'abc123  lodeline-0.14.2-x86_64-pc-windows-msvc.zip\n',
+    },
+    'ok',
+  ),
+  upstream(
+    'live-artifact-not-found',
+    'GET /api/v1/fleet/artifacts/{filename}',
+    '/api/v1/fleet/artifacts/missing.tar.gz',
+    {
+      status: 404,
+      json: { error: { code: 'artifact_not_found', message: 'no artifact named missing.tar.gz' } },
+    },
+  ),
+  upstream(
+    'live-artifact-not-configured',
+    'GET /api/v1/fleet/artifacts/{filename}',
+    '/api/v1/fleet/artifacts/SHA256SUMS',
+    {
+      status: 404,
+      json: {
+        error: { code: 'artifacts_not_configured', message: 'artifact serving is not enabled' },
+      },
+    },
+  ),
+  // A name the server would refuse never leaves the console: the stub records no call.
+  upstream(
+    'live-artifact-bad-name',
+    'GET /api/v1/fleet/artifacts/{filename}',
+    '/api/v1/fleet/artifacts/a%20b',
+    { status: 200, text: 'never sent' },
   ),
   upstream('upstream-401', 'GET /api/v1/fleet/events', '/api/v1/fleet/events', {
     status: 401,

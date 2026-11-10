@@ -6,6 +6,12 @@ read-only consumer of `lodeline-server`'s fleet read API, documented in
 own triage notes. Lodeline measures and does not block, and the console keeps that framing in
 its UI text and docs.
 
+It also reads the release files in the server's `artifacts_dir`: `GET /v1/artifacts` and
+`GET /v1/artifacts/{filename}` (`crates/lodeline-server/src/routes/artifacts.rs`). The Downloads
+page lists them and streams one to a signed-in browser, so the read token never leaves the
+console. These are reads too, and the console stays read-only. It does not check the files, and
+its text must not say that they are signed or verified.
+
 It also reads the server's Lodeline Proxy status and invocations: `GET /v1/proxies`,
 `GET /v1/proxies/{id}`, `GET /v1/proxy-invocations` and `GET /v1/proxy-invocations/{id}`
 ([ledger-and-query.md L2 to L4](../../docs/specs/lodeline-proxy/contracts/ledger-and-query.md)),
@@ -92,9 +98,11 @@ gets, and `src/fleet/tests.rs` checks them against a `lodeline-server` run in pr
 `lodeline-fleet-api` types, so a change to a server route or that crate can fail `cargo test`
 here. The proxy bodies are `src/fleet/proxy.rs`, which keeps the server's nulls and absent
 fields, and `src/fleet/tests/proxies.rs` checks them against the server's proxy routes run in
-process. The mock fleet is `testdata/mock-fleet.json`, `testdata/mock-proxies.json`,
-`testdata/mock-proxy-invocations.json` and `testdata/mock-proxy-inventory.json` (see
-`testdata/README.md`).
+process. `src/fleet/tests/artifacts.rs` checks the release file routes against a server run in
+process, through the console's own router. The mock fleet is `testdata/mock-fleet.json`,
+`testdata/mock-proxies.json`, `testdata/mock-proxy-invocations.json` and
+`testdata/mock-proxy-inventory.json` (see `testdata/README.md`), plus the release files in
+`src/fleet/mock.rs`.
 
 `src/triage.rs` owns the console's SQLite file. It must stay readable by, and sortable with, the
 Go build's: keep the schema text, the pragmas and the fixed-width timestamp layout as they are.

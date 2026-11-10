@@ -1,0 +1,31 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/artifacts",
+    "server": "live"
+  },
+  "status": 502,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/json",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": {
+    "error": {
+      "code": "artifacts_not_configured",
+      "message": "lodeline-server serves no release files: set artifacts_dir in its server.yaml (docs/install-server.md, section 5.1)"
+    }
+  },
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/artifacts",
+      "query": [],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "application/json"
+    }
+  ]
+}

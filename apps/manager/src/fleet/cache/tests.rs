@@ -41,6 +41,7 @@ impl Client for Counting {
         Box::pin(async move {
             let name = match &req {
                 Request::Healthz => "healthz",
+                Request::Artifacts => "artifacts",
                 other => other.endpoint().unwrap(),
             };
             *self.calls.lock().unwrap().entry(name).or_default() += 1;
@@ -69,6 +70,11 @@ impl Client for Counting {
                 }),
             }))
         })
+    }
+
+    fn artifact(&self, _: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>> {
+        *self.calls.lock().unwrap().entry("artifact").or_default() += 1;
+        Box::pin(async { Err(FleetError::NotFound) })
     }
 }
 
@@ -348,6 +354,10 @@ impl Client for PanicsOnce {
             Ok(Arc::new(Response::Events(EventsPage::default())))
         })
     }
+
+    fn artifact(&self, _: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>> {
+        unreachable!("no release file reads here")
+    }
 }
 
 #[tokio::test]
@@ -413,4 +423,21 @@ async fn proxy_reads_have_keys_of_their_own() {
     );
     assert_eq!(up.count("proxy_drift"), 2, "one key per proxy");
     assert_eq!(c.len(), 9);
+}
+
+/// The release file list and each file go to the server every time.
+#[tokio::test]
+async fn release_files_are_never_cached() {
+    let up = Arc::new(Counting::default());
+    let c = cache(&up, CacheConfig::default(), None);
+    let name = ArtifactName::parse("SHA256SUMS").unwrap();
+    for _ in 0..2 {
+        c.get(Request::Artifacts).await.unwrap();
+        assert!(matches!(
+            c.artifact(name.clone()).await,
+            Err(FleetError::NotFound)
+        ));
+    }
+    assert_eq!((up.count("artifacts"), up.count("artifact")), (2, 2));
+    assert_eq!(c.len(), 0);
 }

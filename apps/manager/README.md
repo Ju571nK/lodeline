@@ -176,6 +176,31 @@ the proxy pages, and the Inventory section of a proxy says that it does not serv
 The console only reads proxies. Register, disable and config changes go through the server's
 operator CLI and its management credential, which the console never holds.
 
+### Downloads
+
+The **Downloads** page lists the release files in the server's `artifacts_dir`, and a signed-in
+user can save one in the browser. The console reads `GET /v1/artifacts` and
+`GET /v1/artifacts/{filename}` with `LODELINE_SERVER_READ_TOKEN` and its client certificate, and
+streams each file to the browser as it arrives. The read token stays on the console, so nobody
+has to put it on a host to fetch the files.
+
+To fill the page, set `artifacts_dir` in the server's `server.yaml` and copy the release files
+into that folder ([docs/install-server.md](../../docs/install-server.md), section 5.1). Without
+it, the page says that the server serves no release files.
+
+The console passes each file on as the server sends it and does not check it. Before you install
+a file, check it against the `SHA256SUMS` on the GitHub release page and its attestation, as
+[Install from a release](#install-from-a-release) shows for the console itself. A `SHA256SUMS`
+from the Downloads page comes from the same server as the file, so it shows only that the file
+arrived intact.
+
+- A file name can hold only ASCII letters, digits, `.`, `_` and `-`, and cannot be `.` or `..`,
+  the rule the server uses. The console answers any other name with 400 `bad_filename` and sends
+  no request.
+- The console does not cache the list, so a reload shows the files that the server holds now.
+- A download has no total time limit. It fails when the server sends nothing for 30 s, and the
+  browser then reports a failed download. A fleet read still fails after 5 s.
+
 ## Sessions and the login limit
 
 - A session is a signed token in the `lodeline_session` cookie (`HttpOnly`, `SameSite=Lax`,

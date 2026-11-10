@@ -2,14 +2,14 @@
 //! client, with Go's query parsing and error mapping. The SPA never sees `lodeline-server` URLs.
 
 use axum::extract::State;
-use axum::http::{StatusCode, Uri};
+use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::Response;
 use serde::Serialize;
 
 use crate::api::{write_json, Query};
 use crate::fleet::{
-    self, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams, InventoryParams,
-    InventoryView, InvocationsParams, ProxiesParams, Reply, Request, RiskParams,
+    self, ArtifactName, ComplianceParams, Event, EventsParams, FleetError, GoTime, HostsParams,
+    InventoryParams, InventoryView, InvocationsParams, ProxiesParams, Reply, Request, RiskParams,
 };
 use crate::server::{error_response, AppState};
 use crate::{config, triage};
@@ -173,6 +173,49 @@ async fn inventory(State(s): State<AppState>, uri: Uri, view: InventoryView) -> 
     }
 }
 
+/// The names of the release files in the server's `artifacts_dir`.
+pub async fn artifacts(State(s): State<AppState>) -> Response {
+    relay(retried(&s, Request::Artifacts).await)
+}
+
+/// One release file, streamed from the server under the console's read token. A name the server
+/// would refuse is refused here and never sent.
+pub async fn artifact(State(s): State<AppState>, uri: Uri) -> Response {
+    let Some(name) = ArtifactName::parse(&last_segment(&route_path(uri.path()))) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "bad_filename",
+            "filename must match ^[A-Za-z0-9._-]+$",
+        );
+    };
+    let file = match fleet::retry(fleet::DEFAULT_RETRY, || s.fleet.artifact(name.clone())).await {
+        Ok(file) => file,
+        Err(FleetError::NotFound) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "lodeline-server has no release file with that name",
+            )
+        }
+        Err(e) => return map_err(&e),
+    };
+    let mut res = Response::new(file.body);
+    let h = res.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", name.as_str()))
+            .expect("a safe name is a header value"),
+    );
+    if let Some(len) = file.len {
+        h.insert(header::CONTENT_LENGTH, len.into());
+    }
+    res
+}
+
 /// The server cannot tell an unknown target from one outside the read range, so neither can this.
 fn relay_proxy(reply: Reply, what: &str) -> Response {
     if matches!(reply, Err(FleetError::NotFound)) {
@@ -268,6 +311,12 @@ fn map_err(e: &FleetError) -> Response {
             "lodeline-server did not accept the client certificate in \
              LODELINE_SERVER_CLIENT_CERT_PATH. Issue it from the host client CA \
              (console README, Proxy reads, step 2)",
+        ),
+        FleetError::ArtifactsNotConfigured => error_response(
+            StatusCode::BAD_GATEWAY,
+            "artifacts_not_configured",
+            "lodeline-server serves no release files: set artifacts_dir in its server.yaml \
+             (docs/install-server.md, section 5.1)",
         ),
         FleetError::Unauthorized => error_response(
             StatusCode::BAD_GATEWAY,

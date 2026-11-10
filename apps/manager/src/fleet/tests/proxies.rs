@@ -1078,8 +1078,12 @@ async fn a_proxy_ca_certificate_is_refused_on_every_read() {
         invocations("", 0, "", ""),
         Request::InvocationById(uuid(1)),
         view(InventoryView::Drift, "px-a", "", 0, ""),
+        Request::Artifacts,
     ] {
         let err = client.get(req.clone()).await.unwrap_err();
         assert_eq!(err, FleetError::CertificateRefused, "{req:?}");
     }
+    let name = ArtifactName::parse("SHA256SUMS").unwrap();
+    let err = client.artifact(name).await.err().unwrap();
+    assert_eq!(err, FleetError::CertificateRefused, "artifact");
 }

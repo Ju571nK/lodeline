@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use super::{BoxFuture, Client, FleetError, Reply, Request, Response};
+use super::{ArtifactName, BoxFuture, Client, Download, FleetError, Reply, Request, Response};
 
 /// How much longer metadata and past events stay fresh than live data.
 const SLOW_TIER: u32 = 12;
@@ -115,6 +115,10 @@ impl Client for CachingClient {
     fn get(&self, req: Request) -> BoxFuture<'_, Reply> {
         Box::pin(self.0.clone().get(req))
     }
+
+    fn artifact(&self, name: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>> {
+        self.0.next.artifact(name)
+    }
 }
 
 impl Inner {
@@ -131,7 +135,8 @@ impl Inner {
 
     async fn get(self: Arc<Self>, req: Request) -> Reply {
         let (Some(endpoint), Some(key)) = (req.endpoint(), req.cache_key()) else {
-            // A health probe must show the upstream as it is now.
+            // A health probe must show the upstream as it is now, and so must the release file
+            // list: an operator who has just copied files in expects to see them.
             return self.next.get(req).await;
         };
         let pol = self.policy(endpoint);
