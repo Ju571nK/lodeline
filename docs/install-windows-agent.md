@@ -136,6 +136,11 @@ Set the diagnostic log level with `LODELINE_LOG` (e.g. `$env:LODELINE_LOG = "deb
 `sender.yaml` `agent_control` must be the named pipe `\\.\pipe\lodeline-control`
 (not a Unix socket path).
 
+For enrollment ([install-server.md § 3.1](install-server.md)), `lodeline-sender csr`
+makes the host key and CSR without an `openssl` binary. On Windows the key file
+gets the permissions it inherits from its folder, so write it to a folder that
+only administrators and the sender's account can read.
+
 ---
 
 *Windows path defaults reflect the agent's `default_state_db_path`,

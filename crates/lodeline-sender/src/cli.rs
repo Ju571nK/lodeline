@@ -29,6 +29,21 @@ pub enum Command {
         #[arg(long)]
         url: String,
     },
+    /// Make this host's enrollment key and CSR for `POST /v1/enroll`: a new ECDSA
+    /// P-256 private key and a PEM CSR whose subject is `CN=<host-id>`. Makes no
+    /// network call and never overwrites an existing file.
+    Csr {
+        /// The agent's host_id (a UUID). The CSR's CN is this exact string.
+        #[arg(long)]
+        host_id: String,
+        /// Where to write the private key (PKCS#8 PEM; created 0600 on unix). Use it
+        /// as `client_key_path` with the certificate the server returns.
+        #[arg(long)]
+        key_out: PathBuf,
+        /// Where to write the CSR (PEM).
+        #[arg(long)]
+        csr_out: PathBuf,
+    },
 }
 
 #[cfg(test)]

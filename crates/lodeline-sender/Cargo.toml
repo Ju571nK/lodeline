@@ -33,6 +33,7 @@ reqwest = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 x509-parser = { workspace = true }
+rcgen = { workspace = true }
 http = { workspace = true }
 urlencoding = { workspace = true }
 
@@ -42,6 +43,7 @@ axum = { workspace = true }
 tower = { workspace = true }
 data-encoding = { workspace = true }
 ed25519-dalek = { workspace = true }
+x509-parser = { workspace = true, features = ["verify"] }
 
 # -- OS packages -------------------------------------------------------------
 # Build with `packaging/build.sh sender` (needs `cargo install cargo-deb
