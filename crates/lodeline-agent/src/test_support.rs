@@ -21,6 +21,7 @@ pub struct TestAgentBuilder {
     /// JSON bytes of a policy-signing keystore the agent should load. `None` →
     /// no keystore (Phase 1 mode; `apply_policy` rejects every envelope).
     keystore_json: Option<Vec<u8>>,
+    host_id: Option<String>,
 }
 
 impl Default for TestAgentBuilder {
@@ -35,7 +36,15 @@ impl TestAgentBuilder {
             policy_yaml: String::new(),
             poll_watcher: false,
             keystore_json: None,
+            host_id: None,
         }
+    }
+
+    /// Claim this host_id in the agent's state.db before it boots, as
+    /// `lodeline init-host-id` does.
+    pub fn host_id(mut self, id: &str) -> Self {
+        self.host_id = Some(id.to_string());
+        self
     }
 
     pub fn policy(mut self, yaml: &str) -> Self {
@@ -62,6 +71,11 @@ impl TestAgentBuilder {
         let state_db = td.path().join("state.db");
         let policy_file = td.path().join("policy.yaml");
         std::fs::write(&policy_file, &self.policy_yaml).unwrap();
+        if let Some(id) = &self.host_id {
+            lodeline_core::state::HashCache::open(&state_db)
+                .and_then(|c| c.host_meta_claim_host_id(id))
+                .expect("preassign host_id");
+        }
         let control_socket = td.path().join("control.sock");
         let control_pipe_name =
             format!(r"\\.\pipe\lodeline-test-{}", uuid::Uuid::new_v4().simple());

@@ -63,6 +63,15 @@ pub enum Command {
         #[command(subcommand)]
         what: ShowWhat,
     },
+    /// Give this host its host_id before the agent's first run. Writes only when
+    /// state.db has no host_id yet. Pass the same --state-db as `lodeline run`.
+    /// Exits 0 when the host has this host_id, 3 when it already has another one
+    /// (nothing is written), 2 for a malformed UUID, and 1 on any other error.
+    InitHostId {
+        /// A lowercase, hyphenated version 4 UUID. It is stored exactly as given.
+        #[arg(value_parser = canonical_v4)]
+        host_id: String,
+    },
     /// Print the version (also available via `--version`).
     Version,
     /// Scan installed AI agents' configs once and print a posture score, then
@@ -118,6 +127,16 @@ pub enum Command {
         #[arg(long)]
         fail_on_warn: bool,
     },
+}
+
+/// Rejects, never rewrites: a lowercased copy would not match the host_id in the
+/// server's token, certificate and `sender.yaml`.
+fn canonical_v4(host_id: &str) -> Result<String, &'static str> {
+    if lodeline_core::host_meta::is_canonical_v4(host_id) {
+        Ok(host_id.to_owned())
+    } else {
+        Err("expected a lowercase, hyphenated version 4 UUID")
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -207,6 +226,21 @@ mod cli_tests {
         };
         assert!(json);
         assert_eq!(sender_config.as_deref(), Some(Path::new("/tmp/s.yaml")));
+    }
+
+    /// Not gated by `operator-cli`, so a hardened agent can still enroll.
+    #[test]
+    fn parses_init_host_id_and_rejects_another_spelling() {
+        let id = "5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f";
+        let cli = Cli::parse_from(["lodeline", "init-host-id", id]);
+        let super::Command::InitHostId { host_id } = cli.command else {
+            panic!("expected the init-host-id command");
+        };
+        assert_eq!(host_id, id);
+
+        let err = Cli::try_parse_from(["lodeline", "init-host-id", &id.to_uppercase()])
+            .expect_err("an uppercase UUID must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
