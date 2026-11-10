@@ -1078,14 +1078,15 @@ async fn a_token_redeemed_through_each_listener_shares_one_chain() {
 fn server_refuses_an_enroll_listener_without_enrollment() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("server.yaml");
+    // Single-quoted YAML keeps Windows backslashes literal.
     let d = dir.path().display();
     std::fs::write(
         &cfg,
         format!(
-            "bind: \"127.0.0.1:0\"\nevents_out_dir: \"{d}/events\"\n\
-             policy_bundle_path: \"{d}/policy.json\"\ntls_cert_path: \"{d}/s.crt\"\n\
-             tls_key_path: \"{d}/s.key\"\nclient_ca_path: \"{d}/ca.pem\"\n\
-             events_require_cert_host_match: true\nenroll_listener:\n  bind: \"127.0.0.1:1\"\n"
+            "bind: '127.0.0.1:0'\nevents_out_dir: '{d}/events'\n\
+             policy_bundle_path: '{d}/policy.json'\ntls_cert_path: '{d}/s.crt'\n\
+             tls_key_path: '{d}/s.key'\nclient_ca_path: '{d}/ca.pem'\n\
+             events_require_cert_host_match: true\nenroll_listener:\n  bind: '127.0.0.1:1'\n"
         ),
     )
     .unwrap();
