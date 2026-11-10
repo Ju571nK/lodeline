@@ -792,9 +792,9 @@ mod tests {
         let w = World::new();
         let (_, _, k1) = w.start();
         w.put_key(&w.p.key_next, &k1);
-        let hard = w.p.key_next.with_file_name("other-name");
         #[cfg(unix)]
         {
+            let hard = w.p.key_next.with_file_name("other-name");
             std::fs::hard_link(&w.p.key_next, &hard).unwrap();
             let e = settle(&w.p, HOST, w.now).unwrap_err().to_string();
             assert!(
