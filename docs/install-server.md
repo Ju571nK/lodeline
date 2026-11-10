@@ -542,7 +542,7 @@ need it.
 | Key and certificate, other files missing | No request; writes the rest |
 | Fully enrolled | No request; exit 0 |
 | A file for another host_id | Exit 3 |
-| An expired or foreign certificate | Exit 4 |
+| A foreign certificate, or one that has expired | Exit 4. For an expired one the message names the steps in §3.5 |
 
 When the server's certificate fails enroll's checks (another key or host, not
 under the CA in the file, expired, or more than five minutes ahead of this
@@ -560,8 +560,8 @@ accepted with a warning.
 A host that holds a certificate from `/v1/enroll` can get a new one without a
 token. `POST /v1/renew` is served on the main port, where the client certificate
 the host presents is its credential. It is on whenever enrollment is on, and it
-has no setting of its own. The sender does not call it yet, so today a host or
-its PMS makes the request.
+has no setting of its own. `lodeline-sender` calls it by itself (§3.5); the
+`curl` below shows the request for a host that does not run the sender.
 
 The host makes a CSR for a **new key** (`lodeline-sender csr` writes both) and
 posts it. The host id is the CN of the certificate it presents, so the body has
@@ -642,6 +642,77 @@ start. From the restart, events, policy and rule packs answer 404 `host_unknown`
 and renewal answers 403. The certificate already issued keeps working for the
 host's TLS handshake until its `notAfter`, 30 days by default, and a connection
 opened before then can stay open past it until the next reconnect.
+
+### 3.5 Certificate renewal (on the host)
+
+An enrolled host keeps its certificate and key current by itself. The running
+`lodeline-sender` reads the validity of the certificate it holds and renews between
+60% and 75% of it, at a point that depends on the host_id so that hosts enrolled
+together do not renew together. For the default 30 day certificate that is between
+day 18 and day 22. There is no setting. Renewal needs `server_ca_path`, a client
+certificate and a client key in `sender.yaml`, as `enroll` writes them.
+
+**What a renewal does.** The sender makes a new P-256 key and a CSR, posts it to
+`/v1/renew` over its current certificate, and checks the answer on the host: the
+certificate must be for the new key, name this host, chain to the CA in
+`server_ca_path`, and be valid for client authentication. Only then does it replace
+the files. The new key goes to `client.key` first and the new certificate to
+`client.crt` second, each with a directory sync, and the HTTP client the sender uses
+for events and policy is replaced once, after both. A request in flight finishes on
+the old client. No event is lost or sent twice because of the swap. The old key is
+not wiped from disk when it is replaced.
+
+The files in the certificate directory while a renewal runs are
+`client.key.next`, `client.csr.next` and `client.crt.next`. If the sender stops or
+the host loses power at any point, the next start, or the next wake, repairs the
+directory before anything else. The sender, not `enroll`, does this, so start it
+before you run `enroll` on a host that stopped in the middle of a renewal.
+
+| State on disk | What the sender does |
+|---|---|
+| A leftover `<name>.next.tmp`, or a `.next` file with two links | Removes the `.tmp` and reads the file as one |
+| `client.key.next` only | Makes `client.csr.next` for it and asks |
+| `client.key.next` and `client.csr.next`, no answer yet (the server was down, or the answer was lost) | Sends the same CSR bytes again. The server allows a capped repeat |
+| `client.crt.next` is a good answer for `client.key.next` and is newer than `client.crt` | Replaces the key, then the certificate, and removes `client.csr.next` |
+| The new key is live and the old certificate is still live | Replaces the certificate with `client.crt.next` |
+| The new certificate is live and the old key is still live | Replaces the key with `client.key.next` |
+| `client.crt.next` is older than the live certificate, names another host, or does not fit `client.key.next` (for example after `enroll` or a hand copy) | Removes the `.next` files and keeps the live pair |
+| The live key fits no certificate and no `.next` file fits it | Logs an error that says to run `enroll`, deletes nothing, and the running sender keeps the client it has |
+
+A renewal that fails (no answer, 5xx, a bad answer) is retried with the same CSR.
+The first retry comes after about a fiftieth of the certificate's validity (at most
+a minute), and each later one after twice as long, up to a tenth of the validity and
+at most an hour. A 409 waits for the server's `Retry-After`, at most an hour. The
+sender never retries a refusal quickly.
+
+**What you see in the log.** Each failure line is printed at most once an hour.
+
+| Line | What to do |
+|---|---|
+| `renewed the client certificate and key` | Nothing. |
+| `the server refused to renew this host's certificate` with status 403 | This certificate is no longer the newest one issued for the host (a copy of the key renewed first, or the host was enrolled again elsewhere), or the host is not on the allowlist. Check the allowlist. Otherwise enroll the host again before the certificate expires. |
+| The same line with status 404 | The server does not offer renewal: enrollment is off there, its audit file cannot be read, or it is older than this sender. Fix the server, or enroll the host again. |
+| `certificate renewal failed` | The server could not be reached or answered with an error. The sender retries. It is an error line, not a warning, when less than a tenth of the validity is left (3 days of 30). |
+| `certificate renewal is off: this account cannot create files in the certificate directory` | The sender runs as its own account and must be able to create files beside `client.key`. A directory that `enroll` made as root belongs to root. Give it to the sender account (`systemd-tmpfiles --create` does it for the packaged layout) and restart the sender. Events keep flowing meanwhile. |
+| `client certificate expired at ...` | See below. |
+
+**After expiry.** The sender does not stop and asks nothing. It reads the files again
+every 5 minutes and uses a new pair as soon as one is there, with no restart. To
+give an expired host a new pair, issue a new token (`lodeline-server enroll-token
+--host-id <host_id>`), move `client.crt` aside (and `client.key` for a new key;
+otherwise the old key is kept), and run `enroll` again. If `enroll` exits 4 and names
+another file, move that file aside too: it compares the CA file, the keystore and
+`sender.yaml` byte for byte with what the new enrollment file would write. Enrolling
+again also supersedes the older chain on the server (§3.4).
+
+**One connection can outlive the certificate.** The server checks a client
+certificate when a connection starts. A connection opened before the certificate
+expired can stay open and carry requests past `notAfter`. The sender opens a new
+connection after a renewal, so it presents the new certificate; for a host that
+cannot renew, the first failure comes at the next reconnect.
+
+**Not yet.** `lodeline-sender doctor` does not check renewal. On Windows renewal is
+off, with one log line at start, and `enroll` is not supported there either.
 
 ## 4. Signed policy bundle
 

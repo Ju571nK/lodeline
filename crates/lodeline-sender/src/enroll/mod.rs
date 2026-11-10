@@ -354,14 +354,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
                 have_cert = true;
             }
             Err(why) => {
-                return die(
-                    4,
-                    format!(
-                        "{} exists but {why}; enroll never replaces it. Move it aside, get a new \
-                         token for this host_id, and run enroll again.",
-                        l.cert.display()
-                    ),
-                )
+                return die(4, refused_cert(&l.cert, &l.key, &why));
             }
         }
     }
@@ -513,6 +506,27 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
     // E12.
     summary(&l, &parsed, args, wrote);
     Ok(())
+}
+
+/// What exit 4 says about a certificate enroll will not use. An expired one is what a
+/// host the sender could not renew in time ends up with, so it gets the whole way out.
+fn refused_cert(cert: &Path, key: &Path, why: &str) -> String {
+    let mut m = format!(
+        "{} exists but {why}; enroll never replaces it. Move it aside, get a new token for this \
+         host_id, and run enroll again.",
+        cert.display()
+    );
+    if why == "it has expired" {
+        m.push_str(&format!(
+            " To enroll this host again: get a new token (`lodeline-server enroll-token \
+             --host-id <host_id>`), move {} aside, and {} too for a new key (otherwise the old \
+             key is kept), run enroll again, and if it exits 4 naming another file, move that \
+             file aside too. The running sender picks up the new pair without a restart.",
+            cert.display(),
+            key.display()
+        ));
+    }
+    m
 }
 
 fn put_or_die(path: &Path, bytes: &[u8], mode: u32, give: bool) -> R<()> {
@@ -719,5 +733,21 @@ mod tests {
                 p.display()
             );
         }
+    }
+
+    #[test]
+    fn an_expired_certificate_gets_the_steps_and_another_refusal_does_not() {
+        let (crt, key) = (Path::new("/s/client.crt"), Path::new("/s/client.key"));
+        let m = refused_cert(crt, key, "it has expired");
+        for part in [
+            "new token",
+            "move /s/client.crt aside",
+            "/s/client.key too",
+            "naming another file",
+            "without a restart",
+        ] {
+            assert!(m.contains(part), "{part}: {m}");
+        }
+        assert!(!refused_cert(crt, key, "it is for another key").contains("another file"));
     }
 }

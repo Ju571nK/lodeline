@@ -14,7 +14,8 @@ use crate::control_task::{ControlLoopCtx, PollOutcome};
 use crate::data_task::{self, dead_letter_tls_failure, local_event, DataTaskCtx};
 use crate::dead_letter;
 use crate::heartbeat;
-use crate::transport::{build_client, client_cert_expiry};
+use crate::renew::{self, RenewCtx};
+use crate::transport::{build_client, client_cert_expiry, ClientHandle};
 use anyhow::Result;
 use lodeline_core::event::Evidence;
 use lodeline_core::sender_status::status_path_for;
@@ -37,13 +38,19 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
              client identity. mTLS is the recommended production posture."
         );
     }
+    let paths = renew::paths(&ctx.config);
+    if let Some(p) = &paths {
+        renew::settle_at_start(p, &ctx.host_id);
+    }
     let client = build_client(
         ctx.config.client_cert_path.as_deref(),
         ctx.config.client_key_path.as_deref(),
         ctx.config.server_ca_path.as_deref(),
     )?;
+    let client = ClientHandle::from(client);
+    let client_r = client.clone();
     let stats = heartbeat::shared();
-    // Read once: `client` keeps this certificate until the process restarts.
+    // The first value. Renewal updates it when it swaps the client.
     stats.write().client_cert_expires_at =
         ctx.config
             .client_cert_path
@@ -144,13 +151,29 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
         }
     });
 
+    let renewal = tokio::spawn({
+        let ctx = paths.map(|paths| RenewCtx {
+            client: client_r,
+            stats: stats.clone(),
+            server_base_url: ctx.config.server_base_url.clone(),
+            host_id: ctx.host_id.clone(),
+            paths,
+            shutdown: ctx.shutdown.clone(),
+        });
+        async move {
+            if let Some(ctx) = ctx {
+                renew::run(ctx).await;
+            }
+        }
+    });
+
     let status = tokio::spawn(heartbeat::write_status(
         stats,
         status_path_for(&ctx.config.offset_path),
         ctx.shutdown.clone(),
     ));
 
-    let _ = tokio::join!(control, reader, data, status);
+    let _ = tokio::join!(control, reader, data, status, renewal);
     Ok(())
 }
 

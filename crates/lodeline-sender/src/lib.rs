@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod enroll;
 pub mod heartbeat;
 pub mod manifest;
+pub mod renew;
 pub mod runtime;
 pub mod state;
 pub mod transport;

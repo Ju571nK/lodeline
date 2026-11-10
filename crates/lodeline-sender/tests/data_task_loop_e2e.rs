@@ -73,7 +73,7 @@ async fn happy_path_advances_offset_and_updates_stats() {
     let stats = heartbeat::shared();
     let cancel = CancellationToken::new();
     let ctx = DataTaskCtx {
-        client: reqwest::Client::new(),
+        client: reqwest::Client::new().into(),
         config: cfg(events.path(), state_dir.path(), &addr.to_string()),
         host_id: "h-1".into(),
         agent_version: "0.2.0".into(),
@@ -132,7 +132,7 @@ async fn rejected_events_go_to_dead_letter_and_offset_still_advances() {
     let cancel = CancellationToken::new();
     let dead_letter_dir = state_dir.path().join("dead-letter");
     let ctx = DataTaskCtx {
-        client: reqwest::Client::new(),
+        client: reqwest::Client::new().into(),
         config: cfg(events.path(), state_dir.path(), &addr.to_string()),
         host_id: "h-1".into(),
         agent_version: "0.2.0".into(),
@@ -189,7 +189,7 @@ async fn an_ack_outside_the_batch_is_a_failure_that_keeps_its_start_and_waits() 
     let stats = heartbeat::shared();
     let cancel = CancellationToken::new();
     let ctx = DataTaskCtx {
-        client: reqwest::Client::new(),
+        client: reqwest::Client::new().into(),
         config: cfg(events.path(), state_dir.path(), &addr.to_string()),
         host_id: "h-1".into(),
         agent_version: "0.2.0".into(),
@@ -250,7 +250,7 @@ async fn discovers_first_segment_when_state_empty() {
     let stats = heartbeat::shared();
     let cancel = CancellationToken::new();
     let ctx = DataTaskCtx {
-        client: reqwest::Client::new(),
+        client: reqwest::Client::new().into(),
         config: cfg(events.path(), state_dir.path(), &addr.to_string()),
         host_id: "h-1".into(),
         agent_version: "0.2.0".into(),
@@ -287,7 +287,7 @@ async fn a_failed_offset_write_waits_before_it_sends_the_batch_again() {
 
     let cancel = CancellationToken::new();
     let handle = tokio::spawn(data_task::run(DataTaskCtx {
-        client: reqwest::Client::new(),
+        client: reqwest::Client::new().into(),
         config,
         host_id: "h-1".into(),
         agent_version: "0.2.0".into(),

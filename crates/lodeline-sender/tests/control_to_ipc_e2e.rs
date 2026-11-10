@@ -64,7 +64,7 @@ async fn control_loop_hands_a_new_policy_to_the_agent_and_stores_its_etag() {
     let etag_path = policy_etag_path.clone();
     let ctl = tokio::spawn(async move {
         lodeline_sender::control_task::run(ControlLoopCtx {
-            client,
+            client: client.into(),
             server_base_url: server_base,
             host_id: "h".into(),
             poll_interval: std::time::Duration::from_millis(20),

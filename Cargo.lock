@@ -2193,6 +2193,7 @@ version = "0.14.3"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-server",
  "clap",
  "data-encoding",
  "ed25519-dalek",

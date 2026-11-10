@@ -23,7 +23,20 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   no entries, lines that do not parse are skipped, and a file that cannot be read turns renewal
   off. `docs/install-server.md` has a new section 3.4 and no longer says that short lifetimes or
   re-enrollment stand in for revocation: it says what removes a host and what keeps working until
-  `notAfter`. The sender does not call the route yet. (#569, #553)
+  `notAfter`. (#569, #553)
+- `lodeline-sender` renews its own client certificate and key before they expire. From the
+  validity of the certificate it holds, it renews between 60% and 75% of it, at a point set by
+  its host_id, with no setting. It sends a new key's CSR to `POST /v1/renew`, checks the answer
+  on the host (key, host_id, chain to the server CA, client-auth purpose, validity), and only
+  then replaces `client.key` and `client.crt` through `.next` files, with a directory sync after
+  each rename. One repair step runs at start and at every wake and brings any state a crash
+  leaves to a matching pair, so a host never loses its pair. The HTTP client used for events and
+  policy lives in one handle and is replaced once after a renewal. Refusals (403, 404) and an
+  approaching expiry are logged loudly, at most once an hour; after expiry the sender keeps
+  running and uses a new pair as soon as it appears on disk, without a restart. A certificate
+  directory the sender account cannot write turns renewal off with one error line. `enroll`
+  names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
+  does not check it yet. `docs/install-server.md` has a new section 3.5. (#PR, #553)
 - `lodeline-sender enroll <file>` enrolls a host from one enrollment file: a JSON document,
   `"lodeline_enrollment": 1`, that carries the host_id, the single-use token, the two listener
   addresses, the CA roots and the policy keystore. It stores the host_id through `lodeline

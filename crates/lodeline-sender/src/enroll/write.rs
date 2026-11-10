@@ -152,12 +152,12 @@ fn give_to_dir_owner(_file: &File, _dir: &Dir) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_dir(dir: &Dir) -> io::Result<()> {
+pub(crate) fn sync_dir(dir: &Dir) -> io::Result<()> {
     dir.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Dir) -> io::Result<()> {
+pub(crate) fn sync_dir(_dir: &Dir) -> io::Result<()> {
     Ok(())
 }
 
