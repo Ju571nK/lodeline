@@ -38,7 +38,12 @@ fn resolve_host_id(env: Option<String>, cfg: Option<&str>) -> anyhow::Result<Str
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
     let cli = Cli::parse();
     let config_path = cli.config.unwrap_or_else(default_sender_config);
     match cli.command {

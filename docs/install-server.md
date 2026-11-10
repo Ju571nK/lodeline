@@ -502,6 +502,16 @@ The unit runs as `root` with `ProtectSystem=strict` and writes only to its
 state/log dirs. See [`packaging/README.md`](../packaging/README.md) for the unit
 details.
 
+`lodeline-server` and `lodeline-sender` log at `info` by default. `RUST_LOG` sets
+the level of each one, for example `RUST_LOG=warn` for less output or
+`RUST_LOG=debug` for more. For a package install, set it in a drop-in with
+`sudo systemctl edit lodeline-server` (or `lodeline-sender`):
+
+```ini
+[Service]
+Environment=RUST_LOG=warn
+```
+
 ---
 
 ## 8. Verify
@@ -559,6 +569,7 @@ Two alignment rules from the field:
 ## 10. Operations & troubleshooting
 
 Operational notes (paths, signals, log levels): [runbook/operations.md](runbook/operations.md).
+`RUST_LOG` sets the log level of the server and the sender. Both default to `info` (§7).
 SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 
 | Symptom | Cause | Fix |
