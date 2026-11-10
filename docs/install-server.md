@@ -195,7 +195,11 @@ file in the first. Create it before you start the server:
 ```sh
 sudo install -d -o lodeline -g lodeline -m 0750 /var/lib/lodeline-server
 echo '{"hosts":[]}' | sudo -u lodeline tee /var/lib/lodeline-server/host-allowlist.json
+sudo restorecon -R /var/lib/lodeline-server   # SELinux hosts (Rocky/RHEL) only
 ```
+
+Without the `restorecon`, SELinux keeps the generic `var_lib_t` label on the new
+directory and the server cannot read the file.
 
 The server validates the intermediate at boot (CA:TRUE, key⇄cert match, 0600),
 that it can run `openssl`, and that it can write next to the allowlist. A failed
