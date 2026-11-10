@@ -34,7 +34,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   policy lives in one handle and is replaced once after a renewal. Refusals (403, 404) and an
   approaching expiry are logged loudly, at most once an hour; after expiry the sender keeps
   running and uses a new pair as soon as it appears on disk, without a restart. A certificate
-  directory the sender account cannot write turns renewal off with one error line. `enroll`
+  directory the sender account cannot write, or a live key that the sender account does not own,
+  turns renewal off with one error line; the key and the certificate may sit in two directories,
+  and each `.next` file is renamed in its own. A wake whose repair step was not clean sends no
+  request and renames nothing; a stored answer that cannot be checked because an input cannot be
+  read drops nothing, and one that fails its check is dropped alone, so the same request is sent
+  again. A new answer must expire later than the certificate in use, as a stored one must. `enroll`
   names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
   does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
 - `lodeline-sender enroll <file>` enrolls a host from one enrollment file: a JSON document,

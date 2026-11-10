@@ -650,20 +650,28 @@ An enrolled host keeps its certificate and key current by itself. The running
 60% and 75% of it, at a point that depends on the host_id so that hosts enrolled
 together do not renew together. For the default 30 day certificate that is between
 day 18 and day 22. There is no setting. Renewal needs `server_ca_path`, a client
-certificate and a client key in `sender.yaml`, as `enroll` writes them.
+certificate and a client key in `sender.yaml`, as `enroll` writes them. It also needs
+the account the sender runs as to own the live `client.key` and to be able to create
+files in the directory of the key and in the directory of the certificate (they may be
+two directories). The packaged service runs as `lodeline`, and `enroll` run as root
+gives its files to the owner of the packaged directory. A sender that runs as another account, root
+included, over a key that `lodeline` owns does not renew: it logs one error line that
+names the owner of the key, and the host has to be enrolled again before the
+certificate expires.
 
 **What a renewal does.** The sender makes a new P-256 key and a CSR, posts it to
 `/v1/renew` over its current certificate, and checks the answer on the host: the
 certificate must be for the new key, name this host, chain to the CA in
 `server_ca_path`, and be valid for client authentication. Only then does it replace
 the files. The new key goes to `client.key` first and the new certificate to
-`client.crt` second, each with a directory sync, and the HTTP client the sender uses
+`client.crt` second, each followed by a sync of that file's own directory, and the HTTP client the sender uses
 for events and policy is replaced once, after both. A request in flight finishes on
 the old client. No event is lost or sent twice because of the swap. The old key is
 not wiped from disk when it is replaced.
 
 The files in the certificate directory while a renewal runs are
-`client.key.next`, `client.csr.next` and `client.crt.next`. If the sender stops or
+`client.key.next` and `client.csr.next` beside `client.key`, and `client.crt.next`
+beside `client.crt`. If the sender stops or
 the host loses power at any point, the next start, or the next wake, repairs the
 directory before anything else. The sender, not `enroll`, does this, so start it
 before you run `enroll` on a host that stopped in the middle of a renewal.
@@ -676,8 +684,17 @@ before you run `enroll` on a host that stopped in the middle of a renewal.
 | `client.crt.next` is a good answer for `client.key.next` and is newer than `client.crt` | Replaces the key, then the certificate, and removes `client.csr.next` |
 | The new key is live and the old certificate is still live | Replaces the certificate with `client.crt.next` |
 | The new certificate is live and the old key is still live | Replaces the key with `client.key.next` |
-| `client.crt.next` is older than the live certificate, names another host, or does not fit `client.key.next` (for example after `enroll` or a hand copy) | Removes the `.next` files and keeps the live pair |
-| The live key fits no certificate and no `.next` file fits it | Logs an error that says to run `enroll`, deletes nothing, and the running sender keeps the client it has |
+| `client.crt.next` alone, with no readable `client.key.next` | Removes it |
+| `client.crt.next` does not expire later than the live certificate, or names another host (for example after `enroll` or a hand copy) | Removes the `.next` files and keeps the live pair |
+| `client.crt.next` does not fit `client.key.next`, or fails the chain or client-authentication check | Removes only `client.crt.next`, keeps `client.key.next` and `client.csr.next`, and sends the same CSR again |
+| A file the check needs cannot be read (for example `server_ca_path`) | Removes nothing, logs `cannot settle the renewal files`, and tries again at the next wake |
+| `client.key` or `client.crt` is missing | Logs an error that names the missing file and says to run `enroll`, and deletes nothing |
+| The live key and certificate do not match, and no `.next` file fits them | Logs an error that says to run `enroll`, deletes nothing, and the running sender keeps the client it has |
+
+In the last three rows the wake ends there: the sender sends no renewal request and
+renames nothing until the files are readable and consistent again. A new certificate
+from the server is held to the same rule as a stored one: it must be for the new key,
+name this host, chain to the CA, and expire later than the certificate in use.
 
 A renewal that fails (no answer, 5xx, a bad answer) is retried with the same CSR.
 The first retry comes after about a fiftieth of the certificate's validity (at most
@@ -693,7 +710,10 @@ sender never retries a refusal quickly.
 | `the server refused to renew this host's certificate` with status 403 | This certificate is no longer the newest one issued for the host (a copy of the key renewed first, or the host was enrolled again elsewhere), or the host is not on the allowlist. Check the allowlist. Otherwise enroll the host again before the certificate expires. |
 | The same line with status 404 | The server does not offer renewal: enrollment is off there, its audit file cannot be read, or it is older than this sender. Fix the server, or enroll the host again. |
 | `certificate renewal failed` | The server could not be reached or answered with an error. The sender retries. It is an error line, not a warning, when less than a tenth of the validity is left (3 days of 30). |
-| `certificate renewal is off: this account cannot create files in the certificate directory` | The sender runs as its own account and must be able to create files beside `client.key`. A directory that `enroll` made as root belongs to root. Give it to the sender account (`systemd-tmpfiles --create` does it for the packaged layout) and restart the sender. Events keep flowing meanwhile. |
+| `certificate renewal is off: this account cannot create files in the directory of client.key or of client.crt` | The sender runs as its own account and must be able to create files beside `client.key` and beside `client.crt`. A directory that `enroll` made as root belongs to root. Give it to the sender account (`systemd-tmpfiles --create` does it for the packaged layout) and restart the sender. Events keep flowing meanwhile. |
+| `certificate renewal is off: client.key is owned by uid ...` | The sender does not run as the owner of `client.key`, so a renewal would make a key it could not read at its next start. Run the sender as the account that owns the key, or give the key to that account, and restart. Events keep flowing meanwhile. |
+| `client.key ... missing`, or `client.key and client.crt do not match` | See the last rows of the table above. Enroll the host again with a new token (move both files aside first). |
+| `cannot settle the renewal files` | A file could not be read, or is a link or has two links. Fix the file named in the line. |
 | `client certificate expired at ...` | See below. |
 
 **After expiry.** The sender does not stop and asks nothing. It reads the files again
