@@ -13,7 +13,7 @@ pub const MAX_ENROLLMENT_FILE_BYTES: u64 = 64 * 1024;
 
 /// One host's enrollment file. It carries the token, so it is a secret until the
 /// token is spent or expired. It never carries a private key.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EnrollmentFile {
     /// Origin of the enrollment listener, e.g. `https://lodeline.example.com:8444`.
     pub enroll_url: String,
@@ -32,6 +32,21 @@ pub struct EnrollmentFile {
     pub server_url: String,
     /// Single-use enrollment token from `lodeline-server enroll-token`.
     pub token: String,
+}
+
+impl std::fmt::Debug for EnrollmentFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollmentFile")
+            .field("enroll_url", &self.enroll_url)
+            .field("expires_at", &self.expires_at)
+            .field("host_id", &self.host_id)
+            .field("lodeline_enrollment", &self.lodeline_enrollment)
+            .field("policy_keystore", &self.policy_keystore)
+            .field("server_ca_pem", &self.server_ca_pem)
+            .field("server_url", &self.server_url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The keystore document, with the JSON shape of
@@ -53,6 +68,19 @@ pub struct PolicyKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_hides_the_token() {
+        let f: EnrollmentFile = serde_json::from_str(
+            r#"{"enroll_url":"u","host_id":"h","lodeline_enrollment":1,
+                "policy_keystore":{"pubkeys":[]},"server_ca_pem":"p","server_url":"s",
+                "token":"secret-token-value"}"#,
+        )
+        .unwrap();
+        let shown = format!("{f:?} {f:#?}");
+        assert!(!shown.contains("secret-token-value"), "{shown}");
+        assert!(shown.contains("<redacted>"));
+    }
 
     #[test]
     fn round_trips_and_ignores_unknown_fields() {

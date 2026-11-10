@@ -18,6 +18,7 @@ pub mod audit;
 pub mod index;
 pub mod listener;
 pub mod lock;
+pub mod mint;
 pub mod renewal;
 pub mod sign;
 pub mod tokens;
@@ -53,6 +54,9 @@ pub struct EnrollState {
     /// #553: `POST /v1/renew`. `None` ⇒ the route answers 404 (the audit file
     /// could not be read, or the CA is not usable as a trust anchor).
     pub renewal: Option<renewal::Renewal>,
+    /// #553: `POST /v1/enroll-tokens`. `None` ⇒ the route does not exist. Set by
+    /// `build_state` when `enroll_mint:` is configured; `load` leaves it `None`.
+    pub mint_api: Option<mint::MintApi>,
 }
 
 impl EnrollState {
@@ -201,6 +205,7 @@ impl EnrollState {
             index: index::TokenIndex::new(toks.to_path_buf()),
             deny_log: Arc::new(crate::proxy::ingest::DenyLog::new("enroll request refused")),
             renewal,
+            mint_api: None,
         })
     }
 }

@@ -267,6 +267,38 @@ pub struct EnrollListenerConfig {
     pub bind: SocketAddr,
 }
 
+/// #553: `POST /v1/enroll-tokens`, the HTTP mint of enrollment tokens for the
+/// fleet console. Off when absent. The caller needs a pinned client certificate
+/// and a bearer with scope `enroll`, both listed in `verifiers`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollMintConfig {
+    /// Verifier file (JSON, owner-only 0600, not a symlink) in the format of
+    /// `proxy.management_verifiers`, every entry with `scope: enroll`.
+    pub verifiers: PathBuf,
+    /// Lifetime of a minted token, 60..=86400, default 3600.
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    /// At most this many entries in the token file after pruning (unspent, and
+    /// spent or expired within the last hour, whoever made them), 1..=10000,
+    /// default 100.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
+
+impl EnrollMintConfig {
+    pub const DEFAULT_TTL_SECONDS: u64 = 3600;
+    pub const DEFAULT_MAX_TOKENS: u32 = 100;
+
+    pub fn ttl_seconds(&self) -> u64 {
+        self.ttl_seconds.unwrap_or(Self::DEFAULT_TTL_SECONDS)
+    }
+
+    pub fn max_tokens(&self) -> u32 {
+        self.max_tokens.unwrap_or(Self::DEFAULT_MAX_TOKENS)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Address to bind. e.g. `0.0.0.0:8443`.
@@ -321,6 +353,9 @@ pub struct ServerConfig {
     /// #553: enrollment listener. Absent ⇒ no second socket.
     #[serde(default)]
     pub enroll_listener: Option<EnrollListenerConfig>,
+    /// #553: HTTP mint of enrollment tokens. Absent ⇒ the route does not exist.
+    #[serde(default)]
+    pub enroll_mint: Option<EnrollMintConfig>,
     /// Optional allowlist of `host_id`s. Absent ⇒ accept all authenticated hosts.
     /// REQUIRED for enrollment (#184): without it, auto-add is meaningless, so
     /// enrollment stays off (404) when this is unset.
@@ -427,6 +462,37 @@ impl ServerConfig {
                          (tls_cert_path + tls_key_path + client_ca_path)"
                     .to_string(),
             });
+        }
+        if let Some(m) = &self.enroll_mint {
+            let bad = |reason: &str| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: reason.to_string(),
+            };
+            if !self.mtls_enabled() {
+                return Err(bad(
+                    "enroll_mint requires mTLS (tls_cert_path + tls_key_path + client_ca_path): \
+                     the caller is a pinned client certificate",
+                ));
+            }
+            if self.enroll_listener.is_none() {
+                return Err(bad(
+                    "enroll_mint requires enroll_listener: a token is redeemed by a host that \
+                     has no certificate yet, through that listener",
+                ));
+            }
+            if self.enroll_issuer_fingerprints.is_some() {
+                return Err(bad(
+                    "enroll_mint cannot be combined with enroll_issuer_fingerprints: the \
+                     enrollment listener takes no client certificate, so the issuer gate would \
+                     deny every redeem. Remove enroll_issuer_fingerprints",
+                ));
+            }
+            if !(60..=86_400).contains(&m.ttl_seconds()) {
+                return Err(bad("enroll_mint.ttl_seconds must be within 60..=86400"));
+            }
+            if !(1..=10_000).contains(&m.max_tokens()) {
+                return Err(bad("enroll_mint.max_tokens must be within 1..=10000"));
+            }
         }
         if let Some(l) = &self.enroll_listener {
             let bad = |reason: &str| ConfigError::Invalid {
@@ -624,6 +690,8 @@ mod tests {
         assert!(cfg.active_window_days.is_some());
         assert!(cfg.proxy.is_some());
         assert!(cfg.enroll_listener.is_some());
+        let m = cfg.enroll_mint.expect("example documents enroll_mint");
+        assert_eq!((m.ttl_seconds(), m.max_tokens()), (3600, 100));
         assert!(
             cfg.deprecated_license.is_none(),
             "example must not document `license:`"
@@ -834,6 +902,72 @@ events_require_cert_host_match: true
         assert!(matches!(
             load(&format!(
                 "{mtls}{matched}enroll_listener:\n  bind: \"127.0.0.1:8444\"\n  rate_limit: 5\n"
+            )),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    /// #553: the mint section, its defaults and its boot refusals.
+    #[test]
+    fn enroll_mint_loads_and_refuses_bad_combinations() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("server.yaml");
+        let mtls = "tls_cert_path: /e/s.crt\ntls_key_path: /e/s.key\nclient_ca_path: /e/ca.pem\n";
+        let listener =
+            "events_require_cert_host_match: true\nenroll_listener:\n  bind: \"127.0.0.1:8444\"\n";
+        let mint = "enroll_mint:\n  verifiers: /e/v.json\n";
+        let load = |extra: &str| {
+            std::fs::write(&p, format!("{BASE}{extra}")).unwrap();
+            ServerConfig::load(&p)
+        };
+        let m = load(&format!("{mtls}{listener}{mint}"))
+            .expect("valid mint loads")
+            .enroll_mint
+            .unwrap();
+        assert_eq!((m.ttl_seconds(), m.max_tokens()), (3600, 100));
+        assert!(load(&format!("{mtls}{listener}"))
+            .unwrap()
+            .enroll_mint
+            .is_none());
+        let refused = |extra: String, why: &str| match load(&extra) {
+            Err(ConfigError::Invalid { reason, .. }) => assert!(reason.contains(why), "{reason}"),
+            other => panic!("expected a refusal naming {why:?}, got {other:?}"),
+        };
+        refused(mint.to_string(), "enroll_mint requires mTLS");
+        refused(
+            format!("{mtls}{mint}"),
+            "enroll_mint requires enroll_listener",
+        );
+        refused(
+            format!("{mtls}{listener}{mint}enroll_issuer_fingerprints: []\n"),
+            "enroll_mint cannot be combined",
+        );
+        for (line, why) in [
+            ("ttl_seconds: 59", "ttl_seconds must be within 60..=86400"),
+            (
+                "ttl_seconds: 86401",
+                "ttl_seconds must be within 60..=86400",
+            ),
+            ("max_tokens: 0", "max_tokens must be within 1..=10000"),
+            ("max_tokens: 10001", "max_tokens must be within 1..=10000"),
+        ] {
+            refused(format!("{mtls}{listener}{mint}  {line}\n"), why);
+        }
+        for line in [
+            "ttl_seconds: 60",
+            "ttl_seconds: 86400",
+            "max_tokens: 1",
+            "max_tokens: 10000",
+        ] {
+            load(&format!("{mtls}{listener}{mint}  {line}\n")).expect(line);
+        }
+        assert!(matches!(
+            load(&format!("{mtls}{listener}{mint}  max_ttl_seconds: 5\n")),
+            Err(ConfigError::Parse { .. })
+        ));
+        assert!(matches!(
+            load(&format!(
+                "{mtls}{listener}enroll_mint:\n  ttl_seconds: 60\n"
             )),
             Err(ConfigError::Parse { .. })
         ));

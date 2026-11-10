@@ -110,11 +110,20 @@ pub enum ProxyCommand {
     /// Generate a management token and the verifier-file entry for it. The
     /// token is printed once on stdout; the entry goes to stderr.
     VerifierNew {
+        /// What the token may do: `config` or `identity` (the proxy management
+        /// API), or `enroll` (the enrollment token mint, `enroll_mint.verifiers`).
         #[arg(long)]
         scope: Scope,
-        /// blake3 hex of the management-caller certificate this token is bound to.
+        /// blake3 hex of the caller certificate this token is bound to.
+        #[arg(
+            long,
+            conflicts_with = "caller_cert",
+            required_unless_present = "caller_cert"
+        )]
+        caller_fingerprint: Option<String>,
+        /// PEM file of the caller certificate; its fingerprint is computed here.
         #[arg(long)]
-        caller_fingerprint: String,
+        caller_cert: Option<PathBuf>,
         #[arg(long)]
         key_id: Option<String>,
         #[arg(long)]
@@ -266,6 +275,21 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// The stderr text of `verifier-new`. The mint's file has no SIGHUP path.
+fn verifier_hint(scope: Scope, entry_json: &str) -> String {
+    let reload = if scope == Scope::Enroll {
+        "A change is read at the next request."
+    } else {
+        "A change is read at the next request, or send SIGHUP to the proxy file's server."
+    };
+    format!(
+        "token above is shown ONCE; store it in an owner-only file (0600) on the caller host.\n\
+         Add this entry to the \"entries\" array of the verifier file \
+         (proxy.management_verifiers for scope config or identity, enroll_mint.verifiers \
+         for scope enroll; mode 0600). {reload}\n{entry_json}"
+    )
+}
+
 /// Generate a token and its verifier-file entry. Returns `(token, entry)`.
 pub fn new_verifier(
     scope: Scope,
@@ -343,24 +367,28 @@ pub async fn run(cmd: ProxyCommand) -> Result<()> {
     if let ProxyCommand::VerifierNew {
         scope,
         caller_fingerprint,
+        caller_cert,
         key_id,
         name,
         not_after,
     } = &cmd
     {
+        let fingerprint = match (caller_fingerprint, caller_cert) {
+            (Some(f), _) => f.clone(),
+            (None, Some(pem)) => cert_fingerprint(pem)?,
+            (None, None) => bail!("--caller-fingerprint or --caller-cert is required"),
+        };
         let (token, entry) = new_verifier(
             *scope,
-            caller_fingerprint,
+            &fingerprint,
             key_id.as_deref(),
             name.as_deref(),
             not_after.as_deref(),
         )?;
         println!("{token}");
         eprintln!(
-            "token above is shown ONCE; store it in an owner-only file (0600) on the caller host.\n\
-             Add this entry to the \"entries\" array of the management verifier file \
-             (proxy.management_verifiers, 0600), then reload with SIGHUP:\n{}",
-            serde_json::to_string_pretty(&entry)?
+            "{}",
+            verifier_hint(*scope, &serde_json::to_string_pretty(&entry)?)
         );
         return Ok(());
     }
@@ -577,6 +605,72 @@ mod tests {
             FP
         ])
         .is_err());
+    }
+
+    #[test]
+    fn verifier_hint_names_sighup_only_for_the_proxy_scopes() {
+        assert!(!verifier_hint(Scope::Enroll, "{}").contains("SIGHUP"));
+        for s in [Scope::Config, Scope::Identity] {
+            assert!(verifier_hint(s, "{}").contains("SIGHUP"));
+        }
+    }
+
+    #[test]
+    fn verifier_new_takes_a_certificate_or_a_fingerprint_and_the_enroll_scope() {
+        use clap::CommandFactory;
+        let d = tempfile::tempdir().unwrap();
+        let pem = d.path().join("c.pem");
+        let cert = test_pem();
+        std::fs::write(&pem, cert).unwrap();
+        let p = pem.to_str().unwrap();
+        let w = parse_vn(&["verifier-new", "--scope", "enroll", "--caller-cert", p]);
+        let ProxyCommand::VerifierNew {
+            scope,
+            caller_fingerprint,
+            caller_cert,
+            ..
+        } = w
+        else {
+            panic!("not verifier-new");
+        };
+        assert_eq!(scope, Scope::Enroll);
+        assert_eq!((caller_fingerprint, caller_cert), (None, Some(pem.clone())));
+        assert_eq!(cert_fingerprint(&pem).unwrap().len(), 64);
+        // exactly one of the two
+        for args in [
+            vec!["w", "verifier-new", "--scope", "enroll"],
+            vec![
+                "w",
+                "verifier-new",
+                "--scope",
+                "enroll",
+                "--caller-cert",
+                p,
+                "--caller-fingerprint",
+                FP,
+            ],
+        ] {
+            assert!(W::try_parse_from(args).is_err());
+        }
+        // the help names all three scopes
+        let help = W::command()
+            .find_subcommand_mut("verifier-new")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for scope in ["config", "identity", "enroll"] {
+            assert!(help.contains(scope), "{help}");
+        }
+    }
+
+    /// A throwaway self-signed certificate in PEM, made with the dev-dependency.
+    fn test_pem() -> String {
+        let key = rcgen::KeyPair::generate().unwrap();
+        rcgen::CertificateParams::new(vec!["mint.example".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap()
+            .pem()
     }
 
     fn parse_vn(a: &[&str]) -> ProxyCommand {

@@ -159,7 +159,8 @@ pub(super) fn internal() -> Response {
         .into_response()
 }
 
-fn requested_by(headers: &HeaderMap) -> Option<String> {
+/// The caller-asserted subject: first header only, visible ASCII, 128 characters.
+pub(crate) fn requested_by(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(REQUESTED_BY_HEADER)?.to_str().ok()?;
     let s: String = v
         .chars()
@@ -746,5 +747,19 @@ mod tests {
         assert_eq!(requested_by(&h).unwrap().len(), MAX_REQUESTED_BY);
         h.insert(REQUESTED_BY_HEADER, "   ".parse().unwrap());
         assert_eq!(requested_by(&h), None);
+    }
+
+    #[test]
+    fn requested_by_ignores_non_ascii_and_uses_the_first_copy() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            REQUESTED_BY_HEADER,
+            axum::http::HeaderValue::from_bytes("al\u{ef}ce".as_bytes()).unwrap(),
+        );
+        assert_eq!(requested_by(&h), None);
+        let mut h = HeaderMap::new();
+        h.append(REQUESTED_BY_HEADER, "alice".parse().unwrap());
+        h.append(REQUESTED_BY_HEADER, "bob".parse().unwrap());
+        assert_eq!(requested_by(&h).as_deref(), Some("alice"));
     }
 }
