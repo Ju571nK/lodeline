@@ -232,6 +232,37 @@ pub fn dead_letter_tls_failure(dir: &Path, host_id: &str, in_streak: &mut bool, 
 /// Top-level data plane loop: read JSONL → POST /v1/events → apply_ack
 /// → state::store → dead-letter rejections → update stats. Handles all
 /// `BatchOutcome` variants per spec §3.8.2.
+/// Rate limit for a warning that repeats on every retry: the first one
+/// logs at once, then at most one per `LOG_EVERY`, carrying how many were
+/// skipped. A success resets it.
+#[derive(Default)]
+struct RepeatLog {
+    last: Option<std::time::Instant>,
+    skipped: u32,
+}
+
+const LOG_EVERY: Duration = Duration::from_secs(60);
+
+impl RepeatLog {
+    /// `Some(skipped)` when this failure should be logged now.
+    fn failure(&mut self, now: std::time::Instant) -> Option<u32> {
+        match self.last {
+            Some(t) if now.duration_since(t) < LOG_EVERY => {
+                self.skipped = self.skipped.saturating_add(1);
+                None
+            }
+            _ => {
+                self.last = Some(now);
+                Some(std::mem::take(&mut self.skipped))
+            }
+        }
+    }
+
+    fn success(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub async fn run(ctx: DataTaskCtx) {
     let backoff_busy = BackoffPolicy::server_busy();
     let backoff_perm = BackoffPolicy::upgrade_required();
@@ -244,6 +275,7 @@ pub async fn run(ctx: DataTaskCtx) {
     };
     let mut consecutive_failures: u32 = 0;
     let mut tls_streak = false;
+    let mut read_log = RepeatLog::default();
 
     loop {
         if ctx.shutdown.is_cancelled() {
@@ -267,13 +299,19 @@ pub async fn run(ctx: DataTaskCtx) {
             ctx.config.max_batch_bytes,
         );
         let (events, manifest) = match read_result {
-            Ok(r) => r,
+            Ok(r) => {
+                read_log.success();
+                r
+            }
             Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    current_file = %state.current_file,
-                    "read_next_batch failed"
-                );
+                if let Some(suppressed) = read_log.failure(std::time::Instant::now()) {
+                    tracing::warn!(
+                        error = ?e,
+                        current_file = %state.current_file,
+                        suppressed,
+                        "read_next_batch failed"
+                    );
+                }
                 if !idle_sleep(&ctx.shutdown, Duration::from_secs(1)).await {
                     break;
                 }
@@ -499,6 +537,19 @@ fn next_segment(events_dir: &std::path::Path, state: &SenderState) -> Option<Str
 mod tests {
     use super::*;
     use crate::manifest::{ByteRange, ManifestEntry};
+
+    #[test]
+    fn repeat_log_first_at_once_then_once_a_minute_with_count_and_resets() {
+        let t0 = std::time::Instant::now();
+        let mut l = RepeatLog::default();
+        assert_eq!(l.failure(t0), Some(0));
+        assert_eq!(l.failure(t0 + Duration::from_secs(1)), None);
+        assert_eq!(l.failure(t0 + Duration::from_secs(59)), None);
+        assert_eq!(l.failure(t0 + Duration::from_secs(60)), Some(2));
+        assert_eq!(l.failure(t0 + Duration::from_secs(61)), None);
+        l.success();
+        assert_eq!(l.failure(t0 + Duration::from_secs(62)), Some(0));
+    }
 
     #[test]
     fn two_different_reasons_in_one_streak_write_one_event() {
