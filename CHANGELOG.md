@@ -21,6 +21,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   once no longer fail with "database is locked". The deb and rpm install tests now check that
   the agent package installs disabled and stopped. (#557, #553)
 
+### Fixed
+
+- `lodeline-server` and `lodeline-sender` log at `info` when `RUST_LOG` is unset, as
+  `lodeline-proxy` does. Before, they wrote only errors, so a default install showed no startup
+  line, no refused request, and no sender retry in `journalctl`. `RUST_LOG` still sets the level,
+  for example `RUST_LOG=warn`. Both binaries now write their logs to stderr, so a warning no
+  longer comes before the token on the stdout of `lodeline-server enroll-token`. The journal
+  keeps both streams. (#NNN, #560)
+
 ## [0.14.3] - 2026-11-10
 
 **Upgrade order.** The agent, the sender, the server and the web console can be upgraded in any

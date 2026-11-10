@@ -8,7 +8,12 @@ use lodeline_server::persist::HighWater;
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
     // rustls 0.23 needs an explicit crypto provider; we built with the `ring` feature.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
