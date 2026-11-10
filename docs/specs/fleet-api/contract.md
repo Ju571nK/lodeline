@@ -773,7 +773,7 @@ Aligned with producer spec §8. Items here are explicitly **not** in
 
 | Item | Why | Follow-up venue |
 |---|---|---|
-| Write endpoints (mutate fleet state) | Triage state is consumer-local; no mutation from outside. | Permanent reject |
+| Write endpoints (mutate fleet state) | The fleet read API stays read-only, and the read token never gains write authority. One management endpoint exists outside it: `POST /v1/enroll-tokens`, which makes a single-use enrollment token for the console's enrollment route (§14.15). It needs a pinned client certificate and a scoped bearer that are not the read credential. No other write endpoint is accepted. | Permanent reject, except the enrollment token endpoint |
 | SSE / WebSocket streaming | Polling sufficient (UI/UX §7.2: 5s). | 3b.4.1 or lodeline-cloud |
 | Per-consumer auth tokens + rotation | Single shared bearer in v1. | 3b.4.1 |
 | mTLS on the read side | Reverse proxy + TLS = operator responsibility. | lodeline-cloud |
@@ -1622,3 +1622,26 @@ Consumer implementation:
   Rule pack row, because the label names the rule pack.
 - The console server relays `evidence` as raw JSON, so `user` reaches the SPA
   unchanged.
+
+### 14.15 Enrollment token mint (after v0.14.4, #574 and #553)
+
+This is not part of the fleet read API and adds nothing to its schema. The server
+gains one management route on its main (mutual TLS) listener, which the console uses to
+make a host's enrollment file. [`docs/install-server.md`](../../install-server.md) section 3.6
+specifies it; this note records what a consumer needs.
+
+| Item | Value |
+|---|---|
+| Route | `POST /v1/enroll-tokens`. It exists only when the server's `enroll_mint:` is set; otherwise it answers 404. |
+| Credential | A client certificate pinned in the mint's own verifier file, and `Authorization: Bearer <token>` of an entry with scope `enroll`. Neither is the read credential: the read token is refused here, and the mint bearer is refused on every read route. |
+| Request | `{"host_id":"<lowercase hyphenated version 4 UUID>"}`. Unknown fields are refused. The optional header `X-Lodeline-Requested-By` names the person behind the call, as the caller says it, in visible ASCII. The server records it as asserted. |
+| Answer | `201 {"expires_at":"<RFC 3339>","host_id":"<uuid>","token":"<opaque>"}` with `Cache-Control: no-store`. The token is shown once. |
+| Refusals | 404 (no mint here, or the certificate is not accepted; the two look the same), 401, 403, 405 (any method but POST, from an authenticated caller), 409 `host_exists` and 409 `token_outstanding`, 413, 415, 422, 429 (the token file holds the most entries it allows), 500 (`internal` or `token_store_error`), 503. |
+| Types | `lodeline_fleet_api::mint` (`MintRequest`, `MintResponse`, `MINT_PATH`, `REQUESTED_BY_HEADER`). |
+
+The console calls it from `POST /api/v1/enrollment/files`, builds the enrollment file
+(`lodeline_fleet_api::enrollment::EnrollmentFile`) from its own settings and the server's
+answer, and returns the file's bytes. It never retries the call, because a retry after a lost
+answer would make a second token. It keeps no token and no file. A console that predates this
+route, or a server that predates `enroll_mint`, is unaffected: no read endpoint and no read
+type changed.

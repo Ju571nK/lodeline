@@ -32,6 +32,7 @@ pub struct AppState {
     /// `None` when OIDC is not configured.
     pub oidc: Option<Arc<Oidc>>,
     pub fleet: Arc<dyn fleet::Client>,
+    pub enroll: Arc<crate::enroll::Enroll>,
     pub triage: Arc<triage::Store>,
     /// The login limiter's trusted proxies (`TRUSTED_PROXIES`).
     pub trusted_proxies: Arc<[ipnet::IpNet]>,
@@ -60,6 +61,7 @@ impl AppState {
             }),
             oidc: None,
             fleet,
+            enroll: Arc::new(crate::enroll::Enroll::Off(crate::enroll::REQUIRED.to_vec())),
             triage: Arc::new(triage::Store::open(":memory:").unwrap()),
             trusted_proxies: Arc::new([]),
         }
@@ -69,7 +71,7 @@ impl AppState {
 /// Every API route of the Go router, plus the proxy reads and the release files, in chi pattern
 /// syntax. Session routes sit behind `require_auth`. The parity table must list each one (see the
 /// route test).
-pub const ROUTES: [(Method, &str, Access); 27] = [
+pub const ROUTES: [(Method, &str, Access); 29] = [
     (Method::GET, "/api/health", Access::Public),
     (Method::POST, "/api/v1/auth/login", Access::Public),
     (Method::GET, "/api/v1/auth/methods", Access::Public),
@@ -137,6 +139,8 @@ pub const ROUTES: [(Method, &str, Access); 27] = [
         "/api/v1/triage/{host_id}/{event_id}",
         Access::Session,
     ),
+    (Method::GET, "/api/v1/enrollment", Access::Session),
+    (Method::POST, "/api/v1/enrollment/files", Access::Session),
 ];
 
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'";
@@ -210,6 +214,8 @@ fn endpoint(
         "/api/v1/triage/upsert" => only(method, api::triage::upsert.layer(auth)),
         "/api/v1/triage/note" => only(method, api::triage::note.layer(auth)),
         "/api/v1/triage/{host_id}/{event_id}" => only(method, api::triage::get.layer(auth)),
+        "/api/v1/enrollment" => only(method, api::enrollment::status.layer(auth)),
+        "/api/v1/enrollment/files" => only(method, api::enrollment::make_file.layer(auth)),
         _ => unreachable!("no handler for {path}"),
     }
 }

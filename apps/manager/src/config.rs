@@ -3,6 +3,9 @@
 
 use std::fmt;
 use std::net::Ipv6Addr;
+use std::sync::Arc;
+
+use crate::enroll::{Enroll, SUBJECTS};
 use std::time::Duration;
 
 pub struct Config {
@@ -35,6 +38,8 @@ pub struct Config {
     /// `TRUSTED_PROXIES`: the peers whose `X-Forwarded-For` the login limiter reads. Empty by
     /// default.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// The host enrollment file route (#553): off, or its settings.
+    pub enroll: Arc<Enroll>,
 }
 
 /// The CA and client certificate for an mTLS `lodeline-server`.
@@ -191,6 +196,8 @@ impl Config {
         let fleet_poll_interval =
             positive_duration("FLEET_POLL_INTERVAL_SECONDS", poll_seconds, 1)?;
         let trusted_proxies = trusted_proxies(&raw("TRUSTED_PROXIES"))?;
+        let server = (server_base_url.as_str(), server_tls.as_ref());
+        let enroll = Enroll::load(&trimmed, &raw(SUBJECTS), server, mock_fleet)?;
 
         Ok(Self {
             listen_addr: or_default("LISTEN_ADDR", ":8080"),
@@ -208,6 +215,7 @@ impl Config {
             fleet_cache_max_entries,
             oidc,
             trusted_proxies,
+            enroll: Arc::new(enroll),
         })
     }
 }
@@ -531,6 +539,7 @@ impl fmt::Debug for Config {
             .field("fleet_cache_max_entries", &self.fleet_cache_max_entries)
             .field("oidc", &self.oidc)
             .field("trusted_proxies", &self.trusted_proxies)
+            .field("enroll", &self.enroll)
             .finish()
     }
 }

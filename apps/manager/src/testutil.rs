@@ -86,7 +86,7 @@ impl Pki {
         );
     }
 
-    fn leaf(&self, name: &str, ext: &str) {
+    pub fn leaf(&self, name: &str, ext: &str) {
         self.key(name);
         std::fs::write(self.path(&format!("{name}.ext")), ext).unwrap();
         let (key, csr, crt) = (
@@ -403,5 +403,108 @@ impl axum::body::HttpBody for Trickle {
         };
         self.sent.fetch_add(chunk.len(), Relaxed);
         std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk.into()))))
+    }
+}
+
+pub const SESSION_SECRET: &str = "0123456789abcdefghijklmnopqrstuv";
+/// The console's own origin in the enrollment tests.
+pub const ORIGIN: &str = "https://console.example.com";
+
+/// A session cookie for `subject`, signed with [`SESSION_SECRET`].
+pub fn session_cookie(subject: &str) -> String {
+    let claims = json!({"iss": "lodeline-manager", "sub": subject, "exp": 4_000_000_000_i64});
+    let key = EncodingKey::from_secret(SESSION_SECRET.as_bytes());
+    let token = jsonwebtoken::encode(&Header::default(), &claims, &key).unwrap();
+    format!("lodeline_session={token}")
+}
+
+pub struct Reply {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub body: Vec<u8>,
+}
+
+impl Reply {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+    pub fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+    }
+    pub fn code(&self) -> String {
+        self.json()["error"]["code"].as_str().unwrap_or("").into()
+    }
+}
+
+/// `POST /api/v1/enrollment/files` as the console's own page sends it: the session of `who`
+/// (none for no cookie), `Origin` [`ORIGIN`], `Sec-Fetch-Site: same-origin` and a JSON body.
+/// `edits` replace a default header, or remove it with `None`.
+pub async fn post_files(
+    app: &Router,
+    who: Option<&str>,
+    edits: &[(&str, Option<&str>)],
+    body: &str,
+) -> Reply {
+    use tower::ServiceExt;
+    let cookie = who.map(session_cookie);
+    let mut headers = vec![
+        ("host", Some("console.example.com")),
+        ("cookie", cookie.as_deref()),
+        ("origin", Some(ORIGIN)),
+        ("sec-fetch-site", Some("same-origin")),
+        ("content-type", Some("application/json")),
+    ];
+    for (name, value) in edits {
+        headers.retain(|(n, _)| n != name);
+        headers.push((*name, *value));
+    }
+    let mut req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v1/enrollment/files");
+    for (name, value) in headers {
+        if let Some(v) = value {
+            req = req.header(name, v);
+        }
+    }
+    let res = app
+        .clone()
+        .oneshot(req.body(axum::body::Body::from(body.to_owned())).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = res.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Reply {
+        status: parts.status.as_u16(),
+        headers: parts.headers,
+        body,
+    }
+}
+
+/// `GET /api/v1/enrollment` with the session of `who`, or none.
+pub async fn get_enrollment(app: &Router, who: Option<&str>) -> Reply {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .uri("/api/v1/enrollment")
+        .header("host", "console.example.com");
+    if let Some(who) = who {
+        req = req.header("cookie", session_cookie(who));
+    }
+    let res = app
+        .clone()
+        .oneshot(req.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = res.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Reply {
+        status: parts.status.as_u16(),
+        headers: parts.headers,
+        body,
     }
 }

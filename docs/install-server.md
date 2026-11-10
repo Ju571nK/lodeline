@@ -806,7 +806,9 @@ off, with one log line at start, and `enroll` is not supported there either.
 
 `lodeline-server enroll-token` (§3.1) needs a shell on the server host. A web
 console cannot run it, so the server can also make a token over HTTP for a
-console that holds the credential below: `POST /v1/enroll-tokens` on the main (mutual TLS) listener. The token
+console that holds the credential below: `POST /v1/enroll-tokens` on the main (mutual TLS) listener.
+The console's enrollment route uses it, and the console's side is in the
+[console README, "Enroll a host"](../apps/manager/README.md#enroll-a-host). The token
 redeems on the enrollment listener (§3.2) exactly like one from the subcommand.
 The route does not exist unless `enroll_mint:` is in `server.yaml`. A server
 older than this release ignores the key without a word, so the route answers 404.
@@ -930,7 +932,9 @@ expire. A long `--ttl` on tokens made with the subcommand keeps their entries
 longer. `enroll-token` still works, because it is not capped. **When a credential
 must be stopped**, remove its entry from the verifier file; the next request sees
 it. If the console's session cookie is the thing that was copied, end the
-console's own sessions as well, for example by rotating its session signing secret.
+console's own sessions as well: set a new `JWT_SECRET` on the console and restart it. A
+session is a signed cookie and the console keeps no other session state, so every session
+signed with the old secret stops working.
 
 **The audit line.** Each mint writes one signed line to `enrollment-audit.jsonl`
 (§3.1) before the answer is sent, with `decision` `token_minted`, `reason` `ok`,

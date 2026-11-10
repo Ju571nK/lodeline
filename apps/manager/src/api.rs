@@ -1,6 +1,7 @@
 //! The `/api/v1` handlers, by area, and the Go request and response forms they share.
 
 pub mod auth;
+pub mod enrollment;
 pub mod fleet;
 pub mod ratelimit;
 pub mod triage;

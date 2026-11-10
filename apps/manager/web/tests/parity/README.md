@@ -6,8 +6,9 @@ at `Ju571nK/lodeline-manager@e4fb077`, except the ones listed under "Goldens rec
 Rust build" below. The Rust port does not have to match Go; the suite is a regression check, so a
 run shows every place where the port answers differently from the recorded behavior.
 
-The table has 293 cases over 28 routes: the 18 API routes of the Go router, the 7 proxy read
-routes and the 2 release file routes this console added, and the SPA catch-all. The suite prints the count per route on every
+The table has 299 cases over 30 routes: the 18 API routes of the Go router, the 7 proxy read
+routes, the 2 release file routes and the 2 enrollment routes this console added, and the SPA
+catch-all. The suite prints the count per route on every
 run.
 
 | Cases | Route |
@@ -39,6 +40,8 @@ run.
 | 15 | `POST /api/v1/triage/upsert` |
 | 12 | `POST /api/v1/triage/note` |
 | 6 | `GET /api/v1/triage/{host_id}/{event_id}` |
+| 4 | `GET /api/v1/enrollment` |
+| 2 | `POST /api/v1/enrollment/files` |
 | 20 | `GET /*` (SPA and unrouted paths) |
 
 Every route has a success case and an error case, except the two OIDC routes. Their success path
@@ -127,6 +130,7 @@ difference in the PR. These goldens hold Rust behavior:
 | `fleet-invocations`, `fleet-invocations-filtered-page`, `fleet-invocations-flagged`, `fleet-invocations-bad-limit`, `fleet-invocations-invalid-cursor`, `fleet-invocations-no-session`, `fleet-invocation-flagged`, `fleet-invocation-truncated`, `fleet-invocation-not-found`, `fleet-invocation-no-session`, `live-invocations-cursor`, `live-invocations-invalid-cursor`, `live-invocations-invalid-filter`, `live-invocations-not-mounted`, `live-invocation-unknown`, `live-invocation-not-mounted` | New cases: the Go console had no invocation reads. The mock serves `testdata/mock-proxy-invocations.json`. |
 | `fleet-inventory-snapshots`, `fleet-inventory-snapshots-filtered-page`, `fleet-inventory-snapshots-not-found`, `fleet-inventory-snapshots-no-session`, `fleet-drift`, `fleet-drift-changed`, `fleet-drift-bad-change`, `fleet-drift-no-session`, `fleet-markers`, `fleet-markers-cursor-of-another-proxy`, `fleet-markers-bad-limit`, `fleet-markers-no-session`, `live-drift-cursor`, `live-snapshots-unknown`, `live-snapshots-invalid-cursor`, `live-markers`, `live-markers-not-mounted` | New cases: the Go console had no inventory reads. The mock serves `testdata/mock-proxy-inventory.json`. |
 | `fleet-artifacts`, `fleet-artifacts-no-session`, `fleet-artifact`, `fleet-artifact-not-found`, `fleet-artifact-bad-name`, `fleet-artifact-no-session`, `live-artifacts`, `live-artifacts-not-configured`, `live-artifacts-read-api-off`, `live-artifacts-host-unknown`, `live-artifact`, `live-artifact-not-found`, `live-artifact-not-configured`, `live-artifact-bad-name` | New cases: the Go console had no release file reads. The mock serves four one-line files from `src/fleet/mock.rs`. `live-artifact-bad-name` records no upstream call. |
+| `enrollment-status-off`, `enrollment-status-off-live`, `enrollment-status-no-session`, `enrollment-status-wrong-method-no-session`, `enrollment-files-off`, `enrollment-files-no-session` | New cases: the Go console had no enrollment routes. No parity manager sets an enrollment variable, so the route is off and the status names all eight variables. The Rust tests make a file against a real `lodeline-server`. |
 | `fleet-hosts-cursor-past-end` | The cursor names `frank-ci`, the last mock host, which Go's mock fleet does not have. The page is still empty (`hosts: null`), and `total_estimated` is 6. |
 
 The parity managers run with `TRUSTED_PROXIES=127.0.0.1`, so the recorder is a trusted proxy and

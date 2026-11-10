@@ -99,6 +99,7 @@ fn authorized_status(uri: &str) -> u16 {
     match uri {
         "/api/v1/fleet/events/e1" | "/api/v1/fleet/hosts/h1" | "/api/v1/triage/h1/e1" => 404,
         "/api/v1/triage/upsert" | "/api/v1/triage/note" => 415,
+        "/api/v1/enrollment/files" => 404,
         _ => 200,
     }
 }
