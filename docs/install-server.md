@@ -112,6 +112,9 @@ connect to, and a **client CA** that signs each host's client cert. A single
 self-managed CA can play both roles. The one change that matters in production
 is the **`subjectAltName`**.
 
+Run the `openssl` commands in this section and in §3.1 as root (`sudo -i`),
+because `/etc/lodeline` belongs to root. `sudo` inside a root shell does no harm.
+
 ```sh
 cd /etc/lodeline   # or wherever you keep PKI material
 
@@ -155,6 +158,10 @@ sender's `server_ca_path` / `client_cert_path` / `client_key_path`). Keep
 so give it the key: `sudo install -o lodeline -g lodeline -m 0600 client-hostA.key
 /var/lib/lodeline-sender/client.key`.
 
+Once the files are on the host, remove the host's key and certificate from the
+server, so that no copy of the host's private key stays on it:
+`sudo rm -f /etc/lodeline/client-hostA.key /etc/lodeline/client-hostA.crt`.
+
 **Let the server read its key.** The packaged unit runs the server as `lodeline`,
 and `openssl` made `server.key` for root. Give the group `lodeline` read access, or
 the server cannot start with mTLS. The service can then read the key and cannot
@@ -192,16 +199,22 @@ sudo install -o lodeline -g lodeline -m600 int.key /etc/lodeline/enroll-int.key
 sudo install -m644 int.crt /etc/lodeline/enroll-int.crt
 ```
 
-The commands above ran in `/etc/lodeline`, so `ca.key` and `int.key` are still
-there. Move `ca.key` off the server to offline storage, and delete the copy
-`int.key`, which `enroll-int.key` now replaces:
+The commands above ran in `/etc/lodeline`, so `ca.key` and the files this step
+made are still there. Move `ca.key` off the server, for example onto removable
+storage you keep offline (do it after you have made every certificate that needs
+it). Then delete what `enroll-int.key` and `enroll-int.crt` replace: `int.key`,
+the request `int.csr`, the copy `int.crt` and the serial file `ca.srl` (the
+cleanup at the end of §3 ran before this step made them):
 
 ```sh
-sudo rm /etc/lodeline/int.key
+sudo mv /etc/lodeline/ca.key /media/offline-usb/ca.key   # your offline mount
+sudo rm /etc/lodeline/int.key /etc/lodeline/int.csr /etc/lodeline/int.crt /etc/lodeline/ca.srl
 ```
 
 **2. Configure `server.yaml`** (requires a configured `host_allowlist_path` and
-the mTLS triple — both are enforced at boot, else enrollment stays off):
+the mTLS triple; both are enforced at boot, else enrollment stays off). These
+keys are parts of one file: §5 shows the whole `server.yaml` with mutual TLS and
+enrollment, ready to copy.
 
 ```yaml
 enroll_ca_cert_path: "/etc/lodeline/enroll-int.crt"
@@ -211,7 +224,9 @@ enroll_cert_days: 30                                # lifetime of each issued ce
 host_allowlist_path: "/var/lib/lodeline-server/host-allowlist.json"   # REQUIRED (restrictive set)
 ```
 
-The server rewrites the allowlist each time a host enrolls, so the path must sit
+The server rewrites the allowlist each time a host enrolls. It writes a new file
+and renames it over the old one, so the file ends up mode 0600 and owned by the
+service account `lodeline`, whatever it was before. The path must sit
 in a directory the service can write. The unit makes only
 `/var/lib/lodeline-server` and `/var/log/lodeline-server` writable, so keep the
 file in the first. Create it before you start the server:
@@ -286,7 +301,10 @@ curl --cert pms.crt --key pms.key --cacert ca.crt \
 
 The server signs with a **fixed client-cert profile** (`CA:FALSE`, `clientAuth`,
 `subjectAltName=DNS:<host_id>`), re-inspects the issued cert, adds the host to
-the allowlist, and writes a signed line to `enrollment-audit.jsonl`. On the host,
+the allowlist, and writes a signed line to `enrollment-audit.jsonl`. With the
+paths of §5 the file is `/var/lib/lodeline-server/events/enrollment-audit.jsonl`
+(it sits in the directory of `high_water_path`, which is `events_out_dir` when
+unset). On the host,
 write `client_cert_pem` followed by `ca_chain_pem` to the sender's
 `client_cert_path`, and use the key from the first command as `client_key_path`
 (§7). When `client_ca_path` holds only the root, a file with the leaf alone fails
@@ -310,7 +328,8 @@ only `POST /v1/enroll`. The token in the request is the credential. Both ports
 share one token file, one audit chain and one allowlist, so a token works once,
 on either port. It is off unless `enroll_listener` is set.
 
-**1. Configure `server.yaml`** on top of §3.1 and the mTLS triple:
+**1. Configure `server.yaml`** on top of §3.1 and the mTLS triple (§5 shows the
+whole file):
 
 ```yaml
 enroll_listener:
@@ -339,7 +358,8 @@ The server binds both ports before it serves either and logs one
 `starting lodeline-server (mTLS)` line with `bind` and `enroll_bind`. If either
 listener stops, the process exits non-zero and systemd restarts it.
 
-**2. Probe it** from a host, with the CA and no client certificate. A made-up
+**2. Probe it** from a host, with the server running (§7), with the CA and no
+client certificate. A made-up
 token answers 403, which shows that the port, the server certificate and the
 token check work:
 
@@ -376,7 +396,7 @@ with no `--cert` or `--key`. Then install the certificate as in §3.1.
 - A body of at most 17 KiB.
 
 **What is logged.** Only the request that redeems a token writes to
-`enrollment-audit.jsonl`: an `issued` line, or `denied` with reason
+`enrollment-audit.jsonl` (the path is in §3.1): an `issued` line, or `denied` with reason
 `sign_failed` when signing fails after the token is reserved. The port cannot
 grow the chain beyond one line per token you issue. Every other denial on this
 port, the rate limit included, logs a warning `enroll request refused` with
@@ -450,9 +470,27 @@ client root then also vouches for server certificates. The issued certificates
 are client-authentication only, so that does not let a client certificate act as
 a server certificate.
 
-**Make the file** on the server host, from the CA that signed the server
-certificate and the keystore (the `policy_keystore` object above, saved as
-`policy-signing-pubkeys.pem`, a JSON file despite the name). `jq` 1.6 or later is needed:
+**Make the keystore** on the workstation that holds `signing-key.json` (§4), so the
+secret never reaches the server. The key file has the secret and the public half;
+this copies only the public half. The `id` is the one you gave `lodeline-sign
+keygen --id`, because a signed policy names its key by that id and the agent looks
+it up. The agent accepts a key from `valid_from` up to, not including,
+`valid_until`, and refuses a policy signed with it outside that span. So start
+the span a day back, to cover a host clock that runs behind, and end it when you
+plan to replace the key. This one lasts a year from now. `jq` 1.6 or later is
+needed:
+
+```sh
+jq '{pubkeys: [{id: .id, ed25519_pubkey_b64: .ed25519_pubkey_b64,
+  valid_from: (now - 86400 | floor | todate),
+  valid_until: (now + 365 * 86400 | floor | todate)}]}' signing-key.json > policy-signing-pubkeys.pem
+```
+
+Copy `policy-signing-pubkeys.pem` to the server host. It is a JSON file despite the
+name.
+
+**Make the enrollment file** on the server host, in a directory you can write, from
+the CA that signed the server certificate and that keystore:
 
 ```sh
 H=$(cat /proc/sys/kernel/random/uuid)    # macOS: uuidgen | tr 'A-Z' 'a-z'
@@ -460,7 +498,7 @@ T=$(sudo -u lodeline lodeline-server enroll-token --config /etc/lodeline/server.
 (umask 077; jq -n --arg host_id "$H" --arg token "$T" \
    --arg enroll_url https://lodeline.example.com:8444 \
    --arg server_url https://lodeline.example.com:8443 \
-   --rawfile server_ca_pem ca.crt --slurpfile ks policy-signing-pubkeys.pem \
+   --rawfile server_ca_pem /etc/lodeline/ca.crt --slurpfile ks policy-signing-pubkeys.pem \
    '{lodeline_enrollment: 1, host_id: $host_id, token: $token, enroll_url: $enroll_url,
      server_url: $server_url, server_ca_pem: $server_ca_pem, policy_keystore: $ks[0]}' > "$H.json")
 ```
@@ -530,7 +568,7 @@ need it.
 | 1 | Failed. Read the message |
 | 2 | The enrollment file is bad, or the usage is wrong |
 | 3 | This host has another host_id. `lodeline show host-id` prints it. An existing `sender.yaml` that names another host_id also exits 3, and is checked before the CA and the keystore |
-| 4 | A path enroll would write is not free: the file exists with other content, the path is a link or not a regular file, the file has another hard link, or it cannot be read (larger than 64 KiB, or a read failure). An existing key that is not P-256 also exits 4. Enroll never replaces one |
+| 4 | A path enroll would write is not free: the file exists with other content, the path is a link or not a regular file, the file has another hard link, or it cannot be read (larger than 64 KiB, or a read failure). An existing key that is not P-256 also exits 4, and so does an existing certificate that has no key beside it or that this host cannot use (it is for another key or host, has expired, is not valid yet, does not chain to the file's CA, or is not valid for client authentication). Enroll never replaces one |
 | 5 | The token was refused or may be spent. Issue a new token |
 | 6 | The listener could not be reached or trusted, or stayed busy. The token was not used |
 
@@ -569,12 +607,18 @@ no `host_id`:
 
 ```sh
 lodeline-sender csr --host-id <host_id> --key-out client.key.new --csr-out renew.csr
+# client.crt is the file enroll wrote: the leaf, then the intermediate
 curl --cert client.crt --key client.key --cacert ca.crt \
   -X POST https://lodeline.example.com:8443/v1/renew \
   -H 'content-type: application/json' \
   -d "{\"csr_pem\":\"$(awk '{printf "%s\\n",$0}' renew.csr)\"}"
 #  → {"ca_chain_pem":"...", "client_cert_pem":"...", "host_id":"...", "not_after":"...", "serial":"..."}
 ```
+
+A certificate from an intermediate enrollment CA is presented as the leaf followed
+by the intermediate, because `client_ca_path` holds only the root. `lodeline-sender
+enroll` writes `client.crt` that way, and renewal returns the same two parts, to be
+written the same way (§3.1 step 4).
 
 The answer has the fields `/v1/enroll` returns, and the certificate has the same
 fixed profile and `enroll_cert_days` lifetime. The checks run in this order:
@@ -600,7 +644,7 @@ enrolls once, and renews from then on.
 
 **Which certificate may renew.** For each host id the server keeps the newest
 certificate it issued, from `/v1/enroll` or `/v1/renew`, and rebuilds that at
-start from `enrollment-audit.jsonl`. A host renews from that certificate. When an
+start from `enrollment-audit.jsonl` (the path is in §3.1). A host renews from that certificate. When an
 answer was lost, the one before it may ask again with the same CSR bytes. The
 server issues at most three certificates for one presented certificate and then
 answers 403. The first refusal for each presented certificate is written to the
@@ -635,6 +679,12 @@ more.
 **What renewal needs.** The enrollment CA key stays on the server, with the same
 boot checks as enrollment. An allowlist that cannot be rewritten turns enrollment
 off, and renewal with it, even though renewal never writes the allowlist.
+
+**Adding a host by hand.** The server reads the allowlist at start only, so a
+host id you add to the file yourself also needs a restart of `lodeline-server`.
+Until then the host's events, policy and rule packs answer 404 `host_unknown`
+and a renewal answers 403, with the reason `not_allowlisted` in the server log.
+A host that enrolls through `/v1/enroll` needs no restart.
 
 **Removing a host.** There is no CRL or OCSP. Remove the host id from
 `host_allowlist_path` and restart `lodeline-server`, because the file is read at
@@ -775,7 +825,41 @@ saved, and a restart loads the defaults.
 
 ## 5. Configure `server.yaml`
 
-Copy the example and edit. Full field reference:
+Copy the example and edit. For a packaged server with mutual TLS and enrollment
+(§3 to §3.3), this whole file works with the paths those sections use. Keep the
+three mutual TLS paths, the enrollment keys and `host_allowlist_path` together,
+because the server turns enrollment off without any of them:
+
+```yaml
+# /etc/lodeline/server.yaml
+bind: "0.0.0.0:8443"
+events_out_dir: "/var/lib/lodeline-server/events"
+policy_bundle_path: "/var/lib/lodeline-server/signed-policy.json"   # may be absent until §4; /v1/policy answers 404 until then
+
+# mutual TLS (§3)
+tls_cert_path: "/etc/lodeline/server.crt"
+tls_key_path:  "/etc/lodeline/server.key"
+client_ca_path: "/etc/lodeline/ca.crt"
+
+# enrollment (§3.1)
+enroll_ca_cert_path: "/etc/lodeline/enroll-int.crt"
+enroll_ca_key_path:  "/etc/lodeline/enroll-int.key"
+enroll_tokens_path:  "/var/lib/lodeline-server/enroll-tokens.json"
+enroll_cert_days: 30
+host_allowlist_path: "/var/lib/lodeline-server/host-allowlist.json"
+
+# enrollment listener (§3.2)
+enroll_listener:
+  bind: "0.0.0.0:8444"
+events_require_cert_host_match: true
+```
+
+Create the state directory and the allowlist first (§3.1 step 2), then start the
+server (§7). The log shows `starting lodeline-server (mTLS)` with `bind` and
+`enroll_bind`, and no `enroll:` warning.
+
+The full field reference follows. It shows the keys above in their simplest form
+and the optional ones:
 
 ```yaml
 # /etc/lodeline/server.yaml
@@ -861,7 +945,9 @@ LODELINE_BASE_TOKEN=$TOKEN \
 sudo firewall-cmd --add-port=8443/tcp --permanent && sudo firewall-cmd --reload
 ```
 
-Ubuntu: `sudo ufw allow 8443/tcp`.
+Ubuntu: `sudo ufw allow 8443/tcp`. On a host with neither firewalld nor ufw, open
+the same ports with the tool the platform uses (nftables, iptables or the network's
+own filter), and filter the enrollment port the same way.
 
 With the enrollment listener (§3.2), open its port only to the networks hosts
 enroll from, for example `192.0.2.0/24`:
@@ -893,7 +979,7 @@ sudo restorecon -Rv /your/path`.
 ```sh
 # Package install:
 sudo cp /etc/lodeline/server.yaml.example /etc/lodeline/server.yaml
-sudo $EDITOR /etc/lodeline/server.yaml
+sudo $EDITOR /etc/lodeline/server.yaml     # §5 has a complete file for mTLS and enrollment
 sudo systemctl enable --now lodeline-server
 journalctl -u lodeline-server -f          # watch startup; confirm "mTLS" not "plain HTTP"
 
@@ -919,6 +1005,8 @@ Environment=RUST_LOG=warn
 ---
 
 ## 8. Verify
+
+Run these on a machine that holds the host's key and certificate (the host they were shipped to), in the directory that holds them.
 
 ```sh
 # mTLS reachability (no token needed for healthz):
@@ -992,7 +1080,7 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | `enroll-token` says the token directory is owned by another uid | It was run as root, and the directory belongs to `lodeline` | Run it with `sudo -u lodeline` (§3.1) |
 | `lodeline-sender enroll` exits 2 | The enrollment file is bad: not format 1, a field missing or malformed, or group or others can write it | Read the message, which names the field and never its value (§3.3) |
 | `lodeline-sender enroll` exits 3 | The host has another host_id | `lodeline show host-id`, then make a file for that id (§3.3) |
-| `lodeline-sender enroll` exits 4 | A path it would write exists with other content, is a link or not a regular file, has another hard link, cannot be read, or is a key that is not P-256 | Compare it with the enrollment file, move it aside, run again (§3.3) |
+| `lodeline-sender enroll` exits 4 | A path it would write exists with other content, is a link or not a regular file, has another hard link, cannot be read, is a key that is not P-256, or is a certificate without its key or one this host cannot use (for another key or host, expired, not valid yet, not chained to the file's CA, or not valid for client authentication) | Compare it with the enrollment file, move it aside, run again (§3.3) |
 | `lodeline-sender enroll` exits 5 | The server refused the token, or its certificate failed the checks | Issue a new token. For a rejected certificate, read `client.crt.rejected` and the reason (§3.3) |
 | `lodeline-sender enroll` exits 6 | The listener could not be reached or trusted | Check `enroll_url`, the firewall and the CA in the file; the token was not used (§3.3) |
 | `lodeline-sender enroll` says a `.tmp` file exists | An earlier run stopped half way, or another enroll is running | Make sure none is running, remove that file, run again |

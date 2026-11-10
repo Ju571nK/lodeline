@@ -120,6 +120,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   to take `ca.key` and `int.key` off the server, says the unit runs as `lodeline`, lists every
   case of `enroll` exit 4, and shows the policy keystore layout with a complete enrollment
   file. (#568)
+- `docs/install-server.md` closes the places a literal install left to guesswork. Section 5
+  has one complete `server.yaml` for a packaged server with mutual TLS and enrollment. The
+  guide gives a command to take `ca.key` off the server, removes `int.csr`, `int.crt` and
+  `ca.srl` after the intermediate is installed, gives the path of `enrollment-audit.jsonl`, and
+  shows how to make the policy keystore from `signing-key.json`, with the key id and the
+  validity span. It says that a host added to the allowlist by hand needs a restart, that
+  the server rewrites the allowlist as 0600 owned by `lodeline`, that a client presents the
+  leaf and then the intermediate, and what to open on a host with neither firewalld nor ufw.
+  (#571)
 - Enrollment now works on a packaged Linux server. On a host with the packages installed and
   SELinux enforcing, it failed three ways. The SELinux module did not let `lodeline_server_t`
   run `openssl`, which signing uses, so enrollment was off and the log blamed the CA
