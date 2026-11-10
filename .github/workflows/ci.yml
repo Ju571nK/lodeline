@@ -36,6 +36,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Test builds carry no debug info: it cost minutes of compile and link time per leg
+  # and filled the Rocky runner's disk on a cold cache. Backtraces keep function names.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   test:
@@ -134,9 +137,6 @@ jobs:
     name: rockylinux:9 / stable
     runs-on: ubuntu-latest
     container: rockylinux:9
-    env:
-      # A cold-cache debug build fills the runner's disk ("No space left on device").
-      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - name: install build deps
         run: dnf -y install git gcc perl
