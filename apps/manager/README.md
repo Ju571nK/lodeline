@@ -189,8 +189,10 @@ into that folder ([docs/install-server.md](../../docs/install-server.md), sectio
 it, the page says that the server serves no release files.
 
 The console passes each file on as the server sends it and does not check it. Before you install
-a file, check it against `SHA256SUMS` and its attestation, as [Install from a
-release](#install-from-a-release) shows for the console itself.
+a file, check it against the `SHA256SUMS` on the GitHub release page and its attestation, as
+[Install from a release](#install-from-a-release) shows for the console itself. A `SHA256SUMS`
+from the Downloads page comes from the same server as the file, so it shows only that the file
+arrived intact.
 
 - A file name can hold only ASCII letters, digits, `.`, `_` and `-`, and cannot be `.` or `..`,
   the rule the server uses. The console answers any other name with 400 `bad_filename` and sends

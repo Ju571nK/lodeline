@@ -20,8 +20,9 @@ export function Downloads() {
       <p className="text-sm text-text-muted">
         Release files that the operator of lodeline-server put in its <code>artifacts_dir</code>.
         The console gets each file from the server with its own credentials and passes it on as the
-        server sends it. It does not check the files. Compare a file with the release’s{' '}
-        <code>SHA256SUMS</code> before you install it.
+        server sends it. It does not check the files. Before you install a file, check it against
+        the <code>SHA256SUMS</code> on the GitHub release page and its attestation, because a{' '}
+        <code>SHA256SUMS</code> from this page comes from the same server as the file.
       </p>
       {files.isPending ? (
         <p role="status" className={`${box} text-text-muted`}>
