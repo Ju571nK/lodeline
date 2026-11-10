@@ -41,3 +41,10 @@ describe('top nav', () => {
     expect(await proxiesLinkAt(path)).not.toHaveAttribute('aria-current');
   });
 });
+
+describe('top nav links', () => {
+  it('links Enroll a host to /enroll', async () => {
+    await proxiesLinkAt('/alerts');
+    expect(screen.getByRole('link', { name: 'Enroll a host' })).toHaveAttribute('href', '/enroll');
+  });
+});

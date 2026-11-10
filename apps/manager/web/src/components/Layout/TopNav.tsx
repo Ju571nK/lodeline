@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils';
  * Top navigation strip. Per UI/UX §4:
  *   - Brand mark on the left (◆ lodeline).
  *   - Primary nav items: Alerts (Plan 02), Fleet (Plan 03), Proxies (read-only
- *     Lodeline Proxy status), Downloads (the server's release files), Settings (UI/UX §5.4
+ *     Lodeline Proxy status), Downloads (the server's release files), Enroll a host (a host's enrollment file), Settings (UI/UX §5.4
  *     minimal stub: connection, fleet, audit, auth, read-only).
  *   - Connection-state pill combines liveness with the shared read-API
  *     metadata query, so a reachable server with rejected read access is
@@ -94,6 +94,14 @@ export function TopNav() {
             className="rounded px-2.5 py-1 transition-colors"
           >
             Downloads
+          </Link>
+          <Link
+            to="/enroll"
+            activeProps={{ className: 'text-text-primary bg-bg-elevated' }}
+            inactiveProps={{ className: 'text-text-muted hover:text-text-primary' }}
+            className="rounded px-2.5 py-1 transition-colors"
+          >
+            Enroll a host
           </Link>
           <Link
             to="/settings"

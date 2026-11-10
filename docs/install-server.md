@@ -807,7 +807,7 @@ off, with one log line at start, and `enroll` is not supported there either.
 `lodeline-server enroll-token` (§3.1) needs a shell on the server host. A web
 console cannot run it, so the server can also make a token over HTTP for a
 console that holds the credential below: `POST /v1/enroll-tokens` on the main (mutual TLS) listener.
-The console's enrollment route uses it, and the console's side is in the
+The console's enrollment route uses it, and its Enroll a host page calls that route. The console's side is in the
 [console README, "Enroll a host"](../apps/manager/README.md#enroll-a-host). The token
 redeems on the enrollment listener (§3.2) exactly like one from the subcommand.
 The route does not exist unless `enroll_mint:` is in `server.yaml`. A server

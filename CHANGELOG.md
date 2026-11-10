@@ -16,8 +16,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   settings (`LODELINE_ENROLL_FILE_*`) and answers with the file's bytes. It keeps no token and no
   file. The POST accepts only a request whose `Origin` is `LODELINE_PUBLIC_ORIGIN`, and
   `LODELINE_ENROLL_SUBJECTS` can limit it to some subjects. It is off unless all eight settings
-  are set (see "Enroll a host" in `apps/manager/README.md`) (#575, #553). The page in the web
-  console follows in a later change.
+  are set (see "Enroll a host" in `apps/manager/README.md`) (#575, #553).
+- The web console has an Enroll a host page (`/enroll`, in the top navigation). It shows what a
+  file will hold (the server and enrollment URLs, the CA certificates and the policy keys with
+  their SHA-256 fingerprints), makes the file on one click and has the browser save it, and then
+  shows the host id, the expiry and the steps on a Linux host installed from the packages. It
+  never parses or keeps the file, and its error texts say what to do next, including how to make a
+  new file for a host whose `enroll` stopped halfway (#576, #553).
 - `POST /v1/enroll-tokens` makes a single-use enrollment token over HTTP, for the fleet console
   to use (`docs/install-server.md` section 3.6). It is off unless `enroll_mint:` is
   in `server.yaml`, and needs a pinned client certificate, a bearer with the new scope `enroll`

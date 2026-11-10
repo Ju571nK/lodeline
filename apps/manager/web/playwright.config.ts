@@ -75,6 +75,8 @@ export default defineConfig({
       ADMIN_PASSWORD_BCRYPT: TEST_ADMIN_HASH,
       JWT_SECRET: '0123456789abcdefghijklmnopqrstuv',
       LODELINE_INSECURE_COOKIE: '1',
+      // The enrollment page's POST needs the browser's Origin to match this.
+      LODELINE_PUBLIC_ORIGIN: BASE_URL,
     },
   },
 

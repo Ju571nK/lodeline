@@ -302,6 +302,16 @@ subcommand, which has no such rule, or a new host id. If `lodeline-sender enroll
 stopped after it stored its host id, make a new file for that host id with the `host_id` field
 (`lodeline show host-id` prints it). A host that already has a certificate from this server stays
 a job for `lodeline-server enroll-token`.
+
+**The page.** The console's **Enroll a host** page (`/enroll`, in the top navigation) uses these two
+routes. It says when the route is off and which variables are missing, and when the signed-in
+subject is not on the enroll list. Otherwise it lists what a file will hold, with the SHA-256
+fingerprints that `lodeline-sender enroll` prints, and one button makes the file and has the
+browser save it. The page never parses or stores the file's bytes. It then shows the host id, the
+expiry, and the steps for a Linux host installed from the packages, and an optional field for a
+host id when `enroll` on a host stopped after it stored its id. Each error code in the table above
+has a text with one cause and one action.
+
 ## Sessions and the login limit
 
 - A session is a signed token in the `lodeline_session` cookie (`HttpOnly`, `SameSite=Lax`,
