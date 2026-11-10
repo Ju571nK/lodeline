@@ -24,7 +24,8 @@ refuses two packages owning one path, so a shared name would block installing
 them on the same host (#252). The sources under `packaging/sysusers.d/` and
 `packaging/tmpfiles.d/` carry the same names because cargo-deb names its
 generated postinst calls after the source file; keep the copies identical (CI
-compares them).
+compares them). The one difference is `lodeline-sender.conf`'s extra
+`/var/lib/lodeline-sender` line, which CI leaves out of the comparison.
 
 `lodeline-proxy` runs as its own `lodeline-proxy` user and group (its own sysusers file),
 ships no live `/etc/lodeline/proxy.yaml` (only the `.example`), its

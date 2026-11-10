@@ -13,6 +13,12 @@
 //! Struct fields are declared in alphabetical order. The routes used to build
 //! their bodies with `serde_json::json!`, whose maps sort keys, so this order
 //! keeps the bytes on the wire unchanged. Timestamps are RFC 3339 strings.
+//!
+//! [`enrollment`] holds the enrollment file a host reads with
+//! `lodeline-sender enroll`, so the console that makes it and the sender that
+//! reads it compile against one type.
+pub mod enrollment;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

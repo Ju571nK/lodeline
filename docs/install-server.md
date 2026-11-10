@@ -198,9 +198,12 @@ sudo -u lodeline lodeline-server enroll-token --config /etc/lodeline/server.yaml
 ```
 
 The command replaces the token file and creates `<enroll_tokens_path>.lock`, both
-owned by the user that runs it and mode 0600. After a run as root the server,
-which runs as `lodeline`, can open neither, and every enrollment answers
-`500 sign_failed` until you give both files back to `lodeline` (§10).
+owned by the user that runs it and mode 0600. The server runs as `lodeline`, so
+the command must run as the owner of the token file's directory. Run as root in a
+directory that another account owns, it refuses before it writes anything, and it
+prints that directory and its numeric owner. It also accepts only a lowercase,
+hyphenated version 4 UUID as `--host-id`, the form the agent stores. A token for
+another spelling could never be redeemed by the agent.
 
 **4. Enroll.** On the new host, make its private key and a CSR with
 `CN=<host_id>`. `lodeline-sender csr` needs no `openssl` binary, so it also works on
@@ -208,12 +211,20 @@ Windows. It writes an ECDSA P-256 key (mode 0600 on unix) and refuses to replace
 file that exists:
 
 ```sh
-lodeline-sender csr --host-id <host_id> --key-out /etc/lodeline/client.key --csr-out host.csr
+sudo lodeline-sender csr --host-id <host_id> --key-out /var/lib/lodeline-sender/client.key --csr-out host.csr
 # Alternative where openssl is installed:
 # openssl req -new -newkey rsa:2048 -nodes -keyout host.key -out host.csr -subj "/CN=<host_id>"
 ```
 
-The key stays on the host. The PMS then sends the CSR to the endpoint over mTLS:
+The key stays on the host. The sender runs as `lodeline` and can write only
+`/var/lib/lodeline-sender`, so the key goes there. Run as root, `csr` gives the
+key to the owner of its directory only when the path of that directory has no
+link in it and every parent of it is a root-owned directory that group and others
+cannot write. The packaged directory meets that, so the key becomes
+`lodeline:lodeline` with mode 0600. Otherwise the key stays root-owned, `csr`
+says so on stderr, and you run `chown` on it yourself. For one host, `sudo
+lodeline-sender enroll` (§3.3) does this whole step from a file. The PMS then
+sends the CSR to the endpoint over mTLS:
 
 ```sh
 curl --cert pms.crt --key pms.key --cacert ca.crt \
@@ -331,6 +342,138 @@ addresses, so a balancer would put every host in one count, and a TLS proxy
 would show hosts its own certificate instead of the server's. The limits stop
 one source, not many. A flood from many addresses can stop enrollment, but not
 the main port, so filter it at the firewall.
+
+### 3.3 Enroll a host with an enrollment file
+
+`lodeline-sender enroll <file>` enrolls one host from a single JSON file. It stores
+the host_id through the agent, makes the host's key, sends one CSR to the
+enrollment listener (§3.2) while it trusts only the CA in the file, checks the
+certificate it gets back, and writes `sender.yaml`, the server CA and the policy
+keystore. It enables and starts nothing. Run it as root on the packaged Linux
+layout. It is not supported on Windows yet and exits 1 there.
+
+**The file.** The `lodeline_enrollment` value is the format version. This build
+reads version 1 and refuses any other. It warns about each field it does not
+know, by name. The file is at most 64 KiB, and a file that group or others can
+write is refused. It holds a single-use token, so keep it mode 0600.
+
+| Field | Meaning |
+|---|---|
+| `lodeline_enrollment` | `1` |
+| `host_id` | Lowercase, hyphenated version 4 UUID. The token is bound to it. |
+| `token` | The token `lodeline-server enroll-token` printed. |
+| `enroll_url` | Origin of the enrollment listener, for example `https://lodeline.example.com:8444`. HTTPS, with no path, query, fragment or user name. |
+| `server_url` | Origin of the main listener. It becomes the sender's `server_base_url`. |
+| `server_ca_pem` | PEM `CERTIFICATE` blocks only: the CA of the server certificates and of the issued client certificate. A private key block is refused. |
+| `policy_keystore` | The keystore document (§4), with at least one key. Written as the agent's policy-signing keystore. |
+| `expires_at` | Optional RFC 3339 time. A hint for messages; the server decides. |
+
+With separate server and client roots, put both roots in `server_ca_pem`. The
+client root then also vouches for server certificates. The issued certificates
+are client-authentication only, so that does not let a client certificate act as
+a server certificate.
+
+**Make the file** on the server host, from the CA that signed the server
+certificate and the keystore you wrote in §4. `jq` 1.6 or later is needed:
+
+```sh
+H=$(cat /proc/sys/kernel/random/uuid)    # macOS: uuidgen | tr 'A-Z' 'a-z'
+T=$(sudo -u lodeline lodeline-server enroll-token --config /etc/lodeline/server.yaml --host-id "$H" --ttl 1h)
+(umask 077; jq -n --arg host_id "$H" --arg token "$T" \
+   --arg enroll_url https://lodeline.example.com:8444 \
+   --arg server_url https://lodeline.example.com:8443 \
+   --rawfile server_ca_pem ca.crt --slurpfile ks policy-signing-pubkeys.pem \
+   '{lodeline_enrollment: 1, host_id: $host_id, token: $token, enroll_url: $enroll_url,
+     server_url: $server_url, server_ca_pem: $server_ca_pem, policy_keystore: $ks[0]}' > "$H.json")
+```
+
+Copy `$H.json` to the new host over a channel you trust.
+
+**Enroll.** On the new host, with the agent and the sender installed:
+
+```sh
+sudo lodeline-sender enroll host.json
+```
+
+Before it writes anything, it prints to stderr what the file makes the host
+trust: the two URLs, each CA certificate's subject and SHA-256 fingerprint, and
+each policy key's id, validity and fingerprint. It warns when the two URLs name
+different hosts. Compare the fingerprints with `openssl x509 -fingerprint
+-sha256 -noout -in ca.crt` and the `lodeline-sign keygen` output. There is no
+prompt. A key in the file is the key the agent accepts signed policy from.
+
+Every refusal that needs no server runs first, then it runs `lodeline
+init-host-id`, makes the key (mode 0600) and only then sends the token. The
+certificate is the first file written after the answer. A rerun reads what is on
+disk, so it either finishes without the network or says when a new token is
+needed. When a run changes nothing, it makes no request.
+
+On the packaged layout the files are:
+
+| File | Path | Owner, mode |
+|---|---|---|
+| client key | `/var/lib/lodeline-sender/client.key` | `lodeline:lodeline` 0600 |
+| client certificate (leaf, then chain) | `/var/lib/lodeline-sender/client.crt` | `lodeline:lodeline` 0644 |
+| server CA | `/etc/lodeline/server-ca.pem` | `root:root` 0644 |
+| policy keystore | `/etc/lodeline/policy-signing-pubkeys.pem` | `root:root` 0644 |
+| sender config | `/etc/lodeline/sender.yaml` | `root:root` 0644 |
+
+A file takes the owner of its directory only when enroll created it in this run,
+through the descriptor, and only when that directory is not root-owned. It never
+changes the owner of a file, a path or a directory that already exists, and it
+refuses a link, a FIFO or a hard link where it writes. As root it also uses
+each output directory through its resolved parent, so the path that is checked is
+the path that is opened, and it requires every parent of that directory to be a
+root-owned directory that group and others cannot write. As root it creates only
+the last component of a directory; without root it creates the whole path. When it
+has to create `/var/lib/lodeline-sender` itself, the key stays root-owned until
+systemd, or `systemd-tmpfiles --create`, gives that directory to `lodeline`; the
+packages create it for you. Pass `--config`, `--state-db`, `--events-dir`,
+`--control-socket`, `--keystore` and `--sender-dir` together to enroll a user-mode
+agent without root. Enroll never creates the sender's log directory.
+
+When it finishes it makes one request to the main port over mTLS and warns if
+that fails, for example when the main listener's certificate is not under the CA
+in the file, or when `client_ca_path` lacks the enrollment root. The exit code
+stays 0 and the files stay. Then enable the units:
+
+```sh
+sudo systemctl enable --now lodeline lodeline-sender
+```
+
+A running agent loads the keystore only at start, so restart it if it was
+running. The file is kept; its token is spent, and it still holds only public
+material (the CA and the public policy key), so delete it when you no longer
+need it.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Enrolled, or already enrolled |
+| 1 | Failed. Read the message |
+| 2 | The enrollment file is bad, or the usage is wrong |
+| 3 | This host has another host_id. `lodeline show host-id` prints it. An existing `sender.yaml` that names another host_id also exits 3, and is checked before the CA and the keystore |
+| 4 | A file enroll would write exists with other content. Enroll never replaces one |
+| 5 | The token was refused or may be spent. Issue a new token |
+| 6 | The listener could not be reached or trusted, or stayed busy. The token was not used |
+
+| State left behind | A rerun with the same file |
+|---|---|
+| Nothing written | Full run |
+| host_id stored, no key | Full run |
+| Key, no certificate | Reuses the key. If an earlier run spent the token and lost the answer, the server answers 403, enroll exits 5, and a new token for the same host_id works |
+| Key and certificate, other files missing | No request; writes the rest |
+| Fully enrolled | No request; exit 0 |
+| A file for another host_id | Exit 3 |
+| An expired or foreign certificate | Exit 4 |
+
+When the server's certificate fails enroll's checks (another key or host, not
+under the CA in the file, expired, or more than five minutes ahead of this
+host's clock), enroll saves what the server sent as `client.crt.rejected`, prints
+the path and the reason, and exits 5. The token is spent. If the cause is this
+host's clock or the file's `server_ca_pem`, fix it, move that file to
+`client.crt` and run enroll again. Otherwise fix the server's enrollment CA and
+issue a new token. A certificate up to five minutes ahead of the clock is
+accepted with a warning.
 
 ---
 
@@ -582,7 +725,14 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | `No route to host` from agent | Firewall / port not open | Open `8443/tcp` (§6) |
 | Server exits with `enroll_listener is set but enrollment is off` | A §3.1 enrollment check failed | Fix what the `enroll:` warning above it names (§3.2) |
 | Server exits with `invalid config` naming `enroll_listener` | A §3.2 boot refusal | Do what the message says (§3.2) |
-| Every enrollment answers 500 `token store error` | The token file or its `.lock` file is owned by root after a root `enroll-token` run | `sudo chown lodeline:lodeline <enroll_tokens_path> <enroll_tokens_path>.lock`, then run `enroll-token` with `sudo -u lodeline` (§3.1) |
+| Every enrollment answers 500 `token store error` | The token file or its `.lock` file is owned by root, left by a root `enroll-token` run of an older version | `sudo chown lodeline:lodeline <enroll_tokens_path> <enroll_tokens_path>.lock`, then run `enroll-token` with `sudo -u lodeline` (§3.1) |
+| `enroll-token` says the token directory is owned by another uid | It was run as root, and the directory belongs to `lodeline` | Run it with `sudo -u lodeline` (§3.1) |
+| `lodeline-sender enroll` exits 2 | The enrollment file is bad: not format 1, a field missing or malformed, or group or others can write it | Read the message, which names the field and never its value (§3.3) |
+| `lodeline-sender enroll` exits 3 | The host has another host_id | `lodeline show host-id`, then make a file for that id (§3.3) |
+| `lodeline-sender enroll` exits 4 | A file it would write exists with other content | Compare it with the enrollment file, move it aside, run again (§3.3) |
+| `lodeline-sender enroll` exits 5 | The server refused the token, or its certificate failed the checks | Issue a new token. For a rejected certificate, read `client.crt.rejected` and the reason (§3.3) |
+| `lodeline-sender enroll` exits 6 | The listener could not be reached or trusted | Check `enroll_url`, the firewall and the CA in the file; the token was not used (§3.3) |
+| `lodeline-sender enroll` says a `.tmp` file exists | An earlier run stopped half way, or another enroll is running | Make sure none is running, remove that file, run again |
 | Enrollment port closes the connection before TLS | Rate limit or full listener | Wait about a minute. The server logs `enroll request refused` with `reason=rate_limited` or `listener_full` and the `source` (§3.2) |
 
 ---

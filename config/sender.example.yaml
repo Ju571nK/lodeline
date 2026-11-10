@@ -4,9 +4,11 @@
 server_base_url: "https://lodeline.example.com"
 
 # mTLS material. Generated and signed out-of-band; this host's client cert
-# pins its host_id (handed out at provisioning time).
-client_cert_path: "/etc/lodeline/client.crt"
-client_key_path: "/etc/lodeline/client.key"
+# pins its host_id (handed out at provisioning time). The sender runs as the
+# `lodeline` user and writes only /var/lib/lodeline-sender, so the key and the
+# certificate go there; `lodeline-sender enroll` puts them there.
+client_cert_path: "/var/lib/lodeline-sender/client.crt"
+client_key_path: "/var/lib/lodeline-sender/client.key"
 server_ca_path: "/etc/lodeline/server-ca.pem"
 
 # Where the agent writes its JSONL posture events (`events-*.jsonl`). This is

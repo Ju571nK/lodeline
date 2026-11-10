@@ -29,6 +29,29 @@ pub enum Command {
         #[arg(long)]
         url: String,
     },
+    /// Enroll this host from an enrollment file: store its host_id through the
+    /// agent, make its key, redeem the single-use token for a client certificate,
+    /// and write the sender config, the server CA and the policy keystore. Enables
+    /// and starts nothing. Run it as root (sudo) for the packaged layout.
+    Enroll {
+        /// The enrollment file (JSON, `"lodeline_enrollment": 1`).
+        file: PathBuf,
+        /// state.db the agent uses. As root the agent's own default applies.
+        #[arg(long)]
+        state_db: Option<PathBuf>,
+        /// Events directory the sender reads (default `/var/log/lodeline`).
+        #[arg(long)]
+        events_dir: Option<PathBuf>,
+        /// The agent's control socket (default `/var/run/lodeline/control.sock`).
+        #[arg(long)]
+        control_socket: Option<PathBuf>,
+        /// Where the policy keystore goes (default `/etc/lodeline/policy-signing-pubkeys.pem`).
+        #[arg(long)]
+        keystore: Option<PathBuf>,
+        /// Holds the client key and certificate (default `/var/lib/lodeline-sender`).
+        #[arg(long)]
+        sender_dir: Option<PathBuf>,
+    },
     /// Make this host's enrollment key and CSR for `POST /v1/enroll`: a new ECDSA
     /// P-256 private key and a PEM CSR whose subject is `CN=<host-id>`. Makes no
     /// network call and never overwrites an existing file.
