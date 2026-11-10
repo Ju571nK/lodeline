@@ -350,8 +350,6 @@ mod tests {
         );
     }
 
-    use std::sync::Arc;
-
     fn put(p: &Path, entries: &[(&str, OffsetDateTime, Option<OffsetDateTime>)]) {
         let store = TokenStore {
             tokens: entries
@@ -466,6 +464,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn issue_capped_cli_issue_and_redeem_lose_nothing_under_threads() {
+        use std::sync::Arc;
         let d = tempfile::tempdir().unwrap();
         let p = Arc::new(d.path().join("t.json"));
         let n = now();
