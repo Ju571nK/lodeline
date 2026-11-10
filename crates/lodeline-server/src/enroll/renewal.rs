@@ -21,8 +21,8 @@ pub const SUPERSEDED: &str = "renewal_superseded";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Head {
     pub serial: String,
-    /// The certificate the head was issued for, when the server saw it.
-    pub prev_serial: Option<String>,
+    /// Fingerprint of the certificate the head was issued for, when it was a renewal.
+    pub prev_fp: Option<String>,
     /// blake3 of the CSR bytes that produced the head.
     pub csr_fp: String,
     pub issued_count: u32,
@@ -100,19 +100,19 @@ impl Renewal {
     }
 
     /// The head rule. A host with no entry is allowed.
-    pub fn permits(&self, host: &str, presented: &str, csr_fp: &str) -> bool {
+    pub fn permits(&self, host: &str, serial: &str, fp: &str, csr_fp: &str) -> bool {
         match self.heads.lock().get(host) {
             None => true,
             Some(h) => {
-                h.serial == presented
-                    || (h.prev_serial.as_deref() == Some(presented)
+                h.serial == serial
+                    || (h.prev_fp.as_deref() == Some(fp)
                         && h.csr_fp == csr_fp
                         && h.issued_count < MAX_ISSUANCES)
             }
         }
     }
 
-    pub fn record_renewal(&self, host: &str, serial: &str, csr_fp: &str, presented: &str) {
+    pub fn record_renewal(&self, host: &str, serial: &str, csr_fp: &str, presented_fp: &str) {
         let serial = norm_serial(serial);
         let mut heads = self.heads.lock();
         if serial.is_empty() {
@@ -120,14 +120,14 @@ impl Renewal {
             return;
         }
         let issued_count = match heads.get(host) {
-            Some(h) if h.prev_serial.as_deref() == Some(presented) && h.csr_fp == csr_fp => {
+            Some(h) if h.prev_fp.as_deref() == Some(presented_fp) && h.csr_fp == csr_fp => {
                 h.issued_count + 1
             }
             _ => 1,
         };
         let head = Head {
             serial,
-            prev_serial: Some(presented.to_string()),
+            prev_fp: Some(presented_fp.to_string()),
             csr_fp: csr_fp.to_string(),
             issued_count,
         };
@@ -143,16 +143,21 @@ impl Renewal {
         }
         let head = Head {
             serial,
-            prev_serial: None,
+            prev_fp: None,
             csr_fp: csr_fp.to_string(),
             issued_count: 1,
         };
         heads.insert(host.to_string(), head);
     }
 
-    /// True once per presented certificate: the caller chains that denial.
-    pub fn first_denial(&self, presented_fp: &str) -> bool {
-        self.denied.lock().insert(presented_fp.to_string())
+    /// Whether a denial for this presented certificate is already in the audit file.
+    pub fn denial_chained(&self, presented_fp: &str) -> bool {
+        self.denied.lock().contains(presented_fp)
+    }
+
+    /// Call after the denial's audit line was written.
+    pub fn mark_denial_chained(&self, presented_fp: &str) {
+        self.denied.lock().insert(presented_fp.to_string());
     }
 
     pub fn head(&self, host: &str) -> Option<Head> {
@@ -162,11 +167,10 @@ impl Renewal {
 
 type Scan = (HashMap<String, Head>, HashSet<String>, usize);
 
-/// Read the audit file in order. A renewal line that repeats the previous head's CSR and
-/// caller counts as a repeat; any other renewal replaces the head.
+/// Read the audit file in order. A renewal line that repeats the previous head's CSR from
+/// the same presented certificate counts as a repeat; any other issuance replaces the head.
 fn scan(text: &str) -> Scan {
     let mut heads: HashMap<String, Head> = HashMap::new();
-    let mut callers: HashMap<String, String> = HashMap::new();
     let mut denied = HashSet::new();
     let mut bad = 0;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -184,17 +188,17 @@ fn scan(text: &str) -> Scan {
                 }
                 let renewed = reason == "renewed";
                 let repeat = renewed
-                    && old.as_ref().is_some_and(|h| h.csr_fp == r.csr_fingerprint)
-                    && callers.get(&r.host_id) == Some(&r.caller_fingerprint);
-                let (prev_serial, issued_count) = match old {
-                    Some(h) if repeat => (h.prev_serial, h.issued_count + 1),
-                    Some(h) if renewed => (Some(h.serial), 1),
-                    _ => (None, 1),
+                    && old.as_ref().is_some_and(|h| {
+                        h.csr_fp == r.csr_fingerprint
+                            && h.prev_fp.as_deref() == Some(&r.caller_fingerprint)
+                    });
+                let issued_count = match old {
+                    Some(h) if repeat => h.issued_count + 1,
+                    _ => 1,
                 };
-                callers.insert(r.host_id.clone(), r.caller_fingerprint);
                 let head = Head {
                     serial,
-                    prev_serial,
+                    prev_fp: renewed.then_some(r.caller_fingerprint),
                     csr_fp: r.csr_fingerprint,
                     issued_count,
                 };

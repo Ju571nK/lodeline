@@ -19,7 +19,7 @@ use lodeline_server::routes::renew::renew_at;
 use lodeline_server::tls_accept::{PeerCertAcceptor, PeerIdentity};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyPair, PublicKeyData, SanType,
+    KeyPair, PublicKeyData, SanType, SerialNumber,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -51,7 +51,19 @@ fn leaf(
     nb: OffsetDateTime,
     na: OffsetDateTime,
 ) -> String {
+    leaf_with_serial(issuer, key, cn, nb, na, None)
+}
+
+fn leaf_with_serial(
+    issuer: &CertifiedIssuer<'_, KeyPair>,
+    key: &KeyPair,
+    cn: &str,
+    nb: OffsetDateTime,
+    na: OffsetDateTime,
+    serial: Option<&[u8]>,
+) -> String {
     let mut p = CertificateParams::new(vec![cn.to_string()]).unwrap();
+    p.serial_number = serial.map(SerialNumber::from_slice);
     p.distinguished_name.push(DnType::CommonName, cn);
     p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     p.not_before = nb;
@@ -94,6 +106,17 @@ struct Env {
 
 impl Env {
     fn new() -> Env {
+        Env::build(None).0
+    }
+
+    /// An enrollment CA that is an intermediate under a root. With `root_in_file`
+    /// the CA file holds the intermediate followed by the root.
+    fn intermediate(root_in_file: bool) -> (Env, CertifiedIssuer<'static, KeyPair>) {
+        let (env, root) = Env::build(Some(root_in_file));
+        (env, root.unwrap())
+    }
+
+    fn build(under_root: Option<bool>) -> (Env, Option<CertifiedIssuer<'static, KeyPair>>) {
         let dir = tempfile::tempdir().unwrap();
         // An RSA enrollment CA made by openssl, as in the enroll tests: openssl signs
         // with SHA-256 for RSA on every platform, and with SHA-1 for EC on LibreSSL.
@@ -119,14 +142,27 @@ impl Env {
         let mut p = CertificateParams::new(vec![]).unwrap();
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         p.distinguished_name.push(DnType::CommonName, "enroll-ca");
-        let ca = CertifiedIssuer::self_signed(p, pair).unwrap();
-        std::fs::write(dir.path().join("ca.crt"), ca.pem()).unwrap();
+        let (ca, root) = match under_root {
+            None => (CertifiedIssuer::self_signed(p, pair).unwrap(), None),
+            Some(_) => {
+                let root = ca_named("root-ca");
+                (
+                    CertifiedIssuer::signed_by(p, pair, &root).unwrap(),
+                    Some(root),
+                )
+            }
+        };
+        let mut file = ca.pem();
+        if let (Some(true), Some(root)) = (under_root, root.as_ref()) {
+            file.push_str(&root.pem());
+        }
+        std::fs::write(dir.path().join("ca.crt"), file).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        Env { dir, ca }
+        (Env { dir, ca }, root)
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -443,6 +479,22 @@ async fn a_csr_for_another_host_is_400() {
     );
     let csr_pem = csr(OTHER, &KeyPair::generate().unwrap());
     let (status, _, _) = call(&st, Some(&peer(&old)), &csr_pem, now()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!env.audit().exists());
+}
+
+#[tokio::test]
+async fn a_csr_whose_cn_differs_from_the_host_only_in_letter_case_is_400() {
+    let env = Env::new();
+    let st = env.state(&[HOST]);
+    let old = aged(
+        &env,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        Duration::days(20),
+    );
+    let upper = csr(&HOST.to_uppercase(), &KeyPair::generate().unwrap());
+    let (status, _, _) = call(&st, Some(&peer(&old)), &upper, now()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(!env.audit().exists());
 }
@@ -950,9 +1002,7 @@ async fn live_tls_a_leaf_past_its_notafter_fails_the_handshake_and_the_handler_n
     live.handle.shutdown();
 }
 
-#[tokio::test]
-async fn live_tls_a_valid_leaf_in_its_window_gets_200_over_a_real_handshake() {
-    let env = Env::new();
+async fn assert_live_renewal(env: Env) {
     let live = live(&env, env.state(&[HOST])).await;
     let key = KeyPair::generate().unwrap();
     let cert = aged(&env, &key, HOST, Duration::days(20));
@@ -975,4 +1025,165 @@ async fn live_tls_a_valid_leaf_in_its_window_gets_200_over_a_real_handshake() {
     );
     assert_eq!(live.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     live.handle.shutdown();
+}
+
+#[tokio::test]
+async fn live_tls_a_valid_leaf_in_its_window_gets_200_over_a_real_handshake() {
+    assert_live_renewal(Env::new()).await;
+}
+
+#[tokio::test]
+async fn live_tls_a_leaf_from_an_intermediate_enrollment_ca_gets_200() {
+    assert_live_renewal(Env::intermediate(false).0).await;
+}
+
+#[tokio::test]
+async fn a_leaf_from_an_intermediate_enrollment_ca_renews() {
+    let (env, _root) = Env::intermediate(false);
+    let st = env.state(&[HOST]);
+    let old = aged(
+        &env,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        Duration::days(20),
+    );
+    let new_key = KeyPair::generate().unwrap();
+    let (status, _, body) = call(&st, Some(&peer(&old)), &csr(HOST, &new_key), now()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        spki_of_cert(body["client_cert_pem"].as_str().unwrap()),
+        new_key.subject_public_key_info()
+    );
+}
+
+#[tokio::test]
+async fn with_the_root_after_the_intermediate_only_the_first_certificate_is_the_trust_anchor() {
+    let (env, root) = Env::intermediate(true);
+    let st = env.state(&[HOST]);
+    let csr_pem = csr(HOST, &KeyPair::generate().unwrap());
+    let nb = now() - Duration::days(20);
+    let by_root = leaf(
+        &root,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        nb,
+        nb + Duration::days(30),
+    );
+    let (status, _, _) = call(&st, Some(&peer(&by_root)), &csr_pem, now()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "signed directly by the root");
+    assert!(!env.audit().exists());
+
+    let by_intermediate = aged(
+        &env,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        Duration::days(20),
+    );
+    let (status, _, body) = call(&st, Some(&peer(&by_intermediate)), &csr_pem, now()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_presented_serial_with_a_leading_zero_is_the_head_named_in_the_other_form() {
+    let env = Env::new();
+    let st0 = env.state(&[HOST]);
+    // The audit file names the head without the zero the certificate carries.
+    lodeline_server::enroll::audit::append(
+        &env.audit(),
+        st0.audit_key.as_ref().unwrap(),
+        HOST,
+        "issued",
+        "ok",
+        "csr",
+        "cert",
+        "1",
+        "",
+        "",
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+    let st = env.restart();
+    let nb = now() - Duration::days(20);
+    let old = leaf_with_serial(
+        &env.ca,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        nb,
+        nb + Duration::days(30),
+        Some(&[0x01]),
+    );
+    let (status, _, body) = call(
+        &st,
+        Some(&peer(&old)),
+        &csr(HOST, &KeyPair::generate().unwrap()),
+        now(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// A first certificate the server did not issue renews once, with the audit file
+/// holding no earlier line for the host.
+async fn renewed_once(env: &Env, st: &Arc<AppState>) -> (PeerIdentity, String) {
+    let old = peer(&aged(
+        env,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        Duration::days(20),
+    ));
+    let same = csr(HOST, &KeyPair::generate().unwrap());
+    let (status, _, body) = call(st, Some(&old), &same, now()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    (old, same)
+}
+
+#[tokio::test]
+async fn a_lost_answer_can_be_repeated_after_a_restart_with_no_earlier_line() {
+    let env = Env::new();
+    let (old, same) = renewed_once(&env, &env.state(&[HOST])).await;
+    let st = env.restart();
+    let (status, _, body) = call(&st, Some(&old), &same, now()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn the_repeat_cap_holds_across_a_restart_with_no_earlier_line() {
+    let env = Env::new();
+    let (old, same) = renewed_once(&env, &env.state(&[HOST])).await;
+    let (status, _, _) = call(&env.restart(), Some(&old), &same, now()).await;
+    assert_eq!(status, StatusCode::OK, "second issuance");
+    let (status, _, _) = call(&env.restart(), Some(&old), &same, now()).await;
+    assert_eq!(status, StatusCode::OK, "third issuance");
+    let (status, _, _) = call(&env.restart(), Some(&old), &same, now()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "fourth issuance");
+    assert_eq!(env.lines_with("issued", "renewed"), 3);
+}
+
+#[tokio::test]
+async fn another_csr_from_the_old_certificate_is_refused_after_a_restart_with_no_earlier_line() {
+    let env = Env::new();
+    let (old, _) = renewed_once(&env, &env.state(&[HOST])).await;
+    let other = csr(HOST, &KeyPair::generate().unwrap());
+    let (status, _, _) = call(&env.restart(), Some(&old), &other, now()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_denial_is_remembered_only_after_its_audit_line_was_written() {
+    let env = Env::new();
+    let st = env.state(&[HOST]);
+    let (old, _) = renewed_once(&env, &st).await;
+    let other = csr(HOST, &KeyPair::generate().unwrap());
+    // The first denial cannot be written: a directory sits where the file belongs.
+    let kept = env.path("audit.kept");
+    std::fs::rename(env.audit(), &kept).unwrap();
+    std::fs::create_dir(env.audit()).unwrap();
+    let (status, _, _) = call(&st, Some(&old), &other, now()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    std::fs::remove_dir(env.audit()).unwrap();
+    std::fs::rename(&kept, env.audit()).unwrap();
+
+    let (status, _, _) = call(&st, Some(&old), &other, now()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(env.lines_with("denied", "renewal_superseded"), 1, "chained");
 }

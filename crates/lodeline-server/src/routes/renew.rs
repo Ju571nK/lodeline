@@ -17,6 +17,7 @@
 
 use crate::app::{AppState, SharedState};
 use crate::enroll::audit;
+use crate::enroll::renewal::norm_serial;
 use crate::enroll::sign::{self, SignError};
 use crate::routes::enroll::err;
 use crate::tls_accept::{hex_lower, PeerIdentity};
@@ -70,7 +71,7 @@ fn parse_leaf(der: &[u8]) -> Option<Leaf> {
     Some(Leaf {
         not_before: c.validity().not_before.timestamp(),
         not_after: c.validity().not_after.timestamp(),
-        serial: hex_lower(c.raw_serial()),
+        serial: norm_serial(&hex_lower(c.raw_serial())),
         spki: c.public_key().raw.to_vec(),
     })
 }
@@ -147,11 +148,18 @@ pub fn renew_at(
     let ts = now
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
-    if !rn.permits(host, &leaf.serial, &csr_fp) {
+    if !rn.permits(host, &leaf.serial, &peer.fingerprint, &csr_fp) {
         let resp = deny("superseded");
-        if let (true, Some(key)) = (rn.first_denial(&peer.fingerprint), st.audit_key.as_ref()) {
+        // Chained once per presented certificate, and remembered only once the line is
+        // written. With no audit key or a failed append, every denial still reaches the
+        // rate-limited log line above.
+        let key = st
+            .audit_key
+            .as_ref()
+            .filter(|_| !rn.denial_chained(&peer.fingerprint));
+        if let Some(key) = key {
             let reason = crate::enroll::renewal::SUPERSEDED;
-            if let Err(e) = audit::append(
+            match audit::append(
                 &en.audit_path,
                 key,
                 host,
@@ -164,7 +172,10 @@ pub fn renew_at(
                 &peer.fingerprint,
                 &ts,
             ) {
-                tracing::error!(error = %e, host_id = host, "renew: failed to audit denial");
+                Ok(_) => rn.mark_denial_chained(&peer.fingerprint),
+                Err(e) => {
+                    tracing::error!(error = %e, host_id = host, "renew: failed to audit denial");
+                }
             }
         }
         return resp;
@@ -222,7 +233,7 @@ pub fn renew_at(
         tracing::error!(error = %e, "renew: audit append failed");
         return server_error("audit append failed");
     }
-    rn.record_renewal(host, &serial, &csr_fp, &leaf.serial);
+    rn.record_renewal(host, &serial, &csr_fp, &peer.fingerprint);
 
     tracing::info!(host_id = host, serial = %serial, "renew: issued client cert");
     let chain = std::fs::read_to_string(&en.ca_cert_path).unwrap_or_default();
