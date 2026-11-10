@@ -20,7 +20,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   sends to `POST /v1/enroll`. It refuses a host_id that is not a UUID and never replaces an
   existing file. Before, this step needed the `openssl` binary, which Windows does not ship. The
   `openssl req` command still works. The sender now uses `rcgen` on the `ring` backend that its
-  TLS client already links. (#553)
+  TLS client already links. (#554, #553)
 
 ### Fixed
 
