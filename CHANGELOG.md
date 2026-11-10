@@ -7,6 +7,33 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- `lodeline-sender` renews its own client certificate and key before they expire. From the
+  validity of the certificate it holds, it renews between 60% and 75% of it, at a point set by
+  its host_id, with no setting. It sends a new key's CSR to `POST /v1/renew`, checks the answer
+  on the host (key, host_id, chain to the server CA, client-auth purpose, validity), and only
+  then replaces `client.key` and `client.crt` through `.next` files, with a directory sync after
+  each rename. One repair step runs at start and at every wake and brings any state a crash
+  leaves to a matching pair, so a host never loses its pair. The HTTP client used for events and
+  policy lives in one handle and is replaced once after a renewal. Refusals (403, 404) and an
+  approaching expiry are logged loudly, at most once an hour; after expiry the sender keeps
+  running and uses a new pair as soon as it appears on disk, without a restart. A certificate
+  directory the sender account cannot write, or a live key that the sender account does not own,
+  turns renewal off with one error line; the key and the certificate may sit in two directories,
+  and each `.next` file is renamed in its own. A wake whose repair step was not clean sends no
+  request and renames nothing; a stored answer that cannot be checked because an input cannot be
+  read drops nothing, and one that fails its check is dropped alone, so the same request is sent
+  again. A `.next` file that is there and does not parse, empty or for another key included,
+  is dropped, so it cannot stop renewal (a bad request file alone, so the key it was made for
+  stays); one the sender will not read is named in the error
+  line, and a live pair replaced on disk is still loaded in a wake that ended on such an error.
+  Renewal reads PKCS#8 keys only: a live `client.key` in another form is logged with its own
+  line and the certificate is not renewed until the key is converted or the host enrolls again. A new answer
+  must expire later than the certificate in use, as a stored one must. `enroll`
+  names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
+  does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
+
 ## [0.14.4] - 2026-11-11
 
 **Upgrade order.** Upgrade the server first. The agent, the sender and the web console can stay at

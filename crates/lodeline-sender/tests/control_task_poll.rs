@@ -107,7 +107,7 @@ async fn loop_fires_once_then_shuts_down() {
     let agent_control = dir.path().join("control.sock");
     let handle = tokio::spawn(async move {
         lodeline_sender::control_task::run(lodeline_sender::control_task::ControlLoopCtx {
-            client,
+            client: client.into(),
             server_base_url: format!("http://{addr}"),
             host_id: "h".into(),
             poll_interval: std::time::Duration::from_millis(20),

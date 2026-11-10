@@ -52,6 +52,8 @@ axum = { workspace = true }
 tower = { workspace = true }
 ed25519-dalek = { workspace = true }
 x509-parser = { workspace = true, features = ["verify"] }
+# #553: the renewal test serves the real main listener, as the server's own tests do.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 # -- OS packages -------------------------------------------------------------
 # Build with `packaging/build.sh sender` (needs `cargo install cargo-deb

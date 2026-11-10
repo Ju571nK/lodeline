@@ -3,7 +3,9 @@
 use crate::agent_ipc::{self, Settlement};
 use crate::heartbeat::{Plane, SharedStats};
 use crate::state;
-use crate::transport::{cap_server_text, classify_body_error, classify_send_error, SendOutcome};
+use crate::transport::{
+    cap_server_text, classify_body_error, classify_send_error, ClientHandle, SendOutcome,
+};
 use crate::wire::SignedPolicyResponse;
 use lodeline_core::sender_status::LinkFailure;
 use reqwest::Client;
@@ -209,7 +211,7 @@ use tokio_util::sync::CancellationToken;
 const POLLS_PER_OFFER_REFUSED_FOR_NOW: u32 = 12;
 
 pub struct ControlLoopCtx {
-    pub client: Client,
+    pub client: ClientHandle,
     pub server_base_url: String,
     pub host_id: String,
     pub poll_interval: Duration,
@@ -287,7 +289,7 @@ pub async fn run(ctx: ControlLoopCtx) {
             _ = ctx.shutdown.cancelled() => break,
             _ = interval.tick() => {
                 let p = poll_policy(
-                    &ctx.client,
+                    &ctx.client.get(),
                     &ctx.server_base_url,
                     &ctx.host_id,
                     policy.if_none_match(),
@@ -304,7 +306,7 @@ pub async fn run(ctx: ControlLoopCtx) {
                     break;
                 }
                 let r = poll_rule_packs(
-                    &ctx.client,
+                    &ctx.client.get(),
                     &ctx.server_base_url,
                     &ctx.host_id,
                     packs.if_none_match(),

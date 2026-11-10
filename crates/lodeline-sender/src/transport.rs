@@ -2,8 +2,10 @@
 //!
 //! Spec §3.8.2 — both endpoints share the same client cert.
 
+use parking_lot::RwLock;
 use reqwest::{Client, ClientBuilder, Identity};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -127,6 +129,30 @@ pub fn client_cert_expiry(path: &Path) -> anyhow::Result<OffsetDateTime> {
     Ok(OffsetDateTime::from_unix_timestamp(
         cert.validity().not_after.timestamp(),
     )?)
+}
+
+/// The one place the sender's HTTP client lives. The data and control tasks take the
+/// client from it for each request, and renewal replaces it once, after the new
+/// certificate and key are on disk. A request in flight finishes on the client it
+/// started with.
+#[derive(Clone)]
+pub struct ClientHandle(Arc<RwLock<Client>>);
+
+impl ClientHandle {
+    /// The current client. A clone is a reference count, so this is cheap.
+    pub fn get(&self) -> Client {
+        self.0.read().clone()
+    }
+
+    pub fn set(&self, client: Client) {
+        *self.0.write() = client;
+    }
+}
+
+impl From<Client> for ClientHandle {
+    fn from(client: Client) -> Self {
+        Self(Arc::new(RwLock::new(client)))
+    }
 }
 
 /// High-level outcome of an HTTP send. The data_task uses this to decide

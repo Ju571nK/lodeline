@@ -229,7 +229,7 @@ async fn event_tls_failures_write_one_event_per_streak() {
     write_events(dir.path(), 2);
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(data_task::run(DataTaskCtx {
-        client: reqwest::Client::new(),
+        client: reqwest::Client::new().into(),
         config,
         host_id: "h".into(),
         agent_version: "1".into(),

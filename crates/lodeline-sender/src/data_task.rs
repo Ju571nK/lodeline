@@ -70,7 +70,8 @@ impl BackoffPolicy {
 }
 
 use crate::transport::{
-    cap_server_text, classify_body_error, classify_send_error, classify_status, SendOutcome,
+    cap_server_text, classify_body_error, classify_send_error, classify_status, ClientHandle,
+    SendOutcome,
 };
 use crate::wire::{Envelope, EventsAccepted, EventsRequest};
 use lodeline_core::sink::jsonl::segment_order;
@@ -190,7 +191,7 @@ pub const MAX_REJECTION_DEAD_LETTERS: usize = 20;
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
 pub struct DataTaskCtx {
-    pub client: Client,
+    pub client: ClientHandle,
     pub config: SenderConfig,
     pub host_id: String,
     pub agent_version: String,
@@ -332,8 +333,9 @@ pub async fn run(ctx: DataTaskCtx) {
         }
 
         let batch_size = events.len();
+        let client = ctx.client.get();
         let outcome = send_one_batch(BatchSendCtx {
-            client: &ctx.client,
+            client: &client,
             server_base_url: &ctx.config.server_base_url,
             host_id: &ctx.host_id,
             agent_version: &ctx.agent_version,
