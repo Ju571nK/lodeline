@@ -25,8 +25,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   request and renames nothing; a stored answer that cannot be checked because an input cannot be
   read drops nothing, and one that fails its check is dropped alone, so the same request is sent
   again. A `.next` file that is there and does not parse, empty or for another key included,
-  is dropped, so it cannot stop renewal; one the sender will not read is named in the error
-  line, and a live pair replaced on disk is still loaded in a wake that is not clean. A new answer
+  is dropped, so it cannot stop renewal (a bad request file alone, so the key it was made for
+  stays); one the sender will not read is named in the error
+  line, and a live pair replaced on disk is still loaded in a wake that ended on such an error.
+  Renewal reads PKCS#8 keys only: a live `client.key` in another form is logged with its own
+  line and the certificate is not renewed until the key is converted or the host enrolls again. A new answer
   must expire later than the certificate in use, as a stored one must. `enroll`
   names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
   does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)

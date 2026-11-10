@@ -164,7 +164,6 @@ impl Renewer {
                     if self.log.due("mismatch", t) {
                         tracing::error!("{why}");
                     }
-                    self.reload_if_matching(t);
                     return WAKE;
                 }
                 Err(e) => {

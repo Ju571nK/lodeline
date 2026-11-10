@@ -220,7 +220,7 @@ enrollment, ready to copy.
 enroll_ca_cert_path: "/etc/lodeline/enroll-int.crt"
 enroll_ca_key_path:  "/etc/lodeline/enroll-int.key"   # owned by lodeline, 0600, or enrollment disables
 enroll_tokens_path:  "/var/lib/lodeline-server/enroll-tokens.json"
-enroll_cert_days: 30                                # lifetime of each issued certificate; hosts renew from half of it (§3.4)
+enroll_cert_days: 30                                # lifetime of each issued certificate; the server allows renewal from half of it (§3.4), and `lodeline-sender` asks at 60% to 75% (§3.5)
 host_allowlist_path: "/var/lib/lodeline-server/host-allowlist.json"   # REQUIRED (restrictive set)
 ```
 
@@ -740,17 +740,18 @@ before you run `enroll` on a host that stopped in the middle of a renewal.
 | The new key is live and the old certificate is still live | Replaces the certificate with `client.crt.next` |
 | The new certificate is live and the old key is still live | Replaces the key with `client.key.next` |
 | `client.crt.next` alone, with no readable `client.key.next` | Removes it |
-| A `.next` file that is there and does not parse (a certificate, a key, or a CSR; an empty file included) | Removes it. A bad `client.key.next` or `client.csr.next` takes the other one with it, and a CSR made for another key counts as bad. The live pair is not touched and the next wake asks again |
+| A `.next` file that is there and does not parse (a certificate, a key, or a CSR; an empty file included) | Removes it. A bad `client.key.next` takes `client.csr.next` with it. A bad `client.csr.next` (a CSR made for another key counts as bad) is removed alone and `client.key.next` stays: it may be the only copy of the key for a certificate that is live or stored, and the next request makes a new CSR for it. The live pair is not touched and the next wake asks again |
 | `client.crt.next` does not expire later than the live certificate, or names another host (for example after `enroll` or a hand copy) | Removes the `.next` files and keeps the live pair |
 | `client.crt.next` does not fit `client.key.next`, or fails the chain or client-authentication check | Removes only `client.crt.next`, keeps `client.key.next` and `client.csr.next`, and sends the same CSR again |
 | A file the check needs cannot be read (a `.next` file that is a link, has another hard link or is over 64 KiB, or `server_ca_path`) | Removes nothing, logs `cannot settle the renewal files`, and tries again at the next wake |
 | `client.key` or `client.crt` is missing | Logs an error that names the missing file and says to run `enroll`, and deletes nothing |
+| `client.key` does not read as a PKCS#8 key (`BEGIN PRIVATE KEY`) and `client.crt` reads | Logs an error that says this sender does not renew while the key is in that form (an EC key in `BEGIN EC PRIVATE KEY` form is one; the sender may still connect with it), deletes nothing, and the host must be fixed before its certificate expires: convert the key with `openssl pkcs8 -topk8 -nocrypt`, or enroll the host again |
 | The live key and certificate do not match, and no `.next` file fits them | Logs an error that says to run `enroll`, deletes nothing, and the running sender keeps the client it has |
 
-In the last three rows the wake ends there: the sender sends no renewal request and
+In the rows from the unreadable file down, the wake ends there: the sender sends no renewal request and
 renames nothing until the files are readable and consistent again. The sender still
 loads a live pair that was replaced on disk (an `enroll` run by hand), when the key and
-the certificate match. A new certificate
+the certificate match, in a wake that ended on an error for a file it could not read. A new certificate
 from the server is held to the same rule as a stored one: it must be for the new key,
 name this host, chain to the CA, and expire later than the certificate in use.
 
@@ -771,6 +772,7 @@ sender never retries a refusal quickly.
 | `certificate renewal is off: this account cannot create files in the directory of client.key or of client.crt` | The sender runs as its own account and must be able to create files beside `client.key` and beside `client.crt`. A directory that `enroll` made as root belongs to root. Give it to the sender account (`systemd-tmpfiles --create` does it for the packaged layout) and restart the sender. Events keep flowing meanwhile. |
 | `certificate renewal is off: client.key is owned by uid ...` | The sender does not run as the owner of `client.key`, so a renewal would make a key it could not read at its next start. Run the sender as the account that owns the key, or give the key to that account, and restart. Events keep flowing meanwhile. |
 | `client.key ... missing`, or `client.key and client.crt do not match` | See the last rows of the table above. Enroll the host again with a new token (move both files aside first). |
+| `client.key does not read as a PKCS#8 key` | The key is damaged, or it is in another form such as `BEGIN EC PRIVATE KEY`. The sender may connect with it, but it does not renew the certificate. Convert the key with `openssl pkcs8 -topk8 -nocrypt -in client.key -out client.key.new`, put `client.key.new` in place of `client.key` (keep its owner and mode 0600) and restart the sender, or enroll the host again with a new token. |
 | `cannot settle the renewal files` | A file could not be read, or is a link or has two links. Fix the file named in the line. |
 | `client certificate expired at ...` | See below. |
 

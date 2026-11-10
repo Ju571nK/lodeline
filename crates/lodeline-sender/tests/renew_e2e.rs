@@ -481,6 +481,35 @@ async fn a_live_pair_replaced_on_disk_is_picked_up_in_a_wake_that_is_not_clean_b
 }
 
 #[tokio::test]
+async fn a_wake_that_cannot_settle_keeps_the_old_client_when_the_live_pair_does_not_fit() {
+    let pki = Pki::new();
+    let host = due_host(&pki);
+    let mock = Mock::start(issued(&pki, HOST)).await;
+    let log = Log::default();
+    let _guard = log.capture();
+    let (mut r, stats, _) = host.renewer(&mock.url);
+    let before = stats.read().client_cert_expires_at;
+    // A link where `client.crt.next` goes keeps `settle` from finishing.
+    std::os::unix::fs::symlink(&host.paths.crt, &host.paths.crt_next).unwrap();
+    // A certificate that runs longer than the loaded one, with a key that is not its own.
+    host.install(&pki, ago(1), ago(-60));
+    std::fs::write(
+        &host.paths.key,
+        KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    r.step(OffsetDateTime::now_utc()).await;
+    assert_eq!(stats.read().client_cert_expires_at, before);
+    assert_eq!(log.lines_with("cannot settle the renewal files"), 1);
+    assert_eq!(
+        log.lines_with("keeping the current client"),
+        0,
+        "no load was tried"
+    );
+    assert_eq!(mock.hits(), 0);
+}
+
+#[tokio::test]
 async fn a_next_file_that_is_not_read_is_named_in_the_error_line() {
     let pki = Pki::new();
     let host = due_host(&pki);

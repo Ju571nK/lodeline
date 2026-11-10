@@ -211,24 +211,29 @@ pub fn commit(p: &Paths) -> io::Result<()> {
 }
 
 /// Drop a `.next` file that is there and cannot be used, so it cannot block renewal for
-/// good: a certificate alone, or a key or a CSR with the other one (a CSR without its key
-/// is useless, and a key without its CSR is cheap to make again). A file that cannot be
-/// read is an error, not junk. True when something was dropped.
+/// good: a certificate that does not parse, a key that does not parse (with its CSR, which
+/// is useless without it), or a CSR that does not parse or is for another key. A CSR goes
+/// alone: the key may be the only copy for a certificate that is live or stored, and a
+/// CSR is cheap to make again. A file that cannot be read is an error, not junk. True when
+/// something was dropped.
 fn drop_unparseable(p: &Paths) -> io::Result<bool> {
     let mut dropped = false;
     if read(&p.crt_next)?.is_some_and(|b| parse_cert(&b).is_none()) {
         remove(&p.crt_next)?;
         dropped = true;
     }
-    let (key, csr) = (read(&p.key_next)?, read(&p.csr_next)?);
-    let key = key.map(|b| parse_key(&b));
-    let csr_bad = csr.is_some_and(|b| match (csr_pubkey(&b), &key) {
+    let key = read(&p.key_next)?.map(|b| parse_key(&b));
+    if matches!(key, Some(None)) {
+        remove(&p.key_next)?;
+        remove(&p.csr_next)?;
+        return Ok(true);
+    }
+    let csr_bad = read(&p.csr_next)?.is_some_and(|b| match (csr_pubkey(&b), &key) {
         (None, _) => true,
         (Some(c), Some(Some(k))) => c != k.public_key_raw(),
         _ => false,
     });
-    if csr_bad || matches!(key, Some(None)) {
-        remove(&p.key_next)?;
+    if csr_bad {
         remove(&p.csr_next)?;
         dropped = true;
     }
@@ -263,7 +268,14 @@ pub fn settle(p: &Paths, host_id: &str, now: OffsetDateTime) -> io::Result<Optio
                 .filter(|(f, _)| !f.exists())
                 .map(|(_, name)| name)
                 .collect();
-            return Ok(Some(if gone.is_empty() {
+            return Ok(Some(if gone.is_empty() && key.is_none() && crt.is_some() {
+                "client.key does not read as a PKCS#8 key (`BEGIN PRIVATE KEY`), so this sender \
+                 does not renew the certificate. The sender may still connect with it. Convert \
+                 the key (`openssl pkcs8 -topk8 -nocrypt -in client.key -out client.key.new`, \
+                 then put client.key.new in place of client.key) or enroll this host again \
+                 with a new token"
+                    .into()
+            } else if gone.is_empty() {
                 "client.key and client.crt do not match. Run `lodeline-sender enroll` with a \
                  new token (move both files aside first)"
                     .into()
@@ -771,19 +783,70 @@ mod tests {
         assert_renewal_can_run(&w, &c0);
     }
 
-    #[test]
-    fn a_csr_next_that_does_not_parse_or_is_for_another_key_takes_the_key_with_it() {
-        let w = World::new();
-        let (_, c0, k1) = w.start();
-        for junk in [
+    fn bad_csrs() -> [String; 2] {
+        [
             "not a csr".to_string(),
             crate::csr::csr_for(&KeyPair::generate().unwrap(), HOST).unwrap(),
-        ] {
+        ]
+    }
+
+    fn live_key_is(w: &World, k: &KeyPair) -> bool {
+        read_key(&w.p.key).unwrap().unwrap().public_key_raw() == k.public_key_raw()
+    }
+
+    #[test]
+    fn a_csr_next_that_does_not_parse_or_is_for_another_key_is_dropped_alone() {
+        let w = World::new();
+        let (_, c0, k1) = w.start();
+        for junk in bad_csrs() {
             w.put_key(&w.p.key_next, &k1);
             w.put(&w.p.csr_next, &junk);
             assert_eq!(w.settle(), None);
+            assert!(w.exists(&w.p.key_next) && !w.exists(&w.p.csr_next));
+        }
+        assert_eq!(std::fs::read_to_string(&w.p.crt).unwrap(), c0);
+        let (key, csr) = prepare(&w.p, HOST).unwrap();
+        assert_eq!(key.public_key_raw(), k1.public_key_raw());
+        assert_eq!(csr_pubkey(csr.as_bytes()).unwrap(), k1.public_key_raw());
+    }
+
+    #[test]
+    fn a_bad_csr_next_does_not_stop_a_complete_next_pair_from_being_committed() {
+        for junk in bad_csrs() {
+            let w = World::new();
+            let (_, _, k1) = w.start();
+            w.put_key(&w.p.key_next, &k1);
+            w.put(&w.p.crt_next, &w.new_cert(&k1));
+            w.put(&w.p.csr_next, &junk);
+            assert_eq!(w.settle(), None);
+            assert!(w.live_fits() && live_key_is(&w, &k1));
+            for f in [&w.p.key_next, &w.p.csr_next, &w.p.crt_next] {
+                assert!(!w.exists(f), "{f:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bad_csr_next_does_not_delete_the_only_key_for_the_live_certificate() {
+        for junk in bad_csrs() {
+            let w = World::new();
+            let (_, _, k1) = w.start();
+            w.put(&w.p.crt, &w.new_cert(&k1));
+            w.put_key(&w.p.key_next, &k1);
+            w.put(&w.p.csr_next, &junk);
+            assert_eq!(w.settle(), None);
+            assert!(w.live_fits() && live_key_is(&w, &k1));
             assert!(!w.exists(&w.p.key_next) && !w.exists(&w.p.csr_next));
         }
+    }
+
+    #[test]
+    fn a_csr_next_without_a_key_next_is_dropped() {
+        let w = World::new();
+        let (_, c0, _) = w.start();
+        w.put(&w.p.csr_next, "not a csr");
+        assert_eq!(w.settle(), None);
+        assert!(!w.exists(&w.p.csr_next));
         assert_renewal_can_run(&w, &c0);
     }
 
@@ -843,6 +906,26 @@ mod tests {
             "{why}"
         );
         assert!(w.exists(&w.p.key) && w.exists(&w.p.crt) && w.exists(&w.p.key_next));
+    }
+
+    #[test]
+    fn a_live_key_that_does_not_read_as_pkcs8_gets_its_own_reason_and_nothing_is_deleted() {
+        let w = World::new();
+        let (_, c0, _) = w.start();
+        w.put(
+            &w.p.key,
+            "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n",
+        );
+        let why = w.settle().expect("an error text");
+        assert!(
+            why.contains("PKCS#8") && why.contains("does not renew"),
+            "{why}"
+        );
+        assert!(
+            !why.contains("do not match") && !why.contains("move both"),
+            "{why}"
+        );
+        assert!(w.exists(&w.p.key) && std::fs::read_to_string(&w.p.crt).unwrap() == c0);
     }
 
     #[test]
