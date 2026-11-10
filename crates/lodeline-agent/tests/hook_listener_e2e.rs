@@ -17,6 +17,21 @@ mod unix_only {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
+    /// The socket file appears at `bind`, before the listener is ready, so a
+    /// connect right after `exists()` can be refused. Retry until one succeeds.
+    async fn wait_until_accepting(sock_path: &std::path::Path) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if UnixStream::connect(sock_path).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("hook.sock should accept a connection within 2 s");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hook_listener_stamps_peer_uid_and_action_kind() {
         // 1. Create a temp dir + socket path.
@@ -39,17 +54,7 @@ mod unix_only {
             .expect("hook listener should not exit early");
         });
 
-        // 4. Wait for the socket file to appear (max 2 s).
-        timeout(Duration::from_secs(2), async {
-            loop {
-                if sock_path.exists() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("hook.sock should appear within 2 s");
+        wait_until_accepting(&sock_path).await;
 
         // 5. Connect a UnixStream client and write one HookEnvelope JSON line.
         let mut client = UnixStream::connect(&sock_path)
@@ -166,17 +171,7 @@ mod unix_only {
             .expect("hook listener should not exit early");
         });
 
-        // Wait for the socket to appear.
-        timeout(Duration::from_secs(2), async {
-            loop {
-                if sock_path.exists() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("hook.sock should appear within 2 s");
+        wait_until_accepting(&sock_path).await;
 
         // Open MAX_INFLIGHT + 4 = 36 connections that connect but never send.
         // Each successful accept that wins a permit holds it open (its task is
