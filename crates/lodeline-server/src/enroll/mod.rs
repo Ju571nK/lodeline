@@ -15,13 +15,15 @@
 //!   6. (unix) CA key file mode is NOT looser than 0600.
 
 pub mod audit;
+pub mod index;
+pub mod listener;
 pub mod lock;
 pub mod sign;
 pub mod tokens;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Default issued client-cert validity. Short by design (re-enroll replaces
 /// revocation in the MVP).
@@ -43,6 +45,10 @@ pub struct EnrollState {
     /// Serializes the whole mint critical section:
     /// issuer-check → CN-check → reserve(token) → sign → allowlist → audit.
     pub mint: Mutex<()>,
+    /// #553: the enrollment listener's pre-check of `tokens_path`.
+    pub index: index::TokenIndex,
+    /// #553: counts and logs the enrollment listener's denials.
+    pub deny_log: Arc<crate::proxy::ingest::DenyLog>,
 }
 
 impl EnrollState {
@@ -179,6 +185,8 @@ impl EnrollState {
             cert_days: cert_days.unwrap_or(DEFAULT_CERT_DAYS),
             issuer_fingerprints,
             mint: Mutex::new(()),
+            index: index::TokenIndex::new(toks.to_path_buf()),
+            deny_log: Arc::new(crate::proxy::ingest::DenyLog::new("enroll request refused")),
         })
     }
 }

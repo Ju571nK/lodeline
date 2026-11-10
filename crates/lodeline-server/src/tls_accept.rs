@@ -29,10 +29,13 @@
 //!   rejects anonymous clients during the handshake), NO extension is injected
 //!   — handlers see `None`, never a forged identity.
 
+use anyhow::Context as _;
 use axum_server::accept::Accept;
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::future::Future;
 use std::io;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -128,6 +131,26 @@ fn parse_cn_san(der: &[u8]) -> Option<(Option<String>, Vec<String>)> {
         })
         .unwrap_or_default();
     Some((cn, san_dns))
+}
+
+/// Read a PEM certificate chain; an empty file is an error.
+pub fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let mut rd = std::io::BufReader::new(&data[..]);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut rd)
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("parse certs from {}", path.display()))?;
+    anyhow::ensure!(!certs.is_empty(), "no certs in {}", path.display());
+    Ok(certs)
+}
+
+/// Read the first PEM private key.
+pub fn load_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
+    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let mut rd = std::io::BufReader::new(&data[..]);
+    rustls_pemfile::private_key(&mut rd)
+        .with_context(|| format!("parse key from {}", path.display()))?
+        .with_context(|| format!("no private key in {}", path.display()))
 }
 
 /// [`Accept`] implementation: run axum-server's rustls handshake, then expose

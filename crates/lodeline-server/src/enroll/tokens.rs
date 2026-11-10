@@ -35,6 +35,23 @@ pub struct TokenEntry {
     pub used_at: Option<OffsetDateTime>,
 }
 
+impl TokenEntry {
+    /// Unused, unexpired and bound to `host_id`, checked in this order so the
+    /// most specific reason comes back for logging.
+    pub fn verdict(&self, host_id: &str, now: OffsetDateTime) -> Result<(), RedeemErr> {
+        if self.used_at.is_some() {
+            return Err(RedeemErr::Used);
+        }
+        if now > self.expires_at {
+            return Err(RedeemErr::Expired);
+        }
+        if self.host_id != host_id {
+            return Err(RedeemErr::HostMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// Redeem failure reasons. The HTTP layer collapses Expired/Used/HostMismatch/
 /// NotFound into a single generic `enrollment_denied` (no token-state leak); the
 /// specific reason is logged/audited internally.
@@ -117,21 +134,12 @@ impl TokenStore {
             FileLock::acquire_exclusive(path).map_err(|e| RedeemErr::Io(format!("lock: {e}")))?;
         let store = Self::read(path)?;
         let hash = hash_token(plaintext);
-        let entry = store
+        store
             .tokens
             .iter()
             .find(|t| t.token_hash == hash)
-            .ok_or(RedeemErr::NotFound)?;
-        if entry.used_at.is_some() {
-            return Err(RedeemErr::Used);
-        }
-        if now > entry.expires_at {
-            return Err(RedeemErr::Expired);
-        }
-        if entry.host_id != host_id {
-            return Err(RedeemErr::HostMismatch);
-        }
-        Ok(())
+            .ok_or(RedeemErr::NotFound)?
+            .verdict(host_id, now)
     }
 
     /// Durably stamp `used_at` (reserve the token) under the flock. Re-validates
@@ -152,15 +160,7 @@ impl TokenStore {
             .iter_mut()
             .find(|t| t.token_hash == hash)
             .ok_or(RedeemErr::NotFound)?;
-        if entry.used_at.is_some() {
-            return Err(RedeemErr::Used);
-        }
-        if now > entry.expires_at {
-            return Err(RedeemErr::Expired);
-        }
-        if entry.host_id != host_id {
-            return Err(RedeemErr::HostMismatch);
-        }
+        entry.verdict(host_id, now)?;
         entry.used_at = Some(now);
         Self::write_atomic(path, &store)?;
         Ok(())

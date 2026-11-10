@@ -185,7 +185,7 @@ impl ProxyContext {
             ingest_per_proxy: Mutex::new(HashMap::new()),
             ingest_per_proxy_cap: (pc.ingest_max_concurrent() / 4).max(1),
             ingest_body_timeout: Duration::from_secs(u64::from(pc.ingest_body_timeout())),
-            ingest_log: ingest::DenyLog::default(),
+            ingest_log: ingest::DenyLog::new("proxy request refused"),
             sweep_interval_secs: pc.ledger_sweep_interval(),
             config_ttl: pc.config_ttl(),
             ack_loss_margin: pc.ack_loss_margin(),

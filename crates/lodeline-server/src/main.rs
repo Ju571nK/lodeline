@@ -178,6 +178,10 @@ fn build_state(cfg: &ServerConfig) -> Result<SharedState> {
 
 async fn run(cfg: ServerConfig) -> Result<()> {
     let state = build_state(&cfg)?;
+    // #553: a port opened for enrollment must not answer 404.
+    if cfg.enroll_listener.is_some() && state.enroll.is_none() {
+        anyhow::bail!("enroll_listener is set but enrollment is off; see the enroll warning above");
+    }
     // T-11: refuses to start on a bad proxy CA/registry; None means proxy off.
     let proxy = lodeline_server::proxy::ProxyContext::load(&cfg)?.map(Arc::new);
 
@@ -226,22 +230,54 @@ async fn run(cfg: ServerConfig) -> Result<()> {
         lodeline_server::proxy::spawn_ledger_sweep(ctx, period);
     }
 
-    let app = build_router_with_proxy(state, proxy).layer(axum::middleware::from_fn_with_state(
-        boot_complete.clone(),
-        lodeline_server::app::boot_gate,
-    ));
+    let app =
+        build_router_with_proxy(state.clone(), proxy).layer(axum::middleware::from_fn_with_state(
+            boot_complete.clone(),
+            lodeline_server::app::boot_gate,
+        ));
 
     if cfg.mtls_enabled() {
         let tls = build_mtls(&cfg)?;
-        tracing::info!(bind = %cfg.bind, "starting lodeline-server (mTLS)");
+        let bind = |addr| std::net::TcpListener::bind(addr).with_context(|| format!("bind {addr}"));
+        let main_sock = bind(cfg.bind)?;
+        // #553: bind both sockets before serving either.
+        let enroll = match &cfg.enroll_listener {
+            Some(l) => Some((
+                bind(l.bind)?,
+                lodeline_server::enroll::listener::tls_config(
+                    cfg.tls_cert_path.as_ref().unwrap(),
+                    cfg.tls_key_path.as_ref().unwrap(),
+                )?,
+            )),
+            None => None,
+        };
+        tracing::info!(
+            bind = %cfg.bind,
+            enroll_bind = cfg.enroll_listener.as_ref().map(|l| tracing::field::display(l.bind)),
+            "starting lodeline-server (mTLS)"
+        );
         // #194 — PeerCertAcceptor wraps axum-server's rustls acceptor (same
         // handshake + timeout) and exposes the verified client cert to
         // handlers as an `Extension<Arc<PeerIdentity>>` on every request.
-        axum_server::bind(cfg.bind)
+        let main = axum_server::from_tcp(main_sock)
             .acceptor(lodeline_server::tls_accept::PeerCertAcceptor::new(tls))
-            .serve(app.into_make_service())
-            .await
-            .context("axum_server serve (mTLS)")?;
+            .serve(app.into_make_service());
+        let Some((sock, tls)) = enroll else {
+            main.await.context("axum_server serve (mTLS)")?;
+            return Ok(());
+        };
+        let enroll = lodeline_server::enroll::listener::serve(sock, tls, state);
+        // Either listener stopping takes the process down (systemd restarts it).
+        tokio::select! {
+            r = main => {
+                r.context("axum_server serve (mTLS)")?;
+                anyhow::bail!("main listener stopped");
+            }
+            r = enroll => {
+                r?;
+                anyhow::bail!("enrollment listener stopped");
+            }
+        }
     } else {
         tracing::warn!(bind = %cfg.bind, "starting lodeline-server (PLAIN HTTP — no mTLS)");
         let listener = tokio::net::TcpListener::bind(cfg.bind)
@@ -253,24 +289,7 @@ async fn run(cfg: ServerConfig) -> Result<()> {
 }
 
 fn build_mtls(cfg: &ServerConfig) -> Result<axum_server::tls_rustls::RustlsConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-
-    fn load_certs(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
-        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let mut rd = std::io::BufReader::new(&data[..]);
-        let certs: Vec<_> = rustls_pemfile::certs(&mut rd)
-            .collect::<Result<_, _>>()
-            .with_context(|| format!("parse certs from {}", path.display()))?;
-        anyhow::ensure!(!certs.is_empty(), "no certs in {}", path.display());
-        Ok(certs)
-    }
-    fn load_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
-        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let mut rd = std::io::BufReader::new(&data[..]);
-        rustls_pemfile::private_key(&mut rd)
-            .with_context(|| format!("parse key from {}", path.display()))?
-            .with_context(|| format!("no private key in {}", path.display()))
-    }
+    use lodeline_server::tls_accept::{load_certs, load_key};
 
     let server_certs = load_certs(cfg.tls_cert_path.as_ref().unwrap())?;
     let server_key = load_key(cfg.tls_key_path.as_ref().unwrap())?;

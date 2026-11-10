@@ -5,6 +5,12 @@
 //! Auth: NO read-bearer layer — the enroll token in the body is the credential;
 //! mTLS still gates at the TLS layer (PMS-mediated). Feature off ⇒ 404.
 //!
+//! #553: the enrollment listener (`enroll::listener`) serves this route with no
+//! client certificate through `post_enroll_listener`. Both handlers share
+//! `redeem`, and a `Caller` decides the issuer gate, the audit caller
+//! fingerprint, and whether a denial before the reserve is chained (main
+//! listener) or only counted and logged (enrollment listener).
+//!
 //! COMMIT ORDER (codex-hardened, prevents double-mint):
 //!   lock mint Mutex
 //!   → recompute now/ts (a token that expired while queued is rejected) (fix G)
@@ -29,22 +35,44 @@
 
 use crate::app::SharedState;
 use crate::enroll::audit;
+use crate::enroll::listener::{ConnLife, ROUTE};
 use crate::enroll::sign::{self, SignError};
 use crate::enroll::tokens::{RedeemErr, TokenStore};
+use crate::enroll::EnrollState;
 use crate::tls_accept::PeerIdentity;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc, TryLockError};
 
 #[derive(Debug, Deserialize)]
 pub struct EnrollReq {
     pub token: String,
     pub host_id: String,
     pub csr_pem: String,
+}
+
+/// Who sent an enroll request. It decides the issuer gate, the audit
+/// `caller_fingerprint`, and where a denial before the reserve goes.
+pub enum Caller {
+    /// Main listener: the verified mTLS peer (None only in plain-HTTP dev mode).
+    Fleet(Option<Arc<PeerIdentity>>),
+    /// #553 enrollment listener: no client certificate, only the TCP peer.
+    Anonymous(SocketAddr),
+}
+
+impl Caller {
+    fn fingerprint(&self) -> String {
+        match self {
+            Caller::Fleet(Some(p)) => p.fingerprint.clone(),
+            Caller::Fleet(None) | Caller::Anonymous(_) => String::new(),
+        }
+    }
 }
 
 pub async fn post_enroll(
@@ -54,44 +82,120 @@ pub async fn post_enroll(
     peer: Option<Extension<Arc<PeerIdentity>>>,
     Json(req): Json<EnrollReq>,
 ) -> Response {
-    let peer = peer.map(|Extension(p)| p);
-    // Real caller fingerprint for ALL audit outcomes ("" when absent). #194
-    let caller_fp = peer
-        .as_ref()
-        .map(|p| p.fingerprint.clone())
-        .unwrap_or_default();
-
     // Feature off ⇒ 404 (indistinguishable from "route absent").
     let Some(en) = st.enroll.as_ref() else {
-        return err(
-            StatusCode::NOT_FOUND,
-            "enroll_not_configured",
-            "enrollment is not enabled",
-        );
+        return enroll_off();
     };
-
-    // Input validation (distinct 400, before touching any token).
-    if uuid::Uuid::parse_str(&req.host_id).is_err() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "host_id must be a UUID",
-        );
+    if let Some(resp) = bad_fields(&req) {
+        return resp;
     }
-    if req.token.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "bad_request", "missing token");
-    }
-    if req.csr_pem.len() > sign::MAX_CSR_BYTES {
-        return err(StatusCode::BAD_REQUEST, "bad_request", "csr too large");
-    }
-
-    let csr_fp = audit::fingerprint(req.csr_pem.as_bytes());
-
     // Serialize the entire mint critical section across requests.
     let _mint = match en.mint.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(), // poisoned: proceed (no shared mutable state held)
     };
+    redeem(&st, en, &req, &Caller::Fleet(peer.map(|Extension(p)| p)))
+}
+
+/// #553: `POST /v1/enroll` on the enrollment listener. The token is checked
+/// against the in-memory index before the mint lock and before any CSR parse.
+/// The mint lock is only tried, so an anonymous caller never queues.
+pub async fn post_enroll_listener(
+    State(st): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(conn): Extension<Arc<ConnLife>>,
+    body: Result<Json<EnrollReq>, JsonRejection>,
+) -> Response {
+    let Some(en) = st.enroll.as_ref() else {
+        return enroll_off();
+    };
+    let req = match body {
+        Ok(Json(req)) => req,
+        Err(rejection) => {
+            if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                en.deny_log
+                    .note_from(ROUTE, "payload_too_large", Some(addr.ip()));
+            }
+            return rejection.into_response();
+        }
+    };
+    let _in_handler = conn.enter();
+    if let Some(resp) = bad_fields(&req) {
+        return resp;
+    }
+    if let Err(e) = en
+        .index
+        .check(&req.token, &req.host_id, time::OffsetDateTime::now_utc())
+    {
+        if let RedeemErr::Io(msg) = &e {
+            tracing::error!(error = %msg, "enroll: token index read failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "sign_failed",
+                "token store error",
+            );
+        }
+        en.deny_log
+            .note_from(ROUTE, denial_reason(&e), Some(addr.ip()));
+        return enrollment_denied();
+    }
+    let st2 = st.clone();
+    let work = tokio::task::spawn_blocking(move || {
+        let Some(en) = st2.enroll.as_ref() else {
+            return enroll_off();
+        };
+        let _mint = match en.mint.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                en.deny_log.note_from(ROUTE, "busy", Some(addr.ip()));
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, "1")],
+                    Json(json!({"error": {"code": "busy", "message": "another enrollment is running; retry"}})),
+                )
+                    .into_response();
+            }
+        };
+        redeem(&st2, en, &req, &Caller::Anonymous(addr))
+    });
+    match work.await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!(error = %e, "enroll: mint task failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "sign_failed",
+                "enrollment failed",
+            )
+        }
+    }
+}
+
+/// Input validation (distinct 400, before touching any token).
+fn bad_fields(req: &EnrollReq) -> Option<Response> {
+    if uuid::Uuid::parse_str(&req.host_id).is_err() {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "host_id must be a UUID",
+        ));
+    }
+    if req.token.is_empty() {
+        return Some(err(StatusCode::BAD_REQUEST, "bad_request", "missing token"));
+    }
+    if req.csr_pem.len() > sign::MAX_CSR_BYTES {
+        return Some(err(StatusCode::BAD_REQUEST, "bad_request", "csr too large"));
+    }
+    None
+}
+
+/// Everything after the mint lock, shared by both listeners. The caller holds
+/// `en.mint`.
+fn redeem(st: &SharedState, en: &EnrollState, req: &EnrollReq, caller: &Caller) -> Response {
+    // Real caller fingerprint for ALL audit outcomes ("" when absent). #194
+    let caller_fp = caller.fingerprint();
+    let csr_fp = audit::fingerprint(req.csr_pem.as_bytes());
 
     // fix G: capture `now` AFTER acquiring the mint lock so a token that expired
     // while queued behind the lock is correctly rejected.
@@ -106,22 +210,21 @@ pub async fn post_enroll(
     //    access; answered with the same generic 403 as token failures so an
     //    unauthorized caller learns nothing (no oracle).
     if let Some(allowed) = en.issuer_fingerprints.as_deref() {
-        let permitted = peer
-            .as_ref()
-            .is_some_and(|p| allowed.iter().any(|f| f == &p.fingerprint));
+        let permitted =
+            matches!(caller, Caller::Fleet(Some(p)) if allowed.contains(&p.fingerprint));
         if !permitted {
             tracing::warn!(
                 host_id = %req.host_id,
                 caller_fingerprint = %caller_fp,
                 "enroll: caller cert not in enroll_issuer_fingerprints"
             );
-            record_denied(
-                &st,
+            deny(
+                st,
                 en,
+                caller,
                 &req.host_id,
                 "issuer_not_allowed",
                 &csr_fp,
-                &caller_fp,
                 &ts,
             );
             return enrollment_denied();
@@ -145,22 +248,14 @@ pub async fn post_enroll(
     };
     if cn != req.host_id {
         // CN mismatch is a token-scope denial → generic enrollment_denied.
-        record_denied(
-            &st,
-            en,
-            &req.host_id,
-            "cn_mismatch",
-            &csr_fp,
-            &caller_fp,
-            &ts,
-        );
+        deny(st, en, caller, &req.host_id, "cn_mismatch", &csr_fp, &ts);
         return enrollment_denied();
     }
 
     // 2. Pre-check the token (cheap, gives the specific internal reason).
     if let Err(e) = TokenStore::check(&en.tokens_path, &req.token, &req.host_id, now) {
         let reason = denial_reason(&e);
-        record_denied(&st, en, &req.host_id, reason, &csr_fp, &caller_fp, &ts);
+        deny(st, en, caller, &req.host_id, reason, &csr_fp, &ts);
         // I/O errors are a server fault (500); everything else is a denial.
         if let RedeemErr::Io(msg) = &e {
             tracing::error!(error = %msg, "enroll: token store read failed");
@@ -177,7 +272,7 @@ pub async fn post_enroll(
     //    point the token is spent; any failure ⇒ 500 + no cert (safe re-issue).
     if let Err(e) = TokenStore::mark_used(&en.tokens_path, &req.token, &req.host_id, now) {
         let reason = denial_reason(&e);
-        record_denied(&st, en, &req.host_id, reason, &csr_fp, &caller_fp, &ts);
+        deny(st, en, caller, &req.host_id, reason, &csr_fp, &ts);
         if matches!(e, RedeemErr::Io(_)) {
             tracing::error!(error = %e, "enroll: token reserve write failed");
             return err(
@@ -203,7 +298,7 @@ pub async fn post_enroll(
         Err(e) => {
             tracing::error!(error = %e, host_id = %req.host_id, "enroll: signing failed (token already spent)");
             record_denied(
-                &st,
+                st,
                 en,
                 &req.host_id,
                 "sign_failed",
@@ -274,7 +369,11 @@ pub async fn post_enroll(
     }
 
     let chain = std::fs::read_to_string(&en.ca_cert_path).unwrap_or_default();
-    tracing::info!(host_id = %req.host_id, serial = %serial, "enroll: issued client cert");
+    let peer = match caller {
+        Caller::Anonymous(addr) => Some(tracing::field::display(addr)),
+        Caller::Fleet(_) => None,
+    };
+    tracing::info!(host_id = %req.host_id, serial = %serial, peer, "enroll: issued client cert");
     (
         StatusCode::OK,
         Json(json!({
@@ -298,11 +397,31 @@ fn denial_reason(e: &RedeemErr) -> &'static str {
     }
 }
 
+/// A denial before the token is reserved. A fleet caller's goes to the signed
+/// chain, as before #553; an anonymous caller's is only counted and logged, so
+/// the listener cannot grow the chain.
+fn deny(
+    st: &SharedState,
+    en: &EnrollState,
+    caller: &Caller,
+    host_id: &str,
+    reason: &'static str,
+    csr_fp: &str,
+    ts: &str,
+) {
+    match caller {
+        Caller::Fleet(_) => {
+            record_denied(st, en, host_id, reason, csr_fp, &caller.fingerprint(), ts)
+        }
+        Caller::Anonymous(addr) => en.deny_log.note_from(ROUTE, reason, Some(addr.ip())),
+    }
+}
+
 /// Append a fail-closed-but-best-effort denial audit line. A denial that can't
 /// be audited is logged (we still return the denial; we are not issuing a cert).
 fn record_denied(
     st: &SharedState,
-    en: &crate::enroll::EnrollState,
+    en: &EnrollState,
     host_id: &str,
     reason: &str,
     csr_fp: &str,
@@ -339,7 +458,15 @@ fn enrollment_denied() -> Response {
     )
 }
 
-fn err(code: StatusCode, body_code: &str, message: &str) -> Response {
+fn enroll_off() -> Response {
+    err(
+        StatusCode::NOT_FOUND,
+        "enroll_not_configured",
+        "enrollment is not enabled",
+    )
+}
+
+pub(crate) fn err(code: StatusCode, body_code: &str, message: &str) -> Response {
     (
         code,
         Json(json!({"error": {"code": body_code, "message": message}})),

@@ -618,3 +618,487 @@ async fn absent_peer_audits_empty_caller_fingerprint() {
     let lines = audit_lines(&audit_path);
     assert_eq!(lines[0]["caller_fingerprint"], "");
 }
+
+// --- #553: the enrollment listener ------------------------------------------
+//
+// These drive `enroll::listener::serve` on 127.0.0.1:0 with the TLS config,
+// acceptor, router and HTTP settings `main` uses. Each test runs its own
+// listener, so each has its own rate-limit budget of 10 connections.
+
+use lodeline_server::enroll::listener;
+use std::net::SocketAddr;
+
+const HOST2: &str = "018f9c1a-0000-7000-8000-000000000002";
+
+/// A server certificate for 127.0.0.1 from the test CA in `dir`.
+fn make_server_cert(dir: &Path) -> (PathBuf, PathBuf) {
+    let key = dir.join("server.key");
+    let csr = dir.join("server.csr");
+    let crt = dir.join("server.crt");
+    let ext = dir.join("server.ext");
+    std::fs::write(
+        &ext,
+        "subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n",
+    )
+    .unwrap();
+    run(&[
+        "req".as_ref(),
+        "-new".as_ref(),
+        "-newkey".as_ref(),
+        "rsa:2048".as_ref(),
+        "-nodes".as_ref(),
+        "-keyout".as_ref(),
+        key.as_os_str(),
+        "-subj".as_ref(),
+        "/CN=127.0.0.1".as_ref(),
+        "-out".as_ref(),
+        csr.as_os_str(),
+    ]);
+    run(&[
+        "x509".as_ref(),
+        "-req".as_ref(),
+        "-in".as_ref(),
+        csr.as_os_str(),
+        "-CA".as_ref(),
+        dir.join("ca.crt").as_os_str(),
+        "-CAkey".as_ref(),
+        dir.join("ca.key").as_os_str(),
+        "-set_serial".as_ref(),
+        "0x5a01".as_ref(),
+        "-days".as_ref(),
+        "1".as_ref(),
+        "-extfile".as_ref(),
+        ext.as_os_str(),
+        "-out".as_ref(),
+        crt.as_os_str(),
+    ]);
+    (crt, key)
+}
+
+/// Serve the enrollment listener for `st` (enrollment on, CA in `dir`).
+async fn listen(dir: &Path, st: Arc<AppState>) -> SocketAddr {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (crt, key) = make_server_cert(dir);
+    let tls = listener::tls_config(&crt, &key).unwrap();
+    let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(listener::serve(sock, tls, st));
+    addr
+}
+
+/// A client that trusts the test CA and offers no client certificate.
+fn anon_client(dir: &Path) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(&std::fs::read(dir.join("ca.crt")).unwrap()).unwrap(),
+        )
+}
+
+async fn post_listener(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    body: &serde_json::Value,
+) -> reqwest::Result<(
+    reqwest::StatusCode,
+    reqwest::header::HeaderMap,
+    serde_json::Value,
+)> {
+    let r = client
+        .post(format!("https://127.0.0.1:{}/v1/enroll", addr.port()))
+        .json(body)
+        .send()
+        .await?;
+    let (status, headers) = (r.status(), r.headers().clone());
+    let json = r.json().await.unwrap_or(serde_json::Value::Null);
+    Ok((status, headers, json))
+}
+
+fn enroll_body(token: &str, host_id: &str, csr_pem: &str) -> serde_json::Value {
+    serde_json::json!({"token": token, "host_id": host_id, "csr_pem": csr_pem})
+}
+
+fn issue(st: &AppState, host: &str, ttl: Duration) -> String {
+    let now = OffsetDateTime::now_utc();
+    let path = &st.enroll.as_ref().unwrap().tokens_path;
+    TokenStore::issue(path, host, now + ttl, now).unwrap()
+}
+
+#[tokio::test]
+async fn listener_enrolls_a_host_without_a_client_certificate() {
+    use lodeline_server::allowlist::permits;
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let token = issue(&st, HOST, Duration::hours(1));
+    let csr = make_csr(dir.path(), HOST);
+    let addr = listen(dir.path(), st.clone()).await;
+    let client = anon_client(dir.path()).build().unwrap();
+
+    let (status, _, body) = post_listener(&client, addr, &enroll_body(&token, HOST, &csr))
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "body={body}");
+    let cert = body["client_cert_pem"].as_str().unwrap();
+    assert!(verify_leaf(dir.path(), &dir.path().join("ca.crt"), cert));
+    assert!(
+        cert_text(dir.path(), cert).contains(HOST),
+        "CN/SAN carry host_id"
+    );
+    let hosts = std::fs::read_to_string(st.allowlist_path.as_ref().unwrap()).unwrap();
+    assert!(hosts.contains(HOST), "host added to the allowlist file");
+    assert!(permits(&st.allowlist.read(), HOST), "and in memory");
+    let lines = audit_lines(&st.enroll.as_ref().unwrap().audit_path);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["decision"], "issued");
+    assert_eq!(lines[0]["caller_fingerprint"], "");
+}
+
+/// Every denial before the reserve answers like the main path, spends
+/// nothing and writes no chain line; only the redeemed token is chained.
+#[tokio::test]
+async fn listener_denials_before_the_reserve_spend_nothing_and_are_not_chained() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let audit_path = st.enroll.as_ref().unwrap().audit_path.clone();
+    let token = issue(&st, HOST, Duration::hours(1));
+    let expired = issue(&st, HOST, Duration::seconds(-1));
+    let csr = make_csr(dir.path(), HOST);
+    let csr2 = make_csr(dir.path(), HOST2);
+    let addr = listen(dir.path(), st.clone()).await;
+    let client = anon_client(dir.path()).build().unwrap();
+    let post = |b: serde_json::Value| {
+        let client = client.clone();
+        async move { post_listener(&client, addr, &b).await.unwrap() }
+    };
+
+    for (what, body) in [
+        ("unknown token", enroll_body("x", HOST, &csr)),
+        ("expired token", enroll_body(&expired, HOST, &csr)),
+        ("host mismatch", enroll_body(&token, HOST2, &csr2)),
+        ("cn mismatch", enroll_body(&token, HOST, &csr2)),
+    ] {
+        let (status, _, body) = post(body).await;
+        assert_eq!(status, 403, "{what}: {body}");
+        assert_eq!(body["error"]["code"], "enrollment_denied", "{what}");
+    }
+    let big = "A".repeat(listener::MAX_BODY + 1);
+    let (status, _, _) = post(enroll_body(&token, HOST, &big)).await;
+    assert_eq!(status, 413, "oversized body");
+    let no_type = client
+        .post(format!("https://127.0.0.1:{}/v1/enroll", addr.port()))
+        .body(enroll_body(&token, HOST, &csr).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_type.status(), 415, "no content-type");
+    assert!(audit_lines(&audit_path).is_empty(), "no chain line yet");
+
+    let (status, _, body) = post(enroll_body(&token, HOST, &csr)).await;
+    assert_eq!(status, 200, "token was not spent: {body}");
+    let (status, _, _) = post(enroll_body(&token, HOST, &csr)).await;
+    assert_eq!(status, 403, "spent token");
+    let lines = audit_lines(&audit_path);
+    assert_eq!(lines.len(), 1, "only the redeem is chained");
+    assert_eq!(lines[0]["decision"], "issued");
+}
+
+#[tokio::test]
+async fn listener_answers_busy_while_a_mint_holds_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let token = issue(&st, HOST, Duration::hours(1));
+    let csr = make_csr(dir.path(), HOST);
+    let addr = listen(dir.path(), st.clone()).await;
+    let client = anon_client(dir.path()).build().unwrap();
+
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let st = st.clone();
+        std::thread::spawn(move || {
+            let _g = st.enroll.as_ref().unwrap().mint.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+    };
+    locked_rx.recv().unwrap();
+    let (status, headers, body) = post_listener(&client, addr, &enroll_body(&token, HOST, &csr))
+        .await
+        .unwrap();
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "busy");
+    assert_eq!(headers["retry-after"], "1");
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let (status, _, body) = post_listener(&client, addr, &enroll_body(&token, HOST, &csr))
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "same token after the lock is free: {body}");
+}
+
+#[tokio::test]
+async fn listener_serves_only_post_enroll() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let addr = listen(dir.path(), st).await;
+    let client = anon_client(dir.path()).build().unwrap();
+    let url = |p: &str| format!("https://127.0.0.1:{}{p}", addr.port());
+    for (method, path) in [
+        (reqwest::Method::GET, "/v1/healthz"),
+        (reqwest::Method::POST, "/v1/events"),
+        (reqwest::Method::GET, "/v1/artifacts"),
+        (reqwest::Method::GET, "/v1/enroll"),
+    ] {
+        let r = client
+            .request(method.clone(), url(path))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            r.status() == 404 || r.status() == 405,
+            "{method} {path}: {}",
+            r.status()
+        );
+    }
+}
+
+/// The limit is per connection, so the test fires back to back and needs no
+/// wall-clock spacing: 20 connections inside one refill window cannot all pass.
+#[tokio::test]
+async fn listener_rate_limits_connections_per_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let addr = listen(dir.path(), st).await;
+    let client = anon_client(dir.path()).build().unwrap();
+    let body = enroll_body("x", HOST, "csr");
+    let mut answered = 0;
+    let mut refused = None;
+    for i in 0..20 {
+        match post_listener(&client, addr, &body).await {
+            Ok((status, _, _)) => {
+                assert_eq!(status, 403);
+                answered += 1;
+            }
+            Err(e) => {
+                assert!(e.is_connect(), "dropped before TLS: {e:?}");
+                refused = Some(i);
+                break;
+            }
+        }
+    }
+    assert!(answered >= 10, "the burst is served: {answered}");
+    assert!(refused.is_some(), "a later connection is dropped");
+}
+
+/// HTTP/2 multiplexes streams on one connection; only the first reaches the
+/// handler, the rest get 421 without it.
+#[tokio::test]
+async fn listener_serves_one_request_per_http2_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let addr = listen(dir.path(), st).await;
+    let client = anon_client(dir.path())
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+    let body = enroll_body("x", HOST, "csr");
+    let mut statuses = Vec::new();
+    for _ in 0..20 {
+        let (status, _, _) = post_listener(&client, addr, &body).await.unwrap();
+        statuses.push(status.as_u16());
+    }
+    assert_eq!(statuses[0], 403, "{statuses:?}");
+    assert!(statuses[1..].iter().all(|s| *s == 421), "{statuses:?}");
+}
+
+/// A raw TLS client to the listener, trusting the test CA.
+async fn raw_tls(
+    dir: &Path,
+    addr: SocketAddr,
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    let mut roots = rustls::RootCertStore::empty();
+    let pem = std::fs::read(dir.join("ca.crt")).unwrap();
+    for c in rustls_pemfile::certs(&mut &pem[..]) {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+    tokio_rustls::TlsConnector::from(Arc::new(cfg))
+        .connect(name, tcp)
+        .await
+        .unwrap()
+}
+
+/// Two pipelined HTTP/1.1 keep-alive requests: one answer, then close.
+#[tokio::test]
+async fn listener_serves_one_request_per_http1_connection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let addr = listen(dir.path(), st).await;
+    let body = serde_json::to_string(&enroll_body("x", HOST, "csr")).unwrap();
+    let req = format!(
+        "POST /v1/enroll HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: keep-alive\r\n\
+         content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut tls = raw_tls(dir.path(), addr).await;
+    tls.write_all(format!("{req}{req}").as_bytes())
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let _ = tls.read_to_end(&mut out).await;
+    let out = String::from_utf8_lossy(&out);
+    assert_eq!(out.matches("HTTP/1.1 ").count(), 1, "{out}");
+    assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+    assert!(
+        out.to_ascii_lowercase().contains("connection: close"),
+        "{out}"
+    );
+
+    let client = anon_client(dir.path()).build().unwrap();
+    for _ in 0..2 {
+        let (status, headers, _) = post_listener(&client, addr, &enroll_body("x", HOST, "csr"))
+            .await
+            .unwrap();
+        assert_eq!(status, 403);
+        assert_eq!(headers["connection"], "close", "keep-alive client");
+    }
+}
+
+#[tokio::test]
+async fn listener_closes_an_idle_connection_near_the_deadline() {
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let addr = listen(dir.path(), st).await;
+    let t0 = std::time::Instant::now();
+    let mut tls = raw_tls(dir.path(), addr).await;
+    let mut buf = [0u8; 64];
+    let _ = tokio::time::timeout(
+        listener::CONN_LIFETIME + std::time::Duration::from_secs(5),
+        tls.read(&mut buf),
+    )
+    .await
+    .expect("closed by the server before the test timeout");
+    let took = t0.elapsed();
+    assert!(
+        took >= listener::CONN_LIFETIME - std::time::Duration::from_millis(500)
+            && took <= listener::CONN_LIFETIME + std::time::Duration::from_secs(2),
+        "{took:?}"
+    );
+}
+
+/// The listener never asks for a client certificate, so a client that holds
+/// a fleet certificate is still anonymous in the chain.
+#[tokio::test]
+async fn listener_never_reads_a_client_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let token = issue(&st, HOST, Duration::hours(1));
+    let token2 = issue(&st, HOST2, Duration::hours(1));
+    let csr = make_csr(dir.path(), HOST);
+    let csr2 = make_csr(dir.path(), HOST2);
+    let addr = listen(dir.path(), st.clone()).await;
+    let (status, _, body) = post_listener(
+        &anon_client(dir.path()).build().unwrap(),
+        addr,
+        &enroll_body(&token, HOST, &csr),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let mut identity = std::fs::read(dir.path().join(format!("{HOST}.key"))).unwrap();
+    identity.extend_from_slice(body["client_cert_pem"].as_str().unwrap().as_bytes());
+    let fleet = anon_client(dir.path())
+        .identity(reqwest::Identity::from_pem(&identity).unwrap())
+        .build()
+        .unwrap();
+    let (status, _, body) = post_listener(&fleet, addr, &enroll_body(&token2, HOST2, &csr2))
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "{body}");
+    let lines = audit_lines(&st.enroll.as_ref().unwrap().audit_path);
+    assert_eq!(lines.len(), 2);
+    assert!(lines.iter().all(|l| l["caller_fingerprint"] == ""));
+}
+
+/// One `AppState` behind both listeners: one chain, one allowlist, one
+/// single-use rule.
+#[tokio::test]
+async fn a_token_redeemed_through_each_listener_shares_one_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = state(dir.path(), true);
+    let audit_path = st.enroll.as_ref().unwrap().audit_path.clone();
+    let token_a = issue(&st, HOST, Duration::hours(1));
+    let token_b = issue(&st, HOST2, Duration::hours(1));
+    let csr_a = make_csr(dir.path(), HOST);
+    let csr_b = make_csr(dir.path(), HOST2);
+    let addr = listen(dir.path(), st.clone()).await;
+    let client = anon_client(dir.path()).build().unwrap();
+    let main = build_router(st.clone());
+    let fleet_peer = || Some(peer_with_fingerprint(ISSUER_FP));
+
+    let (status, _, body) = post_listener(&client, addr, &enroll_body(&token_a, HOST, &csr_a))
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post_enroll_as(&main, &token_b, HOST2, &csr_b, fleet_peer()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hosts = std::fs::read_to_string(st.allowlist_path.as_ref().unwrap()).unwrap();
+    assert!(hosts.contains(HOST) && hosts.contains(HOST2), "{hosts}");
+    let lines = audit_lines(&audit_path);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        (lines[0]["seq"].as_u64(), lines[1]["seq"].as_u64()),
+        (Some(0), Some(1))
+    );
+    assert_eq!(lines[1]["prev_hash"], lines[0]["hash"]);
+    assert_eq!(lines[0]["caller_fingerprint"], "");
+    assert_eq!(lines[1]["caller_fingerprint"], ISSUER_FP);
+
+    let (status, _) = post_enroll_as(&main, &token_a, HOST, &csr_a, fleet_peer()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = post_listener(&client, addr, &enroll_body(&token_b, HOST2, &csr_b))
+        .await
+        .unwrap();
+    assert_eq!(status, 403);
+    let lines = audit_lines(&audit_path);
+    assert_eq!(lines.len(), 3, "only the main path chains its denial");
+    assert_eq!(lines[2]["reason"], "token_used");
+    assert_eq!(lines[2]["prev_hash"], lines[1]["hash"]);
+}
+
+/// `serve` refuses an enroll_listener when enrollment is off (here: no
+/// enroll paths), before it opens any socket.
+#[test]
+fn server_refuses_an_enroll_listener_without_enrollment() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("server.yaml");
+    let d = dir.path().display();
+    std::fs::write(
+        &cfg,
+        format!(
+            "bind: \"127.0.0.1:0\"\nevents_out_dir: \"{d}/events\"\n\
+             policy_bundle_path: \"{d}/policy.json\"\ntls_cert_path: \"{d}/s.crt\"\n\
+             tls_key_path: \"{d}/s.key\"\nclient_ca_path: \"{d}/ca.pem\"\n\
+             events_require_cert_host_match: true\nenroll_listener:\n  bind: \"127.0.0.1:1\"\n"
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_lodeline-server"))
+        .args(["serve", "--config"])
+        .arg(&cfg)
+        .env_remove("LODELINE_SERVER_READ_TOKEN")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("enroll_listener is set but enrollment is off"),
+        "{stderr}"
+    );
+}
