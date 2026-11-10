@@ -25,7 +25,7 @@ release asset.
 `/etc/lodeline/host-allowlist.json` needs this, in this order, after the package upgrade: copy the
 file to `/var/lib/lodeline-server/` and give it to `lodeline`, run `restorecon -R
 /var/lib/lodeline-server` on an SELinux host, set `host_allowlist_path` to the new path in
-`server.yaml`, restart `lodeline-server`, check that enrollment is on, then delete the old file.
+`server.yaml`, restart `lodeline-server`, check that enrollment is on (the server's journal shows a line that starts with `enroll: enabled`), then delete the old file.
 Keep the old file until the restart, because a server that finds no file at its configured path
 accepts events from every host that holds a valid certificate. The rpm restarts a running service
 during the upgrade, before you have done this. If you do nothing, the server starts, logs an `enroll:` error that names
@@ -143,7 +143,7 @@ changed messages and the install guide need nothing from you.
   `/var/log/lodeline-server` writable. A server whose allowlist is at
   `/etc/lodeline/host-allowlist.json` must copy the file to `/var/lib/lodeline-server/` (owned by
   `lodeline`, and on SELinux hosts run `restorecon -R /var/lib/lodeline-server`), set
-  `host_allowlist_path` to the new path, restart, check that enrollment is on, and then delete the
+  `host_allowlist_path` to the new path, restart, check that enrollment is on (the server's journal shows a line that starts with `enroll: enabled`), and then delete the
   old file. A server that finds no file at its configured path accepts events from every host that
   holds a valid certificate, so the old file stays until the restart. With enrollment on, the server now checks at
   boot that it can write next to the allowlist. If it cannot, it logs an `enroll:` error, leaves
