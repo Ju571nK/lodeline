@@ -135,7 +135,8 @@ impl Inner {
 
     async fn get(self: Arc<Self>, req: Request) -> Reply {
         let (Some(endpoint), Some(key)) = (req.endpoint(), req.cache_key()) else {
-            // A health probe must show the upstream as it is now.
+            // A health probe must show the upstream as it is now, and so must the release file
+            // list: an operator who has just copied files in expects to see them.
             return self.next.get(req).await;
         };
         let pol = self.policy(endpoint);

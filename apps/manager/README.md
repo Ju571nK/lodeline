@@ -195,6 +195,7 @@ release](#install-from-a-release) shows for the console itself.
 - A file name can hold only ASCII letters, digits, `.`, `_` and `-`, and cannot be `.` or `..`,
   the rule the server uses. The console answers any other name with 400 `bad_filename` and sends
   no request.
+- The console does not cache the list, so a reload shows the files that the server holds now.
 - A download has no total time limit. It fails when the server sends nothing for 30 s, and the
   browser then reports a failed download. A fleet read still fails after 5 s.
 

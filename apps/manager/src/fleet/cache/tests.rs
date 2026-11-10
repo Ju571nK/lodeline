@@ -41,6 +41,7 @@ impl Client for Counting {
         Box::pin(async move {
             let name = match &req {
                 Request::Healthz => "healthz",
+                Request::Artifacts => "artifacts",
                 other => other.endpoint().unwrap(),
             };
             *self.calls.lock().unwrap().entry(name).or_default() += 1;
@@ -424,17 +425,19 @@ async fn proxy_reads_have_keys_of_their_own() {
     assert_eq!(c.len(), 9);
 }
 
-/// A release file goes to the server every time: the cache holds JSON reads only.
+/// The release file list and each file go to the server every time.
 #[tokio::test]
-async fn a_release_file_is_never_cached() {
+async fn release_files_are_never_cached() {
     let up = Arc::new(Counting::default());
     let c = cache(&up, CacheConfig::default(), None);
     let name = ArtifactName::parse("SHA256SUMS").unwrap();
     for _ in 0..2 {
+        c.get(Request::Artifacts).await.unwrap();
         assert!(matches!(
             c.artifact(name.clone()).await,
             Err(FleetError::NotFound)
         ));
     }
-    assert_eq!(up.count("artifact"), 2);
+    assert_eq!((up.count("artifacts"), up.count("artifact")), (2, 2));
+    assert_eq!(c.len(), 0);
 }

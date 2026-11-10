@@ -322,10 +322,10 @@ pub fn from_config(cfg: &Config) -> Result<Arc<dyn Client>, String> {
 
 impl Request {
     /// The endpoint's name in the cache, which also picks its freshness tier; `None` for
-    /// healthz, which is never cached.
+    /// healthz and the release file list, which are never cached.
     fn endpoint(&self) -> Option<&'static str> {
         Some(match self {
-            Self::Healthz => return None,
+            Self::Healthz | Self::Artifacts => return None,
             Self::Meta => "meta",
             Self::Events(_) => "events",
             Self::EventById(_) => "event_by_id",
@@ -340,7 +340,6 @@ impl Request {
             Self::Inventory(InventoryView::Snapshots, _) => "proxy_inventory_snapshots",
             Self::Inventory(InventoryView::Drift, _) => "proxy_drift",
             Self::Inventory(InventoryView::Markers, _) => "proxy_rebaseline_markers",
-            Self::Artifacts => "artifacts",
         })
     }
 
