@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use lodeline_core::paths::default_sender_config;
 use lodeline_sender::cli::{Cli, Command};
@@ -6,7 +6,7 @@ use lodeline_sender::config::SenderConfig;
 use lodeline_sender::csr::host_key_and_csr;
 use lodeline_sender::doctor::{self, Check};
 use lodeline_sender::enroll::is_root;
-use lodeline_sender::enroll::write::{put, root_key_target};
+use lodeline_sender::enroll::write::{put, root_key_target, PutError};
 use lodeline_sender::runtime::{run, RuntimeCtx};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -114,8 +114,9 @@ async fn main() -> Result<()> {
         } => {
             let (key_pem, csr_pem) = host_key_and_csr(&host_id)?;
             // Never overwrite: replacing a key would lose the host identity its cert names.
+            // The overwrite wording is for a file that exists; any other failure names its own cause.
             let refuse = |p: &Path| {
-                format!(
+                anyhow::anyhow!(
                     "cannot create {} (an existing file is never overwritten)",
                     p.display()
                 )
@@ -124,7 +125,10 @@ async fn main() -> Result<()> {
                 .write(true)
                 .create_new(true)
                 .open(&csr_out)
-                .with_context(|| refuse(&csr_out))?;
+                .map_err(|e| match e.kind() {
+                    std::io::ErrorKind::AlreadyExists => refuse(&csr_out),
+                    _ => anyhow::anyhow!("cannot create {}: {e}", csr_out.display()),
+                })?;
             // The key goes through the same write as `enroll`. As root it is given to its
             // directory's owner only under the rule in `enroll::write`; otherwise it
             // stays root-owned.
@@ -133,6 +137,14 @@ async fn main() -> Result<()> {
             } else {
                 (key_out.clone(), false)
             };
+            if let Err(e) = put(&key_path, key_pem.as_bytes(), 0o600, give) {
+                drop(csr_file);
+                let _ = std::fs::remove_file(&csr_out);
+                return Err(match e {
+                    PutError::Conflict => refuse(&key_out),
+                    e => anyhow::anyhow!("cannot create {}: {e}", key_out.display()),
+                });
+            }
             if is_root() && !give {
                 eprintln!(
                     "the key stays root-owned: {} is not below root-owned directories closed to \
@@ -140,11 +152,6 @@ async fn main() -> Result<()> {
                      run `chown` on it, or write it into a directory that rule allows",
                     key_out.display()
                 );
-            }
-            if let Err(e) = put(&key_path, key_pem.as_bytes(), 0o600, give) {
-                drop(csr_file);
-                let _ = std::fs::remove_file(&csr_out);
-                return Err(anyhow::anyhow!("{e}")).with_context(|| refuse(&key_out));
             }
             csr_file.write_all(csr_pem.as_bytes())?;
             csr_file.sync_all()?;
