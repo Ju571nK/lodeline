@@ -249,9 +249,12 @@ puts its temporary files in `/var/lib/lodeline-server`, in short-lived
 `lodeline-enroll-*` directories that are removed when signing ends.
 
 An allowlist that sat at `/etc/lodeline/host-allowlist.json` cannot be rewritten
-by the unit, so every enrollment failed after it spent the token. Move the file
-to `/var/lib/lodeline-server/`, set `host_allowlist_path` to the new path, and
-restart the server.
+by the unit, so every enrollment failed after it spent the token. Copy the file
+to `/var/lib/lodeline-server/` and give it to `lodeline` (on an SELinux host run
+`restorecon -R /var/lib/lodeline-server`), set `host_allowlist_path` to the new
+path, restart the server, check that enrollment is on (the server's journal shows a line that starts with `enroll: enabled`), and then delete the old
+file. Keep the old file until the restart: a server that finds no file at its
+configured path accepts events from every host that holds a valid certificate.
 
 **3. Issue a token** (server host; prints the plaintext once — only its hash is
 stored). Run it as the service account:
@@ -983,7 +986,7 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | `No route to host` from agent | Firewall / port not open | Open `8443/tcp` (§6) |
 | Server exits with `enroll_listener is set but enrollment is off` | A §3.1 enrollment check failed | Fix what the `enroll:` warning above it names (§3.2) |
 | Server exits with `invalid config` naming `enroll_listener` | A §3.2 boot refusal | Do what the message says (§3.2) |
-| Server logs `enroll: cannot write next to host_allowlist_path` and enrollment is off | The service cannot rewrite the allowlist, for example because it sits under `/etc/lodeline` | Move it to `/var/lib/lodeline-server/` and update `host_allowlist_path` (§3.1) |
+| Server logs `enroll: cannot write next to host_allowlist_path` and enrollment is off | The service cannot rewrite the allowlist, for example because it sits under `/etc/lodeline` | Copy it to `/var/lib/lodeline-server/` and give it to `lodeline`, set `host_allowlist_path` to the new path, restart, check that enrollment is on (the server's journal shows a line that starts with `enroll: enabled`), then delete the old file (§3.1) |
 | Server logs `enroll: cannot run openssl at <path>` and enrollment is off | `openssl` is missing, or the service may not run it (SELinux denial: `ausearch -m avc -ts recent`) | Install the `openssl` package. On SELinux hosts use the package's policy module, which allows it (§6) |
 | Every enrollment answers 500 `token store error` | The token file or its `.lock` file is owned by root, left by a root `enroll-token` run of an older version | `sudo chown lodeline:lodeline <enroll_tokens_path> <enroll_tokens_path>.lock`, then run `enroll-token` with `sudo -u lodeline` (§3.1) |
 | `enroll-token` says the token directory is owned by another uid | It was run as root, and the directory belongs to `lodeline` | Run it with `sudo -u lodeline` (§3.1) |
