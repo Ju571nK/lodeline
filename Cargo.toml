@@ -47,6 +47,9 @@ rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false }
 # #194 — pure-Rust X.509 parsing (CN + SAN DNS) of TLS-verified peer certs.
 x509-parser = "0.18"
+# Host key and CSR for enrollment (`lodeline-sender csr`) on the ring backend
+# rustls already links, so no second crypto backend reaches the sender.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 http = "1"
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 tower = "0.5"

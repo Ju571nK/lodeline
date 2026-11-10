@@ -193,11 +193,20 @@ lodeline-server enroll-token --config /etc/lodeline/server.yaml --host-id <agent
 #  → enrollment token: <opaque> (give this to the PMS for that host)
 ```
 
-**4. Enroll** (the PMS generates the host keypair + CSR with `CN=<host_id>` and
-calls the endpoint over mTLS):
+**4. Enroll.** On the new host, make its private key and a CSR with
+`CN=<host_id>`. `lodeline-sender csr` needs no `openssl` binary, so it also works on
+Windows. It writes an ECDSA P-256 key (mode 0600 on unix) and refuses to replace a
+file that exists:
 
 ```sh
-openssl req -new -newkey rsa:2048 -nodes -keyout host.key -out host.csr -subj "/CN=<host_id>"
+lodeline-sender csr --host-id <host_id> --key-out /etc/lodeline/client.key --csr-out host.csr
+# Alternative where openssl is installed:
+# openssl req -new -newkey rsa:2048 -nodes -keyout host.key -out host.csr -subj "/CN=<host_id>"
+```
+
+The key stays on the host. The PMS then sends the CSR to the endpoint over mTLS:
+
+```sh
 curl --cert pms.crt --key pms.key --cacert ca.crt \
   -X POST https://lodeline.example.com:8443/v1/enroll \
   -H 'content-type: application/json' \
@@ -207,9 +216,11 @@ curl --cert pms.crt --key pms.key --cacert ca.crt \
 
 The server signs with a **fixed client-cert profile** (`CA:FALSE`, `clientAuth`,
 `subjectAltName=DNS:<host_id>`), re-inspects the issued cert, adds the host to
-the allowlist, and writes a signed line to `enrollment-audit.jsonl`. The host
-installs `client_cert_pem` + its own `host.key` + `ca_chain_pem` as the sender's
-mTLS material (§7). Tokens are single-use; a failed mint spends the token (issue
+the allowlist, and writes a signed line to `enrollment-audit.jsonl`. On the host,
+write `client_cert_pem` followed by `ca_chain_pem` to the sender's
+`client_cert_path`, and use the key from the first command as `client_key_path`
+(§7). When `client_ca_path` holds only the root, a file with the leaf alone fails
+the TLS handshake. Tokens are single-use; a failed mint spends the token (issue
 a fresh one). Every token failure returns a generic `403 enrollment_denied`.
 
 > Enrollment **mints** certs (Part B). Read-only **artifact** serving (Part A,

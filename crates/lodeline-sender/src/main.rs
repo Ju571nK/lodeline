@@ -1,10 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use lodeline_core::paths::default_sender_config;
 use lodeline_sender::cli::{Cli, Command};
 use lodeline_sender::config::SenderConfig;
+use lodeline_sender::csr::host_key_and_csr;
 use lodeline_sender::doctor::{self, Check};
 use lodeline_sender::runtime::{run, RuntimeCtx};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
@@ -74,6 +78,46 @@ async fn main() -> Result<()> {
         }
         Command::DryRun { url } => {
             println!("dry-run url={url} (not yet wired)");
+        }
+        Command::Csr {
+            host_id,
+            key_out,
+            csr_out,
+        } => {
+            let (key_pem, csr_pem) = host_key_and_csr(&host_id)?;
+            // create_new: replacing a key would lose the host identity its cert names.
+            let refuse = |p: &Path| {
+                format!(
+                    "cannot create {} (an existing file is never overwritten)",
+                    p.display()
+                )
+            };
+            let mut key_opts = OpenOptions::new();
+            key_opts.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut key_opts, 0o600);
+            let mut key_file = key_opts.open(&key_out).with_context(|| refuse(&key_out))?;
+            let mut csr_file = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&csr_out)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    drop(key_file);
+                    let _ = std::fs::remove_file(&key_out);
+                    return Err(e).with_context(|| refuse(&csr_out));
+                }
+            };
+            key_file.write_all(key_pem.as_bytes())?;
+            key_file.sync_all()?;
+            csr_file.write_all(csr_pem.as_bytes())?;
+            csr_file.sync_all()?;
+            println!(
+                "wrote private key {} and CSR {} (CN={host_id})",
+                key_out.display(),
+                csr_out.display()
+            );
         }
     }
     Ok(())

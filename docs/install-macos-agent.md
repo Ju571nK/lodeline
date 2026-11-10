@@ -254,7 +254,10 @@ It also appears as the `host_id` field on every emitted event.
 
 To forward events to a [`lodeline-server`](install-server.md), run `lodeline-sender`.
 First get this host's client cert + `ca.crt` from the server operator
-([install-server.md § 3](install-server.md)). Then write `sender.yaml`:
+([install-server.md § 3](install-server.md)). With enrollment
+([install-server.md § 3.1](install-server.md)), make the key and CSR on this host
+with `lodeline-sender csr` instead, so the key never leaves it. Then write
+`sender.yaml`:
 
 ```yaml
 # ~/.config/lodeline/sender.yaml  (or /etc/lodeline/sender.yaml as root)
