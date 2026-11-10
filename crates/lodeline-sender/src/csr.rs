@@ -8,14 +8,26 @@ pub fn host_key_and_csr(host_id: &str) -> anyhow::Result<(String, String)> {
     if uuid::Uuid::parse_str(host_id).is_err() {
         anyhow::bail!("--host-id must be a UUID (the agent's host_id), got {host_id:?}");
     }
-    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    let key = new_key()?;
+    let csr = csr_for(&key, host_id)?;
+    Ok((key.serialize_pem(), csr))
+}
+
+/// A new ECDSA P-256 host key.
+pub fn new_key() -> anyhow::Result<rcgen::KeyPair> {
+    Ok(rcgen::KeyPair::generate_for(
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+    )?)
+}
+
+/// The PEM CSR for `key`, with subject `CN=<host_id>` and nothing else.
+pub fn csr_for(key: &rcgen::KeyPair, host_id: &str) -> anyhow::Result<String> {
     let mut params = rcgen::CertificateParams::default();
     params.distinguished_name = rcgen::DistinguishedName::new();
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, host_id);
-    let csr = params.serialize_request(&key)?.pem()?;
-    Ok((key.serialize_pem(), csr))
+    Ok(params.serialize_request(key)?.pem()?)
 }
 
 #[cfg(test)]

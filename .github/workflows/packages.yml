@@ -178,7 +178,9 @@ jobs:
           	lodeline-proxy|lodeline-proxy|lodeline-proxy.service|/etc/lodeline/proxy.yaml.example
           	TABLE
 
-          # Co-install (#252), matching the deb leg.
+          # Co-install (#252), matching the deb leg. systemd supplies the
+          # sysusers and tmpfiles the scriptlets call, so it goes in first.
+          dnf -y install systemd
           all=(lodeline lodeline-sender lodeline-server lodeline-signer lodeline-proxy)
           rpms=()
           for pkg in "${all[@]}"; do rpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)"); done
@@ -186,12 +188,14 @@ jobs:
           for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
+          # `lodeline-sender enroll` gives the client key to the owner of this directory
+          # (#553), so the package must make it the sender's before any unit starts.
+          test "$(stat -c '%U:%G %a' /var/lib/lodeline-sender)" = "lodeline:lodeline 750"
+          test "$(stat -c '%U:%G %a' /etc/lodeline)" = "root:root 755"
           rpm -e "${all[@]}"
 
           # Upgrade from the published v0.14.2 packages (proxy is not among
           # them; it installs fresh afterwards) to the packages built above.
-          # systemd supplies the sysusers/tmpfiles the scriptlets call.
-          dnf -y install systemd
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           old=0.14.2
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
@@ -383,11 +387,20 @@ jobs:
           for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
+          # `lodeline-sender enroll` gives the client key to the owner of this directory
+          # (#553), so the package must make it the sender's before any unit starts.
+          # The dependency alternatives allow a host without systemd-tmpfiles, so
+          # assert the tool is there.
+          command -v systemd-tmpfiles
+          test "$(stat -c '%U:%G %a' /var/lib/lodeline-sender)" = "lodeline:lodeline 750"
+          test "$(stat -c '%U:%G %a' /etc/lodeline)" = "root:root 755"
           # The per-package copies must stay identical (they define one shared
           # `lodeline` user and its directories).
           cmp /usr/lib/sysusers.d/lodeline.conf /usr/lib/sysusers.d/lodeline-sender.conf
           cmp /usr/lib/sysusers.d/lodeline.conf /usr/lib/sysusers.d/lodeline-server.conf
-          cmp /usr/lib/tmpfiles.d/lodeline.conf /usr/lib/tmpfiles.d/lodeline-sender.conf
+          # The sender's copy also makes its own state directory; every other line
+          # must match the agent's.
+          grep -v 'lodeline-sender' /usr/lib/tmpfiles.d/lodeline-sender.conf | cmp /usr/lib/tmpfiles.d/lodeline.conf -
           dpkg -P "${all[@]}"
 
           # Upgrade from the published v0.14.2 packages (proxy is not among

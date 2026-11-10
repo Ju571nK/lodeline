@@ -153,6 +153,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test (workspace)
         run: cargo test --workspace
+      # This container runs as root, the one place CI can show that enroll gives a file
+      # to the owner of its directory and refuses a link planted there.
+      - name: test (root-only ownership)
+        run: |
+          cargo test -p lodeline-sender --lib enroll::write -- --ignored
+          cargo test -p lodeline-server --test enroll_token_cli -- --ignored
       - name: release build
         if: github.event_name == 'push'
         run: cargo build --release --workspace
