@@ -36,10 +36,13 @@ flowchart LR
     server -- "GET /v1/policy" --> sender
 ```
 
-- **Server inbound:** exactly **one** port — `8443/tcp` (the `bind` value). All
-  `/v1/*` routes share it.
+- **Server inbound:** exactly **one** port, `8443/tcp` (the `bind` value), which
+  all `/v1/*` routes share. When the enrollment listener is set (§3.2), add its
+  port (`enroll_listener.bind`, for example `8444/tcp`), which serves only
+  `POST /v1/enroll`.
 - **Agent hosts inbound:** none. They only make **outbound** connections to
-  `8443`. (egress-only — friendly to locked-down endpoints.)
+  `8443`, and to the enrollment port while they enroll. (Egress only, which
+  suits locked-down endpoints.)
 
 ---
 
@@ -186,13 +189,18 @@ host_allowlist_path: "/etc/lodeline/host-allowlist.json"   # REQUIRED (restricti
 The server validates the intermediate at boot (CA:TRUE, key⇄cert match, 0600).
 
 **3. Issue a token** (server host; prints the plaintext once — only its hash is
-stored):
+stored). Run it as the service account:
 
 ```sh
-lodeline-server enroll-token --config /etc/lodeline/server.yaml --host-id <agent-host_id> --ttl 1h
+sudo -u lodeline lodeline-server enroll-token --config /etc/lodeline/server.yaml --host-id <agent-host_id> --ttl 1h
 #  → enrollment token: <opaque> (give this to the PMS for that host)
 #  To issue it before the agent has run, set the host's id with `lodeline init-host-id` (§9).
 ```
+
+The command replaces the token file and creates `<enroll_tokens_path>.lock`, both
+owned by the user that runs it and mode 0600. After a run as root the server,
+which runs as `lodeline`, can open neither, and every enrollment answers
+`500 sign_failed` until you give both files back to `lodeline` (§10).
 
 **4. Enroll.** On the new host, make its private key and a CSR with
 `CN=<host_id>`. `lodeline-sender csr` needs no `openssl` binary, so it also works on
@@ -225,9 +233,105 @@ the TLS handshake. Tokens are single-use; a failed mint spends the token (issue
 a fresh one). Every token failure returns a generic `403 enrollment_denied`.
 
 > Enrollment **mints** certs (Part B). Read-only **artifact** serving (Part A,
-> §5.1) is separate. Per-host cert↔host_id binding, CRL/OCSP revocation, and
-> on-host keygen attestation are follow-ups; short cert lifetimes are the MVP's
-> revocation substitute.
+> §5.1) is separate. To bind each host's certificate to its host_id on
+> `POST /v1/events`, set `events_require_cert_host_match: true`; certificates
+> from `/v1/enroll` already match. The server has no CRL or OCSP revocation, and
+> it does not attest that a key was made on the host. Short certificate
+> lifetimes stand in for revocation.
+
+### 3.2 Enrollment listener (self-enrollment), optional
+
+A host that has no client certificate cannot reach `/v1/enroll` on the main
+port, because that port asks every client for one. The enrollment listener is a
+second TLS port for this case. It presents the main server certificate
+(`tls_cert_path`, `tls_key_path`), asks for no client certificate, and serves
+only `POST /v1/enroll`. The token in the request is the credential. Both ports
+share one token file, one audit chain and one allowlist, so a token works once,
+on either port. It is off unless `enroll_listener` is set.
+
+**1. Configure `server.yaml`** on top of §3.1 and the mTLS triple:
+
+```yaml
+enroll_listener:
+  bind: "0.0.0.0:8444"
+events_require_cert_host_match: true
+```
+
+The server refuses to start when:
+
+- `enroll_listener` is set without `tls_cert_path`, `tls_key_path` and
+  `client_ca_path`.
+- `enroll_issuer_fingerprints` is set too, even as an empty list. The listener
+  takes no client certificate, so the issuer gate would deny every caller. Where
+  you need the issuer gate (#211), keep the listener off and enroll through the
+  main port (§3.1).
+- `enroll_listener.bind` equals `bind`.
+- `events_require_cert_host_match` is not `true`. Without it, any fleet
+  certificate can post events as any host, so one leaked token would give a
+  certificate that speaks for the whole fleet. Certificates from `/v1/enroll`
+  already match. Reissue hand-made certificates whose CN is not the host_id
+  (§3 step 3) before you set it.
+- Enrollment is off, because a §3.1 check failed. The `enroll:` warning above
+  the error names the check.
+
+The server binds both ports before it serves either and logs one
+`starting lodeline-server (mTLS)` line with `bind` and `enroll_bind`. If either
+listener stops, the process exits non-zero and systemd restarts it.
+
+**2. Probe it** from a host, with the CA and no client certificate. A made-up
+token answers 403, which shows that the port, the server certificate and the
+token check work:
+
+```sh
+curl --cacert ca.crt -X POST https://lodeline.example.com:8444/v1/enroll \
+  -H 'content-type: application/json' \
+  -d '{"token":"x","host_id":"00000000-0000-4000-8000-000000000000","csr_pem":"x"}'
+#  → {"error":{"code":"enrollment_denied","message":"enrollment denied"}}  (HTTP 403)
+```
+
+**3. Enroll** with the request from §3.1 step 4, sent to the enrollment port
+with no `--cert` or `--key`. Then install the certificate as in §3.1.
+
+| Answer | Meaning |
+|---|---|
+| 200 | The certificate was issued and the host is on the allowlist. |
+| 400 or 422 | The request is malformed. |
+| 403 `enrollment_denied` | The token is unknown, spent, expired or for another host_id, or the CSR CN is not the host_id. Retrying does not help; issue a new token. |
+| 413 | The body is over 17 KiB (the CSR limit is 16 KiB). |
+| 415 | The request has no `content-type: application/json`. |
+| 421 | A second request on one connection. Send each request on a new connection. |
+| 500 | A server fault. The token may be spent: read the server log, then issue a new token. |
+| 503 `busy`, `Retry-After: 1` | Another enrollment is running. Retry after a second. |
+| Connection closed before the TLS handshake | The source's rate limit, or the listener is full. curl exits 35 with `Connection reset by peer` or `SSL_ERROR_SYSCALL`. Wait about a minute, then retry. |
+
+**Limits.** They are fixed, not configured:
+
+- Per source address: 10 connections, then 1 every 6 s. IPv6 sources in one
+  /64 share a count.
+- One request per connection, on HTTP/1.1 and HTTP/2.
+- At most 64 connections at once on the port.
+- A connection closes 15 s after it is accepted, unless its request is being
+  processed. Then it closes once the answer is written.
+- A body of at most 17 KiB.
+
+**What is logged.** Only the request that redeems a token writes to
+`enrollment-audit.jsonl`: an `issued` line, or `denied` with reason
+`sign_failed` when signing fails after the token is reserved. The port cannot
+grow the chain beyond one line per token you issue. Every other denial on this
+port, the rate limit included, logs a warning `enroll request refused` with
+`reason` and `source`. Each reason logs at once the first time. Later ones in
+the next minute are only counted, and the count (`suppressed`) appears on the
+next line for that reason after the minute. The `enroll: issued client cert`
+line carries the host's `peer` address. The server logs only errors unless
+`RUST_LOG` is set, so to see these lines add `Environment=RUST_LOG=info` with
+`sudo systemctl edit lodeline-server`.
+
+**Exposure.** Open the port only to the networks hosts enroll from (§6). Put
+no load balancer or TLS proxy in front of it. The limits count TCP source
+addresses, so a balancer would put every host in one count, and a TLS proxy
+would show hosts its own certificate instead of the server's. The limits stop one source, not
+many. A flood from many addresses can stop enrollment, but not the main port,
+so filter it at the firewall.
 
 ---
 
@@ -360,6 +464,19 @@ sudo firewall-cmd --add-port=8443/tcp --permanent && sudo firewall-cmd --reload
 
 Ubuntu: `sudo ufw allow 8443/tcp`.
 
+With the enrollment listener (§3.2), open its port only to the networks hosts
+enroll from, for example `192.0.2.0/24`:
+
+```sh
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.0.2.0/24" port port="8444" protocol="tcp" accept'
+sudo firewall-cmd --reload
+# Ubuntu: sudo ufw allow from 192.0.2.0/24 to any port 8444 proto tcp
+```
+
+`lodeline_server_t` can bind an unreserved port. If `semanage port -l` lists a
+label for the enrollment port, relabel it as `packaging/selinux/README.md`
+describes.
+
 SELinux is **Enforcing** on Rocky/RHEL by default. The package's
 `StateDirectory`/`LogsDirectory` (`/var/lib/lodeline-server`, `/var/log/lodeline-server`)
 get correct contexts automatically. If you point `events_out_dir` somewhere
@@ -452,6 +569,10 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | Read endpoints return 404 | `LODELINE_SERVER_READ_TOKEN` unset | Set it (§5) |
 | Read endpoints return 401 | Missing/wrong bearer token | Send `Authorization: Bearer <token>` |
 | `No route to host` from agent | Firewall / port not open | Open `8443/tcp` (§6) |
+| Server exits with `enroll_listener is set but enrollment is off` | A §3.1 enrollment check failed | Fix what the `enroll:` warning above it names (§3.2) |
+| Server exits with `invalid config` naming `enroll_listener` | A §3.2 boot refusal | Do what the message says (§3.2) |
+| Every enrollment answers 500 `token store error` | The token file or its `.lock` file is owned by root after a root `enroll-token` run | `sudo chown lodeline:lodeline <enroll_tokens_path> <enroll_tokens_path>.lock`, then run `enroll-token` with `sudo -u lodeline` (§3.1) |
+| Enrollment port closes the connection before TLS | Rate limit or full listener | Wait about a minute. The server logs `enroll request refused` with `reason=rate_limited` or `listener_full` and the `source` (§3.2) |
 
 ---
 
