@@ -104,6 +104,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   stayed unreadable, about 86,000 lines a day now that warnings show by default. It now logs the
   first failure at once, then at most one line a minute that carries how many failures it left
   out. A successful read resets this. The retry timing is unchanged. (#562, #560)
+- On a server whose `openssl` defaults to SHA-1 for an EC key, such as the LibreSSL that ships
+  with macOS, an enrollment CA with an EC key issued host certificates signed with ECDSA and
+  SHA-1. The server's own listener refuses those, so a host it had enrolled was refused at its
+  first connection. Signing now asks for SHA-256. Servers on OpenSSL 3 already signed with
+  SHA-256 and issue the same certificates as before. (#570)
 
 ## [0.14.3] - 2026-11-10
 

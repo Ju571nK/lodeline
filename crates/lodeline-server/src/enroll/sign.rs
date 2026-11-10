@@ -134,6 +134,8 @@ pub fn sign_csr(
     let st = openssl_cmd(openssl)
         .arg("x509")
         .arg("-req")
+        // Without this the digest is the program's default, SHA-1 for an EC CA on some builds.
+        .arg("-sha256")
         .arg("-in")
         .arg(&csr)
         .arg("-CA")
@@ -506,6 +508,86 @@ mod tests {
         assert!(
             cert_has_client_auth(d.path(), &cert),
             "must have clientAuth EKU"
+        );
+    }
+
+    /// An intermediate-style CA with a P-256 key. Some signing programs default
+    /// the digest for an EC key to SHA-1 (the LibreSSL that ships with macOS).
+    fn make_ec_ca(dir: &Path) -> (PathBuf, PathBuf) {
+        let key = dir.join("ec-ca.key");
+        let crt = dir.join("ec-ca.crt");
+        let ssl = openssl();
+        let st = Command::new(&ssl)
+            .args(["genpkey", "-algorithm", "EC", "-pkeyopt"])
+            .args([
+                "ec_paramgen_curve:P-256",
+                "-pkeyopt",
+                "ec_param_enc:named_curve",
+            ])
+            .arg("-out")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(st.status.success());
+        let st = Command::new(&ssl)
+            .args(["req", "-x509", "-new", "-key"])
+            .arg(&key)
+            .args([
+                "-days",
+                "3650",
+                "-subj",
+                "/CN=test-ec-ca",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-out",
+            ])
+            .arg(&crt)
+            .output()
+            .unwrap();
+        assert!(st.status.success());
+        (crt, key)
+    }
+
+    fn pem_to_der(pem: &str) -> rustls::pki_types::CertificateDer<'static> {
+        rustls_pemfile::certs(&mut pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn sign_csr_with_ec_ca_is_accepted_by_the_listener_verifier() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let d = tempfile::tempdir().unwrap();
+        let (ca_cert, ca_key) = make_ec_ca(d.path());
+        let csr = make_csr(d.path(), "host-1");
+        let cert = sign_csr(&openssl(), &ca_cert, &ca_key, &csr, "host-1", 30).unwrap();
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(pem_to_der(&std::fs::read_to_string(&ca_cert).unwrap()))
+            .unwrap();
+        // The same verifier the listener builds in main.rs.
+        let verifier = rustls::server::WebPkiClientVerifier::builder(std::sync::Arc::new(roots))
+            .build()
+            .unwrap();
+        verifier
+            .verify_client_cert(&pem_to_der(&cert), &[], rustls::pki_types::UnixTime::now())
+            .expect("listener must accept the issued certificate");
+
+        let text = Command::new(openssl())
+            .args(["x509", "-noout", "-text", "-in"])
+            .arg({
+                let p = d.path().join("issued.crt");
+                std::fs::write(&p, &cert).unwrap();
+                p
+            })
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&text.stdout).to_lowercase();
+        assert!(
+            text.contains("signature algorithm: ecdsa-with-sha256"),
+            "issued certificate must be signed with SHA-256"
         );
     }
 
