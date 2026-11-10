@@ -23,15 +23,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   shows the host id, the expiry and the steps on a Linux host installed from the packages. It
   never parses or keeps the file, and its error texts say what to do next, including how to make a
   new file for a host whose `enroll` stopped halfway (#576, #553).
-- `POST /v1/enroll-tokens` makes a single-use enrollment token over HTTP, for the fleet console
-  to use (`docs/install-server.md` section 3.6). It is off unless `enroll_mint:` is
-  in `server.yaml`, and needs a pinned client certificate, a bearer with the new scope `enroll`
-  from its own verifier file (`lodeline-server proxy verifier-new --scope enroll --caller-cert
-  <pem>`), and the enrollment listener. It refuses a host id that is on the allowlist or has a certificate
-  this server issued, or that has a live token, keeps at most `enroll_mint.max_tokens` entries in the token file (pruning ones spent or
-  expired more than an hour ago), and writes one signed `token_minted` line per token, with the
-  verified key id and the subject the caller reported, to the enrollment audit file
-  (#574, #553).
+- `POST /v1/enroll-tokens` makes a single-use enrollment token over HTTP, for the fleet console to
+  use (`docs/install-server.md` section 3.6). It is off unless `enroll_mint:` is in `server.yaml`,
+  and needs a pinned client certificate, a bearer with the new scope `enroll` from its own verifier
+  file (`lodeline-server proxy verifier-new --scope enroll --caller-cert <pem>`), and the enrollment
+  listener. It refuses a host id that is on the allowlist or has a certificate this server issued,
+  or that has a live token, keeps at most `enroll_mint.max_tokens` entries in the token file
+  (pruning ones spent or expired more than an hour ago), and writes one signed `token_minted` line
+  per token, with the verified key id and the subject the caller reported, to the enrollment audit
+  file (#574, #553).
 - `lodeline-sender` renews its own client certificate and key before they expire. From the
   validity of the certificate it holds, it renews between 60% and 75% of it, at a point set by
   its host_id, with no setting. It sends a new key's CSR to `POST /v1/renew`, checks the answer
@@ -56,6 +56,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   must expire later than the certificate in use, as a stored one must. `enroll`
   names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
   does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
+
+### Fixed
+
+- `lodeline-sender` logs a renewal-file problem found at start once, not twice within seconds. The
+  first wake of the renewal loop no longer repeats the line the start just wrote, and the line
+  comes again only after an hour (#577).
 
 ## [0.14.4] - 2026-11-11
 

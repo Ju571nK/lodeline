@@ -461,6 +461,16 @@ describe('Enroll a host page: errors', () => {
     expect(cached).not.toContain(MARKER);
   });
 
+  it('treats an expiry header that is not a time as missing, not as text', async () => {
+    serve({ post: () => fileAnswer(OTHER, 'soon') });
+    await renderPage();
+    fireEvent.click(await button());
+    const done = await screen.findByRole('status', { name: 'The file was made' });
+    expect(done).toHaveTextContent('The answer did not carry the expiry.');
+    expect(done).not.toHaveTextContent('Valid until');
+    expect(done).not.toHaveTextContent('soon');
+  });
+
   it('shows the host id and names the expiry when only the expiry header is missing', async () => {
     serve({ post: () => fileAnswer(OTHER, null) });
     await renderPage();

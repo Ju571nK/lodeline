@@ -53,7 +53,8 @@ export async function makeEnrollmentFile(hostId?: string): Promise<MadeFile> {
   if (!res.ok) throw await failure(res);
   const header = res.headers.get('X-Lodeline-Enroll-Host-Id');
   const host_id = header !== null && isCanonicalV4(header) ? header : null;
-  const expires_at = res.headers.get('X-Lodeline-Enroll-Expires-At') || null;
+  const expiry = res.headers.get('X-Lodeline-Enroll-Expires-At');
+  const expires_at = expiry && !Number.isNaN(new Date(expiry).getTime()) ? expiry : null;
   const name = fileName(host_id);
   save(await res.blob(), name);
   return { name, host_id, expires_at };

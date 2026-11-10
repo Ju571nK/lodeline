@@ -82,12 +82,19 @@ pub fn paths(c: &crate::config::SenderConfig) -> Option<Paths> {
 }
 
 /// Settle the files before the first client is built: a pair split by a crash cannot
-/// build one. Anything it cannot repair is left for the caller's own error.
-pub fn settle_at_start(p: &Paths, host_id: &str) {
+/// build one. Anything it cannot repair is left for the caller's own error. Returns the
+/// log line it wrote, if any, so the loop does not write it again at once.
+pub fn settle_at_start(p: &Paths, host_id: &str) -> Option<&'static str> {
     match pair::settle(p, host_id, OffsetDateTime::now_utc()) {
-        Ok(None) => {}
-        Ok(Some(why)) => tracing::error!("{why}"),
-        Err(e) => tracing::error!(error = %e, "cannot settle the renewal files"),
+        Ok(None) => None,
+        Ok(Some(why)) => {
+            tracing::error!("{why}");
+            Some("mismatch")
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "cannot settle the renewal files");
+            Some("settle")
+        }
     }
 }
 
@@ -148,6 +155,13 @@ impl Renewer {
             fails: 0,
             retry_at: None,
             log: Limiter::default(),
+        }
+    }
+
+    /// Count the line the start wrote (`settle_at_start`) as logged at `now`.
+    pub fn already_logged(&mut self, key: Option<&'static str>, now: OffsetDateTime) {
+        if let Some(k) = key {
+            self.log.due(k, now.unix_timestamp());
         }
     }
 
@@ -338,9 +352,10 @@ fn disk(p: &Paths) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((std::fs::read(&p.crt).ok()?, std::fs::read(&p.key).ok()?))
 }
 
-pub async fn run(ctx: RenewCtx) {
+pub async fn run(ctx: RenewCtx, logged_at_start: Option<&'static str>) {
     let shutdown = ctx.shutdown.clone();
     let mut renewer = Renewer::new(ctx);
+    renewer.already_logged(logged_at_start, OffsetDateTime::now_utc());
     loop {
         let wait = renewer.step(OffsetDateTime::now_utc()).await;
         tokio::select! {

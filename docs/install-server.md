@@ -577,7 +577,7 @@ need it.
 | 0 | Enrolled, or already enrolled |
 | 1 | Failed. Read the message |
 | 2 | The enrollment file is bad, or the usage is wrong |
-| 3 | This host has another host_id. `lodeline show host-id` prints it. An existing `sender.yaml` that names another host_id also exits 3, and is checked before the CA and the keystore |
+| 3 | This host has another host_id. `sudo lodeline show host-id` prints it on a host installed from the packages. An existing `sender.yaml` that names another host_id also exits 3, and is checked before the CA and the keystore |
 | 4 | A path enroll would write is not free: the file exists with other content, the path is a link or not a regular file, the file has another hard link, or it cannot be read (larger than 64 KiB, or a read failure). An existing key that is not P-256 also exits 4, and so does an existing certificate that has no key beside it or that this host cannot use (it is for another key or host, has expired, is not valid yet, does not chain to the file's CA, or is not valid for client authentication). Enroll never replaces one |
 | 5 | The token was refused or may be spent. Issue a new token |
 | 6 | The listener could not be reached or trusted, or stayed busy. The token was not used |
@@ -768,6 +768,9 @@ The first retry comes after about a fiftieth of the certificate's validity (at m
 a minute), and each later one after twice as long, up to a tenth of the validity and
 at most an hour. A 409 waits for the server's `Retry-After`, at most an hour. The
 sender never retries a refusal quickly.
+
+When the server refuses a renewal (403 or 404), the sender keeps `client.key.next` and
+`client.csr.next`, does not delete the live pair, and sends the same request again later.
 
 **What you see in the log.** Each failure line is printed at most once an hour.
 
@@ -1266,7 +1269,7 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | Every enrollment answers 500 `token store error` | The token file or its `.lock` file is owned by root, left by a root `enroll-token` run of an older version | `sudo chown lodeline:lodeline <enroll_tokens_path> <enroll_tokens_path>.lock`, then run `enroll-token` with `sudo -u lodeline` (§3.1) |
 | `enroll-token` says the token directory is owned by another uid | It was run as root, and the directory belongs to `lodeline` | Run it with `sudo -u lodeline` (§3.1) |
 | `lodeline-sender enroll` exits 2 | The enrollment file is bad: not format 1, a field missing or malformed, or group or others can write it | Read the message, which names the field and never its value (§3.3) |
-| `lodeline-sender enroll` exits 3 | The host has another host_id | `lodeline show host-id`, then make a file for that id (§3.3) |
+| `lodeline-sender enroll` exits 3 | The host has another host_id | `sudo lodeline show host-id`, then make a file for that id (§3.3) |
 | `lodeline-sender enroll` exits 4 | A path it would write exists with other content, is a link or not a regular file, has another hard link, cannot be read, is a key that is not P-256, or is a certificate without its key or one this host cannot use (for another key or host, expired, not valid yet, not chained to the file's CA, or not valid for client authentication) | Compare it with the enrollment file, move it aside, run again (§3.3) |
 | `lodeline-sender enroll` exits 5 | The server refused the token, or its certificate failed the checks | Issue a new token. For a rejected certificate, read `client.crt.rejected` and the reason (§3.3) |
 | `lodeline-sender enroll` exits 6 | The listener could not be reached or trusted | Check `enroll_url`, the firewall and the CA in the file; the token was not used (§3.3) |

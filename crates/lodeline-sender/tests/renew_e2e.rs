@@ -618,6 +618,33 @@ async fn a_refusal_is_not_retried_quickly_and_is_logged_once_per_period() {
 }
 
 #[tokio::test]
+async fn files_that_are_not_clean_at_start_are_logged_once_then_once_per_period() {
+    let pki = Pki::new();
+    let host = Host::new(&pki, ago(10), ago(-30));
+    // A key that does not belong to the certificate: `settle` cannot repair it.
+    std::fs::write(
+        &host.paths.key,
+        KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    let log = Log::default();
+    let _guard = log.capture();
+    let now = OffsetDateTime::now_utc();
+    let logged = lodeline_sender::renew::settle_at_start(&host.paths, HOST);
+    assert_eq!(log.lines_with("do not match"), 1, "the start logs it");
+    let (mut r, _, _) = host.renewer("http://127.0.0.1:9");
+    r.already_logged(logged, now);
+    r.step(now).await;
+    assert_eq!(
+        log.lines_with("do not match"),
+        1,
+        "the first wake stays quiet"
+    );
+    r.step(now + Duration::seconds(3601)).await;
+    assert_eq!(log.lines_with("do not match"), 2, "again after the period");
+}
+
+#[tokio::test]
 async fn too_early_waits_for_the_servers_retry_after() {
     let pki = Pki::new();
     let host = due_host(&pki);

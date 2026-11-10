@@ -74,7 +74,7 @@ impl MintApi {
             bail!(
                 "enroll_mint is set but the renewal record is not loaded (the enrollment CA is \
                  not usable as a trust anchor, or the enrollment audit file is unreadable); \
-                 the mint needs it to refuse a host that already has a certificate"
+                 the mint needs it to refuse a host id this server issued a certificate for"
             );
         }
         if !has_audit_key {
