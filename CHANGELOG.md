@@ -20,7 +20,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   one as it arrives, so nobody has to put the read token on a host to fetch them. The console
   does not check the files. A server without `artifacts_dir` gets a page that names the
   `server.yaml` setting. The console API adds `GET /api/v1/fleet/artifacts` and
-  `GET /api/v1/fleet/artifacts/{filename}`. (#553)
+  `GET /api/v1/fleet/artifacts/{filename}`. (#555, #553)
 
 ### Fixed
 
