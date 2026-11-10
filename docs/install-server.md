@@ -538,9 +538,11 @@ fixed profile and `enroll_cert_days` lifetime. The checks run in this order:
 | Signing or the audit write failed | 500 `sign_failed`, and no certificate is issued |
 
 Every 403 has the same body. The reason goes to the log, at most one line a
-minute for each reason. A certificate from your own PKI (§3 step 3) cannot renew
-here, because it does not verify against the enrollment CA. Such a host enrolls
-once, and renews from then on.
+minute for each reason. The first certificate in `enroll_ca_cert_path`, the one that
+signs, is the trust anchor, and it may be an intermediate; any further certificate in
+the file is not trusted for renewal. A certificate from your own PKI (§3 step 3)
+cannot renew here, because it does not verify against the enrollment CA. Such a host
+enrolls once, and renews from then on.
 
 **Which certificate may renew.** For each host id the server keeps the newest
 certificate it issued, from `/v1/enroll` or `/v1/renew`, and rebuilds that at
@@ -560,17 +562,21 @@ What follows from that:
   way to cut off a copy of a host's key and certificate. It does not end the
   validity of a certificate already issued.
 - **A copy that renews first wins the race.** The real host then gets 403, and the
-  audit file shows two `renewed` lines from one `caller_fingerprint` with two CSR
-  fingerprints. Re-enroll the real host.
+  audit file shows one `renewed` line and then one `denied` line with the reason
+  `renewal_superseded`, both with the older certificate's `caller_fingerprint`.
+  Re-enroll the real host.
 - **A host with no entry** (an empty or missing audit file, or an enrollment from a
-  release before renewal whose line has no serial) renews once, and the server
-  records the result.
+  release before renewal whose line has no serial) renews, and the server records
+  the result from the renewal line, so a restart keeps it: the same CSR from the
+  same older certificate can still ask again, within the cap of three.
 
 **At start.** A missing audit file means no entries. Lines that do not parse are
 skipped, with one warning that counts them. A file that exists but cannot be read
 turns renewal off, with one `renew:` error line, until you fix it. Enrollment
 keeps working. Rotating or deleting the file breaks nothing, because the entries
-are rebuilt from what is left.
+are rebuilt from what is left. The server then forgets which certificate is the
+newest for each host, so an older certificate that is still valid can renew once
+more.
 
 **What renewal needs.** The enrollment CA key stays on the server, with the same
 boot checks as enrollment. An allowlist that cannot be rewritten turns enrollment
