@@ -704,9 +704,11 @@ certificate and a client key in `sender.yaml`, as `enroll` writes them. It also 
 the account the sender runs as to own the live `client.key` and to be able to create
 files in the directory of the key and in the directory of the certificate (they may be
 two directories). The packaged service runs as `lodeline`, and `enroll` run as root
-gives its files to the owner of the packaged directory. A sender that runs as another account, root
-included, over a key that `lodeline` owns does not renew: it logs one error line that
-names the owner of the key, and the host has to be enrolled again before the
+gives its files to the owner of the packaged directory. A sender that does not own its key does not renew. That is the case for a
+sender run as root over a key that `lodeline` owns, and for a key that `enroll` left
+root-owned (§3.3). The sender logs one error line that names the owner of the key.
+Give the key to the account the sender runs as, or run the sender as the owner of the
+key, and restart it. Until then the host has to be enrolled again before its
 certificate expires.
 
 **What a renewal does.** The sender makes a new P-256 key and a CSR, posts it to
