@@ -136,4 +136,14 @@ systemctl daemon-reload >/dev/null 2>&1 || :
 if [ "$1" -ge 1 ] ; then
     systemctl try-restart lodeline-sender.service >/dev/null 2>&1 || :
 fi
+# The three packages share one SELinux module: remove it with the last of them.
+# Keep it unless the package list was read, is not empty, and names neither other package.
+if [ "$1" = 0 ] && command -v semodule >/dev/null 2>&1 ; then
+    pkgs=$(rpm -qa 2>/dev/null) || pkgs=
+    if [ -n "$pkgs" ] ; then
+        rc=0
+        echo "$pkgs" | grep -qE '^(lodeline|lodeline-server)-[0-9]' || rc=$?
+        [ "$rc" = 1 ] && semodule -r lodeline >/dev/null 2>&1 || :
+    fi
+fi
 """

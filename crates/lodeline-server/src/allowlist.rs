@@ -91,10 +91,28 @@ pub fn add_host_atomic(path: &Path, host_id: &str) -> Result<(), AllowlistError>
     })
 }
 
+/// The directory `write_atomic` makes its temp file in.
+fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+/// Boot check: can `write_atomic` rewrite `path`? Makes and drops a temp file
+/// in the same directory, so a host never spends a token on an allowlist the
+/// service cannot write.
+pub fn check_rewritable(path: &Path) -> std::io::Result<()> {
+    tempfile::Builder::new()
+        .prefix(".hosts-probe-")
+        .tempfile_in(parent_dir(path))
+        .map(drop)
+}
+
 /// Atomic write: tmp file in the same directory, then rename over `path`.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = parent_dir(path);
     let mut tmp = tempfile::Builder::new()
         .prefix(".hosts-")
         .tempfile_in(dir)?;
@@ -147,6 +165,26 @@ mod tests {
         let p = dir.path().join("hosts.json");
         std::fs::write(&p, "not json").unwrap();
         assert!(load(Some(&p)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_rewritable_fails_in_a_read_only_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("hosts.json");
+        assert!(check_rewritable(&p).is_ok());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "probe cleans up"
+        );
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let res = check_rewritable(&p);
+        // root ignores the mode bits, so only assert where the dir really is read-only
+        let really_ro = std::fs::File::create(dir.path().join("x")).is_err();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(res.is_err() || !really_ro);
     }
 
     #[test]

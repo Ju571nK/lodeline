@@ -80,7 +80,8 @@ section = "admin"
 priority = "optional"
 # Match the dependencies injected by Debian's dh_installsystemd and
 # dh_installsysusers helpers. The alternatives keep non-systemd hosts usable.
-depends = "libc6, init-system-helpers (>= 1.52), systemd | systemd-standalone-sysusers | systemd-sysusers"
+# openssl is the program enrollment signs with.
+depends = "libc6, openssl, init-system-helpers (>= 1.52), systemd | systemd-standalone-sysusers | systemd-sysusers"
 maintainer-scripts = "../../packaging/debian-server"
 extended-description = """\
 Lodeline OSS reference server. Receives lodeline agent posture events over HTTPS \
@@ -113,6 +114,8 @@ provides = { "sigil-server" = "*" }
 # Old packages are erased after %post, so the data moves in %posttrans.
 post_trans_script = "/usr/libexec/lodeline-server/migrate-from-sigil server || :"
 summary = "OSS reference server: receives lodeline agent events over HTTPS (mTLS when configured)"
+# Enrollment signs through the openssl program.
+requires = { openssl = "*" }
 assets = [
     { source = "../../packaging/migrate-from-sigil.sh", dest = "/usr/libexec/lodeline-server/migrate-from-sigil", mode = "0755" },
     { source = "../../target/release/lodeline-server", dest = "/usr/bin/lodeline-server", mode = "0755" },
@@ -141,5 +144,15 @@ post_uninstall_script = """\
 systemctl daemon-reload >/dev/null 2>&1 || :
 if [ "$1" -ge 1 ] ; then
     systemctl try-restart lodeline-server.service >/dev/null 2>&1 || :
+fi
+# The three packages share one SELinux module: remove it with the last of them.
+# Keep it unless the package list was read, is not empty, and names neither other package.
+if [ "$1" = 0 ] && command -v semodule >/dev/null 2>&1 ; then
+    pkgs=$(rpm -qa 2>/dev/null) || pkgs=
+    if [ -n "$pkgs" ] ; then
+        rc=0
+        echo "$pkgs" | grep -qE '^(lodeline|lodeline-sender)-[0-9]' || rc=$?
+        [ "$rc" = 1 ] && semodule -r lodeline >/dev/null 2>&1 || :
+    fi
 fi
 """

@@ -60,8 +60,33 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `enroll-token` as the service account, because a root run leaves files the server cannot
   open. (#559, #553)
 
+### Changed
+
+- The documented and example `host_allowlist_path` is now
+  `/var/lib/lodeline-server/host-allowlist.json`. The server rewrites that file each time a
+  host enrolls, and the packaged unit makes only `/var/lib/lodeline-server` and
+  `/var/log/lodeline-server` writable. A server whose allowlist is at
+  `/etc/lodeline/host-allowlist.json` must move the file to `/var/lib/lodeline-server/` (owned by
+  `lodeline`, and on SELinux hosts run `restorecon -R /var/lib/lodeline-server`), set
+  `host_allowlist_path` to the new path and restart. With enrollment on, the server now checks at
+  boot that it can write next to the allowlist. If it cannot, it logs an `enroll:` error, leaves
+  enrollment off, and exits when `enroll_listener` is set. With `enroll_listener` set, a server whose allowlist cannot be
+  rewritten does not start, so event intake stops until the file is moved. Without
+  `enroll_listener`, only enrollment is off. (#567, #566)
+
 ### Fixed
 
+- Enrollment now works on a packaged Linux server. On a host with the packages installed and
+  SELinux enforcing, it failed three ways. The SELinux module did not let `lodeline_server_t`
+  run `openssl`, which signing uses, so enrollment was off and the log blamed the CA
+  certificate. The unit left `/tmp` read-only, so signing answered 500. The documented
+  allowlist path could not be rewritten, so every enrollment spent its token and answered 500.
+  The module now allows the server to run `openssl` (`corecmd_exec_bin`). The unit sets
+  `TMPDIR=/var/lib/lodeline-server`, so signing makes its temporary files in the state directory.
+  When the server cannot run `openssl`, the boot check now says so and names the path instead of
+  reporting a CA certificate that is not `CA:TRUE`. The server packages depend on `openssl`. The
+  three RPMs now remove the shared `lodeline` SELinux module with the last of them, where before
+  `rpm -e` left it installed. (#567, #566)
 - `lodeline-server enroll-token` now refuses before it writes anything when it runs as root and
   the token file's directory belongs to another account, and tells the operator to run it as
   that account (`sudo -u lodeline`). A token file made by root there is one the server cannot
