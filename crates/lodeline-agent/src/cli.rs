@@ -228,7 +228,6 @@ mod cli_tests {
         assert_eq!(sender_config.as_deref(), Some(Path::new("/tmp/s.yaml")));
     }
 
-    /// Not gated by `operator-cli`, so a hardened agent can still enroll.
     #[test]
     fn parses_init_host_id_and_rejects_another_spelling() {
         let id = "5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f";
