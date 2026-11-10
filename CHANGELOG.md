@@ -36,7 +36,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   running and uses a new pair as soon as it appears on disk, without a restart. A certificate
   directory the sender account cannot write turns renewal off with one error line. `enroll`
   names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
-  does not check it yet. `docs/install-server.md` has a new section 3.5. (#PR, #553)
+  does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
 - `lodeline-sender enroll <file>` enrolls a host from one enrollment file: a JSON document,
   `"lodeline_enrollment": 1`, that carries the host_id, the single-use token, the two listener
   addresses, the CA roots and the policy keystore. It stores the host_id through `lodeline
