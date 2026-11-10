@@ -123,27 +123,31 @@ pub async fn post_enroll_listener(
     if let Some(resp) = bad_fields(&req) {
         return resp;
     }
-    if let Err(e) = en
-        .index
-        .check(&req.token, &req.host_id, time::OffsetDateTime::now_utc())
-    {
-        if let RedeemErr::Io(msg) = &e {
-            tracing::error!(error = %msg, "enroll: token index read failed");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "sign_failed",
-                "token store error",
-            );
-        }
-        en.deny_log
-            .note_from(ROUTE, denial_reason(&e), Some(addr.ip()));
-        return enrollment_denied();
-    }
     let st2 = st.clone();
     let work = tokio::task::spawn_blocking(move || {
         let Some(en) = st2.enroll.as_ref() else {
             return enroll_off();
         };
+        if let Err(e) = en
+            .index
+            .check(&req.token, &req.host_id, time::OffsetDateTime::now_utc())
+        {
+            let noted = en
+                .deny_log
+                .note_from(ROUTE, denial_reason(&e), Some(addr.ip()));
+            if let RedeemErr::Io(msg) = &e {
+                // Once per deny-log window, not once per request.
+                if noted {
+                    tracing::error!(error = %msg, "enroll: token index read failed");
+                }
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "sign_failed",
+                    "token store error",
+                );
+            }
+            return enrollment_denied();
+        }
         let _mint = match en.mint.try_lock() {
             Ok(g) => g,
             Err(TryLockError::Poisoned(p)) => p.into_inner(),
@@ -413,7 +417,9 @@ fn deny(
         Caller::Fleet(_) => {
             record_denied(st, en, host_id, reason, csr_fp, &caller.fingerprint(), ts)
         }
-        Caller::Anonymous(addr) => en.deny_log.note_from(ROUTE, reason, Some(addr.ip())),
+        Caller::Anonymous(addr) => {
+            en.deny_log.note_from(ROUTE, reason, Some(addr.ip()));
+        }
     }
 }
 

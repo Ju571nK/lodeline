@@ -329,9 +329,9 @@ line carries the host's `peer` address. The server logs only errors unless
 **Exposure.** Open the port only to the networks hosts enroll from (§6). Put
 no load balancer or TLS proxy in front of it. The limits count TCP source
 addresses, so a balancer would put every host in one count, and a TLS proxy
-would show hosts its own certificate instead of the server's. The limits stop one source, not
-many. A flood from many addresses can stop enrollment, but not the main port,
-so filter it at the firewall.
+would show hosts its own certificate instead of the server's. The limits stop
+one source, not many. A flood from many addresses can stop enrollment, but not
+the main port, so filter it at the firewall.
 
 ---
 

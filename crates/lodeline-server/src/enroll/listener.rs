@@ -106,6 +106,7 @@ impl RateLimiter {
                 b.last_sweep = Some(now);
             }
             if b.map.len() >= MAX_SOURCES {
+                // shortcut: O(MAX_SOURCES) scan under the lock, only when the table is full; use an ordered index if MAX_SOURCES grows
                 full = true;
                 let oldest = b.map.iter().min_by_key(|(_, v)| v.at).map(|(k, _)| *k);
                 if let Some(k) = oldest {
@@ -324,7 +325,9 @@ impl<S: Send + 'static> Accept<TcpStream, S> for EnrollAcceptor {
             };
             match this.limiter.check(peer, Instant::now()) {
                 Admit::Yes => {}
-                Admit::TableFull => this.log.note_from(ROUTE, "rate_table_full", Some(peer)),
+                Admit::TableFull => {
+                    this.log.note_from(ROUTE, "rate_table_full", Some(peer));
+                }
                 Admit::No => return refuse("rate_limited"),
             }
             let life = ConnLife::new(tokio::time::Instant::now() + CONN_LIFETIME);

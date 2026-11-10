@@ -82,7 +82,13 @@ impl DenyLog {
     }
 
     /// Like `note`, with the caller's address on the lines that are written.
-    pub fn note_from(&self, route: &'static str, reason: &'static str, source: Option<IpAddr>) {
+    /// True when this call wrote a line.
+    pub fn note_from(
+        &self,
+        route: &'static str,
+        reason: &'static str,
+        source: Option<IpAddr>,
+    ) -> bool {
         // A `None` field is not recorded, so `note` lines keep their old text.
         let source = source.map(tracing::field::display);
         let mut g = self.seen.lock();
@@ -90,6 +96,7 @@ impl DenyLog {
             None => {
                 g.insert(reason, (Instant::now(), 0));
                 tracing::warn!(route, reason, source, "{}", self.message);
+                true
             }
             Some((t, suppressed)) if t.elapsed() >= LOG_WINDOW => {
                 tracing::warn!(
@@ -102,8 +109,12 @@ impl DenyLog {
                 );
                 *t = Instant::now();
                 *suppressed = 0;
+                true
             }
-            Some((_, suppressed)) => *suppressed += 1,
+            Some((_, suppressed)) => {
+                *suppressed += 1;
+                false
+            }
         }
     }
 }
@@ -520,7 +531,7 @@ mod tests {
                 "/v1/enroll",
                 "rate_limited",
                 Some([192, 0, 2, 7].into()),
-            )
+            );
         });
         assert!(
             with_source.ends_with(
@@ -528,5 +539,16 @@ mod tests {
             ),
             "{with_source}"
         );
+    }
+
+    #[test]
+    fn note_from_says_when_it_wrote_a_line() {
+        let log = DenyLog::new("enroll request refused");
+        assert!(log.note_from("/v1/enroll", "a", None), "first of a reason");
+        assert!(
+            !log.note_from("/v1/enroll", "a", None),
+            "counted in the window"
+        );
+        assert!(log.note_from("/v1/enroll", "b", None), "another reason");
     }
 }
