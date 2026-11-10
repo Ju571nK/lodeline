@@ -1,13 +1,13 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useRef, useState } from 'react';
+import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react';
 import { me } from '@/api/auth';
 import { ApiError } from '@/api/client';
 import {
   type EnrollmentStatus,
   enrollmentStatus,
-  fileName,
   isCanonicalV4,
+  type MadeFile,
   makeEnrollmentFile,
 } from '@/api/enrollment';
 import { Button } from '@/components/ui/button';
@@ -77,6 +77,27 @@ function NotAllowed() {
   );
 }
 
+/** A box that takes the focus when it appears, so a keyboard user lands on the answer. */
+function Answer({
+  role,
+  label,
+  className,
+  children,
+}: {
+  role: 'alert' | 'status';
+  label?: string;
+  className: string;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => ref.current?.focus(), []);
+  return (
+    <section ref={ref} tabIndex={-1} role={role} aria-label={label} className={className}>
+      {children}
+    </section>
+  );
+}
+
 function Ready({ info }: { info: Ready }) {
   const [hostId, setHostId] = useState('');
   const [badHostId, setBadHostId] = useState(false);
@@ -88,7 +109,8 @@ function Ready({ info }: { info: Ready }) {
     },
   });
 
-  function click() {
+  function submit(e: FormEvent) {
+    e.preventDefault();
     if (busy.current) return;
     const given = hostId.trim();
     if (given && !isCanonicalV4(given)) {
@@ -102,7 +124,7 @@ function Ready({ info }: { info: Ready }) {
 
   const error = make.error;
   return (
-    <>
+    <form onSubmit={submit} className="space-y-3">
       <p className="text-sm text-text-muted">
         The enrollment file is a JSON file with a single-use token, and what a new host needs to
         trust: the server's CA certificates and its policy keys. It holds no private key. Copy it to
@@ -130,16 +152,16 @@ function Ready({ info }: { info: Ready }) {
           </p>
         )}
       </div>
-      <Button onClick={click} disabled={make.isPending}>
+      <Button type="submit" disabled={make.isPending}>
         {make.isPending ? 'Making the file…' : 'Make an enrollment file'}
       </Button>
       {error && (
-        <p role="alert" className={box}>
+        <Answer role="alert" className={box}>
           {enrollErrorText(error instanceof ApiError ? error.code : 'network', error.message)}
-        </p>
+        </Answer>
       )}
-      {make.data && <Made hostId={make.data.host_id} expiresAt={make.data.expires_at} />}
-    </>
+      {make.data && <Made file={make.data} />}
+    </form>
   );
 }
 
@@ -207,18 +229,36 @@ function FileTable({ info }: { info: Ready }) {
 
 const when = (iso: string) => {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { timeZoneName: 'short' });
 };
 
 /** After a file was made: what it is, and the steps on the host. Shows no token. */
-function Made({ hostId, expiresAt }: { hostId: string; expiresAt: string }) {
-  const name = fileName(hostId);
+function Made({ file }: { file: MadeFile }) {
+  const { name, host_id: hostId, expires_at: expiresAt } = file;
+  const missing = [hostId ? '' : 'host id', expiresAt ? '' : 'expiry']
+    .filter(Boolean)
+    .map((w) => `the ${w}`)
+    .join(' and ');
   return (
-    <section role="status" aria-label="The file was made" className={`${box} space-y-3`}>
+    <Answer role="status" label="The file was made" className={`${box} space-y-3`}>
       <p>
-        The browser saved <code>{name}</code>. Host id: <code className={mono}>{hostId}</code>.
-        Valid until {when(expiresAt)}.
+        Your browser was given <code>{name}</code> to save.
+        {hostId && (
+          <>
+            {' '}
+            Host id: <code className={mono}>{hostId}</code>.
+          </>
+        )}
+        {expiresAt && <> Valid until {when(expiresAt)}.</>}
       </p>
+      {missing && (
+        <p>
+          The answer did not carry {missing}. A proxy in front of the console may have removed the
+          headers <code>X-Lodeline-Enroll-Host-Id</code> and{' '}
+          <code>X-Lodeline-Enroll-Expires-At</code>. The values are the <code>host_id</code> and{' '}
+          <code>expires_at</code> fields of the saved file.
+        </p>
+      )}
       <p>
         This file is a secret until the host uses it or it expires. It works once. The console did
         not keep a copy.
@@ -252,6 +292,6 @@ function Made({ hostId, expiresAt }: { hostId: string; expiresAt: string }) {
         <p>{hostIdExists}</p>
         <p>{fileStillValid}</p>
       </div>
-    </section>
+    </Answer>
   );
 }

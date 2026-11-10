@@ -22,19 +22,27 @@ export function enrollmentStatus(signal?: AbortSignal): Promise<EnrollmentStatus
   return api<EnrollmentStatus>('/enrollment', { signal });
 }
 
-/** What the page may keep of a made file: two values that are in the file and are not secret. */
+/**
+ * What the page may keep of a made file: the name it was saved under and two values that are in the
+ * file and are not secret. A value is null when the answer did not carry its header.
+ */
 export interface MadeFile {
-  host_id: string;
-  expires_at: string;
+  name: string;
+  host_id: string | null;
+  expires_at: string | null;
 }
 
 /** The server's rule for a host id: lower-case, hyphenated, version 4. */
 export const isCanonicalV4 = (s: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(s);
 
-export const fileName = (hostId: string) => `lodeline-enroll-${hostId}.json`;
+export const fileName = (hostId: string | null) =>
+  hostId ? `lodeline-enroll-${hostId}.json` : 'lodeline-enroll.json';
 
-/** Asks for a file, hands its bytes to the browser's download, and returns only the headers. */
+/**
+ * Asks for a file, hands its bytes to the browser's download, and returns only the headers. A 200
+ * is always saved: the server made a token, so a missing or bad header never drops the file.
+ */
 export async function makeEnrollmentFile(hostId?: string): Promise<MadeFile> {
   const res = await fetch(`${API_BASE}/enrollment/files`, {
     method: 'POST',
@@ -43,13 +51,12 @@ export async function makeEnrollmentFile(hostId?: string): Promise<MadeFile> {
     body: JSON.stringify(hostId ? { host_id: hostId } : {}),
   });
   if (!res.ok) throw await failure(res);
-  const host_id = res.headers.get('X-Lodeline-Enroll-Host-Id') ?? '';
-  const expires_at = res.headers.get('X-Lodeline-Enroll-Expires-At') ?? '';
-  if (!isCanonicalV4(host_id) || !expires_at) {
-    throw new ApiError(502, 'enroll_failed', 'the answer did not carry the file headers');
-  }
-  save(await res.blob(), fileName(host_id));
-  return { host_id, expires_at };
+  const header = res.headers.get('X-Lodeline-Enroll-Host-Id');
+  const host_id = header !== null && isCanonicalV4(header) ? header : null;
+  const expires_at = res.headers.get('X-Lodeline-Enroll-Expires-At') || null;
+  const name = fileName(host_id);
+  save(await res.blob(), name);
+  return { name, host_id, expires_at };
 }
 
 function save(blob: Blob, name: string) {

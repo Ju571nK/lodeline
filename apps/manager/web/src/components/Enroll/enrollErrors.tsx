@@ -7,20 +7,20 @@ export const stoppedHost = (
   <>
     If <code>lodeline-sender enroll</code> on the host stopped after it stored the host id (an exit
     code 3 when you run it again with another file means that), make a new file for that host id:
-    run <code>lodeline show host-id</code> on the host, paste its output into the host id field
+    run <code>sudo lodeline show host-id</code> on the host, paste its output into the host id field
     above, and make the file again.
   </>
 );
 export const hostIdExists = (
   <>
-    If the answer is that the host id already exists on the server, the console cannot help: run{' '}
-    {enrollToken} on the server.
+    If a later try on this page says that the host id already exists on the server, the console
+    cannot help: run {enrollToken} on the server.
   </>
 );
 export const fileStillValid = (
   <>
-    If the answer is that a file for this host id is still valid, use that file, wait until it
-    expires, or run {enrollToken} on the server.
+    If it says that a file for this host id is still valid, use that file, wait until it expires, or
+    run {enrollToken} on the server.
   </>
 );
 

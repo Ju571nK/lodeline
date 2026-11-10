@@ -34,15 +34,18 @@ const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const consoleError = (status: number, code: string, message = 'from the console') =>
   json(status, { error: { code, message } });
-const fileAnswer = (host = HOST) =>
-  new Response(JSON.stringify({ token: MARKER }), {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Lodeline-Enroll-Host-Id': host,
-      'X-Lodeline-Enroll-Expires-At': EXPIRES,
-    },
-  });
+const fileAnswer = (host: string | null = HOST, expires: string | null = EXPIRES) => {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Test-File': '1',
+  };
+  if (host) headers['X-Lodeline-Enroll-Host-Id'] = host;
+  if (expires) headers['X-Lodeline-Enroll-Expires-At'] = expires;
+  return new Response(JSON.stringify({ token: MARKER }), { status: 200, headers });
+};
+const withZone = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { timeZoneName: 'short' });
+const isFileAnswer = (r: unknown) => (r as Response).headers.get('X-Test-File') !== null;
 
 type Route = () => Response | Promise<Response>;
 
@@ -157,7 +160,7 @@ describe('Enroll a host page: states', () => {
       expect(within(table).getByText(new RegExp(text))).toBeInTheDocument();
     }
     expect(screen.getByText(/It holds no private key/)).toBeInTheDocument();
-    expect(await hostInput()).toHaveAccessibleDescription(/lodeline show host-id/);
+    expect(await hostInput()).toHaveAccessibleDescription(/sudo lodeline show host-id/);
   });
 
   it('names a settings error the console reports on the read', async () => {
@@ -198,6 +201,39 @@ describe('Enroll a host page: the click', () => {
     expect(await button()).toBeEnabled();
   });
 
+  it('moves the focus to the success box when the file was made', async () => {
+    serve({});
+    await renderPage();
+    fireEvent.click(await button());
+    const done = await screen.findByRole('status', { name: 'The file was made' });
+    await waitFor(() => expect(document.activeElement).toBe(done));
+    expect(done).toHaveAttribute('tabindex', '-1');
+  });
+
+  it('moves the focus to the error box when the answer is an error', async () => {
+    serve({ post: () => consoleError(409, 'host_exists') });
+    await renderPage();
+    fireEvent.click(await button());
+    const alert = await screen.findByRole('alert');
+    await waitFor(() => expect(document.activeElement).toBe(alert));
+    expect(alert).toHaveAttribute('tabindex', '-1');
+  });
+
+  it('makes one file for Enter in the host id field, and none while one is pending', async () => {
+    let release: (r: Response) => void = () => {};
+    const fetch = serve({ post: () => new Promise<Response>((r) => (release = r)) });
+    await renderPage();
+    const form = (await hostInput()).closest('form') as HTMLFormElement;
+    expect(form).not.toBeNull();
+    fireEvent.submit(form);
+    await screen.findByRole('button', { name: 'Making the file…' });
+    fireEvent.submit(form);
+    expect(posts(fetch)).toHaveLength(1);
+    release(fileAnswer());
+    await screen.findByText(/Valid until/);
+    expect(posts(fetch)).toHaveLength(1);
+  });
+
   it('sends {} without a host id and the given one, trimmed, with it', async () => {
     const fetch = serve({});
     await renderPage();
@@ -235,9 +271,12 @@ describe('Enroll a host page: the click', () => {
     const done = await screen.findByRole('status', { name: 'The file was made' });
     expect(saved).toHaveLength(1);
     expect(saved[0]?.name).toBe(`lodeline-enroll-${OTHER}.json`);
+    expect(done).toHaveTextContent(`Your browser was given lodeline-enroll-${OTHER}.json to save.`);
+    expect(done).not.toHaveTextContent('The browser saved');
     expect(done).toHaveTextContent(`Host id: ${OTHER}`);
     expect(done).toHaveTextContent(`sudo lodeline-sender enroll lodeline-enroll-${OTHER}.json`);
-    expect(done).toHaveTextContent(`Valid until ${new Date(EXPIRES).toLocaleString()}`);
+    expect(done).toHaveTextContent(`Valid until ${withZone(EXPIRES)}`);
+    expect(withZone(EXPIRES)).not.toBe(new Date(EXPIRES).toLocaleString());
   });
 
   it('says that the file is a secret, works once and was not kept, and gives the steps', async () => {
@@ -270,11 +309,13 @@ describe('Enroll a host page: the click', () => {
     const done = await screen.findByRole('status', { name: 'The file was made' });
     expect(done).toHaveTextContent('paste its output into the host id field');
     expect(done).toHaveTextContent(
-      'the console cannot help: run lodeline-server enroll-token on the server',
+      'If a later try on this page says that the host id already exists on the server, the console cannot help: run lodeline-server enroll-token on the server',
     );
     expect(done).toHaveTextContent(
-      'still valid, use that file, wait until it expires, or run lodeline-server enroll-token',
+      'If it says that a file for this host id is still valid, use that file, wait until it expires, or run lodeline-server enroll-token',
     );
+    expect(done).not.toHaveTextContent('If the answer is');
+    expect(done).toHaveTextContent('run sudo lodeline show host-id on the host');
   });
 
   it('revokes the object URL it made', async () => {
@@ -290,6 +331,9 @@ describe('Enroll a host page: the click', () => {
     const json = vi.spyOn(Response.prototype, 'json');
     const text = vi.spyOn(Response.prototype, 'text');
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const logs = (['log', 'info', 'warn', 'error', 'debug'] as const).map((k) =>
+      vi.spyOn(console, k).mockImplementation(() => {}),
+    );
     serve({});
     await renderPage();
     fireEvent.click(await button());
@@ -297,12 +341,9 @@ describe('Enroll a host page: the click', () => {
 
     expect(await saved[0]?.blob.text()).toContain(MARKER);
     // the status read is a GET and may parse its own answer; the file answer is never parsed
-    expect(
-      json.mock.contexts.filter((r) => (r as Response).headers.get('X-Lodeline-Enroll-Host-Id')),
-    ).toHaveLength(0);
-    expect(
-      text.mock.contexts.filter((r) => (r as Response).headers.get('X-Lodeline-Enroll-Host-Id')),
-    ).toHaveLength(0);
+    expect(json.mock.contexts.filter(isFileAnswer)).toHaveLength(0);
+    expect(text.mock.contexts.filter(isFileAnswer)).toHaveLength(0);
+    expect(JSON.stringify(logs.map((l) => l.mock.calls))).not.toContain(MARKER);
     expect(document.documentElement.innerHTML).not.toContain(MARKER);
     expect(setItem).not.toHaveBeenCalled();
     expect(JSON.stringify({ ...localStorage })).not.toContain(MARKER);
@@ -382,13 +423,65 @@ describe('Enroll a host page: errors', () => {
     );
   });
 
-  it('names an answer without the file headers as a failed file', async () => {
-    serve({ post: () => new Response(`{"token":"${MARKER}"}`, { status: 200 }) });
+  it.each([
+    ['both headers', () => fileAnswer(null, null)],
+    ['a host id that is not a v4 id', () => fileAnswer(HOST.toUpperCase(), null)],
+  ])('saves a 200 that lacks %s under the general name and says what is missing', async (_n, post) => {
+    const json = vi.spyOn(Response.prototype, 'json');
+    const text = vi.spyOn(Response.prototype, 'text');
+    const logs = (['log', 'info', 'warn', 'error', 'debug'] as const).map((k) =>
+      vi.spyOn(console, k).mockImplementation(() => {}),
+    );
+    serve({ post });
     await renderPage();
     fireEvent.click(await button());
-    expect(await screen.findByRole('alert')).toHaveTextContent('may have made a token');
-    expect(saved).toHaveLength(0);
+    const done = await screen.findByRole('status', { name: 'The file was made' });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.name).toBe('lodeline-enroll.json');
+    expect(await saved[0]?.blob.text()).toContain(MARKER);
+    expect(done).toHaveTextContent('Your browser was given lodeline-enroll.json to save.');
+    expect(done).toHaveTextContent('The answer did not carry the host id and the expiry.');
+    expect(done).toHaveTextContent('X-Lodeline-Enroll-Host-Id and X-Lodeline-Enroll-Expires-At');
+    expect(done).toHaveTextContent('host_id and expires_at fields of the saved file');
+    expect(done).not.toHaveTextContent('Valid until');
+    expect(done).not.toHaveTextContent('Host id:');
+    expect(done).toHaveTextContent('sudo lodeline-sender enroll lodeline-enroll.json');
+    expect(json.mock.contexts.filter(isFileAnswer)).toHaveLength(0);
+    expect(text.mock.contexts.filter(isFileAnswer)).toHaveLength(0);
+    expect(JSON.stringify(logs.map((l) => l.mock.calls))).not.toContain(MARKER);
     expect(document.documentElement.innerHTML).not.toContain(MARKER);
+    expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain(MARKER);
+    const cached = JSON.stringify(
+      client
+        .getMutationCache()
+        .getAll()
+        .map((m) => ({ data: m.state.data, vars: m.state.variables })),
+    );
+    expect(cached).not.toContain(MARKER);
+  });
+
+  it('shows the host id and names the expiry when only the expiry header is missing', async () => {
+    serve({ post: () => fileAnswer(OTHER, null) });
+    await renderPage();
+    fireEvent.click(await button());
+    const done = await screen.findByRole('status', { name: 'The file was made' });
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.name).toBe(`lodeline-enroll-${OTHER}.json`);
+    expect(done).toHaveTextContent(`Host id: ${OTHER}`);
+    expect(done).toHaveTextContent('The answer did not carry the expiry.');
+    expect(done).not.toHaveTextContent('Valid until');
+  });
+
+  it('shows the expiry and names the host id when only the host id header is missing', async () => {
+    serve({ post: () => fileAnswer(null, EXPIRES) });
+    await renderPage();
+    fireEvent.click(await button());
+    const done = await screen.findByRole('status', { name: 'The file was made' });
+    expect(saved[0]?.name).toBe('lodeline-enroll.json');
+    expect(done).toHaveTextContent(`Valid until ${withZone(EXPIRES)}`);
+    expect(done).toHaveTextContent('The answer did not carry the host id.');
+    expect(done).not.toHaveTextContent('Host id:');
   });
 
   it('keeps the recovery text of the host id field', async () => {
