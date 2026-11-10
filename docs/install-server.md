@@ -67,7 +67,8 @@ sudo apt install ./lodeline-server_*_amd64.deb
 
 This installs `/usr/bin/lodeline-server`, the unit at
 `/usr/lib/systemd/system/lodeline-server.service`, and
-`/etc/lodeline/server.yaml.example`.
+`/etc/lodeline/server.yaml.example`. The package depends on `openssl`, the
+program enrollment signs with (§3.1), so the package manager installs it.
 
 > Prefer to build the package yourself? `cargo install cargo-deb
 > cargo-generate-rpm && packaging/build.sh server` produces them under
@@ -183,10 +184,29 @@ enroll_ca_cert_path: "/etc/lodeline/enroll-int.crt"
 enroll_ca_key_path:  "/etc/lodeline/enroll-int.key"   # 0600 or enrollment disables
 enroll_tokens_path:  "/var/lib/lodeline-server/enroll-tokens.json"
 enroll_cert_days: 30                                # short — re-enroll is the revocation story
-host_allowlist_path: "/etc/lodeline/host-allowlist.json"   # REQUIRED (restrictive set)
+host_allowlist_path: "/var/lib/lodeline-server/host-allowlist.json"   # REQUIRED (restrictive set)
 ```
 
-The server validates the intermediate at boot (CA:TRUE, key⇄cert match, 0600).
+The server rewrites the allowlist each time a host enrolls, so the path must sit
+in a directory the service can write. The unit makes only
+`/var/lib/lodeline-server` and `/var/log/lodeline-server` writable, so keep the
+file in the first. Create it before you start the server:
+
+```sh
+sudo install -d -o lodeline -g lodeline -m 0750 /var/lib/lodeline-server
+echo '{"hosts":[]}' | sudo -u lodeline tee /var/lib/lodeline-server/host-allowlist.json
+```
+
+The server validates the intermediate at boot (CA:TRUE, key⇄cert match, 0600),
+that it can run `openssl`, and that it can write next to the allowlist. A failed
+check logs an `enroll:` line naming the cause, and enrollment stays off. Signing
+makes its temporary files under `/var/lib/lodeline-server/tmp`, which the unit
+creates and points `TMPDIR` at.
+
+An allowlist that sat at `/etc/lodeline/host-allowlist.json` cannot be rewritten
+by the unit, so every enrollment failed after it spent the token. Move the file
+to `/var/lib/lodeline-server/`, set `host_allowlist_path` to the new path, and
+restart the server.
 
 **3. Issue a token** (server host; prints the plaintext once — only its hash is
 stored). Run it as the service account:
@@ -389,7 +409,7 @@ tls_key_path:  "/etc/lodeline/server.key"
 client_ca_path: "/etc/lodeline/ca.crt"
 
 # Optional hardening:
-# host_allowlist_path: "/etc/lodeline/host-allowlist.json"  # {"hosts":["uuid",...]}
+# host_allowlist_path: "/var/lib/lodeline-server/host-allowlist.json"  # {"hosts":["uuid",...]}
 # high_water_path: "/var/lib/lodeline-server/high_water.json" # at-least-once dedup
 
 # Optional — serve signed agent artifacts for air-gapped / PMS install (§5.1):
@@ -475,6 +495,10 @@ sudo firewall-cmd --reload
 `lodeline_server_t` can bind an unreserved port. If `semanage port -l` lists a
 label for the enrollment port, relabel it as `packaging/selinux/README.md`
 describes.
+
+Enrollment runs `openssl` as the server's own process. The package's SELinux
+module lets `lodeline_server_t` run it. If a host loaded an older module, or
+none, update it as `packaging/selinux/README.md` describes, or enrollment stays off.
 
 SELinux is **Enforcing** on Rocky/RHEL by default. The package's
 `StateDirectory`/`LogsDirectory` (`/var/lib/lodeline-server`, `/var/log/lodeline-server`)
@@ -582,6 +606,8 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | `No route to host` from agent | Firewall / port not open | Open `8443/tcp` (§6) |
 | Server exits with `enroll_listener is set but enrollment is off` | A §3.1 enrollment check failed | Fix what the `enroll:` warning above it names (§3.2) |
 | Server exits with `invalid config` naming `enroll_listener` | A §3.2 boot refusal | Do what the message says (§3.2) |
+| Server logs `enroll: cannot write next to host_allowlist_path` and enrollment is off | The service cannot rewrite the allowlist, for example because it sits under `/etc/lodeline` | Move it to `/var/lib/lodeline-server/` and update `host_allowlist_path` (§3.1) |
+| Server logs `enroll: cannot run openssl at <path>` and enrollment is off | `openssl` is missing, or the service may not run it (SELinux denial: `ausearch -m avc -ts recent`) | Install the `openssl` package. On SELinux hosts use the package's policy module, which allows it (§6) |
 | Every enrollment answers 500 `token store error` | The token file or its `.lock` file is owned by root after a root `enroll-token` run | `sudo chown lodeline:lodeline <enroll_tokens_path> <enroll_tokens_path>.lock`, then run `enroll-token` with `sudo -u lodeline` (§3.1) |
 | Enrollment port closes the connection before TLS | Rate limit or full listener | Wait about a minute. The server logs `enroll request refused` with `reason=rate_limited` or `listener_full` and the `source` (§3.2) |
 

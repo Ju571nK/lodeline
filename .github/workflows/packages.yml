@@ -38,7 +38,8 @@ jobs:
     steps:
       - name: install build deps
         # rpm-build provides /usr/lib/rpm/find-requires for packaging/build.sh (#234).
-        run: dnf -y install git gcc perl rpm-build
+        # openssl is a lodeline-server requirement, and rpm -i does not resolve it.
+        run: dnf -y install git gcc perl rpm-build openssl
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -129,6 +130,10 @@ jobs:
               exit 1
             fi
             rpm -qpl "$rpm" | grep -qx "/usr/bin/${bin}"
+            if [ "$pkg" = lodeline-server ]; then
+              # Enrollment signs through the openssl program.
+              rpm -qp --requires "$rpm" | grep -Eq '^openssl( |$)'
+            fi
             if [ "$pkg" = lodeline-proxy ]; then
               # AC-14: installed disabled, no live config, no auto enable/start,
               # no SELinux module load from this package.
@@ -337,6 +342,8 @@ jobs:
             contents=$(dpkg --contents "$deb")
             printf '%s\n' "$contents"
             grep -qE "/usr/bin/${bin}$" <<< "$contents"
+            # Enrollment signs through the openssl program.
+            [ "$pkg" != lodeline-server ] || dpkg-deb -f "$deb" Depends | grep -Eq '(^|, )openssl(,| |$)'
             [ -z "$unit" ]    || grep -qE "/systemd/system/${unit}$" <<< "$contents"
             [ -z "$example" ] || grep -qE "${example}$" <<< "$contents"
             if [ "$pkg" = lodeline-proxy ]; then

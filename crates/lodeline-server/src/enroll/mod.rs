@@ -105,6 +105,17 @@ impl EnrollState {
                 return None;
             }
         }
+        // Enrolling rewrites the allowlist AFTER the token is spent, so a path the
+        // service cannot rewrite must disable enrollment here, not fail a request.
+        if let Err(e) = crate::allowlist::check_rewritable(allowlist_path) {
+            tracing::error!(
+                path = %allowlist_path.display(),
+                error = %e,
+                "enroll: cannot write next to host_allowlist_path (the service must be able to \
+                 rewrite the file); enrollment disabled"
+            );
+            return None;
+        }
         if !cert.is_file() || !key.is_file() {
             tracing::warn!("enroll: ca cert/key missing on disk; enrollment disabled");
             return None;
@@ -116,6 +127,10 @@ impl EnrollState {
                 return None;
             }
         };
+        if let Err(msg) = openssl_runs(&openssl) {
+            tracing::error!("enroll: {msg}; enrollment disabled");
+            return None;
+        }
         if !key_mode_ok(key) {
             tracing::error!(
                 path = %key.display(),
@@ -188,6 +203,25 @@ impl EnrollState {
             index: index::TokenIndex::new(toks.to_path_buf()),
             deny_log: Arc::new(crate::proxy::ingest::DenyLog::new("enroll request refused")),
         })
+    }
+}
+
+/// Run `openssl version` so a binary the service may not execute (an SELinux or
+/// permission denial) is reported as that, not as a bad CA cert later.
+fn openssl_runs(openssl: &Path) -> Result<(), String> {
+    match Command::new(openssl)
+        .env_remove("OPENSSL_CONF")
+        .arg("version")
+        .output()
+    {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "openssl at {} ran but failed ({}): {}",
+            openssl.display(),
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("cannot run openssl at {}: {e}", openssl.display())),
     }
 }
 
@@ -447,6 +481,65 @@ mod tests {
             load(Some(vec!["zz".repeat(32)])).is_none(),
             "non-hex entry rejected"
         );
+    }
+
+    /// An openssl the service cannot run is reported as that, with its path.
+    #[cfg(unix)]
+    #[test]
+    fn openssl_runs_names_the_path_when_it_cannot_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let fake = d.path().join("openssl");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let msg = openssl_runs(&fake).unwrap_err();
+        assert!(msg.contains("cannot run openssl"), "{msg}");
+        assert!(msg.contains(&fake.display().to_string()), "{msg}");
+        assert!(!msg.contains("CA:TRUE"), "{msg}");
+
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(openssl_runs(&fake).is_ok());
+        std::fs::write(&fake, "#!/bin/sh\necho no >&2\nexit 3\n").unwrap();
+        let msg = openssl_runs(&fake).unwrap_err();
+        assert!(
+            msg.contains("ran but failed") && msg.contains("no"),
+            "{msg}"
+        );
+    }
+
+    /// An allowlist the service cannot rewrite disables enrollment at boot.
+    #[cfg(unix)]
+    #[test]
+    fn load_none_when_allowlist_dir_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(openssl) = sign::resolve_openssl() else {
+            return;
+        };
+        let d = tempfile::tempdir().unwrap();
+        let (cert, key) = make_ca(&openssl, d.path());
+        let ro = d.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        let al = write_allowlist(&ro);
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root ignores the mode bits, so only assert where the dir really is read-only
+        let really_ro = std::fs::File::create(ro.join("x")).is_err();
+        let s = EnrollState::load(
+            Some(&cert),
+            Some(&key),
+            Some(&d.path().join("t.json")),
+            Some(&al),
+            true,
+            Some(30),
+            d.path().join("a.jsonl"),
+            None,
+        );
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if really_ro {
+            assert!(
+                s.is_none(),
+                "unwritable allowlist dir must disable enrollment"
+            );
+        }
     }
 
     /// A non-CA (CA:FALSE) cert must be rejected.

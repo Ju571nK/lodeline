@@ -27,7 +27,11 @@ RestartSec=5
 # operator-provided, not packaged.
 User=lodeline
 Group=lodeline
-StateDirectory=lodeline-server
+# The tmp subdirectory is where enrollment signing makes its temporary files:
+# ProtectSystem=strict leaves /tmp read-only, and the state directory is already
+# writable and labelled for the server.
+StateDirectory=lodeline-server lodeline-server/tmp
+Environment=TMPDIR=/var/lib/lodeline-server/tmp
 LogsDirectory=lodeline-server
 StateDirectoryMode=0750
 LogsDirectoryMode=0750
