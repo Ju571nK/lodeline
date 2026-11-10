@@ -1187,3 +1187,33 @@ async fn a_denial_is_remembered_only_after_its_audit_line_was_written() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(env.lines_with("denied", "renewal_superseded"), 1, "chained");
 }
+
+/// A second certificate for the host, from the same CA and in its window, that is
+/// neither the head nor the certificate the head was issued for.
+async fn a_stranger_with_the_same_csr_is_refused(restart: bool) {
+    let env = Env::new();
+    let st = env.state(&[HOST]);
+    let (old, same) = renewed_once(&env, &st).await;
+    let st = if restart { env.restart() } else { st };
+    let third = peer(&aged(
+        &env,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        Duration::days(20),
+    ));
+    let (status, _, _) = call(&st, Some(&third), &same, now()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a third certificate");
+    assert_eq!(env.lines_with("issued", "renewed"), 1);
+    let (status, _, body) = call(&st, Some(&old), &same, now()).await;
+    assert_eq!(status, StatusCode::OK, "the real predecessor: {body}");
+}
+
+#[tokio::test]
+async fn a_repeat_must_come_from_the_previous_certificate() {
+    a_stranger_with_the_same_csr_is_refused(false).await;
+}
+
+#[tokio::test]
+async fn a_repeat_must_come_from_the_previous_certificate_after_a_restart() {
+    a_stranger_with_the_same_csr_is_refused(true).await;
+}
