@@ -229,9 +229,6 @@ pub fn dead_letter_tls_failure(dir: &Path, host_id: &str, in_streak: &mut bool, 
     let _ = dead_letter::append(dir, &evt);
 }
 
-/// Top-level data plane loop: read JSONL → POST /v1/events → apply_ack
-/// → state::store → dead-letter rejections → update stats. Handles all
-/// `BatchOutcome` variants per spec §3.8.2.
 /// Rate limit for a warning that repeats on every retry: the first one
 /// logs at once, then at most one per `LOG_EVERY`, carrying how many were
 /// skipped. A success resets it.
@@ -263,6 +260,9 @@ impl RepeatLog {
     }
 }
 
+/// Top-level data plane loop: read JSONL → POST /v1/events → apply_ack
+/// → state::store → dead-letter rejections → update stats. Handles all
+/// `BatchOutcome` variants per spec §3.8.2.
 pub async fn run(ctx: DataTaskCtx) {
     let backoff_busy = BackoffPolicy::server_busy();
     let backoff_perm = BackoffPolicy::upgrade_required();
