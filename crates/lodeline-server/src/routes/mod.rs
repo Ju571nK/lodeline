@@ -9,6 +9,7 @@ pub mod fleet_risk;
 pub mod healthz;
 pub mod meta;
 pub mod policy_meta;
+pub mod renew;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

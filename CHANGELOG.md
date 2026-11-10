@@ -9,6 +9,21 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- `lodeline-server` renews a host's client certificate. `POST /v1/renew` on the main (mutual
+  TLS) listener takes the host's current certificate as the credential and a CSR for a new key,
+  and answers with a certificate for the same host_id from the enrollment CA, with the fields
+  `/v1/enroll` returns and one signed `issued` audit line with the reason `renewed`. The route
+  is on whenever enrollment is on and has no setting. It answers only when the certificate
+  verifies against the enrollment CA alone, the host is on the allowlist, and more than half of
+  the certificate's validity has passed (409 with `Retry-After` before that). A host renews only
+  from the newest certificate the server issued for it, rebuilt at start from the audit file and
+  updated by both issuing routes, so a re-enrollment ends renewal for the older chain; one
+  presented certificate gets at most three certificates (a lost answer may repeat the same CSR),
+  and the first refusal for each is chained into the audit file. A missing audit file starts with
+  no entries, lines that do not parse are skipped, and a file that cannot be read turns renewal
+  off. `docs/install-server.md` has a new section 3.4 and no longer says that short lifetimes or
+  re-enrollment stand in for revocation: it says what removes a host and what keeps working until
+  `notAfter`. The sender does not call the route yet. (#569, #553)
 - `lodeline-sender enroll <file>` enrolls a host from one enrollment file: a JSON document,
   `"lodeline_enrollment": 1`, that carries the host_id, the single-use token, the two listener
   addresses, the CA roots and the policy keystore. It stores the host_id through `lodeline

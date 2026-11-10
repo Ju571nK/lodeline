@@ -450,6 +450,7 @@ impl Fx {
             san_dns: vec![],
             issuer_dn: Some(issuer.into()),
             issuer_aki: None,
+            ..Default::default()
         };
         let proxy = |id: &str, fp: &str| PeerIdentity {
             fingerprint: fp.into(),
@@ -457,6 +458,7 @@ impl Fx {
             san_dns: vec![proxy_san(id)],
             issuer_dn: Some(self.ctx.ca.subject_dn.clone()),
             issuer_aki: None,
+            ..Default::default()
         };
         match who {
             Who::Host => Some(mk(HOST_FP, "CN=test-host-ca")),

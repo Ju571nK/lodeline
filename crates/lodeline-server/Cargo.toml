@@ -66,6 +66,8 @@ lodeline-server = { path = ".", features = ["test-support"] }
 reqwest = { workspace = true, features = ["http2"] }
 http = { workspace = true }
 insta = { workspace = true }
+# #553: mints test client certificates with an exact notBefore and notAfter.
+rcgen = { workspace = true }
 
 # -- OS packages -------------------------------------------------------------
 # Build with `packaging/build.sh server`. See packaging/README.md.

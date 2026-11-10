@@ -18,6 +18,7 @@ pub mod audit;
 pub mod index;
 pub mod listener;
 pub mod lock;
+pub mod renewal;
 pub mod sign;
 pub mod tokens;
 
@@ -49,6 +50,9 @@ pub struct EnrollState {
     pub index: index::TokenIndex,
     /// #553: counts and logs the enrollment listener's denials.
     pub deny_log: Arc<crate::proxy::ingest::DenyLog>,
+    /// #553: `POST /v1/renew`. `None` ⇒ the route answers 404 (the audit file
+    /// could not be read, or the CA is not usable as a trust anchor).
+    pub renewal: Option<renewal::Renewal>,
 }
 
 impl EnrollState {
@@ -184,6 +188,7 @@ impl EnrollState {
             cert = %cert.display(),
             "enroll: enabled (intermediate CA validated)"
         );
+        let renewal = renewal::Renewal::load(cert, &audit_path);
         Some(EnrollState {
             ca_cert_path: cert.to_path_buf(),
             ca_key_path: key.to_path_buf(),
@@ -195,6 +200,7 @@ impl EnrollState {
             mint: Mutex::new(()),
             index: index::TokenIndex::new(toks.to_path_buf()),
             deny_log: Arc::new(crate::proxy::ingest::DenyLog::new("enroll request refused")),
+            renewal,
         })
     }
 }

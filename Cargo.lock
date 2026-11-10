@@ -2244,6 +2244,7 @@ dependencies = [
  "lodeline-server",
  "parking_lot",
  "rand_core 0.6.4",
+ "rcgen",
  "reqwest",
  "rusqlite",
  "rustls",

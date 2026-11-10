@@ -351,6 +351,9 @@ fn redeem(st: &SharedState, en: &EnrollState, req: &EnrollReq, caller: &Caller) 
             "audit append failed",
         );
     }
+    if let Some(rn) = en.renewal.as_ref() {
+        rn.record_enrollment(&req.host_id, &serial, &csr_fp);
+    }
 
     // 6. Allowlist add (atomic file). Required — failure ⇒ 500, no cert. Runs
     //    AFTER the audit append so the issuance is always recorded first.
