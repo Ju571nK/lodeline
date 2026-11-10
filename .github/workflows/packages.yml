@@ -88,6 +88,33 @@ jobs:
             fi
           }
 
+          # The package never enables or starts the agent, so an operator can run
+          # `lodeline init-host-id` before the agent's first run picks a host_id.
+          agent_assert_disabled_and_stopped() {
+            if command -v systemctl >/dev/null 2>&1; then
+              st=$(systemctl is-enabled lodeline 2>&1 || true)
+              echo "systemctl is-enabled lodeline: $st"
+              case "$st" in enabled*) echo "::error::lodeline is enabled"; exit 1 ;; esac
+              st=$(systemctl is-active lodeline 2>&1 || true)
+              echo "systemctl is-active lodeline: $st"
+              case "$st" in active*|reloading*) echo "::error::lodeline is active"; exit 1 ;; esac
+            fi
+            if ls /etc/systemd/system/*.wants/lodeline.service >/dev/null 2>&1; then
+              echo "::error::lodeline has a wants symlink (enabled)"
+              exit 1
+            fi
+            for c in /proc/[0-9]*/comm; do
+              if [ "$(cat "$c" 2>/dev/null)" = lodeline ]; then
+                echo "::error::lodeline process is running"
+                exit 1
+              fi
+            done
+            if [ -e /var/lib/lodeline/state.db ]; then
+              echo "::error::/var/lib/lodeline/state.db exists, so the agent has run"
+              exit 1
+            fi
+          }
+
           while IFS='|' read -r pkg bin unit example; do
             # Anchor on a digit after the dash so `lodeline-*.rpm` doesn't match
             # lodeline-sender / lodeline-server / lodeline-signer too (issue #7).
@@ -133,6 +160,7 @@ jobs:
               /usr/bin/lodeline-proxy version
               proxy_assert_disabled_and_silent
             fi
+            [ "$pkg" != lodeline ] || agent_assert_disabled_and_stopped
             if [ -n "$unit" ]; then
               test -f "/usr/lib/systemd/system/${unit}"
             fi
@@ -195,6 +223,7 @@ jobs:
             test "$(rpm -q "$pkg" | wc -l)" = 1
           done
           /usr/bin/lodeline --version | grep -F "$want"
+          agent_assert_disabled_and_stopped
           for f in policy sender server; do grep -qx "# operator-marker-$f" "/etc/lodeline/$f.yaml"; done
           test "$(stat -c '%a %U:%G' /var/lib/lodeline)" = "750 root:lodeline"
           test "$(stat -c '%a %U:%G' /var/lib/lodeline/applied)" = "750 root:lodeline"
@@ -264,6 +293,33 @@ jobs:
             fi
           }
 
+          # The package never enables or starts the agent, so an operator can run
+          # `lodeline init-host-id` before the agent's first run picks a host_id.
+          agent_assert_disabled_and_stopped() {
+            if command -v systemctl >/dev/null 2>&1; then
+              st=$(systemctl is-enabled lodeline 2>&1 || true)
+              echo "systemctl is-enabled lodeline: $st"
+              case "$st" in enabled*) echo "::error::lodeline is enabled"; exit 1 ;; esac
+              st=$(systemctl is-active lodeline 2>&1 || true)
+              echo "systemctl is-active lodeline: $st"
+              case "$st" in active*|reloading*) echo "::error::lodeline is active"; exit 1 ;; esac
+            fi
+            if ls /etc/systemd/system/*.wants/lodeline.service >/dev/null 2>&1; then
+              echo "::error::lodeline has a wants symlink (enabled)"
+              exit 1
+            fi
+            for c in /proc/[0-9]*/comm; do
+              if [ "$(cat "$c" 2>/dev/null)" = lodeline ]; then
+                echo "::error::lodeline process is running"
+                exit 1
+              fi
+            done
+            if [ -e /var/lib/lodeline/state.db ]; then
+              echo "::error::/var/lib/lodeline/state.db exists, so the agent has run"
+              exit 1
+            fi
+          }
+
           for entry in \
             "lodeline|lodeline|lodeline.service|/etc/lodeline/policy.yaml.example" \
             "lodeline-sender|lodeline-sender|lodeline-sender.service|/etc/lodeline/sender.yaml.example" \
@@ -313,6 +369,7 @@ jobs:
               /usr/bin/lodeline-proxy version
               proxy_assert_disabled_and_silent
             fi
+            [ "$pkg" != lodeline ] || agent_assert_disabled_and_stopped
             dpkg -P "$pkg"
             test ! -e "/usr/bin/${bin}"
           done
@@ -371,6 +428,7 @@ jobs:
             case "$(dpkg-query -W -f='${Version}' "$pkg")" in "$want"-*) ;; *) exit 1 ;; esac
           done
           /usr/bin/lodeline --version | grep -F "$want"
+          agent_assert_disabled_and_stopped
           grep -qx '# upgrade-marker' /etc/lodeline/policy.yaml.example
           for f in policy sender server; do grep -qx "# operator-marker-$f" "/etc/lodeline/$f.yaml"; done
           test "$(stat -c '%a %U:%G' /var/lib/lodeline)" = "750 root:lodeline"
