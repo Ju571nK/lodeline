@@ -166,3 +166,6 @@ corenet_tcp_bind_all_unreserved_ports(lodeline_server_t)
 corenet_tcp_bind_http_port(lodeline_server_t)
 sysnet_dns_name_resolve(lodeline_server_t)
 auth_use_nsswitch(lodeline_server_t)
+
+# Enrollment signs host certificates by running openssl (enroll/sign.rs).
+corecmd_exec_bin(lodeline_server_t)

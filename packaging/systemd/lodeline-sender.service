@@ -24,7 +24,6 @@ RestartSec=5
 # lodeline user is created by this package at install (sysusers.d). NOTE: existing
 # sender.yaml files must move offset_path/dead_letter_dir to the sender-owned
 # dirs below (see CHANGELOG); fresh configs that omit them get these defaults.
-# events_dir and agent_control have no default; sender.yaml must set both.
 User=lodeline
 Group=lodeline
 StateDirectoryMode=0750
