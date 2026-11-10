@@ -140,7 +140,7 @@ pub async fn guard(State(st): State<SharedState>, mut req: Request, next: Next) 
     let Some(peer) = peer.filter(|p| api.auth.is_caller(&p.fingerprint)) else {
         return not_found("not_a_mint_caller_cert");
     };
-    let token = crate::auth::extract_bearer(req.headers()).filter(|t| !t.is_empty());
+    let token = crate::auth::extract_bearer(req.headers());
     match api
         .auth
         .authenticate(&peer.fingerprint, token, OffsetDateTime::now_utc())
@@ -269,7 +269,7 @@ fn mint(st: &SharedState, call: &MintCall, host_id: &str) -> Response {
         return err(
             StatusCode::CONFLICT,
             "host_exists",
-            "this host id already has a certificate; use lodeline-server enroll-token to re-enroll it",
+            "this host id is already on the allowlist or has a certificate from this server; use lodeline-server enroll-token to re-enroll it",
         );
     }
     let expires_at = now + api.ttl;

@@ -3,8 +3,8 @@
 //! A deny-only filter that runs before the mint lock and before any CSR
 //! parse, so an unknown token costs one `stat` and no file read. The file is
 //! read again only when its `(len, mtime, inode)` stamp changes, never on a
-//! miss. Every write by `TokenStore` replaces the file, so the inode and the
-//! mtime change on each one even when a prune made the file shorter.
+//! miss. Every write by `TokenStore` replaces the file, so the length, the inode
+//! or the mtime changes (a prune followed by an added entry can keep the length).
 //!
 //! The index can only deny wrongly, never grant: the only entries removed are
 //! ones spent or expired more than an hour ago (the HTTP mint prunes them), which

@@ -275,6 +275,21 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// The stderr text of `verifier-new`. The mint's file has no SIGHUP path.
+fn verifier_hint(scope: Scope, entry_json: &str) -> String {
+    let reload = if scope == Scope::Enroll {
+        "A change is read at the next request."
+    } else {
+        "A change is read at the next request, or send SIGHUP to the proxy file's server."
+    };
+    format!(
+        "token above is shown ONCE; store it in an owner-only file (0600) on the caller host.\n\
+         Add this entry to the \"entries\" array of the verifier file \
+         (proxy.management_verifiers for scope config or identity, enroll_mint.verifiers \
+         for scope enroll; mode 0600). {reload}\n{entry_json}"
+    )
+}
+
 /// Generate a token and its verifier-file entry. Returns `(token, entry)`.
 pub fn new_verifier(
     scope: Scope,
@@ -372,12 +387,8 @@ pub async fn run(cmd: ProxyCommand) -> Result<()> {
         )?;
         println!("{token}");
         eprintln!(
-            "token above is shown ONCE; store it in an owner-only file (0600) on the caller host.\n\
-             Add this entry to the \"entries\" array of the verifier file \
-             (proxy.management_verifiers for scope config or identity, enroll_mint.verifiers \
-             for scope enroll; mode 0600). A change is read at the next request, or send \
-             SIGHUP to the proxy file's server:\n{}",
-            serde_json::to_string_pretty(&entry)?
+            "{}",
+            verifier_hint(*scope, &serde_json::to_string_pretty(&entry)?)
         );
         return Ok(());
     }
@@ -594,6 +605,14 @@ mod tests {
             FP
         ])
         .is_err());
+    }
+
+    #[test]
+    fn verifier_hint_names_sighup_only_for_the_proxy_scopes() {
+        assert!(!verifier_hint(Scope::Enroll, "{}").contains("SIGHUP"));
+        for s in [Scope::Config, Scope::Identity] {
+            assert!(verifier_hint(s, "{}").contains("SIGHUP"));
+        }
     }
 
     #[test]

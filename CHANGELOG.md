@@ -13,8 +13,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   to use (`docs/install-server.md` section 3.6). It is off unless `enroll_mint:` is
   in `server.yaml`, and needs a pinned client certificate, a bearer with the new scope `enroll`
   from its own verifier file (`lodeline-server proxy verifier-new --scope enroll --caller-cert
-  <pem>`), and the enrollment listener. It refuses a host that already has a certificate or a live
-  token, keeps at most `enroll_mint.max_tokens` entries in the token file (pruning ones spent or
+  <pem>`), and the enrollment listener. It refuses a host id that is on the allowlist or has a certificate
+  this server issued, or that has a live token, keeps at most `enroll_mint.max_tokens` entries in the token file (pruning ones spent or
   expired more than an hour ago), and writes one signed `token_minted` line per token, with the
   verified key id and the subject the caller reported, to the enrollment audit file
   (#574, #553).

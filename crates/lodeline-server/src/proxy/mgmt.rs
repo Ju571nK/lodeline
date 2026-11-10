@@ -748,4 +748,18 @@ mod tests {
         h.insert(REQUESTED_BY_HEADER, "   ".parse().unwrap());
         assert_eq!(requested_by(&h), None);
     }
+
+    #[test]
+    fn requested_by_ignores_non_ascii_and_uses_the_first_copy() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            REQUESTED_BY_HEADER,
+            axum::http::HeaderValue::from_bytes("al\u{ef}ce".as_bytes()).unwrap(),
+        );
+        assert_eq!(requested_by(&h), None);
+        let mut h = HeaderMap::new();
+        h.append(REQUESTED_BY_HEADER, "alice".parse().unwrap());
+        h.append(REQUESTED_BY_HEADER, "bob".parse().unwrap());
+        assert_eq!(requested_by(&h).as_deref(), Some("alice"));
+    }
 }

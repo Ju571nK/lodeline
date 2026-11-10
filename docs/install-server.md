@@ -266,7 +266,8 @@ sudo -u lodeline lodeline-server enroll-token --config /etc/lodeline/server.yaml
 ```
 
 The subcommand is one way to make a token. The other is the HTTP mint of §3.6,
-which the web console uses; both make a token that redeems the same way.
+for a caller that cannot get a shell on this host; both make a token that redeems
+the same way.
 
 The command replaces the token file and creates `<enroll_tokens_path>.lock`, both
 owned by the user that runs it and mode 0600. The server runs as `lodeline`, so
@@ -801,11 +802,11 @@ cannot renew, the first failure comes at the next reconnect.
 **Not yet.** `lodeline-sender doctor` does not check renewal. On Windows renewal is
 off, with one log line at start, and `enroll` is not supported there either.
 
-### 3.6 Mint tokens over HTTP (for the web console), optional
+### 3.6 Mint tokens over HTTP, optional
 
-`lodeline-server enroll-token` (§3.1) makes a token on the server host. The web
-console's "Enroll a host" page cannot run it, so the server can also make a token
-over HTTP: `POST /v1/enroll-tokens` on the main (mutual TLS) listener. The token
+`lodeline-server enroll-token` (§3.1) needs a shell on the server host. A web
+console cannot run it, so the server can also make a token over HTTP for a
+console that holds the credential below: `POST /v1/enroll-tokens` on the main (mutual TLS) listener. The token
 redeems on the enrollment listener (§3.2) exactly like one from the subcommand.
 The route does not exist unless `enroll_mint:` is in `server.yaml`. A server
 older than this release ignores the key without a word, so the route answers 404.
@@ -824,7 +825,7 @@ of these holds, and the message names the cause:
   certificate redeems the token through that listener), or
   `enroll_issuer_fingerprints` is set;
 - enrollment is off (§3.1), or the renewal record could not be loaded (the mint
-  uses it to refuse a host that already has a certificate: the enrollment CA is
+  uses it to refuse a host id that this server issued a certificate for: the enrollment CA is
   not usable as a trust anchor, or `enrollment-audit.jsonl` cannot be read);
 - the audit signing key is unavailable (a mint with no audit line is refused);
 - the verifier file does not load (not mode 0600, a symlink, owned by another
@@ -852,7 +853,8 @@ lodeline-server proxy verifier-new --scope enroll --caller-cert console-mint.crt
 ```
 
 `--scope` takes `config` or `identity` (the proxy management API) or `enroll`.
-`--caller-cert` takes the PEM file and computes the fingerprint; `--caller-fingerprint`
+`--caller-cert` takes the PEM file and computes the fingerprint of its first
+certificate, so the caller's own certificate must come first in the file; `--caller-fingerprint`
 takes the 64 hex characters instead, and the two cannot be combined. Put
 `{"entries":[<the entry>]}` in the verifier file. On a packaged server the file
 belongs to the service account and is mode 0600, because the server refuses a file
@@ -894,11 +896,15 @@ The checks run in this order, and each stops at its answer:
 | The content type is not `application/json` | 415 |
 | The body is over 1 KiB | 413 |
 | The body is not exactly `{"host_id": "<uuid>"}`, or the host id is not a canonical version 4 UUID | 422 `invalid_request` or `invalid_host_id` |
-| The host id is on the allowlist, or the server holds a certificate for it | 409 `host_exists` (re-enrolling a host that has a certificate stays a job for `enroll-token`) |
+| The host id is on the allowlist (as the server read it at start, plus every host enrolled since), or the enrollment audit file shows a certificate this server issued for it | 409 `host_exists` (re-enrolling such a host stays a job for `enroll-token`) |
 | The host id already has an unspent token that has not expired, whoever made it | 409 `token_outstanding` |
 | The token file already holds `max_tokens` entries | 429 `too_many_tokens` |
 | The token file or the audit file cannot be written | 500 `token_store_error`, or 503 `audit_unavailable` with no token made |
 | Otherwise | 201 |
+
+A certificate made by hand for a host id that is on neither the allowlist nor the
+audit file is not known to the server: such a host cannot send events, and its id
+can get a token.
 
 A host id whose earlier token was spent without a certificate (for example the
 host's `enroll` stopped after it stored its host id) gets a new token. A refusal
@@ -911,9 +917,9 @@ plus tokens spent or expired within the last hour. Each mint first drops the
 entries that were spent or expired more than an hour ago, so the cap means at most
 `max_tokens` mints an hour, and fewer when tokens stay unused. The cap counts
 tokens made with `enroll-token` too, because the file has no column for who made a
-token. The subcommand itself is not capped and does not prune. The issue text for
-this feature speaks of unspent tokens; counting every retained entry bounds the
-rate as well as the stock. Pruning uses the server's clock: if it steps forward by
+token. The subcommand itself is not capped and does not prune. The cap limits tokens,
+not requests: a caller with the credential that sends requests in a loop can make
+hosts that enroll at that moment see `busy` and retry. Pruning uses the server's clock: if it steps forward by
 more than an hour at the moment of a mint, a token that is still live in real time
 can be dropped, and its host's `enroll` is then refused (the host id gets a new
 token; nothing is granted). When a host presents a token that was dropped, the
@@ -923,28 +929,34 @@ listener answers the same 403 and logs the reason `token_not_found`.
 expire. A long `--ttl` on tokens made with the subcommand keeps their entries
 longer. `enroll-token` still works, because it is not capped. **When a credential
 must be stopped**, remove its entry from the verifier file; the next request sees
-it. If the console's session cookie is the thing that was copied, rotate the
-console's `JWT_SECRET`, which ends every session.
+it. If the console's session cookie is the thing that was copied, end the
+console's own sessions as well, for example by rotating its session signing secret.
 
 **The audit line.** Each mint writes one signed line to `enrollment-audit.jsonl`
 (§3.1) before the answer is sent, with `decision` `token_minted`, `reason` `ok`,
-the `host_id`, `not_after` set to the token's expiry, `caller_fingerprint` set to
+the `host_id`, `not_after` set to the token's expiry (in a `token_minted` line it is
+RFC 3339; in an `issued` line it is the certificate's expiry in the form `openssl`
+prints), `caller_fingerprint` set to
 the blake3 of the client certificate's DER, empty `csr_fingerprint`,
 `cert_fingerprint` and `serial`, and two more fields that exist only on this kind
 of line: `management_key_id`, the `key_id` of the verifier entry that
 authenticated the call, which the server verified, and `requested_by_asserted`,
 the name from the header as the caller reported it, which nothing here checked.
 If the line cannot be written, the new token entry is removed again and the
-answer is 503, so no token leaves without its line. The token and its hash are in
+answer is 503, so no token leaves without its line. If an answer is lost on the way
+(or the server stops right after it made the token), nobody holds that token: the
+same host id answers 409 `token_outstanding` until the token expires. To go on
+sooner, make a token with `lodeline-server enroll-token` (it has no such rule) or
+use a new host id. The token and its hash are in
 no log line and not in the audit file.
 
 **What the holder of the credential can do.** Make up to `max_tokens` tokens an
-hour, each valid for `ttl_seconds` and for a host id it chooses that has no
-certificate and no live token. A token that is redeemed on the enrollment
+hour, each valid for `ttl_seconds` and for a host id it chooses that is not on the
+allowlist, has no certificate this server issued and has no live token. A token that is redeemed on the enrollment
 listener gives a client certificate for that host id, puts the id on the
 allowlist, and lets that host send events as itself. The holder cannot read the
-fleet (that is the read bearer), cannot make a token for a host that already has a
-certificate, cannot change policy or sign anything, and cannot reach any other
+fleet (that is the read bearer), cannot make a token for a host id that is on the
+allowlist or has a certificate this server issued, cannot change policy or sign anything, and cannot reach any other
 route with this credential.
 
 ## 4. Signed policy bundle
@@ -1016,7 +1028,7 @@ enroll_listener:
   bind: "0.0.0.0:8444"
 events_require_cert_host_match: true
 
-# HTTP mint of tokens for the web console (§3.6), optional. Needs everything above.
+# HTTP mint of tokens for a web console (§3.6), optional. Needs everything above.
 # enroll_mint:
 #   verifiers: "/etc/lodeline/enroll-mint-verifiers.json"   # lodeline:lodeline, mode 0600
 #   ttl_seconds: 3600

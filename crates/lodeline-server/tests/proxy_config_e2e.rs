@@ -617,6 +617,45 @@ async fn put_requires_config_scope_and_management_cert() {
 }
 
 #[tokio::test]
+async fn an_enroll_scope_entry_in_the_proxy_file_gets_403_on_management_routes() {
+    let (dir, mgmt, fp) = Fx::prepare(|fp, fp2| {
+        let mut v = Fx::default_entries(fp, fp2);
+        v.push(entry("enk", "tok-enroll", Scope::Enroll, fp, None));
+        v
+    });
+    let fx = Fx::start(dir, mgmt, fp).await;
+    proxy(&fx, "pxa").await;
+    let r = put(
+        &fx,
+        "pxa",
+        Some("tok-enroll"),
+        &put_body(0, &spec("pxa", "t")),
+    )
+    .await;
+    assert_eq!((r.status, r.code().as_str()), (403, "forbidden"));
+    let r = send(
+        &fx.mgmt_client(),
+        fx.port,
+        "POST",
+        "/v1/proxies/pxa/disable",
+        Some("tok-enroll"),
+        Some("{}"),
+    )
+    .await;
+    assert_eq!((r.status, r.code().as_str()), (403, "forbidden"));
+    let r = send(
+        &fx.mgmt_client(),
+        fx.port,
+        "POST",
+        "/v1/proxies",
+        Some("tok-enroll"),
+        Some(r#"{"proxy_id":"pxz","display_name":"Z"}"#),
+    )
+    .await;
+    assert_eq!((r.status, r.code().as_str()), (403, "forbidden"));
+}
+
+#[tokio::test]
 async fn revision_conflict_and_stale_revision_are_409() {
     let fx = Fx::new().await;
     let a = proxy(&fx, "pxa").await;

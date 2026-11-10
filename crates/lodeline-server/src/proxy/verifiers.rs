@@ -348,6 +348,7 @@ impl MgmtAuth {
                         Ok(_) => "no entries".to_string(),
                     };
                     tracing::error!(
+                        path = %self.path.display(),
                         reason = %why,
                         "ALERT management verifier reload failed: all management credentials are denied until a valid file loads"
                     );

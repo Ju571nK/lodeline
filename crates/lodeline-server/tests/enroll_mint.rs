@@ -678,6 +678,11 @@ async fn credential_matrix_over_real_mutual_tls() {
             .await,
             401,
         ),
+        (
+            "an empty bearer",
+            send(&mint_c, fx.port, Req::mint("", &h)).await,
+            401,
+        ),
     ];
     for (what, r, want) in cases {
         assert_eq!(
