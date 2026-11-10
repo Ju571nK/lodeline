@@ -28,7 +28,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   line, no refused request, and no sender retry in `journalctl`. `RUST_LOG` still sets the level,
   for example `RUST_LOG=warn`. Both binaries now write their logs to stderr, so a warning no
   longer comes before the token on the stdout of `lodeline-server enroll-token`. The journal
-  keeps both streams. (#NNN, #560)
+  keeps both streams. (#561, #560)
 
 ## [0.14.3] - 2026-11-10
 
