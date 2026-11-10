@@ -205,6 +205,8 @@ arrived intact.
   the rule the server uses. The console answers any other name with 400 `bad_filename` and sends
   no request.
 - The console does not cache the list, so a reload shows the files that the server holds now.
+- A download has no total time limit. It fails when the server sends nothing for 30 s, and the
+  browser then reports a failed download. A fleet read still fails after 5 s.
 
 ### Enroll a host
 
@@ -236,7 +238,9 @@ URL, and trusts the roots of `LODELINE_SERVER_CA_PATH`, as the read calls do. Th
 are what a host dials, so they can differ from the console's own address for the server. The CA
 file holds the certificates hosts trust, with no key, and the keystore is the JSON that
 [section 3.3](../../docs/install-server.md) makes. A mistake in any of them stops the start with
-a message that names the variable and never prints a value. With `MOCK_FLEET=1` the console uses
+a message that names the variable and never prints a value. The request that asks the server
+for a token does not use `HTTP_PROXY` or `HTTPS_PROXY`: the console must reach the server's main
+port directly for it. With `MOCK_FLEET=1` the console uses
 built-in mock values and a mock mint that makes a token which works nowhere; only
 `LODELINE_PUBLIC_ORIGIN` is still read from the environment.
 
@@ -254,8 +258,9 @@ console keeps no other session state.
 **The origin and the subject list.** The POST route needs `Origin` to be exactly
 `LODELINE_PUBLIC_ORIGIN`, compared as a scheme, a lower-case host and a port with a default port
 left out. A request with no `Origin`, a `null` one, another origin, a `Sec-Fetch-Site` other than
-`same-origin`, or a body that is not JSON gets 403 `origin_not_allowed` before the console
-calls the server. There is no `Referer` fallback. Behind a reverse proxy, set the origin the
+`same-origin` gets 403 `origin_not_allowed` before the console calls the server. A body that
+is not `application/json` gets the console's usual 415 `unsupported_media_type`, after the origin
+rule and the subject list and before any call to the server. There is no `Referer` fallback. Behind a reverse proxy, set the origin the
 browser sees. One console reachable by two names needs one of them. The older POST routes (login,
 logout, triage) do not have this rule yet. `LODELINE_ENROLL_SUBJECTS` limits the route to the
 listed session subjects. An OIDC subject is an opaque `oidc:` value, so copy it from the
@@ -277,7 +282,7 @@ chain records who asked, as the console reported it.
 
 | Code | Status | What it means for the operator |
 |---|---|---|
-| `enrollment_not_configured` | 404 | The eight variables are not all set. |
+| `enrollment_not_configured` | 404 | None of the eight variables is set. A partial set stops the start. |
 | `origin_not_allowed` | 403 | The request did not come from the console's own origin. |
 | `not_an_enroller` | 403 | The subject is not in `LODELINE_ENROLL_SUBJECTS`. |
 | `invalid_host_id` | 422 | The `host_id` is not a lowercase, hyphenated version 4 UUID. |
@@ -286,7 +291,9 @@ chain records who asked, as the console reported it.
 | `enrollment_limit_reached` | 429 | The server holds the most tokens it allows. Try again later. |
 | `enroll_unavailable` | 502 | The server has no mint endpoint, or does not accept the console's mint certificate. The two look the same. |
 | `enroll_refused` | 502 | The server refused the mint bearer. |
-| `enroll_failed` | 502 | Anything else: the server answered something unexpected, a setting file cannot be used (the message names the variable), the connection failed or timed out. No file was made. |
+| `unsupported_media_type` | 415 | The body is not `application/json`. |
+| `enroll_misconfigured` | 500 | A setting file cannot be used: it is missing or unreadable, is not what it should be, or would make a file over 64 KiB. The message names the variable and the OS error or the position, never a path or content. The server was not asked. |
+| `enroll_failed` | 502 | The server answered something unexpected, or the connection failed or timed out. No file was made, and the server may have made a token for this host id: the same host id can answer `token_outstanding` until that token expires. The console's stderr line for the refusal ends with a short `cause=` word (`timeout`, `connect`, `request`, `status=<code>` or `answer`). |
 
 The console never retries a mint, because a retry after a lost answer would make a second token.
 A lost answer leaves a token that nobody holds. The same host id then answers
@@ -295,9 +302,6 @@ subcommand, which has no such rule, or a new host id. If `lodeline-sender enroll
 stopped after it stored its host id, make a new file for that host id with the `host_id` field
 (`lodeline show host-id` prints it). A host that already has a certificate from this server stays
 a job for `lodeline-server enroll-token`.
-- A download has no total time limit. It fails when the server sends nothing for 30 s, and the
-  browser then reports a failed download. A fleet read still fails after 5 s.
-
 ## Sessions and the login limit
 
 - A session is a signed token in the `lodeline_session` cookie (`HttpOnly`, `SameSite=Lax`,

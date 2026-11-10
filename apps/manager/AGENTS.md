@@ -22,8 +22,9 @@ It also reads the server's Lodeline Proxy status and invocations: `GET /v1/proxi
 ([ledger-and-query.md L2 to L4](../../docs/specs/lodeline-proxy/contracts/ledger-and-query.md)),
 and a proxy's inventory views: `GET /v1/proxies/{id}/inventory-snapshots`, `/drift` and
 `/rebaseline-markers` ([registry.md R5 and R7b](../../docs/specs/lodeline-proxy/contracts/registry.md)).
-That is the proxy scope M0 of #458: proxy reads only, still read-only against the server. Do not
-add a proxy write route or a control that changes a proxy (register, disable, enable, retire,
+That is the proxy scope M0 of #458: proxy reads only. The console reads the fleet read API, and
+the one request that changes server state is the token request of the enrollment route. Do not add
+a proxy write route or a control that changes a proxy (register, disable, enable, retire,
 config). The operator CLI on the server does those. The only management credential the console
 holds is the enrollment mint credential (`LODELINE_ENROLL_MINT_*`). It has the scope `enroll`
 and cannot touch a proxy.
@@ -32,8 +33,9 @@ The enrollment file route (#553) is `src/enroll.rs` (the settings, the file temp
 mint client) and `src/api/enrollment.rs` (`GET /api/v1/enrollment` and
 `POST /api/v1/enrollment/files`, the two entries at the end of `ROUTES`). The POST runs an
 origin rule before anything else: `Origin` must equal `LODELINE_PUBLIC_ORIGIN`,
-`Sec-Fetch-Site`, when sent, must be `same-origin`, and the body must be JSON. The older POST
-routes do not have that rule yet. The mint client is its own `reqwest::Client` with its own
+`Sec-Fetch-Site`, when sent, must be `same-origin`. A body that is not JSON gets `read_body`'s
+415, after the subject list and before any call to the server. The older POST routes do not have
+the origin rule yet. The mint client is its own `reqwest::Client` with its own
 certificate, follows no redirect and never retries. Do not log, print or put the token in an
 error. The bearer type has no `Display` and a `Debug` that prints a fixed word.
 

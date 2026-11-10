@@ -239,6 +239,10 @@ fn a_ca_file_must_hold_only_certificates_and_at_least_one() {
     let key = std::fs::read_to_string(pki.path("server.key")).unwrap();
     for (what, body) in [
         ("a private key block", format!("{ca}{key}")),
+        (
+            "a comment that says private key",
+            format!("# private key\n{ca}"),
+        ),
         ("no block", "nothing here\n".to_owned()),
         (
             "a bad block",
@@ -259,6 +263,27 @@ fn a_ca_file_must_hold_only_certificates_and_at_least_one() {
         let msg = load_err(&e);
         assert!(msg.contains(FILE_CA), "{what}: {msg}");
     }
+    // The reader looks for the words "private key" in any case, not for a line that ends in KEY-----.
+    let mut e = env(&pki);
+    let body = format!("# a comment that ends in KEY-----\n{ca}");
+    let path = write(&pki.path("ok-ca.pem"), &body);
+    e.insert(FILE_CA, path.to_string_lossy().into_owned());
+    assert!(load(&e, "", false).is_ok());
+}
+
+#[test]
+fn the_example_bearer_is_refused_at_start() {
+    let pki = Pki::new("enroll-example");
+    let mut e = env(&pki);
+    e.insert(MINT_TOKEN, "replace-with-the-enroll-bearer".into());
+    let msg = load_err(&e);
+    assert!(
+        msg.contains(MINT_TOKEN) && msg.contains(".env.example"),
+        "{msg}"
+    );
+    // Mock mode reads no bearer.
+    let mock: Env = [(PUBLIC_ORIGIN, "http://127.0.0.1:8080".to_owned())].into();
+    assert!(load(&mock, "", true).is_ok());
 }
 
 #[test]
@@ -452,19 +477,29 @@ fn the_ca_and_keystore_fingerprints_have_the_form_the_sender_prints() {
                 .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))));
     }
     // The sender prints the same SHA-256 over the 32 raw key bytes.
-    assert_eq!(l.keys[0].sha256, fingerprint(&b64_decode(KEY_B64).unwrap()));
+    let raw = data_encoding::BASE64.decode(KEY_B64.as_bytes()).unwrap();
+    assert_eq!(l.keys[0].sha256, fingerprint(&raw));
 }
 
 #[test]
-fn base64_is_standard_padded_and_exact() {
-    assert_eq!(b64_decode(KEY_B64).unwrap().len(), 32);
-    assert_eq!(b64_decode("TWFu").unwrap(), b"Man");
-    assert_eq!(b64_decode("TWE=").unwrap(), b"Ma");
-    assert_eq!(b64_decode("TQ==").unwrap(), b"M");
+fn a_policy_key_is_standard_padded_base64_of_32_bytes_and_nothing_else() {
+    let decode = |b64: &str| {
+        let ks = keystore(b64, "2020-01-01T00:00:00Z", "2099-01-01T00:00:00Z");
+        keystore_info(ks.as_bytes()).is_ok()
+    };
+    assert!(decode(KEY_B64));
+    // 32 bytes with the last character spelled so that no padding bits are left over.
     for bad in [
-        "TQ=", "TWE", "T===", "TQ=A", "TR==", "TW-u", "TWFu ", "TWF=u",
+        "xKVQIC12z2nEWqPizVT8sAuQLaXtfPgZURnVS0+pcU8",
+        "xKVQIC12z2nEWqPizVT8sAuQLaXtfPgZURnVS0+pcU9=",
+        "xKVQIC12z2nEWqPizVT8sAuQLaXtfPgZURnVS0-pcU8=",
+        " xKVQIC12z2nEWqPizVT8sAuQLaXtfPgZURnVS0+pcU8=",
+        "xKVQIC12z2nEWqPizVT8sAuQLaXtfPgZURnVS0+pcU8=\n",
+        "xKVQIC12z2nEWqPizVT8sAuQLaXtfPgZURnVS0+pcQ==",
+        "TWFu",
+        "",
     ] {
-        assert!(b64_decode(bad).is_none(), "{bad}");
+        assert!(!decode(bad), "{bad:?}");
     }
 }
 

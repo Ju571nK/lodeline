@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use super::*;
 use crate::fleet::{self, Client, HttpClient};
 use crate::server::{router, AppState};
-use crate::testutil::{pem_certs, post_files, Reply, ORIGIN, SESSION_SECRET};
+use crate::testutil::{get_enrollment, pem_certs, post_files, Reply, ORIGIN, SESSION_SECRET};
 
 const READ_TOKEN: &str = "read-bearer-SECRETREAD-0123";
 const MINT_BEARER: &str = "mint-bearer-SECRETMINT-0123456789";
@@ -437,6 +437,13 @@ async fn a_connection_dropped_after_the_token_was_committed_gives_502_no_file_an
     let body = json!({"host_id": host}).to_string();
     let r = post_files(&app, Some("alice"), &[], &body).await;
     assert_eq!((r.status, r.code().as_str()), (502, "enroll_failed"));
+    let said = r.json()["error"]["message"].as_str().unwrap().to_owned();
+    assert!(said.contains("no file was made"), "{said}");
+    assert!(
+        said.contains("may have made a token for this host id"),
+        "{said}"
+    );
+    assert!(!said.contains("did not make a token"), "{said}");
     assert!(r.headers.get("content-disposition").is_none());
     assert_eq!(fx.mints().len(), 1, "the console did not retry");
     let tokens = std::fs::read_to_string(fx.pki.path("srv/tokens.json")).unwrap();
@@ -454,6 +461,8 @@ enum Say {
     Raw(u16, &'static str),
     Redirect,
     Hang,
+    /// A body of `head`, `len` bytes of `x` and `tail`, written as fast as the client takes it.
+    Stream(u16, &'static str, usize, &'static str),
 }
 
 type Hits = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -462,6 +471,49 @@ struct Stub {
     base: String,
     hits: Hits,
     pki: Pki,
+    /// Bytes of a `Say::Stream` body written so far, and whether that body has been dropped.
+    sent: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
+}
+
+/// The body of a `Say::Stream`.
+struct Pump {
+    head: Option<&'static str>,
+    left: usize,
+    tail: Option<&'static str>,
+    sent: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
+}
+
+impl hyper::body::Body for Pump {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let me = &mut *self;
+        let chunk = if let Some(head) = me.head.take() {
+            axum::body::Bytes::from(head)
+        } else if me.left > 0 {
+            let n = me.left.min(16 << 10);
+            me.left -= n;
+            axum::body::Bytes::from(vec![b'x'; n])
+        } else if let Some(tail) = me.tail.take() {
+            axum::body::Bytes::from(tail)
+        } else {
+            return std::task::Poll::Ready(None);
+        };
+        me.sent.fetch_add(chunk.len(), Ordering::SeqCst);
+        std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk))))
+    }
+}
+
+impl Drop for Pump {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
 }
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -483,8 +535,11 @@ async fn stub(say: Say) -> Stub {
     let base = format!("https://{}", listener.local_addr().unwrap());
     let hits: Hits = Default::default();
     let (h, target) = (hits.clone(), format!("{base}/target"));
+    let (sent, closed): (Arc<AtomicUsize>, Arc<AtomicBool>) = Default::default();
+    let (sent_in, closed_in) = (sent.clone(), closed.clone());
     let app = Router::new().fallback(move |req: Request| {
         let (h, say, target) = (h.clone(), say.clone(), target.clone());
+        let (sent, closed) = (sent_in.clone(), closed_in.clone());
         async move {
             let auth = req.headers().get("authorization");
             let auth = auth.and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -494,6 +549,17 @@ async fn stub(say: Say) -> Stub {
                 Say::Json(s, body) => (code(s), axum::Json(body)).into_response(),
                 Say::Raw(s, body) => (code(s), body).into_response(),
                 Say::Redirect => (code(307), [("location", target)]).into_response(),
+                Say::Stream(s, head, len, tail) => {
+                    let (head, left, tail) = (Some(head), len, Some(tail));
+                    let pump = Pump {
+                        head,
+                        left,
+                        tail,
+                        sent,
+                        closed,
+                    };
+                    (code(s), axum::body::Body::new(pump)).into_response()
+                }
                 Say::Hang => {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     code(200).into_response()
@@ -506,11 +572,18 @@ async fn stub(say: Say) -> Stub {
         let server = axum_server::from_tcp_rustls(listener, config);
         let _ = server.serve(app.into_make_service()).await;
     });
-    Stub { base, hits, pki }
+    Stub {
+        base,
+        hits,
+        pki,
+        sent,
+        closed,
+    }
 }
 
-/// The console asking the stand-in, with a short timeout.
-async fn ask(say: Say, body: &str) -> (Reply, Stub) {
+/// The console asking the stand-in, with a short timeout and the template `template` makes
+/// from the stand-in's own PKI directory.
+async fn ask_with(say: Say, template: impl FnOnce(&Pki) -> Template, body: &str) -> (Reply, Stub) {
     let stub = stub(say).await;
     let (pki, bearer) = (&stub.pki, Bearer(MINT_BEARER.into()));
     let timeout = Duration::from_millis(400);
@@ -522,61 +595,156 @@ async fn ask(say: Say, body: &str) -> (Reply, Stub) {
         timeout,
     )
     .unwrap();
-    let app = console(enroller, Template::mock(), vec![]);
+    let app = console(enroller, template(pki), vec![]);
     (post_files(&app, Some("alice"), &[], body).await, stub)
+}
+
+async fn ask(say: Say, body: &str) -> (Reply, Stub) {
+    ask_with(say, |_| Template::mock(), body).await
 }
 
 fn ok_answer(host: &str) -> Value {
     json!({"expires_at": "2030-01-01T00:00:00Z", "host_id": host, "token": ANSWERED})
 }
 
+/// One case of the stand-in: what it says, what the console answers, the cause the console
+/// logs for an `enroll_failed` (none for the other answers), and the body of the request.
+struct Case {
+    say: Say,
+    status: u16,
+    code: &'static str,
+    cause: Option<&'static str>,
+    body: &'static str,
+}
+
+fn case(say: Say, status: u16, code: &'static str, cause: Option<&'static str>) -> Case {
+    let body = "{}";
+    Case {
+        say,
+        status,
+        code,
+        cause,
+        body,
+    }
+}
+
+/// The lines the console has written on this test's thread.
+fn logged() -> Vec<String> {
+    crate::api::enrollment::LOG.with(|l| l.borrow().clone())
+}
+
 #[tokio::test]
 async fn every_answer_of_the_server_maps_to_one_code_and_is_asked_once() {
     let bad = |code: &str| json!({"error": {"code": code, "message": BODY_MARK}});
-    let cases: Vec<(Say, u16, &str)> = vec![
-        (Say::Json(409, bad("host_exists")), 409, "host_exists"),
-        (
+    let status = |n: &'static str| Some(n);
+    let other_host = Case {
+        body: r#"{"host_id":"11111111-1111-4111-8111-111111111111"}"#,
+        ..case(
+            Say::Json(201, ok_answer(HOST)),
+            502,
+            "enroll_failed",
+            Some("answer"),
+        )
+    };
+    let cases = vec![
+        case(Say::Json(409, bad("host_exists")), 409, "host_exists", None),
+        case(
             Say::Json(409, bad("token_outstanding")),
             409,
             "token_outstanding",
+            None,
         ),
-        (Say::Json(409, bad("something_new")), 502, "enroll_failed"),
-        (Say::Raw(409, "not json"), 502, "enroll_failed"),
-        (
+        case(
+            Say::Json(409, bad("something_new")),
+            502,
+            "enroll_failed",
+            status("status=409"),
+        ),
+        case(
+            Say::Raw(409, "not json"),
+            502,
+            "enroll_failed",
+            status("status=409"),
+        ),
+        case(
             Say::Json(429, bad("too_many_tokens")),
             429,
             "enrollment_limit_reached",
+            None,
         ),
-        (Say::Raw(404, BODY_MARK), 502, "enroll_unavailable"),
-        (Say::Json(401, bad("unauthorized")), 502, "enroll_refused"),
-        (Say::Json(403, bad("forbidden")), 502, "enroll_refused"),
-        (Say::Json(422, bad("invalid_host_id")), 502, "enroll_failed"),
-        (Say::Json(500, bad("internal")), 502, "enroll_failed"),
-        (Say::Json(503, bad("audit")), 502, "enroll_failed"),
-        (Say::Json(200, ok_answer("x")), 502, "enroll_failed"),
-        (Say::Raw(201, "{"), 502, "enroll_failed"),
-        (Say::Raw(201, "{\"host_id\":\"x\"}"), 502, "enroll_failed"),
-        (Say::Json(201, ok_answer(HOST)), 502, "enroll_failed"),
-        (Say::Redirect, 502, "enroll_failed"),
-        (Say::Hang, 502, "enroll_failed"),
+        case(Say::Raw(404, BODY_MARK), 502, "enroll_unavailable", None),
+        case(
+            Say::Json(401, bad("unauthorized")),
+            502,
+            "enroll_refused",
+            None,
+        ),
+        case(
+            Say::Json(403, bad("forbidden")),
+            502,
+            "enroll_refused",
+            None,
+        ),
+        case(
+            Say::Json(422, bad("invalid_host_id")),
+            502,
+            "enroll_failed",
+            status("status=422"),
+        ),
+        case(
+            Say::Json(500, bad("internal")),
+            502,
+            "enroll_failed",
+            status("status=500"),
+        ),
+        case(
+            Say::Json(503, bad("audit")),
+            502,
+            "enroll_failed",
+            status("status=503"),
+        ),
+        case(
+            Say::Json(200, ok_answer("x")),
+            502,
+            "enroll_failed",
+            status("status=200"),
+        ),
+        case(Say::Raw(201, "{"), 502, "enroll_failed", Some("answer")),
+        case(
+            Say::Raw(201, "{\"host_id\":\"x\"}"),
+            502,
+            "enroll_failed",
+            Some("answer"),
+        ),
+        // The server answers a host id other than the one the console asked for.
+        other_host,
+        case(Say::Redirect, 502, "enroll_failed", status("status=307")),
+        case(Say::Hang, 502, "enroll_failed", Some("timeout")),
     ];
-    for (i, (say, status, code)) in cases.into_iter().enumerate() {
-        // The last-but-two case answers a host id other than the one asked for.
-        let body = if i == 14 {
-            r#"{"host_id":"11111111-1111-4111-8111-111111111111"}"#
-        } else {
-            "{}"
-        };
-        let (r, stub) = ask(say, body).await;
+    for (i, c) in cases.into_iter().enumerate() {
+        crate::api::enrollment::LOG.with(|l| l.borrow_mut().clear());
+        let (r, stub) = ask(c.say, c.body).await;
         assert_eq!(
             (r.status, r.code().as_str()),
-            (status, code),
+            (c.status, c.code),
             "case {i}: {}",
             r.text()
         );
         assert!(r.headers.get("content-disposition").is_none(), "case {i}");
         for secret in [BODY_MARK, MINT_BEARER, ANSWERED] {
             assert!(!r.text().contains(secret), "case {i}: {}", r.text());
+        }
+        let lines = logged();
+        assert_eq!(lines.len(), 1, "case {i}: {lines:?}");
+        for secret in [BODY_MARK, MINT_BEARER, ANSWERED, "http", "Bearer"] {
+            assert!(!lines[0].contains(secret), "case {i}: {lines:?}");
+        }
+        match c.cause {
+            Some(cause) => assert!(
+                lines[0].ends_with(&format!(" cause={cause}")),
+                "case {i}: {lines:?}"
+            ),
+            None => assert!(!lines[0].contains("cause="), "case {i}: {lines:?}"),
         }
         let hits = stub.hits.lock().unwrap();
         assert_eq!(hits.len(), 1, "case {i}: asked once, got {hits:?}");
@@ -585,6 +753,147 @@ async fn every_answer_of_the_server_maps_to_one_code_and_is_asked_once() {
             Some(format!("Bearer {MINT_BEARER}").as_str())
         );
     }
+}
+
+#[tokio::test]
+async fn a_server_that_cannot_be_reached_logs_connect_and_nothing_else() {
+    crate::api::enrollment::LOG.with(|l| l.borrow_mut().clear());
+    let stub = stub(Say::Raw(200, "")).await;
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("https://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let (pki, bearer) = (&stub.pki, Bearer(MINT_BEARER.into()));
+    let timeout = Duration::from_secs(2);
+    let identity = identity(pki, "client");
+    let enroller = HttpEnroller::new(&base, bearer, identity, &roots(pki), timeout).unwrap();
+    let app = console(enroller, Template::mock(), vec![]);
+    let r = post_files(&app, Some("alice"), &[], "{}").await;
+    assert_eq!((r.status, r.code().as_str()), (502, "enroll_failed"));
+    let lines = logged();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].ends_with(" cause=connect"), "{lines:?}");
+    assert!(!lines[0].contains("127.0.0.1") && !lines[0].contains(MINT_BEARER));
+}
+
+#[tokio::test]
+async fn a_huge_answer_is_not_read_to_the_end_and_none_of_it_is_in_the_answer() {
+    const LEN: usize = 10 << 20;
+    // A 409 that would read as `host_exists` if it were read whole, and a 201 that would be a
+    // good answer if it were read whole: only the size limits make them `enroll_failed`.
+    let head = r#"{"error":{"code":"host_exists","message":"SECRETMARK-STUBBODY"#;
+    let (r, stub) = ask(Say::Stream(409, head, LEN, r#""}}"#), "{}").await;
+    assert_eq!((r.status, r.code().as_str()), (502, "enroll_failed"));
+    assert!(!r.text().contains(BODY_MARK), "{}", r.text());
+    for _ in 0..50 {
+        if stub.closed.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        stub.closed.load(Ordering::SeqCst),
+        "the stand-in's body was never dropped"
+    );
+    let sent = stub.sent.load(Ordering::SeqCst);
+    assert!(sent < LEN, "the console read the whole body ({sent} bytes)");
+    assert_eq!(stub.hits.lock().unwrap().len(), 1);
+
+    let mut big = ok_answer(HOST);
+    big["padding"] = json!(format!("{BODY_MARK}{}", "x".repeat(5 << 10)));
+    let body = json!({"host_id": HOST}).to_string();
+    let (r, _) = ask(Say::Json(201, big), &body).await;
+    assert_eq!((r.status, r.code().as_str()), (502, "enroll_failed"));
+    assert!(!r.text().contains(BODY_MARK) && !r.text().contains(ANSWERED));
+}
+
+/// A CA file big enough that the finished file would pass the reader's 64 KiB limit.
+fn big_ca(pki: &Pki) -> std::path::PathBuf {
+    let one = std::fs::read_to_string(pki.path("ca.crt")).unwrap();
+    let big = one.repeat(MAX_ENROLLMENT_FILE_BYTES as usize / one.len() + 1);
+    write(&pki.path("big.pem"), &big)
+}
+
+#[tokio::test]
+async fn a_file_that_would_pass_64_kib_costs_no_token() {
+    let pki_dir = std::cell::RefCell::new(String::new());
+    let template = |pki: &Pki| {
+        *pki_dir.borrow_mut() = pki.path("").to_string_lossy().into_owned();
+        let t = file_template(
+            pki,
+            "https://lodeline.example.com:8443",
+            "https://lodeline.example.com:8444",
+        );
+        Template {
+            ca: Source::File(FILE_CA, big_ca(pki)),
+            ..t
+        }
+    };
+    let body = json!({"host_id": HOST}).to_string();
+    let (r, stub) = ask_with(Say::Json(201, ok_answer(HOST)), template, &body).await;
+    assert_eq!(
+        (r.status, r.code().as_str()),
+        (500, "enroll_misconfigured"),
+        "{}",
+        r.text()
+    );
+    assert!(
+        r.text().contains(FILE_CA) && r.text().contains("64 KiB"),
+        "{}",
+        r.text()
+    );
+    assert!(r.headers.get("content-disposition").is_none());
+    assert_eq!(stub.hits.lock().unwrap().len(), 0, "a token was asked for");
+    assert!(
+        !r.text().contains(pki_dir.borrow().as_str()),
+        "{}",
+        r.text()
+    );
+}
+
+#[tokio::test]
+async fn a_setting_file_that_cannot_be_used_is_a_console_fault_on_both_routes() {
+    let template = |pki: &Pki| {
+        let t = file_template(
+            pki,
+            "https://lodeline.example.com:8443",
+            "https://lodeline.example.com:8444",
+        );
+        let gone = Source::File(FILE_KEYSTORE, pki.path("no-such-keystore.json"));
+        Template {
+            keystore: gone,
+            ..t
+        }
+    };
+    let stub = stub(Say::Json(201, ok_answer(HOST))).await;
+    let (pki, bearer) = (&stub.pki, Bearer(MINT_BEARER.into()));
+    let identity = identity(pki, "client");
+    let enroller = HttpEnroller::new(
+        &stub.base,
+        bearer,
+        identity,
+        &roots(pki),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let app = console(enroller, template(pki), vec![]);
+    let dir = pki.path("").to_string_lossy().into_owned();
+    let post = post_files(&app, Some("alice"), &[], "{}").await;
+    let get = get_enrollment(&app, Some("alice")).await;
+    for (what, r) in [("post", post), ("get", get)] {
+        assert_eq!(
+            (r.status, r.code().as_str()),
+            (500, "enroll_misconfigured"),
+            "{what}: {}",
+            r.text()
+        );
+        assert!(r.text().contains(FILE_KEYSTORE), "{what}: {}", r.text());
+        assert!(
+            !r.text().contains(&dir) && !r.text().contains("no-such-keystore"),
+            "{what}: {}",
+            r.text()
+        );
+    }
+    assert_eq!(stub.hits.lock().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -647,5 +956,68 @@ async fn the_enroller_and_the_servers_answer_never_print_the_token() {
             !shown.contains(MARK) && !shown.contains("SECRETMINT"),
             "{shown}"
         );
+    }
+}
+
+#[test]
+fn the_console_and_the_host_agree_on_every_ca_file() {
+    let pki = Pki::new("agree-ca");
+    let ca = std::fs::read_to_string(pki.path("ca.crt")).unwrap();
+    let key = std::fs::read_to_string(pki.path("server.key")).unwrap();
+    let template = file_template(
+        &pki,
+        "https://lodeline.example.com:8443",
+        "https://lodeline.example.com:8444",
+    );
+    let host_id = "3f2c6a1e-8b4d-4c2a-9e7f-1a2b3c4d5e6f";
+    let made = template
+        .load()
+        .unwrap()
+        .render(host_id, "2099-01-01T00:00:00Z", "tok")
+        .unwrap();
+    let rows = [
+        ("a plain CA", ca.clone(), Some(true)),
+        (
+            "a comment that says private key",
+            format!("# private key\n{ca}"),
+            Some(false),
+        ),
+        (
+            "a comment that ends in KEY-----",
+            format!("# a comment that ends in KEY-----\n{ca}"),
+            Some(true),
+        ),
+        (
+            "a CA then a private key block",
+            format!("{ca}{key}"),
+            Some(false),
+        ),
+        (
+            "text between two blocks",
+            format!("{ca}between\n{ca}"),
+            None,
+        ),
+        ("CRLF line ends", ca.replace('\n', "\r\n"), None),
+    ];
+    for (what, pem, want) in rows {
+        let ca_path = write(&pki.path("row-ca.pem"), &pem);
+        let ours = Template {
+            ca: Source::File(FILE_CA, ca_path),
+            ..template.clone()
+        };
+        let ours = ours.load().is_ok();
+        let mut file: Value = serde_json::from_slice(&made).unwrap();
+        file["server_ca_pem"] = json!(pem);
+        let path = pki.path("row.json");
+        chmod(&write(&path, &file.to_string()), 0o600);
+        let theirs = lodeline_sender::enroll::file::read(&path, time::OffsetDateTime::now_utc());
+        let theirs = theirs.is_ok();
+        assert_eq!(
+            ours, theirs,
+            "{what}: the console says {ours}, the host says {theirs}"
+        );
+        if let Some(want) = want {
+            assert_eq!(ours, want, "{what}");
+        }
     }
 }

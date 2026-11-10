@@ -38,6 +38,8 @@ pub const REQUIRED: [&str; 8] = [
     PUBLIC_ORIGIN,
 ];
 
+/// The bearer `.env.example` shows. The console refuses it, as it does the other examples.
+const EXAMPLE_MINT_TOKEN: &str = "replace-with-the-enroll-bearer";
 const MINT_TIMEOUT: Duration = Duration::from_secs(10);
 const ANSWER_LIMIT: usize = 4 << 10;
 const ERROR_LIMIT: usize = 1 << 10;
@@ -99,6 +101,11 @@ impl Enroll {
             return Ok(Self::Off(missing));
         } else if !missing.is_empty() {
             return Err(ConfigError::MissingRequired(missing));
+        }
+        if !mock && trimmed(MINT_TOKEN) == EXAMPLE_MINT_TOKEN {
+            return Err(invalid(format!(
+                "config: {MINT_TOKEN} is the public example value from .env.example; set the bearer of your own mint credential"
+            )));
         }
         let public_origin = origin_of(&trimmed(PUBLIC_ORIGIN)).ok_or_else(|| {
             invalid(format!("config: {PUBLIC_ORIGIN} must be one origin such as https://console.example.com, with no path or trailing slash"))
@@ -388,11 +395,9 @@ fn fingerprint(bytes: &[u8]) -> String {
 
 /// The reader's rules for `server_ca_pem`: certificates only, at least one.
 fn ca_info(pem: &str) -> Result<Vec<CaInfo>, &'static str> {
-    let blocks = pem.lines().filter(|l| l.starts_with("-----BEGIN "));
-    if pem.to_ascii_uppercase().contains("KEY-----")
-        || blocks
-            .into_iter()
-            .any(|l| l.trim_end() != "-----BEGIN CERTIFICATE-----")
+    let mut blocks = pem.lines().filter(|l| l.starts_with("-----BEGIN "));
+    if pem.to_ascii_lowercase().contains("private key")
+        || blocks.any(|l| l.trim_end() != "-----BEGIN CERTIFICATE-----")
     {
         return Err("may hold only CERTIFICATE blocks, never a private key");
     }
@@ -429,7 +434,10 @@ fn keystore_info(bytes: &[u8]) -> Result<(PolicyKeystore, Vec<KeyInfo>), String>
         .iter()
         .enumerate()
         .map(|(i, k): (usize, &PolicyKey)| {
-            let raw = b64_decode(&k.ed25519_pubkey_b64).filter(|r| r.len() == 32);
+            let raw = data_encoding::BASE64
+                .decode(k.ed25519_pubkey_b64.as_bytes())
+                .ok()
+                .filter(|r| r.len() == 32);
             let time = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
             let (from, until) = (time(&k.valid_from), time(&k.valid_until));
             match (raw, from, until) {
@@ -452,26 +460,6 @@ fn keystore_info(bytes: &[u8]) -> Result<(PolicyKeystore, Vec<KeyInfo>), String>
         });
     let keys = keys.collect::<Result<Vec<_>, _>>()?;
     Ok((ks, keys))
-}
-
-/// Standard base64 with padding, and no leftover bits, as the reader's decoder is.
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let pad = s.bytes().rev().take_while(|&b| b == b'=').count();
-    if !s.len().is_multiple_of(4) || pad > 2 {
-        return None;
-    }
-    let (mut out, mut acc, mut bits) = (Vec::new(), 0u32, 0);
-    for b in s[..s.len() - pad].bytes() {
-        acc = acc << 6 | ALPHABET.iter().position(|&a| a == b)? as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-            acc &= (1 << bits) - 1;
-        }
-    }
-    (acc == 0).then_some(out)
 }
 
 // ---- the host id -----------------------------------------------------------------------
@@ -507,6 +495,36 @@ pub fn is_canonical_v4(s: &str) -> bool {
 
 // ---- the mint --------------------------------------------------------------------------
 
+/// Why a mint failed, in fixed words: never a body, a URL, a header or a token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    Timeout,
+    Connect,
+    Request,
+    Status(u16),
+    Answer,
+}
+
+impl fmt::Display for Cause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout => f.write_str("timeout"),
+            Self::Connect => f.write_str("connect"),
+            Self::Request => f.write_str("request"),
+            Self::Status(code) => write!(f, "status={code}"),
+            Self::Answer => f.write_str("answer"),
+        }
+    }
+}
+
+fn cause_of(e: &reqwest::Error) -> Cause {
+    match (e.is_timeout(), e.is_connect()) {
+        (true, _) => Cause::Timeout,
+        (_, true) => Cause::Connect,
+        _ => Cause::Request,
+    }
+}
+
 /// Why no token came back. Each maps to one answer of the console's own.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MintError {
@@ -517,7 +535,7 @@ pub enum MintError {
     Unavailable,
     /// 401 or 403.
     Refused,
-    Failed,
+    Failed(Cause),
 }
 
 pub trait Enroller: Send + Sync + fmt::Debug {
@@ -586,16 +604,18 @@ impl HttpEnroller {
         if let Ok(v) = HeaderValue::from_str(&who) {
             req = req.header(REQUESTED_BY_HEADER, v);
         }
-        let res = req.send().await.map_err(|_| MintError::Failed)?;
+        let res = req
+            .send()
+            .await
+            .map_err(|e| MintError::Failed(cause_of(&e)))?;
         let status = res.status().as_u16();
         match status {
             201 => {
                 let body = read_capped(res, ANSWER_LIMIT)
                     .await
-                    .ok()
-                    .flatten()
-                    .ok_or(MintError::Failed)?;
-                serde_json::from_slice(&body).map_err(|_| MintError::Failed)
+                    .map_err(|e| MintError::Failed(cause_of(&e)))?;
+                let body = body.ok_or(MintError::Failed(Cause::Answer))?;
+                serde_json::from_slice(&body).map_err(|_| MintError::Failed(Cause::Answer))
             }
             404 => Err(MintError::Unavailable),
             401 | 403 => Err(MintError::Refused),
@@ -610,10 +630,10 @@ impl HttpEnroller {
                 Err(match v["error"]["code"].as_str() {
                     Some("host_exists") => MintError::HostExists,
                     Some("token_outstanding") => MintError::TokenOutstanding,
-                    _ => MintError::Failed,
+                    _ => MintError::Failed(Cause::Status(status)),
                 })
             }
-            _ => Err(MintError::Failed),
+            _ => Err(MintError::Failed(Cause::Status(status))),
         }
     }
 }

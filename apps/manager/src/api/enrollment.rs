@@ -13,11 +13,23 @@ use serde_json::json;
 use crate::api::{read_body, write_json};
 use crate::auth::Subject;
 use crate::enroll::{
-    is_canonical_v4, new_host_id, origin_of, Active, Enroll, MintError, TemplateError,
+    is_canonical_v4, new_host_id, origin_of, Active, Cause, Enroll, MintError, TemplateError,
 };
 use crate::server::{error_response, AppState};
 
 const BODY_LIMIT: usize = 1024;
+
+// The console's one stderr line per file or refusal; tests also read it from here.
+#[cfg(test)]
+thread_local! {
+    pub static LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn log(line: String) {
+    eprintln!("{line}");
+    #[cfg(test)]
+    LOG.with(|l| l.borrow_mut().push(line));
+}
 
 pub async fn status(
     State(s): State<AppState>,
@@ -121,17 +133,17 @@ async fn make(on: &Active, who: &str, host_id: &str) -> Response {
     };
     let minted = match on.enroller.mint(host_id, who).await {
         Ok(m) if answer_is_sound(host_id, &m) => m,
-        Ok(_) => return mint_failed(who, MintError::Failed),
+        Ok(_) => return mint_failed(who, MintError::Failed(Cause::Answer)),
         Err(e) => return mint_failed(who, e),
     };
     let file = match loaded.render(host_id, &minted.expires_at, &minted.token) {
         Ok(f) => f,
         Err(e) => return unusable(&e),
     };
-    eprintln!(
+    log(format!(
         "enroll: file made subject={who:?} host_id={host_id} expires_at={}",
         minted.expires_at
-    );
+    ));
     (
         StatusCode::OK,
         [
@@ -159,8 +171,9 @@ fn answer_is_sound(host_id: &str, m: &MintResponse) -> bool {
 }
 
 /// The origin rule, run before anything else on this route: `Origin` is present, one value, and
-/// is the configured origin; `Sec-Fetch-Site`, when sent, says `same-origin`; the body is JSON.
-/// There is no `Referer` fallback.
+/// is the configured origin; `Sec-Fetch-Site`, when sent, says `same-origin`. There is no
+/// `Referer` fallback. A body that is not JSON is `read_body`'s 415, after this rule and the
+/// subject list and before any call to the server.
 fn request_is_ours(h: &HeaderMap, configured: &str) -> bool {
     let mut origins = h.get_all(header::ORIGIN).iter();
     let origin_ok = match (origins.next(), origins.next()) {
@@ -175,11 +188,7 @@ fn request_is_ours(h: &HeaderMap, configured: &str) -> bool {
         .get_all("sec-fetch-site")
         .iter()
         .all(|v| v.as_bytes() == b"same-origin");
-    let json = h
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.as_bytes().split(|&b| b == b';').next())
-        .is_some_and(|t| t.trim_ascii().eq_ignore_ascii_case(b"application/json"));
-    origin_ok && fetch_ok && json
+    origin_ok && fetch_ok
 }
 
 fn mint_failed(who: &str, e: MintError) -> Response {
@@ -189,14 +198,25 @@ fn mint_failed(who: &str, e: MintError) -> Response {
         MintError::LimitReached => (StatusCode::TOO_MANY_REQUESTS, "enrollment_limit_reached", "the server holds the most tokens it allows. Try again later."),
         MintError::Unavailable => (StatusCode::BAD_GATEWAY, "enroll_unavailable", "the server has no token endpoint here, or it does not accept this console's mint certificate."),
         MintError::Refused => (StatusCode::BAD_GATEWAY, "enroll_refused", "the server refused this console's mint credential."),
-        MintError::Failed => (StatusCode::BAD_GATEWAY, "enroll_failed", "the server did not make a token. No file was made."),
+        MintError::Failed(_) => (StatusCode::BAD_GATEWAY, "enroll_failed", "no file was made. The console did not get a usable answer from the server, and the server may have made a token for this host id."),
     };
-    eprintln!("enroll: refused subject={who:?} code={code}");
+    let cause = match e {
+        MintError::Failed(c) => format!(" cause={c}"),
+        _ => String::new(),
+    };
+    log(format!(
+        "enroll: refused subject={who:?} code={code}{cause}"
+    ));
     error_response(status, code, message)
 }
 
+/// A setting file the console cannot use is the console's own fault, not the server's.
 fn unusable(e: &TemplateError) -> Response {
-    error_response(StatusCode::BAD_GATEWAY, "enroll_failed", &e.to_string())
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "enroll_misconfigured",
+        &e.to_string(),
+    )
 }
 
 #[cfg(test)]

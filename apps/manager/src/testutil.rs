@@ -482,3 +482,29 @@ pub async fn post_files(
         body,
     }
 }
+
+/// `GET /api/v1/enrollment` with the session of `who`, or none.
+pub async fn get_enrollment(app: &Router, who: Option<&str>) -> Reply {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .uri("/api/v1/enrollment")
+        .header("host", "console.example.com");
+    if let Some(who) = who {
+        req = req.header("cookie", session_cookie(who));
+    }
+    let res = app
+        .clone()
+        .oneshot(req.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = res.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Reply {
+        status: parts.status.as_u16(),
+        headers: parts.headers,
+        body,
+    }
+}

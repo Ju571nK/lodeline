@@ -9,10 +9,10 @@ use axum::Router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::enroll::{new_host_id, Active, Enroll, Enroller, Template, REQUIRED};
+use crate::enroll::{new_host_id, Active, Cause, Enroll, Enroller, Template, REQUIRED};
 use crate::fleet::BoxFuture;
 use crate::server::{router, AppState};
-use crate::testutil::{post_files, session_cookie, Reply, ORIGIN, SESSION_SECRET};
+use crate::testutil::{get_enrollment, post_files, session_cookie, ORIGIN, SESSION_SECRET};
 
 use super::*;
 
@@ -43,7 +43,7 @@ impl Enroller for Scripted {
             Err(MintError::LimitReached) => Err(MintError::LimitReached),
             Err(MintError::Unavailable) => Err(MintError::Unavailable),
             Err(MintError::Refused) => Err(MintError::Refused),
-            Err(MintError::Failed) => Err(MintError::Failed),
+            Err(MintError::Failed(c)) => Err(MintError::Failed(*c)),
         };
         Box::pin(async move { reply })
     }
@@ -72,34 +72,10 @@ fn calls(e: &Scripted) -> usize {
     e.calls.lock().unwrap().len()
 }
 
-async fn get_status(app: &Router, who: Option<&str>) -> Reply {
-    let mut req = Request::builder()
-        .uri("/api/v1/enrollment")
-        .header(header::HOST, "console.example.com");
-    if let Some(who) = who {
-        req = req.header(header::COOKIE, session_cookie(who));
-    }
-    let res = app
-        .clone()
-        .oneshot(req.body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let (parts, body) = res.into_parts();
-    let body = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .unwrap()
-        .to_vec();
-    Reply {
-        status: parts.status.as_u16(),
-        headers: parts.headers,
-        body,
-    }
-}
-
 #[tokio::test]
 async fn the_origin_rule_refuses_before_any_upstream_call() {
     type Edits<'a> = Vec<(&'a str, Option<&'a str>)>;
-    let refused: [(&str, Edits); 13] = [
+    let refused: [(&str, Edits); 11] = [
         ("no origin", vec![("origin", None)]),
         (
             "another host",
@@ -132,8 +108,6 @@ async fn the_origin_rule_refuses_before_any_upstream_call() {
         ("cross-site", vec![("sec-fetch-site", Some("cross-site"))]),
         ("same-site", vec![("sec-fetch-site", Some("same-site"))]),
         ("none", vec![("sec-fetch-site", Some("none"))]),
-        ("text/plain", vec![("content-type", Some("text/plain"))]),
-        ("no content type", vec![("content-type", None)]),
     ];
     let (app, enroller) = on(&[]);
     for (what, edits) in refused {
@@ -145,6 +119,31 @@ async fn the_origin_rule_refuses_before_any_upstream_call() {
             r.text()
         );
     }
+    assert_eq!(calls(&enroller), 0);
+}
+
+#[tokio::test]
+async fn a_wrong_content_type_is_the_consoles_415_after_the_origin_and_subject_rules() {
+    let (app, enroller) = on(&["alice"]);
+    for ct in [
+        Some("text/plain"),
+        Some("application/x-www-form-urlencoded"),
+        Some("multipart/form-data; boundary=x"),
+        None,
+    ] {
+        let r = post_files(&app, Some("alice"), &[("content-type", ct)], "host_id=x").await;
+        assert_eq!(
+            (r.status, r.code().as_str()),
+            (415, "unsupported_media_type"),
+            "{ct:?}"
+        );
+    }
+    let wrong = ("content-type", Some("text/plain"));
+    let other = ("origin", Some("https://evil.example.com"));
+    let r = post_files(&app, Some("alice"), &[wrong, other], "{}").await;
+    assert_eq!((r.status, r.code().as_str()), (403, "origin_not_allowed"));
+    let r = post_files(&app, Some("bob"), &[wrong], "{}").await;
+    assert_eq!((r.status, r.code().as_str()), (403, "not_an_enroller"));
     assert_eq!(calls(&enroller), 0);
 }
 
@@ -204,7 +203,7 @@ async fn no_session_is_401_and_makes_no_call() {
         let r = post_files(&app, who, &[], "{}").await;
         assert_eq!((r.status, r.code().as_str()), (401, "unauthorized"));
     }
-    assert_eq!(get_status(&app, None).await.status, 401);
+    assert_eq!(get_enrollment(&app, None).await.status, 401);
     assert_eq!(calls(&enroller), 0);
 }
 
@@ -215,11 +214,11 @@ async fn a_subject_outside_the_list_is_refused_and_cannot_enroll() {
     assert_eq!((r.status, r.code().as_str()), (403, "not_an_enroller"));
     assert_eq!(calls(&enroller), 0);
     assert_eq!(
-        get_status(&app, Some("bob")).await.json()["can_enroll"],
+        get_enrollment(&app, Some("bob")).await.json()["can_enroll"],
         false
     );
     assert_eq!(
-        get_status(&app, Some("alice")).await.json()["can_enroll"],
+        get_enrollment(&app, Some("alice")).await.json()["can_enroll"],
         true
     );
     assert_eq!(post_files(&app, Some("alice"), &[], "{}").await.status, 200);
@@ -227,7 +226,7 @@ async fn a_subject_outside_the_list_is_refused_and_cannot_enroll() {
     // With no list every signed-in subject may.
     let (open, _) = on(&[]);
     assert_eq!(
-        get_status(&open, Some("bob")).await.json()["can_enroll"],
+        get_enrollment(&open, Some("bob")).await.json()["can_enroll"],
         true
     );
 }
@@ -238,7 +237,7 @@ async fn off_reports_the_missing_names_and_the_post_is_404() {
         SESSION_SECRET,
         Arc::new(crate::fleet::Mock::new(1_779_192_000)),
     ));
-    let r = get_status(&app, Some("alice")).await;
+    let r = get_enrollment(&app, Some("alice")).await;
     assert_eq!(r.status, 200);
     assert_eq!(r.json(), json!({"enabled": false, "missing": REQUIRED}));
     assert_eq!(r.headers["cache-control"], "no-store");
@@ -252,7 +251,7 @@ async fn off_reports_the_missing_names_and_the_post_is_404() {
 #[tokio::test]
 async fn on_reports_what_a_file_made_now_holds_and_no_secret() {
     let (app, _) = on(&[]);
-    let r = get_status(&app, Some("alice")).await;
+    let r = get_enrollment(&app, Some("alice")).await;
     assert_eq!(r.status, 200);
     assert_eq!(r.headers["cache-control"], "no-store");
     let v = r.json();
@@ -398,7 +397,12 @@ async fn each_failure_of_the_mint_has_its_own_answer_and_text() {
             "mint certificate",
         ),
         (MintError::Refused, 502, "enroll_refused", "refused"),
-        (MintError::Failed, 502, "enroll_failed", "No file was made"),
+        (
+            MintError::Failed(Cause::Answer),
+            502,
+            "enroll_failed",
+            "the server may have made a token for this host id",
+        ),
     ];
     for (err, status, code, text) in table {
         *enroller.reply.lock().unwrap() = Err(err);

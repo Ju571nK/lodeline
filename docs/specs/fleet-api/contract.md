@@ -1636,7 +1636,7 @@ specifies it; this note records what a consumer needs.
 | Credential | A client certificate pinned in the mint's own verifier file, and `Authorization: Bearer <token>` of an entry with scope `enroll`. Neither is the read credential: the read token is refused here, and the mint bearer is refused on every read route. |
 | Request | `{"host_id":"<lowercase hyphenated version 4 UUID>"}`. Unknown fields are refused. The optional header `X-Lodeline-Requested-By` names the person behind the call, as the caller says it, in visible ASCII. The server records it as asserted. |
 | Answer | `201 {"expires_at":"<RFC 3339>","host_id":"<uuid>","token":"<opaque>"}` with `Cache-Control: no-store`. The token is shown once. |
-| Refusals | 404 (no mint here, or the certificate is not accepted; the two look the same), 401, 403, 409 `host_exists` and 409 `token_outstanding`, 413, 415, 422, 429 (the token file holds the most entries it allows), 503. |
+| Refusals | 404 (no mint here, or the certificate is not accepted; the two look the same), 401, 403, 405 (any method but POST, from an authenticated caller), 409 `host_exists` and 409 `token_outstanding`, 413, 415, 422, 429 (the token file holds the most entries it allows), 500 (`internal` or `token_store_error`), 503. |
 | Types | `lodeline_fleet_api::mint` (`MintRequest`, `MintResponse`, `MINT_PATH`, `REQUESTED_BY_HEADER`). |
 
 The console calls it from `POST /api/v1/enrollment/files`, builds the enrollment file
