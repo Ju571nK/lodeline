@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Drive the real lodeline-manager release binary and its embedded web console in a real browser with MOCK_FLEET=1, and capture screenshots, Playwright traces, and curl bodies. Use to prove a change to login, the alerts queue, triage, the fleet pages, host detail, the proxy and invocation pages, the Downloads page, settings, or the /api/v1 responses on the real binary, or to reproduce a console bug.
+description: Drive the real lodeline-manager release binary and its embedded web console in a real browser with MOCK_FLEET=1, and capture screenshots, Playwright traces, and curl bodies. Use to prove a change to login, the alerts queue, triage, the fleet pages, host detail, the proxy and invocation pages, the Downloads page, the Enroll a host page, settings, or the /api/v1 responses on the real binary, or to reproduce a console bug.
 ---
 
 # Verify lodeline-manager
@@ -86,6 +86,7 @@ A passing spec proves a server response only if the spec did not replace that re
 | `proxy-invocations.spec.ts` | Everything. No stubs. |
 | `proxy-inventory.spec.ts` | Everything. No stubs. |
 | `downloads.spec.ts` | Everything, except `a server without artifacts_dir is named as such`, which stubs the index. |
+| `enroll.spec.ts` | Everything, except `a server that does not accept the mint certificate is named as such`, which stubs the POST, and `a host id the page cannot accept sends no request`, which aborts any POST. |
 
 The stubbed specs prove how the SPA renders a response. Prove the matching server response with `drive.sh api`.
 
@@ -149,7 +150,7 @@ Stops this run's server, removes `scratch/`, keeps `evidence/`, and lists what s
 
 ## What the mock hides
 
-`MOCK_FLEET=1` replaces the HTTP fleet client with the fixtures in `testdata/mock-fleet.json`, `testdata/mock-proxies.json`, `testdata/mock-proxy-invocations.json`, `testdata/mock-proxy-inventory.json` and four one-line release files (`src/fleet/mock.rs`), so no run talks to a `lodeline-server`. A green run says nothing about these areas, which stay with `cargo test` (`src/fleet/tests.rs` runs a real `lodeline-server` in process, and `src/fleet/http/tests.rs` covers TLS) and the parity suite's live cases:
+`MOCK_FLEET=1` replaces the HTTP fleet client with the fixtures in `testdata/mock-fleet.json`, `testdata/mock-proxies.json`, `testdata/mock-proxy-invocations.json`, `testdata/mock-proxy-inventory.json` and four one-line release files (`src/fleet/mock.rs`), and a mock enrollment mint (`src/enroll.rs`), so no run talks to a `lodeline-server`. A green run says nothing about these areas, which stay with `cargo test` (`src/fleet/tests.rs` runs a real `lodeline-server` in process, and `src/fleet/http/tests.rs` covers TLS) and the parity suite's live cases:
 
 - The bearer token, the custom CA, and mTLS to `lodeline-server`.
 - Retries and the mapping of upstream failures to `upstream_unauthorized`, `read_api_disabled`, `certificate_refused`, `service_unavailable`, `upstream_error`, for the proxy reads `proxy_reads_unavailable`, `upstream_forbidden`, `invalid_cursor` and `invalid_filter`, and for the release files `artifacts_not_configured`. The browser specs for those states use `page.route`.

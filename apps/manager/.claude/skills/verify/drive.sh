@@ -104,6 +104,7 @@ cmd_new() {
     env -i "PATH=/usr/bin:/bin" "HOME=$scratch" "LISTEN_ADDR=127.0.0.1:$port" MOCK_FLEET=1 \
       "TRIAGE_DB_PATH=$scratch/triage.sqlite" ADMIN_USERNAME=admin "ADMIN_PASSWORD_BCRYPT=$hash" \
       "JWT_SECRET=$(openssl rand -hex 32)" LODELINE_INSECURE_COOKIE=1 \
+      "LODELINE_PUBLIC_ORIGIN=http://localhost:$port" \
       "$(cat "$scratch/bin")" >"$evidence/server.stdout" 2>"$evidence/server.stderr" </dev/null &
     { echo "$!"; ps -o lstart= -p "$!"; } >"$scratch/pid"
   )
