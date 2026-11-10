@@ -116,7 +116,8 @@ async fn session_routes_answer_401_forms() {
                 p.replace("{event_id}", "e1")
                     .replace("{host_id}", "h1")
                     .replace("{proxy_id}", "px-edge-01")
-                    .replace("{invocation_id}", "00000000-0000-4000-8000-000000000403"),
+                    .replace("{invocation_id}", "00000000-0000-4000-8000-000000000403")
+                    .replace("{filename}", "SHA256SUMS"),
             )
         })
     {

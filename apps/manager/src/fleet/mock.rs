@@ -10,6 +10,9 @@
 //! `testdata/mock-proxy-invocations.json`, both written for this console: 5 proxy details and 10
 //! invocation details whose times are second offsets from the seed. A list cursor is the last ID
 //! of a page. `testdata/mock-proxy-inventory.json` holds the inventory views of some of them.
+//!
+//! The release files are `ARTIFACTS`: names as a server lists them, each with a line of text that
+//! says it is a mock file.
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -19,18 +22,26 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    go_decode, BoxFuture, Client, CompliancePage, ComplianceParams, ComplianceRow, DriftRecord,
-    Event, EventsPage, EventsParams, FleetError, GoTime, HostDetail, HostsPage, HostsParams,
-    InventoryPage, InventoryParams, InventoryScope, InventorySnapshot, InventoryView,
-    InvocationDetail, InvocationSummary, InvocationsPage, InvocationsParams, Meta, ProxiesPage,
-    ProxiesParams, ProxyDetail, RebaselineMarker, Reply, Request, Response, RiskPage, RiskParams,
-    RiskRow,
+    go_decode, ArtifactName, ArtifactsIndex, BoxFuture, Client, CompliancePage, ComplianceParams,
+    ComplianceRow, Download, DriftRecord, Event, EventsPage, EventsParams, FleetError, GoTime,
+    HostDetail, HostsPage, HostsParams, InventoryPage, InventoryParams, InventoryScope,
+    InventorySnapshot, InventoryView, InvocationDetail, InvocationSummary, InvocationsPage,
+    InvocationsParams, Meta, ProxiesPage, ProxiesParams, ProxyDetail, RebaselineMarker, Reply,
+    Request, Response, RiskPage, RiskParams, RiskRow,
 };
 
 const FIXTURES: &str = include_str!("../../testdata/mock-fleet.json");
 const PROXY_FIXTURES: &str = include_str!("../../testdata/mock-proxies.json");
 const INVOCATION_FIXTURES: &str = include_str!("../../testdata/mock-proxy-invocations.json");
 const INVENTORY_FIXTURES: &str = include_str!("../../testdata/mock-proxy-inventory.json");
+
+/// Sorted, as the server lists them.
+const ARTIFACTS: [&str; 4] = [
+    "SHA256SUMS",
+    "build-manifest.json",
+    "lodeline-0.14.2-aarch64-apple-darwin.tar.gz",
+    "lodeline-0.14.2-x86_64-unknown-linux-musl.tar.gz",
+];
 
 pub struct Mock {
     seed: GoTime,
@@ -432,6 +443,9 @@ impl Mock {
                     .ok_or(FleetError::NotFound)?,
             ),
             Request::Inventory(view, p) => self.inventory(view, &p)?,
+            Request::Artifacts => Response::Artifacts(ArtifactsIndex {
+                artifacts: ARTIFACTS.map(String::from).to_vec(),
+            }),
         })
     }
 }
@@ -440,6 +454,20 @@ impl Client for Mock {
     fn get(&self, req: Request) -> BoxFuture<'_, Reply> {
         let reply = self.answer(req).map(Arc::new);
         Box::pin(async move { reply })
+    }
+
+    fn artifact(&self, name: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>> {
+        let file = ARTIFACTS.contains(&name.as_str()).then(|| {
+            let text = format!(
+                "{}: a mock file from MOCK_FLEET=1, not a release file\n",
+                name.as_str()
+            );
+            Download {
+                len: Some(text.len() as u64),
+                body: text.into(),
+            }
+        });
+        Box::pin(async move { file.ok_or(FleetError::NotFound) })
     }
 }
 

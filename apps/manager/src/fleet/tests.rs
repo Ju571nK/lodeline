@@ -850,4 +850,5 @@ fn compliance_page(b: api::RowsPage<api::ComplianceRow>) -> CompliancePage {
     }
 }
 
+mod artifacts;
 mod proxies;

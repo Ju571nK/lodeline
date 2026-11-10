@@ -1,0 +1,27 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/fleet/artifacts/SHA256SUMS",
+    "server": "live"
+  },
+  "status": 200,
+  "headers": {
+    "content-disposition": "attachment; filename=\"SHA256SUMS\"",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "content-type": "application/octet-stream",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "cookies": [],
+  "body": "abc123  lodeline-0.14.2-x86_64-pc-windows-msvc.zip\n",
+  "upstream": [
+    {
+      "method": "GET",
+      "path": "/v1/artifacts/SHA256SUMS",
+      "query": [],
+      "authorization": "Bearer parity-read-d2931eaa245b0ba9",
+      "accept": "*/*"
+    }
+  ]
+}

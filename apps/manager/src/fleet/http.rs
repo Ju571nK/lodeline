@@ -9,12 +9,19 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::{
-    go_decode, path_escape, BoxFuture, Client, FleetError, InventoryView, Reply, Request, Response,
+    go_decode, path_escape, ArtifactName, BoxFuture, Client, Download, FleetError, InventoryView,
+    Reply, Request, Response,
 };
 use crate::config::ServerTls;
 
-/// The whole exchange, body included, as Go's `http.Client.Timeout`.
+/// The whole exchange, body included, as Go's `http.Client.Timeout`. A release file download
+/// has no such limit.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The longest a release file download waits for the server: to connect and send the headers,
+/// then for each part of the body. Time that the console spends waiting for the browser to take
+/// the body does not count.
+pub const STALL: Duration = Duration::from_secs(30);
 
 /// The largest 200 body read; a larger one is a transport error. The console's own list calls ask
 /// for 100 items a page, and `lodeline-server` takes at most 2 MiB a request (axum's default body
@@ -31,6 +38,7 @@ pub struct HttpClient {
     base_url: String,
     token: String,
     http: reqwest::Client,
+    timeout: Duration,
     body_limit: usize,
 }
 
@@ -43,8 +51,19 @@ impl HttpClient {
         tls: Option<&ServerTls>,
         timeout: Duration,
     ) -> reqwest::Result<Self> {
+        Self::with_stall(base_url, token, tls, timeout, STALL)
+    }
+
+    /// `timeout` bounds each JSON read, set per request so that a download is not cut short.
+    fn with_stall(
+        base_url: &str,
+        token: &str,
+        tls: Option<&ServerTls>,
+        timeout: Duration,
+        stall: Duration,
+    ) -> reqwest::Result<Self> {
         let mut builder = reqwest::Client::builder()
-            .timeout(timeout)
+            .read_timeout(stall)
             .tls_built_in_webpki_certs(false)
             .proxy(env_proxy(|k| std::env::var(k).ok()));
         if let Some(tls) = tls {
@@ -62,6 +81,7 @@ impl HttpClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token: token.to_owned(),
             http: builder.build()?,
+            timeout,
             body_limit: BODY_LIMIT,
         })
     }
@@ -91,6 +111,7 @@ impl HttpClient {
                 ),
                 true,
             ),
+            Request::Artifacts => ("/v1/artifacts".to_owned(), false),
         };
         let proxy = matches!(
             req,
@@ -108,67 +129,105 @@ impl HttpClient {
         let transport =
             |e: reqwest::Error| FleetError::Transport(format!("GET {path}: {}", causes(&e)));
 
-        let mut builder = self.http.get(&url).header(ACCEPT, "application/json");
+        let mut builder = self
+            .http
+            .get(&url)
+            .header(ACCEPT, "application/json")
+            .timeout(self.timeout);
         // Healthz is the one endpoint the server serves without the read token.
         if req != Request::Healthz {
             builder = builder.bearer_auth(&self.token);
         }
         let resp = builder.send().await.map_err(transport)?;
-        let status = resp.status().as_u16();
-        match status {
-            200 => {
-                let limit = self.body_limit;
-                let body = read_capped(resp, limit)
-                    .await
-                    .map_err(transport)?
-                    .ok_or_else(|| {
-                        FleetError::Transport(format!("GET {path}: body over {limit} bytes"))
-                    })?;
-                decode(&req, &body)
-                    .map(Arc::new)
-                    .map_err(|e| FleetError::Transport(format!("decode {path}: {e}")))
-            }
-            401 => Err(FleetError::Unauthorized),
-            503 => Err(FleetError::ServiceUnavailable {
-                retry_after: parse_retry_after(resp.headers().get(RETRY_AFTER)),
-            }),
-            _ => {
-                let body = read_capped(resp, ERROR_BODY_LIMIT)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                Err(match (status, api_error(status, &body)) {
-                    (404, _) if certificate_refused(&body) => FleetError::CertificateRefused,
-                    (403, _) if proxy => FleetError::Forbidden,
-                    // The server answers an unknown proxy or invocation, and one outside the
-                    // caller's `proxy.read` range, with the same `proxy_unknown`. Any other 404 is
-                    // a route it does not serve.
-                    (404, FleetError::Api { code, .. })
-                        if proxy && by_id && code == "proxy_unknown" =>
-                    {
-                        FleetError::NotFound
-                    }
-                    (404, _) if proxy => FleetError::ProxyReadsUnavailable,
-                    // A lookup reaches its 404 only through an enabled read API.
-                    (404, _) if by_id => FleetError::NotFound,
-                    (404, _) => FleetError::ReadApiDisabled,
-                    (422, FleetError::Api { code, .. }) if proxy && code == "invalid_cursor" => {
-                        FleetError::InvalidCursor
-                    }
-                    (422, FleetError::Api { code, .. }) if proxy && code == "invalid_filter" => {
-                        FleetError::InvalidFilter
-                    }
-                    (_, other) => other,
-                })
-            }
+        if resp.status() != 200 {
+            return Err(upstream_error(resp, proxy, by_id).await);
         }
+        let limit = self.body_limit;
+        let body = read_capped(resp, limit)
+            .await
+            .map_err(transport)?
+            .ok_or_else(|| FleetError::Transport(format!("GET {path}: body over {limit} bytes")))?;
+        decode(&req, &body)
+            .map(Arc::new)
+            .map_err(|e| FleetError::Transport(format!("decode {path}: {e}")))
+    }
+
+    /// Streams the body as it arrives, with no size cap and no total time limit. Only a server
+    /// that sends nothing for the stall limit ends it early.
+    async fn download(&self, name: ArtifactName) -> Result<Download, FleetError> {
+        let path = format!("/v1/artifacts/{}", path_escape(name.as_str()));
+        let resp = self
+            .http
+            .get(format!("{}{path}", self.base_url))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| FleetError::Transport(format!("GET {path}: {}", causes(&e))))?;
+        if resp.status() != 200 {
+            return Err(upstream_error(resp, false, false).await);
+        }
+        Ok(Download {
+            len: resp.content_length(),
+            body: axum::body::Body::new(reqwest::Body::from(resp)),
+        })
     }
 }
 
 impl Client for HttpClient {
     fn get(&self, req: Request) -> BoxFuture<'_, Reply> {
         Box::pin(self.fetch(req))
+    }
+
+    fn artifact(&self, name: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>> {
+        Box::pin(self.download(name))
+    }
+}
+
+/// What a non-200 answer means. `proxy` and `by_id` describe the request, as in `fetch`.
+async fn upstream_error(resp: reqwest::Response, proxy: bool, by_id: bool) -> FleetError {
+    let status = resp.status().as_u16();
+    match status {
+        401 => FleetError::Unauthorized,
+        503 => FleetError::ServiceUnavailable {
+            retry_after: parse_retry_after(resp.headers().get(RETRY_AFTER)),
+        },
+        _ => {
+            let body = read_capped(resp, ERROR_BODY_LIMIT)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            match (status, api_error(status, &body)) {
+                (404, _) if certificate_refused(&body) => FleetError::CertificateRefused,
+                // Only the artifact routes send these codes.
+                (404, FleetError::Api { code, .. }) if code == "artifacts_not_configured" => {
+                    FleetError::ArtifactsNotConfigured
+                }
+                (404, FleetError::Api { code, .. }) if code == "artifact_not_found" => {
+                    FleetError::NotFound
+                }
+                (403, _) if proxy => FleetError::Forbidden,
+                // The server answers an unknown proxy or invocation, and one outside the
+                // caller's `proxy.read` range, with the same `proxy_unknown`. Any other 404 is
+                // a route it does not serve.
+                (404, FleetError::Api { code, .. })
+                    if proxy && by_id && code == "proxy_unknown" =>
+                {
+                    FleetError::NotFound
+                }
+                (404, _) if proxy => FleetError::ProxyReadsUnavailable,
+                // A lookup reaches its 404 only through an enabled read API.
+                (404, _) if by_id => FleetError::NotFound,
+                (404, _) => FleetError::ReadApiDisabled,
+                (422, FleetError::Api { code, .. }) if proxy && code == "invalid_cursor" => {
+                    FleetError::InvalidCursor
+                }
+                (422, FleetError::Api { code, .. }) if proxy && code == "invalid_filter" => {
+                    FleetError::InvalidFilter
+                }
+                (_, other) => other,
+            }
+        }
     }
 }
 
@@ -267,6 +326,7 @@ pub(super) fn decode(req: &Request, body: &[u8]) -> serde_json::Result<Response>
         Request::Inventory(InventoryView::Markers, _) => {
             Response::Markers(serde_json::from_str(v.get())?)
         }
+        Request::Artifacts => Response::Artifacts(serde_json::from_str(v.get())?),
     })
 }
 

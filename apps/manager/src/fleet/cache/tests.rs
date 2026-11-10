@@ -70,6 +70,11 @@ impl Client for Counting {
             }))
         })
     }
+
+    fn artifact(&self, _: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>> {
+        *self.calls.lock().unwrap().entry("artifact").or_default() += 1;
+        Box::pin(async { Err(FleetError::NotFound) })
+    }
 }
 
 fn events() -> Request {
@@ -348,6 +353,10 @@ impl Client for PanicsOnce {
             Ok(Arc::new(Response::Events(EventsPage::default())))
         })
     }
+
+    fn artifact(&self, _: ArtifactName) -> BoxFuture<'_, Result<Download, FleetError>> {
+        unreachable!("no release file reads here")
+    }
 }
 
 #[tokio::test]
@@ -413,4 +422,19 @@ async fn proxy_reads_have_keys_of_their_own() {
     );
     assert_eq!(up.count("proxy_drift"), 2, "one key per proxy");
     assert_eq!(c.len(), 9);
+}
+
+/// A release file goes to the server every time: the cache holds JSON reads only.
+#[tokio::test]
+async fn a_release_file_is_never_cached() {
+    let up = Arc::new(Counting::default());
+    let c = cache(&up, CacheConfig::default(), None);
+    let name = ArtifactName::parse("SHA256SUMS").unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            c.artifact(name.clone()).await,
+            Err(FleetError::NotFound)
+        ));
+    }
+    assert_eq!(up.count("artifact"), 2);
 }
