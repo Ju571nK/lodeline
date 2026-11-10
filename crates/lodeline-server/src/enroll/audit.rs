@@ -21,7 +21,7 @@ pub struct EnrollmentAuditRecord {
     pub seq: u64,
     pub ts: String,
     pub host_id: String,
-    /// `outcome` ∈ {"issued","denied"}.
+    /// `outcome` ∈ {"issued","denied","token_minted"}.
     pub decision: String,
     /// Internal reason (e.g. "ok", "token_expired", "host_mismatch", "sign_failed").
     pub reason: String,
@@ -31,12 +31,22 @@ pub struct EnrollmentAuditRecord {
     pub cert_fingerprint: String,
     /// Issued cert serial hex (empty when denied).
     pub serial: String,
-    /// not_after of the issued cert, rfc3339 (empty when denied).
+    /// not_after of the issued cert, rfc3339 (empty when denied). For a
+    /// `token_minted` line, the expiry of the minted token.
     pub not_after: String,
     /// Caller (TLS peer) cert fingerprint — blake3 hex of the leaf DER, as
     /// plumbed by `tls_accept::PeerCertAcceptor` (#194). Empty when the
     /// request carried no peer identity (plain-HTTP dev mode).
     pub caller_fingerprint: String,
+    /// `token_minted` only: the `key_id` of the verifier entry that authenticated
+    /// the mint call. VERIFIED by the server. Absent on every other line, and
+    /// then not serialized, so older lines keep their bytes, hash and signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_key_id: Option<String>,
+    /// `token_minted` only: the subject the caller says it acts for. ASSERTED, as
+    /// the caller reported it; nothing here checked it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by_asserted: Option<String>,
     pub prev_hash: String,
 }
 
@@ -99,21 +109,69 @@ pub fn append(
     caller_fingerprint: &str,
     ts: &str,
 ) -> Result<SignedEnrollmentRecord, AuditAppendError> {
-    let (seq, prev_hash) = resume_chain(path);
-    let record = EnrollmentAuditRecord {
-        v: 1,
-        seq,
-        ts: ts.to_string(),
-        host_id: host_id.to_string(),
-        decision: decision.to_string(),
-        reason: reason.to_string(),
-        csr_fingerprint: csr_fingerprint.to_string(),
-        cert_fingerprint: cert_fingerprint.to_string(),
-        serial: serial.to_string(),
-        not_after: not_after.to_string(),
-        caller_fingerprint: caller_fingerprint.to_string(),
-        prev_hash,
-    };
+    append_record(
+        path,
+        key,
+        EnrollmentAuditRecord {
+            v: 1,
+            seq: 0,
+            ts: ts.to_string(),
+            host_id: host_id.to_string(),
+            decision: decision.to_string(),
+            reason: reason.to_string(),
+            csr_fingerprint: csr_fingerprint.to_string(),
+            cert_fingerprint: cert_fingerprint.to_string(),
+            serial: serial.to_string(),
+            not_after: not_after.to_string(),
+            caller_fingerprint: caller_fingerprint.to_string(),
+            management_key_id: None,
+            requested_by_asserted: None,
+            prev_hash: String::new(),
+        },
+    )
+}
+
+/// The line of one minted token. The caller holds `en.mint`, like every writer.
+#[allow(clippy::too_many_arguments)]
+pub fn append_mint(
+    path: &Path,
+    key: &crate::audit_key::AuditKey,
+    host_id: &str,
+    token_expires_at: &str,
+    caller_fingerprint: &str,
+    management_key_id: &str,
+    requested_by_asserted: Option<&str>,
+    ts: &str,
+) -> Result<SignedEnrollmentRecord, AuditAppendError> {
+    append_record(
+        path,
+        key,
+        EnrollmentAuditRecord {
+            v: 1,
+            seq: 0,
+            ts: ts.to_string(),
+            host_id: host_id.to_string(),
+            decision: "token_minted".to_string(),
+            reason: "ok".to_string(),
+            csr_fingerprint: String::new(),
+            cert_fingerprint: String::new(),
+            serial: String::new(),
+            not_after: token_expires_at.to_string(),
+            caller_fingerprint: caller_fingerprint.to_string(),
+            management_key_id: Some(management_key_id.to_string()),
+            requested_by_asserted: requested_by_asserted.map(str::to_string),
+            prev_hash: String::new(),
+        },
+    )
+}
+
+/// Sets `seq` and `prev_hash` from the file, signs and appends.
+fn append_record(
+    path: &Path,
+    key: &crate::audit_key::AuditKey,
+    mut record: EnrollmentAuditRecord,
+) -> Result<SignedEnrollmentRecord, AuditAppendError> {
+    (record.seq, record.prev_hash) = resume_chain(path);
     let canonical =
         to_canonical_bytes(&record).map_err(|e| AuditAppendError::Canonical(e.to_string()))?;
     let hash = blake3::hash(&canonical).to_hex().to_string();
@@ -126,7 +184,6 @@ pub fn append(
     };
     let line =
         serde_json::to_string(&signed).map_err(|e| AuditAppendError::Canonical(e.to_string()))?;
-
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(AuditAppendError::Io)?;
@@ -214,6 +271,48 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .count();
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn mint_line_carries_two_extra_fields_and_chains_with_the_others() {
+        let d = tempfile::tempdir().unwrap();
+        let k = key(d.path());
+        let p = d.path().join("enrollment-audit.jsonl");
+        let a = append(&p, &k, "h1", "issued", "ok", "c", "f", "0a", "n", "cf", "t").unwrap();
+        let m = append_mint(
+            &p,
+            &k,
+            "h2",
+            "2026-07-01T00:00:00Z",
+            "callerfp",
+            "key-1",
+            Some("alice"),
+            "t2",
+        )
+        .unwrap();
+        let m2 = append_mint(&p, &k, "h3", "x", "callerfp", "key-1", None, "t3").unwrap();
+        assert_eq!(m.record.prev_hash, a.hash);
+        assert_eq!(m2.record.prev_hash, m.hash);
+        assert!(verify_line(&m, &k) && verify_line(&m2, &k));
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&p)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[1]["decision"], "token_minted");
+        assert_eq!(lines[1]["reason"], "ok");
+        assert_eq!(lines[1]["not_after"], "2026-07-01T00:00:00Z");
+        assert_eq!(lines[1]["management_key_id"], "key-1");
+        assert_eq!(lines[1]["requested_by_asserted"], "alice");
+        assert_eq!(lines[1]["caller_fingerprint"], "callerfp");
+        for f in ["csr_fingerprint", "cert_fingerprint", "serial"] {
+            assert_eq!(lines[1][f], "");
+        }
+        assert!(lines[0].get("management_key_id").is_none());
+        assert!(
+            lines[2].get("requested_by_asserted").is_none(),
+            "absent is skipped"
+        );
     }
 
     /// Exact file bytes for a fixed key and fixed inputs.

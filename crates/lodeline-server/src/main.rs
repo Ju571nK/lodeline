@@ -177,7 +177,7 @@ fn build_state(cfg: &ServerConfig) -> Result<SharedState> {
     // #184 — enrollment state. Off unless cert+key+tokens AND host_allowlist are
     // all configured AND boot validation passes (see EnrollState::load).
     let enroll_audit_path = audit_dir.join("enrollment-audit.jsonl");
-    let enroll = lodeline_server::enroll::EnrollState::load(
+    let mut enroll = lodeline_server::enroll::EnrollState::load(
         cfg.enroll_ca_cert_path.as_deref(),
         cfg.enroll_ca_key_path.as_deref(),
         cfg.enroll_tokens_path.as_deref(),
@@ -189,6 +189,16 @@ fn build_state(cfg: &ServerConfig) -> Result<SharedState> {
     );
     if enroll.is_some() {
         tracing::info!("enrollment endpoint enabled (POST /v1/enroll)");
+    }
+    // #553: the HTTP mint. Every start rule that needs no proxy context is here;
+    // the overlap with the proxy's callers is checked in `run`.
+    if let Some(m) = &cfg.enroll_mint {
+        let api =
+            lodeline_server::enroll::mint::MintApi::boot(m, enroll.as_ref(), audit_key.is_some())?;
+        if let Some(en) = enroll.as_mut() {
+            en.mint_api = Some(api);
+            tracing::info!("enrollment token mint enabled (POST /v1/enroll-tokens)");
+        }
     }
 
     Ok(Arc::new(AppState {
@@ -221,6 +231,12 @@ async fn run(cfg: ServerConfig) -> Result<()> {
     }
     // T-11: refuses to start on a bad proxy CA/registry; None means proxy off.
     let proxy = lodeline_server::proxy::ProxyContext::load(&cfg)?.map(Arc::new);
+    if let (Some(api), Some(ctx)) = (
+        state.enroll.as_ref().and_then(|e| e.mint_api.as_ref()),
+        proxy.as_ref(),
+    ) {
+        api.check_proxy_overlap(ctx)?;
+    }
 
     // Boot rebuild runs off-thread so the listener opens immediately; boot_gate
     // serves 503 + Retry-After until this flips boot_complete to true (#19).

@@ -40,6 +40,9 @@ pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 pub enum Scope {
     Config,
     Identity,
+    /// Makes enrollment tokens (`enroll_mint`, `POST /v1/enroll-tokens`). Only the
+    /// mint's own verifier file holds entries of this scope.
+    Enroll,
 }
 
 impl Scope {
@@ -47,6 +50,7 @@ impl Scope {
         match self {
             Scope::Config => "config",
             Scope::Identity => "identity",
+            Scope::Enroll => "enroll",
         }
     }
 }
@@ -57,7 +61,8 @@ impl std::str::FromStr for Scope {
         match s {
             "config" => Ok(Scope::Config),
             "identity" => Ok(Scope::Identity),
-            other => Err(format!("unknown scope {other:?} (config|identity)")),
+            "enroll" => Ok(Scope::Enroll),
+            other => Err(format!("unknown scope {other:?} (config|identity|enroll)")),
         }
     }
 }
@@ -267,7 +272,7 @@ fn validate(file: FileFormat, now: time::OffsetDateTime) -> Result<Vec<Loaded>> 
             not_after,
         });
     }
-    for scope in [Scope::Config, Scope::Identity] {
+    for scope in [Scope::Config, Scope::Identity, Scope::Enroll] {
         let active = out
             .iter()
             .filter(|l| l.entry.scope == scope && l.not_after.is_none_or(|t| t > now))
@@ -374,6 +379,15 @@ impl MgmtAuth {
             .into_iter()
     }
 
+    /// True when every entry of the last good load has `scope` (the mint's file).
+    pub fn only_scope(&self, scope: Scope) -> bool {
+        self.state
+            .read()
+            .entries
+            .iter()
+            .all(|l| l.entry.scope == scope)
+    }
+
     /// True if `fp` is a management-caller cert fingerprint (last good load).
     pub fn is_caller(&self, fp: &str) -> bool {
         self.state.read().callers.contains(fp)
@@ -450,6 +464,43 @@ mod tests {
 
     fn now() -> time::OffsetDateTime {
         time::OffsetDateTime::now_utc()
+    }
+
+    #[test]
+    fn enroll_scope_parses_loads_and_is_told_apart() {
+        assert_eq!("enroll".parse::<Scope>(), Ok(Scope::Enroll));
+        let e = "root".parse::<Scope>().unwrap_err();
+        assert!(e.contains("config|identity|enroll"), "{e}");
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("v.json");
+        write(
+            &p,
+            vec![entry("e", "tok-e", Scope::Enroll, FP, None)],
+            0o600,
+        );
+        let a = MgmtAuth::load(&p).unwrap();
+        assert!(a.only_scope(Scope::Enroll) && !a.only_scope(Scope::Config));
+        match a.authenticate(FP, Some("tok-e"), now()) {
+            AuthOutcome::Ok(p) => assert_eq!(p.scope, Scope::Enroll),
+            other => panic!("{other:?}"),
+        }
+        write(
+            &p,
+            vec![
+                entry("e", "tok-e", Scope::Enroll, FP, None),
+                entry("c", "tok-c", Scope::Config, FP, None),
+            ],
+            0o600,
+        );
+        assert!(!MgmtAuth::load(&p).unwrap().only_scope(Scope::Enroll));
+        let three: Vec<_> = (0..3)
+            .map(|i| entry(&format!("e{i}"), &format!("t{i}"), Scope::Enroll, FP, None))
+            .collect();
+        write(&p, three, 0o600);
+        let err = MgmtAuth::load(&p)
+            .err()
+            .expect("three active enroll entries");
+        assert!(format!("{err:#}").contains("active enroll"), "{err:#}");
     }
 
     #[test]

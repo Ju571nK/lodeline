@@ -212,3 +212,49 @@ fn scan(text: &str) -> Scan {
     }
     (heads, denied, bad)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::enroll::audit::{append, append_mint};
+
+    /// A mint line (empty serial, certificate and CSR fields) must change neither
+    /// the heads, nor the denied set, nor the count of lines that do not parse.
+    #[test]
+    fn a_mint_line_is_ignored_wherever_it_sits() {
+        let d = tempfile::tempdir().unwrap();
+        let k = crate::audit_key::AuditKey::load_or_create(d.path()).unwrap();
+        let real = |p: &Path, n: u32| {
+            match n {
+                0 => append(
+                    p, &k, "h1", "issued", "ok", "csr1", "cert1", "0a", "n", "", "t",
+                ),
+                1 => append(
+                    p, &k, "h1", "issued", "renewed", "csr2", "cert2", "0b", "n", "fp1", "t",
+                ),
+                2 => append(
+                    p, &k, "h2", "issued", "ok", "csr3", "cert3", "0c", "n", "", "t",
+                ),
+                _ => append(
+                    p, &k, "h3", "denied", SUPERSEDED, "csr4", "", "", "", "fpx", "t",
+                ),
+            }
+            .unwrap()
+        };
+        let mint = |p: &Path, h: &str| {
+            append_mint(p, &k, h, "n", "callerfp", "key-1", Some("alice"), "t").unwrap()
+        };
+        let plain = d.path().join("plain.jsonl");
+        let mixed = d.path().join("mixed.jsonl");
+        mint(&mixed, "h1");
+        for n in 0..4 {
+            real(&plain, n);
+            real(&mixed, n);
+            mint(&mixed, ["h1", "h2", "h4", "h3"][n as usize]);
+        }
+        let read = |p: &Path| scan(&std::fs::read_to_string(p).unwrap());
+        let (plain_scan, mixed_scan) = (read(&plain), read(&mixed));
+        assert_eq!(plain_scan.0.len(), 2, "two hosts have a head");
+        assert_eq!(plain_scan, mixed_scan);
+    }
+}

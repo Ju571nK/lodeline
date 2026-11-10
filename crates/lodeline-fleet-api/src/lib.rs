@@ -17,8 +17,9 @@
 //! [`enrollment`] holds the enrollment file a host reads with
 //! `lodeline-sender enroll`, so the console that makes it and the sender that
 //! reads it compile against one type. [`renewal`] holds the two bodies of
-//! `POST /v1/renew`.
+//! `POST /v1/renew`. [`mint`] holds the two bodies of `POST /v1/enroll-tokens`.
 pub mod enrollment;
+pub mod mint;
 pub mod renewal;
 
 use serde::{Deserialize, Serialize};

@@ -66,7 +66,7 @@ pub fn build_router(state: SharedState) -> Router {
     use axum::middleware::from_fn_with_state;
 
     let token = state.read_token.clone();
-    Router::new()
+    let mut router = Router::new()
         .route("/v1/events", post(crate::events_route::post_events))
         .route("/v1/policy", get(crate::policy_route::get_policy))
         .route(
@@ -137,8 +137,19 @@ pub fn build_router(state: SharedState) -> Router {
             post(crate::routes::renew::post_renew).layer(axum::extract::DefaultBodyLimit::max(
                 crate::enroll::listener::MAX_BODY,
             )),
-        )
-        .with_state(state)
+        );
+    // #553: the HTTP mint exists only when `enroll_mint:` is configured, so an
+    // unconfigured server answers the router's own 404 to every method. The guard
+    // is a layer of this route alone: it runs before the body is read.
+    if state.enroll.as_ref().is_some_and(|e| e.mint_api.is_some()) {
+        router = router.route(
+            lodeline_fleet_api::mint::MINT_PATH,
+            axum::routing::any(crate::enroll::mint::post_mint).layer(
+                axum::middleware::from_fn_with_state(state.clone(), crate::enroll::mint::guard),
+            ),
+        );
+    }
+    router.with_state(state)
 }
 
 /// Boot-gate middleware. While the in-memory fleet index is still being rebuilt

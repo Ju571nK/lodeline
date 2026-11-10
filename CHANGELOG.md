@@ -9,6 +9,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- `POST /v1/enroll-tokens` makes a single-use enrollment token over HTTP, for the fleet console
+  to use (`docs/install-server.md` section 3.6). It is off unless `enroll_mint:` is
+  in `server.yaml`, and needs a pinned client certificate, a bearer with the new scope `enroll`
+  from its own verifier file (`lodeline-server proxy verifier-new --scope enroll --caller-cert
+  <pem>`), and the enrollment listener. It refuses a host that already has a certificate or a live
+  token, keeps at most `enroll_mint.max_tokens` entries in the token file (pruning ones spent or
+  expired more than an hour ago), and writes one signed `token_minted` line per token, with the
+  verified key id and the subject the caller reported, to the enrollment audit file
+  (#<PR>, #553).
 - `lodeline-sender` renews its own client certificate and key before they expire. From the
   validity of the certificate it holds, it renews between 60% and 75% of it, at a point set by
   its host_id, with no setting. It sends a new key's CSR to `POST /v1/renew`, checks the answer

@@ -85,6 +85,25 @@ policy_bundle_path: "/var/lib/lodeline-server/signed-policy.json"
 # enroll_listener:
 #   bind: "0.0.0.0:8444"
 
+# Optional (#553). HTTP mint of enrollment tokens for the fleet console:
+# POST /v1/enroll-tokens on the main (mutual TLS) listener. Off when absent. The
+# caller needs a pinned client certificate and a bearer with scope `enroll`, both
+# listed in `verifiers`: a JSON file in the format of proxy.management_verifiers,
+# every entry with scope "enroll", mode 0600, owned by the server's account, not
+# a symlink. Make an entry with
+# `lodeline-server proxy verifier-new --scope enroll --caller-cert <console-mint.crt>`.
+# The server refuses to start unless mTLS and enroll_listener are configured,
+# enrollment is on with its audit file readable, the audit signing key is
+# available, enroll_issuer_fingerprints is unset, the file loads, and no caller
+# certificate in it is a registered proxy or a proxy management caller.
+# ttl_seconds is the lifetime of a token (60..=86400). max_tokens caps the entries
+# the token file keeps after pruning: unspent tokens, and tokens spent or expired
+# within the last hour, including the ones `enroll-token` made.
+# enroll_mint:
+#   verifiers: "/etc/lodeline/enroll-mint-verifiers.json"
+#   ttl_seconds: 3600
+#   max_tokens: 100
+
 # Optional — rolling window (days) for counting a host as active. Reported by
 # GET /v1/meta under `fleet` (`active_host_count`, `active_window_days`).
 # Default 7. (The former `license:` block is deprecated: its

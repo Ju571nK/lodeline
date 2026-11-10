@@ -159,7 +159,8 @@ pub(super) fn internal() -> Response {
         .into_response()
 }
 
-fn requested_by(headers: &HeaderMap) -> Option<String> {
+/// The caller-asserted subject: first header only, visible ASCII, 128 characters.
+pub(crate) fn requested_by(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(REQUESTED_BY_HEADER)?.to_str().ok()?;
     let s: String = v
         .chars()
