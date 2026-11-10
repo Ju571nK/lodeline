@@ -414,6 +414,7 @@ async fn serve_with_proxies(dir: &Path, issuer: &str) -> String {
         san_dns: vec![],
         issuer_dn: Some(issuer.into()),
         issuer_aki: None,
+        ..Default::default()
     });
     let app = build_router_with_proxy(fleet_state(dir), Some(ctx)).layer(
         axum::middleware::from_fn(move |mut req: HttpRequest, next: Next| {
