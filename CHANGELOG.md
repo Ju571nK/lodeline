@@ -14,6 +14,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `disconnected`. Before, this time was fixed at 90 s. The default is still 90 s. A value outside
   60 to 300 s stops the server at boot. The 60 s floor is two proxy heartbeat intervals, so a
   healthy proxy does not read `disconnected` between two heartbeats. (#549)
+- `lodeline-sender csr --host-id <uuid> --key-out <file> --csr-out <file>` makes a host's
+  enrollment key and CSR on the host. It writes a new ECDSA P-256 private key (PKCS#8 PEM,
+  created with mode 0600 on unix) and a PEM CSR whose subject is only `CN=<host_id>`, which a PMS
+  sends to `POST /v1/enroll`. It refuses a host_id that is not a UUID and never replaces an
+  existing file. Before, this step needed the `openssl` binary, which Windows does not ship. The
+  `openssl req` command still works. The sender now uses `rcgen` on the `ring` backend that its
+  TLS client already links. (#554, #553)
 - The web console has a Downloads page. It lists the release files that the server's operator put
   in `artifacts_dir`, and a signed-in user can save one in the browser. The console reads the
   files from `lodeline-server` with its own read token and client certificate, and streams each
