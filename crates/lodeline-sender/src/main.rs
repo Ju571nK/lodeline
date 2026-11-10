@@ -5,7 +5,8 @@ use lodeline_sender::cli::{Cli, Command};
 use lodeline_sender::config::SenderConfig;
 use lodeline_sender::csr::host_key_and_csr;
 use lodeline_sender::doctor::{self, Check};
-use lodeline_sender::enroll::write::put;
+use lodeline_sender::enroll::is_root;
+use lodeline_sender::enroll::write::{put, root_key_target};
 use lodeline_sender::runtime::{run, RuntimeCtx};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -124,9 +125,23 @@ async fn main() -> Result<()> {
                 .create_new(true)
                 .open(&csr_out)
                 .with_context(|| refuse(&csr_out))?;
-            // The key goes through the same write as `enroll`, so as root it takes its
-            // directory's owner.
-            if let Err(e) = put(&key_out, key_pem.as_bytes(), 0o600) {
+            // The key goes through the same write as `enroll`. As root it is given to its
+            // directory's owner only under the rule in `enroll::write`; otherwise it
+            // stays root-owned.
+            let (key_path, give) = if is_root() {
+                root_key_target(&key_out, Path::new("/"))
+            } else {
+                (key_out.clone(), false)
+            };
+            if is_root() && !give {
+                eprintln!(
+                    "the key stays root-owned: {} is not below root-owned directories closed to \
+                     group and others, or has a link in its path. To let the sender read it, \
+                     run `chown` on it, or write it into a directory that rule allows",
+                    key_out.display()
+                );
+            }
+            if let Err(e) = put(&key_path, key_pem.as_bytes(), 0o600, give) {
                 drop(csr_file);
                 let _ = std::fs::remove_file(&csr_out);
                 return Err(anyhow::anyhow!("{e}")).with_context(|| refuse(&key_out));

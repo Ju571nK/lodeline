@@ -9,6 +9,12 @@
 //! `fchown` on a descriptor this run created with create-new, and only when that
 //! directory is not root-owned. The owner of an existing file, a path, a lock or a
 //! directory is never changed.
+//!
+//! Rule for root. As root, a file is given to another account only inside a
+//! directory whose path, as root uses it, has no link in it and whose every ancestor
+//! is a root-owned directory closed to group and others. The check and every later
+//! open use the same path: [`resolve_dir`] gives it, [`untrusted_ancestor`] checks it.
+//! Both `enroll` and `csr` follow this rule.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -21,8 +27,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 /// An open directory on Unix, so its owner is read from the descriptor; nothing elsewhere.
 #[cfg(unix)]
 type Dir = File;
+/// A zero-size stand-in: only Unix reads an owner from the descriptor.
 #[cfg(not(unix))]
-type Dir = ();
+pub struct Dir;
 
 /// Most bytes a pre-existing file in a directory another account owns is read for.
 pub const MAX_READ: u64 = 64 * 1024;
@@ -84,7 +91,7 @@ pub fn open_dir(dir: &Path) -> io::Result<Dir> {
 #[cfg(not(unix))]
 pub fn open_dir(dir: &Path) -> io::Result<Dir> {
     if std::fs::symlink_metadata(dir)?.is_dir() {
-        Ok(())
+        Ok(Dir)
     } else {
         Err(invalid("must be a directory"))
     }
@@ -129,6 +136,7 @@ pub fn read_existing(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 /// Give `file`, which this run just created, to the owner of `dir`, when that is
 /// not root. A file root created has owner 0, which is how root is detected here.
+/// The caller has checked the rule for root before it passes `give`.
 #[cfg(unix)]
 fn give_to_dir_owner(file: &File, dir: &Dir) -> io::Result<()> {
     let (fm, dm) = (file.metadata()?, dir.metadata()?);
@@ -161,8 +169,10 @@ fn temp_name(path: &Path) -> PathBuf {
 
 /// Write `bytes` to `path` with `mode`, without ever replacing a file. Absent means
 /// write, identical means [`Put::Same`], different means [`PutError::Conflict`].
-pub fn put(path: &Path, bytes: &[u8], mode: u32) -> Result<Put, PutError> {
-    put_with(path, bytes, mode, || {})
+/// `give` lets the file go to its directory's owner when root runs this; it is
+/// true only after the rule for root held for that directory.
+pub fn put(path: &Path, bytes: &[u8], mode: u32, give: bool) -> Result<Put, PutError> {
+    put_with(path, bytes, mode, give, || {})
 }
 
 /// [`put`] with a hook that runs after the temporary file is durable and before it
@@ -171,6 +181,7 @@ pub fn put_with(
     path: &Path,
     bytes: &[u8],
     mode: u32,
+    give: bool,
     between: impl FnOnce(),
 ) -> Result<Put, PutError> {
     let dir = match path.parent() {
@@ -204,7 +215,10 @@ pub fn put_with(
         f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         (&f).write_all(bytes)?;
         f.sync_all()?;
-        give_to_dir_owner(&f, &dirf)
+        if give {
+            give_to_dir_owner(&f, &dirf)?;
+        }
+        Ok(())
     })();
     drop(f);
     if let Err(e) = filled {
@@ -226,6 +240,37 @@ pub fn put_with(
             e.kind(),
             format!("{e} (a link must be possible in this directory)"),
         ))),
+    }
+}
+
+/// `dir` as root must use it: its parent resolved through every link and `..`, so no
+/// link remains above the last component. A link at the last component is refused when
+/// the directory is opened.
+pub fn resolve_dir(dir: &Path) -> io::Result<PathBuf> {
+    let abs = std::path::absolute(dir)?;
+    match (abs.parent(), abs.file_name()) {
+        (Some(parent), Some(name)) => Ok(std::fs::canonicalize(parent)
+            .map_err(|e| {
+                io::Error::new(e.kind(), format!("{e}; create {} first", parent.display()))
+            })?
+            .join(name)),
+        _ => std::fs::canonicalize(&abs),
+    }
+}
+
+/// Where the key of `csr --key-out` goes when root runs it, and whether it may be given
+/// to the key directory's owner: only when the rule for root holds for that directory.
+pub fn root_key_target(key_out: &Path, top: &Path) -> (PathBuf, bool) {
+    let dir = match key_out.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let resolved = resolve_dir(dir)
+        .ok()
+        .filter(|r| matches!(untrusted_ancestor(r, top, 0), Ok(None)));
+    match (resolved, key_out.file_name()) {
+        (Some(r), Some(name)) => (r.join(name), true),
+        _ => (key_out.to_path_buf(), false),
     }
 }
 
@@ -306,10 +351,13 @@ mod tests {
     fn absent_is_written_same_is_same_other_is_conflict() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("f");
-        assert!(matches!(put(&p, b"one", 0o644), Ok(Put::Written)));
+        assert!(matches!(put(&p, b"one", 0o644, false), Ok(Put::Written)));
         assert_eq!(mode(&p), 0o644);
-        assert!(matches!(put(&p, b"one", 0o644), Ok(Put::Same)));
-        assert!(matches!(put(&p, b"two", 0o644), Err(PutError::Conflict)));
+        assert!(matches!(put(&p, b"one", 0o644, false), Ok(Put::Same)));
+        assert!(matches!(
+            put(&p, b"two", 0o644, false),
+            Err(PutError::Conflict)
+        ));
         assert_eq!(std::fs::read(&p).unwrap(), b"one");
         assert!(!temp_name(&p).exists(), "no temporary file is left behind");
     }
@@ -319,8 +367,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         // SAFETY: umask has no preconditions; restored before the asserts run.
         let old = unsafe { libc::umask(0o077) };
-        let a = put(&d.path().join("pub"), b"x", 0o644);
-        let b = put(&d.path().join("key"), b"x", 0o600);
+        let a = put(&d.path().join("pub"), b"x", 0o644, false);
+        let b = put(&d.path().join("key"), b"x", 0o600, false);
         let c = ensure_dir(&d.path().join("sub"), 0o755, true);
         unsafe { libc::umask(old) };
         a.unwrap();
@@ -335,7 +383,7 @@ mod tests {
     fn a_target_created_between_fsync_and_link_is_a_conflict() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("f");
-        let r = put_with(&p, b"mine", 0o644, || {
+        let r = put_with(&p, b"mine", 0o644, false, || {
             std::fs::write(&p, b"theirs").unwrap()
         });
         assert!(matches!(r, Err(PutError::Conflict)), "{r:?}");
@@ -347,18 +395,25 @@ mod tests {
     fn a_target_that_appears_with_the_same_bytes_is_same() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("f");
-        let r = put_with(&p, b"same", 0o644, || std::fs::write(&p, b"same").unwrap());
+        let r = put_with(&p, b"same", 0o644, false, || {
+            std::fs::write(&p, b"same").unwrap()
+        });
         assert!(matches!(r, Ok(Put::Same)), "{r:?}");
     }
 
     #[test]
     fn a_link_fifo_or_hard_link_at_the_target_is_refused_and_the_canary_stays() {
-        for kind in ["symlink", "fifo", "hardlink", "dangling"] {
+        for kind in ["symlink", "same_bytes", "fifo", "hardlink", "dangling"] {
             let d = tempfile::tempdir().unwrap();
             let c = canary(d.path());
             let p = d.path().join("client.key");
             match kind {
                 "symlink" => symlink(&c.0, &p).unwrap(),
+                // A followed link would find the new bytes there and report `Same`.
+                "same_bytes" => {
+                    std::fs::write(d.path().join("same"), b"new").unwrap();
+                    symlink(d.path().join("same"), &p).unwrap()
+                }
                 "dangling" => symlink(d.path().join("nowhere"), &p).unwrap(),
                 "hardlink" => std::fs::hard_link(&c.0, &p).unwrap(),
                 _ => {
@@ -367,9 +422,14 @@ mod tests {
                     assert_eq!(unsafe { libc::mkfifo(cs.as_ptr(), 0o600) }, 0);
                 }
             }
-            let r = put(&p, b"new", 0o600);
+            let want = match kind {
+                "fifo" => "must be a regular file",
+                "hardlink" => "must not have another hard link",
+                _ => "must not be a link",
+            };
+            let r = put(&p, b"new", 0o600, false);
             assert!(
-                matches!(r, Err(PutError::Io(_)) | Err(PutError::Conflict)),
+                matches!(&r, Err(PutError::Io(e)) if e.to_string().contains(want)),
                 "{kind}: {r:?}"
             );
             assert_canary_untouched(&c);
@@ -406,7 +466,7 @@ mod tests {
                     assert_eq!(unsafe { libc::mkfifo(cs.as_ptr(), 0o600) }, 0);
                 }
             }
-            let r = put(&p, b"new", 0o600);
+            let r = put(&p, b"new", 0o600, false);
             assert!(matches!(r, Err(PutError::StaleTemp(_))), "{kind}: {r:?}");
             assert!(std::fs::symlink_metadata(&t).is_ok(), "{kind}: kept");
             assert!(!p.exists(), "{kind}: nothing written");
@@ -431,7 +491,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir(d.path().join("real")).unwrap();
         symlink(d.path().join("real"), d.path().join("link")).unwrap();
-        assert!(put(&d.path().join("link").join("f"), b"x", 0o644).is_err());
+        assert!(put(&d.path().join("link").join("f"), b"x", 0o644, false).is_err());
         assert!(!d.path().join("real/f").exists());
         assert!(open_dir(&d.path().join("link")).is_err());
         assert!(ensure_dir(&d.path().join("link"), 0o755, true).is_err());
@@ -441,7 +501,7 @@ mod tests {
     fn an_own_directory_changes_no_owner() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("f");
-        put(&p, b"x", 0o600).unwrap();
+        put(&p, b"x", 0o600, false).unwrap();
         let (f, dm) = (
             std::fs::metadata(&p).unwrap(),
             std::fs::metadata(d.path()).unwrap(),
@@ -475,6 +535,25 @@ mod tests {
         assert!(e.to_string().contains("create"), "{e}");
     }
 
+    #[test]
+    fn a_directory_is_resolved_through_its_parent_and_dotdot() {
+        let t = tempfile::tempdir().unwrap();
+        let d = std::fs::canonicalize(t.path()).unwrap();
+        std::fs::create_dir_all(d.join("closed/sub")).unwrap();
+        std::fs::create_dir(d.join("open")).unwrap();
+        symlink(d.join("closed"), d.join("open/link")).unwrap();
+        assert_eq!(
+            resolve_dir(&d.join("open/link/sender")).unwrap(),
+            d.join("closed/sender")
+        );
+        assert_eq!(
+            resolve_dir(&d.join("closed/sub/..")).unwrap(),
+            d.join("closed")
+        );
+        let e = resolve_dir(&d.join("nowhere/x")).unwrap_err();
+        assert!(e.to_string().contains("create"), "{e}");
+    }
+
     /// Needs root. Run by CI under `sudo` with `--ignored`.
     #[test]
     #[ignore = "needs root"]
@@ -487,12 +566,12 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         std::os::unix::fs::chown(&sub, Some(65534), Some(65533)).unwrap();
 
-        put(&sub.join("client.key"), b"key", 0o600).unwrap();
+        put(&sub.join("client.key"), b"key", 0o600, true).unwrap();
         let m = std::fs::metadata(sub.join("client.key")).unwrap();
         assert_eq!((m.uid(), m.gid(), m.mode() & 0o7777), (65534, 65533, 0o600));
 
         // A root-owned directory keeps root as the owner.
-        put(&d.path().join("root.yaml"), b"x", 0o644).unwrap();
+        put(&d.path().join("root.yaml"), b"x", 0o644, true).unwrap();
         assert_eq!(
             std::fs::metadata(d.path().join("root.yaml")).unwrap().uid(),
             0
@@ -500,14 +579,23 @@ mod tests {
 
         // The account that owns the directory plants a link to a root-only file.
         let canary = d.path().join("shadow");
-        std::fs::write(&canary, b"root only").unwrap();
+        // It holds the new bytes, so a followed link would read as `Same`.
+        std::fs::write(&canary, b"new").unwrap();
         std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o600)).unwrap();
         for name in ["client.crt", "client.crt.tmp"] {
             symlink(&canary, sub.join(name)).unwrap();
         }
-        assert!(put(&sub.join("client.crt"), b"new", 0o644).is_err());
+        let r = put(&sub.join("client.crt"), b"new", 0o644, true);
+        assert!(
+            matches!(&r, Err(PutError::Io(e)) if e.to_string().contains("must not be a link")),
+            "{r:?}"
+        );
         let m = std::fs::metadata(&canary).unwrap();
         assert_eq!((m.uid(), m.mode() & 0o7777), (0, 0o600), "canary unchanged");
-        assert_eq!(std::fs::read(&canary).unwrap(), b"root only");
+        assert_eq!(std::fs::read(&canary).unwrap(), b"new");
+
+        // Without the rule for root, the file stays root-owned.
+        put(&sub.join("kept.key"), b"key", 0o600, false).unwrap();
+        assert_eq!(std::fs::metadata(sub.join("kept.key")).unwrap().uid(), 0);
     }
 }

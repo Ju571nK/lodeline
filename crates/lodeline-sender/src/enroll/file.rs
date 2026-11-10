@@ -50,19 +50,15 @@ pub struct Parsed {
     /// `server_url` and `enroll_url` as origins with no trailing slash.
     pub server_origin: String,
     pub enroll_origin: String,
-    pub enroll_host: String,
-    pub server_host: String,
     pub cas: Vec<CaInfo>,
     pub keys: Vec<KeyInfo>,
     pub keystore_json: Vec<u8>,
-    pub expires: Option<OffsetDateTime>,
     pub warnings: Vec<String>,
 }
 
 /// Read, bound, parse and validate the file at `path`. The error is the message to
 /// print after the path.
 pub fn read(path: &Path, now: OffsetDateTime) -> Result<Parsed, String> {
-    let mut warnings = Vec::new();
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
@@ -80,21 +76,7 @@ pub fn read(path: &Path, now: OffsetDateTime) -> Result<Parsed, String> {
             MAX_ENROLLMENT_FILE_BYTES / 1024
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = md.permissions().mode();
-        if mode & 0o022 != 0 {
-            return Err("it is writable by group or others; run `chmod 600` on it".into());
-        }
-        if mode & 0o004 != 0 {
-            warnings.push(
-                "the enrollment file is readable by every account on this host and holds a \
-                 single-use token; run `chmod 600` on it"
-                    .into(),
-            );
-        }
-    }
+    let warnings: Vec<String> = mode_warning(&md)?.into_iter().collect();
     let mut bytes = Vec::new();
     f.take(MAX_ENROLLMENT_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -103,6 +85,26 @@ pub fn read(path: &Path, now: OffsetDateTime) -> Result<Parsed, String> {
         return Err("it is larger than 64 KiB".into());
     }
     parse(&bytes, now, warnings)
+}
+
+/// Refuse a file that group or others can write, and warn when they can read it.
+#[cfg(unix)]
+fn mode_warning(md: &std::fs::Metadata) -> Result<Option<String>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = md.permissions().mode();
+    if mode & 0o022 != 0 {
+        return Err("it is writable by group or others; run `chmod 600` on it".into());
+    }
+    Ok((mode & 0o004 != 0).then(|| {
+        "the enrollment file is readable by every account on this host and holds a single-use \
+         token; run `chmod 600` on it"
+            .to_string()
+    }))
+}
+
+#[cfg(not(unix))]
+fn mode_warning(_: &std::fs::Metadata) -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 fn parse(bytes: &[u8], now: OffsetDateTime, mut warnings: Vec<String>) -> Result<Parsed, String> {
@@ -183,12 +185,9 @@ fn parse(bytes: &[u8], now: OffsetDateTime, mut warnings: Vec<String>) -> Result
         },
         server_origin,
         enroll_origin,
-        enroll_host,
-        server_host,
         cas,
         keys,
         keystore_json,
-        expires,
         warnings,
     })
 }
@@ -238,6 +237,12 @@ fn origin(s: &str, field: &str) -> Result<(String, String), String> {
 
 /// The PEM labels must all be `CERTIFICATE`, which keeps a private key out of the file.
 fn ca_info(pem: &str) -> Result<Vec<CaInfo>, String> {
+    // A private key block anywhere in the field, however it is indented or prefixed.
+    if pem.to_ascii_uppercase().contains("PRIVATE KEY") {
+        return Err(
+            "field `server_ca_pem` holds a private key; this file must never carry one".into(),
+        );
+    }
     for line in pem.lines().filter(|l| l.starts_with("-----BEGIN ")) {
         if line.trim_end() != "-----BEGIN CERTIFICATE-----" {
             return Err("field `server_ca_pem` may hold only CERTIFICATE blocks; this file must never carry a private key".into());
@@ -528,6 +533,18 @@ pub(crate) mod tests {
         );
         d["server_ca_pem"] = json!(mixed);
         assert!(err_of(&d).contains("private key"));
+    }
+
+    #[test]
+    fn a_private_key_is_refused_wherever_it_sits_in_the_field() {
+        for lead in ["  ", "\t", "x ", "# "] {
+            let mut d = doc();
+            d["server_ca_pem"] = json!(format!(
+                "{}{lead}-----BEGIN PRIVATE KEY-----\nAAAA\n{lead}-----END PRIVATE KEY-----\n",
+                ca_pem()
+            ));
+            assert!(err_of(&d).contains("private key"), "{lead:?}");
+        }
     }
 
     #[test]

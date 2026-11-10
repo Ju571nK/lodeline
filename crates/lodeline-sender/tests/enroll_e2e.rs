@@ -268,6 +268,7 @@ async fn enroll(args: &Args, pacing: Pacing) -> i32 {
         claim: &claim,
         pacing,
         top: PathBuf::from("/"),
+        trust_out: &|_| {},
     };
     run(args, &env).await
 }
@@ -277,9 +278,29 @@ async fn go(args: &Args) -> i32 {
         args,
         Pacing {
             network_waits: vec![std::time::Duration::from_millis(50); 2],
+            ..Pacing::default()
         },
     )
     .await
+}
+
+/// `go`, also returning what the trust block printed.
+async fn go_trust(args: &Args) -> (i32, String) {
+    let seen = Mutex::new(String::new());
+    let sink = |t: &str| seen.lock().unwrap().push_str(t);
+    let claim = |l: &Layout, h: &str| claim_in_process(l, h);
+    let env = Env {
+        root: false,
+        claim: &claim,
+        pacing: Pacing {
+            network_waits: vec![std::time::Duration::from_millis(50); 2],
+            ..Pacing::default()
+        },
+        top: PathBuf::from("/"),
+        trust_out: &sink,
+    };
+    let code = run(args, &env).await;
+    (code, seen.into_inner().unwrap())
 }
 
 fn mode(p: &Path) -> u32 {
@@ -441,6 +462,7 @@ async fn an_existing_config_with_other_content_stops_the_run_before_the_claim() 
         claim: &claim,
         pacing: Pacing::default(),
         top: PathBuf::from("/"),
+        trust_out: &|_| {},
     };
     assert_eq!(run(&args, &env).await, 4);
     assert!(!claimed.load(Ordering::SeqCst));
@@ -461,7 +483,13 @@ async fn a_host_with_another_host_id_exits_3_with_no_key() {
         .unwrap()
         .host_meta_claim_host_id(OTHER)
         .unwrap();
-    assert_eq!(go(&args).await, 3);
+    let (code, trust) = go_trust(&args).await;
+    assert_eq!(code, 3);
+    // The trust block is shown before the claim that refuses the run.
+    assert!(
+        trust.contains("This enrollment file makes this host trust:") && trust.contains("SHA-256"),
+        "{trust}"
+    );
     assert!(!h.exists("s/sender/client.key"));
     assert_eq!(s.redeem(&token, HOST).await, 200);
 }

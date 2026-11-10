@@ -75,3 +75,40 @@ fn rejects_a_host_id_that_is_not_a_uuid() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("must be a UUID"));
     assert!(!key.exists() && !req.exists());
 }
+
+#[cfg(unix)]
+mod as_root {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    fn run_as_root(parent: &Path) -> (std::path::PathBuf, Output) {
+        // SAFETY: geteuid has no preconditions.
+        assert_eq!(unsafe { libc::geteuid() }, 0, "run this test as root");
+        let dir = parent.join("keys");
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::chown(&dir, Some(65534), Some(65533)).unwrap();
+        let key = dir.join("host.key");
+        let out = csr(HOST_ID, &key, &parent.join("host.csr"));
+        (key, out)
+    }
+
+    /// Needs root, and a root-owned closed directory below `/root`. CI runs it in a
+    /// root container with `--ignored`.
+    #[test]
+    #[ignore = "needs root"]
+    fn root_gives_the_key_to_a_directory_owner_only_under_a_closed_root_owned_parent() {
+        let closed = tempfile::Builder::new().tempdir_in("/root").unwrap();
+        let (key, out) = run_as_root(closed.path());
+        assert!(out.status.success(), "{out:?}");
+        let m = fs::metadata(&key).unwrap();
+        assert_eq!((m.uid(), m.gid(), m.mode() & 0o7777), (65534, 65533, 0o600));
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("stays root-owned"));
+
+        let open = tempfile::Builder::new().tempdir_in("/root").unwrap();
+        fs::set_permissions(open.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let (key, out) = run_as_root(open.path());
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(fs::metadata(&key).unwrap().uid(), 0, "stays root-owned");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("stays root-owned"));
+    }
+}

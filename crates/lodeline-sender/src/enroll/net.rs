@@ -15,12 +15,15 @@ const MAX_BUSY_RETRIES: u32 = 5;
 pub struct Pacing {
     /// Waits before each retry after a network error.
     pub network_waits: Vec<Duration>,
+    /// The longest wait for a busy server, whatever its `Retry-After` says.
+    pub busy_cap: Duration,
 }
 
 impl Default for Pacing {
     fn default() -> Self {
         Self {
             network_waits: [10, 20, 30, 60].map(Duration::from_secs).into(),
+            busy_cap: Duration::from_secs(10),
         }
     }
 }
@@ -62,6 +65,7 @@ fn client(ca_pem: &str) -> Result<reqwest::Client, NetFail> {
         .use_rustls_tls()
         .tls_built_in_root_certs(false)
         .http1_only()
+        .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(0)
         .connect_timeout(crate::transport::CONNECT_TIMEOUT)
         .timeout(Duration::from_secs(60));
@@ -72,13 +76,18 @@ fn client(ca_pem: &str) -> Result<reqwest::Client, NetFail> {
         .map_err(|e| fail(1, format!("cannot build the HTTP client: {e}")))
 }
 
-fn spent_hint(r: &Request<'_>) -> String {
+fn spent_hint(r: &Request<'_>, lost_answer: bool) -> String {
     let mut s = format!(
         "Issue a new token with `lodeline-server enroll-token --host-id {}` and run enroll with the new file. The host's key is kept.",
         r.host_id
     );
     if r.earlier_run {
         s.push_str(" An earlier run may have spent this token and lost the answer.");
+    }
+    if lost_answer {
+        s.push_str(
+            " An earlier attempt of this run may have spent this token and lost the answer.",
+        );
     }
     s
 }
@@ -103,6 +112,8 @@ pub async fn post(r: &Request<'_>, pacing: &Pacing) -> Result<Issued, NetFail> {
     let url = format!("{}/v1/enroll", r.enroll_url);
     let body = serde_json::json!({"token": r.token, "host_id": r.host_id, "csr_pem": r.csr_pem});
     let (mut attempts, mut busy, mut waits, mut retried_421) = (0u32, 0u32, 0usize, false);
+    // A retry after a dropped connection may follow an answer that was lost on the way back.
+    let mut lost_answer = false;
     loop {
         attempts += 1;
         let resp = match client.post(&url).json(&body).send().await {
@@ -132,6 +143,7 @@ pub async fn post(r: &Request<'_>, pacing: &Pacing) -> Result<Issued, NetFail> {
                     );
                     tokio::time::sleep(wait).await;
                     waits += 1;
+                    lost_answer = true;
                     continue;
                 }
                 _ => return Err(fail(1, "unexpected client failure")),
@@ -157,7 +169,13 @@ pub async fn post(r: &Request<'_>, pacing: &Pacing) -> Result<Issued, NetFail> {
                 return Err(fail(5, format!(
                     "the token was refused: it is unknown, spent, expired{}, or for another host_id. {}",
                     r.expires_at.map(|e| format!(" (the file says {e})")).unwrap_or_default(),
-                    spent_hint(r)
+                    spent_hint(r, lost_answer)
+                )))
+            }
+            300..=399 => {
+                return Err(fail(6, format!(
+                    "{} answered with a redirect ({status}). Enroll does not follow redirects, so the token was not sent anywhere else. Put the address of the enrollment listener itself in `enroll_url`.",
+                    r.enroll_url
                 )))
             }
             404 => {
@@ -177,9 +195,9 @@ pub async fn post(r: &Request<'_>, pacing: &Pacing) -> Result<Issued, NetFail> {
                 }
                 eprintln!(
                     "the server is busy; trying again in {} s",
-                    retry_after.as_secs()
+                    retry_after.min(pacing.busy_cap).as_secs()
                 );
-                tokio::time::sleep(retry_after).await;
+                tokio::time::sleep(retry_after.min(pacing.busy_cap)).await;
                 continue;
             }
             500..=599 => {

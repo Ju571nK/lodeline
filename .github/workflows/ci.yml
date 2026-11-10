@@ -159,6 +159,7 @@ jobs:
         run: |
           cargo test -p lodeline-sender --lib enroll::write -- --ignored
           cargo test -p lodeline-server --test enroll_token_cli -- --ignored
+          cargo test -p lodeline-sender --test csr_cli -- --ignored
       - name: release build
         if: github.event_name == 'push'
         run: cargo build --release --workspace

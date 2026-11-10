@@ -218,8 +218,11 @@ sudo lodeline-sender csr --host-id <host_id> --key-out /var/lib/lodeline-sender/
 
 The key stays on the host. The sender runs as `lodeline` and can write only
 `/var/lib/lodeline-sender`, so the key goes there. Run as root, `csr` gives the
-key to the owner of its directory when that is not root, so the packaged
-directory makes it `lodeline:lodeline` with mode 0600. For one host, `sudo
+key to the owner of its directory only when the path of that directory has no
+link in it and every parent of it is a root-owned directory that group and others
+cannot write. The packaged directory meets that, so the key becomes
+`lodeline:lodeline` with mode 0600. Otherwise the key stays root-owned, `csr`
+says so on stderr, and you run `chown` on it yourself. For one host, `sudo
 lodeline-sender enroll` (§3.3) does this whole step from a file. The PMS then
 sends the CSR to the endpoint over mTLS:
 
@@ -418,9 +421,11 @@ On the packaged layout the files are:
 A file takes the owner of its directory only when enroll created it in this run,
 through the descriptor, and only when that directory is not root-owned. It never
 changes the owner of a file, a path or a directory that already exists, and it
-refuses a link, a FIFO or a hard link where it writes. As root it also requires
-every parent of an output directory to be a root-owned directory that group and
-others cannot write. It creates only the last component of a directory. When it
+refuses a link, a FIFO or a hard link where it writes. As root it also uses
+each output directory through its resolved parent, so the path that is checked is
+the path that is opened, and it requires every parent of that directory to be a
+root-owned directory that group and others cannot write. As root it creates only
+the last component of a directory; without root it creates the whole path. When it
 has to create `/var/lib/lodeline-sender` itself, the key stays root-owned until
 systemd, or `systemd-tmpfiles --create`, gives that directory to `lodeline`; the
 packages create it for you. Pass `--config`, `--state-db`, `--events-dir`,
@@ -446,7 +451,7 @@ need it.
 | 0 | Enrolled, or already enrolled |
 | 1 | Failed. Read the message |
 | 2 | The enrollment file is bad, or the usage is wrong |
-| 3 | This host has another host_id. `lodeline show host-id` prints it |
+| 3 | This host has another host_id. `lodeline show host-id` prints it. An existing `sender.yaml` that names another host_id also exits 3, and is checked before the CA and the keystore |
 | 4 | A file enroll would write exists with other content. Enroll never replaces one |
 | 5 | The token was refused or may be spent. Issue a new token |
 | 6 | The listener could not be reached or trusted, or stayed busy. The token was not used |

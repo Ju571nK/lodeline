@@ -26,8 +26,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   file or directory, and it refuses a link, a FIFO or a hard link where it writes. The format
   type is in `lodeline-fleet-api`. The packaged sender now creates `/var/lib/lodeline-sender`
   as `lodeline:lodeline` 0750 at install. `enroll` is not supported on Windows yet. `lodeline-sender
-  csr --key-out` writes its key through the same routine, so run as root into the sender's
-  directory it makes a key the sender can read. (#564, #553)
+  csr --key-out` writes its key through the same routine. Run as root, it gives the key to the
+  owner of the key's directory only when that directory's path has no link in it and every
+  parent of it is a root-owned directory closed to group and others; otherwise the key stays
+  root-owned and `csr` says so. (#564, #553)
 - `lodeline init-host-id <uuid>` gives a host its host_id before the agent's first run, so an
   operator can issue the host's enrollment token first. It writes only when the host's
   `state.db` has no host_id, follows the global `--state-db` (pass the same one as

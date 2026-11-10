@@ -95,7 +95,9 @@ fn refuse_root_in_foreign_dir(tokens_path: &std::path::Path) -> Result<()> {
     let owner = std::fs::metadata(dir).map(|m| m.uid()).ok();
     match owner {
         Some(uid) if foreign_owner(euid, uid) => anyhow::bail!(
-            "{} is owned by uid {uid}, not root. A token file made by root there is one the              server cannot write. Run this command as that account, for example              `sudo -u lodeline lodeline-server enroll-token ...`",
+            "{} is owned by uid {uid}, not root. A token file made by root there is one the \
+             server cannot write. Run this command as that account, for example \
+             `sudo -u lodeline lodeline-server enroll-token ...`",
             dir.display()
         ),
         _ => Ok(()),

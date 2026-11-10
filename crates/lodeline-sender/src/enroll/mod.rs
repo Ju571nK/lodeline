@@ -57,6 +57,8 @@ pub struct Env<'a> {
     pub pacing: net::Pacing,
     /// The ancestor walk for root stops here. `/` outside tests.
     pub top: PathBuf,
+    /// Where the trust block goes: stderr outside tests.
+    pub trust_out: &'a dyn Fn(&str),
 }
 
 type R<T> = Result<T, i32>;
@@ -65,6 +67,16 @@ const ANOTHER_HOST_ID: &str = "this host already has another host_id (`lodeline 
      prints it). Issue a token for that id with `lodeline-server enroll-token --host-id <it>`, \
      make a new enrollment file, and run enroll again. If this disk was cloned from another \
      host, the two now share an id.";
+
+fn config_names_another(path: &Path) -> String {
+    format!(
+        "the sender config {} names another host_id (the agent's id may be the same as the \
+         file's; `lodeline show host-id` prints it). Issue a token for the id this host should \
+         have with `lodeline-server enroll-token --host-id <it>`, make a new enrollment file, \
+         and run enroll again.",
+        path.display()
+    )
+}
 
 fn die<T>(code: i32, msg: impl AsRef<str>) -> R<T> {
     eprintln!("lodeline-sender enroll: {}", msg.as_ref());
@@ -76,13 +88,13 @@ fn warn(msg: impl AsRef<str>) {
 }
 
 #[cfg(unix)]
-fn is_root() -> bool {
+pub fn is_root() -> bool {
     // SAFETY: geteuid has no preconditions.
     unsafe { libc::geteuid() == 0 }
 }
 
 #[cfg(not(unix))]
-fn is_root() -> bool {
+pub fn is_root() -> bool {
     false
 }
 
@@ -97,6 +109,7 @@ pub async fn main(args: Args) -> i32 {
         claim: &claim,
         pacing: net::Pacing::default(),
         top: PathBuf::from("/"),
+        trust_out: &|t| eprint!("{t}"),
     };
     run(&args, &env).await
 }
@@ -105,6 +118,25 @@ fn abs(p: &Path) -> R<PathBuf> {
     match std::path::absolute(p) {
         Ok(a) => Ok(a),
         Err(e) => die(1, format!("cannot make {} absolute: {e}", p.display())),
+    }
+}
+
+/// As root, a directory enroll writes into is used through its resolved parent, so the
+/// path that is checked is the path that is opened (see the rule in `write`).
+fn resolved(root: bool, dir: PathBuf) -> R<PathBuf> {
+    if !root {
+        return Ok(dir);
+    }
+    match write::resolve_dir(&dir) {
+        Ok(r) => Ok(r),
+        Err(e) => die(1, format!("{}: {e}", dir.display())),
+    }
+}
+
+fn resolved_file(root: bool, file: PathBuf) -> R<PathBuf> {
+    match (file.parent(), file.file_name()) {
+        (Some(dir), Some(name)) => Ok(resolved(root, dir.to_path_buf())?.join(name)),
+        _ => Ok(file),
     }
 }
 
@@ -128,16 +160,22 @@ fn plan(args: &Args, root: bool) -> R<Layout> {
             ),
         );
     }
-    let config = abs(&args
-        .config
-        .clone()
-        .unwrap_or_else(lodeline_core::paths::default_sender_config))?;
+    let config = resolved_file(
+        root,
+        abs(&args
+            .config
+            .clone()
+            .unwrap_or_else(lodeline_core::paths::default_sender_config))?,
+    )?;
     let config_dir = config.parent().unwrap_or(Path::new("/")).to_path_buf();
     let pick = |a: &Option<PathBuf>, default: &str| abs(a.as_deref().unwrap_or(Path::new(default)));
-    let sender_dir = pick(&args.sender_dir, "/var/lib/lodeline-sender")?;
+    let sender_dir = resolved(root, pick(&args.sender_dir, "/var/lib/lodeline-sender")?)?;
     Ok(Layout {
         ca: config_dir.join("server-ca.pem"),
-        keystore: pick(&args.keystore, "/etc/lodeline/policy-signing-pubkeys.pem")?,
+        keystore: resolved_file(
+            root,
+            pick(&args.keystore, "/etc/lodeline/policy-signing-pubkeys.pem")?,
+        )?,
         key: sender_dir.join("client.key"),
         cert: sender_dir.join("client.crt"),
         events_dir: pick(&args.events_dir, "/var/log/lodeline")?,
@@ -231,16 +269,19 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
             }
         }
     }
-    for (path, bytes, _) in &outputs {
+    // The config first, so a config that names another host_id (exit 3) wins over a
+    // differing CA or keystore (exit 4).
+    for (path, bytes, _) in outputs.iter().rev() {
         match write::read_existing(path) {
             Ok(Some(cur)) if cur != *bytes => {
                 // A config that names another host says what the claim would: exit 3.
-                let named = serde_yaml::from_slice::<SenderConfig>(&cur)
-                    .ok()
-                    .and_then(|c| c.host_id)
-                    .filter(|h| path == &l.config && h != host_id);
-                if named.is_some() {
-                    return die(3, ANOTHER_HOST_ID);
+                if path == &l.config
+                    && serde_yaml::from_slice::<SenderConfig>(&cur)
+                        .ok()
+                        .and_then(|c| c.host_id)
+                        .is_some_and(|h| h != host_id)
+                {
+                    return die(3, config_names_another(path));
                 }
                 return die(
                     4,
@@ -325,7 +366,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
         }
     }
 
-    show_trust(&parsed);
+    (env.trust_out)(&show_trust(&parsed));
 
     // E5: the host_id, before any key or request, so a conflict costs nothing.
     match (env.claim)(&l, host_id) {
@@ -353,6 +394,8 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
             Err(e) => return die(1, format!("{}: {e}", dir.display())),
         }
     }
+    // Past the ancestor check above, so as root a file may go to its directory's owner.
+    let give = env.root;
     let earlier_run = existing_key.is_some();
     let key = match existing_key {
         Some(k) => k,
@@ -361,7 +404,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
                 Ok(k) => k,
                 Err(e) => return die(1, format!("cannot make a key: {e}")),
             };
-            put_or_die(&l.key, k.serialize_pem().as_bytes(), 0o600)?;
+            put_or_die(&l.key, k.serialize_pem().as_bytes(), 0o600, give)?;
             k
         }
     };
@@ -406,7 +449,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
             }
             Err(why) => {
                 let rejected = PathBuf::from(format!("{}.rejected", l.cert.display()));
-                let saved = match write::put(&rejected, bundle.as_bytes(), 0o644) {
+                let saved = match write::put(&rejected, bundle.as_bytes(), 0o644, give) {
                     Ok(_) => format!("Saved it as {}.", rejected.display()),
                     Err(e) => format!("Could not save it ({}: {e}).", rejected.display()),
                 };
@@ -423,7 +466,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
             }
         }
         // E9: the first write after the answer.
-        match write::put(&l.cert, bundle.as_bytes(), 0o644) {
+        match write::put(&l.cert, bundle.as_bytes(), 0o644, give) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("{bundle}");
@@ -442,7 +485,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
     // E10: the rest.
     let mut wrote = asked;
     for (path, bytes, mode) in &outputs {
-        match write::put(path, bytes, *mode) {
+        match write::put(path, bytes, *mode, give) {
             Ok(Put::Written) => wrote = true,
             Ok(Put::Same) => {}
             Err(e) => {
@@ -472,8 +515,8 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
     Ok(())
 }
 
-fn put_or_die(path: &Path, bytes: &[u8], mode: u32) -> R<()> {
-    match write::put(path, bytes, mode) {
+fn put_or_die(path: &Path, bytes: &[u8], mode: u32, give: bool) -> R<()> {
+    match write::put(path, bytes, mode, give) {
         Ok(_) => Ok(()),
         Err(e) => die(
             if matches!(e, PutError::Conflict) {
@@ -486,38 +529,63 @@ fn put_or_die(path: &Path, bytes: &[u8], mode: u32) -> R<()> {
     }
 }
 
-fn show_trust(p: &file::Parsed) {
-    eprintln!("This enrollment file makes this host trust:");
-    eprintln!("  enrollment listener  {}", p.enroll_origin);
-    eprintln!("  main listener        {}", p.server_origin);
-    eprintln!(
+fn show_trust(p: &file::Parsed) -> String {
+    use std::fmt::Write;
+    let mut t = String::new();
+    let _ = writeln!(t, "This enrollment file makes this host trust:");
+    let _ = writeln!(t, "  enrollment listener  {}", p.enroll_origin);
+    let _ = writeln!(t, "  main listener        {}", p.server_origin);
+    let _ = writeln!(
+        t,
         "  CA certificates (the host trusts servers and issued client certificates under these):"
     );
     for c in &p.cas {
-        eprintln!("    {}  SHA-256 {}", c.subject, c.sha256);
+        let _ = writeln!(t, "    {}  SHA-256 {}", c.subject, c.sha256);
     }
-    eprintln!("  policy signing keys (the agent accepts signed policy from these):");
+    let _ = writeln!(
+        t,
+        "  policy signing keys (the agent accepts signed policy from these):"
+    );
     for k in &p.keys {
-        eprintln!(
+        let _ = writeln!(
+            t,
             "    id {}  valid {} to {}  SHA-256 {}",
             k.id, k.valid_from, k.valid_until, k.sha256
         );
     }
-    eprintln!(
+    let _ = writeln!(
+        t,
         "Compare these with the console, or with `openssl x509 -fingerprint -sha256 -noout -in <ca>` \
          and the `lodeline-sign keygen` output, before you rely on this host."
     );
+    t
 }
 
 async fn check_main_port(l: &Layout, server_origin: &str) {
     use std::time::Duration;
-    let client = match crate::transport::build_client_with_timeouts(
-        Duration::from_secs(10),
-        Duration::from_secs(15),
-        Some(&l.cert),
-        Some(&l.key),
-        Some(&l.ca),
-    ) {
+    // Read through `read_existing`, so root follows no link in a directory the sender owns.
+    let read = |p: &Path| match write::read_existing(p) {
+        Ok(Some(b)) => Ok(b),
+        Ok(None) => Err(format!("{} is gone", p.display())),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    };
+    let built = (|| -> Result<reqwest::Client, String> {
+        let mut identity = read(&l.cert)?;
+        identity.push(b'\n');
+        identity.extend(read(&l.key)?);
+        let mut b = reqwest::Client::builder()
+            .use_rustls_tls()
+            .tls_built_in_root_certs(false)
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
+            .identity(reqwest::Identity::from_pem(&identity).map_err(|e| e.to_string())?);
+        for r in reqwest::Certificate::from_pem_bundle(&read(&l.ca)?).map_err(|e| e.to_string())? {
+            b = b.add_root_certificate(r);
+        }
+        b.build().map_err(|e| e.to_string())
+    })();
+    let client = match built {
         Ok(c) => c,
         Err(e) => return warn(format!("cannot check the main port: {e}")),
     };
@@ -609,4 +677,47 @@ fn summary(l: &Layout, p: &file::Parsed, args: &Args, wrote: bool) {
         println!("With the packages: sudo systemctl enable --now lodeline lodeline-sender");
     }
     println!("Lodeline measures and reports this host's AI agent posture; enrolling blocks nothing on this host.");
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn as_root_an_output_directory_is_used_through_its_canonical_parent() {
+        let t = tempfile::tempdir().unwrap();
+        let d = std::fs::canonicalize(t.path()).unwrap();
+        let (open, closed) = (d.join("open"), d.join("closed"));
+        std::fs::create_dir_all(closed.join("etc")).unwrap();
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        // A link in a directory that fails the rule, pointing at one that passes it.
+        symlink(&closed, open.join("link")).unwrap();
+        let through = open.join("link");
+        let args = Args {
+            file: PathBuf::from("unused"),
+            config: Some(through.join("etc/sender.yaml")),
+            state_db: Some(d.join("state.db")),
+            events_dir: Some(d.join("events")),
+            control_socket: Some(d.join("ctl.sock")),
+            keystore: Some(through.join("etc/ks.pem")),
+            sender_dir: Some(through.join("sender")),
+        };
+        let l = plan(&args, true).unwrap();
+        for p in [
+            &l.sender_dir,
+            &l.key,
+            &l.cert,
+            &l.config,
+            &l.ca,
+            &l.keystore,
+        ] {
+            assert!(
+                p.starts_with(&closed),
+                "{} still goes through the link",
+                p.display()
+            );
+        }
+    }
 }

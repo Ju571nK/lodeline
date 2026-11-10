@@ -49,6 +49,13 @@ fn issued() -> String {
     serde_json::json!({"client_cert_pem": "LEAF\n", "ca_chain_pem": "CHAIN\n"}).to_string()
 }
 
+fn fast() -> Pacing {
+    Pacing {
+        network_waits: vec![Duration::from_millis(10); 2],
+        ..Pacing::default()
+    }
+}
+
 async fn run(url: &str, earlier_run: bool) -> Result<(String, String), (i32, String)> {
     let r = Request {
         enroll_url: url,
@@ -59,10 +66,7 @@ async fn run(url: &str, earlier_run: bool) -> Result<(String, String), (i32, Str
         expires_at: Some("2026-11-10T13:00:00Z"),
         earlier_run,
     };
-    let fast = Pacing {
-        network_waits: vec![Duration::from_millis(10); 2],
-    };
-    post(&r, &fast)
+    post(&r, &fast())
         .await
         .map(|i| (i.cert_pem, i.chain_pem))
         .map_err(|f| (f.code, f.msg))
@@ -182,4 +186,79 @@ async fn a_refused_connection_is_retried_with_the_given_waits_and_then_exits_6()
         m.contains("could not reach") && m.contains("10 connections"),
         "{m}"
     );
+}
+
+#[tokio::test]
+async fn a_redirect_is_not_followed_so_the_token_goes_nowhere_else() {
+    let (elsewhere, hit) = scripted(vec![(200, "", issued())]).await;
+    let to: &'static str = Box::leak(format!("location: {elsewhere}/v1/enroll\r\n").into());
+    for status in [307, 308] {
+        let (url, seen) = scripted(vec![(status, to, String::new())]).await;
+        let (c, m) = run(&url, false).await.unwrap_err();
+        assert_eq!(c, 6, "{m}");
+        assert!(
+            m.contains("redirect") && m.contains("not sent anywhere else"),
+            "{m}"
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "no retry");
+    }
+    assert_eq!(
+        hit.load(Ordering::SeqCst),
+        0,
+        "the redirect target saw nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_stays_busy_ends_in_exit_6_after_five_retries() {
+    let (url, seen) = scripted(vec![(503, "retry-after: 9\r\n", String::new())]).await;
+    let pacing = Pacing {
+        busy_cap: Duration::from_millis(5),
+        ..fast()
+    };
+    let r = Request {
+        enroll_url: &url,
+        server_ca_pem: &ca_pem(),
+        token: "tkn-9f8e7d6c",
+        host_id: "3f2c6a1e-8b4d-4c2a-9e7f-1a2b3c4d5e6f",
+        csr_pem: "csr",
+        expires_at: None,
+        earlier_run: false,
+    };
+    let f = post(&r, &pacing).await.err().unwrap();
+    assert_eq!(f.code, 6, "{}", f.msg);
+    assert!(
+        f.msg.contains("stayed busy") && f.msg.contains("token was not used"),
+        "{}",
+        f.msg
+    );
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        6,
+        "the first answer and five retries"
+    );
+}
+
+#[tokio::test]
+async fn a_403_after_a_retry_says_an_earlier_attempt_may_have_spent_the_token() {
+    // The listener drops the first connection, then refuses the token.
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (sock, _) = l.accept().await.unwrap();
+        drop(sock);
+        let (mut sock, _) = l.accept().await.unwrap();
+        let mut buf = vec![0u8; 65536];
+        let _ = sock.read(&mut buf).await;
+        let _ = sock
+            .write_all(b"HTTP/1.1 403 X\r\nconnection: close\r\ncontent-length: 0\r\n\r\n")
+            .await;
+    });
+    let (c, m) = run(&url, false).await.unwrap_err();
+    assert_eq!(c, 5);
+    assert!(
+        m.contains("An earlier attempt of this run may have spent this token"),
+        "{m}"
+    );
+    assert!(!m.contains("An earlier run may"), "{m}");
 }
