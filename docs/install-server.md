@@ -322,9 +322,8 @@ port, the rate limit included, logs a warning `enroll request refused` with
 `reason` and `source`. Each reason logs at once the first time. Later ones in
 the next minute are only counted, and the count (`suppressed`) appears on the
 next line for that reason after the minute. The `enroll: issued client cert`
-line carries the host's `peer` address. The server logs only errors unless
-`RUST_LOG` is set, so to see these lines add `Environment=RUST_LOG=info` with
-`sudo systemctl edit lodeline-server`.
+line carries the host's `peer` address. These lines show by default.
+`RUST_LOG` changes the level (§7).
 
 **Exposure.** Open the port only to the networks hosts enroll from (§6). Put
 no load balancer or TLS proxy in front of it. The limits count TCP source
@@ -502,7 +501,8 @@ The unit runs as `root` with `ProtectSystem=strict` and writes only to its
 state/log dirs. See [`packaging/README.md`](../packaging/README.md) for the unit
 details.
 
-`lodeline-server` and `lodeline-sender` log at `info` by default. `RUST_LOG` sets
+`lodeline-server` and `lodeline-sender` log at `info` by default and write their logs
+to stderr, which the journal keeps. `RUST_LOG` sets
 the level of each one, for example `RUST_LOG=warn` for less output or
 `RUST_LOG=debug` for more. For a package install, set it in a drop-in with
 `sudo systemctl edit lodeline-server` (or `lodeline-sender`):
@@ -569,7 +569,7 @@ Two alignment rules from the field:
 ## 10. Operations & troubleshooting
 
 Operational notes (paths, signals, log levels): [runbook/operations.md](runbook/operations.md).
-`RUST_LOG` sets the log level of the server and the sender. Both default to `info` (§7).
+`RUST_LOG` sets the log level of the server and the sender. Both default to `info` and write to stderr, which the journal keeps (§7).
 SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 
 | Symptom | Cause | Fix |
