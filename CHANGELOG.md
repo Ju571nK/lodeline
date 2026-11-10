@@ -17,7 +17,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   token, keeps at most `enroll_mint.max_tokens` entries in the token file (pruning ones spent or
   expired more than an hour ago), and writes one signed `token_minted` line per token, with the
   verified key id and the subject the caller reported, to the enrollment audit file
-  (#<PR>, #553).
+  (#574, #553).
 - `lodeline-sender` renews its own client certificate and key before they expire. From the
   validity of the certificate it holds, it renews between 60% and 75% of it, at a point set by
   its host_id, with no setting. It sends a new key's CSR to `POST /v1/renew`, checks the answer
