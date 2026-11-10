@@ -376,6 +376,63 @@ async fn an_answer_for_another_host_or_another_key_never_replaces_the_pair() {
     }
 }
 
+#[tokio::test]
+async fn a_live_answer_that_does_not_expire_later_than_the_live_certificate_is_not_used() {
+    let pki = Arc::new(Pki::new());
+    let host = due_host(&pki);
+    let (key0, crt0) = (host.key(), host.crt());
+    let (p, key_next, ca) = (pki.clone(), host.paths.key_next.clone(), pki.ca.pem());
+    let shorter = move |_: usize, _: &str| -> Reply {
+        let key = KeyPair::from_pem(&std::fs::read_to_string(&key_next).unwrap()).unwrap();
+        // The live certificate has 5 days left; this one is for the new key and 3.
+        let cert = p.mint(&key, HOST, ago(1), ago(-3));
+        let body = serde_json::json!({
+            "ca_chain_pem": ca, "client_cert_pem": cert, "host_id": HOST, "not_after": "n", "serial": "1",
+        });
+        (200, None, body.to_string())
+    };
+    let mock = Mock::start(shorter).await;
+    let (mut r, _, _) = host.renewer(&mock.url);
+    r.step(OffsetDateTime::now_utc()).await;
+    assert_eq!(mock.hits(), 1);
+    assert_eq!((host.key(), host.crt()), (key0, crt0));
+    assert!(!host.paths.crt_next.exists(), "nothing was stored");
+}
+
+#[tokio::test]
+async fn a_live_pair_that_does_not_match_ends_the_wake_with_no_request_and_no_rename() {
+    let pki = Pki::new();
+    let host = due_host(&pki);
+    let mock = Mock::start(issued(&pki, HOST)).await;
+    let (mut r, _, _) = host.renewer(&mock.url);
+    std::fs::write(
+        &host.paths.key,
+        KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    let (key0, crt0) = (host.key(), host.crt());
+    let wait = r.step(OffsetDateTime::now_utc()).await;
+    assert_eq!(wait.as_secs(), 300);
+    assert_eq!(mock.hits(), 0, "no request");
+    assert_eq!((host.key(), host.crt()), (key0, crt0));
+    assert_eq!(host.next_files(), [false; 3], "nothing was made");
+}
+
+#[tokio::test]
+async fn a_file_settle_cannot_read_ends_the_wake_with_no_request_and_no_rename() {
+    let pki = Pki::new();
+    let host = due_host(&pki);
+    let mock = Mock::start(issued(&pki, HOST)).await;
+    let (mut r, _, _) = host.renewer(&mock.url);
+    // A link where `client.crt.next` goes: `settle` refuses to read it.
+    std::os::unix::fs::symlink(&host.paths.crt, &host.paths.crt_next).unwrap();
+    let (key0, crt0) = (host.key(), host.crt());
+    r.step(OffsetDateTime::now_utc()).await;
+    assert_eq!(mock.hits(), 0, "no request");
+    assert_eq!((host.key(), host.crt()), (key0, crt0));
+    assert!(!host.paths.key_next.exists(), "no new key was made");
+}
+
 /// Collects what `tracing` prints.
 #[derive(Clone, Default)]
 struct Log(Arc<Mutex<Vec<u8>>>);

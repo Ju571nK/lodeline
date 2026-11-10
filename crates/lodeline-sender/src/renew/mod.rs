@@ -9,7 +9,6 @@
 pub mod net;
 pub mod pair;
 
-use crate::enroll::cert;
 use crate::heartbeat::SharedStats;
 use crate::transport::{build_client, ClientHandle};
 use net::Answer;
@@ -85,7 +84,7 @@ pub fn paths(c: &crate::config::SenderConfig) -> Option<Paths> {
 /// Settle the files before the first client is built: a pair split by a crash cannot
 /// build one. Anything it cannot repair is left for the caller's own error.
 pub fn settle_at_start(p: &Paths, host_id: &str) {
-    match pair::settle(p, host_id, &ca_pem(p), OffsetDateTime::now_utc()) {
+    match pair::settle(p, host_id, OffsetDateTime::now_utc()) {
         Ok(None) => {}
         Ok(Some(why)) => tracing::error!("{why}"),
         Err(e) => tracing::error!(error = %e, "cannot settle the renewal files"),
@@ -120,18 +119,27 @@ fn when(t: i64) -> String {
 
 impl Renewer {
     pub fn new(ctx: RenewCtx) -> Self {
-        let enabled = match pair::writable(&ctx.paths) {
+        let owned = match pair::key_owner_problem(&ctx.paths) {
+            None => true,
+            Some(why) => {
+                tracing::error!("{why}");
+                false
+            }
+        };
+        let writable = match pair::writable(&ctx.paths) {
             Ok(()) => true,
             Err(e) => {
                 tracing::error!(
                     error = %e,
                     "certificate renewal is off: this account cannot create files in the \
-                     certificate directory. Give the directory to the sender account \
-                     (an `enroll` run as root leaves it root-owned) and restart the sender"
+                     directory of client.key or of client.crt. Give the directory to the \
+                     sender account (an `enroll` run as root leaves it root-owned) and \
+                     restart the sender"
                 );
                 false
             }
         };
+        let enabled = owned && writable;
         let loaded = disk(&ctx.paths);
         Self {
             ctx,
@@ -148,17 +156,20 @@ impl Renewer {
         let t = now.unix_timestamp();
         if self.enabled {
             let (p, host) = (&self.ctx.paths, &self.ctx.host_id);
-            match pair::settle(p, host, &ca_pem(p), now) {
+            // Not clean: no request and no rename until the next wake.
+            match pair::settle(p, host, now) {
                 Ok(None) => {}
                 Ok(Some(why)) => {
                     if self.log.due("mismatch", t) {
                         tracing::error!("{why}");
                     }
+                    return WAKE;
                 }
                 Err(e) => {
                     if self.log.due("settle", t) {
                         tracing::error!(error = %e, "cannot settle the renewal files");
                     }
+                    return WAKE;
                 }
             }
         }
@@ -199,7 +210,7 @@ impl Renewer {
             return until(at);
         }
         let near = (not_after - t) * 10 < not_after - not_before;
-        let wait = match self.attempt(now).await {
+        let wait = match self.attempt(now, not_after).await {
             Ok(()) => {
                 // The swap, at once: the next request already uses the new pair.
                 self.reload(t);
@@ -246,7 +257,7 @@ impl Renewer {
 
     /// One renewal: request, check, store, build a client from the new pair, commit.
     /// `Err` carries what to do next; the next files stay for a repeat with the same CSR.
-    async fn attempt(&mut self, now: OffsetDateTime) -> Result<(), Answer> {
+    async fn attempt(&mut self, now: OffsetDateTime, live_not_after: i64) -> Result<(), Answer> {
         let fail = |e: &dyn std::fmt::Display| Answer::Failed(e.to_string());
         let ctx = &self.ctx;
         let (key, csr) = pair::prepare(&ctx.paths, &ctx.host_id).map_err(|e| fail(&e))?;
@@ -259,14 +270,13 @@ impl Renewer {
             bundle.push('\n');
         }
         bundle.push_str(&issued.ca_chain_pem);
-        cert::check(
-            &bundle,
-            key.public_key_raw(),
-            &ctx.host_id,
-            &ca_pem(&ctx.paths),
-            now,
-        )
-        .map_err(|why| fail(&format!("the server's answer cannot be used: {why}")))?;
+        let ca = pair::ca_pem(&ctx.paths).map_err(|e| fail(&e))?;
+        match pair::judge(live_not_after, &key, &bundle, &ctx.host_id, &ca, now) {
+            pair::Verdict::Usable => {}
+            pair::Verdict::Stale(why) | pair::Verdict::Unfit(why) => {
+                return Err(fail(&format!("the server's answer cannot be used: {why}")));
+            }
+        }
         pair::store_cert(&ctx.paths, &bundle).map_err(|e| fail(&e))?;
         let built = build_client(
             Some(&ctx.paths.crt_next),
@@ -315,10 +325,6 @@ impl Renewer {
 
 fn disk(p: &Paths) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((std::fs::read(&p.crt).ok()?, std::fs::read(&p.key).ok()?))
-}
-
-fn ca_pem(p: &Paths) -> String {
-    std::fs::read_to_string(&p.ca).unwrap_or_default()
 }
 
 pub async fn run(ctx: RenewCtx) {
