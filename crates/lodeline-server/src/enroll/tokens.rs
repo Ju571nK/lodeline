@@ -462,6 +462,8 @@ mod tests {
         assert_eq!(hashes(&p), vec![hash_token(&b)]);
     }
 
+    /// The flock is a no-op off unix (`lock.rs`), so only there do writers exclude each other.
+    #[cfg(unix)]
     #[test]
     fn issue_capped_cli_issue_and_redeem_lose_nothing_under_threads() {
         let d = tempfile::tempdir().unwrap();

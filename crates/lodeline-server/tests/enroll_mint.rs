@@ -1144,7 +1144,11 @@ async fn parallel_mints_cli_tokens_and_a_redeem_lose_nothing_and_the_chain_stays
         ),
     )
     .unwrap();
-    let cli_hosts: Vec<String> = (0..6).map(|_| host_id()).collect();
+    // The token file lock is a no-op off unix, so a second process can only write there
+    // when no mint does; the CLI part runs on unix.
+    let cli_hosts: Vec<String> = (0..if cfg!(unix) { 6 } else { 0 })
+        .map(|_| host_id())
+        .collect();
     let cli = {
         let (cfg, hosts) = (cfg.clone(), cli_hosts.clone());
         tokio::task::spawn_blocking(move || {
