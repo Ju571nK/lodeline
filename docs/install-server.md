@@ -204,8 +204,8 @@ directory and the server cannot read the file.
 The server validates the intermediate at boot (CA:TRUE, key⇄cert match, 0600),
 that it can run `openssl`, and that it can write next to the allowlist. A failed
 check logs an `enroll:` line naming the cause, and enrollment stays off. Signing
-makes its temporary files under `/var/lib/lodeline-server/tmp`, which the unit
-creates and points `TMPDIR` at.
+puts its temporary files in `/var/lib/lodeline-server`, in short-lived
+`lodeline-enroll-*` directories that are removed when signing ends.
 
 An allowlist that sat at `/etc/lodeline/host-allowlist.json` cannot be rewritten
 by the unit, so every enrollment failed after it spent the token. Move the file

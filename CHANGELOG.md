@@ -49,7 +49,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `lodeline`, and on SELinux hosts run `restorecon -R /var/lib/lodeline-server`), set
   `host_allowlist_path` to the new path and restart. With enrollment on, the server now checks at
   boot that it can write next to the allowlist. If it cannot, it logs an `enroll:` error, leaves
-  enrollment off, and exits when `enroll_listener` is set. (#566)
+  enrollment off, and exits when `enroll_listener` is set. With `enroll_listener` set, a server whose allowlist cannot be
+  rewritten does not start, so event intake stops until the file is moved. Without
+  `enroll_listener`, only enrollment is off. (#567, #566)
 
 ### Fixed
 
@@ -63,7 +65,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   When the server cannot run `openssl`, the boot check now says so and names the path instead of
   reporting a CA certificate that is not `CA:TRUE`. The server packages depend on `openssl`. The
   three RPMs now remove the shared `lodeline` SELinux module with the last of them, where before
-  `rpm -e` left it installed. (#566)
+  `rpm -e` left it installed. (#567, #566)
 - `lodeline-server` and `lodeline-sender` log at `info` when `RUST_LOG` is unset, as
   `lodeline-proxy` does. Before, they wrote only errors, so a default install showed no startup
   line, no warning, and no sender retry in `journalctl`. `RUST_LOG` still sets the level,
