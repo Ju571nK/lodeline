@@ -43,11 +43,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - `lodeline-server` and `lodeline-sender` log at `info` when `RUST_LOG` is unset, as
   `lodeline-proxy` does. Before, they wrote only errors, so a default install showed no startup
-  line, no refused request, and no sender retry in `journalctl`. `RUST_LOG` still sets the level,
+  line, no warning, and no sender retry in `journalctl`. `RUST_LOG` still sets the level,
   for example `RUST_LOG=warn`. Both binaries now write their logs to stderr instead of stdout, so
   a warning no longer comes before the token on the stdout of `lodeline-server enroll-token`. The
   journal keeps both streams, but a script that reads their logs from stdout must read stderr
   now. (#561, #560)
+- `lodeline-sender` logged one `read_next_batch failed` warning per second while a spool file
+  stayed unreadable, about 86,000 lines a day now that warnings show by default. It now logs the
+  first failure at once, then at most one line a minute that carries how many failures it left
+  out. A successful read resets this. The retry timing is unchanged. (#562, #560)
 
 ## [0.14.3] - 2026-11-10
 
