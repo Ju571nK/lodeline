@@ -110,7 +110,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   validity span. It says that a host added to the allowlist by hand needs a restart, that
   the server rewrites the allowlist as 0600 owned by `lodeline`, that a client presents the
   leaf and then the intermediate, and what to open on a host with neither firewalld nor ufw.
-  (#PR)
+  (#571)
 - Enrollment now works on a packaged Linux server. On a host with the packages installed and
   SELinux enforcing, it failed three ways. The SELinux module did not let `lodeline_server_t`
   run `openssl`, which signing uses, so enrollment was off and the log blamed the CA
