@@ -22,11 +22,13 @@ change for it. No package or release asset is added or removed, and `lodeline-pr
 release asset.
 
 **Server operators.** A server with enrollment on whose `host_allowlist_path` is
-`/etc/lodeline/host-allowlist.json` needs this, in this order, after the package upgrade: move the
+`/etc/lodeline/host-allowlist.json` needs this, in this order, after the package upgrade: copy the
 file to `/var/lib/lodeline-server/` and give it to `lodeline`, run `restorecon -R
 /var/lib/lodeline-server` on an SELinux host, set `host_allowlist_path` to the new path in
-`server.yaml`, and restart `lodeline-server`. The rpm restarts a running service during the upgrade,
-before you have done this. If you do nothing, the server starts, logs an `enroll:` error that names
+`server.yaml`, restart `lodeline-server`, check that enrollment is on, then delete the old file.
+Keep the old file until the restart, because a server that finds no file at its configured path
+accepts events from every host that holds a valid certificate. The rpm restarts a running service
+during the upgrade, before you have done this. If you do nothing, the server starts, logs an `enroll:` error that names
 the path, keeps serving events and the console API, and leaves enrollment off. Renewal is off with
 it. A server with `enroll_listener` set in `server.yaml` does not start. Hosts that are already
 enrolled keep working. A server without enrollment needs nothing. The server packages now depend on
@@ -34,15 +36,17 @@ enrolled keep working. A server without enrollment needs nothing. The server pac
 `TMPDIR=/var/lib/lodeline-server`, so a server that runs from a copy of the unit file needs that
 line. On an rpm host, the package scriptlet builds the SELinux module again and loads it during the
 upgrade only when `/usr/share/selinux/devel/Makefile` exists (the `selinux-policy-devel` package).
-That module lets the server run `openssl`. Without the Makefile the module that was loaded stays,
-and the server logs `enroll: cannot run openssl` and leaves enrollment off until you load the new
-module as `packaging/selinux/README.md` describes. The three rpm packages now remove the shared
+That module lets the server run `openssl`. On a host that had the module loaded before and has no
+Makefile, the old module stays, and the server logs `enroll: cannot run openssl` and leaves
+enrollment off until you load the new module as `packaging/selinux/README.md` describes. A host
+that never had the module loaded is not affected. The three rpm packages now remove the shared
 SELinux module together with the last of them.
 
 **Certificates.** The sender does not call `POST /v1/renew` in this release. A certificate that
 enrollment issues still lasts `enroll_cert_days` (30 by default), and the host must be enrolled
-again with a new token before it expires, unless a host or its PMS calls the route by hand
-(`docs/install-server.md` §3.4). Renewal is on whenever enrollment is on and has no setting. At
+again with a new token before it expires, unless a host or its deployment tool (for example
+Ansible or Intune) calls the route by hand (`docs/install-server.md` §3.4). Apart from the cases
+below, renewal is on whenever enrollment is on and has no setting. At
 start the server reads `enrollment-audit.jsonl`. A missing file means no entries, lines that do not
 parse are skipped with one warning, and a file that exists but cannot be read turns renewal off with
 a `renew:` error, while enrollment keeps working. A server whose `openssl` defaults to SHA-1 for an
@@ -54,13 +58,13 @@ with a new token. A server on OpenSSL 3 sees no change.
 version 4 host_id, and refuses to run as root when the token file's directory belongs to another
 account. A script that passes another form of the host_id, or runs it with plain `sudo` where that
 directory belongs to `lodeline`, fails: use `sudo -u lodeline`. `lodeline-server` and
-`lodeline-sender` now log at `info` on stderr when `RUST_LOG` is unset, so a default install writes
-more lines to the journal, and a script that reads their logs from stdout must read stderr. The
+`lodeline-sender` now log to stderr, and at `info` when `RUST_LOG` is unset, so a default install
+writes more lines to the journal, and a script that reads their logs from stdout must read stderr. The
 sender's repeated read-failure warning is limited to one line a minute. The packaged sender now
 creates `/var/lib/lodeline-sender` at install or upgrade, owned by `lodeline:lodeline` with mode
 0750. As root, `lodeline-sender csr --key-out` gives the key to the owner of the key's directory
-only when the path has no link and every parent is a root-owned directory closed to group and
-others. `lodeline init-host-id` is new, and a host that already has a host_id is unchanged. The two
+only when the path has no link and every parent is a root-owned directory that group and others
+cannot write to. `lodeline init-host-id` is new, and a host that already has a host_id is unchanged. The two
 changed messages and the install guide need nothing from you.
 
 ### Added
@@ -99,7 +103,7 @@ changed messages and the install guide need nothing from you.
   as `lodeline:lodeline` 0750 at install. `enroll` is not supported on Windows yet. `lodeline-sender
   csr --key-out` writes its key through the same routine. Run as root, it gives the key to the
   owner of the key's directory only when that directory's path has no link in it and every
-  parent of it is a root-owned directory closed to group and others; otherwise the key stays
+  parent of it is a root-owned directory that group and others cannot write to; otherwise the key stays
   root-owned and `csr` says so. (#564, #553)
 - `lodeline init-host-id <uuid>` gives a host its host_id before the agent's first run, so an
   operator can issue the host's enrollment token first. It writes only when the host's
@@ -137,9 +141,11 @@ changed messages and the install guide need nothing from you.
   `/var/lib/lodeline-server/host-allowlist.json`. The server rewrites that file each time a
   host enrolls, and the packaged unit makes only `/var/lib/lodeline-server` and
   `/var/log/lodeline-server` writable. A server whose allowlist is at
-  `/etc/lodeline/host-allowlist.json` must move the file to `/var/lib/lodeline-server/` (owned by
+  `/etc/lodeline/host-allowlist.json` must copy the file to `/var/lib/lodeline-server/` (owned by
   `lodeline`, and on SELinux hosts run `restorecon -R /var/lib/lodeline-server`), set
-  `host_allowlist_path` to the new path and restart. With enrollment on, the server now checks at
+  `host_allowlist_path` to the new path, restart, check that enrollment is on, and then delete the
+  old file. A server that finds no file at its configured path accepts events from every host that
+  holds a valid certificate, so the old file stays until the restart. With enrollment on, the server now checks at
   boot that it can write next to the allowlist. If it cannot, it logs an `enroll:` error, leaves
   enrollment off, and exits when `enroll_listener` is set. With `enroll_listener` set, a server whose allowlist cannot be
   rewritten does not start, so event intake stops until the file is moved. Without

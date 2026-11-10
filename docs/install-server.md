@@ -249,9 +249,12 @@ puts its temporary files in `/var/lib/lodeline-server`, in short-lived
 `lodeline-enroll-*` directories that are removed when signing ends.
 
 An allowlist that sat at `/etc/lodeline/host-allowlist.json` cannot be rewritten
-by the unit, so every enrollment failed after it spent the token. Move the file
-to `/var/lib/lodeline-server/`, set `host_allowlist_path` to the new path, and
-restart the server.
+by the unit, so every enrollment failed after it spent the token. Copy the file
+to `/var/lib/lodeline-server/` and give it to `lodeline` (on an SELinux host run
+`restorecon -R /var/lib/lodeline-server`), set `host_allowlist_path` to the new
+path, restart the server, check that enrollment is on, and then delete the old
+file. Keep the old file until the restart: a server that finds no file at its
+configured path accepts events from every host that holds a valid certificate.
 
 **3. Issue a token** (server host; prints the plaintext once — only its hash is
 stored). Run it as the service account:
