@@ -1,7 +1,8 @@
 //! Hash baseline persistence backed by SQLite.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -18,11 +19,28 @@ pub struct HashCache {
     pub(crate) conn: Connection,
 }
 
+/// While another connection writes to a file that is not in WAL mode yet, the
+/// switch to WAL fails at once instead of waiting out the busy timeout. Retry it
+/// for as long as that timeout, rusqlite's 5 s.
+fn enable_wal(conn: &Connection) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == ErrorCode::DatabaseBusy && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            done => return done,
+        }
+    }
+}
+
 impl HashCache {
     pub fn open(db_path: &Path) -> Result<Self, StateError> {
         let conn = Connection::open(db_path)?;
         // Spec section 1.4 PRAGMAs.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        enable_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.pragma_update(None, "mmap_size", 0i64)?;
@@ -148,6 +166,25 @@ mod tests {
     fn open_in(td: &TempDir) -> (HashCache, PathBuf) {
         let dbp = td.path().join("state.db");
         (HashCache::open(&dbp).unwrap(), dbp)
+    }
+
+    /// Two processes opening a new state.db at once, such as the agent's first
+    /// boot and `lodeline init-host-id`.
+    #[test]
+    fn open_waits_for_a_writer_on_a_new_file() {
+        let td = TempDir::new().unwrap();
+        let dbp = td.path().join("state.db");
+        let writer = Connection::open(&dbp).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            writer.execute_batch("COMMIT").unwrap();
+        });
+
+        let opened = HashCache::open(&dbp);
+
+        release.join().unwrap();
+        opened.unwrap();
     }
 
     #[test]
