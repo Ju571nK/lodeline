@@ -191,6 +191,7 @@ stored):
 ```sh
 lodeline-server enroll-token --config /etc/lodeline/server.yaml --host-id <agent-host_id> --ttl 1h
 #  → enrollment token: <opaque> (give this to the PMS for that host)
+#  To issue it before the agent has run, set the host's id with `lodeline init-host-id` (§9).
 ```
 
 **4. Enroll.** On the new host, make its private key and a CSR with
@@ -424,6 +425,16 @@ Two alignment rules from the field:
    mismatch makes the server reject the **whole batch** with
    `host_id_payload_mismatch`. Find the agent's id in its startup log:
    `journalctl -u lodeline | grep "agent host_id resolved"`.
+
+   To choose the id yourself, for example to issue the host's token (§3.1)
+   before the agent runs, run `lodeline init-host-id <uuid>` on the host before
+   its first `lodeline run`. Run it as the account the agent runs as (root for the
+   Linux packages), and pass the same `--state-db` as `lodeline run` if the agent
+   uses one. The UUID must be a lowercase, hyphenated version 4 UUID. The command
+   stores it exactly as given and writes only when the host has no host_id yet.
+   It exits 0 when the host has that id, 3 when the host already has another one
+   (it names that id and writes nothing), 2 for a malformed UUID, and 1 for any
+   other error.
 2. **One client cert per host**, all signed by `client_ca_path`.
 
 ---

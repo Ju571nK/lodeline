@@ -3,6 +3,7 @@
 //! Spec §1.4 `host_id` persistence: on first start, generate a UUIDv4 and
 //! store it in `state.db`. On subsequent starts, read the existing value.
 
+use lodeline_core::host_meta::HostIdClaim;
 use lodeline_core::state::{HashCache, StateError};
 use thiserror::Error;
 use tracing::info;
@@ -18,16 +19,18 @@ pub enum HostMetaInitError {
     State(#[from] StateError),
 }
 
-/// Initialize the `host_id` row if absent. Returns the resolved `host_id`.
+/// Return the host's `host_id`, claiming a fresh UUIDv4 when it has none. A host
+/// that already has one, such as from `lodeline init-host-id`, keeps it.
 pub fn ensure_host_id(cache: &HashCache) -> Result<String, HostMetaInitError> {
-    let meta = cache.host_meta_get()?;
-    if let Some(id) = meta.host_id {
-        return Ok(id);
-    }
-    let new_id = Uuid::new_v4().to_string();
-    cache.host_meta_set_host_id(&new_id)?;
-    info!(host_id = %new_id, "generated new host_id (first run)");
-    Ok(new_id)
+    let fresh = Uuid::new_v4().to_string();
+    Ok(match cache.host_meta_claim_host_id(&fresh)? {
+        HostIdClaim::Claimed => {
+            info!(host_id = %fresh, "generated new host_id (first run)");
+            fresh
+        }
+        HostIdClaim::AlreadySet => fresh,
+        HostIdClaim::Conflict { stored } => stored,
+    })
 }
 
 /// Outcome of `ensure_fingerprint`.
@@ -97,6 +100,23 @@ mod tests {
         let id3 = ensure_host_id(&cache).unwrap();
         assert_eq!(id1, id2);
         assert_eq!(id2, id3);
+    }
+
+    #[test]
+    fn a_claim_through_another_handle_is_adopted_not_overwritten() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let agent = HashCache::open(&db).unwrap();
+        let operator = HashCache::open(&db).unwrap();
+        let preassigned = "5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f";
+
+        operator.host_meta_claim_host_id(preassigned).unwrap();
+
+        assert_eq!(ensure_host_id(&agent).unwrap(), preassigned);
+        assert_eq!(
+            operator.host_meta_get().unwrap().host_id.as_deref(),
+            Some(preassigned)
+        );
     }
 
     #[test]

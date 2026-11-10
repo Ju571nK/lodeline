@@ -7,6 +7,20 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- `lodeline init-host-id <uuid>` gives a host its host_id before the agent's first run, so an
+  operator can issue the host's enrollment token first. It writes only when the host's
+  `state.db` has no host_id, follows the global `--state-db` (pass the same one as
+  `lodeline run`), and prints the `state.db` path it used. It exits 0 when the host has that
+  host_id, 3 when it already has another one (it names that id and writes nothing), 2 for an id
+  that is not a lowercase, hyphenated version 4 UUID, and 1 for any other error. It stores the id
+  exactly as given, because the server compares host_ids as exact strings. The hardened build
+  keeps the command. The agent's first run now stores its new host_id only when the row is
+  empty, so the two never store different ids, and two processes that open a new `state.db` at
+  once no longer fail with "database is locked". The deb and rpm install tests now check that
+  the agent package installs disabled and stopped. (#557, #553)
+
 ## [0.14.3] - 2026-11-10
 
 **Upgrade order.** The agent, the sender, the server and the web console can be upgraded in any

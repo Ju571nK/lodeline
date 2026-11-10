@@ -8,6 +8,8 @@ use lodeline_agent::control::{default_control_pipe_name, default_control_socket}
 use lodeline_agent::control_client;
 use lodeline_agent::runtime::{default_events_dir, default_state_db_path};
 use lodeline_agent::{cli, doctor, runtime, show};
+use lodeline_core::host_meta::HostIdClaim;
+use lodeline_core::state::HashCache;
 
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
@@ -56,6 +58,10 @@ fn main() -> anyhow::Result<()> {
                 &control_socket,
             )?;
             std::process::exit(code);
+        }
+        cli::Command::InitHostId { host_id } => {
+            let state_db = cli.state_db.clone().unwrap_or_else(default_state_db_path);
+            std::process::exit(init_host_id(&host_id, &state_db));
         }
         cli::Command::Version => {
             println!("lodeline {}", env!("CARGO_PKG_VERSION"));
@@ -106,6 +112,51 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn init_host_id(host_id: &str, state_db: &std::path::Path) -> i32 {
+    let db = state_db.display();
+    // A relative path depends on the working directory, so `run` started elsewhere
+    // opens another file. The Windows default is relative when %ProgramData% is unset.
+    if !state_db.is_absolute() {
+        eprintln!(
+            "lodeline init-host-id: the state.db path {db} is not absolute. Pass the \
+             absolute --state-db that `lodeline run` uses."
+        );
+        return 1;
+    }
+    let claim = || -> anyhow::Result<HostIdClaim> {
+        if let Some(dir) = state_db.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(HashCache::open(state_db)?.host_meta_claim_host_id(host_id)?)
+    };
+    match claim() {
+        Ok(HostIdClaim::Claimed) => {
+            println!("host_id {host_id} stored (state.db: {db})");
+            0
+        }
+        Ok(HostIdClaim::AlreadySet) => {
+            println!("host_id {host_id} was already set; nothing written (state.db: {db})");
+            0
+        }
+        Ok(HostIdClaim::Conflict { stored }) => {
+            eprintln!(
+                "lodeline init-host-id: this host already has host_id {stored}; nothing was \
+                 written (state.db: {db}).\nIf this machine was enrolled before, {stored} is \
+                 its identity. If its disk was copied from another host, two machines now \
+                 share that host_id."
+            );
+            3
+        }
+        Err(e) => {
+            eprintln!(
+                "lodeline init-host-id: cannot write the host_id to {db}: {e:#}. Run this \
+                 command as the account the agent runs as (root for the Linux packages)."
+            );
+            1
+        }
+    }
 }
 
 #[cfg(feature = "operator-cli")]

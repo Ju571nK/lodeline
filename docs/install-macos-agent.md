@@ -248,6 +248,12 @@ grep "agent host_id resolved" /var/log/lodeline/agent.err.log
 
 It also appears as the `host_id` field on every emitted event.
 
+To choose the host_id instead, run `lodeline init-host-id <uuid>` before the
+agent's first run, as the account the agent runs as (root for the LaunchDaemon),
+and with the same `--state-db` as `lodeline run` if you pass one. It never
+replaces a host_id the host already has. Its rules and exit codes are in
+[install-server.md § 9](install-server.md).
+
 ---
 
 ## 7. Ship events to a server (optional)

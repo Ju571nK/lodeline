@@ -13,7 +13,8 @@ use time::OffsetDateTime;
 /// Snapshot of the host_meta row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostMeta {
-    /// UUIDv4 string, generated on first run, stable across restarts.
+    /// UUIDv4 string, generated on first run or set before it by
+    /// `lodeline init-host-id`. Never changes once written.
     pub host_id: Option<String>,
     /// blake3 hex of (platform_uuid || stable_mac || cpu_brand).
     pub hw_fingerprint: Option<String>,
@@ -63,6 +64,28 @@ impl AppliedEnvelope {
     }
 }
 
+/// What [`HashCache::host_meta_claim_host_id`] found. Only `Claimed` wrote.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HostIdClaim {
+    /// The host had no host_id and now has the requested one.
+    Claimed,
+    /// The host already had the requested host_id.
+    AlreadySet,
+    /// The host already had another host_id, and keeps it.
+    Conflict { stored: String },
+}
+
+/// True only for the form `Uuid::new_v4().to_string()` produces: an RFC 4122
+/// version 4 UUID, lowercase and hyphenated. The server compares host_ids as
+/// exact strings, so another spelling of the same UUID is another host.
+pub fn is_canonical_v4(host_id: &str) -> bool {
+    uuid::Uuid::parse_str(host_id).is_ok_and(|u| {
+        u.get_version_num() == 4
+            && u.get_variant() == uuid::Variant::RFC4122
+            && u.hyphenated().to_string() == host_id
+    })
+}
+
 /// An apply that recorded its intent and has not finished.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingEnvelope {
@@ -107,13 +130,27 @@ impl HashCache {
         Ok(row)
     }
 
-    /// Set `host_id` (idempotent).
-    pub fn host_meta_set_host_id(&self, host_id: &str) -> Result<(), StateError> {
-        self.conn.execute(
-            "UPDATE host_meta SET host_id = ?1 WHERE id = 1",
-            rusqlite::params![host_id],
+    /// Store `host_id` only if the host has none. A host keeps the first host_id
+    /// written, so concurrent writers, even in other processes, agree on one.
+    pub fn host_meta_claim_host_id(&self, host_id: &str) -> Result<HostIdClaim, StateError> {
+        let claimed = self.conn.execute(
+            "UPDATE host_meta SET host_id = ?1 WHERE id = 1 AND host_id IS NULL",
+            params![host_id],
         )?;
-        Ok(())
+        if claimed == 1 {
+            return Ok(HostIdClaim::Claimed);
+        }
+        // Nothing clears a host_id, so this reads the id that stopped the update.
+        let stored: String =
+            self.conn
+                .query_row("SELECT host_id FROM host_meta WHERE id = 1", [], |r| {
+                    r.get(0)
+                })?;
+        Ok(if stored == host_id {
+            HostIdClaim::AlreadySet
+        } else {
+            HostIdClaim::Conflict { stored }
+        })
     }
 
     /// Set `hw_fingerprint` (idempotent).
@@ -294,17 +331,76 @@ mod tests {
         assert_eq!(m.policy.version(), 0);
     }
 
+    const FIRST: &str = "5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f";
+    const SECOND: &str = "9d8c7b6a-5f4e-4d3c-9b2a-1f0e9d8c7b6a";
+
     #[test]
-    fn set_and_get_host_id() {
+    fn a_claim_on_an_empty_row_stores_the_id() {
         let (_dir, cache) = fresh_cache();
-        cache
-            .host_meta_set_host_id("5a7c3e91-aaaa-bbbb-cccc-dddddddddddd")
-            .unwrap();
-        let m = cache.host_meta_get().unwrap();
+
         assert_eq!(
-            m.host_id.as_deref(),
-            Some("5a7c3e91-aaaa-bbbb-cccc-dddddddddddd")
+            cache.host_meta_claim_host_id(FIRST).unwrap(),
+            HostIdClaim::Claimed
         );
+        assert_eq!(
+            cache.host_meta_get().unwrap().host_id.as_deref(),
+            Some(FIRST)
+        );
+    }
+
+    #[test]
+    fn claiming_the_stored_id_again_is_already_set() {
+        let (_dir, cache) = fresh_cache();
+        cache.host_meta_claim_host_id(FIRST).unwrap();
+
+        assert_eq!(
+            cache.host_meta_claim_host_id(FIRST).unwrap(),
+            HostIdClaim::AlreadySet
+        );
+        assert_eq!(
+            cache.host_meta_get().unwrap().host_id.as_deref(),
+            Some(FIRST)
+        );
+    }
+
+    #[test]
+    fn claiming_another_id_is_a_conflict_and_keeps_the_first() {
+        let (_dir, cache) = fresh_cache();
+        cache.host_meta_claim_host_id(FIRST).unwrap();
+
+        assert_eq!(
+            cache.host_meta_claim_host_id(SECOND).unwrap(),
+            HostIdClaim::Conflict {
+                stored: FIRST.into()
+            }
+        );
+        assert_eq!(
+            cache.host_meta_get().unwrap().host_id.as_deref(),
+            Some(FIRST)
+        );
+    }
+
+    #[test]
+    fn only_a_lowercase_hyphenated_v4_uuid_is_canonical() {
+        assert!(is_canonical_v4(FIRST));
+        assert!(is_canonical_v4(&uuid::Uuid::new_v4().to_string()));
+        for rejected in [
+            "5A7C3E91-1F2B-4C3D-8E4F-0A1B2C3D4E5F",
+            "5a7c3e91-1f2b-4c3d-8E4F-0a1b2c3d4e5f",
+            "{5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f}",
+            "urn:uuid:5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f",
+            "5a7c3e911f2b4c3d8e4f0a1b2c3d4e5f",
+            " 5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f",
+            "00000000-0000-0000-0000-000000000000",
+            "5a7c3e91-1f2b-1c3d-8e4f-0a1b2c3d4e5f",
+            "01910f5a-1234-7890-abcd-ef0123456789",
+            "5a7c3e91-1f2b-4c3d-0e4f-0a1b2c3d4e5f",
+            "5a7c3e91-1f2b-4c3d-ce4f-0a1b2c3d4e5f",
+            "not-a-uuid",
+            "",
+        ] {
+            assert!(!is_canonical_v4(rejected), "{rejected:?} was accepted");
+        }
     }
 
     #[test]
@@ -432,7 +528,7 @@ mod tests {
         let db = dir.path().join("state.db");
         {
             let cache = HashCache::open(&db).unwrap();
-            cache.host_meta_set_host_id("persist-me").unwrap();
+            cache.host_meta_claim_host_id("persist-me").unwrap();
             apply(&cache, Policy, 7);
             cache.record_pending(RulePacks, &pending(3)).unwrap();
         }
