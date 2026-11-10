@@ -138,15 +138,8 @@ impl EnrollState {
             );
             return None;
         }
-        if !ca_cert_is_ca(&openssl, cert) {
-            tracing::error!(
-                path = %cert.display(),
-                "enroll: configured CA cert is not CA:TRUE; enrollment disabled"
-            );
-            return None;
-        }
-        if !key_matches_cert(&openssl, cert, key) {
-            tracing::error!("enroll: CA key does not match CA cert; enrollment disabled");
+        if let Err(msg) = check_ca_files(&openssl, cert, key) {
+            tracing::error!("enroll: {msg}; enrollment disabled");
             return None;
         }
         // #194.1 — normalize issuer fingerprints to lowercase hex once, at
@@ -239,6 +232,22 @@ fn key_mode_ok(_key: &Path) -> bool {
     true
 }
 
+/// The boot checks on the CA files, in the order that names the real cause.
+fn check_ca_files(openssl: &Path, cert: &Path, key: &Path) -> Result<(), String> {
+    for p in [cert, key] {
+        if let Err(e) = std::fs::File::open(p) {
+            return Err(format!("cannot read {} ({e})", p.display()));
+        }
+    }
+    if !ca_cert_is_ca(openssl, cert) {
+        return Err(format!(
+            "configured CA cert {} is not CA:TRUE",
+            cert.display()
+        ));
+    }
+    key_matches_cert(openssl, cert, key)
+}
+
 /// Verify the cert advertises `CA:TRUE` via `openssl x509 -text`.
 fn ca_cert_is_ca(openssl: &Path, cert: &Path) -> bool {
     let out = Command::new(openssl)
@@ -258,7 +267,7 @@ fn ca_cert_is_ca(openssl: &Path, cert: &Path) -> bool {
 
 /// Verify the private key matches the cert by comparing public-key hashes.
 /// Algorithm-agnostic: `-pubkey` from cert and from key must be byte-identical.
-fn key_matches_cert(openssl: &Path, cert: &Path, key: &Path) -> bool {
+fn key_matches_cert(openssl: &Path, cert: &Path, key: &Path) -> Result<(), String> {
     let cert_pub = Command::new(openssl)
         .env_remove("OPENSSL_CONF")
         .arg("x509")
@@ -274,10 +283,15 @@ fn key_matches_cert(openssl: &Path, cert: &Path, key: &Path) -> bool {
         .args(["-pubout"])
         .output();
     match (cert_pub, key_pub) {
-        (Ok(c), Ok(k)) if c.status.success() && k.status.success() => {
-            !c.stdout.is_empty() && c.stdout == k.stdout
+        (Ok(c), Ok(k))
+            if c.status.success()
+                && k.status.success()
+                && !c.stdout.is_empty()
+                && c.stdout == k.stdout =>
+        {
+            Ok(())
         }
-        _ => false,
+        _ => Err("CA key does not match CA cert".to_string()),
     }
 }
 
@@ -562,6 +576,96 @@ mod tests {
             None,
         );
         assert!(s.is_none(), "CA:FALSE cert must disable enrollment");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boot_check_says_unreadable_for_a_cert_the_account_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(openssl) = sign::resolve_openssl() else {
+            return;
+        };
+        let d = tempfile::tempdir().unwrap();
+        let (cert, key) = make_ca(&openssl, d.path());
+        std::fs::set_permissions(&cert, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // root reads any file, so only assert where the certificate is really unreadable
+        if std::fs::File::open(&cert).is_ok() {
+            return;
+        }
+        let msg = check_ca_files(&openssl, &cert, &key).unwrap_err();
+        assert!(msg.starts_with("cannot read "), "{msg}");
+        assert!(msg.contains(cert.to_str().unwrap()), "{msg}");
+        assert!(
+            !msg.contains("CA:TRUE") && !msg.contains("does not match"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn boot_check_keeps_the_other_causes() {
+        let Some(openssl) = sign::resolve_openssl() else {
+            return;
+        };
+        let d = tempfile::tempdir().unwrap();
+        let (leaf, leaf_key) = make_leaf_cert(&openssl, d.path());
+        let msg = check_ca_files(&openssl, &leaf, &leaf_key).unwrap_err();
+        assert!(msg.contains("is not CA:TRUE"), "{msg}");
+        let o = tempfile::tempdir().unwrap();
+        let (cert, _key) = make_ca(&openssl, o.path());
+        let (_c, other_key) = make_ca(&openssl, d.path());
+        assert_eq!(
+            check_ca_files(&openssl, &cert, &other_key).unwrap_err(),
+            "CA key does not match CA cert"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_check_says_unreadable_for_a_key_the_account_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(openssl) = sign::resolve_openssl() else {
+            return;
+        };
+        let d = tempfile::tempdir().unwrap();
+        let (cert, key) = make_ca(&openssl, d.path());
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // root reads any file, so only assert where the key is really unreadable
+        if std::fs::File::open(&key).is_ok() {
+            return;
+        }
+        let msg = check_ca_files(&openssl, &cert, &key).unwrap_err();
+        assert!(msg.starts_with("cannot read "), "{msg}");
+        assert!(msg.contains(key.to_str().unwrap()), "{msg}");
+        assert!(!msg.contains("does not match"), "{msg}");
+    }
+
+    #[test]
+    fn key_check_says_unreadable_for_a_missing_key() {
+        let Some(openssl) = sign::resolve_openssl() else {
+            return;
+        };
+        let d = tempfile::tempdir().unwrap();
+        let (cert, _key) = make_ca(&openssl, d.path());
+        let gone = d.path().join("gone.key");
+        let msg = check_ca_files(&openssl, &cert, &gone).unwrap_err();
+        assert!(msg.starts_with("cannot read "), "{msg}");
+        assert!(msg.contains(gone.to_str().unwrap()), "{msg}");
+    }
+
+    #[test]
+    fn key_check_says_mismatch_for_another_cas_key() {
+        let Some(openssl) = sign::resolve_openssl() else {
+            return;
+        };
+        let d = tempfile::tempdir().unwrap();
+        let (cert, key) = make_ca(&openssl, d.path());
+        let other = tempfile::tempdir().unwrap();
+        let (_c2, key2) = make_ca(&openssl, other.path());
+        assert_eq!(
+            check_ca_files(&openssl, &cert, &key2).unwrap_err(),
+            "CA key does not match CA cert"
+        );
+        assert!(check_ca_files(&openssl, &cert, &key).is_ok());
     }
 
     fn make_ca(openssl: &Path, dir: &Path) -> (PathBuf, PathBuf) {
