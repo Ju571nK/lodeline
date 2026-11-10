@@ -575,6 +575,7 @@ mod tests {
         assert!(s.is_none(), "CA:FALSE cert must disable enrollment");
     }
 
+    #[cfg(unix)]
     #[test]
     fn key_check_says_unreadable_for_a_key_the_account_cannot_read() {
         use std::os::unix::fs::PermissionsExt;
