@@ -7,6 +7,23 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-11-10
+
+**Upgrade order.** The agent, the sender, the server and the web console can be upgraded in any
+order. This release adds no event kind and no reason kind, and the agent's events are unchanged
+on the wire. AI Guard now watches more Claude Code files, so hosts record more `file_change`
+events. A host's findings can change after its agent is upgraded, because a project row at the
+home folder no longer repeats the findings for `~/.claude/loop.md`. The server's fleet API and
+its proxy routes send the same fields as in v0.14.2, and only the order of `audit_gaps` in
+`GET /v1/proxies/{id}` changes. An existing `server.yaml` needs no change. Without
+`proxy.stale_after_seconds`, a proxy still reads `disconnected` after 90 s without contact, and
+a value outside 60 to 300 stops the server at boot. The sender has a new `lodeline-sender csr`
+subcommand, and no package or release asset is added or removed. The console's Downloads page
+reads `GET /v1/artifacts`, a route that the server has served since v0.7.0, with the credentials
+that the console already uses. Against a server without `artifacts_dir`, the page says that the
+server does not serve release files and names the `server.yaml` setting. `lodeline-proxy` is
+still not a release asset.
+
 ### Added
 
 - `lodeline-server` has a new `proxy.stale_after_seconds` setting. It sets how long a proxy can
