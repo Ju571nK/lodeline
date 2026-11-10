@@ -66,6 +66,49 @@ fn refuses_to_overwrite_an_existing_key_or_csr() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_link_in_the_key_path_is_named_and_not_called_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let req = dir.path().join("host.csr");
+    let out = csr(HOST_ID, &link.join("host.key"), &req);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("must be a directory, not a link"), "{err}");
+    assert!(!err.contains("never overwritten"), "{err}");
+    assert!(!err.contains("stays root-owned"), "{err}");
+    assert!(!req.exists(), "no CSR is left behind");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unwritable_key_directory_is_named_and_not_called_an_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let closed = dir.path().join("closed");
+    fs::create_dir(&closed).unwrap();
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o555)).unwrap();
+    // root writes anywhere, so only assert where the directory is really closed
+    if fs::File::create(closed.join("probe")).is_ok() {
+        return;
+    }
+    let req = dir.path().join("host.csr");
+    let out = csr(HOST_ID, &closed.join("host.key"), &req);
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("cannot create") && err.contains("host.key"),
+        "{err}"
+    );
+    assert!(!err.contains("never overwritten"), "{err}");
+    assert!(!req.exists());
+}
+
 #[test]
 fn rejects_a_host_id_that_is_not_a_uuid() {
     let dir = tempfile::tempdir().unwrap();
