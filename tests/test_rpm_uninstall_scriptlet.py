@@ -8,7 +8,7 @@ import re
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get("SCRIPTLET_ROOT") or Path(__file__).resolve().parents[1])  # override reads altered copies
 PACKAGES = {
     "lodeline-agent": "lodeline",
     "lodeline-sender": "lodeline-sender",
@@ -23,7 +23,7 @@ def scriptlet(crate):
     return body.replace("\\\\", "\\")  # TOML basic string: only \\ is used
 
 
-def run(crate, arg, rpm_body, with_semodule=True):
+def run(crate, arg, rpm_body, with_semodule=True, grep_body=None):
     """Run the scriptlet under sh -e; return (exit code, whether semodule -r ran)."""
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
@@ -41,8 +41,10 @@ def run(crate, arg, rpm_body, with_semodule=True):
         if with_semodule:
             stub("semodule", f'echo "$@" >> {log}')
         # Only the stubs plus /bin and /usr/bin tools the scriptlet needs, none of them semodule.
+        if grep_body:
+            stub("grep", grep_body)
         for tool in ("grep", "echo"):
-            if (Path("/usr/bin") / tool).exists():
+            if not (stubs / tool).exists() and (Path("/usr/bin") / tool).exists():
                 (stubs / tool).symlink_to(Path("/usr/bin") / tool)
         env = {"PATH": str(stubs)}
         r = subprocess.run(
@@ -70,11 +72,21 @@ class UninstallScriptletTests(unittest.TestCase):
     def test_cases(self):
         for crate, me in PACKAGES.items():
             others = tuple(p for p in ALL if p != me)
-            with self.subTest(crate=crate, case="upgrade"):
-                self.check(crate, "1", listing(*others), False)
-            for n, expect in ((1, False), (2, False), (0, True)):
-                with self.subTest(crate=crate, case=f"erase with {n} other(s)"):
-                    self.check(crate, "0", listing(*others[:n]), expect)
+            for arg, pkgs, expect, case in (
+                ("1", others, False, "upgrade with both others"),
+                ("1", (), False, "upgrade alone"),
+                ("0", others[:1], False, "erase with first other"),
+                ("0", others[1:], False, "erase with second other"),
+                ("0", others, False, "erase with both others"),
+                ("0", (), True, "erase alone"),
+                ("0", ("lodeline-proxy",), True, "erase with proxy only"),
+                ("0", ("lodeline-manager",), True, "erase with manager only"),
+                ("0", ("x" + others[0],), True, "erase with unanchored name only"),
+            ):
+                with self.subTest(crate=crate, case=case):
+                    self.check(crate, arg, listing(*pkgs), expect)
+            with self.subTest(crate=crate, case="grep errors"):
+                self.check(crate, "0", listing(), False, grep_body="exit 2")
             with self.subTest(crate=crate, case="rpm -qa fails"):
                 self.check(crate, "0", "exit 1", False)
             with self.subTest(crate=crate, case="rpm -qa fails after partial output"):
