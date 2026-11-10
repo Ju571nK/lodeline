@@ -141,6 +141,10 @@ makes the host key and CSR without an `openssl` binary. On Windows the key file
 gets the permissions it inherits from its folder, so write it to a folder that
 only administrators and the sender's account can read.
 
+`lodeline-sender enroll` ([install-server.md § 3.3](install-server.md)) is not
+supported on Windows yet and exits 1. It needs a Windows file protection that has
+not been tested on a Windows host.
+
 ---
 
 *Windows path defaults reflect the agent's `default_state_db_path`,

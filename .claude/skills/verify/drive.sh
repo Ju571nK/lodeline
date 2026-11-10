@@ -6,8 +6,8 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 bin="$repo/target/debug"
 base="${TMPDIR:-/tmp}"
 base="${base%/}/lodeline-verify"
-packages=(-p lodeline-agent -p lodeline-hook -p lodeline-signer -p lodeline-server)
-binaries=(lodeline lodeline-hook lodeline-sign lodeline-server)
+packages=(-p lodeline-agent -p lodeline-hook -p lodeline-signer -p lodeline-server -p lodeline-sender)
+binaries=(lodeline lodeline-hook lodeline-sign lodeline-server lodeline-sender)
 
 die() {
   echo "drive.sh: $*" >&2

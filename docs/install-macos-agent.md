@@ -262,7 +262,10 @@ To forward events to a [`lodeline-server`](install-server.md), run `lodeline-sen
 First get this host's client cert + `ca.crt` from the server operator
 ([install-server.md § 3](install-server.md)). With enrollment
 ([install-server.md § 3.1](install-server.md)), make the key and CSR on this host
-with `lodeline-sender csr` instead, so the key never leaves it. Then write
+with `lodeline-sender csr` instead, so the key never leaves it. With an
+enrollment file, `lodeline-sender enroll` does the whole step, including
+`sender.yaml`; see [install-server.md § 3.3](install-server.md). On macOS the
+sender runs as root, because the key it writes is root's. Otherwise write
 `sender.yaml`:
 
 ```yaml

@@ -28,7 +28,7 @@ From the repo root or a worktree root:
 RUN=$(.claude/skills/verify/drive.sh new)
 ```
 
-This runs `cargo build --locked` for `lodeline-agent`, `lodeline-hook`, `lodeline-signer`, and `lodeline-server`, creates the empty run, and prints the run id on stdout. The instance is ready when the id prints and Doctor passes. No migration or seed step exists: scratch starts empty, and each feature file seeds what it needs.
+This runs `cargo build --locked` for `lodeline-agent`, `lodeline-hook`, `lodeline-signer`, `lodeline-server`, and `lodeline-sender`, creates the empty run, and prints the run id on stdout. The instance is ready when the id prints and Doctor passes. No migration or seed step exists: scratch starts empty, and each feature file seeds what it needs.
 
 The shell does not keep `RUN` between tool calls, so pass the id literally in each later call. Every run has its own scratch directory, so runs can overlap, except for the fleet port in [`features/fleet-local.md`](features/fleet-local.md).
 
@@ -83,7 +83,7 @@ Stops this run's background processes, removes `scratch/`, keeps `evidence/`, an
 
 ## Secondary surfaces
 
-- **Fleet stack.** `lodeline-sign` and `lodeline-server` in plain HTTP on loopback run locally, as [`features/fleet-local.md`](features/fleet-local.md) shows. `lodeline-sender`, mTLS, and enrollment have no recipe here and stay with `cargo test -p lodeline-server` and `cargo test -p lodeline-sender`. The `lodeline-manager` console has its own verify skill in [`apps/manager/.claude/skills/verify/`](../../../apps/manager/.claude/skills/verify/SKILL.md).
+- **Fleet stack.** `lodeline-sign` and `lodeline-server` in plain HTTP on loopback run locally, as [`features/fleet-local.md`](features/fleet-local.md) shows. Enrolling a host over mTLS with `lodeline-sender enroll` runs locally too, as [`features/fleet-enroll.md`](features/fleet-enroll.md) shows. Enrollment on a packaged host (owners, systemd, SELinux) has no recipe here. The `lodeline-manager` console has its own verify skill in [`apps/manager/.claude/skills/verify/`](../../../apps/manager/.claude/skills/verify/SKILL.md).
 - **Diagnostic app.** The macOS Tauri app is planned and has no driver yet.
 
 Keep the map current with `/maintain-verification-skill`.

@@ -28,6 +28,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Release the upgrade tests start from. Also keys the download cache below.
+  OLD_RELEASE: 0.14.2
 
 jobs:
   # RPM path in the rockylinux:9 container (glibc 2.34, dnf-installed toolchain).
@@ -49,6 +51,13 @@ jobs:
         run: |
           cargo install cargo-generate-rpm --locked
           packaging/build.sh rpm
+      # GitHub's release downloads answer 5xx now and then, and a retry loop
+      # cannot outlast it. Files are checked against SHA256SUMS after restore.
+      - name: cache old release packages
+        uses: actions/cache@v4
+        with:
+          path: /opt/old-release
+          key: old-release-rpm-${{ env.OLD_RELEASE }}
       - name: inspect & install-test .rpm (all 5 packages)
         run: |
           set -eux
@@ -183,7 +192,9 @@ jobs:
           	lodeline-proxy|lodeline-proxy|lodeline-proxy.service|/etc/lodeline/proxy.yaml.example
           	TABLE
 
-          # Co-install (#252), matching the deb leg.
+          # Co-install (#252), matching the deb leg. systemd supplies the
+          # sysusers and tmpfiles the scriptlets call, so it goes in first.
+          dnf -y install systemd
           all=(lodeline lodeline-sender lodeline-server lodeline-signer lodeline-proxy)
           rpms=()
           for pkg in "${all[@]}"; do rpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)"); done
@@ -191,23 +202,27 @@ jobs:
           for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
+          # `lodeline-sender enroll` gives the client key to the owner of this directory
+          # (#553), so the package must make it the sender's before any unit starts.
+          test "$(stat -c '%U:%G %a' /var/lib/lodeline-sender)" = "lodeline:lodeline 750"
+          test "$(stat -c '%U:%G %a' /etc/lodeline)" = "root:root 755"
           rpm -e "${all[@]}"
 
-          # Upgrade from the published v0.14.2 packages (proxy is not among
+          # Upgrade from the published $OLD_RELEASE packages (proxy is not among
           # them; it installs fresh afterwards) to the packages built above.
-          # systemd supplies the sysusers/tmpfiles the scriptlets call.
-          dnf -y install systemd
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          old=0.14.2
+          old="$OLD_RELEASE"
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
-          dl=$(mktemp -d)
-          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
+          dl=/opt/old-release
+          mkdir -p "$dl"
+          : > "$dl/sums"
+          [ -s "$dl/SHA256SUMS" ] || curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
           upg=(lodeline lodeline-sender lodeline-server lodeline-signer)
           oldrpms=()
           newrpms=()
           for pkg in "${upg[@]}"; do
             f="${pkg}-${old}-1.$(uname -m).rpm"
-            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/$f" "$base/$f"
+            [ -s "$dl/$f" ] || curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/$f" "$base/$f"
             awk -v f="$f" '$2 == f { found = 1; print } END { exit !found }' "$dl/SHA256SUMS" >> "$dl/sums"
             oldrpms+=("$dl/$f")
             newrpms+=("$(echo target/generate-rpm/${pkg}-[0-9]*.rpm)")
@@ -258,6 +273,13 @@ jobs:
         run: |
           cargo install cargo-deb --locked
           packaging/build.sh deb
+      # GitHub's release downloads answer 5xx now and then, and a retry loop
+      # cannot outlast it. Files are checked against SHA256SUMS after restore.
+      - name: cache old release packages
+        uses: actions/cache@v4
+        with:
+          path: /opt/old-release
+          key: old-release-deb-${{ env.OLD_RELEASE }}
       - name: inspect & install-test .deb (all 5 packages)
         shell: bash
         run: |
@@ -390,28 +412,39 @@ jobs:
           for f in lodeline lodeline-sender lodeline-server lodeline-proxy; do
             test -f "/usr/lib/sysusers.d/${f}.conf"
           done
+          # `lodeline-sender enroll` gives the client key to the owner of this directory
+          # (#553), so the package must make it the sender's before any unit starts.
+          # The dependency alternatives allow a host without systemd-tmpfiles, so
+          # assert the tool is there.
+          command -v systemd-tmpfiles
+          test "$(stat -c '%U:%G %a' /var/lib/lodeline-sender)" = "lodeline:lodeline 750"
+          test "$(stat -c '%U:%G %a' /etc/lodeline)" = "root:root 755"
           # The per-package copies must stay identical (they define one shared
           # `lodeline` user and its directories).
           cmp /usr/lib/sysusers.d/lodeline.conf /usr/lib/sysusers.d/lodeline-sender.conf
           cmp /usr/lib/sysusers.d/lodeline.conf /usr/lib/sysusers.d/lodeline-server.conf
-          cmp /usr/lib/tmpfiles.d/lodeline.conf /usr/lib/tmpfiles.d/lodeline-sender.conf
+          # The sender's copy also makes its own state directory; every other line
+          # must match the agent's.
+          grep -v 'lodeline-sender' /usr/lib/tmpfiles.d/lodeline-sender.conf | cmp /usr/lib/tmpfiles.d/lodeline.conf -
           dpkg -P "${all[@]}"
 
-          # Upgrade from the published v0.14.2 packages (proxy is not among
+          # Upgrade from the published $OLD_RELEASE packages (proxy is not among
           # them; it installs fresh afterwards) to the packages built above.
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          old=0.14.2
+          old="$OLD_RELEASE"
           arch=$(dpkg --print-architecture)
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
-          dl=$(mktemp -d)
+          dl=/opt/old-release
+          mkdir -p "$dl"
+          : > "$dl/sums"
           chmod 755 "$dl"  # apt's _apt user must be able to read the files
-          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
+          [ -s "$dl/SHA256SUMS" ] || curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
           upg=(lodeline lodeline-sender lodeline-server lodeline-signer)
           olddebs=()
           newdebs=()
           for pkg in "${upg[@]}"; do
             f="${pkg}_${old}-1_${arch}.deb"
-            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/$f" "$base/$f"
+            [ -s "$dl/$f" ] || curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$dl/$f" "$base/$f"
             awk -v f="$f" '$2 == f { found = 1; print } END { exit !found }' "$dl/SHA256SUMS" >> "$dl/sums"
             olddebs+=("$dl/$f")
             newdebs+=("./$(echo target/debian/${pkg}_[0-9]*.deb)")

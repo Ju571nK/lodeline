@@ -11,6 +11,7 @@ pub mod csr;
 pub mod data_task;
 pub mod dead_letter;
 pub mod doctor;
+pub mod enroll;
 pub mod heartbeat;
 pub mod manifest;
 pub mod runtime;

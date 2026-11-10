@@ -191,6 +191,7 @@ struct H {
     srv: Server,
     host: reqwest::Client,
     up: Upstream,
+    started: std::time::Instant,
 }
 
 async fn mgmt_call(
@@ -258,6 +259,7 @@ impl H {
         .await;
         assert_eq!(st, 200, "config put: {b}");
         Some(H {
+            started: std::time::Instant::now(),
             pki,
             proxy_cert,
             srv,
@@ -288,6 +290,25 @@ impl H {
 
     fn state_dir(&self) -> PathBuf {
         self.pki.dir.path().join("proxy-state")
+    }
+
+    /// What to print when the state_dir lock cannot be taken: the lock file,
+    /// its holders (best effort, `lsof`) and how long this test has run.
+    fn lock_report(&self) -> String {
+        let lock = self.state_dir().join(lodeline_proxy::state_dir::LOCK_FILE);
+        let holders = Command::new("lsof")
+            .arg(&lock)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_else(|e| format!("lsof failed: {e}"));
+        format!(
+            "lock file {} exists={} len={:?}; test running for {:?}; own pid {}; holders:\n{holders}",
+            lock.display(),
+            lock.exists(),
+            std::fs::metadata(&lock).map(|m| m.len()).ok(),
+            self.started.elapsed(),
+            std::process::id(),
+        )
     }
 
     /// Latest applied status snapshot the server holds.
@@ -416,7 +437,7 @@ async fn start_proxy(h: &H, registry_poll: Duration) -> Running {
         })
     })
     .await
-    .expect("the proxy starts");
+    .unwrap_or_else(|e| panic!("the proxy starts: {e}\n{}", h.lock_report()));
     eventually("the proxy forwards", || async {
         px.call(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
             .await
@@ -927,7 +948,7 @@ async fn real_invocations_replay_deduplicate_and_refuse_before_dispatch() {
         Ok(lodeline_proxy::lifecycle::Lifecycle::start(&bootstrap)?)
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|e| panic!("the proxy restarts: {e}\n{}", h.lock_report()));
     let mut source = lifecycle.open_spool(&Default::default()).unwrap();
     let events = source.next_events(100, &Default::default());
     let raw = serde_json::to_string(&events).unwrap();

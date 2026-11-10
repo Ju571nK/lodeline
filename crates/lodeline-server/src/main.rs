@@ -54,11 +54,14 @@ fn enroll_token(cfg: &ServerConfig, host_id: &str, ttl: &str) -> Result<()> {
         .enroll_tokens_path
         .as_ref()
         .context("enroll_tokens_path not set in config — enrollment is not configured")?;
-    // Validate host_id is a UUID up front (matches the server's check).
+    // The agent stores only a canonical host_id, so a token for another spelling
+    // could never be redeemed by it.
     anyhow::ensure!(
-        uuid::Uuid::parse_str(host_id).is_ok(),
-        "host_id must be a valid UUID"
+        lodeline_core::host_meta::is_canonical_v4(host_id),
+        "host_id must be a lowercase, hyphenated version 4 UUID, the form the agent accepts"
     );
+    #[cfg(unix)]
+    refuse_root_in_foreign_dir(tokens_path)?;
     let ttl = parse_ttl(ttl).with_context(|| format!("invalid --ttl {ttl:?}"))?;
     let now = time::OffsetDateTime::now_utc();
     let expires_at = now + ttl;
@@ -75,6 +78,35 @@ fn enroll_token(cfg: &ServerConfig, host_id: &str, ttl: &str) -> Result<()> {
     );
     eprintln!("note: this token is shown only once; only its blake3 hash is stored.");
     Ok(())
+}
+
+/// As root, a token file made in a directory another account owns is one that
+/// account's server cannot write, and every enrollment then answers 500. Nothing is
+/// written or re-owned; the operator runs the command as the directory's owner.
+#[cfg(unix)]
+fn refuse_root_in_foreign_dir(tokens_path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = match tokens_path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let owner = std::fs::metadata(dir).map(|m| m.uid()).ok();
+    match owner {
+        Some(uid) if foreign_owner(euid, uid) => anyhow::bail!(
+            "{} is owned by uid {uid}, not root. A token file made by root there is one the \
+             server cannot write. Run this command as that account, for example \
+             `sudo -u lodeline lodeline-server enroll-token ...`",
+            dir.display()
+        ),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+fn foreign_owner(euid: u32, dir_uid: u32) -> bool {
+    euid == 0 && dir_uid != 0
 }
 
 /// Parse a simple TTL like `1h`, `30m`, `45s`, `2d`. No unit ⇒ error.
@@ -318,8 +350,19 @@ fn build_mtls(cfg: &ServerConfig) -> Result<axum_server::tls_rustls::RustlsConfi
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::foreign_owner;
     use super::parse_ttl;
     use time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_root_in_a_directory_of_another_account_is_refused() {
+        assert!(foreign_owner(0, 996));
+        assert!(!foreign_owner(0, 0));
+        assert!(!foreign_owner(996, 996));
+        assert!(!foreign_owner(1000, 0));
+    }
 
     #[test]
     fn parse_ttl_units() {
