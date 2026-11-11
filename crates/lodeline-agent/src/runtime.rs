@@ -645,10 +645,9 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         "state_store",
         tokio::spawn({
             let cache = cache.clone();
-            let stats = stats.clone();
             let host_id = host_id.clone();
             let tx_sink_st = tx_sink.clone();
-            async move { state_task::run(rx_hashed, tx_sink_st, cache, host_id, stats).await }
+            async move { state_task::run(rx_hashed, tx_sink_st, cache, host_id).await }
         }),
     );
 

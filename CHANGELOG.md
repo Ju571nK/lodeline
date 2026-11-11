@@ -64,6 +64,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   a refresh, also when the bytes are the same, and each write would record a `file_change` event.
   The Codex parser reads both folders at each assessment. A change there is read at the next agent
   start or heartbeat (24 hours), not at once. (#583, #582, #584)
+- The agent counted each file change twice in `lodeline show stats`, in the `lodeline status`
+  line and in the heartbeat's `events_emitted_total` (and the `file_change` entry of
+  `events_by_kind`). The recorded events were never doubled; only the counters were. The numbers
+  are right now, so a host's total can look lower after the upgrade.
 
 ## [0.14.5] - 2026-11-11
 
