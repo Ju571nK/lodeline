@@ -7,6 +7,22 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- AI Guard reports two more Claude Code controls from the managed settings files:
+  `permissions.blockReadsOutsideWorkingDirectories` and
+  `permissions.blockWritesOutsideWorkingDirectories`, each when its value is `true`. No score, reason
+  kind or event field changes. (#582, #539)
+
+### Fixed
+
+- AI Guard now reassesses Claude Code as soon as a skill or subagent file is added or changed in
+  `~/.claude/skills/<name>/SKILL.md`, `~/.claude/agents/` or a repository's `.claude/skills` or
+  `.claude/agents`. Before, no watch target covered these files, so the agent read them only at the
+  next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
+  for each edit (hashes and sizes, never file text). Symlinked skill folders are not followed by the
+  watcher, and the watcher on Linux uses one inotify watch per subfolder. (#582, #539)
+
 ## [0.14.5] - 2026-11-11
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to
