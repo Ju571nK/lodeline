@@ -61,7 +61,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - `lodeline-sender` logs a renewal-file problem found at start once, not twice within seconds. The
   first wake of the renewal loop no longer repeats the line the start just wrote, and the line
-  comes again only after an hour (#577).
+  comes again only after an hour. The two messages of `lodeline-sender enroll` that point to
+  `lodeline show host-id` say to use `sudo` when `enroll` ran with `sudo` (#577).
 
 ## [0.14.4] - 2026-11-11
 
