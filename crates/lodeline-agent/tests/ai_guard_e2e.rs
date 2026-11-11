@@ -1307,8 +1307,6 @@ async fn claude_project_skill_and_agent_files_trigger_reassessment() {
 
         let file = repo.join(".claude").join(rel);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        // Linux places the watch on a new folder after its creation event; a file written at once can be missed (a known limit), so wait.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         std::fs::write(&file, COMPONENT_WITH_BROAD_HOOK).unwrap();
         let found = agent
             .wait_for_event(
