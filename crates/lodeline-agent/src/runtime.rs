@@ -1078,7 +1078,9 @@ pub(crate) fn perform_warmup(
 }
 
 /// Files under the directory prefix of the pattern entry `pattern` that the
-/// pattern matches, found with the matcher the normalizer uses. A plain path
+/// pattern matches, found with the matcher the normalizer uses, nearest folder
+/// first so that a bound cuts the deepest files. Each path is in
+/// [`crate::normalizer::match_form`], the key form of events. A plain path
 /// that is missing has no prefix to walk and yields nothing. Visits at most
 /// `entry_limit` entries and returns at most `file_limit` files;
 /// past either bound it logs one warning, and a file beyond it gets no baseline
@@ -1095,8 +1097,8 @@ fn files_matching_pattern(pattern: &Path, entry_limit: usize, file_limit: usize)
     };
     let mut files = Vec::new();
     let mut visited = 0;
-    let mut stack = vec![root];
-    while let Some(folder) = stack.pop() {
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(folder) = queue.pop_front() {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
@@ -1110,9 +1112,12 @@ fn files_matching_pattern(pattern: &Path, entry_limit: usize, file_limit: usize)
                 continue;
             };
             if kind.is_dir() {
-                stack.push(entry.path());
-            } else if kind.is_file() && glob.is_match(&entry.path()) {
-                files.push(entry.path());
+                queue.push_back(entry.path());
+            } else if kind.is_file() {
+                let path = crate::normalizer::match_form(entry.path());
+                if glob.is_match(&path) {
+                    files.push(path);
+                }
             }
         }
     }
@@ -2373,14 +2378,7 @@ mod tests {
         .await
         .unwrap();
         drop(tx);
-        crate::state_task::run(
-            rx,
-            tx_sink,
-            w.cache.clone(),
-            "h".into(),
-            std::sync::Arc::new(lodeline_core::stats::Stats::default()),
-        )
-        .await;
+        crate::state_task::run(rx, tx_sink, w.cache.clone(), "h".into()).await;
         match rx_sink.recv().await.unwrap().event.evidence {
             lodeline_core::event::Evidence::FileChange { before_hash, .. } => before_hash,
             other => panic!("not a file change: {other:?}"),
@@ -2435,6 +2433,46 @@ mod tests {
         assert_eq!(super::files_matching_pattern(&pattern, 100, 100).len(), 10);
         assert_eq!(super::files_matching_pattern(&pattern, 100, 4).len(), 4);
         assert_eq!(super::files_matching_pattern(&pattern, 3, 100).len(), 3);
+    }
+
+    #[test]
+    fn pattern_warmup_reaches_the_nearest_files_before_the_budget_goes_to_deep_folders() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        // Two big folders sort before and after the small ones, so a depth first
+        // walk spends the budget in a big folder whichever way the folders are listed.
+        for big in ["a_big", "z_big"] {
+            for sub in 0..30 {
+                let d = dir.join(big).join(format!("d{sub}"));
+                std::fs::create_dir_all(&d).unwrap();
+                for f in 0..30 {
+                    std::fs::write(d.join(format!("x{f}")), "x").unwrap();
+                }
+            }
+        }
+        for small in 0..4 {
+            let d = dir.join(format!("m_small{small}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), "x").unwrap();
+        }
+        let found = super::files_matching_pattern(&dir.join("*").join("SKILL.md"), 80, 100);
+        assert_eq!(found.len(), 4);
+    }
+
+    #[test]
+    fn pattern_warmup_lists_a_decomposed_name_in_the_form_events_use() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let nfd = "e\u{301}";
+        let file = dir.join("skills").join(nfd).join("SKILL.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "x").unwrap();
+        let found =
+            super::files_matching_pattern(&dir.join("skills").join("*").join("SKILL.md"), 100, 100);
+        // macOS composes the name; elsewhere the bytes stay as stored, like events.
+        assert_eq!(found, vec![crate::normalizer::match_form(file)]);
+        #[cfg(target_os = "macos")]
+        assert!(found[0].to_str().unwrap().contains('\u{e9}'));
     }
 
     #[cfg(unix)]
