@@ -62,7 +62,7 @@ pub fn missing_file_warning(
         return None;
     };
     Some(format!(
-        "host_allowlist_path {} does not exist, so the host allowlist is not in force and refuses no host_id. Create the file and restart the server to enforce it",
+        "host_allowlist_path {} does not exist, so the host allowlist is not in force and no host_id is refused for being absent from it. Create the file and restart the server to enforce it",
         path.display()
     ))
 }
