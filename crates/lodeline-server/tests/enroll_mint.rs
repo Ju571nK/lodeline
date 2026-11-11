@@ -511,6 +511,12 @@ impl Resp {
     fn code(&self) -> String {
         self.json()["error"]["code"].as_str().unwrap_or("").into()
     }
+    // `date` has one-second resolution, so two answers rarely share it.
+    fn headers_without_date(&self) -> reqwest::header::HeaderMap {
+        let mut h = self.headers.clone();
+        h.remove("date");
+        h
+    }
     fn minted(&self) -> MintResponse {
         assert_eq!(self.status, 201, "{}", String::from_utf8_lossy(&self.body));
         serde_json::from_slice(&self.body).unwrap()
@@ -767,7 +773,11 @@ async fn an_unpinned_caller_gets_the_routers_own_404_for_every_method_and_body()
             let (what, ct) = (format!("{} mint_on={mint_on}", p.method), p.content_type);
             let r = send(&host_c, fx.port, p).await;
             assert_eq!((r.status, &r.body), (404, &unknown.body), "{what} {ct:?}");
-            assert_eq!(r.headers, unknown.headers, "{what}: same headers too");
+            assert_eq!(
+                r.headers_without_date(),
+                unknown.headers_without_date(),
+                "{what}: same headers too"
+            );
         }
         if !mint_on {
             // the pinned certificate does not help when the mint is off
