@@ -152,6 +152,15 @@ openssl x509 -req -in client-hostA.csr -CA ca.crt -CAkey ca.key -CAcreateserial 
 rm -f *.csr *.ext ca.srl
 ```
 
+For a real host the CN is that host's host id, not `hostA`. On a host that has the
+agent installed, `sudo lodeline show host-id` prints it once the agent has run. Before
+the first run it prints `no host_id yet` and exits 1. Then `sudo lodeline init-host-id
+<uuid>` (a lowercase version 4 UUID, §9 step 1) creates it. Both need `sudo`, because the
+state directory of a packaged host is `root:lodeline` 0750. Where the server has
+`host_allowlist_path`, add the host id to that file and restart `lodeline-server`
+before the host's events are accepted (§3.4, "Adding a host by hand"). A host that is
+not on the list gets 404 `host_unknown`.
+
 Ship `ca.crt` + the host's `client-hostA.{crt,key}` to that agent host (the
 sender's `server_ca_path` / `client_cert_path` / `client_key_path`). Keep
 `ca.key` offline/secured. On a packaged Linux host the sender runs as `lodeline`,
@@ -232,7 +241,9 @@ and renames it over the old one, so the file ends up mode 0600 and owned by the
 service account `lodeline`, whatever it was before. The path must sit
 in a directory the service can write. The unit makes only
 `/var/lib/lodeline-server` and `/var/log/lodeline-server` writable, so keep the
-file in the first. Create it before you start the server:
+file in the first. A configured path whose file does not exist adds no restriction,
+and the server logs a warning at start that says so; enrollment stays off until the
+file exists. Create it before you start the server:
 
 ```sh
 sudo install -d -o lodeline -g lodeline -m 0750 /var/lib/lodeline-server
@@ -725,7 +736,10 @@ and restart the sender. A host whose certificate you made yourself (§3) is rene
 after it enrolls once (§3.3), because the server refuses to renew a certificate its
 enrollment CA did not issue, so the line alone does not help. When `enroll` runs on a
 host whose `sender.yaml` lacks the line, it leaves the file as it is and prints the line
-to set.
+to set. `lodeline-sender doctor` shows which case a host is in on its `certificate
+renewal` line: `off` (an `[INFO]` line, since off is the intended state where you make the
+certificates yourself) where the line is not set, a warning where it is set and a path is
+missing, and `on` where the sender will try.
 
 Renewal needs `server_ca_path`, a client
 certificate and a client key in `sender.yaml`, as `enroll` writes them. It also needs
@@ -822,7 +836,11 @@ expired can stay open and carry requests past `notAfter`. The sender opens a new
 connection after a renewal, so it presents the new certificate; for a host that
 cannot renew, the first failure comes at the next reconnect.
 
-**Not yet.** `lodeline-sender doctor` does not check renewal. On Windows renewal is
+**What `doctor` checks.** `lodeline-sender doctor` prints the `certificate renewal` line
+from the same decision the sender takes at start. It does not repeat the checks the
+sender makes then (who owns the key, its form, whether the pair matches), because they
+need the key, which `doctor` never reads. `on` therefore means that the config asks for
+renewal; a sender that cannot renew says why in its log at start. On Windows renewal is
 off, with one log line at start, and `enroll` is not supported there either.
 
 ### 3.6 Mint tokens over HTTP, optional

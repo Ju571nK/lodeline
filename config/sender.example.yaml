@@ -43,6 +43,7 @@ dead_letter_dir: "/var/log/lodeline-sender/dead-letter"
 
 # Renew the client certificate before it expires. `lodeline-sender enroll` writes this line;
 # it has an effect only for a certificate that enrollment issued.
+# `lodeline-sender doctor` shows whether the sender will renew (the `certificate renewal` line).
 # renew_client_cert: true
 
 # Optional overrides — defaults shown.

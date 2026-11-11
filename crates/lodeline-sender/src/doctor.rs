@@ -2,6 +2,7 @@
 //! no network call, and it reads the metadata of the key file but never the key.
 
 use crate::config::{ConfigError, SenderConfig};
+use crate::renew::{self, Renewal};
 use crate::transport::client_cert_expiry;
 use lodeline_core::sender_status::status_path_for;
 use lodeline_diag::{collect, safe, AgentRun, ClientCert, FleetLink, Level, Probe};
@@ -45,6 +46,7 @@ pub async fn run(config_path: &Path, now: OffsetDateTime) -> Vec<Check> {
         server_url(&config.server_base_url),
     ];
     checks.extend(identity(&config, now));
+    checks.extend(renewal(&config));
     if let Some(ca) = &config.server_ca_path {
         checks.push(public_file("server CA", ca));
     }
@@ -116,6 +118,34 @@ fn identity(config: &SenderConfig, now: OffsetDateTime) -> Vec<Check> {
         ),
     }
     checks
+}
+
+/// Says what the sender decides at start (`renew::decide`). It does not repeat the checks
+/// the sender makes then (key owner, key form, pair match), which need the key.
+pub(crate) fn renewal(config: &SenderConfig) -> Option<Check> {
+    const SUBJECT: &str = "certificate renewal";
+    Some(match renew::decide(config) {
+        Renewal::Silent => return None,
+        Renewal::Incomplete(missing) => Check::new(
+            Level::Warn,
+            SUBJECT,
+            format!(
+                "renew_client_cert is set but {} is missing from sender.yaml, so the sender does not renew its certificate",
+                missing.join(", ")
+            ),
+        ),
+        Renewal::Windows => Check::new(Level::Info, SUBJECT, "not supported on Windows yet"),
+        Renewal::Off => Check::new(
+            Level::Info,
+            SUBJECT,
+            "off, renew_client_cert is not set in sender.yaml (`lodeline-sender enroll` sets it)",
+        ),
+        Renewal::On(_) => Check::new(
+            Level::Ok,
+            SUBJECT,
+            "on (a sender that cannot renew says why in its log at start)",
+        ),
+    })
 }
 
 #[cfg(unix)]
