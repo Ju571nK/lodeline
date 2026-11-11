@@ -719,11 +719,13 @@ between day 18 and day 22.
 Renewal is on because `enroll` writes `renew_client_cert: true` into `sender.yaml`.
 Without that line the sender does not renew, does not touch the certificate
 directory and sends no request to `/v1/renew`. That is the case for a host whose
-`sender.yaml` was written by hand or by an older `enroll` (before v0.14.5). To turn
-renewal on for such a host, add `renew_client_cert: true` to `sender.yaml` and restart
-the sender. A host on a certificate from your own PKI (§3) joins by enrolling once
-(§3.3). If its `sender.yaml` came from an older `enroll`, that run leaves the file as
-it is and prints the line to add.
+`sender.yaml` was written by an older `enroll` (before v0.14.5) or by hand. If an
+earlier `enroll` issued the certificate, add `renew_client_cert: true` to `sender.yaml`
+and restart the sender. A host whose certificate you made yourself (§3) is renewed only
+after it enrolls once (§3.3), because the server refuses to renew a certificate its
+enrollment CA did not issue, so the line alone does not help. When `enroll` runs on a
+host whose `sender.yaml` lacks the line, it leaves the file as it is and prints the line
+to set.
 
 Renewal needs `server_ca_path`, a client
 certificate and a client key in `sender.yaml`, as `enroll` writes them. It also needs
@@ -792,7 +794,7 @@ When the server refuses a renewal (403 or 404), the sender keeps `client.key.nex
 | Line | What to do |
 |---|---|
 | `renewed the client certificate and key` | Nothing. |
-| `this sender does not renew its client certificate: renew_client_cert is not set in sender.yaml` | Nothing, if the certificate is one you make yourself. To let the sender renew it, enroll the host (§3.3) or add `renew_client_cert: true` to `sender.yaml` and restart the sender. |
+| `this sender does not renew its client certificate: renew_client_cert is not set in sender.yaml` | Nothing, if the certificate is one you make yourself. To let the sender renew, enroll the host (§3.3). If an earlier `enroll` issued the certificate, add `renew_client_cert: true` to `sender.yaml` and restart the sender. |
 | `renew_client_cert is set but ... is missing from sender.yaml` | Add the paths the line names, or remove `renew_client_cert`. The sender runs and does not renew. |
 | `the server refused to renew this host's certificate` with status 403 | Either this certificate is no longer the newest one issued for the host (the host was enrolled again, or a copy of its key renewed first), or the server already issued three certificates for it, or the host is not on the allowlist. Check the server's audit file for this host (§3.4): a `renewal_superseded` line means the certificate was replaced, so enroll the host again with a new token before the certificate expires. Without one, check the allowlist. |
 | The same line with status 404 | The server does not offer renewal: enrollment is off there, its audit file cannot be read, or it is older than this sender. Fix the server, or enroll the host again. |

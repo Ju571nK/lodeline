@@ -537,9 +537,8 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
     summary(&l, &parsed, args, wrote);
     if old_config {
         warn(format!(
-            "{} was written by an older enroll and does not set renew_client_cert, so this \
-             sender will not renew its certificate. Add the line `renew_client_cert: true` to it \
-             and restart the sender.",
+            "{} does not set `renew_client_cert: true` (an older enroll did not write it), so \
+             this sender will not renew its certificate. Set it there and restart the sender.",
             l.config.display()
         ));
     }

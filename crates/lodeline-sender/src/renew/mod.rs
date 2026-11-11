@@ -2,8 +2,8 @@
 //!
 //! Everything comes from the certificate on disk: it names its own validity, and
 //! renewal is due between 60% and 75% of it, at a point that depends on the host_id so
-//! a fleet does not renew at once. There is no setting. [`Renewer::step`] does one
-//! wake: settle the files ([`pair::settle`]), pick up a pair that appeared on disk,
+//! a fleet does not renew at once. It runs only where `renew_client_cert` is set.
+//! [`Renewer::step`] does one wake: settle the files ([`pair::settle`]), pick up a pair that appeared on disk,
 //! and renew when due. The task calls it, then sleeps for what it returns.
 
 pub mod net;

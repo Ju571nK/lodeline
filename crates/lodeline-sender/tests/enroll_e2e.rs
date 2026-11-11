@@ -431,6 +431,21 @@ async fn a_config_without_the_renew_line_is_kept_and_the_run_goes_on() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_config_with_renew_off_written_out_is_kept_and_the_run_goes_on() {
+    let s = server(None).await;
+    let h = Host::new();
+    let args = h.args(h.file("host.json", &s, &s.token(HOST), HOST, &s.ca_pem()));
+    assert_eq!(go(&args).await, 0);
+    let mut off = drop_renew_line(&h);
+    off.push_str("renew_client_cert: false\n");
+    std::fs::write(h.p("s/sender.yaml"), &off).unwrap();
+    assert_eq!(go(&args).await, 0);
+    assert_eq!(std::fs::read_to_string(h.p("s/sender.yaml")).unwrap(), off);
+    let cfg = lodeline_sender::config::SenderConfig::load(&h.p("s/sender.yaml")).unwrap();
+    assert!(lodeline_sender::renew::paths(&cfg).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_config_that_differs_in_another_key_is_still_refused() {
     let s = server(None).await;
     let h = Host::new();
