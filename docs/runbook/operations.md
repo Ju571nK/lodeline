@@ -31,6 +31,10 @@
   patterns such as `/Applications/*.app/Contents/Info.plist` resolve only
   matching directory components; discovery does not recursively watch all of
   `/Applications`. Symlink directories below a wildcard are not followed.
+- A watch path is matched as a glob against the file an event names. A folder
+  path such as `~/.claude/hooks/` matches the folder itself and never a file in
+  it; write `~/.claude/hooks/*` to watch the files below it (`*` also crosses
+  folder separators, and `**` is rejected at policy load).
 - After registration, current files are replayed through normal filtering and
   hashing. This recovers current state, not historical changes that occurred
   and disappeared while the root was unavailable. Native and polling backends

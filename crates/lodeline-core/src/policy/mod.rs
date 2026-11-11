@@ -1168,6 +1168,212 @@ targets:
     }
 
     #[test]
+    fn builtin_watch_paths_never_end_with_a_separator() {
+        // A path is matched as a glob against the file an event names, so a
+        // folder path matches the folder and never a file in it.
+        for yaml in [
+            lodeline_rules_basic::DEFAULTS_MACOS,
+            lodeline_rules_basic::DEFAULTS_LINUX,
+            lodeline_rules_basic::DEFAULTS_WINDOWS,
+        ] {
+            for t in parse(yaml).unwrap().targets {
+                for p in &t.paths {
+                    assert!(
+                        !p.ends_with('/') && !p.ends_with('\\'),
+                        "{}: `{p}` names a folder, which matches no file in it; write `{p}*` (or `{p}*.json` for one file type)",
+                        t.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_folder_entries_match_the_files_in_them() {
+        // Backslash is an escape for the glob matcher off Windows, so the
+        // Windows file is checked by its strings only.
+        let (yaml, home, managed) = if cfg!(target_os = "macos") {
+            (
+                lodeline_rules_basic::DEFAULTS_MACOS,
+                "/Users/alice",
+                "/Library/Application Support/ClaudeCode",
+            )
+        } else if cfg!(target_os = "linux") {
+            (
+                lodeline_rules_basic::DEFAULTS_LINUX,
+                "/home/alice",
+                "/etc/claude-code",
+            )
+        } else {
+            return;
+        };
+        let doc = parse(yaml).unwrap();
+        let globs: Vec<glob::CompiledGlob> = doc
+            .targets
+            .iter()
+            .flat_map(|t| &t.paths)
+            .map(|p| {
+                let p = match p.strip_prefix("~/") {
+                    Some(rest) => format!("{home}/{rest}"),
+                    None => p.clone(),
+                };
+                glob::CompiledGlob::new(&p).unwrap()
+            })
+            .collect();
+        for file in [
+            format!("{home}/.claude/hooks/pre.sh"),
+            format!("{home}/.claude/hooks/lib/common.sh"),
+            format!("{managed}/managed-settings.d/10-policy.json"),
+            format!("{home}/.codex/cache/codex_apps_tools/a.json"),
+            format!("{home}/.codex/cache/codex_apps_server_info/a.json"),
+        ] {
+            assert!(
+                globs
+                    .iter()
+                    .any(|g| g.is_match(std::path::Path::new(&file))),
+                "no built-in watch path matches {file}"
+            );
+        }
+    }
+
+    /// The Windows file, expanded the way the agent does (`expand_per_user`
+    /// with a per-user home), must match a real file path for every Claude
+    /// Code and Codex entry. Runs on the Windows CI leg only.
+    #[cfg(windows)]
+    #[test]
+    fn builtin_windows_entries_match_the_files_in_them() {
+        use super::expand::{expand_per_user, UserContext, VarLookup};
+
+        struct Vars;
+        impl VarLookup for Vars {
+            fn lookup(&self, name: &str) -> Option<String> {
+                (name == "ProgramData").then(|| r"C:\ProgramData".to_string())
+            }
+            fn home(&self) -> Option<PathBuf> {
+                None
+            }
+        }
+        let users = [UserContext {
+            name: "alice".into(),
+            home: PathBuf::from(r"C:\Users\alice"),
+            uid_or_sid: "S-1-5-21-1".into(),
+        }];
+        // (template, a file it must match, the bare folder it must not match)
+        let table = [
+            (
+                r"%USERPROFILE%\.claude\settings.json",
+                r"C:\Users\alice\.claude\settings.json",
+                "",
+            ),
+            (
+                r"%USERPROFILE%\.claude\settings.local.json",
+                r"C:\Users\alice\.claude\settings.local.json",
+                "",
+            ),
+            (
+                r"%USERPROFILE%\.claude\hooks\*",
+                r"C:\Users\alice\.claude\hooks\pre.sh",
+                r"C:\Users\alice\.claude\hooks",
+            ),
+            (
+                r"%USERPROFILE%\.claude\hooks\*",
+                r"C:\Users\alice\.claude\hooks\lib\common.sh",
+                "",
+            ),
+            (
+                r"%USERPROFILE%\.claude\skills\*\SKILL.md",
+                r"C:\Users\alice\.claude\skills\demo\SKILL.md",
+                "",
+            ),
+            (
+                r"%USERPROFILE%\.claude\agents\*.md",
+                r"C:\Users\alice\.claude\agents\reviewer.md",
+                r"C:\Users\alice\.claude\agents",
+            ),
+            (
+                r"%USERPROFILE%\.claude\CLAUDE.md",
+                r"C:\Users\alice\.claude\CLAUDE.md",
+                "",
+            ),
+            (
+                r"%USERPROFILE%\.claude\loop.md",
+                r"C:\Users\alice\.claude\loop.md",
+                "",
+            ),
+            (
+                r"%USERPROFILE%\.claude\scheduled-tasks\*\SKILL.md",
+                r"C:\Users\alice\.claude\scheduled-tasks\nightly\SKILL.md",
+                "",
+            ),
+            (
+                r"C:\Program Files\ClaudeCode\managed-settings.json",
+                r"C:\Program Files\ClaudeCode\managed-settings.json",
+                "",
+            ),
+            (
+                r"C:\Program Files\ClaudeCode\managed-settings.d\*.json",
+                r"C:\Program Files\ClaudeCode\managed-settings.d\10-policy.json",
+                r"C:\Program Files\ClaudeCode\managed-settings.d",
+            ),
+            (
+                r"%USERPROFILE%\.codex\config.toml",
+                r"C:\Users\alice\.codex\config.toml",
+                "",
+            ),
+            (
+                r"%ProgramData%\OpenAI\Codex\requirements.toml",
+                r"C:\ProgramData\OpenAI\Codex\requirements.toml",
+                "",
+            ),
+            (
+                r"%USERPROFILE%\.codex\cache\codex_apps_tools\*.json",
+                r"C:\Users\alice\.codex\cache\codex_apps_tools\a.json",
+                r"C:\Users\alice\.codex\cache\codex_apps_tools",
+            ),
+            (
+                r"%USERPROFILE%\.codex\cache\codex_apps_server_info\*.json",
+                r"C:\Users\alice\.codex\cache\codex_apps_server_info\a.json",
+                r"C:\Users\alice\.codex\cache\codex_apps_server_info",
+            ),
+        ];
+        let doc = parse(lodeline_rules_basic::DEFAULTS_WINDOWS).unwrap();
+        let mut entries: Vec<&str> = doc
+            .targets
+            .iter()
+            .filter(|t| {
+                t.id.starts_with("ai-guard-claude-code-") || t.id.starts_with("ai-guard-codex-")
+            })
+            .flat_map(|t| t.paths.iter().map(String::as_str))
+            .collect();
+        entries.sort_unstable();
+        let mut covered: Vec<&str> = table.iter().map(|r| r.0).collect();
+        covered.sort_unstable();
+        covered.dedup();
+        assert_eq!(
+            entries, covered,
+            "the table must cover every Claude Code and Codex entry"
+        );
+
+        for (template, file, bare) in table {
+            let expanded = expand_per_user(template, &users, &Vars);
+            assert_eq!(expanded.len(), 1, "{template}");
+            let expanded = expanded.into_iter().next().unwrap().unwrap();
+            let g = glob::CompiledGlob::new(&expanded.to_string_lossy()).unwrap();
+            assert!(
+                g.is_match(std::path::Path::new(file)),
+                "{template} (as {}) does not match {file}",
+                g.pattern()
+            );
+            if !bare.is_empty() {
+                assert!(
+                    !g.is_match(std::path::Path::new(bare)),
+                    "{template} matches the bare folder {bare}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn policy_document_continue_workspaces_round_trip() {
         let yaml = r#"version: 1
 host_id_strategy: machine_id

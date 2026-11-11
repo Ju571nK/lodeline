@@ -37,14 +37,14 @@ targets:
     paths:
       - "~/.claude/settings.json"
       - "~/.claude/settings.local.json"
-      - "~/.claude/hooks/"
+      - "~/.claude/hooks/*"
       - "~/.claude/skills/*/SKILL.md"
       - "~/.claude/agents/*.md"
       - "~/.claude/CLAUDE.md"
       - "~/.claude/loop.md"
       - "~/.claude/scheduled-tasks/*/SKILL.md"
       - "/Library/Application Support/ClaudeCode/managed-settings.json"
-      - "/Library/Application Support/ClaudeCode/managed-settings.d/"
+      - "/Library/Application Support/ClaudeCode/managed-settings.d/*.json"
     recursive: true
     follow_symlinks: false
 
@@ -55,8 +55,8 @@ targets:
     paths:
       - "~/.codex/config.toml"
       - "/etc/codex/requirements.toml"
-      - "~/.codex/cache/codex_apps_tools/"
-      - "~/.codex/cache/codex_apps_server_info/"
+      - "~/.codex/cache/codex_apps_tools/*.json"
+      - "~/.codex/cache/codex_apps_server_info/*.json"
     recursive: true
     follow_symlinks: false
 

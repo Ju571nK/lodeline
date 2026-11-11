@@ -12,6 +12,9 @@ host_id_strategy: machine_id
 #     tier: standard
 
 # Optional: add custom watchlist entries.
+# A path is matched as a glob against the file an event names, so a folder path such as
+# "~/.config/example/" matches the folder itself and never a file in it. To watch the files in a
+# folder, write "~/.config/example/*" (`*` also crosses folder separators; `**` is rejected).
 targets:
   - id: team-mcp-allowlist
     description: Example MCP allowlist file

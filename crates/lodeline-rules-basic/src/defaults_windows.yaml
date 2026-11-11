@@ -38,14 +38,14 @@ targets:
     paths:
       - "%USERPROFILE%\\.claude\\settings.json"
       - "%USERPROFILE%\\.claude\\settings.local.json"
-      - "%USERPROFILE%\\.claude\\hooks\\"
+      - "%USERPROFILE%\\.claude\\hooks\\*"
       - "%USERPROFILE%\\.claude\\skills\\*\\SKILL.md"
       - "%USERPROFILE%\\.claude\\agents\\*.md"
       - "%USERPROFILE%\\.claude\\CLAUDE.md"
       - "%USERPROFILE%\\.claude\\loop.md"
       - "%USERPROFILE%\\.claude\\scheduled-tasks\\*\\SKILL.md"
       - "C:\\Program Files\\ClaudeCode\\managed-settings.json"
-      - "C:\\Program Files\\ClaudeCode\\managed-settings.d\\"
+      - "C:\\Program Files\\ClaudeCode\\managed-settings.d\\*.json"
     recursive: true
     follow_symlinks: false
 
@@ -56,8 +56,8 @@ targets:
     paths:
       - "%USERPROFILE%\\.codex\\config.toml"
       - "%ProgramData%\\OpenAI\\Codex\\requirements.toml"
-      - "%USERPROFILE%\\.codex\\cache\\codex_apps_tools\\"
-      - "%USERPROFILE%\\.codex\\cache\\codex_apps_server_info\\"
+      - "%USERPROFILE%\\.codex\\cache\\codex_apps_tools\\*.json"
+      - "%USERPROFILE%\\.codex\\cache\\codex_apps_server_info\\*.json"
     recursive: true
     follow_symlinks: false
 
