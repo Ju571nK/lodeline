@@ -53,7 +53,8 @@ policy_bundle_path: "/var/lib/lodeline-server/signed-policy.json"
 #
 # With enrollment on, a host renews its certificate over POST /v1/renew on the main
 # port. The server allows it from half of the certificate's life; lodeline-sender asks
-# at 60% to 75% of it. There is no setting for it. The CA key must stay on this server
+# at 60% to 75% of it, on a host whose sender.yaml sets renew_client_cert (`enroll` writes it).
+# The server has no setting for it. The CA key must stay on this server
 # for it (docs/install-server.md sections 3.4 and 3.5).
 
 # Optional (#194.1) — bind /v1/enroll to specific caller certs. Each entry is the

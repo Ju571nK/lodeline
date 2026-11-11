@@ -66,6 +66,7 @@ fn log_through_prune(server_base_url: &str, rust_log: Option<&str>) -> String {
         max_batch_bytes: 1024 * 1024,
         policy_poll_interval: Duration::from_secs(1),
         host_id: Some(uuid::Uuid::from_u128(1).to_string()),
+        renew_client_cert: false,
     };
     let config_path = dir.path().join("sender.yaml");
     std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();

@@ -34,7 +34,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   file (#574, #553).
 - `lodeline-sender` renews its own client certificate and key before they expire. From the
   validity of the certificate it holds, it renews between 60% and 75% of it, at a point set by
-  its host_id, with no setting. It sends a new key's CSR to `POST /v1/renew`, checks the answer
+  its host_id. Renewal is on for a host that `enroll` set up, which writes
+  `renew_client_cert: true` into `sender.yaml`; a sender without that line does what it did
+  before (it touches no file and sends no request) and logs one info line at start that says
+  so. It sends a new key's CSR to `POST /v1/renew`, checks the answer
   on the host (key, host_id, chain to the server CA, client-auth purpose, validity), and only
   then replaces `client.key` and `client.crt` through `.next` files, with a directory sync after
   each rename. One repair step runs at start and at every wake and brings any state a crash
@@ -55,7 +58,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   line and the certificate is not renewed until the key is converted or the host enrolls again. A new answer
   must expire later than the certificate in use, as a stored one must. `enroll`
   names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
-  does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
+  does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553, #580)
 
 ### Changed
 

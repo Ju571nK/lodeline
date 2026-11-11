@@ -803,6 +803,7 @@ async fn a_directory_that_cannot_be_written_turns_renewal_off_with_one_error_and
         max_batch_bytes: 1024 * 1024,
         policy_poll_interval: std::time::Duration::from_secs(600),
         host_id: None,
+        renew_client_cert: true,
     };
     let task = tokio::spawn(lodeline_sender::runtime::run(
         lodeline_sender::runtime::RuntimeCtx {
@@ -822,6 +823,82 @@ async fn a_directory_that_cannot_be_written_turns_renewal_off_with_one_error_and
     let _ = task.await;
     std::fs::set_permissions(host.dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(sent, 1, "the batch was delivered with renewal off");
+}
+
+/// Starts the real runtime on a host whose certificate is due, with the setting `renew`,
+/// lets it run, and returns the requests the mock got, the certificate directory's
+/// file names before and after, and the log.
+async fn run_due_host(renew: bool) -> (usize, Vec<String>, Vec<String>, Log) {
+    let pki = Pki::new();
+    let host = due_host(&pki);
+    let mock = Mock::start(issued(&pki, HOST)).await;
+    let names = || {
+        let mut v: Vec<String> = std::fs::read_dir(host.dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let before = names();
+    let state_dir = tempfile::tempdir().unwrap();
+    let events = tempfile::tempdir().unwrap();
+    let yaml = format!(
+        "server_base_url: {}\nclient_cert_path: {}\nclient_key_path: {}\nserver_ca_path: {}\n\
+         events_dir: {}\noffset_path: {}\nagent_control: {}\ndead_letter_dir: {}\n{}",
+        mock.url,
+        host.paths.crt.display(),
+        host.paths.key.display(),
+        host.paths.ca.display(),
+        events.path().display(),
+        state_dir.path().join("sender-offset.json").display(),
+        state_dir.path().join("control.sock").display(),
+        state_dir.path().join("dead-letter").display(),
+        if renew {
+            "renew_client_cert: true\n"
+        } else {
+            ""
+        },
+    );
+    let cfg_path = state_dir.path().join("sender.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let config = lodeline_sender::config::SenderConfig::load(&cfg_path).unwrap();
+    let log = Log::default();
+    let guard = log.capture();
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(lodeline_sender::runtime::run(
+        lodeline_sender::runtime::RuntimeCtx {
+            config,
+            host_id: HOST.into(),
+            agent_version: "1".into(),
+            sender_version: "1".into(),
+            shutdown: shutdown.clone(),
+        },
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    shutdown.cancel();
+    let _ = task.await;
+    drop(guard);
+    (mock.hits(), before, names(), log)
+}
+
+#[tokio::test]
+async fn a_sender_without_the_setting_leaves_the_certificate_directory_and_the_server_alone() {
+    let (hits, before, after, log) = run_due_host(false).await;
+    assert_eq!(hits, 0, "no request to /v1/renew");
+    assert_eq!(before, after, "no probe, repair or .next file is left");
+    assert_eq!(
+        log.lines_with("does not renew its client certificate: renew_client_cert is not set"),
+        1
+    );
+    assert_eq!(log.lines_with("renewal"), 0);
+}
+
+#[tokio::test]
+async fn a_sender_with_the_setting_renews_a_due_certificate() {
+    let (hits, _, _, log) = run_due_host(true).await;
+    assert!(hits >= 1, "the sender asks for a new certificate");
+    assert_eq!(log.lines_with("renew_client_cert is not set"), 0);
 }
 
 #[tokio::test]
@@ -862,6 +939,7 @@ async fn a_crash_between_the_renames_is_repaired_before_the_sender_builds_its_cl
                 max_batch_bytes: 1024 * 1024,
                 policy_poll_interval: std::time::Duration::from_secs(600),
                 host_id: None,
+                renew_client_cert: true,
             },
             host_id: HOST.into(),
             agent_version: "1".into(),
@@ -1116,20 +1194,22 @@ async fn a_host_stays_online_past_its_first_certificates_notafter() {
     let events = tempfile::tempdir().unwrap();
     let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
     feed_events(events.path().to_path_buf(), stop.clone());
-    let config = lodeline_sender::config::SenderConfig {
-        server_base_url: format!("https://127.0.0.1:{}", srv.port),
-        client_cert_path: Some(host.paths.crt.clone()),
-        client_key_path: Some(host.paths.key.clone()),
-        server_ca_path: Some(host.paths.ca.clone()),
-        events_dir: events.path().to_path_buf(),
-        offset_path: state_dir.path().join("sender-offset.json"),
-        agent_control: state_dir.path().join("control.sock"),
-        dead_letter_dir: state_dir.path().join("dead-letter"),
-        max_batch_events: 256,
-        max_batch_bytes: 1024 * 1024,
-        policy_poll_interval: std::time::Duration::from_secs(600),
-        host_id: None,
-    };
+    let yaml = format!(
+        "server_base_url: https://127.0.0.1:{}\nclient_cert_path: {}\nclient_key_path: {}\n\
+         server_ca_path: {}\nevents_dir: {}\noffset_path: {}\nagent_control: {}\n\
+         dead_letter_dir: {}\npolicy_poll_interval: 600\nrenew_client_cert: true\n",
+        srv.port,
+        host.paths.crt.display(),
+        host.paths.key.display(),
+        host.paths.ca.display(),
+        events.path().display(),
+        state_dir.path().join("sender-offset.json").display(),
+        state_dir.path().join("control.sock").display(),
+        state_dir.path().join("dead-letter").display(),
+    );
+    let cfg_path = state_dir.path().join("sender.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let config = lodeline_sender::config::SenderConfig::load(&cfg_path).unwrap();
     let task = tokio::spawn(lodeline_sender::runtime::run(
         lodeline_sender::runtime::RuntimeCtx {
             config: config.clone(),

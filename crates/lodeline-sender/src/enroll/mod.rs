@@ -186,6 +186,25 @@ fn plan(args: &Args, root: bool) -> R<Layout> {
     })
 }
 
+/// Whether `cur` is the config `enroll` would write, except that it does not turn
+/// renewal on.
+fn lacks_only_renew(cur: &[u8], new: &[u8]) -> bool {
+    match (
+        serde_yaml::from_slice::<SenderConfig>(cur),
+        serde_yaml::from_slice::<SenderConfig>(new),
+    ) {
+        (Ok(cur), Ok(new)) => {
+            !cur.renew_client_cert
+                && cur
+                    == SenderConfig {
+                        renew_client_cert: false,
+                        ..new
+                    }
+        }
+        _ => false,
+    }
+}
+
 fn sender_config_yaml(l: &Layout, server_origin: &str, host_id: &str) -> R<Vec<u8>> {
     let p = |p: &Path| serde_json::Value::String(p.to_string_lossy().into_owned());
     // Through serde so the sender's own defaults fill the fields enroll does not set.
@@ -199,6 +218,7 @@ fn sender_config_yaml(l: &Layout, server_origin: &str, host_id: &str) -> R<Vec<u
         "offset_path": p(&l.sender_dir.join("sender-offset.json")),
         "dead_letter_dir": p(&l.sender_dir.join("dead-letter")),
         "host_id": host_id,
+        "renew_client_cert": true,
     })) {
         Ok(c) => c,
         Err(e) => return die(1, format!("cannot build sender.yaml: {e}")),
@@ -271,9 +291,16 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
     }
     // The config first, so a config that names another host_id (exit 3) wins over a
     // differing CA or keystore (exit 4).
+    let mut old_config = false;
     for (path, bytes, _) in outputs.iter().rev() {
         match write::read_existing(path) {
             Ok(Some(cur)) if cur != *bytes => {
+                // A config from before `renew_client_cert` existed differs only by that
+                // line. It stays as it is, and the run ends with the line to add.
+                if path == &l.config && lacks_only_renew(&cur, bytes) {
+                    old_config = true;
+                    continue;
+                }
                 // A config that names another host says what the claim would: exit 3.
                 if path == &l.config
                     && serde_yaml::from_slice::<SenderConfig>(&cur)
@@ -478,6 +505,9 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
     // E10: the rest.
     let mut wrote = asked;
     for (path, bytes, mode) in &outputs {
+        if old_config && path == &l.config {
+            continue;
+        }
         match write::put(path, bytes, *mode, give) {
             Ok(Put::Written) => wrote = true,
             Ok(Put::Same) => {}
@@ -505,6 +535,13 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
 
     // E12.
     summary(&l, &parsed, args, wrote);
+    if old_config {
+        warn(format!(
+            "{} does not set `renew_client_cert: true` (an older enroll did not write it), so \
+             this sender will not renew its certificate. Set it there and restart the sender.",
+            l.config.display()
+        ));
+    }
     Ok(())
 }
 
