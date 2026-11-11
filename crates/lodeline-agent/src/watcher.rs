@@ -358,7 +358,10 @@ pub fn spawn_watcher(
         if catch_up_new_folders {
             // inotify places the watch on a new folder only after this callback
             // returns, so a file already in it gives no event. List it now, before
-            // the watch exists: a listed file cannot also get a kernel event.
+            // the watch exists. A file gets one event, except that a subfolder
+            // created after the new folder's watch but before notify walks it is
+            // listed again by its own creation event, and a file in it may then
+            // get a kernel event too (same content).
             for file in new_folders(&event)
                 .iter()
                 .flat_map(|d| files_in_new_folder(d))
@@ -407,8 +410,8 @@ pub fn spawn_watcher(
     Ok((rx, handle))
 }
 
-/// Most files read from one new folder. The root catch-up has no such bound.
-const NEW_FOLDER_FILE_LIMIT: usize = 512;
+/// Most entries (files and folders) one new-folder listing visits. The root catch-up has no such bound.
+const NEW_FOLDER_ENTRY_LIMIT: usize = 512;
 
 /// Directories that appeared under a watched folder, by creation or by a move in.
 fn new_folders(event: &Event) -> Vec<PathBuf> {
@@ -424,26 +427,29 @@ fn new_folders(event: &Event) -> Vec<PathBuf> {
     }
 }
 
-/// Files in `dir` and its subfolders, at most `NEW_FOLDER_FILE_LIMIT`. Symbolic
-/// links are not followed, as in `catch_up_files`.
+/// Files in `dir` and its subfolders, found by visiting at most
+/// `NEW_FOLDER_ENTRY_LIMIT` entries, files and folders alike. Symbolic links are
+/// not followed, as in `catch_up_files`.
 fn files_in_new_folder(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
+    let mut visited = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(folder) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
         for entry in entries.flatten() {
+            if visited == NEW_FOLDER_ENTRY_LIMIT {
+                tracing::warn!(path = %dir.display(), limit = NEW_FOLDER_ENTRY_LIMIT, "new folder has more entries than the catch-up limit; files not listed wait for their own events");
+                return files;
+            }
+            visited += 1;
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
             if kind.is_dir() {
                 stack.push(entry.path());
             } else if kind.is_file() {
-                if files.len() == NEW_FOLDER_FILE_LIMIT {
-                    tracing::warn!(path = %dir.display(), limit = NEW_FOLDER_FILE_LIMIT, "new folder has more files than the catch-up limit; the rest wait for their own events");
-                    return files;
-                }
                 files.push(entry.path());
             }
         }
@@ -844,10 +850,17 @@ mod tests {
 
         let many = td.path().join("many");
         fs::create_dir(&many).unwrap();
-        for i in 0..NEW_FOLDER_FILE_LIMIT + 5 {
+        for i in 0..NEW_FOLDER_ENTRY_LIMIT + 5 {
             fs::write(many.join(format!("{i}.md")), b"x").unwrap();
         }
-        assert_eq!(files_in_new_folder(&many).len(), NEW_FOLDER_FILE_LIMIT);
+        assert_eq!(files_in_new_folder(&many).len(), NEW_FOLDER_ENTRY_LIMIT);
+
+        let wide = td.path().join("wide");
+        for i in 0..NEW_FOLDER_ENTRY_LIMIT + 5 {
+            fs::create_dir_all(wide.join(i.to_string())).unwrap();
+            fs::write(wide.join(i.to_string()).join("f.md"), b"x").unwrap();
+        }
+        assert!(files_in_new_folder(&wide).is_empty());
     }
 
     #[cfg(target_os = "linux")]
