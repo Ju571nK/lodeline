@@ -49,16 +49,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   checkout or an unpack) may produce no event; the next heartbeat reads it. Skills below a
   subfolder of a project and skills of `--add-dir` folders are read but not watched. (#582, #539)
 - AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
-  (`~/.claude/hooks/`), in the Claude Code managed settings
-  drop-in folder (`managed-settings.d/*.json`) or in the two Codex apps cache folders
+  (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, in the Claude Code
+  managed settings drop-in folder (`managed-settings.d/*.json`) or in the two Codex apps cache folders
   (`~/.codex/cache/codex_apps_tools/` and `codex_apps_server_info/`, `*.json`). Before, these
   entries named the folder itself, which matches no file in it, so such an edit reached the agent
   only at the next heartbeat or with a change to another watched file. Hosts also record a
   `file_change` event for each such edit (hashes and sizes, never file text). The Codex cache
   folders are rewritten when Codex refreshes its tool list, so expect a few events per Codex
   session; an unchanged result sends no new assessment. The limits of the skills and agents entry
-  above apply to the hooks folder too. A repository's `.claude/hooks/` folder is not covered yet:
-  its per-project entry still names the folder. The Windows entries use the same patterns and were not
+  above apply to the hooks folders too. The Windows entries use the same patterns and were not
   tried on a device. A policy of your own that lists a folder path still matches only the folder:
   write `folder/*`. (#582)
 

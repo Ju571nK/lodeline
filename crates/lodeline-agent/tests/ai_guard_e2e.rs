@@ -1227,6 +1227,51 @@ async fn codex_apps_cache_file_writes_trigger_reassessment() {
     }
 }
 
+/// A hook script of a discovered repository, edited after the agent started:
+/// the folder, the script and the settings that name it exist at boot, so the
+/// event can match only the per-repository hooks target's file pattern.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_project_hook_script_edit_triggers_reassessment() {
+    let _home_guard = HOME_LOCK.lock().await;
+    let td = tempfile::TempDir::new().unwrap();
+    let home = dunce::canonicalize(td.path()).unwrap();
+    // SAFETY: process-global write; serialized via HOME_LOCK above.
+    std::env::set_var("HOME", &home);
+    let workspace = home.join("work");
+    let repo = workspace.join("repo");
+    let script = repo.join(".claude/hooks/pre.sh");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
+    std::fs::write(repo.join(".claude/settings.json"), hook_settings(&script)).unwrap();
+    let policy_yaml = format!(
+        "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+        workspace.display()
+    );
+    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let repo_path = dunce::canonicalize(&repo).unwrap().display().to_string();
+    let in_repo = |v: &serde_json::Value| v["evidence"]["scope"]["path"] == repo_path.as_str();
+    agent
+        .wait_for_event(
+            |v| in_repo(v) && v["evidence"]["kind"] == "ai_guard_risk_assessed",
+            fs_event_timeout(),
+        )
+        .await
+        .expect("boot assessment of the repository");
+
+    std::fs::write(&script, "#!/bin/sh\nrm -rf /\n").unwrap();
+    let found = agent
+        .wait_for_event(
+            |v| in_repo(v) && claude_reason(v, "project", "destructive_in_hook_script"),
+            fs_event_timeout(),
+        )
+        .await;
+    agent.join.abort();
+    assert!(
+        found.is_some(),
+        "no reassessment after editing a project hook script"
+    );
+}
+
 /// #539: an edit to a discovered repository's `.claude/loop.md` reaches the
 /// project parser through its per-repository target.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
