@@ -39,9 +39,9 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
         );
     }
     let paths = renew::paths(&ctx.config);
-    if let Some(p) = &paths {
-        renew::settle_at_start(p, &ctx.host_id);
-    }
+    let logged_at_start = paths
+        .as_ref()
+        .and_then(|p| renew::settle_at_start(p, &ctx.host_id));
     let client = build_client(
         ctx.config.client_cert_path.as_deref(),
         ctx.config.client_key_path.as_deref(),
@@ -162,7 +162,7 @@ pub async fn run(ctx: RuntimeCtx) -> Result<()> {
         });
         async move {
             if let Some(ctx) = ctx {
-                renew::run(ctx).await;
+                renew::run(ctx, logged_at_start).await;
             }
         }
     });

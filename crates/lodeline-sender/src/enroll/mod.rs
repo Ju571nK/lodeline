@@ -64,15 +64,15 @@ pub struct Env<'a> {
 type R<T> = Result<T, i32>;
 
 const ANOTHER_HOST_ID: &str = "this host already has another host_id (`lodeline show host-id` \
-     prints it). Issue a token for that id with `lodeline-server enroll-token --host-id <it>`, \
-     make a new enrollment file, and run enroll again. If this disk was cloned from another \
+     prints it; use `sudo` if you ran this command with `sudo`). Issue a token for \
+     that id with `lodeline-server enroll-token --host-id <it>`, make a new enrollment file, and run enroll again. If this disk was cloned from another \
      host, the two now share an id.";
 
 fn config_names_another(path: &Path) -> String {
     format!(
         "the sender config {} names another host_id (the agent's id may be the same as the \
-         file's; `lodeline show host-id` prints it). Issue a token for the id this host should \
-         have with `lodeline-server enroll-token --host-id <it>`, make a new enrollment file, \
+         file's; `lodeline show host-id` prints it; use `sudo` if you ran this command with `sudo`). Issue a \
+         token for the id this host should have with `lodeline-server enroll-token --host-id <it>`, make a new enrollment file, \
          and run enroll again.",
         path.display()
     )

@@ -551,6 +551,34 @@ async fn an_unparseable_next_file_does_not_stop_renewal_and_no_bad_bytes_are_sen
     }
 }
 
+thread_local! {
+    static CURRENT: std::cell::RefCell<Option<Log>> = const { std::cell::RefCell::new(None) };
+}
+
+struct Route;
+
+impl std::io::Write for Route {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        CURRENT.with(|c| {
+            c.borrow_mut()
+                .as_mut()
+                .map(|l| l.write(b))
+                .unwrap_or(Ok(b.len()))
+        })
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct Capture;
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        CURRENT.with(|c| *c.borrow_mut() = None);
+    }
+}
+
 /// Collects what `tracing` prints.
 #[derive(Clone, Default)]
 struct Log(Arc<Mutex<Vec<u8>>>);
@@ -566,14 +594,21 @@ impl std::io::Write for Log {
 }
 
 impl Log {
-    fn capture(&self) -> tracing::subscriber::DefaultGuard {
-        let w = self.clone();
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(move || w.clone())
-                .with_ansi(false)
-                .finish(),
-        )
+    /// One global subscriber that writes to the calling thread's log: scoped subscribers
+    /// racing on a shared call site lose events.
+    fn capture(&self) -> Capture {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(|| Route)
+                    .with_ansi(false)
+                    .finish(),
+            )
+            .unwrap();
+        });
+        CURRENT.with(|c| *c.borrow_mut() = Some(self.clone()));
+        Capture
     }
 
     fn lines_with(&self, needle: &str) -> usize {
@@ -615,6 +650,63 @@ async fn a_refusal_is_not_retried_quickly_and_is_logged_once_per_period() {
         );
         assert!(!host.next_files()[2]);
     }
+}
+
+#[tokio::test]
+async fn files_that_are_not_clean_at_start_are_logged_once_then_once_per_period() {
+    let pki = Pki::new();
+    let host = Host::new(&pki, ago(10), ago(-30));
+    // A key that does not belong to the certificate: `settle` cannot repair it.
+    std::fs::write(
+        &host.paths.key,
+        KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    let log = Log::default();
+    let _guard = log.capture();
+    let now = OffsetDateTime::now_utc();
+    let logged = lodeline_sender::renew::settle_at_start(&host.paths, HOST);
+    assert_eq!(log.lines_with("do not match"), 1, "the start logs it");
+    let (mut r, _, _) = host.renewer("http://127.0.0.1:9");
+    r.already_logged(logged, now);
+    r.step(now).await;
+    assert_eq!(
+        log.lines_with("do not match"),
+        1,
+        "the first wake stays quiet"
+    );
+    r.step(now + Duration::seconds(3601)).await;
+    assert_eq!(log.lines_with("do not match"), 2, "again after the period");
+}
+
+#[tokio::test]
+async fn run_does_not_log_again_at_its_first_wake_what_the_start_logged() {
+    let pki = Pki::new();
+    let host = Host::new(&pki, ago(10), ago(-30));
+    std::fs::write(
+        &host.paths.key,
+        KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    let log = Log::default();
+    let _guard = log.capture();
+    let logged = lodeline_sender::renew::settle_at_start(&host.paths, HOST);
+    // Cancelled before the start: `run` makes its first wake, then stops.
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    lodeline_sender::renew::run(
+        RenewCtx {
+            client: ClientHandle::from(reqwest::Client::new()),
+            stats: heartbeat::shared(),
+            server_base_url: "http://127.0.0.1:9".into(),
+            host_id: HOST.to_string(),
+            paths: Paths::new(&host.paths.crt, &host.paths.key, &host.paths.ca),
+            shutdown,
+        },
+        logged,
+    )
+    .await;
+    assert_eq!(log.lines_with("do not match"), 1, "the start's line only");
 }
 
 #[tokio::test]

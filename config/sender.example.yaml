@@ -33,7 +33,8 @@ agent_control: "/var/run/lodeline/control.sock"
 dead_letter_dir: "/var/log/lodeline-sender/dead-letter"
 
 # REQUIRED — this host's identifier. Must equal the agent's host_id (the UUID
-# stored in the agent's state.db, shown by `lodeline show host-id`). The server
+# stored in the agent's state.db, shown by `sudo lodeline show host-id` on a
+# packaged host). The server
 # validates that every event's host_id matches the batch envelope host_id and
 # rejects the entire batch if they differ. Overridable by the LODELINE_HOST_ID
 # env var (env takes precedence over this field). Leaving both unset causes

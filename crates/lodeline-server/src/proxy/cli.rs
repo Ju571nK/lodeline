@@ -278,9 +278,9 @@ fn hex(bytes: &[u8]) -> String {
 /// The stderr text of `verifier-new`. The mint's file has no SIGHUP path.
 fn verifier_hint(scope: Scope, entry_json: &str) -> String {
     let reload = if scope == Scope::Enroll {
-        "A change is read at the next request."
+        "A change is read at the next request:"
     } else {
-        "A change is read at the next request, or send SIGHUP to the proxy file's server."
+        "A change is read at the next request, or send SIGHUP to the proxy file's server:"
     };
     format!(
         "token above is shown ONCE; store it in an owner-only file (0600) on the caller host.\n\
@@ -612,6 +612,9 @@ mod tests {
         assert!(!verifier_hint(Scope::Enroll, "{}").contains("SIGHUP"));
         for s in [Scope::Config, Scope::Identity] {
             assert!(verifier_hint(s, "{}").contains("SIGHUP"));
+        }
+        for s in [Scope::Config, Scope::Identity, Scope::Enroll] {
+            assert!(verifier_hint(s, "{}").ends_with(":\n{}"));
         }
     }
 

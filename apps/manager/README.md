@@ -305,8 +305,8 @@ A lost answer leaves a token that nobody holds. The same host id then answers
 `token_outstanding` until that token expires. The ways on are the server's `enroll-token`
 subcommand, which has no such rule, or a new host id. If `lodeline-sender enroll` on a host
 stopped after it stored its host id, make a new file for that host id with the `host_id` field
-(`lodeline show host-id` prints it). A host that already has a certificate from this server stays
-a job for `lodeline-server enroll-token`.
+(`sudo lodeline show host-id` prints it on a host installed from the packages). A host that
+already has a certificate from this server stays a job for `lodeline-server enroll-token`.
 
 **The page.** The console's **Enroll a host** page (`/enroll`, in the top navigation) uses these two
 routes. It says when the route is off and which variables are missing, and when the signed-in
