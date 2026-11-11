@@ -2,8 +2,7 @@ use std::process::Command;
 
 /// A scratch home plus a control socket of its own, so the binary reads nothing of the
 /// developer's and reaches no agent that the test did not start.
-/// shortcut: Windows has no flag for the control pipe, so there the binary still
-/// asks the default pipe; point it elsewhere when the product gains a flag.
+/// shortcut: Windows has no flag for the control pipe and reads the policy from a fixed machine path, so there only the home and state folders are isolated; point both elsewhere when the product gains flags.
 struct Scratch(tempfile::TempDir);
 
 impl Scratch {
