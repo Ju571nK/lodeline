@@ -55,8 +55,9 @@ targets:
     paths:
       - "~/.codex/config.toml"
       - "/etc/codex/requirements.toml"
-      - "~/.codex/cache/codex_apps_tools/*.json"
-      - "~/.codex/cache/codex_apps_server_info/*.json"
+      # The Codex apps cache folders (codex_apps_tools, codex_apps_server_info) are not
+      # listed: Codex rewrites them at every start, also with the same bytes. The parser
+      # reads them at each assessment.
     recursive: true
     follow_symlinks: false
 

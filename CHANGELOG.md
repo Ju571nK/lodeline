@@ -49,19 +49,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   checkout or an unpack) may produce no event; the next heartbeat reads it. Skills below a
   subfolder of a project and skills of `--add-dir` folders are read but not watched. (#582, #539)
 - AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
-  (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, in the Claude Code
-  managed settings drop-in folder (`managed-settings.d/*.json`) or in the two Codex apps cache folders
-  (`~/.codex/cache/codex_apps_tools/` and `codex_apps_server_info/`, `*.json`). Before, these
-  entries named the folder itself, which matches no file in it, so such an edit reached the agent
-  only at the next heartbeat or with a change to another watched file. Hosts also record a
-  `file_change` event for each such edit (hashes and sizes, never file text). The Codex cache
-  folders are rewritten when Codex fetches its tool list (at start and on a refresh), also when
-  the bytes are the same, so expect a few events per Codex session; an unchanged result sends no
-  new risk event, though each write still records a `file_change` event. The write rate is read
-  from the public Codex source, not measured. The limits of the skills and agents entry
+  (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude
+  Code managed settings drop-in folder (`managed-settings.d/*.json`). Before, these entries named
+  the folder itself, which matches no file in it, so such an edit reached the agent only at the
+  next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
+  for each such edit (hashes and sizes, never file text). The limits of the skills and agents entry
   above apply to the hooks folders too. The Windows entries use the same patterns and were not
   tried on a device. A policy of your own that lists a folder path still matches only the folder:
-  write `folder/*`. (#583, #582)
+  write `folder/*`. The two Codex apps cache folders (`~/.codex/cache/codex_apps_tools/` and
+  `codex_apps_server_info/`) are not watch targets, as in every release so far, where their entries
+  matched no file. Codex rewrites both folders each time it fetches its tool list, at start and on
+  a refresh, also when the bytes are the same, and each write would record a `file_change` event.
+  The Codex parser reads both folders at each assessment. A change there is read at the next agent
+  start or heartbeat (24 hours), not at once. (#583, #582, #584)
 
 ## [0.14.5] - 2026-11-11
 

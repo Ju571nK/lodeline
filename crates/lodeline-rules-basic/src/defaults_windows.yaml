@@ -56,8 +56,9 @@ targets:
     paths:
       - "%USERPROFILE%\\.codex\\config.toml"
       - "%ProgramData%\\OpenAI\\Codex\\requirements.toml"
-      - "%USERPROFILE%\\.codex\\cache\\codex_apps_tools\\*.json"
-      - "%USERPROFILE%\\.codex\\cache\\codex_apps_server_info\\*.json"
+      # The Codex apps cache folders (codex_apps_tools, codex_apps_server_info) are not
+      # listed: Codex rewrites them at every start, also with the same bytes. The parser
+      # reads them at each assessment.
     recursive: true
     follow_symlinks: false
 

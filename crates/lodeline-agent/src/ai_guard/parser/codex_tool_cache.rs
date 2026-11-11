@@ -119,9 +119,9 @@ impl AiGuardParser for CodexToolCacheParser {
     }
 
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        // The cache directory itself: the daemon watches it so newly written /
-        // rewritten `*.json` snapshots re-trigger assessment. `lodeline scan`
-        // treats "dir exists" as "configured".
+        // The cache directory itself. The built-in policies do not watch it (Codex rewrites it at every
+        // start, also with the same bytes), so a change is read at boot, at the heartbeat, or when a
+        // policy of your own lists it. `lodeline scan` treats "dir exists" as "configured".
         let dir = cache_dir(home_dir, self.codex_home.as_deref());
         vec![dir.clone(), dir.with_file_name("codex_apps_server_info")]
     }
