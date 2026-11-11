@@ -15,6 +15,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   certificates yourself), `[WARN]` where the line is set and a path is missing, `[INFO]` on
   Windows, `[OK]` `on` otherwise. It makes no network call and does not read the key, so it does
   not repeat the ownership and key form checks the sender makes at start. (#581)
+- AI Guard reports two more Claude Code controls from the managed settings files:
+  `permissions.blockReadsOutsideWorkingDirectories` and
+  `permissions.blockWritesOutsideWorkingDirectories`, each when its value is `true`. No score, reason
+  kind or event field changes. (#582, #539)
 
 ### Changed
 
@@ -25,6 +29,25 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   comes from (`lodeline show host-id`, `lodeline init-host-id`) and that the id goes into the
   allowlist file first. Section 3.5 names the `doctor` line, and section 3.1 and
   `config/server.example.yaml` say what a configured allowlist path without a file means. (#581)
+
+### Fixed
+
+- AI Guard now reassesses Claude Code as soon as a skill or subagent file is added or changed in
+  `~/.claude/skills/<name>/SKILL.md`, `~/.claude/agents/` or a repository's `.claude/skills` or
+  `.claude/agents`, within the limits below. Before, no watch target covered these files, so the agent read them only at the
+  next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
+  for each edit (hashes and sizes, never file text). Limits: at start the watcher scans no existing file. A folder
+  that appears after the agent started, or one that a policy reload adds, is scanned once, and files
+  that match no watched pattern are dropped. Events for a file reached through a symbolic link to a
+  single skill, or through a folder linked after the agent started, do not match; the next heartbeat
+  reads such files. A `skills` folder that is itself a link and exists at start works. On Linux the
+  watcher uses one inotify watch per subfolder. When the kernel refuses a watch (the per-user
+  inotify limit) the agent goes on, the folder keeps the watches already placed and is tried again
+  every few seconds, and this is logged at debug level only; files without a watch are read at the
+  next heartbeat. On Linux, a folder created under a watched root gets its watch only after the
+  creation event is read, so a file written into it at once (a skill copied in with `cp -r`, a
+  checkout or an unpack) may produce no event; the next heartbeat reads it. Skills below a
+  subfolder of a project and skills of `--add-dir` folders are read but not watched. (#582, #539)
 
 ## [0.14.5] - 2026-11-11
 

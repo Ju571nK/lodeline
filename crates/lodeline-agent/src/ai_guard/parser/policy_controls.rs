@@ -256,6 +256,14 @@ pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessE
             "permissions.disableBypassPermissionsMode",
             Value::from("disable"),
         ),
+        (
+            "permissions.blockReadsOutsideWorkingDirectories",
+            Value::from(true),
+        ),
+        (
+            "permissions.blockWritesOutsideWorkingDirectories",
+            Value::from(true),
+        ),
         ("allowManagedPermissionRulesOnly", Value::from(true)),
         ("allowManagedHooksOnly", Value::from(true)),
         ("allowManagedMcpServersOnly", Value::from(true)),
@@ -338,6 +346,31 @@ mod tests {
             .iter()
             .all(|c| c.source_path == path && c.id.contains(".configured.")));
         assert!(!serde_json::to_string(&controls).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn claude_outside_working_directory_blocks_are_reported_only_for_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed-settings.json");
+        for key in [
+            "blockReadsOutsideWorkingDirectories",
+            "blockWritesOutsideWorkingDirectories",
+        ] {
+            std::fs::write(&path, format!(r#"{{"permissions":{{"{key}":true}}}}"#)).unwrap();
+            let controls = claude_controls(dir.path()).unwrap();
+            assert_eq!(controls.len(), 1, "{key}");
+            assert_eq!(
+                controls[0].id,
+                format!("claude_code.configured.permissions.{key}")
+            );
+            for off in ["false", r#""true""#] {
+                std::fs::write(&path, format!(r#"{{"permissions":{{"{key}":{off}}}}}"#)).unwrap();
+                assert!(
+                    claude_controls(dir.path()).unwrap().is_empty(),
+                    "{key} {off}"
+                );
+            }
+        }
     }
 
     #[test]

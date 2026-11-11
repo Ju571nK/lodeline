@@ -39,6 +39,8 @@ targets:
       - "%USERPROFILE%\\.claude\\settings.json"
       - "%USERPROFILE%\\.claude\\settings.local.json"
       - "%USERPROFILE%\\.claude\\hooks\\"
+      - "%USERPROFILE%\\.claude\\skills\\*\\SKILL.md"
+      - "%USERPROFILE%\\.claude\\agents\\*.md"
       - "%USERPROFILE%\\.claude\\CLAUDE.md"
       - "%USERPROFILE%\\.claude\\loop.md"
       - "%USERPROFILE%\\.claude\\scheduled-tasks\\*\\SKILL.md"
