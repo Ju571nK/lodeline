@@ -57,6 +57,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
   does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
 
+### Changed
+
+- `docs/install-server.md` section 3.6 now gives one command that turns the output of
+  `proxy verifier-new` into a valid verifier file (the output holds advice lines before the entry),
+  and says that a file that does not load stops the server at start. The "Read API token" block
+  puts the token in a root-only `EnvironmentFile` instead of `Environment=`, which every account on
+  the host can read with `systemctl show`. The console README says where its read certificate
+  comes from and that it is not the mint certificate. (#578)
+
 ### Fixed
 
 - `lodeline-sender` logs a renewal-file problem found at start once, not twice within seconds. The

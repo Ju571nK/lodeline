@@ -860,8 +860,20 @@ lodeline-server proxy verifier-new --scope enroll --caller-cert console-mint.crt
 `--scope` takes `config` or `identity` (the proxy management API) or `enroll`.
 `--caller-cert` takes the PEM file and computes the fingerprint of its first
 certificate, so the caller's own certificate must come first in the file; `--caller-fingerprint`
-takes the 64 hex characters instead, and the two cannot be combined. Put
-`{"entries":[<the entry>]}` in the verifier file. On a packaged server the file
+takes the 64 hex characters instead, and the two cannot be combined.
+`console-mint.entry` is not JSON as it stands: it holds two lines of advice, then
+the entry as a JSON object over several lines. The verifier file is
+`{"entries":[<the entry>]}`. This command keeps the lines from the first one that
+starts with `{` and wraps them:
+
+```sh
+{ printf '{"entries":['; sed -n '/^{/,$p' console-mint.entry; printf ']}\n'; } > enroll-mint-verifiers.json
+```
+
+If the file does not load when the server starts, the server does not start: it
+exits with an error that names `enroll_mint.verifiers` and gives the reason
+below it, such as the parse error, and systemd restarts it every 5 seconds, so look for that error in
+`journalctl -u lodeline-server`. On a packaged server the file
 belongs to the service account and is mode 0600, because the server refuses a file
 that is readable by others or owned by another account:
 
@@ -872,7 +884,8 @@ sudo install -o lodeline -g lodeline -m 0600 enroll-mint-verifiers.json /etc/lod
 The file is read again at the next request after it changes. Write a new file and
 rename it over the old one. A file that no longer loads makes every mint answer
 404 until a valid one is there. At most 2 unexpired entries are allowed, so a new
-bearer can overlap the old one while the console is switched over.
+bearer can overlap the old one while the console is switched over (add its entry, the
+object that starts at the line `{`, to the array by hand, after a comma).
 
 **The request** carries the bearer, the client certificate and the host id, which
 the caller chooses (a lowercase hyphenated version 4 UUID):
@@ -1073,14 +1086,25 @@ client_ca_path: "/etc/lodeline/ca.crt"
 The fleet/read endpoints (`/v1/meta`, `/v1/fleet/*`, `/v1/events`, …) are gated
 by a bearer token from the **`LODELINE_SERVER_READ_TOKEN`** environment variable.
 If it is unset, those routes return **404** (the data plane and `/v1/healthz`
-still work). Set it via a systemd drop-in so it isn't in the world-readable
-config:
+still work). Keep it out of the world-readable config and out of the unit: put it
+in a file only root can read, and name that file in a systemd drop-in. Make the
+file with its owner and mode first, then write the token into it, so the token
+never sits in a readable file:
 
 ```sh
+sudo install -o root -g root -m 0600 /dev/null /etc/lodeline/server.env
+sudo restorecon -v /etc/lodeline/server.env     # only on a host with SELinux
+printf 'LODELINE_SERVER_READ_TOKEN=%s\n' "$(openssl rand -hex 32)" | sudo tee /etc/lodeline/server.env > /dev/null
 sudo systemctl edit lodeline-server
 # [Service]
-# Environment=LODELINE_SERVER_READ_TOKEN=<long-random-token>
+# EnvironmentFile=/etc/lodeline/server.env
 ```
+
+`sudo cat /etc/lodeline/server.env` shows the token when you give it to the
+console. systemd reads the file as root before it starts the service, so the
+`lodeline` account needs no access to it. Section 7 starts the server. On a server
+that already runs, restart it: `sudo systemctl restart lodeline-server`. Do not use `Environment=` here: every
+account on the host can read a unit's `Environment=` values with `systemctl show`.
 
 The `lodeline-manager` web console reads the fleet through these routes with the
 same token. Each release has a `lodeline-manager-<version>-<target>` archive of it. To
