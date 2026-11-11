@@ -230,7 +230,7 @@ of section 3.6 of the install guide (`enroll_mint:` in `server.yaml`), with a mi
 made for this console: a client certificate from the host client CA, and a bearer with the scope
 `enroll` whose verifier is in the mint's own verifier file. Use a new certificate and key for
 it. The console refuses to start when that certificate is the one in
-`LODELINE_SERVER_CLIENT_CERT_PATH`. A server older than the mint ignores `enroll_mint:` without a
+`LODELINE_SERVER_CLIENT_CERT_PATH`. A server older than v0.14.5 ignores `enroll_mint:` without a
 word, and the console then answers `enroll_unavailable`.
 
 **What the console needs.** Set all eight of `LODELINE_ENROLL_MINT_TOKEN`,

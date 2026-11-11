@@ -778,7 +778,7 @@ When the server refuses a renewal (403 or 404), the sender keeps `client.key.nex
 |---|---|
 | `renewed the client certificate and key` | Nothing. |
 | `the server refused to renew this host's certificate` with status 403 | Either this certificate is no longer the newest one issued for the host (the host was enrolled again, or a copy of its key renewed first), or the server already issued three certificates for it, or the host is not on the allowlist. Check the server's audit file for this host (§3.4): a `renewal_superseded` line means the certificate was replaced, so enroll the host again with a new token before the certificate expires. Without one, check the allowlist. |
-| The same line with status 404 | The server does not offer renewal: enrollment is off there, its audit file cannot be read, or it is older than this sender. Fix the server, or enroll the host again. |
+| The same line with status 404 | The server does not offer renewal: enrollment is off there, its audit file cannot be read, or it is older than v0.14.4. Fix the server, or enroll the host again. |
 | `certificate renewal failed` | The server could not be reached or answered with an error. The sender retries. It is an error line, not a warning, when less than a tenth of the validity is left (3 days of 30). |
 | `certificate renewal is off: this account cannot create files in the directory of client.key or of client.crt` | The sender runs as its own account and must be able to create files beside `client.key` and beside `client.crt`. A directory that `enroll` made as root belongs to root. Give it to the sender account (`systemd-tmpfiles --create` does it for the packaged layout) and restart the sender. Events keep flowing meanwhile. |
 | `certificate renewal is off: client.key is owned by uid ...` | The sender does not run as the owner of `client.key`, so a renewal would make a key it could not read at its next start. Run the sender as the account that owns the key, or give the key to that account, and restart. Events keep flowing meanwhile. |
@@ -814,7 +814,7 @@ The console's enrollment route uses it, and its Enroll a host page calls that ro
 [console README, "Enroll a host"](../apps/manager/README.md#enroll-a-host). The token
 redeems on the enrollment listener (§3.2) exactly like one from the subcommand.
 The route does not exist unless `enroll_mint:` is in `server.yaml`. A server
-older than this release ignores the key without a word, so the route answers 404.
+older than v0.14.5 ignores the key without a word, so the route answers 404.
 
 ```yaml
 enroll_mint:
@@ -1287,7 +1287,7 @@ SIEM rules: [runbook/siem-rules.md](runbook/siem-rules.md).
 | Server exits with `enroll_listener is set but enrollment is off` | A §3.1 enrollment check failed | Fix what the `enroll:` warning above it names (§3.2) |
 | Server exits with `invalid config` naming `enroll_listener` | A §3.2 boot refusal | Do what the message says (§3.2) |
 | Server exits with an error naming `enroll_mint` | A §3.6 start refusal | Do what the message says (§3.6) |
-| `POST /v1/enroll-tokens` answers 404 | The mint is off or the server is older than this feature, the client certificate is not listed in the verifier file, or the verifier file no longer loads (the log shows a reload error) | Check `enroll_mint:`, the entry's fingerprint (`verifier-new --caller-cert`) and the file's owner and mode (§3.6) |
+| `POST /v1/enroll-tokens` answers 404 | The mint is off or the server is older than v0.14.5, the client certificate is not listed in the verifier file, or the verifier file no longer loads (the log shows a reload error) | Check `enroll_mint:`, the entry's fingerprint (`verifier-new --caller-cert`) and the file's owner and mode (§3.6) |
 | Server logs `enroll: cannot write next to host_allowlist_path` and enrollment is off | The service cannot rewrite the allowlist, for example because it sits under `/etc/lodeline` | Copy it to `/var/lib/lodeline-server/` and give it to `lodeline`, set `host_allowlist_path` to the new path, restart, check that enrollment is on (the server's journal shows a line that starts with `enroll: enabled`), then delete the old file (§3.1) |
 | Server logs `enroll: cannot run openssl at <path>` and enrollment is off | `openssl` is missing, or the service may not run it (SELinux denial: `ausearch -m avc -ts recent`) | Install the `openssl` package. On SELinux hosts use the package's policy module, which allows it (§6) |
 | Every enrollment answers 500 `token store error` | The token file or its `.lock` file is owned by root, left by a root `enroll-token` run of an older version | `sudo chown lodeline:lodeline <enroll_tokens_path> <enroll_tokens_path>.lock`, then run `enroll-token` with `sudo -u lodeline` (§3.1) |

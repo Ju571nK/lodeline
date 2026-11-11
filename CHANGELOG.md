@@ -7,6 +7,114 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-11-11
+
+**Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to
+enroll hosts from it. A v0.14.5 sender renews its certificate through `POST /v1/renew`, which
+a v0.14.4 server already has, so the server needs this release only for the mint route. A
+v0.14.4 server still works with a v0.14.5 sender, agent and console. Against a server older
+than v0.14.4 the renew route answers 404: the sender logs one error line an hour, keeps
+delivering events, and the host must be enrolled again before its certificate expires. This
+release adds no event kind and no reason kind, changes no event on the wire and no fleet API
+response (`lodeline-fleet-api` gains a `mint` module, which only the server and the console use).
+No package script, unit file, tmpfiles entry or SELinux module changed, so the packaged
+policy is the one of v0.14.4. No package or release asset is added or removed, the console is
+still an archive with no OS package, and `lodeline-proxy` is still not a release asset.
+
+**Hosts.** A sender with a client certificate, a key and a server CA in `sender.yaml` renews on
+Linux and macOS, between 60% and 75% of the certificate's validity, with no setting. A host
+enrolled the documented way needs nothing from you. If the sender cannot renew (the sender
+account cannot create files in the key's directory or does not own `client.key`, or the key is
+not PKCS#8), it logs one error line that says why and keeps delivering events, and the host must
+be fixed or enrolled again before the certificate expires. Renewal is off on Windows. A host that
+stays on a v0.14.4 sender keeps a certificate that ends after `enroll_cert_days` and must be
+enrolled again.
+
+**Server and console.** `POST /v1/enroll-tokens` is off unless `enroll_mint:` is in
+`server.yaml`, so an existing `server.yaml` needs no change. A server older than v0.14.5 ignores
+the key without a word. With the key, the server does not start unless the other settings in
+`docs/install-server.md` section 3.6 are in place. `lodeline-server proxy verifier-new` takes
+`--scope enroll` and `--caller-cert`, and its stderr advice text changed; the entry it prints and
+the stdout bearer did not, and the guide's `sed` command reads only the entry. The console
+makes enrollment files only when all eight `LODELINE_ENROLL_*` and `LODELINE_PUBLIC_ORIGIN`
+settings are set. With none set it behaves as before, and its Enroll a host page says it cannot
+make files yet and names the settings; a partial set stops the console at start. A console that
+does not use enrollment sets nothing new. A v0.14.5 console against an older server answers
+`enroll_unavailable` for enrollment and reads the fleet as before, and an older console works
+against a v0.14.5 server. The console still has a write path to the server only through the
+mint credential.
+
+**Read token.** `docs/install-server.md` ("Read API token", in section 5) now puts the token in a
+root-only `EnvironmentFile`. A server whose token is in an `Environment=` drop-in has it readable
+by every account on the host through `systemctl show`. Move it to a root-only file as that
+section shows and restart the server. Nothing breaks if you do not.
+
+### Added
+
+- The fleet console makes a host's enrollment file (`GET /api/v1/enrollment` and
+  `POST /api/v1/enrollment/files`). A signed-in operator asks; the console asks the server for a
+  single-use token with its own mint credential (`LODELINE_ENROLL_MINT_TOKEN`,
+  `LODELINE_ENROLL_MINT_CERT_PATH`, `LODELINE_ENROLL_MINT_KEY_PATH`), builds the file from its
+  settings (`LODELINE_ENROLL_FILE_*`) and answers with the file's bytes. It keeps no token and no
+  file. The POST accepts only a request whose `Origin` is `LODELINE_PUBLIC_ORIGIN`, and
+  `LODELINE_ENROLL_SUBJECTS` can limit it to some subjects. It is off unless all eight settings
+  are set (see "Enroll a host" in `apps/manager/README.md`) (#575, #553).
+- The web console has an Enroll a host page (`/enroll`, in the top navigation). It shows what a
+  file will hold (the server and enrollment URLs, the CA certificates and the policy keys with
+  their SHA-256 fingerprints), makes the file on one click and has the browser save it, and then
+  shows the host id, the expiry and the steps on a Linux host installed from the packages. It
+  never parses or keeps the file, and its error texts say what to do next, including how to make a
+  new file for a host whose `enroll` stopped halfway (#576, #553).
+- `POST /v1/enroll-tokens` makes a single-use enrollment token over HTTP, for the fleet console to
+  use (`docs/install-server.md` section 3.6). It is off unless `enroll_mint:` is in `server.yaml`,
+  and needs a pinned client certificate, a bearer with the new scope `enroll` from its own verifier
+  file (`lodeline-server proxy verifier-new --scope enroll --caller-cert <pem>`), and the enrollment
+  listener. It refuses a host id that is on the allowlist or has a certificate this server issued,
+  or that has a live token, keeps at most `enroll_mint.max_tokens` entries in the token file
+  (pruning ones spent or expired more than an hour ago), and writes one signed `token_minted` line
+  per token, with the verified key id and the subject the caller reported, to the enrollment audit
+  file (#574, #553).
+- `lodeline-sender` renews its own client certificate and key before they expire. From the
+  validity of the certificate it holds, it renews between 60% and 75% of it, at a point set by
+  its host_id, with no setting. It sends a new key's CSR to `POST /v1/renew`, checks the answer
+  on the host (key, host_id, chain to the server CA, client-auth purpose, validity), and only
+  then replaces `client.key` and `client.crt` through `.next` files, with a directory sync after
+  each rename. One repair step runs at start and at every wake and brings any state a crash
+  leaves to a matching pair, so a host never loses its pair. The HTTP client used for events and
+  policy lives in one handle and is replaced once after a renewal. Refusals (403, 404) and an
+  approaching expiry are logged loudly, at most once an hour; after expiry the sender keeps
+  running and uses a new pair as soon as it appears on disk, without a restart. A certificate
+  directory the sender account cannot write, or a live key that the sender account does not own,
+  turns renewal off with one error line; the key and the certificate may sit in two directories,
+  and each `.next` file is renamed in its own. A wake whose repair step was not clean sends no
+  request and renames nothing; a stored answer that cannot be checked because an input cannot be
+  read drops nothing, and one that fails its check is dropped alone, so the same request is sent
+  again. A `.next` file that is there and does not parse, empty or for another key included,
+  is dropped, so it cannot stop renewal (a bad request file alone, so the key it was made for
+  stays); one the sender will not read is named in the error
+  line, and a live pair replaced on disk is still loaded in a wake that ended on such an error.
+  Renewal reads PKCS#8 keys only: a live `client.key` in another form is logged with its own
+  line and the certificate is not renewed until the key is converted or the host enrolls again. A new answer
+  must expire later than the certificate in use, as a stored one must. `enroll`
+  names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
+  does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553)
+
+### Changed
+
+- `docs/install-server.md` section 3.6 now gives one command that turns the output of
+  `proxy verifier-new` into a valid verifier file (the output holds advice lines before the entry),
+  and says that a file that does not load stops the server at start. The "Read API token" block
+  puts the token in a root-only `EnvironmentFile` instead of `Environment=`, which every account on
+  the host can read with `systemctl show`. The console README says where its read certificate
+  comes from and that it is not the mint certificate. (#578)
+
+### Fixed
+
+- `lodeline-sender` logs a renewal-file problem found at start once, not twice within seconds. The
+  first wake of the renewal loop no longer repeats the line the start just wrote, and the line
+  comes again only after an hour. The two messages of `lodeline-sender enroll` that point to
+  `lodeline show host-id` say to use `sudo` when `enroll` ran with `sudo` (#577).
+
 ### Added
 
 - The fleet console makes a host's enrollment file (`GET /api/v1/enrollment` and
