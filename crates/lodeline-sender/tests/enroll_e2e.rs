@@ -328,6 +328,11 @@ async fn enrolls_a_host_and_writes_every_file() {
     assert_eq!(cfg.host_id.as_deref(), Some(HOST));
     assert_eq!(cfg.client_key_path, Some(h.p("s/sender/client.key")));
     assert_eq!(cfg.server_ca_path, Some(h.p("s/server-ca.pem")));
+    assert!(cfg.renew_client_cert, "enroll turns renewal on");
+    assert!(
+        lodeline_sender::renew::paths(&cfg).is_some(),
+        "the sender renews on the host enroll set up"
+    );
     assert!(h.exists("s/server-ca.pem"));
     lodeline_core::policy::pubkeys::Keystore::load_from_file(h.p("s/ks.pem")).unwrap();
     let db = HashCache::open(&h.p("s/state.db")).unwrap();
@@ -386,6 +391,56 @@ async fn a_lost_certificate_needs_a_new_token_and_keeps_the_key() {
     assert_eq!(std::fs::read(h.p("s/sender/client.key")).unwrap(), key);
     assert!(h.exists("s/sender/client.crt"));
     assert_eq!(s.issued_lines(), 2);
+}
+
+/// A host enrolled by an older enroll has no `renew_client_cert` line.
+fn drop_renew_line(h: &Host) -> String {
+    let path = h.p("s/sender.yaml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let old: String = text
+        .lines()
+        .filter(|l| !l.starts_with("renew_client_cert"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_ne!(old, text);
+    std::fs::write(&path, &old).unwrap();
+    old
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_without_the_renew_line_is_kept_and_the_run_goes_on() {
+    let s = server(None).await;
+    let h = Host::new();
+    let args = h.args(h.file("host.json", &s, &s.token(HOST), HOST, &s.ca_pem()));
+    assert_eq!(go(&args).await, 0);
+    let old = drop_renew_line(&h);
+
+    // The same file again.
+    assert_eq!(go(&args).await, 0);
+    assert_eq!(std::fs::read_to_string(h.p("s/sender.yaml")).unwrap(), old);
+
+    // An expired host: the certificate and key moved aside, a new token.
+    std::fs::remove_file(h.p("s/sender/client.crt")).unwrap();
+    std::fs::remove_file(h.p("s/sender/client.key")).unwrap();
+    let again = h.args(h.file("host2.json", &s, &s.token(HOST), HOST, &s.ca_pem()));
+    assert_eq!(go(&again).await, 0);
+    assert!(h.exists("s/sender/client.crt"));
+    assert_eq!(std::fs::read_to_string(h.p("s/sender.yaml")).unwrap(), old);
+    let cfg = lodeline_sender::config::SenderConfig::load(&h.p("s/sender.yaml")).unwrap();
+    assert!(lodeline_sender::renew::paths(&cfg).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_that_differs_in_another_key_is_still_refused() {
+    let s = server(None).await;
+    let h = Host::new();
+    let args = h.args(h.file("host.json", &s, &s.token(HOST), HOST, &s.ca_pem()));
+    assert_eq!(go(&args).await, 0);
+    let mut old = drop_renew_line(&h);
+    old.push_str("max_batch_events: 7\n");
+    std::fs::write(h.p("s/sender.yaml"), &old).unwrap();
+    assert_eq!(go(&args).await, 4);
+    assert_eq!(std::fs::read_to_string(h.p("s/sender.yaml")).unwrap(), old);
 }
 
 #[tokio::test(flavor = "multi_thread")]

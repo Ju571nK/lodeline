@@ -68,16 +68,39 @@ impl Limiter {
     }
 }
 
-/// The files renewal works on, when the config names a whole mutual TLS identity and the
-/// CA that signs the new certificate. Not on Windows, where renewal is off.
+/// The files renewal works on: only when `renew_client_cert` is set (`enroll` sets it)
+/// and the config names a whole mutual TLS identity and the CA that signs the new
+/// certificate. Not on Windows, where renewal is off.
 pub fn paths(c: &crate::config::SenderConfig) -> Option<Paths> {
-    match (&c.client_cert_path, &c.client_key_path, &c.server_ca_path) {
-        (Some(_), Some(_), Some(_)) if cfg!(windows) => {
-            tracing::info!("certificate renewal is not supported on Windows yet");
-            None
+    let (Some(crt), Some(key), Some(ca)) =
+        (&c.client_cert_path, &c.client_key_path, &c.server_ca_path)
+    else {
+        if c.renew_client_cert {
+            let missing: Vec<&str> = [
+                ("client_cert_path", c.client_cert_path.is_none()),
+                ("client_key_path", c.client_key_path.is_none()),
+                ("server_ca_path", c.server_ca_path.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(name, gone)| gone.then_some(name))
+            .collect();
+            tracing::warn!(
+                "renew_client_cert is set but {} is missing from sender.yaml, so the sender does not renew its certificate",
+                missing.join(", ")
+            );
         }
-        (Some(crt), Some(key), Some(ca)) => Some(Paths::new(crt, key, ca)),
-        _ => None,
+        return None;
+    };
+    if cfg!(windows) {
+        tracing::info!("certificate renewal is not supported on Windows yet");
+        None
+    } else if !c.renew_client_cert {
+        tracing::info!(
+            "this sender does not renew its client certificate: renew_client_cert is not set in sender.yaml (`lodeline-sender enroll` sets it)"
+        );
+        None
+    } else {
+        Some(Paths::new(crt, key, ca))
     }
 }
 
@@ -376,6 +399,46 @@ mod tests {
         "018f9c1a-0000-7000-8000-00000000aa02",
         "5a1c6a1e-8b4d-4c2a-9e7f-1a2b3c4d5e70",
     ];
+
+    fn config(renew: bool, ca: bool) -> crate::config::SenderConfig {
+        let p = |n: &str| Some(std::path::PathBuf::from(n));
+        crate::config::SenderConfig {
+            server_base_url: "https://lodeline.example.com".into(),
+            client_cert_path: p("/x/client.crt"),
+            client_key_path: p("/x/client.key"),
+            server_ca_path: if ca { p("/x/ca.pem") } else { None },
+            events_dir: "/x/events".into(),
+            offset_path: "/x/offset".into(),
+            agent_control: "/x/ctl".into(),
+            dead_letter_dir: "/x/dl".into(),
+            max_batch_events: 1,
+            max_batch_bytes: 1,
+            policy_poll_interval: std::time::Duration::from_secs(1),
+            host_id: None,
+            renew_client_cert: renew,
+        }
+    }
+
+    #[test]
+    fn renewal_needs_the_setting_and_the_three_paths() {
+        assert!(paths(&config(false, true)).is_none());
+        assert!(paths(&config(true, false)).is_none());
+        assert_eq!(paths(&config(true, true)).is_some(), !cfg!(windows));
+    }
+
+    #[test]
+    fn a_config_with_the_key_loads_where_the_key_is_unknown() {
+        // The sender struct has no `deny_unknown_fields`, so a sender that predates the
+        // key ignores it. This struct stands in for such a sender.
+        #[derive(serde::Deserialize)]
+        struct Old {
+            server_base_url: String,
+        }
+        let yaml = serde_yaml::to_string(&config(true, true)).unwrap();
+        assert!(yaml.contains("renew_client_cert: true"));
+        let old: Old = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(old.server_base_url, "https://lodeline.example.com");
+    }
 
     #[test]
     fn the_target_lies_between_sixty_and_seventy_five_percent_of_any_validity() {

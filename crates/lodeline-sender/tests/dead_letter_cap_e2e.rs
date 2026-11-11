@@ -117,6 +117,7 @@ async fn sender_against(
         max_batch_bytes: 1024 * 1024,
         policy_poll_interval: Duration::from_millis(50),
         host_id: None,
+        renew_client_cert: false,
     };
     let shutdown = CancellationToken::new();
     let sender = tokio::spawn(run(RuntimeCtx {
