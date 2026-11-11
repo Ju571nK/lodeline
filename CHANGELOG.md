@@ -32,6 +32,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The agent now records a baseline at start, and at a policy reload, for the files that a pattern
+  watch entry of a critical target matches, as it already did for a plain path. Before, the first
+  change of a skill, subagent, hook script or managed settings file after a start had no hash
+  before it, or one left by an earlier run. For each pattern entry the agent visits at most 8192
+  files and folders, hashes at most 2048 files and does not follow symbolic links; past a bound,
+  one warning is logged and the first event for a file not reached has no `before_hash`, as before.
 - AI Guard now reassesses Claude Code as soon as a skill or subagent file is added or changed in
   `~/.claude/skills/<name>/SKILL.md`, `~/.claude/agents/` or a repository's `.claude/skills` or
   `.claude/agents`, within the limits below. Before, no watch target covered these files, so the agent read them only at the

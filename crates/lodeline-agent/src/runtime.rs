@@ -1038,12 +1038,26 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     Ok(exit_code)
 }
 
+/// Most entries (files and folders) the warm-up visits under one pattern entry.
+const WARMUP_ENTRY_LIMIT: usize = 8192;
+/// Most files the warm-up hashes for one pattern entry.
+const WARMUP_FILE_LIMIT: usize = 2048;
+
 pub(crate) fn perform_warmup(
     eff: &lodeline_core::policy::EffectivePolicy,
     expanded: &HashMap<String, Vec<PathBuf>>,
     cache: &Arc<Mutex<HashCache>>,
 ) -> anyhow::Result<()> {
     use lodeline_core::hashing::{hash_path, HashOutcome};
+    let seed = |p: &Path, target_id: &str| {
+        if let Ok(HashOutcome::Hashed { hex, size }) = hash_path(p) {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let _ = cache.lock().put(p, &hex, size, target_id, now_ms);
+        }
+    };
     for t in &eff.targets {
         if !matches!(t.tier, Tier::Critical) {
             continue;
@@ -1052,19 +1066,58 @@ pub(crate) fn perform_warmup(
             continue;
         };
         for p in paths {
-            if !p.exists() {
-                continue;
-            }
-            if let Ok(HashOutcome::Hashed { hex, size }) = hash_path(p) {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let _ = cache.lock().put(p, &hex, size, &t.id, now_ms);
+            if p.exists() {
+                seed(p, &t.id);
+            } else {
+                for file in files_matching_pattern(p, WARMUP_ENTRY_LIMIT, WARMUP_FILE_LIMIT) {
+                    seed(&file, &t.id);
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Files under the directory prefix of the pattern entry `pattern` that the
+/// pattern matches, found with the matcher the normalizer uses. A plain path
+/// that is missing has no prefix to walk and yields nothing. Visits at most
+/// `entry_limit` entries and returns at most `file_limit` files;
+/// past either bound it logs one warning, and a file beyond it gets no baseline
+/// (its first event has no `before_hash`). Symbolic links are not followed, as
+/// in `files_in_new_folder`.
+fn files_matching_pattern(pattern: &Path, entry_limit: usize, file_limit: usize) -> Vec<PathBuf> {
+    let root = glob_root_dir(pattern);
+    if root == pattern {
+        return Vec::new();
+    }
+    let Ok(glob) = lodeline_core::policy::glob::CompiledGlob::new(&pattern.to_string_lossy())
+    else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    let mut visited = 0;
+    let mut stack = vec![root];
+    while let Some(folder) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if visited == entry_limit || files.len() == file_limit {
+                tracing::warn!(pattern = %pattern.display(), entry_limit, file_limit, "watch pattern matches more than the warm-up limit; files not listed get no baseline until their own first event");
+                return files;
+            }
+            visited += 1;
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() && glob.is_match(&entry.path()) {
+                files.push(entry.path());
+            }
+        }
+    }
+    files
 }
 
 /// The directory prefix of a (possibly glob) path: everything before the path
@@ -2218,5 +2271,189 @@ mod tests {
         let matching: Vec<_> = roots.iter().filter(|(path, _)| path == &expected).collect();
         assert_eq!(matching, vec![&(expected, true)]);
         assert!(!root.exists());
+    }
+
+    /// A critical target holding either the plain path or the pattern that
+    /// matches one skill file, plus a cache and the expanded-path map the
+    /// agent would pass to `perform_warmup`.
+    struct Warm {
+        _td: tempfile::TempDir,
+        file: std::path::PathBuf,
+        eff: lodeline_core::policy::EffectivePolicy,
+        expanded: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
+        cache: std::sync::Arc<parking_lot::Mutex<lodeline_core::state::HashCache>>,
+        db: std::path::PathBuf,
+    }
+
+    fn warm_fixture(pattern: bool) -> Warm {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let file = dir.join("skills").join("alpha").join("SKILL.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "v0").unwrap();
+        let entry = if pattern {
+            dir.join("skills").join("*").join("SKILL.md")
+        } else {
+            file.clone()
+        };
+        let mut eff = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        // Only this target: the default targets would reach the real home.
+        eff.targets = vec![lodeline_core::policy::WatchTarget {
+            id: "t".into(),
+            description: "t".into(),
+            tier: lodeline_core::policy::Tier::Critical,
+            platform: lodeline_core::policy::Platform::Any,
+            paths: vec![entry.to_string_lossy().into_owned()],
+            recursive: true,
+            follow_symlinks: false,
+            disabled: false,
+        }];
+        let expanded = [("t".to_string(), vec![entry])].into();
+        let db = dir.join("state.db");
+        let cache = std::sync::Arc::new(parking_lot::Mutex::new(
+            lodeline_core::state::HashCache::open(&db).unwrap(),
+        ));
+        Warm {
+            _td: td,
+            file,
+            eff,
+            expanded,
+            cache,
+            db,
+        }
+    }
+
+    fn hex(bytes: &str) -> String {
+        blake3::hash(bytes.as_bytes()).to_hex().to_string()
+    }
+
+    impl Warm {
+        fn warm(&self) {
+            super::perform_warmup(&self.eff, &self.expanded, &self.cache).unwrap();
+        }
+        fn baseline(&self) -> Option<String> {
+            self.cache.lock().get(&self.file).unwrap()
+        }
+        fn updated_at(&self) -> Option<i64> {
+            rusqlite::Connection::open(&self.db)
+                .unwrap()
+                .query_row(
+                    "SELECT updated_at_ms FROM baseline WHERE path = ?1",
+                    [self.file.to_string_lossy()],
+                    |r| r.get(0),
+                )
+                .ok()
+        }
+    }
+
+    /// Case 1: the `before_hash` of the first event for a file that was there
+    /// at start, as the state task takes it from the baseline.
+    async fn first_event_before_hash(w: &Warm) -> Option<String> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx_sink, mut rx_sink) = tokio::sync::mpsc::channel(1);
+        tx.send(crate::hasher::HashedEvent {
+            norm: crate::normalizer::NormalizedEvent {
+                path: w.file.clone(),
+                kind: lodeline_core::event::FileChangeKind::Modified,
+                rename_from: None,
+                target_id: "t".into(),
+                tier: lodeline_core::policy::Tier::Critical,
+            },
+            after_hash: Some(hex("v1")),
+            size_after: Some(2),
+            recheck_hash: None,
+            quality: lodeline_core::event::EvidenceQuality::Definitive,
+            debounced_from: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        crate::state_task::run(
+            rx,
+            tx_sink,
+            w.cache.clone(),
+            "h".into(),
+            std::sync::Arc::new(lodeline_core::stats::Stats::default()),
+        )
+        .await;
+        match rx_sink.recv().await.unwrap().event.evidence {
+            lodeline_core::event::Evidence::FileChange { before_hash, .. } => before_hash,
+            other => panic!("not a file change: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn warmup_gives_the_first_edit_a_before_hash_for_both_kinds_of_entry() {
+        for pattern in [false, true] {
+            let w = warm_fixture(pattern);
+            w.warm();
+            std::fs::write(&w.file, "v1").unwrap();
+            assert_eq!(
+                first_event_before_hash(&w).await,
+                Some(hex("v0")),
+                "pattern entry: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn warmup_after_an_offline_change_records_the_new_content_for_both_kinds_of_entry() {
+        for pattern in [false, true] {
+            let w = warm_fixture(pattern);
+            // The baseline an earlier run left behind.
+            w.cache.lock().put(&w.file, &hex("v0"), 2, "t", 1).unwrap();
+            std::fs::write(&w.file, "v1").unwrap();
+            w.warm();
+            assert_eq!(w.baseline(), Some(hex("v1")), "pattern entry: {pattern}");
+        }
+    }
+
+    #[test]
+    fn warmup_again_with_the_file_unchanged_rewrites_the_baseline_for_both_kinds_of_entry() {
+        for pattern in [false, true] {
+            let w = warm_fixture(pattern);
+            w.cache.lock().put(&w.file, &hex("v0"), 2, "t", 1).unwrap();
+            w.warm();
+            assert_eq!(w.baseline(), Some(hex("v0")));
+            assert_ne!(w.updated_at(), Some(1), "pattern entry: {pattern}");
+        }
+    }
+
+    #[test]
+    fn pattern_warmup_stops_at_the_file_limit_and_at_the_entry_limit() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        for i in 0..10 {
+            std::fs::write(dir.join(format!("f{i}.md")), "x").unwrap();
+        }
+        let pattern = dir.join("*.md");
+        assert_eq!(super::files_matching_pattern(&pattern, 100, 100).len(), 10);
+        assert_eq!(super::files_matching_pattern(&pattern, 100, 4).len(), 4);
+        assert_eq!(super::files_matching_pattern(&pattern, 3, 100).len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pattern_warmup_does_not_follow_links_out_of_the_root() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(outside.join("beta")).unwrap();
+        std::fs::write(outside.join("beta").join("SKILL.md"), "x").unwrap();
+        let root = dir.join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(outside.join("beta"), root.join("beta")).unwrap();
+        assert!(super::files_matching_pattern(
+            &root.join("*").join("SKILL.md"),
+            super::WARMUP_ENTRY_LIMIT,
+            super::WARMUP_FILE_LIMIT
+        )
+        .is_empty());
     }
 }
