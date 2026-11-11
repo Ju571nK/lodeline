@@ -1168,6 +1168,75 @@ targets:
     }
 
     #[test]
+    fn builtin_watch_paths_never_end_with_a_separator() {
+        // A path is matched as a glob against the file an event names, so a
+        // folder path matches the folder and never a file in it.
+        for yaml in [
+            lodeline_rules_basic::DEFAULTS_MACOS,
+            lodeline_rules_basic::DEFAULTS_LINUX,
+            lodeline_rules_basic::DEFAULTS_WINDOWS,
+        ] {
+            for t in parse(yaml).unwrap().targets {
+                for p in &t.paths {
+                    assert!(
+                        !p.ends_with('/') && !p.ends_with('\\'),
+                        "{}: `{p}` names a folder, which matches no file in it; write `{p}*` (or `{p}*.json` for one file type)",
+                        t.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_folder_entries_match_the_files_in_them() {
+        // Backslash is an escape for the glob matcher off Windows, so the
+        // Windows file is checked by its strings only.
+        let (yaml, home, managed) = if cfg!(target_os = "macos") {
+            (
+                lodeline_rules_basic::DEFAULTS_MACOS,
+                "/Users/alice",
+                "/Library/Application Support/ClaudeCode",
+            )
+        } else if cfg!(target_os = "linux") {
+            (
+                lodeline_rules_basic::DEFAULTS_LINUX,
+                "/home/alice",
+                "/etc/claude-code",
+            )
+        } else {
+            return;
+        };
+        let doc = parse(yaml).unwrap();
+        let globs: Vec<glob::CompiledGlob> = doc
+            .targets
+            .iter()
+            .flat_map(|t| &t.paths)
+            .map(|p| {
+                let p = match p.strip_prefix("~/") {
+                    Some(rest) => format!("{home}/{rest}"),
+                    None => p.clone(),
+                };
+                glob::CompiledGlob::new(&p).unwrap()
+            })
+            .collect();
+        for file in [
+            format!("{home}/.claude/hooks/pre.sh"),
+            format!("{home}/.claude/hooks/lib/common.sh"),
+            format!("{managed}/managed-settings.d/10-policy.json"),
+            format!("{home}/.codex/cache/codex_apps_tools/a.json"),
+            format!("{home}/.codex/cache/codex_apps_server_info/a.json"),
+        ] {
+            assert!(
+                globs
+                    .iter()
+                    .any(|g| g.is_match(std::path::Path::new(&file))),
+                "no built-in watch path matches {file}"
+            );
+        }
+    }
+
+    #[test]
     fn policy_document_continue_workspaces_round_trip() {
         let yaml = r#"version: 1
 host_id_strategy: machine_id
