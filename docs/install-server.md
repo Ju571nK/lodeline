@@ -868,8 +868,8 @@ starts with `{` and wraps them:
 ```
 
 If the file does not load when the server starts, the server does not start: it
-exits with an error that names `enroll_mint.verifiers` and ends with the parse
-error, and systemd restarts it every 5 seconds, so look for that error in
+exits with an error that names `enroll_mint.verifiers` and gives the reason
+below it, such as the parse error, and systemd restarts it every 5 seconds, so look for that error in
 `journalctl -u lodeline-server`. On a packaged server the file
 belongs to the service account and is mode 0600, because the server refuses a file
 that is readable by others or owned by another account:
@@ -881,8 +881,8 @@ sudo install -o lodeline -g lodeline -m 0600 enroll-mint-verifiers.json /etc/lod
 The file is read again at the next request after it changes. Write a new file and
 rename it over the old one. A file that no longer loads makes every mint answer
 404 until a valid one is there. At most 2 unexpired entries are allowed, so a new
-bearer can overlap the old one while the console is switched over (add its entry
-to the array by hand, after a comma).
+bearer can overlap the old one while the console is switched over (add its entry, the
+object that starts at the line `{`, to the array by hand, after a comma).
 
 **The request** carries the bearer, the client certificate and the host id, which
 the caller chooses (a lowercase hyphenated version 4 UUID):
@@ -1095,12 +1095,12 @@ printf 'LODELINE_SERVER_READ_TOKEN=%s\n' "$(openssl rand -hex 32)" | sudo tee /e
 sudo systemctl edit lodeline-server
 # [Service]
 # EnvironmentFile=/etc/lodeline/server.env
-sudo systemctl restart lodeline-server
 ```
 
 `sudo cat /etc/lodeline/server.env` shows the token when you give it to the
 console. systemd reads the file as root before it starts the service, so the
-`lodeline` account needs no access to it. Do not use `Environment=` here: every
+`lodeline` account needs no access to it. Section 7 starts the server. On a server
+that already runs, restart it: `sudo systemctl restart lodeline-server`. Do not use `Environment=` here: every
 account on the host can read a unit's `Environment=` values with `systemctl show`.
 
 The `lodeline-manager` web console reads the fleet through these routes with the
