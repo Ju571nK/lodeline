@@ -1119,7 +1119,7 @@ targets:
     }
 
     #[test]
-    fn builtin_policies_watch_mcp_caches_and_local_managed_sources() {
+    fn builtin_policies_watch_managed_and_requirements_sources() {
         for yaml in [
             lodeline_rules_basic::DEFAULTS_MACOS,
             lodeline_rules_basic::DEFAULTS_LINUX,
@@ -1128,8 +1128,6 @@ targets:
             let doc = parse(yaml).unwrap();
             const CLAUDE_USER_GLOBAL: &str = "ai-guard-claude-code-user-global";
             for (leaf, id_prefix) in [
-                ("codex_apps_tools", ""),
-                ("codex_apps_server_info", ""),
                 ("managed-settings.json", ""),
                 ("managed-settings.d", ""),
                 ("requirements.toml", ""),
@@ -1189,6 +1187,25 @@ targets:
     }
 
     #[test]
+    fn builtin_policies_leave_out_the_codex_apps_cache_folders() {
+        for yaml in [
+            lodeline_rules_basic::DEFAULTS_MACOS,
+            lodeline_rules_basic::DEFAULTS_LINUX,
+            lodeline_rules_basic::DEFAULTS_WINDOWS,
+        ] {
+            for t in parse(yaml).unwrap().targets {
+                for p in &t.paths {
+                    assert!(
+                        !p.contains("codex_apps_"),
+                        "{}: `{p}` is a Codex apps cache folder, left out on purpose: Codex rewrites it at every start, also with the same bytes, and the agent records a file_change event for such a write. Decide what a write with unchanged content records before listing it",
+                        t.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn builtin_folder_entries_match_the_files_in_them() {
         // Backslash is an escape for the glob matcher off Windows, so the
         // Windows file is checked by its strings only.
@@ -1224,8 +1241,6 @@ targets:
             format!("{home}/.claude/hooks/pre.sh"),
             format!("{home}/.claude/hooks/lib/common.sh"),
             format!("{managed}/managed-settings.d/10-policy.json"),
-            format!("{home}/.codex/cache/codex_apps_tools/a.json"),
-            format!("{home}/.codex/cache/codex_apps_server_info/a.json"),
         ] {
             assert!(
                 globs
@@ -1324,16 +1339,6 @@ targets:
                 r"%ProgramData%\OpenAI\Codex\requirements.toml",
                 r"C:\ProgramData\OpenAI\Codex\requirements.toml",
                 "",
-            ),
-            (
-                r"%USERPROFILE%\.codex\cache\codex_apps_tools\*.json",
-                r"C:\Users\alice\.codex\cache\codex_apps_tools\a.json",
-                r"C:\Users\alice\.codex\cache\codex_apps_tools",
-            ),
-            (
-                r"%USERPROFILE%\.codex\cache\codex_apps_server_info\*.json",
-                r"C:\Users\alice\.codex\cache\codex_apps_server_info\a.json",
-                r"C:\Users\alice\.codex\cache\codex_apps_server_info",
             ),
         ];
         let doc = parse(lodeline_rules_basic::DEFAULTS_WINDOWS).unwrap();
