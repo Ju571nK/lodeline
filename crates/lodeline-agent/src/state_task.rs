@@ -8,7 +8,6 @@ use lodeline_core::event::{
     Event, Evidence, FileChangeKind, Severity, SourceKind, Subject, AGENT_VERSION, SCHEMA_VERSION,
 };
 use lodeline_core::state::HashCache;
-use lodeline_core::stats::Stats;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +28,6 @@ pub async fn run(
     tx_sink: mpsc::Sender<CommittableEvent>,
     cache: Arc<Mutex<HashCache>>,
     host_id: String,
-    stats: Arc<Stats>,
 ) {
     while let Some(hashed) = rx.recv().await {
         let path = hashed.norm.path.clone();
@@ -59,8 +57,6 @@ pub async fn run(
             evidence,
             target_id: Some(hashed.norm.target_id.clone()),
         };
-
-        stats.record_emit("file_change");
 
         let committable = CommittableEvent {
             event,
