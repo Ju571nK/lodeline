@@ -7,6 +7,56 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-11-11
+
+**Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to
+enroll hosts from it. A v0.14.5 sender that is set to renew uses `POST /v1/renew`, which a v0.14.4
+server already has, so the server needs this release only for the mint route. A v0.14.4 server still
+works with a v0.14.5 sender, agent and console. Against a server older than v0.14.4 the renew route
+answers 404: a sender that is set to renew logs an error line for each refused attempt, from 60% to
+75% of the certificate's validity until it expires (once every six hours for a 30 day certificate),
+keeps delivering events, and the host must be enrolled again before its certificate expires. This
+release adds no event kind and no reason kind, changes no event on the wire and no fleet API
+response (`lodeline-fleet-api` gains a `mint` module, which only the server and the console use). No
+package script, unit file, tmpfiles entry or SELinux module changed, so the packaged policy is the
+one of v0.14.4. No package or release asset is added or removed, the console is still an archive
+with no OS package, and `lodeline-proxy` is still not a release asset.
+
+**Hosts.** A sender renews its certificate only where `sender.yaml` has
+`renew_client_cert: true`, which `lodeline-sender enroll` writes from this version. It renews on
+Linux and macOS, between 60% and 75% of the certificate's validity. A host enrolled with a v0.14.4
+`enroll` does not have the line: add it and restart the sender, or its certificate still ends after
+`enroll_cert_days` and the host must be enrolled again (`enroll` run again on such a host keeps the
+file and prints what to set). A sender without the line does nothing about certificates, as a
+v0.14.4 sender did; if it has a client certificate, a client key and a server CA set, it logs one
+`info` line at start saying so. A fleet whose certificates you make yourself sees only that line.
+Adding the line does not help such a host, because the server renews only certificates its
+enrollment CA issued: it joins by enrolling once. If a sender that is set to renew cannot (the
+sender account cannot create files in the directory of `client.key` or of `client.crt`, it does not
+own `client.key`, the key is not PKCS#8, or the key and the certificate do not match), it logs an
+error that says why when it starts, repeats a line at most once an hour, and keeps delivering
+events. Renewal is off on Windows.
+
+**Server and console.** `POST /v1/enroll-tokens` is off unless `enroll_mint:` is in
+`server.yaml`, so an existing `server.yaml` needs no change. A server older than v0.14.5 ignores
+the key without a word. With the key, the server does not start unless the other settings in
+`docs/install-server.md` section 3.6 are in place. `lodeline-server proxy verifier-new` takes
+`--scope enroll` and `--caller-cert`, and its stderr advice text changed; the entry it prints and
+the stdout bearer did not, and the guide's `sed` command reads only the entry. The console
+makes enrollment files only when all eight settings are set (the three `LODELINE_ENROLL_MINT_*`,
+the four `LODELINE_ENROLL_FILE_*` and `LODELINE_PUBLIC_ORIGIN`). With none set it behaves as before,
+and its Enroll a host page says it cannot
+make files yet and names the settings; a partial set stops the console at start. A console that
+does not use enrollment sets nothing new. A v0.14.5 console against an older server answers
+`enroll_unavailable` for enrollment and reads the fleet as before, and an older console works
+against a v0.14.5 server. The console's only write to the server is the mint request, made with its
+own credential; it was read-only before.
+
+**Read token.** `docs/install-server.md` ("Read API token", in section 5) now puts the token in a
+root-only `EnvironmentFile`. A server whose token is in an `Environment=` drop-in has it readable
+by every account on the host through `systemctl show`. Move it to a root-only file as that
+section shows and restart the server. Nothing breaks if you do not.
+
 ### Added
 
 - The fleet console makes a host's enrollment file (`GET /api/v1/enrollment` and

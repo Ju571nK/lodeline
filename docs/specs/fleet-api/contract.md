@@ -1623,7 +1623,7 @@ Consumer implementation:
 - The console server relays `evidence` as raw JSON, so `user` reaches the SPA
   unchanged.
 
-### 14.15 Enrollment token mint (after v0.14.4, #574 and #553)
+### 14.15 Enrollment token mint (since v0.14.5, #574 and #553)
 
 This is not part of the fleet read API and adds nothing to its schema. The server
 gains one management route on its main (mutual TLS) listener, which the console uses to
