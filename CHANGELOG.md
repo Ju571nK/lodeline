@@ -9,10 +9,26 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- `lodeline-sender doctor` prints a `certificate renewal` line after the client certificate
+  lines. It reads the decision the sender takes at start: `[INFO]` `off` where `sender.yaml` has
+  a whole identity and no `renew_client_cert` (the state to expect where you make the
+  certificates yourself), `[WARN]` where the line is set and a path is missing, `[INFO]` on
+  Windows, `[OK]` `on` otherwise. It makes no network call and does not read the key, so it does
+  not repeat the ownership and key form checks the sender makes at start. (#581)
 - AI Guard reports two more Claude Code controls from the managed settings files:
   `permissions.blockReadsOutsideWorkingDirectories` and
   `permissions.blockWritesOutsideWorkingDirectories`, each when its value is `true`. No score, reason
   kind or event field changes. (#582, #539)
+
+### Changed
+
+- `lodeline-server` logs one warning at start when `host_allowlist_path` is set and the file does
+  not exist. The server starts as before, with no restriction; the line says so and that the
+  server reads the file at start only. (#581)
+- `docs/install-server.md` section 3 says where the host id for a certificate you make yourself
+  comes from (`lodeline show host-id`, `lodeline init-host-id`) and that the id goes into the
+  allowlist file first. Section 3.5 names the `doctor` line, and section 3.1 and
+  `config/server.example.yaml` say what a configured allowlist path without a file means. (#581)
 
 ### Fixed
 
@@ -20,8 +36,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `~/.claude/skills/<name>/SKILL.md`, `~/.claude/agents/` or a repository's `.claude/skills` or
   `.claude/agents`. Before, no watch target covered these files, so the agent read them only at the
   next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
-  for each edit (hashes and sizes, never file text). Symlinked skill folders are not followed by the
-  watcher, and the watcher on Linux uses one inotify watch per subfolder. (#582, #539)
+  for each edit (hashes and sizes, never file text). Limits: at start the watcher scans no existing file. A folder
+  that appears after the agent started, or one that a policy reload adds, is scanned once, and files
+  that match no watched pattern are dropped. Events for a file reached through a symbolic link to a
+  single skill, or through a folder linked after the agent started, do not match; the next heartbeat
+  reads such files. A `skills` folder that is itself a link and exists at start works. On Linux the
+  watcher uses one inotify watch per subfolder. When the kernel refuses a watch (the per-user
+  inotify limit) the agent goes on, the folder keeps the watches already placed and is tried again
+  every few seconds, and this is logged at debug level only; files without a watch are read at the
+  next heartbeat. (#582, #539)
 
 ## [0.14.5] - 2026-11-11
 
