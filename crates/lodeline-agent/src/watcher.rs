@@ -2,7 +2,7 @@
 
 use lodeline_core::event::FileChangeKind;
 use notify::{
-    event::{EventKind as NEvent, ModifyKind, RenameMode},
+    event::{CreateKind, EventKind as NEvent, ModifyKind, RenameMode},
     Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use std::collections::BTreeMap;
@@ -270,7 +270,7 @@ async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<Raw
         return;
     };
     if meta.is_file() {
-        let _ = replay_file(root, &tx).await;
+        let _ = catch_up_file(root, &tx).await;
         return;
     }
     if !meta.is_dir() {
@@ -292,7 +292,7 @@ async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<Raw
                     continue;
                 };
                 if kind.is_file() {
-                    if !replay_file(entry.path(), &tx).await {
+                    if !catch_up_file(entry.path(), &tx).await {
                         return;
                     }
                 } else if recursive && kind.is_dir() {
@@ -316,7 +316,7 @@ async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<Raw
     }
 }
 
-async fn replay_file(path: PathBuf, tx: &mpsc::Sender<RawFsEvent>) -> bool {
+async fn catch_up_file(path: PathBuf, tx: &mpsc::Sender<RawFsEvent>) -> bool {
     // A current-state observation, not a reconstructed creation time.
     tx.send(RawFsEvent {
         path,
@@ -343,6 +343,8 @@ pub fn spawn_watcher(
     let tx = Arc::new(tx);
     let tx_for_cb = tx.clone();
     let handle_for_cb = runtime_handle.clone();
+    // The polling backend finds files in new folders by itself.
+    let catch_up_new_folders = cfg!(target_os = "linux") && poll_interval.is_none();
 
     let on_event = move |res: notify::Result<Event>| {
         let event = match res {
@@ -353,6 +355,23 @@ pub fn spawn_watcher(
             }
         };
         tracing::trace!(kind = ?event.kind, paths = ?event.paths, "raw notify event");
+        if catch_up_new_folders {
+            // inotify places the watch on a new folder only after this callback
+            // returns, so a file already in it gives no event. List it now, before
+            // the watch exists. A file gets one event, except that a subfolder
+            // created after the new folder's watch but before notify walks it is
+            // listed again by its own creation event, and a file in it may then
+            // get a kernel event too (same content).
+            for file in new_folders(&event)
+                .iter()
+                .flat_map(|d| files_in_new_folder(d))
+            {
+                let tx = tx_for_cb.clone();
+                handle_for_cb.spawn(async move {
+                    catch_up_file(file, &tx).await;
+                });
+            }
+        }
         let mapped = map_notify_event(&event);
         for raw in mapped {
             tracing::debug!(path = %raw.path.display(), kind = ?raw.kind, "fs event");
@@ -389,6 +408,53 @@ pub fn spawn_watcher(
     }
     let _ = handle.rebuild_roots(false);
     Ok((rx, handle))
+}
+
+/// Most entries (files and folders) one new-folder listing visits. The root catch-up has no such bound.
+const NEW_FOLDER_ENTRY_LIMIT: usize = 512;
+
+/// Directories that appeared under a watched folder, by creation or by a move in.
+fn new_folders(event: &Event) -> Vec<PathBuf> {
+    match event.kind {
+        NEvent::Create(CreateKind::Folder) => event.paths.clone(),
+        NEvent::Modify(ModifyKind::Name(RenameMode::To)) => event
+            .paths
+            .iter()
+            .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Files in `dir` and its subfolders, found by visiting at most
+/// `NEW_FOLDER_ENTRY_LIMIT` entries, files and folders alike. Symbolic links are
+/// not followed, as in `catch_up_files`.
+fn files_in_new_folder(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut visited = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(folder) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if visited == NEW_FOLDER_ENTRY_LIMIT {
+                tracing::warn!(path = %dir.display(), limit = NEW_FOLDER_ENTRY_LIMIT, "new folder has more entries than the catch-up limit; files not listed wait for their own events");
+                return files;
+            }
+            visited += 1;
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files
 }
 
 fn os_backend_name() -> &'static str {
@@ -764,6 +830,98 @@ mod tests {
         })
         .await
         .expect("shutdown retained a raw-event sender");
+    }
+
+    #[test]
+    fn new_folder_listing_is_bounded_and_does_not_follow_links() {
+        let td = TempDir::new().unwrap();
+        let dir = td.path().join("new");
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::write(dir.join("top.md"), b"x").unwrap();
+        fs::write(dir.join("a/b/deep.md"), b"x").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(td.path(), dir.join("loop")).unwrap();
+            std::os::unix::fs::symlink(dir.join("top.md"), dir.join("link.md")).unwrap();
+        }
+        let mut found = files_in_new_folder(&dir);
+        found.sort();
+        assert_eq!(found, [dir.join("a/b/deep.md"), dir.join("top.md")]);
+
+        let many = td.path().join("many");
+        fs::create_dir(&many).unwrap();
+        for i in 0..NEW_FOLDER_ENTRY_LIMIT + 5 {
+            fs::write(many.join(format!("{i}.md")), b"x").unwrap();
+        }
+        assert_eq!(files_in_new_folder(&many).len(), NEW_FOLDER_ENTRY_LIMIT);
+
+        let wide = td.path().join("wide");
+        for i in 0..NEW_FOLDER_ENTRY_LIMIT + 5 {
+            fs::create_dir_all(wide.join(i.to_string())).unwrap();
+            fs::write(wide.join(i.to_string()).join("f.md"), b"x").unwrap();
+        }
+        assert!(files_in_new_folder(&wide).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn kinds_for(rx: &mut mpsc::Receiver<RawFsEvent>, file: &Path) -> Vec<FileChangeKind> {
+        let mut kinds = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(1500), async {
+            while let Some(event) = rx.recv().await {
+                if event.path == file {
+                    kinds.push(event.kind);
+                }
+            }
+        })
+        .await;
+        kinds
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_moved_in_with_a_file_gives_one_event_for_it() {
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let staged = td.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("SKILL.md"), b"x").unwrap();
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            64,
+            None,
+        )
+        .unwrap();
+        fs::rename(&staged, root.join("demo")).unwrap();
+        let kinds = kinds_for(&mut rx, &root.join("demo/SKILL.md")).await;
+        assert_eq!(kinds, [FileChangeKind::Modified]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_moved_in_just_after_its_new_folder_gives_one_event() {
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let staged = td.path().join("SKILL.md");
+        fs::write(&staged, b"x").unwrap();
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            64,
+            None,
+        )
+        .unwrap();
+        let folder = root.join("demo");
+        fs::create_dir(&folder).unwrap();
+        fs::rename(&staged, folder.join("SKILL.md")).unwrap();
+        let kinds = kinds_for(&mut rx, &folder.join("SKILL.md")).await;
+        assert_eq!(
+            kinds.len(),
+            1,
+            "one move must give one event, got {kinds:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

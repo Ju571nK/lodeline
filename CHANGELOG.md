@@ -44,10 +44,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   watcher uses one inotify watch per subfolder. When the kernel refuses a watch (the per-user
   inotify limit) the agent goes on, the folder keeps the watches already placed and is tried again
   every few seconds, and this is logged at debug level only; files without a watch are read at the
-  next heartbeat. On Linux, a folder created under a watched root gets its watch only after the
-  creation event is read, so a file written into it at once (a skill copied in with `cp -r`, a
-  checkout or an unpack) may produce no event; the next heartbeat reads it. Skills below a
-  subfolder of a project and skills of `--add-dir` folders are read but not watched. (#582, #539)
+  next heartbeat. On Linux, when the agent reads the creation of a folder under a watched root, or
+  of one moved in, it also reads the files already in it, after visiting at most 512 files and
+  folders per new folder (a skill copied in with `cp -r`, a checkout or an unpack); a file written
+  during the short time (usually milliseconds, longer for a very large folder) between that read and
+  the placing of the watch may still wait for the next heartbeat. Skills below a
+  subfolder of a project and skills of `--add-dir` folders are read but not watched. (#582, #539, #586)
 - AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
   (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude
   Code managed settings drop-in folder (`managed-settings.d/*.json`). Before, these entries named
