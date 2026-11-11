@@ -32,7 +32,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - `docs/install-macos-agent.md` and `docs/install-windows-agent.md` say that `lodeline show paths`
   prints a path with a wildcard as the pattern, not the files it matches, and name two folders the
   agent creates: `state.mcp-baselines` next to the state database, and on macOS and Linux the
-  socket folder under `$TMPDIR` that a non-root agent uses when `XDG_RUNTIME_DIR` is not set. (#590)
+  socket folder under `$TMPDIR` that a non-root agent uses when `XDG_RUNTIME_DIR` is not set. The
+  example policy in section 3 of the macOS guide gains the `description` the agent requires. (#590)
 
 ### Fixed
 

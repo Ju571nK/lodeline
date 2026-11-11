@@ -86,6 +86,7 @@ version: 1
 host_id_strategy: machine_id
 targets:
   - id: team-mcp-allowlist
+    description: Example MCP allowlist file
     tier: critical
     platform: any
     paths: ["~/.config/example/mcp-allowlist.json"]
@@ -111,7 +112,7 @@ The agent creates the folder with the permissions your umask gives, and sets eac
 owner and group only. The MCP baselines folder is named after the state database with the
 extension `mcp-baselines`, so `--state-db /x/foo.db` gives `/x/foo.mcp-baselines/`. It appears
 when the agent first records the tools of an MCP server (read from the Codex tool cache) and
-holds one file per server, with server and tool names, hashes and property names, and no
+holds one file per server and home, with server and tool names, hashes and property names, and no
 descriptions, schema values or prompts. Each file is readable by its owner only; keep the
 folder as protected as the state database.
 
@@ -200,8 +201,8 @@ lodeline show risk           # AI Guard risk score per tool (queries the running
 lodeline show stats          # live heartbeat from the running daemon
 ```
 
-`lodeline show paths` writes each target's paths once per user, with `~` expanded to that user's
-home. A path with a wildcard prints as the pattern (`~/.claude/skills/*/SKILL.md` stays a
+`lodeline show paths` writes a path that starts with `~` once per user, with `~` expanded to that
+user's home, and any other path once. A path with a wildcard prints as the pattern (`~/.claude/skills/*/SKILL.md` stays a
 pattern); it does not list the files the pattern matches.
 
 `lodeline show risk` is the core AI-SPM read: it scores each detected AI tool
@@ -298,10 +299,10 @@ dead_letter_dir: "/Users/<you>/.local/state/lodeline/dead-letter"
 # server reject the entire batch with host_id_payload_mismatch.
 host_id: "<agent host_id from section 6>"
 
-# Control IPC — must equal the agent's control socket. As your user that is the
-# auto fallback (e.g. /tmp/lodeline-<uid>/control.sock), or whatever you passed to
-# `lodeline --control-socket`.
-agent_control: "/tmp/lodeline-501/control.sock"
+# Control IPC: must equal the agent's control socket. As your user on macOS that is
+# under $TMPDIR (see the path table above; run `echo $TMPDIR` for the folder, and replace
+# <uid> with `id -u`), unless you passed `lodeline --control-socket`, which overrides it.
+agent_control: "/var/folders/xx/yyyy/T/lodeline-<uid>/control.sock"
 ```
 
 Replace `<you>` with your user name. The sender does not expand `~` or `$HOME` in
