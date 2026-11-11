@@ -60,7 +60,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `codex_apps_server_info/`) are not watch targets, as in every release so far, where their entries
   matched no file. Codex rewrites both folders each time it fetches its tool list, at start and on
   a refresh, also when the bytes are the same, and each write would record a `file_change` event.
-  The Codex parser reads both folders at each assessment. (#583, #582, #584)
+  The Codex parser reads both folders at each assessment. A change there is read at the next agent
+  start or heartbeat (24 hours), not at once. (#583, #582, #584)
 
 ## [0.14.5] - 2026-11-11
 

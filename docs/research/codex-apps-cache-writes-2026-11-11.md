@@ -1,9 +1,8 @@
 # Codex apps cache writes
 
-Checked 2026-11-11 against `openai/codex` tag `rust-v0.167.0`, the version
-installed here (`codex --version` prints `codex-cli 0.167.0`). The files read
-are identical on `main` (commit `c1934fc9`) the same day. Only static reads
-were run; no Codex command other than `--version` was run.
+Checked 2026-11-11 against `openai/codex` tag `rust-v0.167.0` (`codex-cli 0.167.0`).
+The files read are identical on `main` (commit `c1934fc9`) the same day. Only
+static reads were run.
 
 ## What Codex does
 
