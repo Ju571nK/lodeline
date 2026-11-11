@@ -1147,19 +1147,29 @@ async fn claude_project_loop_md_edit_triggers_reassessment() {
 }
 
 /// #539: a skill or subagent file created in a discovered repository's
-/// `.claude/skills` or `.claude/agents`, folders that do not exist at boot,
-/// reaches the project parser through its per-repository target.
+/// `.claude/skills` or `.claude/agents` reaches the project parser through its
+/// per-repository target. With the folder present at boot only the new file
+/// (and the skill's own folder) is written afterwards, so the event can match
+/// only the target's file pattern. With the folder missing at boot the folder
+/// itself is also seen through the settings target, so that case proves only
+/// that the new target's root is picked up once it appears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claude_project_skill_and_agent_files_trigger_reassessment() {
     let _home_guard = HOME_LOCK.lock().await;
-    for rel in ["skills/demo/SKILL.md", "agents/demo.md"] {
+    let cases = [
+        ("skills/demo/SKILL.md", Some("skills")),
+        ("agents/demo.md", Some("agents")),
+        ("skills/demo/SKILL.md", None),
+        ("agents/demo.md", None),
+    ];
+    for (rel, folder_at_boot) in cases {
         let td = tempfile::TempDir::new().unwrap();
         let home = dunce::canonicalize(td.path()).unwrap();
         // SAFETY: process-global write; serialized via HOME_LOCK above.
         std::env::set_var("HOME", &home);
         let workspace = home.join("work");
         let repo = workspace.join("repo");
-        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude").join(folder_at_boot.unwrap_or(""))).unwrap();
         std::fs::write(
             repo.join(".claude").join("settings.json"),
             r#"{"permissions":{"allow":["Bash(*)"]}}"#,
@@ -1182,6 +1192,8 @@ async fn claude_project_skill_and_agent_files_trigger_reassessment() {
 
         let file = repo.join(".claude").join(rel);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // Let the recursive watch cover the new skill folder before the file lands.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         std::fs::write(&file, COMPONENT_WITH_BROAD_HOOK).unwrap();
         let found = agent
             .wait_for_event(
@@ -1192,7 +1204,7 @@ async fn claude_project_skill_and_agent_files_trigger_reassessment() {
         agent.join.abort();
         assert!(
             found.is_some(),
-            "no reassessment after creating .claude/{rel}"
+            "no reassessment after creating .claude/{rel} (folder at boot: {folder_at_boot:?})"
         );
     }
 }

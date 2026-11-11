@@ -1808,7 +1808,10 @@ pub(crate) fn push_claude_code_synthetic_targets(
     });
     effective.targets.push(lodeline_core::policy::WatchTarget {
         id: format!("claude_code-skills-agents-{h}"),
-        description: format!("#539 synthetic skills and agents: {}", repo_root.display()),
+        description: format!(
+            "Phase 3b.6.2 synthetic skills and agents: {}",
+            repo_root.display()
+        ),
         tier: lodeline_core::policy::Tier::Critical,
         platform: lodeline_core::policy::Platform::Any,
         paths: vec![
