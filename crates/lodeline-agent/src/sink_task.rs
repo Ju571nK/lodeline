@@ -126,4 +126,66 @@ mod tests {
         });
         assert_eq!(evidence_kind_str(&ev), "possible_hook_activity_silent");
     }
+
+    #[tokio::test]
+    async fn one_file_change_is_counted_once() {
+        use crate::hasher::HashedEvent;
+        use crate::normalizer::NormalizedEvent;
+        use lodeline_core::event::{EvidenceQuality, FileChangeKind};
+        use lodeline_core::policy::Tier;
+
+        struct NullSink;
+        impl EventSink for NullSink {
+            fn write(
+                &mut self,
+                _: &lodeline_core::event::Event,
+            ) -> Result<(), lodeline_core::sink::SinkError> {
+                Ok(())
+            }
+            fn flush_durable(&mut self) -> Result<(), lodeline_core::sink::SinkError> {
+                Ok(())
+            }
+            fn shutdown(&mut self) -> Result<(), lodeline_core::sink::SinkError> {
+                Ok(())
+            }
+        }
+        let td = tempfile::tempdir().unwrap();
+        let cache = Arc::new(Mutex::new(
+            HashCache::open(&td.path().join("state.db")).unwrap(),
+        ));
+        let stats = Arc::new(Stats::default());
+        let (tx_hashed, rx_hashed) = mpsc::channel(1);
+        let (tx_sink, rx_sink) = mpsc::channel(1);
+        let state = tokio::spawn(crate::state_task::run(
+            rx_hashed,
+            tx_sink,
+            cache.clone(),
+            "host".into(),
+        ));
+        let sink = tokio::spawn(run(NullSink, rx_sink, cache, stats.clone()));
+        tx_hashed
+            .send(HashedEvent {
+                norm: NormalizedEvent {
+                    path: td.path().join("watched.json"),
+                    kind: FileChangeKind::Modified,
+                    rename_from: None,
+                    target_id: "t".into(),
+                    tier: Tier::Standard,
+                },
+                after_hash: Some("h".into()),
+                size_after: Some(1),
+                recheck_hash: None,
+                quality: EvidenceQuality::Definitive,
+                debounced_from: None,
+            })
+            .await
+            .unwrap();
+        drop(tx_hashed);
+        state.await.unwrap();
+        sink.await.unwrap().unwrap();
+
+        let snap = stats.snapshot();
+        assert_eq!(snap.events_emitted_total, 1);
+        assert_eq!(snap.events_by_kind["file_change"], 1);
+    }
 }
