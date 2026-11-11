@@ -331,7 +331,7 @@ jobs:
 
           ## Web console
 
-          `lodeline-manager-<version>-<target>.tar.gz` (`.zip` on Windows) holds the read-only fleet
+          `lodeline-manager-<version>-<target>.tar.gz` (`.zip` on Windows) holds the fleet
           web console, `lodeline-manager`, with its web UI built in, for the same five targets. It
           reads the fleet from a `lodeline-server` with the read API on. It reads its configuration
           from environment variables only, and `.env.example` in the archive lists them. Run it

@@ -134,6 +134,10 @@ fn build_state(cfg: &ServerConfig) -> Result<SharedState> {
 
     let allowlist =
         allowlist::load(cfg.host_allowlist_path.as_deref()).context("load host allowlist")?;
+    if let Some(w) = allowlist::missing_file_warning(cfg.host_allowlist_path.as_deref(), &allowlist)
+    {
+        tracing::warn!("{w}");
+    }
     let high_water = HighWater::load(&cfg.high_water_path()).context("load high-water map")?;
 
     let read_token = ReadToken::from_env();

@@ -7,6 +7,25 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- `lodeline-sender doctor` prints a `certificate renewal` line after the client certificate
+  lines. It reads the decision the sender takes at start: `[INFO]` `off` where `sender.yaml` has
+  a whole identity and no `renew_client_cert` (the state to expect where you make the
+  certificates yourself), `[WARN]` where the line is set and a path is missing, `[INFO]` on
+  Windows, `[OK]` `on` otherwise. It makes no network call and does not read the key, so it does
+  not repeat the ownership and key form checks the sender makes at start. (#581)
+
+### Changed
+
+- `lodeline-server` logs one warning at start when `host_allowlist_path` is set and the file does
+  not exist. The server starts as before, with no restriction; the line says so and that the
+  server reads the file at start only. (#581)
+- `docs/install-server.md` section 3 says where the host id for a certificate you make yourself
+  comes from (`lodeline show host-id`, `lodeline init-host-id`) and that the id goes into the
+  allowlist file first. Section 3.5 names the `doctor` line, and section 3.1 and
+  `config/server.example.yaml` say what a configured allowlist path without a file means. (#581)
+
 ## [0.14.5] - 2026-11-11
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to

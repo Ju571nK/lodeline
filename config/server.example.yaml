@@ -19,9 +19,10 @@ policy_bundle_path: "/var/lib/lodeline-server/signed-policy.json"
 # client_ca_path: "/etc/lodeline/client-ca.pem"
 
 # Optional — restrict accepted host_ids. JSON: {"hosts": ["uuid-a", "uuid-b"]}.
-# Without this, every authenticated client is accepted. Enrollment rewrites this
-# file, so keep it where the service can write: the unit makes only
-# /var/lib/lodeline-server and /var/log/lodeline-server writable.
+# Without this, every authenticated client is accepted, and so it is when the path
+# is set but the file does not exist (the server logs a warning at start).
+# Enrollment rewrites this file, so keep it where the service can write: the unit
+# makes only /var/lib/lodeline-server and /var/log/lodeline-server writable.
 # host_allowlist_path: "/var/lib/lodeline-server/host-allowlist.json"
 
 # Optional — per-host event-id high-water file (at-least-once dedup). If

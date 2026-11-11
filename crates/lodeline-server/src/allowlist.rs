@@ -51,6 +51,22 @@ pub fn load(path: Option<&Path>) -> Result<Option<HashSet<String>>, AllowlistErr
     Ok(Some(file.hosts.into_iter().collect()))
 }
 
+/// The start-up warning for a configured path whose file does not exist: `load` gave
+/// `None` for a `Some` path only then. The list is read once at start, so a created
+/// file takes effect at the next start.
+pub fn missing_file_warning(
+    path: Option<&Path>,
+    loaded: &Option<HashSet<String>>,
+) -> Option<String> {
+    let (path, None) = (path?, loaded) else {
+        return None;
+    };
+    Some(format!(
+        "host_allowlist_path {} does not exist, so the host allowlist is not in force and refuses no host_id. Create the file and restart the server to enforce it",
+        path.display()
+    ))
+}
+
 /// Returns `true` if `host_id` is permitted given `allowlist` (`None` ⇒ all permitted).
 pub fn permits(allowlist: &Option<HashSet<String>>, host_id: &str) -> bool {
     match allowlist {
@@ -145,6 +161,18 @@ mod tests {
         let al = load(Some(&dir.path().join("missing.json"))).unwrap();
         assert!(al.is_none());
         assert!(permits(&al, "anything"));
+    }
+
+    #[test]
+    fn a_configured_path_without_a_file_gets_a_warning() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("hosts.json");
+        let warn = |p: Option<&Path>| missing_file_warning(p, &load(p).unwrap());
+        let text = warn(Some(&p)).unwrap();
+        assert!(text.contains(&p.display().to_string()) && text.contains("does not exist"));
+        assert!(warn(None).is_none());
+        std::fs::write(&p, r#"{"hosts":[]}"#).unwrap();
+        assert!(warn(Some(&p)).is_none());
     }
 
     #[test]

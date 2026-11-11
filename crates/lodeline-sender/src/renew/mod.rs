@@ -68,39 +68,70 @@ impl Limiter {
     }
 }
 
-/// The files renewal works on: only when `renew_client_cert` is set (`enroll` sets it)
-/// and the config names a whole mutual TLS identity and the CA that signs the new
-/// certificate. Not on Windows, where renewal is off.
-pub fn paths(c: &crate::config::SenderConfig) -> Option<Paths> {
+/// What the sender does about renewing its client certificate, decided from the config
+/// alone. [`paths`] logs it at start and `lodeline-sender doctor` prints it.
+pub enum Renewal {
+    /// No whole mutual TLS identity and `renew_client_cert` not set: nothing to say.
+    Silent,
+    /// `renew_client_cert` is set but these config keys are missing.
+    Incomplete(Vec<&'static str>),
+    Windows,
+    /// The identity is whole and `renew_client_cert` is not set.
+    Off,
+    On(Paths),
+}
+
+pub fn decide(c: &crate::config::SenderConfig) -> Renewal {
     let (Some(crt), Some(key), Some(ca)) =
         (&c.client_cert_path, &c.client_key_path, &c.server_ca_path)
     else {
-        if c.renew_client_cert {
-            let missing: Vec<&str> = [
+        if !c.renew_client_cert {
+            return Renewal::Silent;
+        }
+        return Renewal::Incomplete(
+            [
                 ("client_cert_path", c.client_cert_path.is_none()),
                 ("client_key_path", c.client_key_path.is_none()),
                 ("server_ca_path", c.server_ca_path.is_none()),
             ]
             .into_iter()
             .filter_map(|(name, gone)| gone.then_some(name))
-            .collect();
+            .collect(),
+        );
+    };
+    if cfg!(windows) {
+        Renewal::Windows
+    } else if !c.renew_client_cert {
+        Renewal::Off
+    } else {
+        Renewal::On(Paths::new(crt, key, ca))
+    }
+}
+
+/// The files renewal works on: only when `renew_client_cert` is set (`enroll` sets it)
+/// and the config names a whole mutual TLS identity and the CA that signs the new
+/// certificate. Not on Windows, where renewal is off.
+pub fn paths(c: &crate::config::SenderConfig) -> Option<Paths> {
+    match decide(c) {
+        Renewal::Silent => None,
+        Renewal::Incomplete(missing) => {
             tracing::warn!(
                 "renew_client_cert is set but {} is missing from sender.yaml, so the sender does not renew its certificate",
                 missing.join(", ")
             );
+            None
         }
-        return None;
-    };
-    if cfg!(windows) {
-        tracing::info!("certificate renewal is not supported on Windows yet");
-        None
-    } else if !c.renew_client_cert {
-        tracing::info!(
-            "this sender does not renew its client certificate: renew_client_cert is not set in sender.yaml (`lodeline-sender enroll` sets it)"
-        );
-        None
-    } else {
-        Some(Paths::new(crt, key, ca))
+        Renewal::Windows => {
+            tracing::info!("certificate renewal is not supported on Windows yet");
+            None
+        }
+        Renewal::Off => {
+            tracing::info!(
+                "this sender does not renew its client certificate: renew_client_cert is not set in sender.yaml (`lodeline-sender enroll` sets it)"
+            );
+            None
+        }
+        Renewal::On(p) => Some(p),
     }
 }
 
@@ -416,6 +447,50 @@ mod tests {
             policy_poll_interval: std::time::Duration::from_secs(1),
             host_id: None,
             renew_client_cert: renew,
+        }
+    }
+
+    #[test]
+    fn doctor_line_agrees_with_the_decision() {
+        use lodeline_diag::Level;
+        let line =
+            |c: &crate::config::SenderConfig| crate::doctor::renewal(c).map(|k| (k.level, k.text));
+        let mut none = config(false, true);
+        none.client_cert_path = None;
+        none.client_key_path = None;
+        assert!(matches!(decide(&none), Renewal::Silent));
+        assert!(line(&none).is_none());
+        let mut half = config(false, false);
+        half.server_ca_path = None;
+        assert!(matches!(decide(&half), Renewal::Silent));
+        assert!(line(&half).is_none());
+
+        let incomplete = config(true, false);
+        assert!(matches!(decide(&incomplete), Renewal::Incomplete(m) if m == ["server_ca_path"]));
+        assert_eq!(
+            line(&incomplete),
+            Some((Level::Warn, "certificate renewal: renew_client_cert is set but server_ca_path is missing from sender.yaml, so the sender does not renew its certificate".to_string()))
+        );
+
+        let off = config(false, true);
+        if cfg!(windows) {
+            assert!(matches!(decide(&off), Renewal::Windows));
+            assert_eq!(
+                line(&off).unwrap().1,
+                "certificate renewal: not supported on Windows yet"
+            );
+        } else {
+            assert!(matches!(decide(&off), Renewal::Off));
+            let (level, text) = line(&off).unwrap();
+            assert_eq!(level, Level::Info);
+            assert!(text.starts_with(
+                "certificate renewal: off, renew_client_cert is not set in sender.yaml"
+            ));
+            let on = config(true, true);
+            assert!(matches!(decide(&on), Renewal::On(_)));
+            let (level, text) = line(&on).unwrap();
+            assert_eq!(level, Level::Ok);
+            assert!(text.starts_with("certificate renewal: on"));
         }
     }
 
