@@ -162,6 +162,9 @@ Once the files are on the host, remove the host's key and certificate from the
 server, so that no copy of the host's private key stays on it:
 `sudo rm -f /etc/lodeline/client-hostA.key /etc/lodeline/client-hostA.crt`.
 
+The sender does not renew a certificate made this way: you make a new one before it
+expires. A host joins the sender's own renewal by enrolling once (§3.3, §3.5).
+
 **Let the server read its key.** The packaged unit runs the server as `lodeline`,
 and `openssl` made `server.key` for root. Give the group `lodeline` read access, or
 the server cannot start with mTLS. The service can then read the key and cannot
@@ -428,8 +431,9 @@ the main port, so filter it at the firewall.
 `lodeline-sender enroll <file>` enrolls one host from a single JSON file. It stores
 the host_id through the agent, makes the host's key, sends one CSR to the
 enrollment listener (§3.2) while it trusts only the CA in the file, checks the
-certificate it gets back, and writes `sender.yaml`, the server CA and the policy
-keystore. It enables and starts nothing. Run it as root on the packaged Linux
+certificate it gets back, and writes `sender.yaml` (with `renew_client_cert: true`, which turns on
+certificate renewal, §3.5), the server CA and the policy keystore. It enables and
+starts nothing. Run it as root on the packaged Linux
 layout. It is not supported on Windows yet and exits 1 there.
 
 **The file.** The `lodeline_enrollment` value is the format version. This build
@@ -608,8 +612,8 @@ accepted with a warning.
 A host that holds a certificate from `/v1/enroll` can get a new one without a
 token. `POST /v1/renew` is served on the main port, where the client certificate
 the host presents is its credential. It is on whenever enrollment is on, and it
-has no setting of its own. `lodeline-sender` calls it by itself (§3.5); the
-`curl` below shows the request for a host that does not run the sender.
+has no setting of its own. `lodeline-sender` calls it by itself on a host that
+`enroll` set up (§3.5); the `curl` below shows the request for a host that does not run the sender.
 
 The host makes a CSR for a **new key** (`lodeline-sender csr` writes both) and
 posts it. The host id is the CN of the certificate it presents, so the body has
@@ -706,11 +710,24 @@ opened before then can stay open past it until the next reconnect.
 
 ### 3.5 Certificate renewal (on the host)
 
-An enrolled host keeps its certificate and key current by itself. The running
-`lodeline-sender` reads the validity of the certificate it holds and renews between
-60% and 75% of it, at a point that depends on the host_id so that hosts enrolled
-together do not renew together. For the default 30 day certificate that is between
-day 18 and day 22. There is no setting. Renewal needs `server_ca_path`, a client
+A host that `enroll` set up keeps its certificate and key current by itself. The
+running `lodeline-sender` reads the validity of the certificate it holds and renews
+between 60% and 75% of it, at a point that depends on the host_id so that hosts
+enrolled together do not renew together. For the default 30 day certificate that is
+between day 18 and day 22.
+
+Renewal is on because `enroll` writes `renew_client_cert: true` into `sender.yaml`.
+Without that line the sender does not renew, does not touch the certificate
+directory and sends no request to `/v1/renew`. That is the case for a host whose
+`sender.yaml` was written by an older `enroll` (before v0.14.5) or by hand. If an
+earlier `enroll` issued the certificate, add `renew_client_cert: true` to `sender.yaml`
+and restart the sender. A host whose certificate you made yourself (§3) is renewed only
+after it enrolls once (§3.3), because the server refuses to renew a certificate its
+enrollment CA did not issue, so the line alone does not help. When `enroll` runs on a
+host whose `sender.yaml` lacks the line, it leaves the file as it is and prints the line
+to set.
+
+Renewal needs `server_ca_path`, a client
 certificate and a client key in `sender.yaml`, as `enroll` writes them. It also needs
 the account the sender runs as to own the live `client.key` and to be able to create
 files in the directory of the key and in the directory of the certificate (they may be
@@ -777,6 +794,8 @@ When the server refuses a renewal (403 or 404), the sender keeps `client.key.nex
 | Line | What to do |
 |---|---|
 | `renewed the client certificate and key` | Nothing. |
+| `this sender does not renew its client certificate: renew_client_cert is not set in sender.yaml` | Nothing, if the certificate is one you make yourself. To let the sender renew, enroll the host (§3.3). If an earlier `enroll` issued the certificate, add `renew_client_cert: true` to `sender.yaml` and restart the sender. |
+| `renew_client_cert is set but ... is missing from sender.yaml` | Add the paths the line names, or remove `renew_client_cert`. The sender runs and does not renew. |
 | `the server refused to renew this host's certificate` with status 403 | Either this certificate is no longer the newest one issued for the host (the host was enrolled again, or a copy of its key renewed first), or the server already issued three certificates for it, or the host is not on the allowlist. Check the server's audit file for this host (§3.4): a `renewal_superseded` line means the certificate was replaced, so enroll the host again with a new token before the certificate expires. Without one, check the allowlist. |
 | The same line with status 404 | The server does not offer renewal: enrollment is off there, its audit file cannot be read, or it is older than v0.14.4. Fix the server, or enroll the host again. |
 | `certificate renewal failed` | The server could not be reached or answered with an error. The sender retries. It is an error line, not a warning, when less than a tenth of the validity is left (3 days of 30). |
@@ -793,7 +812,8 @@ give an expired host a new pair, issue a new token (`lodeline-server enroll-toke
 --host-id <host_id>`), move `client.crt` aside (and `client.key` for a new key;
 otherwise the old key is kept), and run `enroll` again. If `enroll` exits 4 and names
 another file, move that file aside too: it compares the CA file, the keystore and
-`sender.yaml` byte for byte with what the new enrollment file would write. Enrolling
+`sender.yaml` byte for byte with what the new enrollment file would write (a
+`sender.yaml` that differs only by lacking `renew_client_cert` is kept, with a warning). Enrolling
 again also supersedes the older chain on the server (§3.4).
 
 **One connection can outlive the certificate.** The server checks a client

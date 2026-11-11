@@ -49,6 +49,7 @@ impl Sender {
             max_batch_bytes: 1024 * 1024,
             policy_poll_interval: Duration::from_secs(600),
             host_id: None,
+            renew_client_cert: false,
         };
         let config_path = dir.path().join("sender.yaml");
         std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();

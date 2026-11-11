@@ -54,6 +54,11 @@ pub struct SenderConfig {
     /// host_id. Overridable at runtime by the LODELINE_HOST_ID env var.
     #[serde(default)]
     pub host_id: Option<String>,
+    /// Renew the client certificate before it expires. `lodeline-sender enroll` writes
+    /// `true`; a host whose certificate was made by hand leaves it unset and is not
+    /// renewed. Needs the three certificate paths above.
+    #[serde(default)]
+    pub renew_client_cert: bool,
 }
 
 fn default_offset_path() -> PathBuf {

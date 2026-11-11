@@ -41,6 +41,10 @@ dead_letter_dir: "/var/log/lodeline-sender/dead-letter"
 # the sender to exit immediately with an error.
 # host_id: "00000000-0000-0000-0000-000000000000"
 
+# Renew the client certificate before it expires. `lodeline-sender enroll` writes this line;
+# it has an effect only for a certificate that enrollment issued.
+# renew_client_cert: true
+
 # Optional overrides — defaults shown.
 # max_batch_events: 256
 # max_batch_bytes: 1048576

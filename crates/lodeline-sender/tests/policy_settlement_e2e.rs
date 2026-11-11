@@ -225,6 +225,7 @@ impl Sender {
                 max_batch_bytes: 1024 * 1024,
                 policy_poll_interval: POLL,
                 host_id: None,
+                renew_client_cert: false,
             },
             host_id: "h".into(),
             agent_version: "1".into(),
