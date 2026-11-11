@@ -55,11 +55,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   entries named the folder itself, which matches no file in it, so such an edit reached the agent
   only at the next heartbeat or with a change to another watched file. Hosts also record a
   `file_change` event for each such edit (hashes and sizes, never file text). The Codex cache
-  folders are rewritten when Codex refreshes its tool list, so expect a few events per Codex
-  session; an unchanged result sends no new assessment. The limits of the skills and agents entry
+  folders are rewritten when Codex fetches its tool list (at start and on a refresh), also when
+  the bytes are the same, so expect a few events per Codex session; an unchanged result sends no
+  new risk event, though each write still records a `file_change` event. The write rate is read
+  from the public Codex source, not measured. The limits of the skills and agents entry
   above apply to the hooks folders too. The Windows entries use the same patterns and were not
   tried on a device. A policy of your own that lists a folder path still matches only the folder:
-  write `folder/*`. (#582)
+  write `folder/*`. (#583, #582)
 
 ## [0.14.5] - 2026-11-11
 

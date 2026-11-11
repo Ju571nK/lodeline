@@ -1761,7 +1761,7 @@ pub(crate) fn push_continue_synthetic_target(
 
 /// Phase 3b.6.2: push THREE synthetic WatchTargets for a Claude Code per-repo
 /// config: one for `settings.json` + `settings.local.json` (not recursive),
-/// one for `.claude/hooks/` (recursive, hook scripts are watched as a dir),
+/// one for `.claude/hooks/*` (recursive; the pattern matches every file below the folder),
 /// one for `.claude/skills/` and `.claude/agents/` (recursive).
 pub(crate) fn push_claude_code_synthetic_targets(
     effective: &mut lodeline_core::policy::EffectivePolicy,
