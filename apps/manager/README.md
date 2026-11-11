@@ -148,9 +148,13 @@ JWT_SECRET=... \
 
 If the server requires client certificates, also set `LODELINE_SERVER_CLIENT_CERT_PATH` and
 `LODELINE_SERVER_CLIENT_KEY_PATH`, and `LODELINE_SERVER_CA_PATH` if a private CA signed the
-server's certificate. Leave `LODELINE_INSECURE_COOKIE` unset and put a TLS terminator in front
-of the console. The session cookie carries `Secure`, so a browser drops it over plain HTTP and
-login seems to fail.
+server's certificate. Make the client certificate from the host client CA, with the per-host
+recipe in [section 3 of the server guide](../../docs/install-server.md#3-pki--mtls) (give it a
+name of its own). It is not the mint certificate that [section
+3.6](../../docs/install-server.md#36-mint-tokens-over-http-optional) makes for the Enroll a host
+page, which the server accepts on one route only. Leave `LODELINE_INSECURE_COOKIE` unset and put
+a TLS terminator in front of the console. The session cookie carries `Secure`, so a browser drops
+it over plain HTTP and login seems to fail.
 
 ### Proxy reads
 
