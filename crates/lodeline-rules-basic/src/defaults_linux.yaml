@@ -71,6 +71,8 @@ targets:
       - "~/.claude/settings.json"
       - "~/.claude/settings.local.json"
       - "~/.claude/hooks/"
+      - "~/.claude/skills/*/SKILL.md"
+      - "~/.claude/agents/*.md"
       - "~/.claude/CLAUDE.md"
       - "~/.claude/loop.md"
       - "~/.claude/scheduled-tasks/*/SKILL.md"

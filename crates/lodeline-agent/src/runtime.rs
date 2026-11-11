@@ -1759,9 +1759,10 @@ pub(crate) fn push_continue_synthetic_target(
     });
 }
 
-/// Phase 3b.6.2 — push TWO synthetic WatchTargets for a Claude Code per-repo
+/// Phase 3b.6.2: push THREE synthetic WatchTargets for a Claude Code per-repo
 /// config: one for `settings.json` + `settings.local.json` (not recursive),
-/// one for `.claude/hooks/` (recursive — hook scripts are watched as a dir).
+/// one for `.claude/hooks/` (recursive, hook scripts are watched as a dir),
+/// one for `.claude/skills/` and `.claude/agents/` (recursive).
 pub(crate) fn push_claude_code_synthetic_targets(
     effective: &mut lodeline_core::policy::EffectivePolicy,
     repo_root: &std::path::Path,
@@ -1801,6 +1802,23 @@ pub(crate) fn push_claude_code_synthetic_targets(
         tier: lodeline_core::policy::Tier::Critical,
         platform: lodeline_core::policy::Platform::Any,
         paths: vec![cd.join("hooks").to_string_lossy().to_string()],
+        recursive: true,
+        follow_symlinks: false,
+        disabled: false,
+    });
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!("claude_code-skills-agents-{h}"),
+        description: format!("#539 synthetic skills and agents: {}", repo_root.display()),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths: vec![
+            cd.join("skills")
+                .join("*")
+                .join("SKILL.md")
+                .to_string_lossy()
+                .to_string(),
+            cd.join("agents").join("*.md").to_string_lossy().to_string(),
+        ],
         recursive: true,
         follow_symlinks: false,
         disabled: false,
@@ -2081,6 +2099,30 @@ pub(crate) fn register_ext_scripts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_code_project_targets_watch_skills_and_agents_recursively() {
+        let repo = std::path::Path::new("/repo");
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        for want in [
+            repo.join(".claude/skills/*/SKILL.md"),
+            repo.join(".claude/agents/*.md"),
+        ] {
+            assert!(
+                effective.targets.iter().any(|t| t.recursive
+                    && !t.follow_symlinks
+                    && t.paths.iter().any(|p| std::path::Path::new(p) == want)),
+                "a new project skill or subagent file must reach the parser: {want:?}"
+            );
+        }
+    }
+
     #[test]
     fn cursor_project_target_watches_hooks_json() {
         let repo = std::path::Path::new("/repo");

@@ -1148,6 +1148,22 @@ targets:
                 assert!(!target.disabled);
                 assert!(!target.follow_symlinks);
             }
+            // Event paths are matched as globs, so each folder is watched by
+            // the pattern of the files the parser reads in it.
+            let user_global = doc
+                .targets
+                .iter()
+                .find(|t| t.id.starts_with(CLAUDE_USER_GLOBAL))
+                .unwrap();
+            for (dir, tail) in [("skills", "SKILL.md"), ("agents", ".md")] {
+                assert!(
+                    user_global
+                        .paths
+                        .iter()
+                        .any(|p| p.contains(dir) && p.ends_with(tail)),
+                    "missing {dir} watcher"
+                );
+            }
         }
     }
 
