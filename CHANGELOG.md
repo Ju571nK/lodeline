@@ -29,6 +29,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   comes from (`lodeline show host-id`, `lodeline init-host-id`) and that the id goes into the
   allowlist file first. Section 3.5 names the `doctor` line, and section 3.1 and
   `config/server.example.yaml` say what a configured allowlist path without a file means. (#581)
+- `docs/install-macos-agent.md` and `docs/install-windows-agent.md` say that `lodeline show paths`
+  prints a path with a wildcard as the pattern, not the files it matches, and name two folders the
+  agent creates: `state.mcp-baselines` next to the state database, and on macOS and Linux the
+  socket folder under `$TMPDIR` that a non-root agent uses when `XDG_RUNTIME_DIR` is not set. The
+  example policy in section 3 of the macOS guide gains the `description` the agent requires. (#590)
 
 ### Fixed
 

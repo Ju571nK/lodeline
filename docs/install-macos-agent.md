@@ -86,6 +86,7 @@ version: 1
 host_id_strategy: machine_id
 targets:
   - id: team-mcp-allowlist
+    description: Example MCP allowlist file
     tier: critical
     platform: any
     paths: ["~/.config/example/mcp-allowlist.json"]
@@ -101,8 +102,19 @@ this matters on macOS because the system locations aren't user-writable:
 | policy | `/etc/lodeline/policy.yaml` (see below) | `$XDG_CONFIG_HOME/lodeline/policy.yaml` → else `~/.config/lodeline/policy.yaml` (auto) |
 | state.db | `/var/lib/lodeline/state.db` | pass `--state-db ~/.local/state/lodeline/state.db` |
 | events dir | `/var/log/lodeline` | pass `--events-dir ~/.local/state/lodeline/events` |
-| control socket | `/var/run/lodeline/control.sock` | `$XDG_RUNTIME_DIR/lodeline/control.sock` → else `/tmp/lodeline-<uid>/control.sock` (auto) |
+| control socket | `/var/run/lodeline/control.sock` | `$XDG_RUNTIME_DIR/lodeline/control.sock` → else `$TMPDIR/lodeline-<uid>/control.sock` (`/tmp` if `$TMPDIR` is unset) (auto) |
+| socket folder | `/var/run/lodeline/` | the folder of the control socket above |
+| MCP baselines | `/var/lib/lodeline/state.mcp-baselines/` | `state.mcp-baselines/` next to the `--state-db` you pass (auto) |
 | keystore | `/etc/lodeline/policy-signing-pubkeys.pem` | `$XDG_CONFIG_HOME/lodeline/...` → else `~/.config/lodeline/...` (auto) |
+
+The socket folder holds `control.sock` and the two hook sockets (`hook.sock`, `hook-decide.sock`).
+The agent creates the folder with the permissions your umask gives, and sets each socket to
+owner and group only. The MCP baselines folder is named after the state database with the
+extension `mcp-baselines`, so `--state-db /x/foo.db` gives `/x/foo.mcp-baselines/`. It appears
+when the agent first records the tools of an MCP server (read from the Codex tool cache) and
+holds one file per server and home, with server and tool names, hashes and property names, and no
+descriptions, schema values or prompts. Each file is readable by its owner only; keep the
+folder as protected as the state database.
 
 As root, a signed policy or rule-pack bundle lands in `/var/lib/lodeline/applied/`,
 not `/etc/lodeline`. Each file there replaces the content of its namesake in
@@ -184,10 +196,14 @@ Set the diagnostic log level with `LODELINE_LOG` (e.g. `LODELINE_LOG=debug`).
 lodeline status              # components, agent, fleet link; add --json for the data
 lodeline doctor              # config + permissions (FDA), does not start the daemon
 lodeline show config         # merged effective policy
-lodeline show paths          # fully expanded watch paths
+lodeline show paths          # policy files in force, then each target's paths (patterns stay patterns)
 lodeline show risk           # AI Guard risk score per tool (queries the running daemon)
 lodeline show stats          # live heartbeat from the running daemon
 ```
+
+`lodeline show paths` writes a path that starts with `~` once per user, with `~` expanded to that
+user's home, and any other path once. A path with a wildcard prints as the pattern (`~/.claude/skills/*/SKILL.md` stays a
+pattern); it does not list the files the pattern matches.
 
 `lodeline show risk` is the core AI-SPM read: it scores each detected AI tool
 (`claude-code`, `codex`, `gemini`, `cursor`) from its real on-disk config.
@@ -283,10 +299,10 @@ dead_letter_dir: "/Users/<you>/.local/state/lodeline/dead-letter"
 # server reject the entire batch with host_id_payload_mismatch.
 host_id: "<agent host_id from section 6>"
 
-# Control IPC — must equal the agent's control socket. As your user that is the
-# auto fallback (e.g. /tmp/lodeline-<uid>/control.sock), or whatever you passed to
-# `lodeline --control-socket`.
-agent_control: "/tmp/lodeline-501/control.sock"
+# Control IPC: must equal the agent's control socket. As your user on macOS that is
+# under $TMPDIR (see the path table above; run `echo $TMPDIR` for the folder, and replace
+# <uid> with `id -u`), unless you passed `lodeline --control-socket`, which overrides it.
+agent_control: "/var/folders/xx/yyyy/T/lodeline-<uid>/control.sock"
 ```
 
 Replace `<you>` with your user name. The sender does not expand `~` or `$HOME` in

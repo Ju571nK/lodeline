@@ -28,8 +28,27 @@ fn lodeline_bin() -> &'static str {
 
 // ── helper: run `lodeline assess` with extra args; optionally pipe `stdin_data` ──
 
+/// Without `--policy`, `assess` reads the system policy files (`/etc/lodeline`,
+/// `/var/lib/lodeline/applied`), so a host that runs an agent would change the verdicts.
+/// A call that names no policy gets an empty one in a scratch folder, and the home and
+/// config variables point into that folder too.
 fn run_assess(extra_args: &[&str], stdin_data: Option<&[u8]>) -> std::process::Output {
+    let scratch = tempfile::tempdir().unwrap();
+    let home = scratch.path();
     let mut cmd = Command::new(lodeline_bin());
+    cmd.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("APPDATA", home)
+        .env("LOCALAPPDATA", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_RUNTIME_DIR", home.join("run"));
+    if !extra_args.contains(&"--policy") {
+        let policy = home.join("policy.yaml");
+        std::fs::write(&policy, "version: 1\n").unwrap();
+        cmd.arg("--policy").arg(policy);
+    }
     cmd.arg("assess");
     for a in extra_args {
         cmd.arg(a);
