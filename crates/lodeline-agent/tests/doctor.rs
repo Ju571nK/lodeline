@@ -1,9 +1,37 @@
 use std::process::Command;
 
+/// A scratch home plus a control socket of its own, so the binary reads nothing of the
+/// developer's and reaches no agent that the test did not start.
+/// shortcut: Windows has no flag for the control pipe, so there the binary still
+/// asks the default pipe; point it elsewhere when the product gains a flag.
+struct Scratch(tempfile::TempDir);
+
+impl Scratch {
+    fn new() -> Self {
+        Self(tempfile::tempdir().unwrap())
+    }
+
+    fn lodeline(&self) -> Command {
+        let home = self.0.path();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lodeline"));
+        cmd.arg("--control-socket")
+            .arg(home.join("control.sock"))
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("APPDATA", home)
+            .env("LOCALAPPDATA", home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("XDG_RUNTIME_DIR", home.join("run"));
+        cmd
+    }
+}
+
 #[test]
 fn it_doctor_succeeds_on_valid_config() {
-    let bin = env!("CARGO_BIN_EXE_lodeline");
-    let out = Command::new(bin).arg("doctor").output().unwrap();
+    let scratch = Scratch::new();
+    let out = scratch.lodeline().arg("doctor").output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Lodeline doctor"));
     let code = out.status.code().unwrap_or(-1);
@@ -15,20 +43,21 @@ fn it_doctor_succeeds_on_valid_config() {
 
 #[test]
 fn it_show_paths_prints_targets() {
-    let bin = env!("CARGO_BIN_EXE_lodeline");
-    let out = Command::new(bin).args(["show", "paths"]).output().unwrap();
+    let scratch = Scratch::new();
+    let out = scratch.lodeline().args(["show", "paths"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("# "));
 }
 
 #[test]
 fn show_paths_and_doctor_name_the_policy_file_in_force() {
+    let scratch = Scratch::new();
     let tmp = tempfile::tempdir().unwrap();
     let policy = tmp.path().join("policy.yaml");
     std::fs::write(&policy, "version: 1\n").unwrap();
-    let bin = env!("CARGO_BIN_EXE_lodeline");
 
-    let show = Command::new(bin)
+    let show = scratch
+        .lodeline()
         .args(["show", "paths", "--policy"])
         .arg(&policy)
         .output()
@@ -40,7 +69,8 @@ fn show_paths_and_doctor_name_the_policy_file_in_force() {
     );
     assert!(show.contains("# rule packs in force: none ("), "{show}");
 
-    let doctor = Command::new(bin)
+    let doctor = scratch
+        .lodeline()
         .args(["doctor", "--policy"])
         .arg(&policy)
         .output()
@@ -57,11 +87,12 @@ fn show_paths_and_doctor_name_the_policy_file_in_force() {
 // isn't told it has a problem just because the daemon hasn't created the DB yet.
 #[test]
 fn doctor_absent_state_db_is_info_not_warn() {
+    let scratch = Scratch::new();
     let tmp = tempfile::tempdir().unwrap();
     let missing_db = tmp.path().join("nope").join("state.db");
     assert!(!missing_db.exists());
-    let bin = env!("CARGO_BIN_EXE_lodeline");
-    let out = Command::new(bin)
+    let out = scratch
+        .lodeline()
         .arg("doctor")
         .arg("--state-db")
         .arg(&missing_db)
@@ -87,10 +118,10 @@ fn doctor_absent_state_db_is_info_not_warn() {
 
 #[test]
 fn doctor_prints_ai_guard_section_when_agent_down() {
+    let scratch = Scratch::new();
     // Agent isn't running in this test binary's process. doctor should
     // still print the AI Guard section header + fallback message.
-    let bin = env!("CARGO_BIN_EXE_lodeline");
-    let out = Command::new(bin).arg("doctor").output().unwrap();
+    let out = scratch.lodeline().arg("doctor").output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("──────────────  AI Guard  ──────────────"),
@@ -105,8 +136,8 @@ fn doctor_prints_ai_guard_section_when_agent_down() {
 
 #[test]
 fn doctor_static_rubric_table_includes_all_eleven_kinds() {
-    let bin = env!("CARGO_BIN_EXE_lodeline");
-    let out = Command::new(bin).arg("doctor").output().unwrap();
+    let scratch = Scratch::new();
+    let out = scratch.lodeline().arg("doctor").output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     for kind in &[
         "destructive_in_inline_command",
@@ -130,6 +161,7 @@ fn doctor_static_rubric_table_includes_all_eleven_kinds() {
 
 #[test]
 fn doctor_with_override_in_policy_shows_marker() {
+    let scratch = Scratch::new();
     // Write a tempdir policy.yaml with an override; pass via --policy.
     // Verified flag: `lodeline doctor --policy <PATH>` overrides the policy file path.
     let tmp = tempfile::tempdir().unwrap();
@@ -143,8 +175,8 @@ rubric_overrides:
 "#,
     )
     .unwrap();
-    let bin = env!("CARGO_BIN_EXE_lodeline");
-    let out = Command::new(bin)
+    let out = scratch
+        .lodeline()
         .arg("doctor")
         .arg("--policy")
         .arg(&policy_path)
