@@ -34,7 +34,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - AI Guard now reassesses Claude Code as soon as a skill or subagent file is added or changed in
   `~/.claude/skills/<name>/SKILL.md`, `~/.claude/agents/` or a repository's `.claude/skills` or
-  `.claude/agents`. Before, no watch target covered these files, so the agent read them only at the
+  `.claude/agents`, within the limits below. Before, no watch target covered these files, so the agent read them only at the
   next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
   for each edit (hashes and sizes, never file text). Limits: at start the watcher scans no existing file. A folder
   that appears after the agent started, or one that a policy reload adds, is scanned once, and files
@@ -44,7 +44,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   watcher uses one inotify watch per subfolder. When the kernel refuses a watch (the per-user
   inotify limit) the agent goes on, the folder keeps the watches already placed and is tried again
   every few seconds, and this is logged at debug level only; files without a watch are read at the
-  next heartbeat. (#582, #539)
+  next heartbeat. On Linux, a folder created under a watched root gets its watch only after the
+  creation event is read, so a file written into it at once (a skill copied in with `cp -r`, a
+  checkout or an unpack) may produce no event; the next heartbeat reads it. Skills below a
+  subfolder of a project and skills of `--add-dir` folders are read but not watched. (#582, #539)
 
 ## [0.14.5] - 2026-11-11
 
