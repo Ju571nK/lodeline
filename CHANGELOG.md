@@ -7,6 +7,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- The Claude Code assessment reads `allowedHttpHookUrls` from the managed, user and project
+  settings files and merges the lists. An `http` hook whose URL no pattern can match, or any
+  `http` hook when the list is empty, no longer gives `HookForwardsToolCalls`, because Claude
+  Code does not run it. The managed hooks are still reported, and a pattern the Claude Code
+  documentation leaves open (whether `*` crosses `/` and `:`, how scheme and port match) keeps
+  the hook reported. The user scope also reports a control `claude_code.configured.allowedHttpHookUrls`
+  that holds the number of patterns and never a URL. No reason kind or event field is added.
+
 ## [0.14.5] - 2026-11-12
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to

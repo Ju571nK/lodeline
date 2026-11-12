@@ -65,11 +65,15 @@ impl AiGuardParser for ClaudeCodeParser {
     }
 
     fn assess_posture(&self, home_dir: &Path) -> Result<super::AiGuardAssessment, AssessError> {
+        let policy_dir = super::policy_controls::claude_policy_dir();
+        let mut controls = super::policy_controls::claude_controls(&policy_dir)?;
+        controls.extend(super::policy_controls::claude_http_hook_url_control(
+            &self.locate(home_dir).0,
+            &policy_dir,
+        )?);
         Ok(super::AiGuardAssessment {
             reasons: self.assess(home_dir)?,
-            controls: Some(super::policy_controls::claude_controls(
-                &super::policy_controls::claude_policy_dir(),
-            )?),
+            controls: Some(controls),
         })
     }
 
@@ -168,9 +172,12 @@ fn assess_user(
     let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
 
+    // shortcut: a project file's list also applies to the user's hooks, which
+    // this host-wide scope cannot see; the project row reads the user's list.
+    let allowed = http_hook_allowlist(&[managed.as_ref(), Some(&merged)]);
     let mut out = Vec::new();
     if !hooks_off {
-        emit_hook_reasons(&merged, home, &mut out)?;
+        emit_hook_reasons_allowing(&merged, home, allowed.as_deref(), &mut out)?;
         super::claude_components::emit_component_hook_reasons(&components, home, &mut out);
     }
     // Managed deny rules apply to every session, so the deny list is the
@@ -432,6 +439,17 @@ pub(crate) fn emit_hook_reasons(
     home: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) -> Result<(), AssessError> {
+    emit_hook_reasons_allowing(settings, home, None, out)
+}
+
+/// `allowed` is the merged `allowedHttpHookUrls` of every scope, when one
+/// sets it. A caller that cannot see every scope passes `None`.
+fn emit_hook_reasons_allowing(
+    settings: &Value,
+    home: Option<&Path>,
+    allowed: Option<&[String]>,
+    out: &mut Vec<AiGuardReason>,
+) -> Result<(), AssessError> {
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
         return Ok(());
     };
@@ -490,7 +508,7 @@ pub(crate) fn emit_hook_reasons(
                 // `command` string, so keying off that field alone made every
                 // other type invisible.
                 match h.get("type").and_then(Value::as_str) {
-                    Some("http") => emit_http_hook_reason(h, event_name, out),
+                    Some("http") => emit_http_hook_reason(h, event_name, allowed, out),
                     // An `mcp_tool` hook hands the tool call to a configured
                     // MCP server — a different trust domain from the agent,
                     // and possibly a remote one.
@@ -581,14 +599,130 @@ fn hooks_disabled(files: &[Option<&Value>]) -> bool {
         .unwrap_or(false)
 }
 
+/// The `allowedHttpHookUrls` patterns of `files`, merged as Claude Code
+/// merges list keys. `None` when no file sets it, or when a file sets it to
+/// something other than a list of strings: an unreadable list is not read as
+/// "block everything".
+pub(crate) fn http_hook_allowlist(files: &[Option<&Value>]) -> Option<Vec<String>> {
+    let mut out: Option<Vec<String>> = None;
+    for value in files
+        .iter()
+        .flatten()
+        .filter_map(|f| f.get("allowedHttpHookUrls"))
+    {
+        let list = out.get_or_insert_with(Vec::new);
+        for pattern in value.as_array()? {
+            let pattern = pattern.as_str()?;
+            if !list.iter().any(|p| p == pattern) {
+                list.push(pattern.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Could Claude Code's allowlist let `url` through? The docs name `*` as the
+/// wildcard and example `https://hooks.example.com/*` and `http://localhost:*`,
+/// but do not say whether `*` crosses `/` and `:`, or how scheme and port
+/// match. So this reads the patterns as loosely as any reading could: `*`
+/// matches anything, a pattern may omit the scheme, and an explicit default
+/// port or a bare host with no path may match either way. Only a URL that no
+/// such reading admits counts as blocked. Hostnames match without case and
+/// without a trailing dot, which the docs state.
+fn url_may_match(url: &str, patterns: &[String]) -> bool {
+    let candidates = url_forms(url);
+    patterns.iter().any(|pattern| {
+        let pattern = normalize_url(pattern);
+        candidates.iter().any(|c| glob_match(&pattern, c))
+    })
+}
+
+fn normalize_url(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").map_or(("", url), |(s, r)| (s, r));
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let authority = authority.to_ascii_lowercase();
+    let (host, port) = match authority.rfind(':') {
+        Some(i) if !authority[i..].contains(']') => authority.split_at(i),
+        _ => (authority.as_str(), ""),
+    };
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let scheme = scheme.to_ascii_lowercase();
+    let sep = if rest.len() == url.len() { "" } else { "://" };
+    format!("{scheme}{sep}{host}{port}{tail}")
+}
+
+fn url_forms(url: &str) -> Vec<String> {
+    let url = normalize_url(url);
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", &url));
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let default_port = match scheme {
+        "http" => ":80",
+        "https" => ":443",
+        _ => "",
+    };
+    let mut authorities = vec![authority.to_string()];
+    if !default_port.is_empty() {
+        authorities.push(match authority.strip_suffix(default_port) {
+            Some(bare) => bare.to_string(),
+            None => format!("{authority}{default_port}"),
+        });
+    }
+    let mut tails = vec![tail.to_string()];
+    if tail.is_empty() {
+        tails.push("/".to_string());
+    }
+    let mut forms = Vec::new();
+    for a in &authorities {
+        for t in &tails {
+            forms.push(format!("{scheme}://{a}{t}"));
+            forms.push(format!("{a}{t}"));
+        }
+    }
+    forms
+}
+
+/// `*` matches any run of characters, including none.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let (p, t) = (pattern.as_bytes(), text.as_bytes());
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == b'*')
+}
+
 /// #199 — an `http` hook forwards the whole tool-call payload to a URL. On
 /// `PreToolUse` that is every intercepted call and its arguments leaving the
 /// machine. Evidence records the destination host, not the full URL: a URL can
 /// carry a token or a path that identifies the user.
-fn emit_http_hook_reason(hook: &Value, event_name: &str, out: &mut Vec<AiGuardReason>) {
+fn emit_http_hook_reason(
+    hook: &Value,
+    event_name: &str,
+    allowed: Option<&[String]>,
+    out: &mut Vec<AiGuardReason>,
+) {
     let Some(url) = hook.get("url").and_then(Value::as_str) else {
         return;
     };
+    // Claude Code blocks an HTTP hook whose URL matches no allowlist pattern.
+    if allowed.is_some_and(|patterns| !url_may_match(url, patterns)) {
+        return;
+    }
     // A loopback hook is a local validator: the payload never leaves the
     // machine, which is the whole claim this finding makes. Reporting one
     // would describe an exposure the operator does not have.
@@ -1550,9 +1684,10 @@ fn assess_project(
         )
     };
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
+    let allowed = http_hook_allowlist(&[managed.as_ref(), user.as_ref(), Some(&merged)]);
     let mut out = Vec::new();
     if !hooks_off {
-        emit_hook_reasons(&merged, Some(home), &mut out)?;
+        emit_hook_reasons_allowing(&merged, Some(home), allowed.as_deref(), &mut out)?;
         super::claude_components::emit_component_hook_reasons(&components, Some(home), &mut out);
     }
     emit_permission_reasons(&merged, &mut out);
@@ -4096,7 +4231,6 @@ mod tests {
             r#"["https://*.example.test/*"]"#,
             r#"["https://collect.example.test:443/*"]"#,
             r#"["collect.example.test/*"]"#,
-            r#"["https://collect.example.test"]"#,
             r#"["https://*"]"#,
         ] {
             assert!(user_forwards(&with(kept)), "{kept}");
@@ -4105,6 +4239,7 @@ mod tests {
             r#"["http://collect.example.test/*"]"#,
             r#"["https://collect.example.test:8443/*"]"#,
             r#"["https://collect.example.test/other/*"]"#,
+            r#"["https://collect.example.test"]"#,
             r#"[7]"#,
         ] {
             assert_eq!(user_forwards(&with(blocked)), blocked == "[7]", "{blocked}");
