@@ -4294,6 +4294,67 @@ mod tests {
         assert!(!forwards("c.example.test"));
     }
 
+    #[test]
+    fn project_list_admits_a_user_hook_the_user_list_blocks() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        write_settings(
+            home.path(),
+            r#"{"hooks": {"PreToolUse": [{"hooks": [{"type": "http", "url": "https://c.example.test/h"}]}]},
+                "allowedHttpHookUrls": ["https://a.example.test/*"]}"#,
+        );
+        let destinations = |project: &str| {
+            write_file(repo.path(), ".claude/settings.json", project);
+            assess_project(repo.path(), home.path(), &home.path().join("no-policy"))
+                .unwrap()
+                .into_iter()
+                .filter_map(|r| match r {
+                    AiGuardReason::HookForwardsToolCalls { destination, .. } => Some(destination),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let admitted = destinations(r#"{"allowedHttpHookUrls": ["https://c.example.test/*"]}"#);
+        assert_eq!(admitted.len(), 1, "{admitted:?}");
+        assert!(admitted[0].contains("c.example.test"), "{admitted:?}");
+        assert!(destinations(r#"{"allowedHttpHookUrls": ["https://b.example.test/*"]}"#).is_empty());
+        assert!(destinations("{}").is_empty());
+    }
+
+    #[test]
+    fn allowlist_path_and_query_match_without_case() {
+        let url = r#"{"hooks": {"PreToolUse": [{"hooks": [
+            {"type": "http", "url": "https://h.example.test/API/x?Q=1"}]}]},
+            "allowedHttpHookUrls": ["https://h.example.test/api/*"]}"#;
+        assert!(user_forwards(url));
+    }
+
+    #[test]
+    fn managed_http_hook_is_reported_whatever_the_lists_say() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), r#"{"allowedHttpHookUrls": []}"#);
+        let policy = tempdir().unwrap();
+        write_file(
+            policy.path(),
+            "managed-settings.json",
+            r#"{"hooks": {"PreToolUse": [{"hooks": [{"type": "http", "url": "https://m.example.test/h"}]}]},
+                "allowedHttpHookUrls": ["https://other.example.test/*"]}"#,
+        );
+        let reasons = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            policy.path(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::HookForwardsToolCalls { .. })),
+            "{reasons:?}"
+        );
+    }
+
     // ---- #199: non-command hook types ------------------------------------
 
     #[test]
