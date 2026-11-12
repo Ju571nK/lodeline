@@ -10,22 +10,73 @@ pub enum GlobError {
     Invalid(#[from] globset::Error),
 }
 
+/// A path segment that is exactly `*`, followed by plain segments only, names
+/// one folder (`skills/*/SKILL.md`), although globset's `*` would also cross `/`.
+/// `above` matches the folders before that segment; `tail` counts the segments
+/// after it.
 #[derive(Debug)]
-pub struct CompiledGlob(GlobMatcher);
+struct OneFolder {
+    above: GlobMatcher,
+    tail: usize,
+}
+
+#[derive(Debug)]
+pub struct CompiledGlob {
+    whole: GlobMatcher,
+    one_folder: Option<OneFolder>,
+}
+
+fn is_plain(segment: &str) -> bool {
+    !segment.contains(['*', '?', '[', ']', '{', '}'])
+}
 
 impl CompiledGlob {
     pub fn new(pattern: &str) -> Result<Self, GlobError> {
-        let glob = Glob::new(pattern)?;
-        Ok(Self(glob.compile_matcher()))
+        let whole = Glob::new(pattern)?.compile_matcher();
+        // shortcut: only the last `*` segment is held to one folder, and only
+        // when plain segments follow it; upgrade when another entry needs more.
+        let parts: Vec<_> = Path::new(pattern).components().collect();
+        let one_folder = parts
+            .iter()
+            .rposition(|c| c.as_os_str() == "*")
+            .filter(|&i| i > 0 && i + 1 < parts.len())
+            .filter(|&i| {
+                parts[i + 1..]
+                    .iter()
+                    .all(|c| is_plain(&c.as_os_str().to_string_lossy()))
+            })
+            .and_then(|i| {
+                let above: std::path::PathBuf = parts[..i].iter().collect();
+                Some(OneFolder {
+                    above: Glob::new(above.to_str()?).ok()?.compile_matcher(),
+                    tail: parts.len() - i - 1,
+                })
+            });
+        Ok(Self { whole, one_folder })
     }
 
     pub fn is_match(&self, path: &Path) -> bool {
-        self.0.is_match(path)
+        self.whole.is_match(path)
+            && self.one_folder.as_ref().is_none_or(|o| {
+                path.ancestors()
+                    .nth(o.tail + 1)
+                    .is_some_and(|folder| o.above.is_match(folder))
+            })
+    }
+
+    /// False when no file below `dir` can match: `dir` lies inside a folder
+    /// that the `*` segment named, deeper than the plain tail reaches.
+    pub fn may_match_below(&self, dir: &Path) -> bool {
+        self.one_folder.as_ref().is_none_or(|o| {
+            !dir.ancestors()
+                .skip(o.tail)
+                .any(|star| star.parent().is_some_and(|above| o.above.is_match(above)))
+        })
     }
 
     /// The original pattern string the matcher was compiled from.
     pub fn pattern(&self) -> &str {
-        self.0.glob().glob()
+        self.whole.glob().glob()
     }
 }
 
@@ -60,5 +111,34 @@ mod tests {
     fn pattern_round_trips_the_input_string() {
         let g = CompiledGlob::new("/Users/*/.claude/policy-*.json").unwrap();
         assert_eq!(g.pattern(), "/Users/*/.claude/policy-*.json");
+    }
+
+    #[test]
+    fn star_segment_before_plain_segments_names_one_folder() {
+        let g = CompiledGlob::new("/h/.claude/skills/*/SKILL.md").unwrap();
+        assert!(g.is_match(Path::new("/h/.claude/skills/a/SKILL.md")));
+        assert!(!g.is_match(Path::new("/h/.claude/skills/a/b/SKILL.md")));
+        assert!(!g.is_match(Path::new("/h/.claude/skills/SKILL.md")));
+        assert!(g.may_match_below(Path::new("/h/.claude/skills")));
+        assert!(g.may_match_below(Path::new("/h/.claude")));
+        assert!(g.may_match_below(Path::new("/h/.claude/skills/a")));
+        assert!(!g.may_match_below(Path::new("/h/.claude/skills/a/b")));
+        let g = CompiledGlob::new("/h/*/.claude/skills/*/SKILL.md").unwrap();
+        assert!(g.is_match(Path::new("/h/alice/.claude/skills/a/SKILL.md")));
+        assert!(!g.is_match(Path::new("/h/alice/.claude/skills/a/b/SKILL.md")));
+    }
+
+    #[test]
+    fn other_stars_still_cross_folders() {
+        for (pattern, file) in [
+            ("/h/.claude/hooks/*", "/h/.claude/hooks/a/b.sh"),
+            ("/h/.claude/agents/*.md", "/h/.claude/agents/a/b.md"),
+            ("/h/rules/**", "/h/rules/a/b.mdc"),
+            ("/h/*/x/*.md", "/h/a/x/b/c.md"),
+        ] {
+            let g = CompiledGlob::new(pattern).unwrap();
+            assert!(g.is_match(Path::new(file)), "{pattern} vs {file}");
+            assert!(g.may_match_below(Path::new("/h/.claude/hooks/a/b")));
+        }
     }
 }

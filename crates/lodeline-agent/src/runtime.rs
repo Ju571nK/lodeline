@@ -1111,13 +1111,13 @@ fn files_matching_pattern(pattern: &Path, entry_limit: usize, file_limit: usize)
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
+            let path = crate::normalizer::match_form(entry.path());
             if kind.is_dir() {
-                queue.push_back(entry.path());
-            } else if kind.is_file() {
-                let path = crate::normalizer::match_form(entry.path());
-                if glob.is_match(&path) {
-                    files.push(path);
+                if glob.may_match_below(&path) {
+                    queue.push_back(entry.path());
                 }
+            } else if kind.is_file() && glob.is_match(&path) {
+                files.push(path);
             }
         }
     }
@@ -2182,6 +2182,68 @@ mod tests {
                 "a new project skill, subagent or hook file must reach the parser: {want:?}"
             );
         }
+    }
+
+    #[test]
+    fn claude_code_project_skills_entry_matches_one_level_only() {
+        use lodeline_core::policy::glob::CompiledGlob;
+        let repo = std::path::Path::new("/repo");
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        let skills = effective
+            .targets
+            .iter()
+            .flat_map(|t| &t.paths)
+            .find(|p| p.ends_with("SKILL.md") && p.contains("/repo"))
+            .map(|p| CompiledGlob::new(p).unwrap())
+            .expect("project skills entry");
+        let dir = repo.join(".claude").join("skills");
+        assert!(skills.is_match(&dir.join("demo").join("SKILL.md")));
+        for deep in [
+            dir.join("demo").join("sub").join("SKILL.md"),
+            dir.join("demo")
+                .join("node_modules")
+                .join("x")
+                .join("SKILL.md"),
+        ] {
+            assert!(
+                !skills.is_match(&deep),
+                "project skills entry {} must not match {deep:?}",
+                skills.pattern()
+            );
+        }
+        let agents = repo.join(".claude").join("agents").join("sub").join("x.md");
+        let hooks = repo.join(".claude").join("hooks").join("sub").join("x.sh");
+        for file in [agents, hooks] {
+            assert!(
+                effective
+                    .targets
+                    .iter()
+                    .flat_map(|t| &t.paths)
+                    .any(|p| CompiledGlob::new(p).unwrap().is_match(&file)),
+                "{file:?} must stay watched"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_up_lists_one_level_of_skills_and_skips_what_is_below() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let skill = dir.join("skills").join("alpha");
+        let deep = skill.join("node_modules").join("x");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "v0").unwrap();
+        std::fs::write(deep.join("SKILL.md"), "v0").unwrap();
+        let listed =
+            super::files_matching_pattern(&dir.join("skills").join("*").join("SKILL.md"), 100, 100);
+        assert_eq!(listed, vec![skill.join("SKILL.md")]);
     }
 
     #[test]

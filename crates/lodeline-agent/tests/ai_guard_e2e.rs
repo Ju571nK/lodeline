@@ -1497,3 +1497,75 @@ async fn claude_edit_below_a_linked_watched_folder_triggers_reassessment() {
         "control: {table:?}"
     );
 }
+
+/// A `SKILL.md` inside a skill (a vendored package) is not a skill: the
+/// assessment reads one level, so its edit records no file change. The control
+/// edit of the skill's own file, made after it, is recorded and reassessed
+/// once, so the absence cannot come from looking too early.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_skill_file_below_a_skill_triggers_nothing() {
+    let _home_guard = HOME_LOCK.lock().await;
+    const CLEAN: &str = "---\nname: demo\ndescription: demo\n---\nbody\n";
+    let td = tempfile::TempDir::new().unwrap();
+    let home = dunce::canonicalize(td.path()).unwrap();
+    // SAFETY: process-global write; serialized via HOME_LOCK above.
+    std::env::set_var("HOME", &home);
+    let skill = home.join(".claude/skills/demo");
+    let deep = skill.join("node_modules/x");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(skill.join("SKILL.md"), CLEAN).unwrap();
+    std::fs::write(deep.join("SKILL.md"), CLEAN).unwrap();
+
+    let agent = TestAgentBuilder::new()
+        .policy(&claude_user_policy_only_under(&home))
+        .start()
+        .await;
+    agent
+        .wait_for_event(
+            |v| {
+                v["evidence"]["kind"] == "ai_guard_risk_assessed"
+                    && v["evidence"]["tool"] == "claude_code"
+                    && v["evidence"]["scope"]["kind"] == "user_global"
+            },
+            fs_event_timeout(),
+        )
+        .await
+        .expect("boot assessment of the user scope");
+
+    std::fs::write(deep.join("SKILL.md"), COMPONENT_WITH_BROAD_HOOK).unwrap();
+    std::fs::write(skill.join("SKILL.md"), COMPONENT_WITH_BROAD_HOOK).unwrap();
+    let reassessed = agent
+        .wait_for_event(
+            |v| claude_reason(v, "user_global", "broad_matcher"),
+            fs_event_timeout(),
+        )
+        .await;
+    // Let a late event for the deep file arrive before the absence is read.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let events = agent.read_all_events();
+    agent.join.abort();
+    assert!(
+        reassessed.is_some(),
+        "no reassessment after the control edit"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|v| v["evidence"]["kind"] == "file_change"
+                && v.to_string().contains("demo/SKILL.md")),
+        "the control edit was not recorded as a file change"
+    );
+    let reassessments = events
+        .iter()
+        .filter(|v| claude_reason(v, "user_global", "broad_matcher"))
+        .count();
+    assert_eq!(reassessments, 1, "the control edit gives one reassessment");
+    let deep_events: Vec<_> = events
+        .iter()
+        .filter(|v| v.to_string().contains("node_modules"))
+        .collect();
+    assert!(
+        deep_events.is_empty(),
+        "an edit below a skill produced events: {deep_events:?}"
+    );
+}

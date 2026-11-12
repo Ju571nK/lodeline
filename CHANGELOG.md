@@ -69,10 +69,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   during the short time (usually milliseconds, longer for a very large folder) between that read and
   the placing of the watch may still wait for the next heartbeat. Skills below a
   subfolder of a project and skills of `--add-dir` folders are read but not watched.
+  The skills and scheduled tasks entries (`skills/*/SKILL.md`, `scheduled-tasks/*/SKILL.md`) name
+  one folder per skill, as the assessment reads them: a `SKILL.md` deeper in a skill (inside its
+  `node_modules`, say) is not watched. Subagent files and hooks match at any depth.
   A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
   each assessment, but an edit of its target records no file change and starts no assessment;
   the next assessment reads it.
-  (#582, #539, #586, #591)
+  (#582, #539, #586, #591, #592)
 - AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
   (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude
   Code managed settings drop-in folder (`managed-settings.d/*.json`). Before, these entries named
@@ -86,7 +89,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   matched no file. Codex rewrites both folders each time it fetches its tool list, at start and on
   a refresh, also when the bytes are the same, and each write would record a `file_change` event.
   The Codex parser reads both folders at each assessment. A change there is read at the next agent
-  start or heartbeat (24 hours), not at once. (#583, #582, #584)
+  start or heartbeat (24 hours), not at once. (#583, #582, #584, #592)
 - The agent counted each file change twice in `lodeline show stats`, in the `lodeline status`
   line and in the heartbeat's `events_emitted_total` (and the `file_change` entry of
   `events_by_kind`). The recorded events were never doubled; only the counters were. The numbers
