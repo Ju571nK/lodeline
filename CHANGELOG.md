@@ -19,6 +19,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `permissions.blockReadsOutsideWorkingDirectories` and
   `permissions.blockWritesOutsideWorkingDirectories`, each when its value is `true`. No score, reason
   kind or event field changes. (#582, #539)
+- AI Guard now reads the frontmatter hooks of subagents in `<subfolder>/.claude/agents/` below a
+  repository, as it already does for nested skills, under the same folder bounds. Claude Code
+  loads such a subagent for a session started in that subfolder, not for one at the root, so the
+  assessment can report a hook the root session never runs; changes to these files are noticed at
+  the next assessment, not by the watcher. (#539)
 
 ### Changed
 

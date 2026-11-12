@@ -77,6 +77,11 @@ Lodeline now scores frontmatter hooks of nested skills below a discovered
 repository. The walk goes at most 8 folders deep and reads at most 20,000
 folders, skips hidden, `node_modules` and `target` folders, and does not follow
 symlinked directories. Nested skills have their own 1,000-file budget.
+Subagents in a subfolder's `.claude/agents/` are read the same way, under the same
+folder bounds, with their own 1,000-file budget. Claude Code loads them for a
+session started in that subfolder ("Project subagents are discovered by walking up
+from the current working directory", read 2026-11-12), so a session at the root
+does not load them, but the assessment reports them.
 
 ### Discovery
 
@@ -90,12 +95,12 @@ same markers as the agent.
   control.
 - `.claude/scheduled_tasks.json` as an unattended task source.
 - Parent-directory skills for a start directory below the root, the worktree
-  fallback to the main checkout's skills, nested subagents, and nested
+  fallback to the main checkout's skills, and nested
   `.claude/settings.json` files.
 - The user scope still merges `~/.claude/settings.local.json` into every
   session, which over-reports for sessions started elsewhere.
 - `permissions.blockReadsOutsideWorkingDirectories` and
   `permissions.blockWritesOutsideWorkingDirectories` as controls.
-- Changes to nested skills and to the repository root's local file are picked
-  up by the watcher only where a watch target covers them: the root file has
-  one, nested skills wait for the next assessment.
+- Changes to nested skills and subagents and to the repository root's local file
+  are picked up by the watcher only where a watch target covers them: the root
+  file has one, nested skills and subagents wait for the next assessment.

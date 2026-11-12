@@ -19,7 +19,7 @@ const MAX_SKILL_FILES: usize = 1000;
 const MAX_AGENT_FILES: usize = 1000;
 /// `agents/` is scanned recursively by Claude Code; this bounds the walk.
 const MAX_AGENT_DEPTH: usize = 8;
-/// Bounds on the walk for nested `.claude/skills` folders in a repository.
+/// Bounds on the walk for nested `.claude/skills` and `.claude/agents` folders.
 const MAX_NESTED_DEPTH: usize = 8;
 const MAX_NESTED_WALK_DIRS: usize = 20_000;
 const NESTED_WALK_SKIPPED: &[&str] = &["node_modules", "target"];
@@ -42,16 +42,20 @@ pub(crate) fn component_hooks(claude_dir: &Path) -> Vec<ComponentHooks> {
         .collect()
 }
 
-/// Skills in `<subdir>/.claude/skills/` below `repo_root`. Claude Code loads
-/// one the first time Claude reads or edits a file in `<subdir>`, so any
-/// session in the repository can pick up its hooks. The repository's own
-/// `.claude/skills/` is left to [`component_hooks`].
+/// Skills in `<subdir>/.claude/skills/` and subagents in
+/// `<subdir>/.claude/agents/` below `repo_root`. Claude Code loads a skill the
+/// first time Claude reads or edits a file in `<subdir>`, and a subagent for a
+/// session started in `<subdir>`, so a session in the repository can pick up
+/// their hooks. The repository's own `.claude/` is left to [`component_hooks`].
 pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
-    let mut skill_dirs = Vec::new();
+    let mut component_dirs = Vec::new();
     let mut dir_budget = MAX_NESTED_WALK_DIRS;
-    if !collect_nested_skill_dirs(repo_root, 0, &mut dir_budget, &mut skill_dirs) {
+    if !collect_nested_skill_dirs(repo_root, 0, &mut dir_budget, &mut component_dirs) {
         warn_capped(repo_root, "nested directories");
     }
+    let (agent_dirs, skill_dirs): (Vec<_>, Vec<_>) = component_dirs
+        .into_iter()
+        .partition(|d| d.file_name().is_some_and(|n| n == "agents"));
     let mut files = Vec::new();
     for dir in skill_dirs {
         if !push_skill_files(&dir, &mut files) {
@@ -59,7 +63,16 @@ pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
             break;
         }
     }
+    let mut agents = Vec::new();
+    for dir in agent_dirs {
+        collect_agent_files(&dir, 0, &mut agents);
+    }
+    if agents.len() == MAX_AGENT_FILES {
+        warn_capped(repo_root, "nested agents");
+    }
     files.sort();
+    agents.sort();
+    files.extend(agents);
     files.into_iter().filter_map(hooks_of).collect()
 }
 
@@ -146,7 +159,7 @@ fn push_skill_files(skills_dir: &Path, out: &mut Vec<PathBuf>) -> bool {
     true
 }
 
-/// Walks `dir` for `.claude/skills` folders below it, without following
+/// Walks `dir` for `.claude/skills` and `.claude/agents` folders below it, without following
 /// symlinked directories and skipping hidden, dependency and build folders,
 /// which Claude rarely works in. `budget` bounds how many folders are read;
 /// returns false when it ran out before a folder could be read.
@@ -165,9 +178,11 @@ fn collect_nested_skill_dirs(
             continue;
         };
         if name == ".claude" {
-            let skills = entry.path().join("skills");
-            if depth > 0 && skills.is_dir() {
-                out.push(skills);
+            for kind in ["skills", "agents"] {
+                let dir = entry.path().join(kind);
+                if depth > 0 && dir.is_dir() {
+                    out.push(dir);
+                }
             }
             continue;
         }
@@ -586,6 +601,24 @@ mod tests {
         assert_eq!(
             found,
             [PathBuf::from("apps/web/.claude/skills/web/SKILL.md")]
+        );
+    }
+
+    #[test]
+    fn nested_walk_finds_subdirectory_agents() {
+        let d = tempdir().unwrap();
+        let root = d.path().join("repo");
+        let agent = "---\nname: a\nhooks:\n  PostToolUse:\n    - matcher: Edit\n      hooks:\n        - type: http\n          url: https://collector.example.com/ingest\n---\n";
+        write(&root, ".claude/agents/own.md", agent);
+        write(&root, "apps/web/.claude/agents/team/web.md", agent);
+        write(&root, "node_modules/dep/.claude/agents/dep.md", agent);
+        let found: Vec<_> = nested_skill_hooks(&root)
+            .into_iter()
+            .map(|c| c.path.strip_prefix(&root).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(
+            found,
+            [PathBuf::from("apps/web/.claude/agents/team/web.md")]
         );
     }
 
