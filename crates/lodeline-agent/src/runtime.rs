@@ -1068,7 +1068,13 @@ pub(crate) fn perform_warmup(
             if p.exists() {
                 seed(p, &t.id);
             } else {
-                for file in files_matching_pattern(p, WARMUP_ENTRY_LIMIT, WARMUP_FILE_LIMIT) {
+                let found = files_matching_pattern(
+                    p,
+                    crate::normalizer::uses_one_folder_rule(t),
+                    WARMUP_ENTRY_LIMIT,
+                    WARMUP_FILE_LIMIT,
+                );
+                for file in found {
                     seed(&file, &t.id);
                 }
             }
@@ -1086,13 +1092,24 @@ pub(crate) fn perform_warmup(
 /// past either bound it logs one warning, and a file beyond it gets no baseline
 /// (its first event has no `before_hash`). Symbolic links are not followed, as
 /// in `files_in_new_folder`.
-fn files_matching_pattern(pattern: &Path, entry_limit: usize, file_limit: usize) -> Vec<PathBuf> {
+fn files_matching_pattern(
+    pattern: &Path,
+    one_folder: bool,
+    entry_limit: usize,
+    file_limit: usize,
+) -> Vec<PathBuf> {
+    use lodeline_core::policy::glob::CompiledGlob;
     let root = glob_root_dir(pattern);
     if root == pattern {
         return Vec::new();
     }
-    let Ok(glob) = lodeline_core::policy::glob::CompiledGlob::new(&pattern.to_string_lossy())
-    else {
+    let pattern_str = pattern.to_string_lossy();
+    let compiled = if one_folder {
+        CompiledGlob::new_one_folder(&pattern_str)
+    } else {
+        CompiledGlob::new(&pattern_str)
+    };
+    let Ok(glob) = compiled else {
         return Vec::new();
     };
     let mut files = Vec::new();
@@ -1111,17 +1128,43 @@ fn files_matching_pattern(pattern: &Path, entry_limit: usize, file_limit: usize)
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
+            let path = crate::normalizer::match_form(entry.path());
             if kind.is_dir() {
-                queue.push_back(entry.path());
-            } else if kind.is_file() {
-                let path = crate::normalizer::match_form(entry.path());
-                if glob.is_match(&path) {
-                    files.push(path);
+                if glob.may_match_below(&path) {
+                    queue.push_back(entry.path());
                 }
+            } else if kind.is_file() && glob.is_match(&path) {
+                files.push(path);
             }
         }
     }
     files
+}
+
+/// True for the per-project skills and agents target `push_claude_code_synthetic_targets`
+/// builds: its id and its exact two paths, which fix the repository root.
+pub(crate) fn is_claude_code_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
+    let Some(h) = t.id.strip_prefix("claude_code-skills-agents-") else {
+        return false;
+    };
+    let Some(repo_root) = t
+        .paths
+        .first()
+        .and_then(|p| std::path::Path::new(p).ancestors().nth(4))
+    else {
+        return false;
+    };
+    let cd = repo_root.join(".claude");
+    h == synthetic_target_id_suffix(repo_root)
+        && t.paths
+            == [
+                cd.join("skills")
+                    .join("*")
+                    .join("SKILL.md")
+                    .to_string_lossy()
+                    .to_string(),
+                cd.join("agents").join("*.md").to_string_lossy().to_string(),
+            ]
 }
 
 /// The directory prefix of a (possibly glob) path: everything before the path
@@ -2185,6 +2228,80 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_project_skills_entry_matches_one_level_only() {
+        use lodeline_core::policy::glob::CompiledGlob;
+        let repo = std::path::Path::new("/repo");
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        let target = effective
+            .targets
+            .iter()
+            .find(|t| t.id.starts_with("claude_code-skills-agents-"))
+            .expect("project skills target");
+        assert!(crate::normalizer::uses_one_folder_rule(target));
+        let mut forged = target.clone();
+        forged.paths = vec!["/other/.claude/skills/*/SKILL.md".into()];
+        assert!(!crate::normalizer::uses_one_folder_rule(&forged));
+        let skills = target
+            .paths
+            .iter()
+            .find(|p| p.ends_with("SKILL.md"))
+            .map(|p| CompiledGlob::new_one_folder(p).unwrap())
+            .expect("project skills entry");
+        let dir = repo.join(".claude").join("skills");
+        assert!(skills.is_match(&dir.join("demo").join("SKILL.md")));
+        for deep in [
+            dir.join("demo").join("sub").join("SKILL.md"),
+            dir.join("demo")
+                .join("node_modules")
+                .join("x")
+                .join("SKILL.md"),
+        ] {
+            assert!(
+                !skills.is_match(&deep),
+                "project skills entry {} must not match {deep:?}",
+                skills.pattern()
+            );
+        }
+        let agents = repo.join(".claude").join("agents").join("sub").join("x.md");
+        let hooks = repo.join(".claude").join("hooks").join("sub").join("x.sh");
+        for file in [agents, hooks] {
+            assert!(
+                effective
+                    .targets
+                    .iter()
+                    .flat_map(|t| &t.paths)
+                    .any(|p| CompiledGlob::new(p).unwrap().is_match(&file)),
+                "{file:?} must stay watched"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_up_lists_one_level_of_skills_and_skips_what_is_below() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let skill = dir.join("skills").join("alpha");
+        let deep = skill.join("node_modules").join("x");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "v0").unwrap();
+        std::fs::write(deep.join("SKILL.md"), "v0").unwrap();
+        let listed = super::files_matching_pattern(
+            &dir.join("skills").join("*").join("SKILL.md"),
+            true,
+            100,
+            100,
+        );
+        assert_eq!(listed, vec![skill.join("SKILL.md")]);
+    }
+
+    #[test]
     fn cursor_project_target_watches_hooks_json() {
         let repo = std::path::Path::new("/repo");
         let mut effective = lodeline_core::policy::merge(
@@ -2333,6 +2450,33 @@ mod tests {
         }
     }
 
+    /// An operator pattern shaped `<folder>/*/<name>` keeps its meaning: its `*`
+    /// crosses folders, so the start baseline reaches a file two folders below.
+    #[test]
+    fn operator_star_pattern_still_reaches_below_one_folder_at_start() {
+        let w = warm_fixture(true);
+        let file = w.file.parent().unwrap().parent().unwrap().parent().unwrap();
+        let file = file.join("tools").join("a").join("b").join("config.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "v0").unwrap();
+        let mut eff = w.eff.clone();
+        eff.targets[0].paths = vec![file
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .join("*")
+            .join("config.json")
+            .to_string_lossy()
+            .into_owned()];
+        let expanded = [(
+            "t".to_string(),
+            eff.targets[0].paths.iter().map(Into::into).collect(),
+        )]
+        .into();
+        super::perform_warmup(&eff, &expanded, &w.cache).unwrap();
+        assert!(w.cache.lock().get(&file).unwrap().is_some());
+    }
+
     fn hex(bytes: &str) -> String {
         blake3::hash(bytes.as_bytes()).to_hex().to_string()
     }
@@ -2430,9 +2574,18 @@ mod tests {
             std::fs::write(dir.join(format!("f{i}.md")), "x").unwrap();
         }
         let pattern = dir.join("*.md");
-        assert_eq!(super::files_matching_pattern(&pattern, 100, 100).len(), 10);
-        assert_eq!(super::files_matching_pattern(&pattern, 100, 4).len(), 4);
-        assert_eq!(super::files_matching_pattern(&pattern, 3, 100).len(), 3);
+        assert_eq!(
+            super::files_matching_pattern(&pattern, false, 100, 100).len(),
+            10
+        );
+        assert_eq!(
+            super::files_matching_pattern(&pattern, false, 100, 4).len(),
+            4
+        );
+        assert_eq!(
+            super::files_matching_pattern(&pattern, false, 3, 100).len(),
+            3
+        );
     }
 
     #[test]
@@ -2455,7 +2608,7 @@ mod tests {
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("SKILL.md"), "x").unwrap();
         }
-        let found = super::files_matching_pattern(&dir.join("*").join("SKILL.md"), 80, 100);
+        let found = super::files_matching_pattern(&dir.join("*").join("SKILL.md"), false, 80, 100);
         assert_eq!(found.len(), 4);
     }
 
@@ -2467,8 +2620,12 @@ mod tests {
         let file = dir.join("skills").join(nfd).join("SKILL.md");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "x").unwrap();
-        let found =
-            super::files_matching_pattern(&dir.join("skills").join("*").join("SKILL.md"), 100, 100);
+        let found = super::files_matching_pattern(
+            &dir.join("skills").join("*").join("SKILL.md"),
+            false,
+            100,
+            100,
+        );
         // macOS composes the name; elsewhere the bytes stay as stored, like events.
         assert_eq!(found, vec![crate::normalizer::match_form(file)]);
         #[cfg(target_os = "macos")]
@@ -2488,6 +2645,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.join("beta"), root.join("beta")).unwrap();
         assert!(super::files_matching_pattern(
             &root.join("*").join("SKILL.md"),
+            false,
             super::WARMUP_ENTRY_LIMIT,
             super::WARMUP_FILE_LIMIT
         )

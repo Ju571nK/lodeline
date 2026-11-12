@@ -34,7 +34,10 @@
 - A watch path is matched as a glob against the file an event names. A folder
   path such as `~/.claude/hooks/` matches the folder itself and never a file in
   it; write `~/.claude/hooks/*` to watch the files below it (`*` also crosses
-  folder separators, and `**` is rejected at policy load).
+  folder separators, and `**` is rejected at policy load). This holds for every
+  pattern you write. The built-in skills and scheduled tasks entries, such as
+  `~/.claude/skills/*/SKILL.md`, are the exception: their `*` stands for one
+  folder, so `skills/<name>/node_modules/x/SKILL.md` does not match them.
   A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
   each assessment, but an edit of its target records no file change and starts no assessment;
   the next assessment reads it.

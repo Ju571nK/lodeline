@@ -34,6 +34,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   agent creates: `state.mcp-baselines` next to the state database, and on macOS and Linux the
   socket folder under `$TMPDIR` that a non-root agent uses when `XDG_RUNTIME_DIR` is not set. The
   example policy in section 3 of the macOS guide gains the `description` the agent requires. (#590)
+- The built-in scheduled task entry (`~/.claude/scheduled-tasks/*/SKILL.md`) now matches a
+  `SKILL.md` one folder below the scheduled tasks folder only, so a deeper `SKILL.md` no longer
+  records a file change. Operator patterns are unchanged. (#592)
 
 ### Fixed
 
@@ -69,10 +72,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   during the short time (usually milliseconds, longer for a very large folder) between that read and
   the placing of the watch may still wait for the next heartbeat. Skills below a
   subfolder of a project and skills of `--add-dir` folders are read but not watched.
+  The skills and scheduled tasks entries (`skills/*/SKILL.md`, `scheduled-tasks/*/SKILL.md`) name
+  one folder per skill, as the assessment reads them: a `SKILL.md` deeper in a skill (inside its
+  `node_modules`, say) is not watched. Subagent files and hooks match at any depth.
   A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
   each assessment, but an edit of its target records no file change and starts no assessment;
   the next assessment reads it.
-  (#582, #539, #586, #591)
+  (#582, #539, #586, #591, #592)
 - AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
   (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude
   Code managed settings drop-in folder (`managed-settings.d/*.json`). Before, these entries named

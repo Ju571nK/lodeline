@@ -45,8 +45,16 @@ a bare folder path matches the folder itself, not the files in it, and policy
 files reject `**`. The shipped user-global target therefore lists
 `~/.claude/skills/*/SKILL.md` and `~/.claude/agents/*.md` (`*` also crosses
 folder separators, so nested subagent files match), and the per-project target
-lists the same two patterns under `.claude/`.
+lists the same two patterns under `.claude/`. See the addendum below for the
+skills entry.
 
 Windows paths are the same strings as the neighbouring entries and were not
 tried on a device. `CLAUDE_CONFIG_DIR` is not covered, as for the other
 user-global entries.
+
+Addendum, 2026-11-12. The `skills/*/SKILL.md` and `scheduled-tasks/*/SKILL.md`
+entries matched a `SKILL.md` at any depth, also inside a skill's `node_modules`,
+while the assessment reads `skills/<name>/SKILL.md` one level deep. In these
+built-in entries, and in the per-project skills entry, the `*` now stands for one
+folder. A pattern in an operator's policy file still lets `*` cross folders, and
+the agents and hooks entries still match at any depth.

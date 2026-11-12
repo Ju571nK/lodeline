@@ -1251,6 +1251,56 @@ targets:
         }
     }
 
+    /// The skills and scheduled-task entries name one folder per skill, as the
+    /// assessment reads them: a `SKILL.md` deeper in a skill (a vendored
+    /// package, say) is not one. The agents and hooks entries stay recursive.
+    #[test]
+    fn builtin_skills_entries_match_one_level_only() {
+        let (yaml, home, sep) = if cfg!(target_os = "macos") {
+            (lodeline_rules_basic::DEFAULTS_MACOS, "/Users/alice", "/")
+        } else if cfg!(target_os = "linux") {
+            (lodeline_rules_basic::DEFAULTS_LINUX, "/home/alice", "/")
+        } else {
+            (
+                lodeline_rules_basic::DEFAULTS_WINDOWS,
+                r"C:\Users\alice",
+                r"\",
+            )
+        };
+        let doc = parse(yaml).unwrap();
+        let compile = |tail: &str| {
+            let template = tail.replace('/', sep);
+            let entry = doc
+                .targets
+                .iter()
+                .flat_map(|t| &t.paths)
+                .find(|p| p.ends_with(&template))
+                .unwrap_or_else(|| panic!("no built-in entry ends with {tail}"));
+            let expanded =
+                entry
+                    .replacen("~/", &format!("{home}{sep}"), 1)
+                    .replacen("%USERPROFILE%", home, 1);
+            glob::CompiledGlob::new_one_folder(&expanded).unwrap()
+        };
+        let at = |rel: &str| PathBuf::from(format!("{home}{sep}{}", rel.replace('/', sep)));
+        for folder in ["skills", "scheduled-tasks"] {
+            let g = compile(&format!(".claude/{folder}/*/SKILL.md"));
+            assert!(g.is_match(&at(&format!(".claude/{folder}/demo/SKILL.md"))));
+            for deep in [
+                format!(".claude/{folder}/demo/sub/SKILL.md"),
+                format!(".claude/{folder}/demo/node_modules/x/SKILL.md"),
+            ] {
+                assert!(
+                    !g.is_match(&at(&deep)),
+                    "{folder} entry {} must not match {deep}",
+                    g.pattern()
+                );
+            }
+        }
+        assert!(compile(".claude/agents/*.md").is_match(&at(".claude/agents/sub/x.md")));
+        assert!(compile(".claude/hooks/*").is_match(&at(".claude/hooks/sub/x.sh")));
+    }
+
     /// The Windows file, expanded the way the agent does (`expand_per_user`
     /// with a per-user home), must match a real file path for every Claude
     /// Code and Codex entry. Runs on the Windows CI leg only.
