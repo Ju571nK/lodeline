@@ -172,8 +172,8 @@ fn assess_user(
     let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
 
-    // shortcut: a project file's list also applies to the user's hooks, which
-    // this host-wide scope cannot see; the project row reads the user's list.
+    // A project file's list can admit a hook this list blocks; the project row
+    // reports it, because this host-wide scope cannot see project files.
     let allowed = http_hook_allowlist(&[managed.as_ref(), Some(&merged)]);
     let mut out = Vec::new();
     if !hooks_off {
@@ -638,16 +638,18 @@ fn url_may_match(url: &str, patterns: &[String]) -> bool {
 }
 
 fn normalize_url(url: &str) -> String {
+    // The docs state case-insensitivity for the host only; reading the whole
+    // URL without case keeps more hooks reported, the safe side.
+    let url = url.to_ascii_lowercase();
+    let url = url.as_str();
     let (scheme, rest) = url.split_once("://").map_or(("", url), |(s, r)| (s, r));
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(end);
-    let authority = authority.to_ascii_lowercase();
     let (host, port) = match authority.rfind(':') {
         Some(i) if !authority[i..].contains(']') => authority.split_at(i),
-        _ => (authority.as_str(), ""),
+        _ => (authority, ""),
     };
     let host = host.strip_suffix('.').unwrap_or(host);
-    let scheme = scheme.to_ascii_lowercase();
     let sep = if rest.len() == url.len() { "" } else { "://" };
     format!("{scheme}{sep}{host}{port}{tail}")
 }
@@ -1591,6 +1593,36 @@ fn is_home(dir: &Path, home: &Path) -> bool {
 
 /// The project assessment. `policy_dir` is the managed-settings folder,
 /// passed in so tests do not depend on the host's real one.
+/// The user row drops an HTTP hook its own list blocks, but Claude Code merges
+/// the lists, so in a project whose files admit that hook it runs. Report here
+/// the user hooks the merged list admits and the user list alone blocks.
+fn emit_user_hooks_admitted_here(
+    user_all: &Value,
+    home: &Path,
+    managed: Option<&Value>,
+    merged_list: Option<&[String]>,
+    out: &mut Vec<AiGuardReason>,
+) {
+    let user_list = http_hook_allowlist(&[managed, Some(user_all)]);
+    if user_list.as_deref() == merged_list {
+        return;
+    }
+    let (mut admitted, mut blocked) = (Vec::new(), Vec::new());
+    // An unreadable user hook is the user row's to report.
+    let _ = emit_hook_reasons_allowing(user_all, Some(home), merged_list, &mut admitted);
+    let _ = emit_hook_reasons_allowing(user_all, Some(home), user_list.as_deref(), &mut blocked);
+    for reason in blocked {
+        if let Some(i) = admitted.iter().position(|a| *a == reason) {
+            admitted.remove(i);
+        }
+    }
+    for reason in admitted {
+        if matches!(reason, AiGuardReason::HookForwardsToolCalls { .. }) && !out.contains(&reason) {
+            out.push(reason);
+        }
+    }
+}
+
 fn assess_project(
     repo_root: &Path,
     home: &Path,
@@ -1684,10 +1716,24 @@ fn assess_project(
         )
     };
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
-    let allowed = http_hook_allowlist(&[managed.as_ref(), user.as_ref(), Some(&merged)]);
+    // The user's own `settings.local.json` merges into the user list too.
+    let user_all = merge_overlay(
+        user.clone().unwrap_or(Value::Object(Default::default())),
+        super::read_json_optional(&home.join(".claude").join("settings.local.json"))
+            .ok()
+            .flatten(),
+    );
+    let allowed = http_hook_allowlist(&[managed.as_ref(), Some(&user_all), Some(&merged)]);
     let mut out = Vec::new();
     if !hooks_off {
         emit_hook_reasons_allowing(&merged, Some(home), allowed.as_deref(), &mut out)?;
+        emit_user_hooks_admitted_here(
+            &user_all,
+            home,
+            managed.as_ref(),
+            allowed.as_deref(),
+            &mut out,
+        );
         super::claude_components::emit_component_hook_reasons(&components, Some(home), &mut out);
     }
     emit_permission_reasons(&merged, &mut out);
@@ -4317,7 +4363,9 @@ mod tests {
         let admitted = destinations(r#"{"allowedHttpHookUrls": ["https://c.example.test/*"]}"#);
         assert_eq!(admitted.len(), 1, "{admitted:?}");
         assert!(admitted[0].contains("c.example.test"), "{admitted:?}");
-        assert!(destinations(r#"{"allowedHttpHookUrls": ["https://b.example.test/*"]}"#).is_empty());
+        assert!(
+            destinations(r#"{"allowedHttpHookUrls": ["https://b.example.test/*"]}"#).is_empty()
+        );
         assert!(destinations("{}").is_empty());
     }
 
