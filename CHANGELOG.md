@@ -7,6 +7,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- **Agent.** The agent records a write to a watched file only when the bytes differ from the last
+  recorded or start-up state. A rewrite with the same bytes, and a mode or owner change that leaves
+  the bytes alone, is no longer recorded, so `events_emitted_total`, `events_by_kind` and the
+  `show stats` totals are lower than before for the same activity. AI Guard still reassesses on every
+  write. A rename now forgets the old path's baseline, so recreating that path with the same bytes is
+  recorded. No event or wire format changes.
+
 ## [0.14.5] - 2026-11-12
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to

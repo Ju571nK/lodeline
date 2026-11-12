@@ -22,6 +22,9 @@ pub async fn run(
             biased;
             maybe = rx.recv() => {
                 let Some(committable) = maybe else { break; };
+                if is_unchanged_write(&cache, &committable) {
+                    continue;
+                }
                 sink.write(&committable.event).map_err(std::io::Error::other)?;
                 stats.record_emit(evidence_kind_str(&committable.event.evidence));
                 let now_ms = std::time::SystemTime::now()
@@ -36,6 +39,31 @@ pub async fn run(
         }
     }
     sink.shutdown().map_err(std::io::Error::other)
+}
+
+/// True when the write left the bytes at the baseline, so recording it adds nothing.
+fn is_unchanged_write(cache: &Mutex<HashCache>, committable: &CommittableEvent) -> bool {
+    use lodeline_core::event::{Evidence, EvidenceQuality, FileChangeKind};
+    let Evidence::FileChange {
+        change_kind,
+        after_hash: Some(after),
+        recheck_hash,
+        evidence_quality,
+        ..
+    } = &committable.event.evidence
+    else {
+        return false;
+    };
+    *change_kind != FileChangeKind::Removed
+        && *evidence_quality != EvidenceQuality::Incomplete
+        && recheck_hash.as_ref().is_none_or(|r| r == after)
+        && cache
+            .lock()
+            .get(&committable.path_for_db)
+            .ok()
+            .flatten()
+            .as_ref()
+            == Some(after)
 }
 
 fn evidence_kind_str(e: &lodeline_core::event::Evidence) -> &'static str {

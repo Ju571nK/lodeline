@@ -104,6 +104,8 @@ lodeline run
 
 The daemon must be running for `lodeline-mcp` and `lodeline-hook` to function. Both are clients of the daemon and have no independent capability without it. On macOS and Linux they connect over Unix sockets. On Windows, `lodeline-hook` connects over named pipes.
 
+The daemon records a write to a watched file only when the bytes change. A write with the same bytes, and a mode or owner change that leaves the bytes alone, adds no event. `~/.claude.json` changes often where Claude Code runs, so it still produces events at that pace.
+
 ---
 
 ## Local rule packs via git

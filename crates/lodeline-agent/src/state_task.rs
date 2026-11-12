@@ -80,9 +80,13 @@ pub fn commit_baseline(cache: &Mutex<HashCache>, committable: &CommittableEvent,
             Evidence::FileChange {
                 size_after: Some(size),
                 change_kind,
+                rename_from,
                 ..
             },
         ) if *change_kind != FileChangeKind::Removed => {
+            if let Some(from) = rename_from {
+                let _ = g.delete(from);
+            }
             let _ = g.put(
                 &committable.path_for_db,
                 hash,
