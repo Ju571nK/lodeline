@@ -113,7 +113,21 @@ pub fn respell(
     targets: &[CompiledTarget],
     aliases: &[(PathBuf, PathBuf)],
 ) -> PathBuf {
-    canonical
+    if aliases.is_empty() || match_target(&canonical, targets).is_some() {
+        return canonical;
+    }
+    aliases
+        .iter()
+        .find_map(|(real, link)| {
+            let rest = canonical.strip_prefix(real).ok()?;
+            let spelled = if rest.as_os_str().is_empty() {
+                link.clone()
+            } else {
+                link.join(rest)
+            };
+            match_target(&spelled, targets).map(|_| spelled)
+        })
+        .unwrap_or(canonical)
 }
 
 pub const RENAME_PAIR_WINDOW: Duration = Duration::from_millis(200);
