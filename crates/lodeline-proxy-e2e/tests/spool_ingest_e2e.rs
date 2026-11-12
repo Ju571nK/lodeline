@@ -700,43 +700,20 @@ async fn expired_events_reach_the_server_as_a_spool_expired_gap() {
 // ------------------------------------------------------- the real binary
 
 /// Build (a no-op when current) and locate the real `lodeline-proxy` binary, built
-/// WITHOUT the `test-util` feature: the release code path. `None` (with a note on
-/// stderr) when it cannot be located or built, so that one test skips.
+/// WITHOUT the `test-util` feature: the release code path. Under `CI` a failure
+/// fails the test; elsewhere it prints a note and that one test skips.
 fn proxy_binary() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let profile_dir = exe.parent()?.parent()?.to_path_buf();
-    let profile = profile_dir.file_name()?.to_owned();
-    // CARGO_TARGET_DIR wins; otherwise the layout `<target>/<profile>/deps/<exe>`.
-    let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => profile_dir.parent()?.to_path_buf(),
-    };
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut c = Command::new(cargo);
-    c.args(["build", "-p", "lodeline-proxy", "--bin", "lodeline-proxy"])
-        .arg("--target-dir")
-        .arg(&target_dir)
-        .current_dir(env!("CARGO_MANIFEST_DIR"));
-    if profile == "release" {
-        c.arg("--release");
-    }
-    match c.status() {
-        Ok(st) if st.success() => {}
-        other => {
+    match common::real_proxy_binary() {
+        Ok(bin) => Some(bin),
+        Err(e) => {
             assert!(
                 std::env::var_os("CI").is_none(),
-                "building the lodeline-proxy binary failed under CI ({other:?})"
+                "no real lodeline-proxy binary under CI: {e}"
             );
-            eprintln!("skipped: building the lodeline-proxy binary failed ({other:?})");
-            return None;
+            eprintln!("skipped: {e}");
+            None
         }
     }
-    let bin = target_dir.join(&profile).join("lodeline-proxy");
-    if !bin.exists() {
-        eprintln!("skipped: no lodeline-proxy binary at {}", bin.display());
-        return None;
-    }
-    Some(bin)
 }
 
 /// Kills the child if the test fails before it stopped it.
