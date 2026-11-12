@@ -161,22 +161,6 @@ impl CodexLayer {
         })
     }
 
-    /// The legacy `profile = "<name>"` key selects `[profiles.<name>]`, which Codex
-    /// lays over the config. A `--profile` flag is runtime state and is not read.
-    fn apply_selected_profile(&mut self) {
-        let Some(config) = self.config.as_mut() else {
-            return;
-        };
-        let profile = config
-            .get("profile")
-            .and_then(Value::as_str)
-            .and_then(|name| config.get("profiles")?.get(name))
-            .cloned();
-        if let Some(profile) = profile {
-            merge_layer(config, &profile);
-        }
-    }
-
     fn hook_sources(&self) -> impl Iterator<Item = &Value> {
         self.config.iter().chain(self.json_hooks.iter())
     }
@@ -348,8 +332,7 @@ fn assess_user_layers(
     codex_dir: &Path,
     home_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
-    let mut layers = [CodexLayer::read(system_dir)?, CodexLayer::read(codex_dir)?];
-    layers[1].apply_selected_profile();
+    let layers = [CodexLayer::read(system_dir)?, CodexLayer::read(codex_dir)?];
     let mut effective: Option<Value> = None;
     for config in layers.iter().filter_map(|layer| layer.config.as_ref()) {
         match effective.as_mut() {
@@ -4935,49 +4918,44 @@ base_url = "https://llm.corp.example/v1"
             .contains(&super::super::policy_controls::codex_requirements_path()));
     }
 
-    fn auto_approval_modes(config: &str) -> Vec<String> {
+    fn reasons_for(config: &str) -> Vec<AiGuardReason> {
         let dir = tempdir().unwrap();
         write_config(dir.path(), config);
-        CodexParser::default()
-            .assess(dir.path())
-            .unwrap()
-            .into_iter()
-            .filter_map(|r| match r {
-                AiGuardReason::AutoApprovalEnabled { mode } => Some(mode),
-                _ => None,
-            })
-            .collect()
+        CodexParser::default().assess(dir.path()).unwrap()
     }
 
     #[test]
-    fn selected_profile_is_overlaid_on_the_user_layer() {
+    fn legacy_profile_key_and_table_are_not_applied_as_codex_0_167_0_refuses_the_key() {
+        let plain = reasons_for("model = \"gpt-5\"\n");
+        for profile_table in [
+            "approval_policy = \"never\"",
+            "sandbox_mode = \"danger-full-access\"",
+        ] {
+            let config = format!("profile = \"p\"\n[profiles.p]\n{profile_table}\n");
+            assert_eq!(reasons_for(&config), plain, "{profile_table}");
+        }
+    }
+
+    #[test]
+    fn profile_table_without_the_legacy_key_is_not_applied() {
         assert_eq!(
-            auto_approval_modes("profile = \"p\"\n[profiles.p]\napproval_policy = \"never\"\n"),
-            ["never"]
+            reasons_for("[profiles.p]\napproval_policy = \"never\"\n"),
+            reasons_for("")
         );
     }
 
     #[test]
-    fn profile_without_a_table_or_table_without_profile_changes_nothing() {
-        assert!(auto_approval_modes(
-            "profile = \"p\"\n[profiles.q]\napproval_policy = \"never\"\n"
-        )
-        .is_empty());
-        assert!(auto_approval_modes("[profiles.p]\napproval_policy = \"never\"\n").is_empty());
-    }
-
-    #[test]
-    fn profile_key_replaces_the_user_key_and_keeps_the_others() {
-        let config = "profile = \"p\"\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n[profiles.p]\napproval_policy = \"on-request\"\n";
+    fn profile_file_passed_with_the_profile_flag_is_not_read() {
         let dir = tempdir().unwrap();
-        write_config(dir.path(), config);
-        let reasons = CodexParser::default().assess(dir.path()).unwrap();
-        assert!(!reasons
-            .iter()
-            .any(|r| matches!(r, AiGuardReason::AutoApprovalEnabled { .. })));
-        assert!(
-            reasons.contains(&AiGuardReason::SandboxDisabled),
-            "{reasons:?}"
+        write_config(dir.path(), "");
+        std::fs::write(
+            dir.path().join(".codex/p.config.toml"),
+            "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            CodexParser::default().assess(dir.path()).unwrap(),
+            reasons_for("")
         );
     }
 }

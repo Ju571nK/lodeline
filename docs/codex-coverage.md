@@ -1,14 +1,12 @@
 # Codex coverage
 
-This page says what Lodeline reads from Codex configuration and where its reading stops. Checked against Codex 0.167.0 unless a line names another version.
+This page says what Lodeline reads from Codex configuration and where its reading stops. It was checked on Codex 0.167.0. For each claim about profiles, the check ran `codex debug prompt-input`, which loads configuration and prints without contacting a service, against a scratch `CODEX_HOME` that held only the file under test.
 
 ## Profiles
 
-When `config.toml` sets `profile = "<name>"` and holds a `[profiles.<name>]` table, Lodeline lays that table over the user layer before it assesses the file. A key in the table replaces the same key in the user layer and leaves the others. A name with no table, or a table with no `profile` key, changes nothing.
+Lodeline does not apply the legacy `profile = "<name>"` key or the `[profiles.<name>]` tables. Codex 0.167.0 stops with the error "legacy `profile` config is no longer supported; use `--profile` with `<name>.config.toml` instead" when `config.toml` sets the key, with or without the table. A `[profiles.<name>]` table without the key loads and has no effect. A profile table therefore never runs, and reporting it would report a setting Codex does not use. The release that removed the key is not known.
 
-Codex 0.167.0 no longer loads the legacy `profile` key. It stops with the error "legacy `profile` config is no longer supported; use `--profile` with `<name>.config.toml` instead". A `[profiles.<name>]` table without the key still loads and does nothing. Lodeline still reads the legacy key because hosts can run an older Codex that honors it, so on a 0.167.0 host it can report a setting that Codex refuses to start with.
-
-Profile files passed with `--profile`, such as `p.config.toml`, are not read. The flag is runtime state that a daemon cannot see.
+Files passed with `--profile`, such as `p.config.toml`, are not read. The flag is runtime state that a daemon cannot see.
 
 ## Approval policy
 

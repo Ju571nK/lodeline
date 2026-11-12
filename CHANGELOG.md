@@ -7,9 +7,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
-### Added
+### Documentation
 
-- AI Guard lays the `[profiles.<name>]` table selected by a legacy `profile = "<name>"` key over the Codex user config before it assesses the file. Codex 0.167.0 no longer loads that key; `docs/codex-coverage.md` says what is read and where coverage ends.
+- `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied.
 
 ## [0.14.5] - 2026-11-12
 
