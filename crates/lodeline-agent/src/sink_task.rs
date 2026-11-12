@@ -355,6 +355,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_file_that_vanished_is_recorded_when_it_comes_back_with_the_same_bytes() {
+        use lodeline_core::event::FileChangeKind::{Created, Modified};
+        let p = std::path::Path::new("/w/a.json");
+        let (n, _) = emitted_after(
+            &[(p, "h")],
+            vec![hashed(p, Modified, None), hashed(p, Created, Some("h"))],
+        )
+        .await;
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
     async fn a_rename_deletes_the_baseline_of_the_old_path() {
         use lodeline_core::event::FileChangeKind::Renamed;
         let old = std::path::Path::new("/w/old.json");
