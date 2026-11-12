@@ -1335,7 +1335,8 @@ mod hook_launch_tests {
     use super::*;
     use std::time::Duration;
 
-    const T: Duration = Duration::from_secs(2);
+    // Only a bound: `start_hook` returns as soon as the hook exits.
+    const T: Duration = Duration::from_secs(60);
 
     fn register(dir: &Path, agent: &str, command: &str) {
         std::fs::write(

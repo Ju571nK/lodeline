@@ -860,8 +860,13 @@ async fn retry_locked_waits_only_for_a_held_state_dir_lock() {
     attempts.store(0, Ordering::Relaxed);
     let other = Id::new("px-2").unwrap();
     let Err(e) = common::retry_locked(|| async {
-        attempts.fetch_add(1, Ordering::Relaxed);
-        Ok(StateDir::open(&dir, &other)?)
+        let opened = StateDir::open(&dir, &other);
+        // A child another test forked can still hold the lock fd; that Locked
+        // is retried by design. Count only the answers that are not Locked.
+        if !matches!(opened, Err(StateError::Locked)) {
+            attempts.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(opened?)
     })
     .await
     else {
