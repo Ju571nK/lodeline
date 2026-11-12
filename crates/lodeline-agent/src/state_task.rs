@@ -95,13 +95,9 @@ pub fn commit_baseline(cache: &Mutex<HashCache>, committable: &CommittableEvent,
                 now_ms,
             );
         }
-        (
-            None,
-            Evidence::FileChange {
-                change_kind: FileChangeKind::Removed,
-                ..
-            },
-        ) => {
+        // No hash means the file is gone or unreadable, so the old bytes are no
+        // baseline: a later write with the same bytes must be recorded.
+        (None, Evidence::FileChange { .. }) => {
             let _ = g.delete(&committable.path_for_db);
         }
         _ => {}

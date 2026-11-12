@@ -13,8 +13,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   recorded or start-up state. A rewrite with the same bytes, and a mode or owner change that leaves
   the bytes alone, is no longer recorded, so `events_emitted_total`, `events_by_kind` and the
   `show stats` totals are lower than before for the same activity. AI Guard still reassesses on every
-  write. A rename now forgets the old path's baseline, so recreating that path with the same bytes is
-  recorded. No event or wire format changes.
+  write. A file that is gone or unreadable forgets its baseline, and so does the old path of a rename, so
+  recreating that path with the same bytes is recorded. No event or wire format changes.
 
 ## [0.14.5] - 2026-11-12
 
