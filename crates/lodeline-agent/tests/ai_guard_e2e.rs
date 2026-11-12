@@ -1321,3 +1321,179 @@ async fn claude_project_skill_and_agent_files_trigger_reassessment() {
         );
     }
 }
+
+/// The shipped user-global paths under `home`, with every default target off:
+/// the agent then watches only the scratch folder.
+fn claude_user_policy_only_under(home: &std::path::Path) -> String {
+    let mut yaml = shipped_policy_under(home, "ai-guard-claude-code-user-global");
+    yaml.push_str("overrides:\n");
+    for target in lodeline_core::policy::defaults().unwrap().targets {
+        yaml.push_str(&format!("  - id: {}\n    disabled: true\n", target.id));
+    }
+    yaml
+}
+
+/// Part of the Claude Code folder is a symbolic link to a folder outside the
+/// home (dotfiles layout). An edit of a file below it must be recorded as a
+/// file change and must also start a reassessment: the watched path names the
+/// link, the incoming path is the resolved one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_edit_below_a_linked_watched_folder_triggers_reassessment() {
+    let _home_guard = HOME_LOCK.lock().await;
+    const CLEAN: &str = "---\nname: demo\ndescription: demo\n---\nbody\n";
+    const BROAD_HOOK_SETTINGS: &str = r#"{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"echo hi"}]}]}}"#;
+    // (label, what is moved outside the home and linked ("" is the whole
+    // folder), file written, relative to the home or to the outside folder,
+    // body, expected reason kind)
+    let cases = [
+        (
+            "1 skills is a link",
+            "skills",
+            false,
+            ".claude/skills/demo/SKILL.md",
+            COMPONENT_WITH_BROAD_HOOK,
+            "broad_matcher",
+        ),
+        (
+            "2a .claude is a link, settings.json",
+            "",
+            false,
+            ".claude/settings.json",
+            BROAD_HOOK_SETTINGS,
+            "broad_matcher",
+        ),
+        (
+            "2b .claude is a link, SKILL.md",
+            "",
+            false,
+            ".claude/skills/demo/SKILL.md",
+            COMPONENT_WITH_BROAD_HOOK,
+            "broad_matcher",
+        ),
+        (
+            "3 agents is a link",
+            "agents",
+            false,
+            ".claude/agents/demo.md",
+            COMPONENT_WITH_BROAD_HOOK,
+            "broad_matcher",
+        ),
+        (
+            "4 hooks is a link",
+            "hooks",
+            false,
+            ".claude/hooks/pre.sh",
+            "#!/bin/sh\nrm -rf /\n",
+            "destructive_in_hook_script",
+        ),
+        (
+            "5 settings.json is a link",
+            "settings.json",
+            true,
+            "settings.json",
+            BROAD_HOOK_SETTINGS,
+            "broad_matcher",
+        ),
+        (
+            "7 one skill folder is a link",
+            "skills/demo",
+            false,
+            ".claude/skills/demo/SKILL.md",
+            COMPONENT_WITH_BROAD_HOOK,
+            "broad_matcher",
+        ),
+        (
+            "6 control, no link",
+            "none",
+            false,
+            ".claude/skills/demo/SKILL.md",
+            COMPONENT_WITH_BROAD_HOOK,
+            "broad_matcher",
+        ),
+    ];
+    let mut table = Vec::new();
+    for (label, linked, write_outside, rel, body, kind) in cases {
+        let td = tempfile::TempDir::new().unwrap();
+        let home = dunce::canonicalize(td.path()).unwrap();
+        let out_td = tempfile::TempDir::new().unwrap();
+        let outside = dunce::canonicalize(out_td.path()).unwrap();
+        // SAFETY: process-global write; serialized via HOME_LOCK above.
+        std::env::set_var("HOME", &home);
+        let claude = home.join(".claude");
+        let script = claude.join("hooks/pre.sh");
+        for dir in ["hooks", "skills/demo", "agents"] {
+            std::fs::create_dir_all(claude.join(dir)).unwrap();
+        }
+        std::fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::write(claude.join("settings.json"), hook_settings(&script)).unwrap();
+        std::fs::write(claude.join("skills/demo/SKILL.md"), CLEAN).unwrap();
+        std::fs::write(claude.join("agents/demo.md"), CLEAN).unwrap();
+        match linked {
+            "none" => {}
+            "" => {
+                std::fs::rename(&claude, outside.join(".claude")).unwrap();
+                std::os::unix::fs::symlink(outside.join(".claude"), &claude).unwrap();
+            }
+            part => {
+                std::fs::create_dir_all(outside.join(part).parent().unwrap()).unwrap();
+                std::fs::rename(claude.join(part), outside.join(part)).unwrap();
+                std::os::unix::fs::symlink(outside.join(part), claude.join(part)).unwrap();
+            }
+        }
+
+        let agent = TestAgentBuilder::new()
+            .policy(&claude_user_policy_only_under(&home))
+            .start()
+            .await;
+        agent
+            .wait_for_event(
+                |v| {
+                    v["evidence"]["kind"] == "ai_guard_risk_assessed"
+                        && v["evidence"]["tool"] == "claude_code"
+                        && v["evidence"]["scope"]["kind"] == "user_global"
+                },
+                fs_event_timeout(),
+            )
+            .await
+            .expect("boot assessment of the user scope");
+
+        let file = if write_outside {
+            outside.join(rel)
+        } else {
+            home.join(rel)
+        };
+        std::fs::write(&file, body).unwrap();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let recorded = agent
+            .wait_for_event(
+                |v| v["evidence"]["kind"] == "file_change" && v.to_string().contains(&name),
+                fs_event_timeout(),
+            )
+            .await
+            .is_some();
+        let reassessed = agent
+            .wait_for_event(
+                |v| claude_reason(v, "user_global", kind),
+                if recorded {
+                    fs_event_timeout()
+                } else {
+                    Duration::from_secs(3)
+                },
+            )
+            .await
+            .is_some();
+        agent.join.abort();
+        eprintln!("CASE {label}: recorded={recorded} reassessed={reassessed}");
+        table.push((label, recorded, reassessed));
+    }
+    for (label, recorded, reassessed) in &table {
+        assert!(
+            !recorded || *reassessed,
+            "{label}: the edit was recorded as a file change but started no reassessment; table: {table:?}"
+        );
+    }
+    assert!(
+        table.last().is_some_and(|c| c.1 && c.2),
+        "control: {table:?}"
+    );
+}

@@ -226,13 +226,18 @@ async fn set_user_homes(ctx: &mut TaskCtx, mut next: Vec<AssessHome>) {
 /// Match an incoming change path against a watched path/dir. A watched dir
 /// matches any path inside it; a watched file matches by exact equality.
 ///
-/// Incoming paths are canonical. Resolve the watched prefix too, including
-/// macOS /etc -> /private/etc and missing policy leaves under existing parents.
+/// Incoming paths are canonical. Resolve the watched path too, its last
+/// component included when it exists (a watched folder that is a link), else
+/// its prefix: macOS /etc -> /private/etc and missing policy leaves under
+/// existing parents.
 fn path_matches(incoming: &std::path::Path, watched: &std::path::Path) -> bool {
     if incoming.starts_with(watched) {
         return true;
     }
-    let watched = crate::normalizer::canonicalize_glob_prefix(watched);
+    let watched = dunce::canonicalize(watched).map_or_else(
+        |_| crate::normalizer::canonicalize_glob_prefix(watched),
+        crate::normalizer::match_form,
+    );
     if incoming == watched {
         return true;
     }
@@ -1465,6 +1470,22 @@ mod tests {
         let incoming = real.canonicalize().unwrap().join("requirements.toml");
         assert!(path_matches(&incoming, &link.join("requirements.toml")));
         assert!(!path_matches(&incoming, &link.join("other.toml")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_watched_folder_that_is_a_link_matches_the_files_below_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("skills");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let incoming = real.canonicalize().unwrap().join("demo/SKILL.md");
+        assert!(
+            path_matches(&incoming, &link),
+            "a path below a watched folder that is a symbolic link must match"
+        );
+        assert!(!path_matches(&incoming, &dir.path().join("agents")));
     }
 
     #[cfg(unix)]
