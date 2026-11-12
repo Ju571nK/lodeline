@@ -188,4 +188,153 @@ mod tests {
         assert_eq!(snap.events_emitted_total, 1);
         assert_eq!(snap.events_by_kind["file_change"], 1);
     }
+
+    struct NullSink;
+    impl EventSink for NullSink {
+        fn write(
+            &mut self,
+            _: &lodeline_core::event::Event,
+        ) -> Result<(), lodeline_core::sink::SinkError> {
+            Ok(())
+        }
+        fn flush_durable(&mut self) -> Result<(), lodeline_core::sink::SinkError> {
+            Ok(())
+        }
+        fn shutdown(&mut self) -> Result<(), lodeline_core::sink::SinkError> {
+            Ok(())
+        }
+    }
+
+    fn hashed(
+        path: &std::path::Path,
+        kind: lodeline_core::event::FileChangeKind,
+        after: Option<&str>,
+    ) -> crate::hasher::HashedEvent {
+        use crate::normalizer::NormalizedEvent;
+        use lodeline_core::event::EvidenceQuality;
+        crate::hasher::HashedEvent {
+            norm: NormalizedEvent {
+                path: path.to_path_buf(),
+                kind,
+                rename_from: None,
+                target_id: "t".into(),
+                tier: lodeline_core::policy::Tier::Standard,
+            },
+            after_hash: after.map(str::to_string),
+            size_after: after.map(|_| 1),
+            recheck_hash: None,
+            quality: EvidenceQuality::Definitive,
+            debounced_from: None,
+        }
+    }
+
+    /// Runs `events` through the state and sink tasks over a baseline seeded
+    /// with `seed`, and returns the emitted count and the cache.
+    async fn emitted_after(
+        seed: &[(&std::path::Path, &str)],
+        events: Vec<crate::hasher::HashedEvent>,
+    ) -> (u64, Arc<Mutex<HashCache>>) {
+        let td = tempfile::tempdir().unwrap();
+        let cache = Arc::new(Mutex::new(
+            HashCache::open(&td.path().join("state.db")).unwrap(),
+        ));
+        for (path, hash) in seed {
+            cache.lock().put(path, hash, 1, "t", 0).unwrap();
+        }
+        let stats = Arc::new(Stats::default());
+        let (tx_hashed, rx_hashed) = mpsc::channel(1);
+        let (tx_sink, rx_sink) = mpsc::channel(1);
+        let state = tokio::spawn(crate::state_task::run(
+            rx_hashed,
+            tx_sink,
+            cache.clone(),
+            "host".into(),
+        ));
+        let sink = tokio::spawn(run(NullSink, rx_sink, cache.clone(), stats.clone()));
+        for event in events {
+            tx_hashed.send(event).await.unwrap();
+        }
+        drop(tx_hashed);
+        state.await.unwrap();
+        sink.await.unwrap().unwrap();
+        (stats.snapshot().events_emitted_total, cache)
+    }
+
+    #[tokio::test]
+    async fn a_write_that_leaves_the_baseline_unchanged_is_dropped() {
+        use lodeline_core::event::FileChangeKind::Modified;
+        let p = std::path::Path::new("/w/a.json");
+        let (n, _) = emitted_after(&[(p, "h")], vec![hashed(p, Modified, Some("h"))]).await;
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn a_write_that_changes_the_bytes_is_recorded() {
+        use lodeline_core::event::FileChangeKind::Modified;
+        let p = std::path::Path::new("/w/a.json");
+        let (n, cache) = emitted_after(&[(p, "h")], vec![hashed(p, Modified, Some("h2"))]).await;
+        assert_eq!(n, 1);
+        assert_eq!(cache.lock().get(p).unwrap().as_deref(), Some("h2"));
+    }
+
+    #[tokio::test]
+    async fn recreating_a_removed_file_with_the_same_bytes_is_recorded() {
+        use lodeline_core::event::FileChangeKind::{Created, Removed};
+        let p = std::path::Path::new("/w/a.json");
+        let (n, _) = emitted_after(
+            &[(p, "h")],
+            vec![hashed(p, Removed, None), hashed(p, Created, Some("h"))],
+        )
+        .await;
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    async fn an_event_without_an_after_hash_is_recorded() {
+        use lodeline_core::event::FileChangeKind::Modified;
+        let p = std::path::Path::new("/w/a.json");
+        let (n, _) = emitted_after(&[(p, "h")], vec![hashed(p, Modified, None)]).await;
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_event_is_recorded() {
+        use lodeline_core::event::EvidenceQuality::Incomplete;
+        use lodeline_core::event::FileChangeKind::Modified;
+        let p = std::path::Path::new("/w/a.json");
+        let mut ev = hashed(p, Modified, Some("h"));
+        ev.quality = Incomplete;
+        let (n, _) = emitted_after(&[(p, "h")], vec![ev]).await;
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn a_recheck_that_differs_is_recorded() {
+        use lodeline_core::event::FileChangeKind::Modified;
+        let p = std::path::Path::new("/w/a.json");
+        let mut ev = hashed(p, Modified, Some("h"));
+        ev.recheck_hash = Some("h2".into());
+        let (n, _) = emitted_after(&[(p, "h")], vec![ev]).await;
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn a_file_with_no_baseline_is_recorded() {
+        use lodeline_core::event::FileChangeKind::Modified;
+        let p = std::path::Path::new("/w/a.json");
+        let (n, _) = emitted_after(&[], vec![hashed(p, Modified, Some("h"))]).await;
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn a_rename_deletes_the_baseline_of_the_old_path() {
+        use lodeline_core::event::FileChangeKind::Renamed;
+        let old = std::path::Path::new("/w/old.json");
+        let new = std::path::Path::new("/w/new.json");
+        let mut ev = hashed(new, Renamed, Some("h2"));
+        ev.norm.rename_from = Some(old.to_path_buf());
+        let (_, cache) = emitted_after(&[(old, "h")], vec![ev]).await;
+        assert_eq!(cache.lock().get(old).unwrap(), None);
+        assert_eq!(cache.lock().get(new).unwrap().as_deref(), Some("h2"));
+    }
 }
