@@ -774,38 +774,9 @@ async fn sustained_concurrent_calls_are_not_refused() {
 
 /// Build (a no-op when current) and locate the real `lodeline-proxy` binary, built
 /// WITHOUT the `test-util` feature: the release code path. Failing to build or
-/// find it fails under `CI`; elsewhere the test skips.
+/// find it fails the test.
 fn proxy_binary() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let profile_dir = exe.parent()?.parent()?.to_path_buf();
-    let profile = profile_dir.file_name()?.to_owned();
-    let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => profile_dir.parent()?.to_path_buf(),
-    };
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut c = Command::new(cargo);
-    c.args(["build", "-p", "lodeline-proxy", "--bin", "lodeline-proxy"])
-        .arg("--target-dir")
-        .arg(&target_dir)
-        .current_dir(env!("CARGO_MANIFEST_DIR"));
-    if profile == "release" {
-        c.arg("--release");
-    }
-    let status = c
-        .status()
-        .expect("cargo runs to build the real lodeline-proxy binary");
-    assert!(
-        status.success(),
-        "building the real lodeline-proxy binary failed: {status}"
-    );
-    let bin = target_dir.join(&profile).join("lodeline-proxy");
-    assert!(
-        bin.exists(),
-        "cargo succeeded but produced no real proxy binary at {}",
-        bin.display()
-    );
-    Some(bin)
+    Some(common::real_proxy_binary().unwrap_or_else(|e| panic!("{e}")))
 }
 
 /// Kills the child if the test fails before it stopped it.
