@@ -54,6 +54,7 @@ user-global entries.
 
 Addendum, 2026-11-12. The `skills/*/SKILL.md` and `scheduled-tasks/*/SKILL.md`
 entries matched a `SKILL.md` at any depth, also inside a skill's `node_modules`,
-while the assessment reads `skills/<name>/SKILL.md` one level deep. A `*` segment
-followed only by plain segments now names one folder. The agents and hooks
-entries still match at any depth.
+while the assessment reads `skills/<name>/SKILL.md` one level deep. In these
+built-in entries, and in the per-project skills entry, the `*` now stands for one
+folder. A pattern in an operator's policy file still lets `*` cross folders, and
+the agents and hooks entries still match at any depth.
