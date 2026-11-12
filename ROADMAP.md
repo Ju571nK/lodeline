@@ -6,14 +6,52 @@ merge SHA for each shipped phase.
 
 ## Status
 
-- **0.1.x — alpha.** The event schema and CLI surface can break between minor
-  releases until 0.2. `schema_version` in every event lets downstream
-  consumers detect this.
-- **Platforms.** macOS, Windows, and Linux at runtime. The Linux runtime
-  landed as a minimal foundation (Phase 3a) and is exercised in CI; some
-  refinements are marked `TODO(community)` in `platform/linux.rs` — see
-  [CONTRIBUTING.md](CONTRIBUTING.md).
-- **Schema.** Version `1`.
+- **0.14.x, alpha.** The latest release is 0.14.5 (2026-11-12). The event
+  schema and CLI surface can still change between minor releases.
+  `schema_version` in every event lets downstream consumers detect this.
+- **Platforms.** macOS, Linux and Windows at runtime. Some Linux refinements are marked
+  `TODO(community)` in `platform/linux.rs`, see
+  [CONTRIBUTING.md](CONTRIBUTING.md). Windows has gaps that the changelog
+  names, for example `enroll` and certificate renewal are not available there.
+- **Schema.** Event `schema_version` is `1`.
+- **Proxy.** Lodeline Proxy is at phase P1: the P0 contracts closed on
+  2026-10-11, the P1 implementation is under way, and `lodeline-proxy` is
+  still not a release asset. See the
+  [specification and implementation plan](docs/specs/lodeline-proxy/README.md).
+
+## v0.15: a scan you can trust on a real machine
+
+The aim is that a single developer who runs Claude Code, Codex or Cursor can
+trust what a scan reports on a real host. v0.15 is done when all seven hold:
+
+1. **No noise on a real macOS host.** A two-hour agent run with the default
+   policy records no `file_change` event whose hash before and after are
+   equal.
+2. **Links are followed.** A skill folder, a subagent file and a settings file
+   that are symbolic links each get a baseline at start, and an event and a
+   reassessment when their content changes, proven by tests on macOS and
+   Linux.
+3. **Claude Code coverage page.** Every security-relevant key on the official
+   Claude Code settings page is either assessed or listed in a "not assessed,
+   and why" table in the docs.
+4. **Codex.** Granular `approval_policy`, profile layers and hook trust state
+   are read correctly and checked against an installed Codex version.
+5. **Cursor.** Project-level hooks are scanned, or the open issue records why
+   not.
+6. **An honest roadmap.** This file states the 0.14.x status, the proxy at
+   P1, and these criteria.
+7. **Tested changes.** Each change has a test that failed before it, CI is
+   green on every leg, and the v0.15.0 notes are checked against the
+   changelog.
+
+## Later themes
+
+Not planned for v0.15, and without dates or promises.
+
+- **Per-group policy.** Different signed policy for different groups of hosts.
+- **Windows coverage.** Closing the gaps the changelog lists for Windows.
+- **Release trust.** Build signing and the rest of Phase 3c, listed
+  under Planned below.
 
 ## Shipped
 
@@ -102,7 +140,7 @@ merge SHA for each shipped phase.
 
 ## Planned
 
-- **Lodeline Proxy — P0 research/contracts/fixtures in progress; production proxy not implemented.** Optional, independently deployed MCP observation/control service in this workspace, managed through lodeline-server and the existing lodeline-manager UI. See the [specification and implementation plan](docs/specs/lodeline-proxy/README.md). Compatibility/contracts precede the observation MVP; enforcement and human approvals follow separate gates.
+- **Lodeline Proxy, P1 under way; production proxy not released.** Optional, independently deployed MCP observation/control service in this workspace, managed through lodeline-server and the existing lodeline-manager UI. See the [specification and implementation plan](docs/specs/lodeline-proxy/README.md). The P0 contracts closed on 2026-10-11; enforcement and human approvals follow separate gates.
 
 - **Phase 3c (remaining) — planned.** CI manifest generation + build-signing key
   ceremony (populate `LODELINE_BUILD_PUBKEYS`), bit-identical reproducibility audit;
