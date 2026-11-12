@@ -40,7 +40,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - AI Guard now reassesses Claude Code when a file changes below a watched folder that is itself a
   symbolic link, such as `~/.claude/skills`, `~/.claude/agents` or `~/.claude/hooks` linked to a
   dotfiles folder. Before, the change was recorded as a `file_change` event but started no
-  assessment until the next heartbeat. (#PR)
+  assessment until the next heartbeat. (#591)
 - The agent now records a baseline at start, and at a policy reload, for the files that a pattern
   watch entry of a critical target matches, as it already did for a plain path. Before, the first
   change of a skill, subagent, hook script or managed settings file after a start had no hash
@@ -71,7 +71,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   subfolder of a project and skills of `--add-dir` folders are read but not watched.
   A skill folder or a settings file that is itself a symbolic link is read at each assessment, but
   a change in it records no file change and starts no assessment; the next assessment reads it.
-  (#582, #539, #586, #PR)
+  (#582, #539, #586, #591)
 - AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
   (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude
   Code managed settings drop-in folder (`managed-settings.d/*.json`). Before, these entries named
