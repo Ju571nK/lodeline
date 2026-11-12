@@ -7,103 +7,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
-### Added
-
-- `lodeline-sender doctor` prints a `certificate renewal` line after the client certificate
-  lines. It reads the decision the sender takes at start: `[INFO]` `off` where `sender.yaml` has
-  a whole identity and no `renew_client_cert` (the state to expect where you make the
-  certificates yourself), `[WARN]` where the line is set and a path is missing, `[INFO]` on
-  Windows, `[OK]` `on` otherwise. It makes no network call and does not read the key, so it does
-  not repeat the ownership and key form checks the sender makes at start. (#581)
-- AI Guard reports two more Claude Code controls from the managed settings files:
-  `permissions.blockReadsOutsideWorkingDirectories` and
-  `permissions.blockWritesOutsideWorkingDirectories`, each when its value is `true`. No score, reason
-  kind or event field changes. (#582, #539)
-- AI Guard now reads the frontmatter hooks of subagents in `<subfolder>/.claude/agents/` below a
-  repository, as it already does for nested skills, under the same folder bounds. Claude Code
-  loads such a subagent for a session started in that subfolder, not for one at the root, so the
-  assessment can report a hook the root session never runs; changes to these files are noticed at
-  the next assessment, not by the watcher. (#539)
-
-### Changed
-
-- `lodeline-server` logs one warning at start when `host_allowlist_path` is set and the file does
-  not exist. The server starts as before, with no restriction; the line says so and that the
-  server reads the file at start only. (#581)
-- `docs/install-server.md` section 3 says where the host id for a certificate you make yourself
-  comes from (`lodeline show host-id`, `lodeline init-host-id`) and that the id goes into the
-  allowlist file first. Section 3.5 names the `doctor` line, and section 3.1 and
-  `config/server.example.yaml` say what a configured allowlist path without a file means. (#581)
-- `docs/install-macos-agent.md` and `docs/install-windows-agent.md` say that `lodeline show paths`
-  prints a path with a wildcard as the pattern, not the files it matches, and name two folders the
-  agent creates: `state.mcp-baselines` next to the state database, and on macOS and Linux the
-  socket folder under `$TMPDIR` that a non-root agent uses when `XDG_RUNTIME_DIR` is not set. The
-  example policy in section 3 of the macOS guide gains the `description` the agent requires. (#590)
-- The built-in scheduled task entry (`~/.claude/scheduled-tasks/*/SKILL.md`) now matches a
-  `SKILL.md` one folder below the scheduled tasks folder only, so a deeper `SKILL.md` no longer
-  records a file change. Operator patterns are unchanged. (#592)
-
-### Fixed
-
-- AI Guard now reassesses Claude Code when a file changes below a watched folder that is itself a
-  symbolic link, such as `~/.claude/skills`, `~/.claude/agents` or `~/.claude/hooks` linked to a
-  dotfiles folder. Before, the change was recorded as a `file_change` event but started no
-  assessment until the next heartbeat. (#591)
-- The agent now records a baseline at start, and at a policy reload, for the files that a pattern
-  watch entry of a critical target matches, as it already did for a plain path. Before, the first
-  change of a skill, subagent, hook script or managed settings file after a start had no hash
-  before it, or one left by an earlier run. For each pattern entry the agent visits at most 8192
-  files and folders, hashes at most 2048 files and does not follow symbolic links; past a bound,
-  one warning is logged and the first event for a file not reached has no `before_hash`, as before.
-  Files nearest the pattern's folder are read first, so the bound cuts the deepest files. A file
-  reached only through a symbolic link gets no baseline. At a policy reload the baseline of a
-  pattern-matched file is read again, as for a plain path, so a change that is being processed in
-  that instant can be recorded with the same hash before and after.
-- AI Guard now reassesses Claude Code as soon as a skill or subagent file is added or changed in
-  `~/.claude/skills/<name>/SKILL.md`, `~/.claude/agents/` or a repository's `.claude/skills` or
-  `.claude/agents`, within the limits below. Before, no watch target covered these files, so the agent read them only at the
-  next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
-  for each edit (hashes and sizes, never file text). Limits: at start the watcher scans no existing file. A folder
-  that appears after the agent started, or one that a policy reload adds, is scanned once, and files
-  that match no watched pattern are dropped. Events for a file reached through a symbolic link to a
-  single skill, or through a folder linked after the agent started, do not match; the next heartbeat
-  reads such files. A `skills` folder that is itself a link and exists at start works. On Linux the
-  watcher uses one inotify watch per subfolder. When the kernel refuses a watch (the per-user
-  inotify limit) the agent goes on, the folder keeps the watches already placed and is tried again
-  every few seconds, and this is logged at debug level only; files without a watch are read at the
-  next heartbeat. On Linux, when the agent reads the creation of a folder under a watched root, or
-  of one moved in, it also reads the files already in it, after visiting at most 512 files and
-  folders per new folder (a skill copied in with `cp -r`, a checkout or an unpack); a file written
-  during the short time (usually milliseconds, longer for a very large folder) between that read and
-  the placing of the watch may still wait for the next heartbeat. Skills below a
-  subfolder of a project and skills of `--add-dir` folders are read but not watched.
-  The skills and scheduled tasks entries (`skills/*/SKILL.md`, `scheduled-tasks/*/SKILL.md`) name
-  one folder per skill, as the assessment reads them: a `SKILL.md` deeper in a skill (inside its
-  `node_modules`, say) is not watched. Subagent files and hooks match at any depth.
-  A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
-  each assessment, but an edit of its target records no file change and starts no assessment;
-  the next assessment reads it.
-  (#582, #539, #586, #591, #592)
-- AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
-  (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude
-  Code managed settings drop-in folder (`managed-settings.d/*.json`). Before, these entries named
-  the folder itself, which matches no file in it, so such an edit reached the agent only at the
-  next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
-  for each such edit (hashes and sizes, never file text). The limits of the skills and agents entry
-  above apply to the hooks folders too. The Windows entries use the same patterns and were not
-  tried on a device. A policy of your own that lists a folder path still matches only the folder:
-  write `folder/*`. The two Codex apps cache folders (`~/.codex/cache/codex_apps_tools/` and
-  `codex_apps_server_info/`) are not watch targets, as in every release so far, where their entries
-  matched no file. Codex rewrites both folders each time it fetches its tool list, at start and on
-  a refresh, also when the bytes are the same, and each write would record a `file_change` event.
-  The Codex parser reads both folders at each assessment. A change there is read at the next agent
-  start or heartbeat (24 hours), not at once. (#583, #582, #584)
-- The agent counted each file change twice in `lodeline show stats`, in the `lodeline status`
-  line and in the heartbeat's `events_emitted_total` (and the `file_change` entry of
-  `events_by_kind`). The recorded events were never doubled; only the counters were. The numbers
-  are right now, so a host's total can look lower after the upgrade.
-
-## [0.14.5] - 2026-11-11
+## [0.14.5] - 2026-11-12
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to
 enroll hosts from it. A v0.14.5 sender that is set to renew uses `POST /v1/renew`, which a v0.14.4
@@ -125,7 +29,8 @@ Linux and macOS, between 60% and 75% of the certificate's validity. A host enrol
 `enroll_cert_days` and the host must be enrolled again (`enroll` run again on such a host keeps the
 file and prints what to set). A sender without the line does nothing about certificates, as a
 v0.14.4 sender did; if it has a client certificate, a client key and a server CA set, it logs one
-`info` line at start saying so. A fleet whose certificates you make yourself sees only that line.
+`info` line at start saying so, and `lodeline-sender doctor` shows it on its `certificate renewal`
+line. A fleet whose certificates you make yourself sees only that line.
 Adding the line does not help such a host, because the server renews only certificates its
 enrollment CA issued: it joins by enrolling once. If a sender that is set to renew cannot (the
 sender account cannot create files in the directory of `client.key` or of `client.crt`, it does not
@@ -133,10 +38,19 @@ own `client.key`, the key is not PKCS#8, or the key and the certificate do not m
 error that says why when it starts, repeats a line at most once an hour, and keeps delivering
 events. Renewal is off on Windows.
 
+The agent counts a file change once now, so a host's `events_emitted_total` and the `file_change`
+count in `events_by_kind` (also `lodeline show stats` and the `status` line) can look lower than
+before the upgrade; the recorded events are the same. When the files change, a host can record new
+`file_change` events for Claude Code skills, agents, hooks and managed settings files, which the
+default policy now watches. An AI Guard score can go up (a higher score is riskier), not down,
+where a subagent below a repository subfolder declares a hook; the two new managed settings
+controls change the controls an assessment reports, not its score.
+
 **Server and console.** `POST /v1/enroll-tokens` is off unless `enroll_mint:` is in
 `server.yaml`, so an existing `server.yaml` needs no change. A server older than v0.14.5 ignores
-the key without a word. With the key, the server does not start unless the other settings in
-`docs/install-server.md` section 3.6 are in place. `lodeline-server proxy verifier-new` takes
+the key without a word. A server whose `host_allowlist_path` names a file that does not exist now
+logs one warning at start; it starts as before. With the key, the server does not start unless the
+other settings in `docs/install-server.md` section 3.6 are in place. `lodeline-server proxy verifier-new` takes
 `--scope enroll` and `--caller-cert`, and its stderr advice text changed; the entry it prints and
 the stdout bearer did not, and the guide's `sed` command reads only the entry. The console
 makes enrollment files only when all eight settings are set (the three `LODELINE_ENROLL_MINT_*`,
@@ -203,8 +117,24 @@ section shows and restart the server. Nothing breaks if you do not.
   Renewal reads PKCS#8 keys only: a live `client.key` in another form is logged with its own
   line and the certificate is not renewed until the key is converted or the host enrolls again. A new answer
   must expire later than the certificate in use, as a stored one must. `enroll`
-  names the steps for an expired host when it exits 4. Renewal is off on Windows, and `doctor`
-  does not check it yet. `docs/install-server.md` has a new section 3.5. (#572, #553, #580)
+  names the steps for an expired host when it exits 4. Renewal is off on Windows. `lodeline-sender
+  doctor` shows only the sender's decision, on a `certificate renewal` line.
+  `docs/install-server.md` has a new section 3.5. (#572, #553, #580)
+- `lodeline-sender doctor` prints a `certificate renewal` line after the client certificate
+  lines. It reads the decision the sender takes at start: `[INFO]` `off` where `sender.yaml` has
+  a whole identity and no `renew_client_cert` (the state to expect where you make the
+  certificates yourself), `[WARN]` where the line is set and a path setting is missing, `[INFO]` on
+  Windows, `[OK]` `on` otherwise. It makes no network call and does not read the key, so it does
+  not repeat the ownership and key form checks the sender makes at start. (#581)
+- AI Guard reports two more Claude Code controls from the managed settings files:
+  `permissions.blockReadsOutsideWorkingDirectories` and
+  `permissions.blockWritesOutsideWorkingDirectories`, each when its value is `true`. No score, reason
+  kind or event field changes. (#582, #539)
+- AI Guard now reads the frontmatter hooks of subagents in `<subfolder>/.claude/agents/` below a
+  repository, as it already does for nested skills, under the same folder bounds. Claude Code
+  loads such a subagent for a session started in that subfolder, not for one at the root, so the
+  assessment can report a hook the root session never runs; changes to these files are noticed at
+  the next assessment, not by the watcher. (#593, #539)
 
 ### Changed
 
@@ -214,6 +144,21 @@ section shows and restart the server. Nothing breaks if you do not.
   puts the token in a root-only `EnvironmentFile` instead of `Environment=`, which every account on
   the host can read with `systemctl show`. The console README says where its read certificate
   comes from and that it is not the mint certificate. (#578)
+- `lodeline-server` logs one warning at start when `host_allowlist_path` is set and the file does
+  not exist. The server starts as before, with no restriction; the line says so and that the
+  server reads the file at start only. (#581)
+- `docs/install-server.md` section 3 says where the host id for a certificate you make yourself
+  comes from (`lodeline show host-id`, `lodeline init-host-id`) and that the id goes into the
+  allowlist file first. Section 3.5 names the `doctor` line, and section 3.1 and
+  `config/server.example.yaml` say what a configured allowlist path without a file means. (#581)
+- `docs/install-macos-agent.md` and `docs/install-windows-agent.md` say that `lodeline show paths`
+  prints a path with a wildcard as the pattern, not the files it matches, and name two folders the
+  agent creates: `state.mcp-baselines` next to the state database, and on macOS and Linux the
+  socket folder under `$TMPDIR` that a non-root agent uses when `XDG_RUNTIME_DIR` is not set. The
+  example policy in section 3 of the macOS guide gains the `description` the agent requires. (#590)
+- The built-in scheduled task entry (`~/.claude/scheduled-tasks/*/SKILL.md`) now matches a
+  `SKILL.md` one folder below the scheduled tasks folder only, so a deeper `SKILL.md` no longer
+  records a file change. Operator patterns are unchanged. (#592)
 
 ### Fixed
 
@@ -221,6 +166,63 @@ section shows and restart the server. Nothing breaks if you do not.
   first wake of the renewal loop no longer repeats the line the start just wrote, and the line
   comes again only after an hour. The two messages of `lodeline-sender enroll` that point to
   `lodeline show host-id` say to use `sudo` when `enroll` ran with `sudo` (#577).
+- AI Guard now reassesses Claude Code as soon as a skill or subagent file is added or changed in
+  `~/.claude/skills/<name>/SKILL.md`, `~/.claude/agents/` or a repository's `.claude/skills` or
+  `.claude/agents`, within the limits below. Before, no watch target covered these files, so the agent read them only at the
+  next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
+  for each edit (hashes and sizes, never file text). Limits: at start the watcher scans no existing file. A folder
+  that appears after the agent started, or one that a policy reload adds, is scanned once, and files
+  that match no watched pattern are dropped. Events for a file reached through a symbolic link to a
+  single skill, or through a folder linked after the agent started, do not match; the next heartbeat
+  reads such files. A `skills` folder that is itself a link and exists at start works. On Linux the
+  watcher uses one inotify watch per subfolder. When the kernel refuses a watch (the per-user
+  inotify limit) the agent goes on, the folder keeps the watches already placed and is tried again
+  every few seconds, and this is logged at debug level only; files without a watch are read at the
+  next heartbeat. On Linux, when the agent reads the creation of a folder under a watched root, or
+  of one moved in, it also reads the files already in it, after visiting at most 512 files and
+  folders per new folder (a skill copied in with `cp -r`, a checkout or an unpack); a file written
+  during the short time (usually milliseconds, longer for a very large folder) between that read and
+  the placing of the watch may still wait for the next heartbeat. Skills below a
+  subfolder of a project and skills of `--add-dir` folders are read but not watched.
+  The skills and scheduled tasks entries (`skills/*/SKILL.md`, `scheduled-tasks/*/SKILL.md`) name
+  one folder per skill, as the assessment reads them: a `SKILL.md` deeper in a skill (inside its
+  `node_modules`, say) is not watched. Subagent files and hooks match at any depth.
+  A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
+  each assessment, but an edit of its target records no file change and starts no assessment;
+  the next assessment reads it.
+  (#582, #539, #586, #591, #592)
+- AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
+  (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude
+  Code managed settings drop-in folder (`managed-settings.d/*.json`). Before, these entries named
+  the folder itself, which matches no file in it, so such an edit reached the agent only at the
+  next heartbeat or with a change to another watched file. Hosts also record a `file_change` event
+  for each such edit (hashes and sizes, never file text). The limits of the skills and agents entry
+  above apply to the hooks folders too. The Windows entries use the same patterns and were not
+  tried on a device. A policy of your own that lists a folder path still matches only the folder:
+  write `folder/*`. The two Codex apps cache folders (`~/.codex/cache/codex_apps_tools/` and
+  `codex_apps_server_info/`) are not watch targets, as in every release so far, where their entries
+  matched no file. Codex rewrites both folders each time it fetches its tool list, at start and on
+  a refresh, also when the bytes are the same, and each write would record a `file_change` event.
+  The Codex parser reads both folders at each assessment. A change there is read at the next agent
+  start or heartbeat (24 hours), not at once. (#583, #582, #584)
+- The agent counted each file change twice in `lodeline show stats`, in the `lodeline status`
+  line and in the heartbeat's `events_emitted_total` (and the `file_change` entry of
+  `events_by_kind`). The recorded events were never doubled; only the counters were. The numbers
+  are right now, so a host's total can look lower after the upgrade. (#589)
+- The agent now records a baseline at start, and at a policy reload, for the files that a pattern
+  watch entry of a critical target matches, as it already did for a plain path. Before, the first
+  change of a skill, subagent, hook script or managed settings file after a start had no hash
+  before it, or one left by an earlier run. For each pattern entry the agent visits at most 8192
+  files and folders, hashes at most 2048 files and does not follow symbolic links; past a bound,
+  one warning is logged and the first event for a file not reached has no `before_hash`, as before.
+  Files nearest the pattern's folder are read first, so the bound cuts the deepest files. A file
+  reached only through a symbolic link gets no baseline. At a policy reload the baseline of a
+  pattern-matched file is read again, as for a plain path, so a change that is being processed in
+  that instant can be recorded with the same hash before and after. (#588)
+- AI Guard now reassesses Claude Code when a file changes below a watched folder that is itself a
+  symbolic link, such as `~/.claude/skills`, `~/.claude/agents` or `~/.claude/hooks` linked to a
+  dotfiles folder. Before, the change was recorded as a `file_change` event but started no
+  assessment until the next heartbeat. (#591)
 
 ## [0.14.4] - 2026-11-11
 
