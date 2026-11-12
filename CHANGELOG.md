@@ -34,6 +34,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   agent creates: `state.mcp-baselines` next to the state database, and on macOS and Linux the
   socket folder under `$TMPDIR` that a non-root agent uses when `XDG_RUNTIME_DIR` is not set. The
   example policy in section 3 of the macOS guide gains the `description` the agent requires. (#590)
+- The built-in scheduled task entry (`~/.claude/scheduled-tasks/*/SKILL.md`) now matches a
+  `SKILL.md` one folder below the scheduled tasks folder only, so a deeper `SKILL.md` no longer
+  records a file change. Operator patterns are unchanged. (#592)
 
 ### Fixed
 
@@ -89,7 +92,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   matched no file. Codex rewrites both folders each time it fetches its tool list, at start and on
   a refresh, also when the bytes are the same, and each write would record a `file_change` event.
   The Codex parser reads both folders at each assessment. A change there is read at the next agent
-  start or heartbeat (24 hours), not at once. (#583, #582, #584, #592)
+  start or heartbeat (24 hours), not at once. (#583, #582, #584)
 - The agent counted each file change twice in `lodeline show stats`, in the `lodeline status`
   line and in the heartbeat's `events_emitted_total` (and the `file_change` entry of
   `events_by_kind`). The recorded events were never doubled; only the counters were. The numbers

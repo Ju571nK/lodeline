@@ -12,7 +12,7 @@
 
 use crate::watcher::RawFsEvent;
 use lodeline_core::event::FileChangeKind;
-use lodeline_core::policy::{glob::CompiledGlob, EffectivePolicy, Tier};
+use lodeline_core::policy::{glob::CompiledGlob, EffectivePolicy, Tier, WatchTarget};
 use lodeline_core::ratelimit::{DropReport, RateLimiter};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -117,6 +117,23 @@ pub struct CompiledTarget {
     pub globs: Vec<CompiledGlob>,
 }
 
+/// True for a target whose paths are built in, so the one-folder rule of
+/// [`CompiledGlob::new_one_folder`] applies: a target of the built-in defaults
+/// (an operator cannot reuse such an id, and an override changes only `disabled`
+/// and `tier`), or the per-project Claude Code skills and agents target with its
+/// exact paths. An operator target that reuses that id with other paths gets
+/// the plain matcher.
+pub(crate) fn uses_one_folder_rule(t: &WatchTarget) -> bool {
+    static BUILT_IN: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    let built_in = BUILT_IN.get_or_init(|| {
+        lodeline_core::policy::defaults()
+            .map(|d| d.targets.into_iter().map(|t| t.id).collect())
+            .unwrap_or_default()
+    });
+    built_in.contains(&t.id) || crate::runtime::is_claude_code_skills_target(t)
+}
+
 /// Compile the effective policy's expanded paths into matchers. Callers pass
 /// paths that have already been run through [`canonicalize_glob_prefix`] so the
 /// globs match the canonical event paths the normalizer produces.
@@ -127,9 +144,16 @@ pub fn compile_targets(
     let mut out = Vec::new();
     for t in &policy.targets {
         let mut globs = Vec::new();
+        let one_folder = uses_one_folder_rule(t);
         if let Some(paths) = expanded_paths.get(&t.id) {
             for p in paths {
-                if let Ok(g) = CompiledGlob::new(&p.to_string_lossy()) {
+                let p = p.to_string_lossy();
+                let g = if one_folder {
+                    CompiledGlob::new_one_folder(&p)
+                } else {
+                    CompiledGlob::new(&p)
+                };
+                if let Ok(g) = g {
                     globs.push(g);
                 }
             }
@@ -297,8 +321,43 @@ fn monotonic_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_glob_prefix, match_form};
+    use super::{canonicalize_glob_prefix, compile_targets, match_form};
     use std::path::{Path, PathBuf};
+
+    /// An operator pattern shaped `<folder>/*/<name>` keeps its meaning: `*`
+    /// crosses folders. Only built-in targets use the one-folder rule.
+    #[test]
+    fn operator_star_pattern_still_matches_below_one_folder() {
+        let mut eff = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        let pattern = Path::new("/scratch")
+            .join("tools")
+            .join("*")
+            .join("config.json");
+        eff.targets = vec![lodeline_core::policy::WatchTarget {
+            id: "ops-tools".into(),
+            description: "t".into(),
+            tier: lodeline_core::policy::Tier::Critical,
+            platform: lodeline_core::policy::Platform::Any,
+            paths: vec![pattern.to_string_lossy().into_owned()],
+            recursive: true,
+            follow_symlinks: false,
+            disabled: false,
+        }];
+        let expanded = [("ops-tools".to_string(), vec![pattern])].into();
+        let targets = compile_targets(&eff, &expanded);
+        let deep = Path::new("/scratch")
+            .join("tools")
+            .join("a")
+            .join("b")
+            .join("config.json");
+        assert!(targets[0].globs.iter().any(|g| g.is_match(&deep)));
+    }
 
     const HAN_NFC: &str = "/u/\u{D55C}\u{AE00}.json";
     const HAN_NFD: &str = "/u/\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.json";

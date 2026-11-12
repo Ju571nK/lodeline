@@ -1501,7 +1501,8 @@ async fn claude_edit_below_a_linked_watched_folder_triggers_reassessment() {
 /// A `SKILL.md` inside a skill (a vendored package) is not a skill: the
 /// assessment reads one level, so its edit records no file change. The control
 /// edit of the skill's own file, made after it, is recorded and reassessed
-/// once, so the absence cannot come from looking too early.
+/// once, so the absence cannot come from looking too early. The built-in
+/// per-project target carries the rule; every default target is off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claude_skill_file_below_a_skill_triggers_nothing() {
     let _home_guard = HOME_LOCK.lock().await;
@@ -1510,33 +1511,43 @@ async fn claude_skill_file_below_a_skill_triggers_nothing() {
     let home = dunce::canonicalize(td.path()).unwrap();
     // SAFETY: process-global write; serialized via HOME_LOCK above.
     std::env::set_var("HOME", &home);
-    let skill = home.join(".claude/skills/demo");
+    let workspace = home.join("work");
+    let repo = workspace.join("repo");
+    let skill = repo.join(".claude/skills/demo");
     let deep = skill.join("node_modules/x");
     std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(
+        repo.join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Bash(*)"]}}"#,
+    )
+    .unwrap();
     std::fs::write(skill.join("SKILL.md"), CLEAN).unwrap();
     std::fs::write(deep.join("SKILL.md"), CLEAN).unwrap();
-
-    let agent = TestAgentBuilder::new()
-        .policy(&claude_user_policy_only_under(&home))
-        .start()
-        .await;
+    // A policy needs one target of its own once the defaults are off.
+    let mut policy_yaml = format!(
+        "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets:\n  - id: e2e-unused\n    description: unused\n    tier: critical\n    platform: any\n    paths:\n      - '{}'\n    recursive: false\n    follow_symlinks: false\noverrides:\n",
+        workspace.display(),
+        home.join("unused.json").display()
+    );
+    for target in lodeline_core::policy::defaults().unwrap().targets {
+        policy_yaml.push_str(&format!("  - id: {}\n    disabled: true\n", target.id));
+    }
+    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let repo_path = dunce::canonicalize(&repo).unwrap().display().to_string();
+    let in_repo = |v: &serde_json::Value| v["evidence"]["scope"]["path"] == repo_path.as_str();
     agent
         .wait_for_event(
-            |v| {
-                v["evidence"]["kind"] == "ai_guard_risk_assessed"
-                    && v["evidence"]["tool"] == "claude_code"
-                    && v["evidence"]["scope"]["kind"] == "user_global"
-            },
+            |v| in_repo(v) && v["evidence"]["kind"] == "ai_guard_risk_assessed",
             fs_event_timeout(),
         )
         .await
-        .expect("boot assessment of the user scope");
+        .expect("boot assessment of the repository");
 
     std::fs::write(deep.join("SKILL.md"), COMPONENT_WITH_BROAD_HOOK).unwrap();
     std::fs::write(skill.join("SKILL.md"), COMPONENT_WITH_BROAD_HOOK).unwrap();
     let reassessed = agent
         .wait_for_event(
-            |v| claude_reason(v, "user_global", "broad_matcher"),
+            |v| in_repo(v) && claude_reason(v, "project", "broad_matcher"),
             fs_event_timeout(),
         )
         .await;
@@ -1557,7 +1568,7 @@ async fn claude_skill_file_below_a_skill_triggers_nothing() {
     );
     let reassessments = events
         .iter()
-        .filter(|v| claude_reason(v, "user_global", "broad_matcher"))
+        .filter(|v| in_repo(v) && claude_reason(v, "project", "broad_matcher"))
         .count();
     assert_eq!(reassessments, 1, "the control edit gives one reassessment");
     let deep_events: Vec<_> = events

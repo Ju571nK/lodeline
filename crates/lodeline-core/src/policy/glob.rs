@@ -17,6 +17,8 @@ pub enum GlobError {
 #[derive(Debug)]
 struct OneFolder {
     above: GlobMatcher,
+    /// True when `above` has no glob character, so it names one folder.
+    above_plain: bool,
     tail: usize,
 }
 
@@ -31,7 +33,18 @@ fn is_plain(segment: &str) -> bool {
 }
 
 impl CompiledGlob {
+    /// Matches as globset does: `*` crosses `/`. Every operator pattern uses this.
     pub fn new(pattern: &str) -> Result<Self, GlobError> {
+        Ok(Self {
+            whole: Glob::new(pattern)?.compile_matcher(),
+            one_folder: None,
+        })
+    }
+
+    /// As [`CompiledGlob::new`], but a `*` segment followed only by plain segments
+    /// names one folder. For built-in targets only, so an operator's pattern keeps
+    /// its meaning.
+    pub fn new_one_folder(pattern: &str) -> Result<Self, GlobError> {
         let whole = Glob::new(pattern)?.compile_matcher();
         // shortcut: only the last `*` segment is held to one folder, and only
         // when plain segments follow it; upgrade when another entry needs more.
@@ -47,8 +60,10 @@ impl CompiledGlob {
             })
             .and_then(|i| {
                 let above: std::path::PathBuf = parts[..i].iter().collect();
+                let above = above.to_str()?;
                 Some(OneFolder {
-                    above: Glob::new(above.to_str()?).ok()?.compile_matcher(),
+                    above: Glob::new(above).ok()?.compile_matcher(),
+                    above_plain: is_plain(above),
                     tail: parts.len() - i - 1,
                 })
             });
@@ -65,12 +80,16 @@ impl CompiledGlob {
     }
 
     /// False when no file below `dir` can match: `dir` lies inside a folder
-    /// that the `*` segment named, deeper than the plain tail reaches.
+    /// that the `*` segment named, deeper than the plain tail reaches. Pruned
+    /// only when the folders above the `*` are plain: an earlier `*` crosses `/`
+    /// and can make a folder that looks too deep a match.
     pub fn may_match_below(&self, dir: &Path) -> bool {
         self.one_folder.as_ref().is_none_or(|o| {
-            !dir.ancestors()
-                .skip(o.tail)
-                .any(|star| star.parent().is_some_and(|above| o.above.is_match(above)))
+            !o.above_plain
+                || !dir
+                    .ancestors()
+                    .skip(o.tail)
+                    .any(|star| star.parent().is_some_and(|above| o.above.is_match(above)))
         })
     }
 
@@ -115,7 +134,7 @@ mod tests {
 
     #[test]
     fn star_segment_before_plain_segments_names_one_folder() {
-        let g = CompiledGlob::new("/h/.claude/skills/*/SKILL.md").unwrap();
+        let g = CompiledGlob::new_one_folder("/h/.claude/skills/*/SKILL.md").unwrap();
         assert!(g.is_match(Path::new("/h/.claude/skills/a/SKILL.md")));
         assert!(!g.is_match(Path::new("/h/.claude/skills/a/b/SKILL.md")));
         assert!(!g.is_match(Path::new("/h/.claude/skills/SKILL.md")));
@@ -123,9 +142,27 @@ mod tests {
         assert!(g.may_match_below(Path::new("/h/.claude")));
         assert!(g.may_match_below(Path::new("/h/.claude/skills/a")));
         assert!(!g.may_match_below(Path::new("/h/.claude/skills/a/b")));
-        let g = CompiledGlob::new("/h/*/.claude/skills/*/SKILL.md").unwrap();
+        let g = CompiledGlob::new_one_folder("/h/*/.claude/skills/*/SKILL.md").unwrap();
         assert!(g.is_match(Path::new("/h/alice/.claude/skills/a/SKILL.md")));
         assert!(!g.is_match(Path::new("/h/alice/.claude/skills/a/b/SKILL.md")));
+    }
+
+    #[test]
+    fn may_match_below_keeps_a_folder_an_earlier_star_can_reach() {
+        // The first `*` crosses `/`, so `a/skills/b` is one match of it and the
+        // file below `a/skills/b/skills/c` is a match.
+        let g = CompiledGlob::new_one_folder("/h/*/skills/*/SKILL.md").unwrap();
+        let file = Path::new("/h/a/skills/b/skills/c/SKILL.md");
+        assert!(g.is_match(file));
+        assert!(g.may_match_below(Path::new("/h/a/skills/b/skills")));
+        assert!(g.may_match_below(Path::new("/h/a/skills/b/skills/c")));
+    }
+
+    #[test]
+    fn plain_constructor_keeps_the_star_crossing_folders() {
+        let g = CompiledGlob::new("/h/.claude/skills/*/SKILL.md").unwrap();
+        assert!(g.is_match(Path::new("/h/.claude/skills/a/b/SKILL.md")));
+        assert!(g.may_match_below(Path::new("/h/.claude/skills/a/b")));
     }
 
     #[test]

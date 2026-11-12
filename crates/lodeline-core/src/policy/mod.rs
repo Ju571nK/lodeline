@@ -1280,7 +1280,7 @@ targets:
                 entry
                     .replacen("~/", &format!("{home}{sep}"), 1)
                     .replacen("%USERPROFILE%", home, 1);
-            glob::CompiledGlob::new(&expanded).unwrap()
+            glob::CompiledGlob::new_one_folder(&expanded).unwrap()
         };
         let at = |rel: &str| PathBuf::from(format!("{home}{sep}{}", rel.replace('/', sep)));
         for folder in ["skills", "scheduled-tasks"] {
