@@ -42,10 +42,9 @@ The agent counts a file change once now, so a host's `events_emitted_total` and 
 count in `events_by_kind` (also `lodeline show stats` and the `status` line) can look lower than
 before the upgrade; the recorded events are the same. When the files change, a host can record new
 `file_change` events for Claude Code skills, agents, hooks and managed settings files, which the
-default policy now watches, and fewer for the two Codex apps cache folders, which it no longer
-watches. An AI Guard score can go up, not down, where a subagent below a repository subfolder
-declares a hook; the two new managed settings controls change the controls an assessment reports,
-not its score.
+default policy now watches. An AI Guard score can go up (a higher score is riskier), not down,
+where a subagent below a repository subfolder declares a hook; the two new managed settings
+controls change the controls an assessment reports, not its score.
 
 **Server and console.** `POST /v1/enroll-tokens` is off unless `enroll_mint:` is in
 `server.yaml`, so an existing `server.yaml` needs no change. A server older than v0.14.5 ignores
@@ -124,7 +123,7 @@ section shows and restart the server. Nothing breaks if you do not.
 - `lodeline-sender doctor` prints a `certificate renewal` line after the client certificate
   lines. It reads the decision the sender takes at start: `[INFO]` `off` where `sender.yaml` has
   a whole identity and no `renew_client_cert` (the state to expect where you make the
-  certificates yourself), `[WARN]` where the line is set and a path is missing, `[INFO]` on
+  certificates yourself), `[WARN]` where the line is set and a path setting is missing, `[INFO]` on
   Windows, `[OK]` `on` otherwise. It makes no network call and does not read the key, so it does
   not repeat the ownership and key form checks the sender makes at start. (#581)
 - AI Guard reports two more Claude Code controls from the managed settings files:
