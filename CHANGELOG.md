@@ -69,8 +69,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   during the short time (usually milliseconds, longer for a very large folder) between that read and
   the placing of the watch may still wait for the next heartbeat. Skills below a
   subfolder of a project and skills of `--add-dir` folders are read but not watched.
-  A skill folder or a settings file that is itself a symbolic link is read at each assessment, but
-  a change in it records no file change and starts no assessment; the next assessment reads it.
+  A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
+  each assessment, but an edit of its target records no file change and starts no assessment;
+  the next assessment reads it.
   (#582, #539, #586, #591)
 - AI Guard now reassesses as soon as a file changes in the Claude Code user hooks folder
   (`~/.claude/hooks/`) or in a discovered repository's `.claude/hooks/` folder, or in the Claude

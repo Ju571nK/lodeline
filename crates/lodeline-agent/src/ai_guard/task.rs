@@ -1481,7 +1481,10 @@ mod tests {
         let link = dir.path().join("skills");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let incoming = real.canonicalize().unwrap().join("demo/SKILL.md");
-        assert!(path_matches(&incoming, &link));
+        assert!(
+            path_matches(&incoming, &link),
+            "a path below a watched folder that is a symbolic link must match"
+        );
         assert!(!path_matches(&incoming, &dir.path().join("agents")));
     }
 

@@ -35,9 +35,9 @@
   path such as `~/.claude/hooks/` matches the folder itself and never a file in
   it; write `~/.claude/hooks/*` to watch the files below it (`*` also crosses
   folder separators, and `**` is rejected at policy load).
-  A skill folder or a settings file that is itself a symbolic link is read at each assessment,
-  but a change in it records no file change and starts no assessment; the next assessment reads
-  it.
+  A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
+  each assessment, but an edit of its target records no file change and starts no assessment;
+  the next assessment reads it.
 - After registration, current files are replayed through normal filtering and
   hashing. This recovers current state, not historical changes that occurred
   and disappeared while the root was unavailable. Native and polling backends
