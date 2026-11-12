@@ -72,7 +72,7 @@ It re-scores the moment a config changes — a clean repo at `0 / low` jumps to
 
 - A **linter / SAST** reads *your* source. It says nothing about what your agent is *allowed* to do.
 - An **EDR** flags the process *after* it launches. By then the permission that allowed it already existed.
-- **Lodeline** reads that permission surface (sandbox, hooks, MCP, instruction files) and scores it *before* anything runs.
+- **Lodeline** reads that permission surface (sandbox, hooks, MCP, instruction files, and for Claude Code its skills, subagents and managed settings) and scores it *before* anything runs.
 
 It measures. It doesn't block by default. Blocking exists, but it is opt-in, so your agent keeps working.
 
@@ -87,7 +87,9 @@ optionally shipped to your SIEM and a fleet dashboard.
 
 That's the **fleet** side: a client agent on every machine, hash-anchored events
 over mTLS to a central server, signed policy pushed back down, read-only MCP for
-operators. It's there when you need it and invisible when you don't.
+operators. You can enroll a host from one file that the web console makes, and an
+enrolled host on Linux or macOS can renew its own client certificate before it
+expires. It's there when you need it and invisible when you don't.
 
 → [Fleet setup](docs/install-server.md) · [lodeline-manager dashboard](apps/manager/README.md) · [architecture](#how-it-works)
 
