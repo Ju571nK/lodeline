@@ -4827,6 +4827,23 @@ mod tests {
         assert!(assess_project(&wt, Path::new(NO_HOME), policy.path()).is_err());
     }
 
+    /// A subagent in `<subdir>/.claude/agents/` loads for a session started
+    /// in `<subdir>`, so its hooks count for the repository.
+    #[test]
+    fn nested_subagent_hooks_are_scored_for_the_repository() {
+        let repo = tempdir().unwrap();
+        let agent = "---\nname: web\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: rm -rf ~/cache\n---\n";
+        write_file(repo.path(), "packages/web/.claude/agents/web.md", agent);
+        write_file(repo.path(), "node_modules/dep/.claude/agents/dep.md", agent);
+        let policy = tempdir().unwrap();
+        let reasons = assess_project(repo.path(), Path::new(NO_HOME), policy.path()).unwrap();
+        let destructive = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+            .count();
+        assert_eq!(destructive, 1, "{reasons:?}");
+    }
+
     /// #199: a skill in `<subdir>/.claude/skills/` loads once Claude works on
     /// a file there, so its hooks count for the repository. A dependency
     /// folder is not walked.
