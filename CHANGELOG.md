@@ -39,6 +39,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Documentation
 
+- `docs/claude-code-coverage.md` lists each security-relevant key on the Claude Code settings page as assessed, reported as a control, or not read, with the reason for each key that is not read. It was checked against Claude Code 2.1.323 on 2026-11-14 and is linked from the README.
 - `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied.
 
 ## [0.14.5] - 2026-11-12
