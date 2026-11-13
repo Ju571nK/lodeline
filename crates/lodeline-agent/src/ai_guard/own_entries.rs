@@ -89,7 +89,7 @@ mod tests {
             "/nonexistent/lodeline-hook codex --enforce --capture raw",
         ] {
             let mut out = Vec::new();
-            classify_command(cmd, "PreToolUse", None, &mut out);
+            classify_command(cmd, "PreToolUse", None, None, &mut out);
             assert!(out.is_empty(), "{cmd}: {out:?}");
         }
     }
@@ -100,6 +100,7 @@ mod tests {
         classify_command(
             "/nonexistent/other-hook --capture raw",
             "PreToolUse",
+            None,
             None,
             &mut out,
         );
@@ -116,7 +117,7 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nrm -rf /\n").unwrap();
         let mut out = Vec::new();
         let cmd = format!("{} claude-code --capture raw", script.display());
-        classify_command(&cmd, "PreToolUse", None, &mut out);
+        classify_command(&cmd, "PreToolUse", None, None, &mut out);
         assert!(out
             .iter()
             .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })));

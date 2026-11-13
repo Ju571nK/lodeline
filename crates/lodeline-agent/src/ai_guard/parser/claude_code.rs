@@ -524,7 +524,7 @@ fn emit_hook_reasons_allowing(
                         if let Some(cmd) = h.get("command").and_then(Value::as_str) {
                             // Exec form (`args` set) spawns `command` with no shell.
                             let home = home.filter(|_| h.get("args").is_none());
-                            classify_command(cmd, event_name, home, out);
+                            classify_command(cmd, event_name, home, None, out);
                         }
                     }
                     // `prompt` and `agent` hand the payload to the model the
@@ -786,10 +786,14 @@ fn destination_is_loopback(url: &str) -> bool {
 /// Decide whether `cmd` is inline shell, a convention-dir script (we read it),
 /// or an external script (we mark unscanned). Codex hooks share it. `home` is
 /// the home whose settings hold `cmd`; `None` leaves a leading `~` as written.
+/// `run_dir` is the folder the tool runs the hook in, when its docs name one;
+/// a relative script path is read from there, and from the agent's own working
+/// directory when it is `None`.
 pub(crate) fn classify_command(
     cmd: &str,
     event_name: &str,
     home: Option<&Path>,
+    run_dir: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) {
     // First token whitespace-separated. Treat as path candidate iff it looks
@@ -806,7 +810,7 @@ pub(crate) fn classify_command(
             let own = crate::ai_guard::own_entries::is_own_hook_command(cmd);
             out.extend(
                 crate::ai_guard::ext_script::scan_hook_script(
-                    &script_file(cmd, script, home),
+                    &script_file(cmd, script, home, run_dir),
                     event_name,
                 )
                 .into_iter()
@@ -829,14 +833,14 @@ pub(crate) fn classify_command(
 }
 
 /// The file `script`, a word of `cmd`, names.
-fn script_file(cmd: &str, script: &str, home: Option<&Path>) -> PathBuf {
+fn script_file(cmd: &str, script: &str, home: Option<&Path>, run_dir: Option<&Path>) -> PathBuf {
     // `hook_script_path` trims the quotes off an operand, so `script` is a
     // subslice of `cmd` and the trimmed quotes sit just before it.
     let start = script.as_ptr() as usize - cmd.as_ptr() as usize;
     let word = &cmd[cmd[..start].trim_end_matches(['"', '\'']).len()..start + script.len()];
     match (home, home_relative(word, script)) {
         (Some(home), Some(rest)) => home.join(rest.trim_start_matches('/')),
-        _ => PathBuf::from(script),
+        _ => run_dir.map_or_else(|| PathBuf::from(script), |dir| dir.join(script)),
     }
 }
 
@@ -900,7 +904,7 @@ pub(crate) fn collect_external_script_paths_from_settings(
                 let Some(cmd) = h.get("command").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
-                if let Some(p) = external_path_from_command(cmd, hooks_dir) {
+                if let Some(p) = external_path_from_command(cmd, hooks_dir, None) {
                     out.push(p);
                 }
             }
@@ -911,12 +915,15 @@ pub(crate) fn collect_external_script_paths_from_settings(
 
 /// Returns Some(path) if `cmd`'s first token is a path that lies OUTSIDE
 /// `hooks_dir` (i.e., would be classified as external by `classify_command`).
-/// Shares `hook_script_path` with `classify_command`.
+/// Shares `hook_script_path` with `classify_command`. A relative path is
+/// resolved from `run_dir` when given.
 pub(crate) fn external_path_from_command(
     cmd: &str,
     hooks_dir: &std::path::Path,
+    run_dir: Option<&Path>,
 ) -> Option<std::path::PathBuf> {
-    let candidate = std::path::PathBuf::from(hook_script_path(cmd)?);
+    let script = hook_script_path(cmd)?;
+    let candidate = run_dir.map_or_else(|| PathBuf::from(script), |dir| dir.join(script));
     if path_is_inside(&candidate, hooks_dir) {
         None
     } else {
