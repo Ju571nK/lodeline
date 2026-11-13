@@ -9,6 +9,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- **Agent.** The agent records a write to a watched file only when the bytes differ from the last
+  recorded or start-up state. A rewrite with the same bytes, and a mode or owner change that leaves
+  the bytes alone, is no longer recorded, so `events_emitted_total`, `events_by_kind` and the
+  `show stats` totals are lower than before for the same activity. AI Guard still reassesses on every
+  write. A file that is gone or unreadable forgets its baseline, and so does the old path of a rename, so
+  recreating that path with the same bytes is recorded. No event or wire format changes.
+
 - The Claude Code assessment reads `allowedHttpHookUrls` from the managed, user and project
   settings files and merges the lists. An `http` hook whose URL no pattern can match, or any
   `http` hook when the list is empty, no longer gives `HookForwardsToolCalls`, because Claude
