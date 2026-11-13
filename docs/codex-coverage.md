@@ -4,7 +4,7 @@ This page says what Lodeline reads from Codex configuration and where its readin
 
 ## Profiles
 
-Lodeline does not apply the legacy `profile = "<name>"` key or the `[profiles.<name>]` tables. Codex 0.167.0 stops with the error "legacy `profile` config is no longer supported; use `--profile` with `<name>.config.toml` instead" when `config.toml` sets the key, with or without the table. A `[profiles.<name>]` table without the key loads and has no effect. A profile table therefore never runs, and reporting it would report a setting Codex does not use. The release that removed the key is not known.
+Lodeline does not apply the legacy `profile = "<name>"` key or the `[profiles.<name>]` tables. Codex 0.167.0 stops when `config.toml` sets the key, with or without the table. The error reads: legacy `profile = "p"` config is no longer supported; use `--profile p` with `p.config.toml` instead. A `[profiles.<name>]` table without the key loads and has no effect. A profile table therefore never runs, and reporting it would report a setting Codex does not use. The release that removed the key is not known.
 
 Files passed with `--profile`, such as `p.config.toml`, are not read. The flag is runtime state that a daemon cannot see.
 
@@ -14,4 +14,4 @@ The granular `approval_policy` table is read on purpose. It only turns prompts i
 
 ## Hook trust
 
-Lodeline reads hook trust from the trust state in the user config. A hook whose stored hash no longer matches is still reported as running. Codex skips such a hook, so Lodeline over-reports a modified hook. It does not compare the hash, because the input to that hash changes between Codex releases and a wrong mismatch would hide a hook that runs.
+Lodeline reads hook trust from the trust state in the user config. A hook whose stored hash no longer matches is still reported as running. Codex is expected to skip such a hook, so Lodeline over-reports a modified hook. It does not compare the hash, because the input to that hash changes between Codex releases and a wrong mismatch would hide a hook that runs. The skip behaviour comes from the Codex source at rust-v0.164 and was not checked on 0.167.0.
