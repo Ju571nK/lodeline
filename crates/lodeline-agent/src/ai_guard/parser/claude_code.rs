@@ -67,10 +67,15 @@ impl AiGuardParser for ClaudeCodeParser {
     fn assess_posture(&self, home_dir: &Path) -> Result<super::AiGuardAssessment, AssessError> {
         let policy_dir = super::policy_controls::claude_policy_dir();
         let mut controls = super::policy_controls::claude_controls(&policy_dir)?;
+        let claude = self.locate(home_dir).0;
         controls.extend(super::policy_controls::claude_http_hook_url_control(
-            &self.locate(home_dir).0,
+            &claude,
             &policy_dir,
         )?);
+        controls.extend(super::policy_controls::claude_outside_dir_controls(&[
+            claude.join("settings.json"),
+            claude.join("settings.local.json"),
+        ]));
         Ok(super::AiGuardAssessment {
             reasons: self.assess(home_dir)?,
             controls: Some(controls),
@@ -1562,6 +1567,19 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             &hooks_dir,
         ));
         paths
+    }
+
+    /// A project reports controls only when its files set one, so a project
+    /// without them keeps the unsupported-inspection shape of its events.
+    fn assess_posture(&self, home_dir: &Path) -> Result<super::AiGuardAssessment, AssessError> {
+        let cd = self.repo_root.join(".claude");
+        let mut files = vec![cd.join("settings.json"), cd.join("settings.local.json")];
+        files.extend(shared_local_settings(&self.repo_root, home_dir));
+        let controls = super::policy_controls::claude_outside_dir_controls(&files);
+        Ok(super::AiGuardAssessment {
+            reasons: self.assess(home_dir)?,
+            controls: (!controls.is_empty()).then_some(controls),
+        })
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
@@ -4232,6 +4250,67 @@ mod tests {
                 .any(|r| matches!(r, AiGuardReason::AutoModeDefaultsDropped { .. })),
             "got {reasons:?}"
         );
+    }
+
+    // ---- #539: block*OutsideWorkingDirectories ---------------------------
+
+    const OUTSIDE_BOTH: &str = r#"{"permissions": {
+        "blockReadsOutsideWorkingDirectories": true,
+        "blockWritesOutsideWorkingDirectories": true}}"#;
+
+    fn outside_controls(
+        parser: &dyn AiGuardParser,
+        home: &Path,
+    ) -> Vec<lodeline_core::event::AiGuardControl> {
+        parser
+            .assess_posture(home)
+            .unwrap()
+            .controls
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| {
+                c.setting.contains("OutsideWorkingDirectories") && c.source_path.starts_with(home)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn user_scope_reports_outside_working_directory_blocks_without_changing_the_score() {
+        let home = tempdir().unwrap();
+        let user = ClaudeCodeParser::default();
+        write_settings(home.path(), r#"{"permissions": {"allow": ["Bash(ls)"]}}"#);
+        let before = user.assess(home.path()).unwrap();
+        assert!(outside_controls(&user, home.path()).is_empty());
+        write_settings(
+            home.path(),
+            r#"{"permissions": {"allow": ["Bash(ls)"],
+                "blockReadsOutsideWorkingDirectories": true,
+                "blockWritesOutsideWorkingDirectories": true}}"#,
+        );
+        let found = outside_controls(&user, home.path());
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(user.assess(home.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn project_scope_reports_outside_working_directory_blocks() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let project = ClaudeCodeProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        };
+        write_file(repo.path(), ".claude/settings.json", r#"{"model": "x"}"#);
+        assert!(project
+            .assess_posture(home.path())
+            .unwrap()
+            .controls
+            .is_none());
+        write_file(repo.path(), ".claude/settings.json", OUTSIDE_BOTH);
+        let found = outside_controls(&project, repo.path());
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found
+            .iter()
+            .all(|c| c.source_path == repo.path().join(".claude/settings.json")));
     }
 
     // ---- #539: allowedHttpHookUrls ---------------------------------------
