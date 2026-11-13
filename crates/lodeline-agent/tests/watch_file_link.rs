@@ -151,3 +151,26 @@ async fn a_dangling_link_is_followed_once_its_target_exists() {
     assert!(!agent.join.is_finished(), "the agent stopped");
     agent.join.abort();
 }
+
+#[cfg(feature = "operator-cli")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_that_adds_a_linked_file_follows_it() {
+    let td = tempfile::tempdir().unwrap();
+    let (link, target, spelled) = linked_settings(td.path());
+    let agent = TestAgentBuilder::new()
+        .policy(&isolated_policy(&td.path().join("elsewhere/settings.json")))
+        .start()
+        .await;
+    std::fs::write(&agent.policy_file, isolated_policy(&link)).unwrap();
+    assert_eq!(
+        agent
+            .control(&serde_json::json!({"cmd":"reload_policy"}))
+            .await["ok"],
+        true
+    );
+    let writer = keep_writing(target);
+    let seen = wait_for_change(&agent, &spelled, None).await;
+    writer.abort();
+    assert!(seen, "no file_change for {}", spelled.display());
+    agent.join.abort();
+}

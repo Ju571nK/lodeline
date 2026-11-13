@@ -102,7 +102,7 @@ fn canonical_prefix(pattern: &Path) -> PathBuf {
 
 /// `(real canonical path, link path)` pairs, published on a watch channel like
 /// the matcher set. The pipeline spells an event under a link the way the
-/// operator wrote the watched path. Empty until the link cases fill it.
+/// operator wrote the watched path.
 pub type AliasTable = Arc<Vec<(PathBuf, PathBuf)>>;
 
 /// The spelling of `canonical` the targets match: itself when a target

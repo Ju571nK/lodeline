@@ -471,7 +471,6 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         &effective,
         &expanded_paths,
     )));
-    let (aliases_tx, aliases_rx) = watch::channel(normalizer::AliasTable::default());
     // Phase 3b.1 — AI Guard shared state. Created here (before ControlContext)
     // so the IPC handler can read assessments via `ai_guard_state`. The broadcast
     // sender is created later, close to where the hasher needs it.
@@ -520,12 +519,14 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         roots = watch_roots.len(),
         "runtime: spawning filesystem watcher"
     );
-    let (raw_rx, watcher_handle) = watcher::spawn_watcher(
+    let (raw_rx, mut watcher_handle) = watcher::spawn_watcher(
         watch_roots.clone(),
         runtime_handle.clone(),
         1024,
         poll_interval,
     )?;
+    watcher_handle.follow_files(watched_files(&effective, &expanded_paths), false);
+    let aliases_rx = watcher_handle.aliases_rx();
     let backend_name = watcher_handle.backend_name;
     tracing::info!(
         backend = backend_name,
@@ -603,7 +604,6 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 policy_version_rx: policy_version_tx.subscribe(),
                 rule_packs_version_rx,
                 targets_tx,
-                aliases_tx,
                 watcher: watcher_handle,
                 watched_roots: watch_roots,
                 cache: cache.clone(),
@@ -1251,6 +1251,19 @@ pub(crate) fn expand_targets(
     }
     let watch_roots = unique.into_iter().collect();
     (expanded_paths, watch_roots)
+}
+
+/// The concrete file paths the policy watches, in policy order, for the watcher
+/// to check for links.
+pub(crate) fn watched_files(
+    eff: &lodeline_core::policy::EffectivePolicy,
+    expanded_paths: &HashMap<String, Vec<PathBuf>>,
+) -> Vec<PathBuf> {
+    eff.targets
+        .iter()
+        .flat_map(|t| &expanded_paths[&t.id])
+        .cloned()
+        .collect()
 }
 
 async fn emit_permission_missing(
