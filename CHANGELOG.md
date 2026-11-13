@@ -9,6 +9,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- **Agent.** The agent records a write to a watched file only when the bytes differ from the last
+  recorded or start-up state. A rewrite with the same bytes, and a mode or owner change that leaves
+  the bytes alone, is no longer recorded, so `events_emitted_total`, `events_by_kind` and the
+  `show stats` totals are lower than before for the same activity. AI Guard still reassesses on every
+  write. A file that is gone or unreadable forgets its baseline, and so does the old path of a rename, so
+  recreating that path with the same bytes is recorded. No event or wire format changes.
+
 - The Claude Code assessment reads `allowedHttpHookUrls` from the managed, user and project
   settings files and merges the lists. An `http` hook whose URL no pattern can match, or any
   `http` hook when the list is empty, no longer gives `HookForwardsToolCalls`, because Claude
@@ -20,6 +27,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   Claude Code merges the lists and runs it there. The path and query of a URL match a pattern
   without case.
 - The agent follows a watched file that is a link to a regular file. It watches the link path, so a write to the target is recorded under the link path, with the baseline and the AI Guard reassessment keyed the same way, and the target need not sit in the home folder. Every 5 seconds it re-reads the link, so a retarget, a late link or a target that appears later is picked up and records the current state once. A link whose target is missing, or already covered by another watched root, is left unfollowed with one warning. A link to a file in its own folder is followed. Two links to one target both stay, and the first one listed in the policy names the event. A link to a folder is not followed yet.
+
+### Documentation
+
+- `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied.
 
 ## [0.14.5] - 2026-11-12
 
