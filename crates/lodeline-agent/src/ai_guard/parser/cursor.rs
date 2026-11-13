@@ -439,8 +439,13 @@ mod tests {
         assert_eq!(paths, [PathBuf::from("/opt/guards/check.sh")]);
     }
 
-    fn project_scripts(repo: &Path, hooks: &str) -> Vec<PathBuf> {
-        write_hooks(&repo.join(".cursor"), hooks);
+    fn project_scripts(repo: &Path, commands: &[&str]) -> Vec<PathBuf> {
+        let entries: Vec<_> = commands
+            .iter()
+            .map(|c| serde_json::json!({"command": c}))
+            .collect();
+        let hooks = serde_json::json!({"version": 1, "hooks": {"stop": entries}});
+        write_hooks(&repo.join(".cursor"), &hooks.to_string());
         CursorProjectParser {
             repo_root: repo.to_path_buf(),
         }
@@ -450,23 +455,19 @@ mod tests {
     #[test]
     fn project_hook_script_outside_the_repo_is_watched() {
         let repo = tempdir().unwrap();
-        let paths = project_scripts(
-            repo.path(),
-            r#"{"version": 1, "hooks": {"beforeShellExecution": [
-                {"command": "/opt/guards/check.sh"},
-                {"type": "prompt", "prompt": "/opt/guards/prompt.sh"}
-            ]}}"#,
-        );
-        assert_eq!(paths, [PathBuf::from("/opt/guards/check.sh")]);
+        let outside = PathBuf::from(if cfg!(windows) {
+            r"C:\opt\check.sh"
+        } else {
+            "/opt/check.sh"
+        });
+        let paths = project_scripts(repo.path(), &[outside.to_str().unwrap()]);
+        assert_eq!(paths, [outside]);
     }
 
     #[test]
     fn project_relative_script_resolves_from_the_repo_root() {
         let repo = tempdir().unwrap();
-        let paths = project_scripts(
-            repo.path(),
-            r#"{"version": 1, "hooks": {"stop": [{"command": "../guards/check.sh"}]}}"#,
-        );
+        let paths = project_scripts(repo.path(), &["../guards/check.sh"]);
         assert_eq!(paths, [repo.path().join("../guards/check.sh")]);
     }
 
@@ -474,29 +475,24 @@ mod tests {
     fn project_script_inside_the_repo_hooks_dir_is_not_external() {
         let repo = tempdir().unwrap();
         let inside = repo.path().join(".cursor/hooks/check.sh");
-        let hooks = format!(
-            r#"{{"version": 1, "hooks": {{"stop": [
-                {{"command": ".cursor/hooks/check.sh"}},
-                {{"command": "{}"}}
-            ]}}}}"#,
-            inside.display()
+        let paths = project_scripts(
+            repo.path(),
+            &[".cursor/hooks/check.sh", inside.to_str().unwrap()],
         );
-        assert!(project_scripts(repo.path(), &hooks).is_empty());
+        assert!(paths.is_empty(), "got {paths:?}");
     }
 
     #[test]
     fn project_missing_script_is_not_a_crash() {
         let repo = tempdir().unwrap();
-        let hooks = r#"{"version": 1, "hooks": {"stop": [{"command": "/nonexistent/x.sh"}]}}"#;
-        write_hooks(&repo.path().join(".cursor"), hooks);
-        let p = CursorProjectParser {
+        let missing = repo.path().join("gone").join("x.sh");
+        let paths = project_scripts(repo.path(), &[missing.to_str().unwrap()]);
+        assert_eq!(paths, [missing]);
+        CursorProjectParser {
             repo_root: repo.path().to_path_buf(),
-        };
-        assert_eq!(
-            p.collect_external_script_paths(repo.path()),
-            [PathBuf::from("/nonexistent/x.sh")]
-        );
-        p.assess(repo.path()).unwrap();
+        }
+        .assess(repo.path())
+        .unwrap();
     }
 
     #[test]
