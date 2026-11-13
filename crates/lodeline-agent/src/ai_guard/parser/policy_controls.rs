@@ -294,6 +294,43 @@ pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessE
     Ok(out)
 }
 
+/// `allowedHttpHookUrls` set in the user's own settings files: one control
+/// that carries the number of patterns in the merged list and never a pattern,
+/// because a URL can name an internal host. The managed files have no control
+/// for it. Its source is the first of `settings.json` and
+/// `settings.local.json` that sets the key.
+pub(super) fn claude_http_hook_url_control(
+    claude: &Path,
+    policy_dir: &Path,
+) -> Result<Vec<AiGuardControl>, AssessError> {
+    let key = "allowedHttpHookUrls";
+    let mut sources = Vec::new();
+    for name in ["settings.json", "settings.local.json"] {
+        let path = claude.join(name);
+        if let Some(value) = super::read_json_optional(&path)? {
+            if value.get(key).is_some() {
+                sources.push((path, value));
+            }
+        }
+    }
+    let managed = claude_managed_settings(policy_dir).ok();
+    let files: Vec<Option<&Value>> = std::iter::once(managed.as_ref())
+        .chain(sources.iter().map(|(_, v)| Some(v)))
+        .collect();
+    let (Some((path, _)), Some(list)) = (
+        sources.first(),
+        super::claude_code::http_hook_allowlist(&files),
+    ) else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![observation(
+        "claude_code",
+        path,
+        key,
+        Value::from(list.len()),
+    )])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +383,38 @@ mod tests {
             .iter()
             .all(|c| c.source_path == path && c.id.contains(".configured.")));
         assert!(!serde_json::to_string(&controls).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn claude_http_hook_url_control_holds_the_count_and_no_url() {
+        let home = tempfile::tempdir().unwrap();
+        let policy = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let control = |claude: &Path| claude_http_hook_url_control(claude, policy.path()).unwrap();
+        assert!(control(&claude).is_empty());
+        std::fs::write(
+            claude.join("settings.json"),
+            r#"{"allowedHttpHookUrls": ["https://internal.example.test/*", "https://b.example.test/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            claude.join("settings.local.json"),
+            r#"{"allowedHttpHookUrls": ["https://b.example.test/*", "https://c.example.test/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            policy.path().join("managed-settings.json"),
+            r#"{"allowedHttpHookUrls": ["https://managed.example.test/*"]}"#,
+        )
+        .unwrap();
+        let found = control(&claude);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "claude_code.configured.allowedHttpHookUrls");
+        assert_eq!(found[0].source_path, claude.join("settings.json"));
+        assert_eq!(found[0].value, Value::from(4));
+        let text = serde_json::to_string(&found).unwrap();
+        assert!(!text.contains("example.test"), "{text}");
     }
 
     #[test]

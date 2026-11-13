@@ -128,32 +128,46 @@ macro_rules! string_scalar {
 
 string_scalar!(
     /// Lowercase hyphenated UUID text (any version).
-    Uuid, is_uuid_shape, "uuid"
+    Uuid,
+    is_uuid_shape,
+    "uuid"
 );
 string_scalar!(
     /// `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`.
-    Id, is_id, "id"
+    Id,
+    is_id,
+    "id"
 );
 string_scalar!(
     /// Lowercase UUID with version nibble 8 and RFC 9562 variant.
-    MetadataRef, is_metadata_ref, "metadata_ref"
+    MetadataRef,
+    is_metadata_ref,
+    "metadata_ref"
 );
 string_scalar!(
     /// `kid-` followed by 24 lowercase hex digits.
-    KeyId, is_key_id, "key_id"
+    KeyId,
+    is_key_id,
+    "key_id"
 );
 string_scalar!(
     /// Keyed HMAC-SHA-256 hex (64 lowercase hex digits).
-    Fingerprint, is_hex64, "fingerprint"
+    Fingerprint,
+    is_hex64,
+    "fingerprint"
 );
 string_scalar!(
     /// SHA-256 hex of the applied config (64 lowercase hex digits).
-    ConfigHash, is_hex64, "config_hash"
+    ConfigHash,
+    is_hex64,
+    "config_hash"
 );
 string_scalar!(
     /// UTC RFC 3339 text with uppercase `T`/`Z`. Kept verbatim: dedup compares
     /// code point for code point, so `08:00:00Z` and `08:00:00.0Z` differ.
-    Timestamp, is_timestamp, "timestamp"
+    Timestamp,
+    is_timestamp,
+    "timestamp"
 );
 
 macro_rules! int_scalar {
@@ -196,11 +210,15 @@ macro_rules! int_scalar {
 
 int_scalar!(
     /// Integer in `1..=2^63-1`.
-    PositiveI64, 1, "positive integer"
+    PositiveI64,
+    1,
+    "positive integer"
 );
 int_scalar!(
     /// Integer in `0..=2^63-1`.
-    NonNegativeI64, 0, "non-negative integer"
+    NonNegativeI64,
+    0,
+    "non-negative integer"
 );
 
 /// The constant `schema_version: 1`.

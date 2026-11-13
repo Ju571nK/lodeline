@@ -471,6 +471,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         &effective,
         &expanded_paths,
     )));
+    let (aliases_tx, aliases_rx) = watch::channel(normalizer::AliasTable::default());
     // Phase 3b.1 — AI Guard shared state. Created here (before ControlContext)
     // so the IPC handler can read assessments via `ai_guard_state`. The broadcast
     // sender is created later, close to where the hasher needs it.
@@ -542,7 +543,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             let tx_dropped = tx_dropped.clone();
             let targets_rx = targets_rx.clone();
             async move {
-                normalizer::run(targets_rx, raw_rx, tx_norm, tx_dropped).await;
+                normalizer::run(targets_rx, aliases_rx, raw_rx, tx_norm, tx_dropped).await;
             }
         }),
     );
@@ -602,6 +603,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 policy_version_rx: policy_version_tx.subscribe(),
                 rule_packs_version_rx,
                 targets_tx,
+                aliases_tx,
                 watcher: watcher_handle,
                 watched_roots: watch_roots,
                 cache: cache.clone(),

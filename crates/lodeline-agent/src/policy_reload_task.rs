@@ -203,6 +203,7 @@ pub struct ReloadCtx {
     /// rule packs are re-merged into the live parser set.
     pub rule_packs_version_rx: watch::Receiver<i64>,
     pub targets_tx: watch::Sender<Arc<Vec<CompiledTarget>>>,
+    pub aliases_tx: watch::Sender<normalizer::AliasTable>,
     pub watcher: WatcherHandle,
     pub watched_roots: Vec<(PathBuf, bool)>,
     pub cache: Arc<Mutex<HashCache>>,
@@ -648,6 +649,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         &expanded_paths,
     )));
 
+    let _ = ctx.aliases_tx.send(normalizer::AliasTable::default());
+
     // Reconcile watch roots on the live watcher. `watch`/`unwatch` failures are
     // logged and tolerated; failed registrations remain pending for retry.
     let mut added = 0usize;
@@ -773,6 +776,7 @@ mod tests {
                 policy_version_rx,
                 rule_packs_version_rx,
                 targets_tx,
+                aliases_tx: watch::channel(normalizer::AliasTable::default()).0,
                 watcher,
                 watched_roots: roots,
                 cache,
@@ -843,6 +847,7 @@ mod tests {
                 policy_version_rx,
                 rule_packs_version_rx,
                 targets_tx,
+                aliases_tx: watch::channel(normalizer::AliasTable::default()).0,
                 watcher,
                 watched_roots: roots,
                 cache,
