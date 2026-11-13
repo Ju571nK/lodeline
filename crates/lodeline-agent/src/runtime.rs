@@ -2064,6 +2064,21 @@ pub(crate) fn push_cursor_synthetic_target(
         follow_symlinks: false,
         disabled: false,
     });
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!("cursor-hooks-{h}"),
+        description: format!("Cursor synthetic hook scripts: {}", repo_root.display()),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths: vec![repo_root
+            .join(".cursor")
+            .join("hooks")
+            .join("*")
+            .to_string_lossy()
+            .to_string()],
+        recursive: true,
+        follow_symlinks: false,
+        disabled: false,
+    });
     // #156 — .cursor/rules/** : recursive glob so the normalizer matches files in
     // nested subdirs too (Cursor supports `.cursor/rules/<subdir>/foo.mdc`).
     // recursive:true → expand_targets watches the `.cursor/rules` dir recursively
@@ -2338,6 +2353,32 @@ mod tests {
                 .any(|p| std::path::Path::new(p) == hooks),
             "a project hooks.json edit must reach the parser"
         );
+    }
+
+    #[test]
+    fn cursor_project_target_watches_scripts_under_hooks_dir() {
+        use lodeline_core::policy::glob::CompiledGlob;
+        let repo = std::path::Path::new("/repo");
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_cursor_synthetic_target(&mut effective, repo);
+        let hooks = repo.join(".cursor").join("hooks");
+        for file in [hooks.join("a.sh"), hooks.join("sub").join("b.sh")] {
+            assert!(
+                effective
+                    .targets
+                    .iter()
+                    .filter(|t| t.recursive)
+                    .flat_map(|t| &t.paths)
+                    .any(|p| CompiledGlob::new(p).unwrap().is_match(&file)),
+                "{file:?} must be watched recursively"
+            );
+        }
     }
 
     #[test]
