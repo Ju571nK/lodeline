@@ -73,7 +73,7 @@ works with a v0.14.5 sender, agent and console. Against a server older than v0.1
 answers 404: a sender that is set to renew logs an error line for each refused attempt, from 60% to
 75% of the certificate's validity until it expires (once every six hours for a 30 day certificate),
 keeps delivering events, and the host must be enrolled again before its certificate expires. This
-release adds no event kind and no reason kind, changes no event format and no fleet API
+release adds no event kind and no reason kind, changes no event on the wire and no fleet API
 response (`lodeline-fleet-api` gains a `mint` module, which only the server and the console use). No
 package script, unit file, tmpfiles entry or SELinux module changed, so the packaged policy is the
 one of v0.14.4. No package or release asset is added or removed, the console is still an archive
