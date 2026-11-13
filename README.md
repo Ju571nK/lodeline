@@ -63,6 +63,8 @@ The misconfigurations that turn a helpful agent into a foothold:
 
 Across the agents you actually run: **Claude Code, Codex, Cursor, Gemini CLI, Antigravity, Continue.dev, Claude Desktop.**
 
+[Claude Code coverage](docs/claude-code-coverage.md) lists each Claude Code setting as assessed, reported or not read. [Codex coverage](docs/codex-coverage.md) does the same for Codex.
+
 It re-scores the moment a config changes — a clean repo at `0 / low` jumps to
 `critical` the instant a risky hook lands.
 
