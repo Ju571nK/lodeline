@@ -331,6 +331,14 @@ pub(super) fn claude_http_hook_url_control(
     )])
 }
 
+/// The two `permissions.block*OutsideWorkingDirectories` keys set to `true` in
+/// the given non-managed settings files, one control per key. Claude Code
+/// honors `true` from any scope, so the source is the first file that sets it.
+/// An unreadable file is the reasons channel's to report, so it is skipped here.
+pub(super) fn claude_outside_dir_controls(_files: &[PathBuf]) -> Vec<AiGuardControl> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +448,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn outside_working_directory_blocks_are_reported_from_non_managed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, local) = (
+            dir.path().join("settings.json"),
+            dir.path().join("settings.local.json"),
+        );
+        let files = [user.clone(), local.clone()];
+        assert!(claude_outside_dir_controls(&files).is_empty());
+        for key in [
+            "blockReadsOutsideWorkingDirectories",
+            "blockWritesOutsideWorkingDirectories",
+        ] {
+            std::fs::write(&user, format!(r#"{{"permissions":{{"{key}":true}}}}"#)).unwrap();
+            let found = claude_outside_dir_controls(&files);
+            assert_eq!(found.len(), 1, "{key}");
+            assert_eq!(
+                found[0].id,
+                format!("claude_code.configured.permissions.{key}")
+            );
+            assert_eq!(found[0].setting, format!("permissions.{key}"));
+            assert_eq!(found[0].value, Value::Bool(true));
+            assert_eq!(found[0].source_path, user);
+            for off in ["false", r#""true""#, "1", "null"] {
+                std::fs::write(&user, format!(r#"{{"permissions":{{"{key}":{off}}}}}"#)).unwrap();
+                assert!(
+                    claude_outside_dir_controls(&files).is_empty(),
+                    "{key} {off}"
+                );
+            }
+        }
+        std::fs::write(
+            &user,
+            r#"{"permissions":{"blockReadsOutsideWorkingDirectories":false}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &local,
+            r#"{"permissions":{"blockReadsOutsideWorkingDirectories":true,"blockWritesOutsideWorkingDirectories":true}}"#,
+        )
+        .unwrap();
+        let found = claude_outside_dir_controls(&files);
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|c| c.source_path == local));
+    }
+
+    #[test]
+    fn outside_working_directory_controls_skip_missing_and_broken_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("settings.json");
+        std::fs::write(&broken, "{").unwrap();
+        let ok = dir.path().join("settings.local.json");
+        std::fs::write(
+            &ok,
+            r#"{"permissions":{"blockWritesOutsideWorkingDirectories":true}}"#,
+        )
+        .unwrap();
+        let found =
+            claude_outside_dir_controls(&[broken, dir.path().join("absent.json"), ok.clone()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_path, ok);
     }
 
     #[test]
