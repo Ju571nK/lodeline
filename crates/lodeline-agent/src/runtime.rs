@@ -1259,11 +1259,13 @@ pub(crate) fn watched_files(
     eff: &lodeline_core::policy::EffectivePolicy,
     expanded_paths: &HashMap<String, Vec<PathBuf>>,
 ) -> Vec<PathBuf> {
-    eff.targets
-        .iter()
-        .flat_map(|t| &expanded_paths[&t.id])
-        .cloned()
-        .collect()
+    let mut files: Vec<PathBuf> = Vec::new();
+    for path in eff.targets.iter().flat_map(|t| &expanded_paths[&t.id]) {
+        if !files.contains(path) {
+            files.push(path.clone());
+        }
+    }
+    files
 }
 
 async fn emit_permission_missing(
@@ -2407,6 +2409,30 @@ mod tests {
         let matching: Vec<_> = roots.iter().filter(|(path, _)| path == &expected).collect();
         assert_eq!(matching, vec![&(expected, true)]);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_file_listed_by_two_targets_is_watched_once() {
+        let td = tempfile::tempdir().unwrap();
+        let file = td.path().join("settings.json");
+        let target = |id: &str| {
+            format!(
+            "  - id: {id}\n    description: {id}\n    tier: standard\n    platform: any\n    paths: ['{}']\n    recursive: false\n",
+            file.display()
+        )
+        };
+        let yaml = format!("version: 1\ntargets:\n{}{}", target("one"), target("two"));
+        let eff = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            Some(lodeline_core::policy::parse(&yaml).unwrap()),
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        let (expanded, _) = super::expand_targets(&eff, &crate::platform::ActivePlatform::new());
+        let files = super::watched_files(&eff, &expanded);
+        let listed = crate::normalizer::canonicalize_glob_prefix(&file);
+        assert_eq!(files.iter().filter(|f| **f == listed).count(), 1);
     }
 
     /// A critical target holding either the plain path or the pattern that

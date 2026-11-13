@@ -173,7 +173,7 @@ impl WatcherHandle {
                 *resolved.entry(root).or_default() |= recursive;
             }
         }
-        // Publish the aliases before a root registers and replays its file.
+        // Publish the aliases before a root registers and re-reads its file.
         let links = self.follow_links(&resolved);
         for (_, link) in &links {
             resolved.insert(link.clone(), false);
@@ -229,9 +229,12 @@ impl WatcherHandle {
             }
             let real = crate::normalizer::match_form(real);
             // A folder watched without recursion covers only the files directly in it.
+            // The link's own folder does not count, so a link to a sibling is followed.
             if roots.iter().any(|(root, recursive)| {
                 root == &real
-                    || if *recursive {
+                    || if !*recursive && link.parent() == Some(root) {
+                        false
+                    } else if *recursive {
                         real.starts_with(root)
                     } else {
                         real.parent() == Some(root)

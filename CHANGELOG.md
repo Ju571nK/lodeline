@@ -19,7 +19,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   A project row also reports a user `http` hook that the project's own list admits, because
   Claude Code merges the lists and runs it there. The path and query of a URL match a pattern
   without case.
-- The agent follows a watched file that is a link to a regular file. It watches the link path, so a write to the target is recorded under the link path, with the baseline and the AI Guard reassessment keyed the same way, and the target need not sit in the home folder. Every 5 seconds it re-reads the link, so a retarget, a late link or a target that appears later is picked up and records the current state once. A link whose target is missing, or already covered by another watched root, is left unfollowed with one warning. Two links to one target both stay, and the first one listed in the policy names the event. A link to a folder is not followed yet.
+- The agent follows a watched file that is a link to a regular file. It watches the link path, so a write to the target is recorded under the link path, with the baseline and the AI Guard reassessment keyed the same way, and the target need not sit in the home folder. Every 5 seconds it re-reads the link, so a retarget, a late link or a target that appears later is picked up and records the current state once. A link whose target is missing, or already covered by another watched root, is left unfollowed with one warning. A link to a file in its own folder is followed. Two links to one target both stay, and the first one listed in the policy names the event. A link to a folder is not followed yet.
 
 ## [0.14.5] - 2026-11-12
 

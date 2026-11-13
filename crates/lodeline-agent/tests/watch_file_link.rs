@@ -54,7 +54,7 @@ async fn wait_for_changes(agent: &TestAgent, path: &Path, count: usize) -> bool 
 }
 
 /// Rewrite `file` until the test aborts the writer: a write that lands in the
-/// watcher's startup gap is never replayed, so one write can be lost.
+/// watcher's startup gap is never scanned, so one write can be lost.
 fn keep_writing(file: PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut n = 0u64;
@@ -171,5 +171,24 @@ async fn a_reload_that_adds_a_linked_file_follows_it() {
     let seen = wait_for_changes(&agent, &spelled, 1).await;
     writer.abort();
     assert!(seen, "no file_change for {}", spelled.display());
+    agent.join.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_to_a_file_in_its_own_folder_is_followed() {
+    let td = tempfile::tempdir().unwrap();
+    let folder = dunce::canonicalize(td.path()).unwrap();
+    let target = folder.join("real.json");
+    std::fs::write(&target, b"initial").unwrap();
+    let link = folder.join("settings.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let agent = TestAgentBuilder::new()
+        .policy(&isolated_policy(&link))
+        .start()
+        .await;
+    let writer = keep_writing(target);
+    let seen = wait_for_changes(&agent, &link, 1).await;
+    writer.abort();
+    assert!(seen, "no file_change for {}", link.display());
     agent.join.abort();
 }
