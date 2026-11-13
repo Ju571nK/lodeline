@@ -73,6 +73,22 @@ fn external_script_paths(hooks_json: &Path, hooks_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// A project hook runs from the repo root, so a relative script is read from
+/// there and one inside `.cursor/hooks` is not external.
+fn project_script_paths(repo_root: &Path) -> Vec<PathBuf> {
+    let cursor = repo_root.join(".cursor");
+    let hooks_dir = dunce::canonicalize(cursor.join("hooks")).unwrap_or(cursor.join("hooks"));
+    external_script_paths(&cursor.join("hooks.json"), &hooks_dir)
+        .into_iter()
+        .map(|p| repo_root.join(p))
+        .filter(|p| {
+            !dunce::canonicalize(p)
+                .unwrap_or_else(|_| p.clone())
+                .starts_with(&hooks_dir)
+        })
+        .collect()
+}
+
 fn assess_user(
     home_dir: &Path,
     enterprise_hooks: &Path,
@@ -139,6 +155,7 @@ impl AiGuardParser for CursorProjectParser {
         vec![
             self.repo_root.join(".cursor").join("mcp.json"),
             self.repo_root.join(".cursor").join("hooks.json"),
+            self.repo_root.join(".cursor").join("hooks"),
             self.repo_root.join(".cursorrules"),
             self.repo_root.join(".cursor").join("rules"), // dir → starts_with matches child files
         ]
@@ -165,6 +182,9 @@ impl AiGuardParser for CursorProjectParser {
             &mut out,
         );
         Ok(out)
+    }
+    fn collect_external_script_paths(&self, _home: &Path) -> Vec<PathBuf> {
+        project_script_paths(&self.repo_root)
     }
 }
 
@@ -417,6 +437,76 @@ mod tests {
             &home.path().join(".cursor").join("hooks"),
         );
         assert_eq!(paths, [PathBuf::from("/opt/guards/check.sh")]);
+    }
+
+    fn project_scripts(repo: &Path, hooks: &str) -> Vec<PathBuf> {
+        write_hooks(&repo.join(".cursor"), hooks);
+        CursorProjectParser {
+            repo_root: repo.to_path_buf(),
+        }
+        .collect_external_script_paths(Path::new("/unused"))
+    }
+
+    #[test]
+    fn project_hook_script_outside_the_repo_is_watched() {
+        let repo = tempdir().unwrap();
+        let paths = project_scripts(
+            repo.path(),
+            r#"{"version": 1, "hooks": {"beforeShellExecution": [
+                {"command": "/opt/guards/check.sh"},
+                {"type": "prompt", "prompt": "/opt/guards/prompt.sh"}
+            ]}}"#,
+        );
+        assert_eq!(paths, [PathBuf::from("/opt/guards/check.sh")]);
+    }
+
+    #[test]
+    fn project_relative_script_resolves_from_the_repo_root() {
+        let repo = tempdir().unwrap();
+        let paths = project_scripts(
+            repo.path(),
+            r#"{"version": 1, "hooks": {"stop": [{"command": "../guards/check.sh"}]}}"#,
+        );
+        assert_eq!(paths, [repo.path().join("../guards/check.sh")]);
+    }
+
+    #[test]
+    fn project_script_inside_the_repo_hooks_dir_is_not_external() {
+        let repo = tempdir().unwrap();
+        let inside = repo.path().join(".cursor/hooks/check.sh");
+        let hooks = format!(
+            r#"{{"version": 1, "hooks": {{"stop": [
+                {{"command": ".cursor/hooks/check.sh"}},
+                {{"command": "{}"}}
+            ]}}}}"#,
+            inside.display()
+        );
+        assert!(project_scripts(repo.path(), &hooks).is_empty());
+    }
+
+    #[test]
+    fn project_missing_script_is_not_a_crash() {
+        let repo = tempdir().unwrap();
+        let hooks = r#"{"version": 1, "hooks": {"stop": [{"command": "/nonexistent/x.sh"}]}}"#;
+        write_hooks(&repo.path().join(".cursor"), hooks);
+        let p = CursorProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        };
+        assert_eq!(
+            p.collect_external_script_paths(repo.path()),
+            [PathBuf::from("/nonexistent/x.sh")]
+        );
+        p.assess(repo.path()).unwrap();
+    }
+
+    #[test]
+    fn project_hooks_dir_is_watched() {
+        let repo = tempdir().unwrap();
+        let p = CursorProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        };
+        let watched = p.watched_paths(Path::new("/unused"));
+        assert!(watched.contains(&repo.path().join(".cursor").join("hooks")));
     }
 
     #[test]

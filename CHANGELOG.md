@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cursor project hook scripts are watched.** A script that a repo's `.cursor/hooks.json` runs from outside the repo, and every file under `.cursor/hooks/`, now triggers a new assessment when it changes. A relative script path is read from the repo root, as Cursor runs it. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
+
 ## [0.14.5] - 2026-11-12
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to
