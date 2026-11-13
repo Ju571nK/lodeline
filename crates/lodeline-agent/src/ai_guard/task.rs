@@ -1489,6 +1489,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn an_incoming_link_spelling_matches_a_watched_folder_and_a_watched_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("skills");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(path_matches(&link.join("demo/SKILL.md"), &link));
+        assert!(path_matches(
+            &link.join("settings.json"),
+            &link.join("settings.json")
+        ));
+        assert!(!path_matches(
+            &link.join("other.json"),
+            &link.join("settings.json")
+        ));
+    }
+
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn a_symlinked_home_is_one_home_and_its_changes_match() {
         let root = tempfile::tempdir().unwrap();
