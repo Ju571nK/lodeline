@@ -42,20 +42,15 @@ fn changes_at(agent: &TestAgent, path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-async fn wait_for_change(agent: &TestAgent, path: &Path, after_hash_not: Option<&str>) -> bool {
-    agent
-        .wait_for_event(
-            |e| {
-                e["evidence"]["kind"] == "file_change"
-                    && e["subject"]["value"]
-                        .as_str()
-                        .is_some_and(|p| Path::new(p) == path)
-                    && after_hash_not.is_none_or(|h| e["evidence"]["after_hash"] != h)
-            },
-            fs_event_timeout(),
-        )
-        .await
-        .is_some()
+async fn wait_for_changes(agent: &TestAgent, path: &Path, count: usize) -> bool {
+    let deadline = std::time::Instant::now() + fs_event_timeout();
+    while std::time::Instant::now() < deadline {
+        if changes_at(agent, path).len() >= count {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 /// Rewrite `file` until the test aborts the writer: a write that lands in the
@@ -80,7 +75,7 @@ async fn writing_the_target_records_the_link_path(poll: bool) {
         .start()
         .await;
     let writer = keep_writing(target);
-    let seen = wait_for_change(&agent, &spelled, None).await;
+    let seen = wait_for_changes(&agent, &spelled, 1).await;
     writer.abort();
     assert!(seen, "no file_change for {}", spelled.display());
     agent.join.abort();
@@ -105,7 +100,7 @@ async fn retarget_records_one_current_state_event(poll: bool) {
         .start()
         .await;
     let writer = keep_writing(target);
-    assert!(wait_for_change(&agent, &spelled, None).await);
+    assert!(wait_for_changes(&agent, &spelled, 1).await);
     writer.abort();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let before = changes_at(&agent, &spelled);
@@ -120,9 +115,11 @@ async fn retarget_records_one_current_state_event(poll: bool) {
     std::os::unix::fs::symlink(&other, &swap).unwrap();
     std::fs::rename(&swap, &link).unwrap();
 
-    assert!(wait_for_change(&agent, &spelled, Some(&old_hash)).await);
+    assert!(wait_for_changes(&agent, &spelled, before.len() + 1).await);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(changes_at(&agent, &spelled).len(), before.len() + 1);
+    let after = changes_at(&agent, &spelled);
+    assert_eq!(after.len(), before.len() + 1);
+    assert_ne!(after.last().unwrap()["evidence"]["after_hash"], old_hash);
     agent.join.abort();
 }
 
@@ -147,7 +144,7 @@ async fn a_dangling_link_is_followed_once_its_target_exists() {
         .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     std::fs::write(&target, b"now it exists").unwrap();
-    assert!(wait_for_change(&agent, &spelled, None).await);
+    assert!(wait_for_changes(&agent, &spelled, 1).await);
     assert!(!agent.join.is_finished(), "the agent stopped");
     agent.join.abort();
 }
@@ -169,7 +166,7 @@ async fn a_reload_that_adds_a_linked_file_follows_it() {
         true
     );
     let writer = keep_writing(target);
-    let seen = wait_for_change(&agent, &spelled, None).await;
+    let seen = wait_for_changes(&agent, &spelled, 1).await;
     writer.abort();
     assert!(seen, "no file_change for {}", spelled.display());
     agent.join.abort();
