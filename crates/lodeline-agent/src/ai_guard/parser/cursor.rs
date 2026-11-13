@@ -441,19 +441,22 @@ mod tests {
     #[test]
     fn external_hook_scripts_outside_the_hooks_dir_are_watched() {
         let home = tempdir().unwrap();
+        let check = home.path().join("guards").join("check.sh");
+        let prompt = home.path().join("guards").join("prompt.sh");
         write_hooks(
             &home.path().join(".cursor"),
-            r#"{"version": 1, "hooks": {"beforeShellExecution": [
-                {"command": "/opt/guards/check.sh"},
-                {"type": "prompt", "prompt": "/opt/guards/prompt.sh"}
-            ]}}"#,
+            &serde_json::json!({"version": 1, "hooks": {"beforeShellExecution": [
+                {"command": check},
+                {"type": "prompt", "prompt": prompt}
+            ]}})
+            .to_string(),
         );
         let paths = external_script_paths(
             &home.path().join(".cursor").join("hooks.json"),
             &home.path().join(".cursor").join("hooks"),
             &home.path().join(".cursor"),
         );
-        assert_eq!(paths, [PathBuf::from("/opt/guards/check.sh")]);
+        assert_eq!(paths, [check]);
     }
 
     fn project_scripts(repo: &Path, commands: &[&str]) -> Vec<PathBuf> {
