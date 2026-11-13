@@ -63,7 +63,7 @@ The managed folder is `/Library/Application Support/ClaudeCode` on macOS, `C:\Pr
 
 A `PermissionRequest` hook also gives `standing_command_approval`, because it answers the permission prompt.
 
-A hook command that names a script by a relative path is read relative to the agent's working directory, not the folder Claude Code runs the hook in. This will change in a later release, and this paragraph will change with it.
+A hook command that names a script by a relative path is read relative to the agent's working directory, not the folder Claude Code runs the hook in.
 
 ## Reported
 
