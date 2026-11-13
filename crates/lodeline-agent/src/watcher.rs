@@ -168,13 +168,34 @@ impl WatcherHandle {
     /// never creates a recursive subscription on a broad ancestor (#223).
     fn rebuild_roots(&mut self, catch_up: bool) -> BTreeMap<PathBuf, notify::Error> {
         let mut resolved = BTreeMap::new();
+        let mut matched = BTreeSet::new();
+        let mut folder_links = BTreeSet::new();
         for (pattern, recursive) in &self.desired {
-            for root in resolve_directory_pattern(pattern) {
+            for (root, via_link) in resolve_pattern(pattern) {
+                if via_link {
+                    folder_links.insert(root);
+                    continue;
+                }
+                if has_glob(pattern) {
+                    matched.insert(root.clone());
+                }
                 *resolved.entry(root).or_default() |= recursive;
             }
         }
+        // A real folder that a wildcard found inside a recursive root is covered by it.
+        let recursive_roots: Vec<_> = resolved
+            .iter()
+            .filter(|(_, recursive)| **recursive)
+            .map(|(root, _)| root.clone())
+            .collect();
+        resolved.retain(|root, recursive| {
+            *recursive
+                || !matched.contains(root)
+                || self.desired.contains_key(root)
+                || !recursive_roots.iter().any(|r| root.starts_with(r))
+        });
         // Publish the aliases before a root registers and re-reads its file.
-        let links = self.follow_links(&resolved);
+        let links = self.follow_links(&resolved, folder_links);
         for (_, link) in &links {
             resolved.insert(link.clone(), false);
         }
@@ -206,13 +227,30 @@ impl WatcherHandle {
         errors
     }
 
-    /// The `(real path, link path)` pair of each watched file that is a link to a
-    /// regular file, in policy order. A link is left out, with one warning, when
-    /// its target is missing or a watched root already covers it. Two links to
-    /// one target both stay, and the first matches.
-    fn follow_links(&mut self, roots: &BTreeMap<PathBuf, bool>) -> Vec<(PathBuf, PathBuf)> {
+    /// The `(real path, link path)` pair of each watched file or wildcard folder
+    /// that is a link, in policy order. A link is left out, with one warning, when
+    /// its target is missing or a watched root already covers it. A folder link is
+    /// also left out when its target holds a watched folder, as `/` does. Two file
+    /// links to one target both stay, and the first matches. A second folder link
+    /// to one target is left out, so the folder gets one subscription.
+    fn follow_links(
+        &mut self,
+        roots: &BTreeMap<PathBuf, bool>,
+        folders: BTreeSet<PathBuf>,
+    ) -> Vec<(PathBuf, PathBuf)> {
         let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for link in self.files.clone() {
+        let files: Vec<PathBuf> = self
+            .files
+            .iter()
+            .flat_map(|file| {
+                if has_glob(file) {
+                    leaf_links(file)
+                } else {
+                    vec![file.clone()]
+                }
+            })
+            .collect();
+        for link in files {
             if !std::fs::symlink_metadata(&link).is_ok_and(|m| m.is_symlink()) {
                 continue;
             }
@@ -228,18 +266,7 @@ impl WatcherHandle {
                 continue;
             }
             let real = crate::normalizer::match_form(real);
-            // A folder watched without recursion covers only the files directly in it.
-            // The link's own folder does not count, so a link to a sibling is followed.
-            if roots.iter().any(|(root, recursive)| {
-                root == &real
-                    || if !*recursive && link.parent() == Some(root) {
-                        false
-                    } else if *recursive {
-                        real.starts_with(root)
-                    } else {
-                        real.parent() == Some(root)
-                    }
-            }) {
+            if is_covered(roots, &link, &real, false) {
                 self.warn_once(
                     &link,
                     "in-root",
@@ -255,6 +282,36 @@ impl WatcherHandle {
                 );
             }
             links.push((real, link));
+        }
+        for link in folders {
+            let Ok(real) = dunce::canonicalize(&link) else {
+                continue;
+            };
+            let real = crate::normalizer::match_form(real);
+            if is_covered(roots, &link, &real, true) {
+                self.warn_once(
+                    &link,
+                    "in-root",
+                    "link target is in a watched root; not followed",
+                );
+            } else if real.parent().is_none()
+                || link.starts_with(&real)
+                || roots.keys().any(|root| root.starts_with(&real))
+            {
+                self.warn_once(
+                    &link,
+                    "parent",
+                    "link target is a parent of a watched folder; not followed",
+                );
+            } else if links.iter().any(|(other, _)| *other == real) {
+                self.warn_once(
+                    &link,
+                    "shared",
+                    "link shares its target with an earlier link",
+                );
+            } else {
+                links.push((real, link));
+            }
         }
         links
     }
@@ -291,38 +348,103 @@ impl WatcherHandle {
     }
 }
 
+/// True when a watched root already covers `real`. A folder watched without
+/// recursion covers only the files directly in it, and the link's own folder does
+/// not count, so a link to a sibling is followed.
+fn is_covered(roots: &BTreeMap<PathBuf, bool>, link: &Path, real: &Path, folder: bool) -> bool {
+    roots.iter().any(|(root, recursive)| {
+        root == real
+            || if !*recursive && link.parent() == Some(root) {
+                false
+            } else if *recursive {
+                real.starts_with(root)
+            } else {
+                !folder && real.parent() == Some(root)
+            }
+    })
+}
+
+/// The links to regular files that a wildcard leaf such as `agents/*.md` matches.
+/// The folder must be a literal path, so this goes one level and no further.
+fn leaf_links(pattern: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (pattern.parent(), pattern.file_name()) else {
+        return Vec::new();
+    };
+    if has_glob(dir) || !has_glob(Path::new(name)) {
+        return Vec::new();
+    }
+    let Ok(glob) = lodeline_core::policy::glob::CompiledGlob::new(&pattern.to_string_lossy())
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .take(crate::runtime::WARMUP_ENTRY_LIMIT)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_symlink()))
+        .map(|entry| entry.path())
+        .filter(|path| glob.is_match(&crate::normalizer::match_form(path.clone())))
+        .take(crate::runtime::WARMUP_FILE_LIMIT)
+        .collect()
+}
+
+/// The folder `link` leads to, when `link` is a link to a folder that is not `/`
+/// and does not hold the link itself.
+pub(crate) fn linked_folder(link: &Path) -> Option<PathBuf> {
+    let real = crate::normalizer::match_form(dunce::canonicalize(link).ok()?);
+    (real.is_dir() && real.parent().is_some() && !link.starts_with(&real)).then_some(real)
+}
+
 fn has_glob(path: &Path) -> bool {
     path.to_string_lossy()
         .contains(['*', '?', '[', ']', '{', '}'])
 }
 
+fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
+    resolve_pattern(pattern)
+        .into_iter()
+        .map(|(root, _)| root)
+        .collect()
+}
+
 /// Walk one directory level per pattern component, not an entire subtree.
 /// Literal missing roots retain #219's retry behavior; wildcard roots are
 /// discovered afresh so installation/removal/replacement needs no restart.
-fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
+/// A link to a folder counts as a folder at the first wildcard component only,
+/// and its root is flagged. A link under it, or a literal link, is not followed.
+fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, bool)> {
     if !has_glob(pattern) {
-        return vec![pattern.to_path_buf()];
+        return vec![(pattern.to_path_buf(), false)];
     }
-    let mut candidates = vec![PathBuf::new()];
+    let mut candidates = vec![(PathBuf::new(), false)];
     let mut in_pattern = false;
     for component in pattern.components() {
         let part = Path::new(component.as_os_str());
         if has_glob(part) {
+            let first = !in_pattern;
             in_pattern = true;
             let Ok(glob) = lodeline_core::policy::glob::CompiledGlob::new(&part.to_string_lossy())
             else {
                 return Vec::new();
             };
             let mut matches = Vec::new();
-            for parent in candidates {
+            for (parent, via_link) in candidates {
                 let Ok(entries) = std::fs::read_dir(&parent) else {
                     continue;
                 };
                 for entry in entries.flatten() {
-                    if entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    let Ok(kind) = entry.file_type() else {
+                        continue;
+                    };
+                    let linked = first
+                        && kind.is_symlink()
+                        && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir());
+                    if (kind.is_dir() || linked)
                         && glob.is_match(&crate::normalizer::match_form(entry.file_name().into()))
                     {
-                        matches.push(entry.path());
+                        matches.push((entry.path(), via_link || linked));
                     }
                 }
             }
@@ -330,12 +452,12 @@ fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
         } else {
             candidates = candidates
                 .into_iter()
-                .filter_map(|mut parent| {
+                .filter_map(|(mut parent, via_link)| {
                     parent.push(part);
                     // Do not follow a wildcard match's symlink descendants outside
                     // the policy's canonical prefix (normalizer paths must agree).
                     if !in_pattern || std::fs::symlink_metadata(&parent).is_ok_and(|m| m.is_dir()) {
-                        Some(parent)
+                        Some((parent, via_link))
                     } else {
                         None
                     }
@@ -358,9 +480,12 @@ async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<Raw
     let Ok(meta) = tokio::fs::symlink_metadata(&root).await else {
         return;
     };
-    let links_to_file =
-        meta.is_symlink() && tokio::fs::metadata(&root).await.is_ok_and(|m| m.is_file());
-    if meta.is_file() || links_to_file {
+    let meta = if meta.is_symlink() {
+        tokio::fs::metadata(&root).await.unwrap_or(meta)
+    } else {
+        meta
+    };
+    if meta.is_file() {
         let _ = catch_up_file(root, &tx).await;
         return;
     }
@@ -795,18 +920,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn wildcard_discovery_does_not_follow_symlink_directories() {
+    fn wildcard_discovery_follows_a_link_only_at_the_first_wildcard_component() {
         let td = TempDir::new().unwrap();
         let outside = td.path().join("outside");
         fs::create_dir_all(outside.join("Contents")).unwrap();
-        std::os::unix::fs::symlink(&outside, td.path().join("Link.app")).unwrap();
-        fs::create_dir(td.path().join("Real.app")).unwrap();
-        std::os::unix::fs::symlink(
-            outside.join("Contents"),
-            td.path().join("Real.app/Contents"),
-        )
-        .unwrap();
-        assert!(resolve_directory_pattern(&td.path().join("*.app/Contents")).is_empty());
+        let apps = td.path().join("apps");
+        fs::create_dir_all(apps.join("Real.app")).unwrap();
+        std::os::unix::fs::symlink(&outside, apps.join("Link.app")).unwrap();
+        std::os::unix::fs::symlink(outside.join("Contents"), apps.join("Real.app/Contents"))
+            .unwrap();
+        assert_eq!(
+            resolve_directory_pattern(&apps.join("*.app/Contents")),
+            [apps.join("Link.app/Contents")]
+        );
+        // A link at a second wildcard component stays unfollowed.
+        fs::create_dir_all(apps.join("Group")).unwrap();
+        std::os::unix::fs::symlink(&outside, apps.join("Group/Deep.app")).unwrap();
+        assert!(resolve_directory_pattern(&apps.join("*/*.app/Contents")).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -870,7 +1000,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_respects_depth_and_does_not_follow_child_symlinks() {
+    async fn catchup_respects_depth_and_follows_only_a_root_link() {
         let td = TempDir::new().unwrap();
         let root = td.path().join("watched");
         fs::create_dir_all(root.join("nested")).unwrap();
@@ -892,6 +1022,26 @@ mod tests {
                 count += 1;
             }
             assert_eq!(count, expected);
+        }
+        #[cfg(unix)]
+        {
+            // The root itself may be a link, and a link inside it is still not followed.
+            let linked_root = td.path().join("linked-root");
+            std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+            let (tx, mut rx) = mpsc::channel(8);
+            catch_up_files(linked_root.clone(), true, Arc::new(tx)).await;
+            let mut seen = Vec::new();
+            while let Some(event) = rx.recv().await {
+                seen.push(event.path);
+            }
+            seen.sort();
+            assert_eq!(
+                seen,
+                [
+                    linked_root.join("direct.json"),
+                    linked_root.join("nested/child.json")
+                ]
+            );
         }
     }
 
@@ -1243,5 +1393,179 @@ mod tests {
         });
         assert_eq!(logs.matches("shares its target").count(), 1, "{logs}");
         assert_eq!(aliases_of(&watcher), [(target.clone(), one), (target, two)]);
+    }
+
+    /// `skills` (recursive) with `foo` linked to a folder outside it, and the
+    /// wildcard root the agent adds for the link.
+    #[cfg(unix)]
+    fn skills_with_link() -> (TempDir, PathBuf, PathBuf) {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        let outside = dir.join("outside/foo");
+        fs::create_dir_all(skills.join("real")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("SKILL.md"), b"a").unwrap();
+        (td, skills, outside)
+    }
+
+    /// What spawning a watcher on `roots` and one more reconcile log, and the watcher.
+    #[cfg(unix)]
+    fn watching(roots: Vec<(PathBuf, bool)>) -> (String, WatcherHandle) {
+        let mut watcher = None;
+        let logs = test_logs::logs_of(|| {
+            let (_rx, mut handle) = idle_watcher(roots);
+            handle.reconcile();
+            watcher = Some(handle);
+        });
+        (logs, watcher.unwrap())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_link_added_later_is_watched_by_its_link_path() {
+        let (_td, skills, outside) = skills_with_link();
+        let (mut rx, mut watcher) =
+            idle_watcher(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        assert!(aliases_of(&watcher).is_empty());
+        let link = skills.join("foo");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(outside, link.clone())]);
+        receive_path(&mut rx, &link.join("SKILL.md")).await;
+        // The real folder is already covered by the recursive root.
+        let mut active: Vec<_> = watcher.active.keys().cloned().collect();
+        active.sort();
+        assert_eq!(active, [skills.clone(), link.clone()]);
+        assert!(!watcher.active[&link].0);
+
+        fs::remove_file(&link).unwrap();
+        watcher.reconcile();
+        assert!(aliases_of(&watcher).is_empty());
+        assert_eq!(watcher.active.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_link_to_the_root_or_to_a_parent_of_a_watched_folder_is_refused_once() {
+        let (_td, skills, _) = skills_with_link();
+        std::os::unix::fs::symlink("/", skills.join("bar")).unwrap();
+        std::os::unix::fs::symlink(skills.parent().unwrap(), skills.join("loop")).unwrap();
+        // Not recursive: a polling watcher would walk the link to `/` for real.
+        let (logs, watcher) = watching(vec![(skills.clone(), false), (skills.join("*"), false)]);
+        assert_eq!(
+            logs.matches("parent of a watched folder").count(),
+            2,
+            "{logs}"
+        );
+        assert!(aliases_of(&watcher).is_empty());
+        assert!(watcher
+            .active
+            .keys()
+            .all(|root| root.parent() != Some(&skills) || root.ends_with("real")));
+    }
+
+    /// A link inside a recursive root to the folder that holds the root is
+    /// refused with one warning, and the watcher keeps reporting real edits. A
+    /// polling backend still walks the link itself, so what the agent records
+    /// from behind it is checked in `tests/follow_wildcard_link.rs`.
+    #[cfg(unix)]
+    async fn a_loop_link_in_a_recursive_root_is_refused_and_the_watcher_keeps_working(
+        poll: Option<Duration>,
+    ) {
+        let (_td, skills, _) = skills_with_link();
+        let real = skills.join("real/SKILL.md");
+        fs::write(&real, b"0").unwrap();
+        let loop_link = skills.join("loop");
+        std::os::unix::fs::symlink(skills.parent().unwrap(), &loop_link).unwrap();
+        let mut watcher = None;
+        let logs = test_logs::logs_of(|| {
+            let (rx, mut handle) = spawn_watcher(
+                vec![(skills.clone(), true), (skills.join("*"), false)],
+                tokio::runtime::Handle::current(),
+                64,
+                poll,
+            )
+            .unwrap();
+            handle.reconcile();
+            watcher = Some((rx, handle));
+        });
+        let (mut rx, _handle) = watcher.unwrap();
+        assert_eq!(
+            logs.matches("parent of a watched folder").count(),
+            1,
+            "{logs}"
+        );
+        // A write in the startup gap can be lost, so keep writing until one lands.
+        let mut seen = false;
+        for n in 1..=100 {
+            fs::write(&real, format!("change-{n}")).unwrap();
+            while let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+            {
+                seen |= event.path == real;
+            }
+            if seen && n > 3 {
+                break;
+            }
+        }
+        assert!(seen, "the real edit was not reported");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_a_loop_link_in_a_recursive_root_is_refused() {
+        a_loop_link_in_a_recursive_root_is_refused_and_the_watcher_keeps_working(None).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polling_a_loop_link_in_a_recursive_root_is_refused() {
+        a_loop_link_in_a_recursive_root_is_refused_and_the_watcher_keeps_working(Some(
+            Duration::from_millis(120),
+        ))
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_links_to_one_folder_follow_the_first_and_warn_once() {
+        let (_td, skills, outside) = skills_with_link();
+        let (one, two) = (skills.join("a-first"), skills.join("b-second"));
+        std::os::unix::fs::symlink(&outside, &one).unwrap();
+        std::os::unix::fs::symlink(&outside, &two).unwrap();
+        let (logs, watcher) = watching(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        assert_eq!(logs.matches("shares its target").count(), 1, "{logs}");
+        assert_eq!(aliases_of(&watcher), [(outside, one.clone())]);
+        assert!(watcher.active.contains_key(&one) && !watcher.active.contains_key(&two));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_link_to_a_folder_inside_the_recursive_root_is_not_followed() {
+        let (_td, skills, _) = skills_with_link();
+        std::os::unix::fs::symlink(skills.join("real"), skills.join("again")).unwrap();
+        let (logs, watcher) = watching(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        assert_eq!(logs.matches("in a watched root").count(), 1, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_subagent_file_link_at_a_wildcard_leaf_is_watched_by_its_link_path() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let agents = dir.join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::create_dir_all(dir.join("outside")).unwrap();
+        let target = dir.join("outside/a.md");
+        fs::write(&target, b"a").unwrap();
+        fs::write(agents.join("b.md"), b"b").unwrap();
+        let link = agents.join("a.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (mut rx, mut watcher) = idle_watcher(vec![(agents.clone(), true)]);
+        watcher.follow_files(vec![agents.join("*.md")], true);
+        assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
+        receive_path(&mut rx, &link).await;
     }
 }
