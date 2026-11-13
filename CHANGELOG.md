@@ -28,6 +28,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   without case.
 - The agent keeps a table of link spellings and uses it to name an event path the way the watched path was written, so an event under a link's target can match a target given as the link. The table is empty in this release, so no event path, baseline key or counter changes.
 
+### Fixed
+
+- **Cursor project hook scripts are watched.** The agent now watches the scripts that a repo's `.cursor/hooks.json` runs, in the repo or outside it, and the `.cursor/hooks/` folder. An edit to a script that `hooks.json` names by an absolute path triggers a new assessment. A script named by a relative path is watched from the repo root, but the assessment still reads it relative to the agent's working directory, so its edits do not change the result yet. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
+
 ### Documentation
 
 - `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied.
