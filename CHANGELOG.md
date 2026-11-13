@@ -21,6 +21,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   without case.
 - The agent keeps a table of link spellings and uses it to name an event path the way the watched path was written, so an event under a link's target can match a target given as the link. The table is empty in this release, so no event path, baseline key or counter changes.
 
+### Documentation
+
+- `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied.
+
 ## [0.14.5] - 2026-11-12
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to
