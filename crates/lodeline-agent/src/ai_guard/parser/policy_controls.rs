@@ -335,8 +335,24 @@ pub(super) fn claude_http_hook_url_control(
 /// the given non-managed settings files, one control per key. Claude Code
 /// honors `true` from any scope, so the source is the first file that sets it.
 /// An unreadable file is the reasons channel's to report, so it is skipped here.
-pub(super) fn claude_outside_dir_controls(_files: &[PathBuf]) -> Vec<AiGuardControl> {
-    Vec::new()
+pub(super) fn claude_outside_dir_controls(files: &[PathBuf]) -> Vec<AiGuardControl> {
+    let settings: Vec<(&PathBuf, Value)> = files
+        .iter()
+        .filter_map(|path| Some((path, super::read_json_optional(path).ok()??)))
+        .collect();
+    [
+        "blockReadsOutsideWorkingDirectories",
+        "blockWritesOutsideWorkingDirectories",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        let key = format!("permissions.{name}");
+        let (path, _) = settings
+            .iter()
+            .find(|(_, v)| dotted(v, &key) == Some(&Value::Bool(true)))?;
+        Some(observation("claude_code", path, &key, Value::Bool(true)))
+    })
+    .collect()
 }
 
 #[cfg(test)]

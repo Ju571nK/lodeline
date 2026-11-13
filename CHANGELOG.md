@@ -26,6 +26,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   A project row also reports a user `http` hook that the project's own list admits, because
   Claude Code merges the lists and runs it there. The path and query of a URL match a pattern
   without case.
+- The Claude Code assessment reports a control for each of `permissions.blockReadsOutsideWorkingDirectories`
+  and `permissions.blockWritesOutsideWorkingDirectories` that a user or project settings file sets to
+  `true`, as `claude_code.configured.permissions.<key>`. Claude Code honors `true` from any scope. The
+  control names the first file that sets it. A project that sets neither key reports no controls, as
+  before. The score does not change. No reason kind or event field is added.
 - The agent keeps a table of link spellings and uses it to name an event path the way the watched path was written, so an event under a link's target can match a target given as the link. The table is empty in this release, so no event path, baseline key or counter changes.
 
 ### Documentation
