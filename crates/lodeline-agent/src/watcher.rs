@@ -208,7 +208,7 @@ impl WatcherHandle {
 
     /// The `(real path, link path)` pair of each watched file that is a link to a
     /// regular file, in policy order. A link is left out, with one warning, when
-    /// its target is missing or lies in or around a watched root. Two links to
+    /// its target is missing or a watched root already covers it. Two links to
     /// one target both stay, and the first matches.
     fn follow_links(&mut self, roots: &BTreeMap<PathBuf, bool>) -> Vec<(PathBuf, PathBuf)> {
         let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -228,10 +228,15 @@ impl WatcherHandle {
                 continue;
             }
             let real = crate::normalizer::match_form(real);
-            if roots
-                .keys()
-                .any(|root| real.starts_with(root) || root.starts_with(&real))
-            {
+            // A folder watched without recursion covers only the files directly in it.
+            if roots.iter().any(|(root, recursive)| {
+                root == &real
+                    || if *recursive {
+                        real.starts_with(root)
+                    } else {
+                        real.parent() == Some(root)
+                    }
+            }) {
                 self.warn_once(
                     &link,
                     "in-root",
@@ -1196,6 +1201,25 @@ mod tests {
         assert_eq!(logs.matches("in a watched root").count(), 1, "{logs}");
         assert!(aliases_of(&watcher).is_empty());
         assert!(!watcher.active.contains_key(&link));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_watched_without_recursion_does_not_cover_a_deeper_target() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let target = dir.join("dotfiles/settings.json");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"a").unwrap();
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![(dir.clone(), false)]);
+        watcher.follow_files(vec![link.clone()], true);
+        assert_eq!(aliases_of(&watcher), [(target, link)]);
+
+        let (_rx, mut watcher) = idle_watcher(vec![(dir.clone(), true)]);
+        watcher.follow_files(vec![dir.join("settings.json")], true);
+        assert!(aliases_of(&watcher).is_empty());
     }
 
     #[cfg(unix)]
