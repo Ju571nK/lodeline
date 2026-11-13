@@ -513,6 +513,41 @@ mod tests {
     }
 
     #[test]
+    fn managed_and_user_outside_working_directory_blocks_are_listed_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("managed-settings.json");
+        let user = dir.path().join("settings.json");
+        let key = "blockReadsOutsideWorkingDirectories";
+        let listed = |managed_on: bool, user_on: bool| {
+            std::fs::write(
+                &managed,
+                format!(r#"{{"permissions":{{"{key}":{managed_on}}}}}"#),
+            )
+            .unwrap();
+            std::fs::write(&user, format!(r#"{{"permissions":{{"{key}":{user_on}}}}}"#)).unwrap();
+            let mut all = claude_controls(dir.path()).unwrap();
+            all.extend(claude_outside_dir_controls(std::slice::from_ref(&user)));
+            all
+        };
+
+        let both = listed(true, true);
+        assert_eq!(both.len(), 2);
+        assert!(both
+            .iter()
+            .all(|c| c.id == format!("claude_code.configured.permissions.{key}")));
+        let sources: Vec<_> = both.iter().map(|c| c.source_path.clone()).collect();
+        assert_eq!(sources, [managed.clone(), user.clone()]);
+
+        let user_only = listed(false, true);
+        assert_eq!(user_only.len(), 1);
+        assert_eq!(user_only[0].source_path, user);
+
+        let managed_only = listed(true, false);
+        assert_eq!(managed_only.len(), 1);
+        assert_eq!(managed_only[0].source_path, managed);
+    }
+
+    #[test]
     fn outside_working_directory_controls_skip_missing_and_broken_files() {
         let dir = tempfile::tempdir().unwrap();
         let broken = dir.path().join("settings.json");
