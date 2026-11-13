@@ -1465,6 +1465,68 @@ mod tests {
             .all(|root| root.parent() != Some(&skills) || root.ends_with("real")));
     }
 
+    /// A link inside a recursive root to the folder that holds the root is
+    /// refused with one warning, and the watcher keeps reporting real edits. A
+    /// polling backend still walks the link itself, so what the agent records
+    /// from behind it is checked in `tests/follow_wildcard_link.rs`.
+    #[cfg(unix)]
+    async fn a_loop_link_in_a_recursive_root_is_refused_and_the_watcher_keeps_working(
+        poll: Option<Duration>,
+    ) {
+        let (_td, skills, _) = skills_with_link();
+        let real = skills.join("real/SKILL.md");
+        fs::write(&real, b"0").unwrap();
+        let loop_link = skills.join("loop");
+        std::os::unix::fs::symlink(skills.parent().unwrap(), &loop_link).unwrap();
+        let mut watcher = None;
+        let logs = test_logs::logs_of(|| {
+            let (rx, mut handle) = spawn_watcher(
+                vec![(skills.clone(), true), (skills.join("*"), false)],
+                tokio::runtime::Handle::current(),
+                64,
+                poll,
+            )
+            .unwrap();
+            handle.reconcile();
+            watcher = Some((rx, handle));
+        });
+        let (mut rx, _handle) = watcher.unwrap();
+        assert_eq!(
+            logs.matches("parent of a watched folder").count(),
+            1,
+            "{logs}"
+        );
+        // A write in the startup gap can be lost, so keep writing until one lands.
+        let mut seen = false;
+        for n in 1..=100 {
+            fs::write(&real, format!("change-{n}")).unwrap();
+            while let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+            {
+                seen |= event.path == real;
+            }
+            if seen && n > 3 {
+                break;
+            }
+        }
+        assert!(seen, "the real edit was not reported");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_a_loop_link_in_a_recursive_root_is_refused() {
+        a_loop_link_in_a_recursive_root_is_refused_and_the_watcher_keeps_working(None).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polling_a_loop_link_in_a_recursive_root_is_refused() {
+        a_loop_link_in_a_recursive_root_is_refused_and_the_watcher_keeps_working(Some(
+            Duration::from_millis(120),
+        ))
+        .await;
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_links_to_one_folder_follow_the_first_and_warn_once() {

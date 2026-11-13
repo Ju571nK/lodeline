@@ -114,3 +114,42 @@ async fn native_a_linked_subagent_file_records_under_the_link_path() {
 async fn polling_a_linked_subagent_file_records_under_the_link_path() {
     a_linked_subagent_file_records_under_the_link_path(true).await;
 }
+
+/// `skills/loop` links to the folder that holds `skills`, so a followed link
+/// would record `skills/loop/SKILL.md` for the file next to `skills`.
+async fn a_loop_link_is_not_followed_and_a_real_skill_still_records(poll: bool) {
+    let td = tempfile::tempdir().unwrap();
+    let home = dunce::canonicalize(td.path()).unwrap();
+    let skills = home.join("skills");
+    std::fs::create_dir_all(skills.join("a")).unwrap();
+    std::fs::write(home.join("SKILL.md"), b"initial").unwrap();
+    std::os::unix::fs::symlink(&home, skills.join("loop")).unwrap();
+    let agent = TestAgentBuilder::new()
+        .policy(&isolated_policy(&skills.join("*/SKILL.md")))
+        .poll_watcher(poll)
+        .start()
+        .await;
+    let behind_the_loop = keep_writing(home.join("SKILL.md"));
+    change_is_recorded_at(
+        &agent,
+        &skills.join("a/SKILL.md"),
+        skills.join("a/SKILL.md"),
+    )
+    .await;
+    // The edits to the file behind the link ran for as long as the real edit took.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    behind_the_loop.abort();
+    assert_eq!(changes_at(&agent, &skills.join("loop/SKILL.md")), 0);
+    assert!(!agent.join.is_finished(), "the agent stopped");
+    agent.join.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_a_loop_link_is_not_followed_and_a_real_skill_still_records() {
+    a_loop_link_is_not_followed_and_a_real_skill_still_records(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn polling_a_loop_link_is_not_followed_and_a_real_skill_still_records() {
+    a_loop_link_is_not_followed_and_a_real_skill_still_records(true).await;
+}
