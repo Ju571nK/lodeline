@@ -203,7 +203,6 @@ pub struct ReloadCtx {
     /// rule packs are re-merged into the live parser set.
     pub rule_packs_version_rx: watch::Receiver<i64>,
     pub targets_tx: watch::Sender<Arc<Vec<CompiledTarget>>>,
-    pub aliases_tx: watch::Sender<normalizer::AliasTable>,
     pub watcher: WatcherHandle,
     pub watched_roots: Vec<(PathBuf, bool)>,
     pub cache: Arc<Mutex<HashCache>>,
@@ -649,7 +648,10 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         &expanded_paths,
     )));
 
-    let _ = ctx.aliases_tx.send(normalizer::AliasTable::default());
+    ctx.watcher.follow_files(
+        crate::runtime::watched_files(&effective, &expanded_paths),
+        true,
+    );
 
     // Reconcile watch roots on the live watcher. `watch`/`unwatch` failures are
     // logged and tolerated; failed registrations remain pending for retry.
@@ -689,6 +691,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
 mod tests {
     use super::*;
     use crate::runtime::expand_targets;
+    use crate::watcher::test_logs::logs_of;
     use std::time::Duration;
 
     /// Verify the repos_for_tool closure (as defined in reload()) returns an
@@ -776,7 +779,6 @@ mod tests {
                 policy_version_rx,
                 rule_packs_version_rx,
                 targets_tx,
-                aliases_tx: watch::channel(normalizer::AliasTable::default()).0,
                 watcher,
                 watched_roots: roots,
                 cache,
@@ -847,7 +849,6 @@ mod tests {
                 policy_version_rx,
                 rule_packs_version_rx,
                 targets_tx,
-                aliases_tx: watch::channel(normalizer::AliasTable::default()).0,
                 watcher,
                 watched_roots: roots,
                 cache,
@@ -1154,31 +1155,6 @@ mod tests {
         assert!(targets_rx.borrow().iter().any(|c| c.id == "target-b"));
         assert!(has_pack(&running.parsers, "old-pack"));
         running.stop().await;
-    }
-
-    /// Everything `f` logs on this thread. The subscriber is process-wide because
-    /// tracing caches a callsite's interest when any thread first reaches it, so a
-    /// thread-local subscriber loses a callsite another test reached first.
-    fn logs_of(f: impl FnOnce()) -> String {
-        thread_local!(static LINES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) });
-        struct Lines;
-        impl std::io::Write for Lines {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                // A thread that is exiting may log after its buffer is gone.
-                let _ = LINES.try_with(|lines| lines.borrow_mut().extend_from_slice(bytes));
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        static SUBSCRIBER: std::sync::Once = std::sync::Once::new();
-        SUBSCRIBER.call_once(|| tracing_subscriber::fmt().with_writer(|| Lines).init());
-        // A callsite first reached during the install cached no subscriber.
-        tracing::callsite::rebuild_interest_cache();
-        LINES.take();
-        f();
-        String::from_utf8(LINES.take()).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

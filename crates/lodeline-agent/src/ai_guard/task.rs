@@ -1508,6 +1508,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_linked_settings_file_matches_by_its_link_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("dotfiles/settings.json");
+        std::fs::create_dir(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"{}").unwrap();
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(path_matches(&link, &link));
+        assert!(!path_matches(&dir.path().join("other.json"), &link));
+    }
+
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn a_symlinked_home_is_one_home_and_its_changes_match() {
         let root = tempfile::tempdir().unwrap();

@@ -5,12 +5,12 @@ use notify::{
     event::{CreateKind, EventKind as NEvent, ModifyKind, RenameMode},
     Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Error)]
 pub enum WatcherError {
@@ -38,6 +38,11 @@ pub struct WatcherHandle {
     catchups: BTreeMap<PathBuf, tokio::task::JoinHandle<()>>,
     tx: Arc<mpsc::Sender<RawFsEvent>>,
     runtime: tokio::runtime::Handle,
+    /// Watched file paths to check each tick for being a link to a regular file.
+    files: Vec<PathBuf>,
+    aliases_tx: watch::Sender<crate::normalizer::AliasTable>,
+    /// Link problems already logged, so a tick does not repeat them.
+    warned: BTreeSet<(PathBuf, &'static str)>,
 }
 
 pub(crate) const ROOT_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -96,6 +101,19 @@ impl BackendWatcher {
 }
 
 impl WatcherHandle {
+    /// The `(real path, link path)` pairs of the followed file links. The pipeline
+    /// spells an event under the real path as the link, as the operator wrote it.
+    pub fn aliases_rx(&self) -> watch::Receiver<crate::normalizer::AliasTable> {
+        self.aliases_tx.subscribe()
+    }
+
+    /// Set the watched file paths. Each one that is a link to a regular file is
+    /// watched under its link path and aliased from its target.
+    pub fn follow_files(&mut self, files: Vec<PathBuf>, catch_up: bool) {
+        self.files = files;
+        let _ = self.rebuild_roots(catch_up);
+    }
+
     /// Record desired coverage, including failed registrations, for retry.
     pub fn watch(&mut self, root: &Path, recursive: bool) -> notify::Result<()> {
         let requested = resolve_directory_pattern(root);
@@ -155,6 +173,18 @@ impl WatcherHandle {
                 *resolved.entry(root).or_default() |= recursive;
             }
         }
+        // Publish the aliases before a root registers and re-reads its file.
+        let links = self.follow_links(&resolved);
+        for (_, link) in &links {
+            resolved.insert(link.clone(), false);
+        }
+        self.aliases_tx.send_if_modified(|table| {
+            let changed = **table != links;
+            if changed {
+                *table = Arc::new(links);
+            }
+            changed
+        });
         let obsolete: Vec<_> = self
             .resolved
             .keys()
@@ -174,6 +204,65 @@ impl WatcherHandle {
             }
         }
         errors
+    }
+
+    /// The `(real path, link path)` pair of each watched file that is a link to a
+    /// regular file, in policy order. A link is left out, with one warning, when
+    /// its target is missing or a watched root already covers it. Two links to
+    /// one target both stay, and the first matches.
+    fn follow_links(&mut self, roots: &BTreeMap<PathBuf, bool>) -> Vec<(PathBuf, PathBuf)> {
+        let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for link in self.files.clone() {
+            if !std::fs::symlink_metadata(&link).is_ok_and(|m| m.is_symlink()) {
+                continue;
+            }
+            let Ok(real) = dunce::canonicalize(&link) else {
+                self.warn_once(
+                    &link,
+                    "dangling",
+                    "watched file is a link to a missing target",
+                );
+                continue;
+            };
+            if !real.is_file() {
+                continue;
+            }
+            let real = crate::normalizer::match_form(real);
+            // A folder watched without recursion covers only the files directly in it.
+            // The link's own folder does not count, so a link to a sibling is followed.
+            if roots.iter().any(|(root, recursive)| {
+                root == &real
+                    || if !*recursive && link.parent() == Some(root) {
+                        false
+                    } else if *recursive {
+                        real.starts_with(root)
+                    } else {
+                        real.parent() == Some(root)
+                    }
+            }) {
+                self.warn_once(
+                    &link,
+                    "in-root",
+                    "link target is in a watched root; not followed",
+                );
+                continue;
+            }
+            if links.iter().any(|(other, _)| *other == real) {
+                self.warn_once(
+                    &link,
+                    "shared",
+                    "link shares its target with an earlier link",
+                );
+            }
+            links.push((real, link));
+        }
+        links
+    }
+
+    fn warn_once(&mut self, link: &Path, kind: &'static str, message: &str) {
+        if self.warned.insert((link.to_path_buf(), kind)) {
+            tracing::warn!(link = %link.display(), "{message}");
+        }
     }
 
     /// Check only configured roots, never recursively subscribe to an ancestor.
@@ -269,7 +358,9 @@ async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<Raw
     let Ok(meta) = tokio::fs::symlink_metadata(&root).await else {
         return;
     };
-    if meta.is_file() {
+    let links_to_file =
+        meta.is_symlink() && tokio::fs::metadata(&root).await.is_ok_and(|m| m.is_file());
+    if meta.is_file() || links_to_file {
         let _ = catch_up_file(root, &tx).await;
         return;
     }
@@ -402,6 +493,9 @@ pub fn spawn_watcher(
         catchups: BTreeMap::new(),
         tx,
         runtime: runtime_handle,
+        files: Vec::new(),
+        aliases_tx: watch::channel(Default::default()).0,
+        warned: BTreeSet::new(),
     };
     for (root, recursive) in roots {
         *handle.desired.entry(root).or_default() |= recursive;
@@ -491,6 +585,34 @@ fn map_notify_event(event: &Event) -> Vec<RawFsEvent> {
         }
     }
     out
+}
+
+#[cfg(test)]
+pub(crate) mod test_logs {
+    /// Everything `f` logs on this thread. The subscriber is process-wide because
+    /// tracing caches a callsite's interest when any thread first reaches it, so a
+    /// thread-local subscriber loses a callsite another test reached first.
+    pub(crate) fn logs_of(f: impl FnOnce()) -> String {
+        thread_local!(static LINES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) });
+        struct Lines;
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                // A thread that is exiting may log after its buffer is gone.
+                let _ = LINES.try_with(|lines| lines.borrow_mut().extend_from_slice(bytes));
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        static SUBSCRIBER: std::sync::Once = std::sync::Once::new();
+        SUBSCRIBER.call_once(|| tracing_subscriber::fmt().with_writer(|| Lines).init());
+        // A callsite first reached during the install cached no subscriber.
+        tracing::callsite::rebuild_interest_cache();
+        LINES.take();
+        f();
+        String::from_utf8(LINES.take()).unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -1001,5 +1123,125 @@ mod tests {
             }
         }
         assert!(saw_change, "poll watcher did not report the change");
+    }
+
+    #[cfg(unix)]
+    fn idle_watcher(roots: Vec<(PathBuf, bool)>) -> (mpsc::Receiver<RawFsEvent>, WatcherHandle) {
+        spawn_watcher(
+            roots,
+            tokio::runtime::Handle::current(),
+            16,
+            Some(Duration::from_secs(60)),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn aliases_of(watcher: &WatcherHandle) -> Vec<(PathBuf, PathBuf)> {
+        watcher.aliases_rx().borrow().to_vec()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_linked_file_is_watched_by_its_link_and_follows_a_retarget() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let (first, second) = (dir.join("dotfiles/a.json"), dir.join("dotfiles/b.json"));
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        let (mut rx, mut watcher) = idle_watcher(vec![]);
+        watcher.follow_files(vec![link.clone()], true);
+        assert_eq!(aliases_of(&watcher), [(first, link.clone())]);
+        receive_path(&mut rx, &link).await;
+
+        let swap = dir.join("swap");
+        std::os::unix::fs::symlink(&second, &swap).unwrap();
+        fs::rename(&swap, &link).unwrap();
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(second, link.clone())]);
+        receive_path(&mut rx, &link).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dangling_link_warns_once_and_is_followed_when_its_target_appears() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let target = dir.join("missing.json");
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("missing target").count(), 1, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+
+        fs::write(&target, b"now").unwrap();
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(target, link)]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_link_whose_target_is_in_a_watched_root_is_not_followed() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let target = dir.join("dotfiles/settings.json");
+        fs::write(&target, b"a").unwrap();
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![(dir.join("dotfiles"), false)]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("in a watched root").count(), 1, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+        assert!(!watcher.active.contains_key(&link));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_watched_without_recursion_does_not_cover_a_deeper_target() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let target = dir.join("dotfiles/settings.json");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"a").unwrap();
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![(dir.clone(), false)]);
+        watcher.follow_files(vec![link.clone()], true);
+        assert_eq!(aliases_of(&watcher), [(target, link)]);
+
+        let (_rx, mut watcher) = idle_watcher(vec![(dir.clone(), true)]);
+        watcher.follow_files(vec![dir.join("settings.json")], true);
+        assert!(aliases_of(&watcher).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_links_to_one_target_both_stay_and_warn_once() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let target = dir.join("dotfiles/settings.json");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"a").unwrap();
+        let (one, two) = (dir.join("one.json"), dir.join("two.json"));
+        std::os::unix::fs::symlink(&target, &one).unwrap();
+        std::os::unix::fs::symlink(&target, &two).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![one.clone(), two.clone()], true);
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("shares its target").count(), 1, "{logs}");
+        assert_eq!(aliases_of(&watcher), [(target.clone(), one), (target, two)]);
     }
 }
