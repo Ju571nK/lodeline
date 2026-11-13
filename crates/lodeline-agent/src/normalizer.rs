@@ -100,6 +100,36 @@ fn canonical_prefix(pattern: &Path) -> PathBuf {
     pattern.to_path_buf()
 }
 
+/// `(real canonical path, link path)` pairs, published on a watch channel like
+/// the matcher set. The pipeline spells an event under a link the way the
+/// operator wrote the watched path. Empty until the link cases fill it.
+pub type AliasTable = Arc<Vec<(PathBuf, PathBuf)>>;
+
+/// The spelling of `canonical` the targets match: itself when a target
+/// matches, else its link spelling from `aliases` when that one matches, else
+/// itself.
+pub fn respell(
+    canonical: PathBuf,
+    targets: &[CompiledTarget],
+    aliases: &[(PathBuf, PathBuf)],
+) -> PathBuf {
+    if aliases.is_empty() || match_target(&canonical, targets).is_some() {
+        return canonical;
+    }
+    aliases
+        .iter()
+        .find_map(|(real, link)| {
+            let rest = canonical.strip_prefix(real).ok()?;
+            let spelled = if rest.as_os_str().is_empty() {
+                link.clone()
+            } else {
+                link.join(rest)
+            };
+            match_target(&spelled, targets).map(|_| spelled)
+        })
+        .unwrap_or(canonical)
+}
+
 pub const RENAME_PAIR_WINDOW: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
@@ -200,6 +230,7 @@ struct PendingFrom {
 
 pub async fn run(
     targets_rx: tokio::sync::watch::Receiver<Arc<Vec<CompiledTarget>>>,
+    aliases_rx: tokio::sync::watch::Receiver<AliasTable>,
     mut rx_raw: mpsc::Receiver<RawFsEvent>,
     tx_norm: mpsc::Sender<NormalizedEvent>,
     tx_dropped: mpsc::Sender<DropReport>,
@@ -214,11 +245,15 @@ pub async fn run(
             biased;
             maybe_event = rx_raw.recv() => {
                 let Some(raw) = maybe_event else { break; };
-                let canonical =
-                    match_form(dunce::canonicalize(&raw.path).unwrap_or(raw.path.clone()));
                 // Snapshot the active matcher set for this event (cheap Arc clone).
                 // Live policy reload publishes new sets on `targets_rx`.
                 let targets = targets_rx.borrow().clone();
+                let aliases = aliases_rx.borrow().clone();
+                let canonical = respell(
+                    match_form(dunce::canonicalize(&raw.path).unwrap_or(raw.path.clone())),
+                    &targets,
+                    &aliases,
+                );
                 tracing::debug!(
                     raw_path = %raw.path.display(),
                     canonical = %canonical.display(),
@@ -321,8 +356,143 @@ fn monotonic_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_glob_prefix, compile_targets, match_form};
+    use super::{canonicalize_glob_prefix, compile_targets, match_form, NormalizedEvent};
+    use crate::watcher::RawFsEvent;
+    use lodeline_core::event::FileChangeKind;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Run the normalizer over `raw` with one target on `pattern` and the
+    /// given alias pairs. Returns what reaches the debouncer.
+    async fn normalize(
+        pattern: &str,
+        aliases: &[(&str, &str)],
+        raw: Vec<RawFsEvent>,
+    ) -> Vec<NormalizedEvent> {
+        let mut eff = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        eff.targets = vec![lodeline_core::policy::WatchTarget {
+            id: "t".into(),
+            description: "t".into(),
+            tier: lodeline_core::policy::Tier::Critical,
+            platform: lodeline_core::policy::Platform::Any,
+            paths: vec![pattern.into()],
+            recursive: true,
+            follow_symlinks: false,
+            disabled: false,
+        }];
+        let expanded = [("t".to_string(), vec![PathBuf::from(pattern)])].into();
+        let (_ttx, targets_rx) =
+            tokio::sync::watch::channel(Arc::new(compile_targets(&eff, &expanded)));
+        let table = aliases
+            .iter()
+            .map(|(r, l)| (PathBuf::from(r), PathBuf::from(l)))
+            .collect();
+        let (_atx, aliases_rx) = tokio::sync::watch::channel(Arc::new(table));
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(16);
+        let (norm_tx, mut norm_rx) = tokio::sync::mpsc::channel(16);
+        let (drop_tx, _drop_rx) = tokio::sync::mpsc::channel(16);
+        for r in raw {
+            raw_tx.send(r).await.unwrap();
+        }
+        drop(raw_tx);
+        super::run(targets_rx, aliases_rx, raw_rx, norm_tx, drop_tx).await;
+        let mut out = Vec::new();
+        while let Ok(Some(e)) =
+            tokio::time::timeout(Duration::from_millis(10), norm_rx.recv()).await
+        {
+            out.push(e);
+        }
+        out
+    }
+
+    fn raw(path: &str, kind: FileChangeKind, rename_id: Option<u64>) -> RawFsEvent {
+        RawFsEvent {
+            path: path.into(),
+            kind,
+            rename_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_path_with_an_alias_is_spelled_as_the_link() {
+        let got = normalize(
+            "/scratch/link/**",
+            &[("/scratch/real", "/scratch/link")],
+            vec![raw(
+                "/scratch/real/a/SKILL.md",
+                FileChangeKind::Modified,
+                None,
+            )],
+        )
+        .await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, PathBuf::from("/scratch/link/a/SKILL.md"));
+    }
+
+    #[tokio::test]
+    async fn a_file_alias_spells_the_file_as_the_link() {
+        let got = normalize(
+            "/scratch/link.json",
+            &[("/scratch/real.json", "/scratch/link.json")],
+            vec![raw("/scratch/real.json", FileChangeKind::Modified, None)],
+        )
+        .await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, PathBuf::from("/scratch/link.json"));
+    }
+
+    #[tokio::test]
+    async fn both_paths_of_a_rename_pair_are_spelled_as_the_link() {
+        let got = normalize(
+            "/scratch/link/**",
+            &[("/scratch/real", "/scratch/link")],
+            vec![
+                raw("/scratch/real/old.md", FileChangeKind::Renamed, Some(7)),
+                raw("/scratch/real/new.md", FileChangeKind::Renamed, Some(7)),
+            ],
+        )
+        .await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, PathBuf::from("/scratch/link/new.md"));
+        assert_eq!(
+            got[0].rename_from,
+            Some(PathBuf::from("/scratch/link/old.md"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_with_no_alias_is_dropped_and_a_direct_match_is_kept() {
+        let got = normalize(
+            "/scratch/link/**",
+            &[("/scratch/real", "/scratch/link")],
+            vec![
+                raw("/scratch/other/x.md", FileChangeKind::Modified, None),
+                raw("/scratch/link/y.md", FileChangeKind::Modified, None),
+            ],
+        )
+        .await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, PathBuf::from("/scratch/link/y.md"));
+    }
+
+    #[tokio::test]
+    async fn a_direct_match_is_not_rewritten_even_with_an_alias_over_it() {
+        let got = normalize(
+            "/scratch/real/**",
+            &[("/scratch/real", "/scratch/link")],
+            vec![raw("/scratch/real/x.md", FileChangeKind::Modified, None)],
+        )
+        .await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, PathBuf::from("/scratch/real/x.md"));
+    }
 
     /// An operator pattern shaped `<folder>/*/<name>` keeps its meaning: `*`
     /// crosses folders. Only built-in targets use the one-folder rule.

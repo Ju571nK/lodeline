@@ -7,6 +7,20 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- The Claude Code assessment reads `allowedHttpHookUrls` from the managed, user and project
+  settings files and merges the lists. An `http` hook whose URL no pattern can match, or any
+  `http` hook when the list is empty, no longer gives `HookForwardsToolCalls`, because Claude
+  Code does not run it. The managed hooks are still reported, and a pattern the Claude Code
+  documentation leaves open (whether `*` crosses `/` and `:`, how scheme and port match) keeps
+  the hook reported. The user scope also reports a control `claude_code.configured.allowedHttpHookUrls`
+  that holds the number of patterns and never a URL. No reason kind or event field is added.
+  A project row also reports a user `http` hook that the project's own list admits, because
+  Claude Code merges the lists and runs it there. The path and query of a URL match a pattern
+  without case.
+- The agent keeps a table of link spellings and uses it to name an event path the way the watched path was written, so an event under a link's target can match a target given as the link. The table is empty in this release, so no event path, baseline key or counter changes.
+
 ### Fixed
 
 - **Cursor project hook scripts are watched.** A script that a repo's `.cursor/hooks.json` runs from outside the repo, and every file under `.cursor/hooks/`, now triggers a new assessment when it changes. A relative script path is read from the repo root, as Cursor runs it. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.

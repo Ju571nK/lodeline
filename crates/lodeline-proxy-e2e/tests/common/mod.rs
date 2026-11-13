@@ -403,3 +403,42 @@ where
         }
     }
 }
+
+/// Build (a no-op when current) the real `lodeline-proxy` binary, without the
+/// `test-util` feature (the release code path), and return the path cargo
+/// reports for it. It never derives the path from the test executable, whose
+/// location depends on cargo's build-dir layout.
+#[allow(dead_code)]
+pub fn real_proxy_binary() -> Result<PathBuf, String> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut c = Command::new(cargo);
+    c.args([
+        "build",
+        "-p",
+        "lodeline-proxy",
+        "--bin",
+        "lodeline-proxy",
+        "--message-format=json",
+    ])
+    .current_dir(env!("CARGO_MANIFEST_DIR"))
+    .stderr(std::process::Stdio::inherit());
+    if !cfg!(debug_assertions) {
+        c.arg("--release");
+    }
+    let out = c.output().map_err(|e| format!("cargo did not run: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("building lodeline-proxy failed: {}", out.status));
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "lodeline-proxy")
+        .filter(|m| {
+            m["target"]["kind"]
+                .as_array()
+                .is_some_and(|k| k.iter().any(|k| k == "bin"))
+        })
+        .find_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .filter(|p| p.exists())
+        .ok_or_else(|| "cargo reported no lodeline-proxy executable".to_string())
+}
