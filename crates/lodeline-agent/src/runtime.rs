@@ -2716,21 +2716,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn pattern_warmup_does_not_follow_links_out_of_the_root() {
+    fn pattern_warmup_follows_a_link_at_the_first_wildcard_and_not_deeper() {
         let td = tempfile::tempdir().unwrap();
         let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
         let outside = dir.join("outside");
-        std::fs::create_dir_all(outside.join("beta")).unwrap();
-        std::fs::write(outside.join("beta").join("SKILL.md"), "x").unwrap();
+        for name in ["beta", "deep"] {
+            std::fs::create_dir_all(outside.join(name)).unwrap();
+            std::fs::write(outside.join(name).join("SKILL.md"), "x").unwrap();
+        }
         let root = dir.join("skills");
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
         std::os::unix::fs::symlink(outside.join("beta"), root.join("beta")).unwrap();
-        assert!(super::files_matching_pattern(
+        std::os::unix::fs::symlink(outside.join("deep"), root.join("alpha/inner")).unwrap();
+        // The skills root stays one link away from the home: a link to its parent is refused.
+        std::os::unix::fs::symlink(&dir, root.join("up")).unwrap();
+        let mut found = super::files_matching_pattern(
             &root.join("*").join("SKILL.md"),
             false,
             super::WARMUP_ENTRY_LIMIT,
-            super::WARMUP_FILE_LIMIT
-        )
-        .is_empty());
+            super::WARMUP_FILE_LIMIT,
+        );
+        found.sort();
+        assert_eq!(found, [root.join("beta/SKILL.md")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pattern_warmup_lists_a_link_to_a_file_at_a_wildcard_leaf() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let agents = dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(dir.join("a.md"), "x").unwrap();
+        std::fs::write(agents.join("b.md"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.join("a.md"), agents.join("a.md")).unwrap();
+        let mut found = super::files_matching_pattern(
+            &agents.join("*.md"),
+            false,
+            super::WARMUP_ENTRY_LIMIT,
+            super::WARMUP_FILE_LIMIT,
+        );
+        found.sort();
+        assert_eq!(found, [agents.join("a.md"), agents.join("b.md")]);
     }
 }

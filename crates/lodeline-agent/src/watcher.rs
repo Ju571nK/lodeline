@@ -795,18 +795,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn wildcard_discovery_does_not_follow_symlink_directories() {
+    fn wildcard_discovery_follows_a_link_only_at_the_first_wildcard_component() {
         let td = TempDir::new().unwrap();
         let outside = td.path().join("outside");
         fs::create_dir_all(outside.join("Contents")).unwrap();
-        std::os::unix::fs::symlink(&outside, td.path().join("Link.app")).unwrap();
-        fs::create_dir(td.path().join("Real.app")).unwrap();
-        std::os::unix::fs::symlink(
-            outside.join("Contents"),
-            td.path().join("Real.app/Contents"),
-        )
-        .unwrap();
-        assert!(resolve_directory_pattern(&td.path().join("*.app/Contents")).is_empty());
+        let apps = td.path().join("apps");
+        fs::create_dir_all(apps.join("Real.app")).unwrap();
+        std::os::unix::fs::symlink(&outside, apps.join("Link.app")).unwrap();
+        std::os::unix::fs::symlink(outside.join("Contents"), apps.join("Real.app/Contents"))
+            .unwrap();
+        assert_eq!(
+            resolve_directory_pattern(&apps.join("*.app/Contents")),
+            [apps.join("Link.app/Contents")]
+        );
+        // A link at a second wildcard component stays unfollowed.
+        fs::create_dir_all(apps.join("Group")).unwrap();
+        std::os::unix::fs::symlink(&outside, apps.join("Group/Deep.app")).unwrap();
+        assert!(resolve_directory_pattern(&apps.join("Group/*.app/Contents")).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -870,7 +875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_respects_depth_and_does_not_follow_child_symlinks() {
+    async fn catchup_respects_depth_and_follows_only_a_root_link() {
         let td = TempDir::new().unwrap();
         let root = td.path().join("watched");
         fs::create_dir_all(root.join("nested")).unwrap();
@@ -892,6 +897,26 @@ mod tests {
                 count += 1;
             }
             assert_eq!(count, expected);
+        }
+        #[cfg(unix)]
+        {
+            // The root itself may be a link, and a link inside it is still not followed.
+            let linked_root = td.path().join("linked-root");
+            std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+            let (tx, mut rx) = mpsc::channel(8);
+            catch_up_files(linked_root.clone(), true, Arc::new(tx)).await;
+            let mut seen = Vec::new();
+            while let Some(event) = rx.recv().await {
+                seen.push(event.path);
+            }
+            seen.sort();
+            assert_eq!(
+                seen,
+                [
+                    linked_root.join("direct.json"),
+                    linked_root.join("nested/child.json")
+                ]
+            );
         }
     }
 
@@ -1243,5 +1268,117 @@ mod tests {
         });
         assert_eq!(logs.matches("shares its target").count(), 1, "{logs}");
         assert_eq!(aliases_of(&watcher), [(target.clone(), one), (target, two)]);
+    }
+
+    /// `skills` (recursive) with `foo` linked to a folder outside it, and the
+    /// wildcard root the agent adds for the link.
+    #[cfg(unix)]
+    fn skills_with_link() -> (TempDir, PathBuf, PathBuf) {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        let outside = dir.join("outside/foo");
+        fs::create_dir_all(skills.join("real")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("SKILL.md"), b"a").unwrap();
+        (td, skills, outside)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_link_added_later_is_watched_by_its_link_path() {
+        let (_td, skills, outside) = skills_with_link();
+        let (mut rx, mut watcher) =
+            idle_watcher(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        assert!(aliases_of(&watcher).is_empty());
+        let link = skills.join("foo");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(outside, link.clone())]);
+        receive_path(&mut rx, &link.join("SKILL.md")).await;
+        // The real folder is already covered by the recursive root.
+        let mut active: Vec<_> = watcher.active.keys().cloned().collect();
+        active.sort();
+        assert_eq!(active, [skills.clone(), link.clone()]);
+        assert!(!watcher.active[&link].0);
+
+        fs::remove_file(&link).unwrap();
+        watcher.reconcile();
+        assert!(aliases_of(&watcher).is_empty());
+        assert_eq!(watcher.active.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_link_to_the_root_or_to_a_parent_of_a_watched_folder_is_refused_once() {
+        let (_td, skills, _) = skills_with_link();
+        std::os::unix::fs::symlink("/", skills.join("bar")).unwrap();
+        std::os::unix::fs::symlink(skills.parent().unwrap(), skills.join("loop")).unwrap();
+        // Not recursive: a polling watcher would walk the link to `/` for real.
+        let (_rx, mut watcher) =
+            idle_watcher(vec![(skills.clone(), false), (skills.join("*"), false)]);
+        let logs = test_logs::logs_of(|| {
+            watcher.reconcile();
+            watcher.reconcile();
+        });
+        assert_eq!(
+            logs.matches("parent of a watched folder").count(),
+            2,
+            "{logs}"
+        );
+        assert!(aliases_of(&watcher).is_empty());
+        assert!(watcher
+            .active
+            .keys()
+            .all(|root| root.parent() != Some(&skills) || root.ends_with("real")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_links_to_one_folder_follow_the_first_and_warn_once() {
+        let (_td, skills, outside) = skills_with_link();
+        let (one, two) = (skills.join("a-first"), skills.join("b-second"));
+        std::os::unix::fs::symlink(&outside, &one).unwrap();
+        std::os::unix::fs::symlink(&outside, &two).unwrap();
+        let (_rx, mut watcher) =
+            idle_watcher(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        let logs = test_logs::logs_of(|| {
+            watcher.reconcile();
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("shares its target").count(), 1, "{logs}");
+        assert_eq!(aliases_of(&watcher), [(outside, one.clone())]);
+        assert!(watcher.active.contains_key(&one) && !watcher.active.contains_key(&two));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_link_to_a_folder_inside_the_recursive_root_is_not_followed() {
+        let (_td, skills, _) = skills_with_link();
+        std::os::unix::fs::symlink(skills.join("real"), skills.join("again")).unwrap();
+        let (_rx, mut watcher) =
+            idle_watcher(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        let logs = test_logs::logs_of(|| watcher.reconcile());
+        assert_eq!(logs.matches("in a watched root").count(), 1, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_subagent_file_link_at_a_wildcard_leaf_is_watched_by_its_link_path() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let agents = dir.join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::create_dir_all(dir.join("outside")).unwrap();
+        let target = dir.join("outside/a.md");
+        fs::write(&target, b"a").unwrap();
+        fs::write(agents.join("b.md"), b"b").unwrap();
+        let link = agents.join("a.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (mut rx, mut watcher) = idle_watcher(vec![(agents.clone(), true)]);
+        watcher.follow_files(vec![agents.join("*.md")], true);
+        assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
+        receive_path(&mut rx, &link).await;
     }
 }
