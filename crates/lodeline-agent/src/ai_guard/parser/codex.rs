@@ -4917,4 +4917,45 @@ base_url = "https://llm.corp.example/v1"
             .watched_paths_in(Path::new("/home/.codex"))
             .contains(&super::super::policy_controls::codex_requirements_path()));
     }
+
+    fn reasons_for(config: &str) -> Vec<AiGuardReason> {
+        let dir = tempdir().unwrap();
+        write_config(dir.path(), config);
+        CodexParser::default().assess(dir.path()).unwrap()
+    }
+
+    #[test]
+    fn legacy_profile_key_and_table_are_not_applied_as_codex_0_167_0_refuses_the_key() {
+        let plain = reasons_for("model = \"gpt-5\"\n");
+        for profile_table in [
+            "approval_policy = \"never\"",
+            "sandbox_mode = \"danger-full-access\"",
+        ] {
+            let config = format!("profile = \"p\"\n[profiles.p]\n{profile_table}\n");
+            assert_eq!(reasons_for(&config), plain, "{profile_table}");
+        }
+    }
+
+    #[test]
+    fn profile_table_without_the_legacy_key_is_not_applied() {
+        assert_eq!(
+            reasons_for("[profiles.p]\napproval_policy = \"never\"\n"),
+            reasons_for("")
+        );
+    }
+
+    #[test]
+    fn profile_file_passed_with_the_profile_flag_is_not_read() {
+        let dir = tempdir().unwrap();
+        write_config(dir.path(), "");
+        std::fs::write(
+            dir.path().join(".codex/p.config.toml"),
+            "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            CodexParser::default().assess(dir.path()).unwrap(),
+            reasons_for("")
+        );
+    }
 }

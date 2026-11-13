@@ -25,6 +25,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - **Cursor project hook scripts are watched.** A script that a repo's `.cursor/hooks.json` runs from outside the repo, and every file under `.cursor/hooks/`, now triggers a new assessment when it changes. A relative script path is read from the repo root, as Cursor runs it. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
 
+### Documentation
+
+- `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied.
+
 ## [0.14.5] - 2026-11-12
 
 **Upgrade order.** Upgrade the server first, then the hosts, and the console last if you want to
