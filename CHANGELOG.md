@@ -23,7 +23,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
-- **Cursor project hook scripts are watched.** A script that a repo's `.cursor/hooks.json` runs from outside the repo, and every file under `.cursor/hooks/`, now triggers a new assessment when it changes. A relative script path is read from the repo root, as Cursor runs it. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
+- **Cursor project hook scripts are watched.** The agent now watches the scripts that a repo's `.cursor/hooks.json` runs, in the repo or outside it, and the `.cursor/hooks/` folder. An edit to a script that `hooks.json` names by an absolute path triggers a new assessment. A script named by a relative path is watched from the repo root, but the assessment still reads it relative to the agent's working directory, so its edits do not change the result yet. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
 
 ### Documentation
 
