@@ -1446,7 +1446,7 @@ pub(crate) fn emit_hook_reasons(
                 match handler.get("type").and_then(Value::as_str) {
                     Some("command") => {
                         if let Some(cmd) = hook_command(handler, cfg!(windows)) {
-                            claude_code::classify_command(cmd, event_name, home, out);
+                            claude_code::classify_command(cmd, event_name, home, None, out);
                         }
                     }
                     Some("mcp_tool") => emit_mcp_tool_hook_reason(handler, event_name, out),
@@ -1521,7 +1521,9 @@ pub(crate) fn collect_external_script_paths_from_config(
                 let Some(cmd) = hook_command(handler, cfg!(windows)) else {
                     continue;
                 };
-                if let Some(candidate) = claude_code::external_path_from_command(cmd, hooks_dir) {
+                if let Some(candidate) =
+                    claude_code::external_path_from_command(cmd, hooks_dir, None)
+                {
                     out.push(candidate);
                 }
             }

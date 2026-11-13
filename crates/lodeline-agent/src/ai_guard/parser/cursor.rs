@@ -50,12 +50,19 @@ fn hook_commands(hooks_json: &Value) -> Vec<(&str, &str)> {
 
 /// Cursor skips a `hooks.json` it cannot parse (it also accepts JSONC, which
 /// strict JSON rejects), so one is skipped here too rather than failing the
-/// MCP findings beside it, as Codex `hooks.json` is.
-fn emit_hook_reasons(path: &Path, home: Option<&Path>, out: &mut Vec<AiGuardReason>) {
+/// MCP findings beside it, as Codex `hooks.json` is. `run_dir` is where Cursor
+/// runs these hooks (https://cursor.com/docs/hooks), so a relative script is
+/// read from there.
+fn emit_hook_reasons(
+    path: &Path,
+    home: Option<&Path>,
+    run_dir: &Path,
+    out: &mut Vec<AiGuardReason>,
+) {
     match super::read_json_optional(path) {
         Ok(Some(val)) => {
             for (event, cmd) in hook_commands(&val) {
-                classify_command(cmd, event, home, out);
+                classify_command(cmd, event, home, Some(run_dir), out);
             }
         }
         Ok(None) => {}
@@ -63,13 +70,13 @@ fn emit_hook_reasons(path: &Path, home: Option<&Path>, out: &mut Vec<AiGuardReas
     }
 }
 
-fn external_script_paths(hooks_json: &Path, hooks_dir: &Path) -> Vec<PathBuf> {
+fn external_script_paths(hooks_json: &Path, hooks_dir: &Path, run_dir: &Path) -> Vec<PathBuf> {
     let Ok(Some(val)) = super::read_json_optional(hooks_json) else {
         return Vec::new();
     };
     hook_commands(&val)
         .into_iter()
-        .filter_map(|(_, cmd)| external_path_from_command(cmd, hooks_dir))
+        .filter_map(|(_, cmd)| external_path_from_command(cmd, hooks_dir, Some(run_dir)))
         .collect()
 }
 
@@ -78,9 +85,8 @@ fn external_script_paths(hooks_json: &Path, hooks_dir: &Path) -> Vec<PathBuf> {
 fn project_script_paths(repo_root: &Path) -> Vec<PathBuf> {
     let cursor = repo_root.join(".cursor");
     let hooks_dir = dunce::canonicalize(cursor.join("hooks")).unwrap_or(cursor.join("hooks"));
-    external_script_paths(&cursor.join("hooks.json"), &hooks_dir)
+    external_script_paths(&cursor.join("hooks.json"), &hooks_dir, repo_root)
         .into_iter()
-        .map(|p| repo_root.join(p))
         .filter(|p| {
             !dunce::canonicalize(p)
                 .unwrap_or_else(|_| p.clone())
@@ -95,8 +101,14 @@ fn assess_user(
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let cursor = home_dir.join(".cursor");
     let mut out = assess_path(cursor.join("mcp.json"))?;
-    emit_hook_reasons(&cursor.join("hooks.json"), Some(home_dir), &mut out);
-    emit_hook_reasons(enterprise_hooks, Some(home_dir), &mut out);
+    emit_hook_reasons(
+        &cursor.join("hooks.json"),
+        Some(home_dir),
+        &cursor,
+        &mut out,
+    );
+    let enterprise_dir = enterprise_hooks.parent().unwrap_or(Path::new(""));
+    emit_hook_reasons(enterprise_hooks, Some(home_dir), enterprise_dir, &mut out);
     Ok(out)
 }
 
@@ -127,12 +139,15 @@ impl AiGuardParser for CursorParser {
         )
     }
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        let hooks_dir = home_dir.join(".cursor").join("hooks");
-        let mut paths =
-            external_script_paths(&home_dir.join(".cursor").join("hooks.json"), &hooks_dir);
+        let cursor = home_dir.join(".cursor");
+        let hooks_dir = cursor.join("hooks");
+        let mut paths = external_script_paths(&cursor.join("hooks.json"), &hooks_dir, &cursor);
+        let enterprise = super::policy_controls::cursor_enterprise_hooks_path();
+        let enterprise_dir = enterprise.parent().unwrap_or(Path::new("")).to_path_buf();
         paths.extend(external_script_paths(
-            &super::policy_controls::cursor_enterprise_hooks_path(),
+            &enterprise,
             &hooks_dir,
+            &enterprise_dir,
         ));
         paths
     }
@@ -173,6 +188,7 @@ impl AiGuardParser for CursorProjectParser {
         emit_hook_reasons(
             &self.repo_root.join(".cursor").join("hooks.json"),
             Some(home),
+            &self.repo_root,
             &mut out,
         );
         // #146 — instruction files.
@@ -435,6 +451,7 @@ mod tests {
         let paths = external_script_paths(
             &home.path().join(".cursor").join("hooks.json"),
             &home.path().join(".cursor").join("hooks"),
+            &home.path().join(".cursor"),
         );
         assert_eq!(paths, [PathBuf::from("/opt/guards/check.sh")]);
     }
@@ -663,6 +680,7 @@ mod tests {
         let paths = external_script_paths(
             &home.path().join(".cursor").join("hooks.json"),
             &home.path().join(".cursor").join("hooks"),
+            &home.path().join(".cursor"),
         );
         assert_eq!(paths, [home.path().join(".cursor").join("../guards/g.sh")]);
     }

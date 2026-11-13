@@ -35,7 +35,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
-- **Cursor project hook scripts are watched.** The agent now watches the scripts that a repo's `.cursor/hooks.json` runs, in the repo or outside it, and the `.cursor/hooks/` folder. An edit to a script that `hooks.json` names by an absolute path triggers a new assessment. A script named by a relative path is watched from the repo root, but the assessment still reads it relative to the agent's working directory, so its edits do not change the result yet. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
+- **Cursor project hook scripts are watched.** The agent now watches the scripts that a repo's `.cursor/hooks.json` runs, in the repo or outside it, and the `.cursor/hooks/` folder. An edit to a script that `hooks.json` names by an absolute path triggers a new assessment. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
+
+- **Cursor hook scripts named by a relative path are read from the folder Cursor runs the hook in.** A project hook is read from the project root, a user hook from `~/.cursor/` and an enterprise hook from the folder that holds the enterprise `hooks.json`, as the Cursor hooks page describes. Before, the agent read the script relative to its own working directory, so a project script such as `.cursor/hooks/x.sh` was reported as unscanned and its edits did not change the result. The Claude Code and Codex assessments are unchanged: the Claude Code hooks page says only that a hook runs in the current directory, which can change during a session, so a relative path there stays unresolved. Absolute paths behave as before. No reason kind or event field is added.
 
 ### Documentation
 
