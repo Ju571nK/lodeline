@@ -547,4 +547,123 @@ mod tests {
             lodeline_core::event::AiGuardReason::InstructionFileDirective { .. }
         )));
     }
+
+    fn hook_script(dir: &Path, rel: &str, body: &str) {
+        let file = dir.join(rel);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+    }
+
+    fn project_reasons(repo: &Path, command: &str) -> Vec<AiGuardReason> {
+        write_hooks(
+            &repo.join(".cursor"),
+            &serde_json::json!({"version": 1, "hooks": {"stop": [{"command": command}]}})
+                .to_string(),
+        );
+        CursorProjectParser {
+            repo_root: repo.to_path_buf(),
+        }
+        .assess(repo)
+        .unwrap()
+    }
+
+    fn is_destructive(out: &[AiGuardReason]) -> bool {
+        out.iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. }))
+    }
+
+    #[test]
+    fn project_relative_script_is_scanned_from_the_repo_root() {
+        let repo = tempdir().unwrap();
+        hook_script(repo.path(), ".cursor/hooks/x.sh", "#!/bin/sh\nrm -rf /\n");
+        assert!(is_destructive(&project_reasons(
+            repo.path(),
+            ".cursor/hooks/x.sh"
+        )));
+    }
+
+    #[test]
+    fn project_relative_script_outside_the_hooks_dir_is_scanned_from_the_repo_root() {
+        let repo = tempdir().unwrap();
+        hook_script(repo.path(), "tools/x.sh", "#!/bin/sh\nrm -rf /\n");
+        assert!(is_destructive(&project_reasons(repo.path(), "tools/x.sh")));
+    }
+
+    #[test]
+    fn project_script_above_the_repo_is_resolved_from_the_repo_root() {
+        let parent = tempdir().unwrap();
+        let repo = parent.path().join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        hook_script(parent.path(), "guards/g.sh", "#!/bin/sh\nrm -rf /\n");
+        assert!(is_destructive(&project_reasons(&repo, "../guards/g.sh")));
+    }
+
+    #[test]
+    fn project_absolute_script_is_scanned_where_it_is() {
+        let repo = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        hook_script(other.path(), "x.sh", "#!/bin/sh\nrm -rf /\n");
+        let abs = other.path().join("x.sh");
+        assert!(is_destructive(&project_reasons(
+            repo.path(),
+            abs.to_str().unwrap()
+        )));
+    }
+
+    #[test]
+    fn missing_relative_script_is_unscanned_like_a_missing_absolute_one() {
+        let repo = tempdir().unwrap();
+        let rel = project_reasons(repo.path(), ".cursor/hooks/gone.sh");
+        let abs = repo.path().join(".cursor/hooks/gone.sh");
+        let abs = project_reasons(repo.path(), abs.to_str().unwrap());
+        for out in [&rel, &abs] {
+            assert!(
+                matches!(
+                    out.as_slice(),
+                    [AiGuardReason::ExternalScriptUnscanned { .. }]
+                ),
+                "got {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_relative_script_is_scanned_from_the_cursor_folder() {
+        let home = tempdir().unwrap();
+        let none = tempdir().unwrap();
+        hook_script(home.path(), ".cursor/hooks/x.sh", "#!/bin/sh\nrm -rf /\n");
+        write_hooks(
+            &home.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"stop": [{"command": "./hooks/x.sh"}]}}"#,
+        );
+        let out = assess_user(home.path(), &none.path().join("hooks.json")).unwrap();
+        assert!(is_destructive(&out), "got {out:?}");
+    }
+
+    #[test]
+    fn enterprise_relative_script_is_scanned_from_its_config_folder() {
+        let home = tempdir().unwrap();
+        let ent = tempdir().unwrap();
+        hook_script(ent.path(), "hooks/x.sh", "#!/bin/sh\nrm -rf /\n");
+        let file = write_hooks(
+            ent.path(),
+            r#"{"version": 1, "hooks": {"stop": [{"command": "./hooks/x.sh"}]}}"#,
+        );
+        let out = assess_user(home.path(), &file).unwrap();
+        assert!(is_destructive(&out), "got {out:?}");
+    }
+
+    #[test]
+    fn user_relative_script_is_watched_from_the_cursor_folder() {
+        let home = tempdir().unwrap();
+        write_hooks(
+            &home.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"stop": [{"command": "../guards/g.sh"}]}}"#,
+        );
+        let paths = external_script_paths(
+            &home.path().join(".cursor").join("hooks.json"),
+            &home.path().join(".cursor").join("hooks"),
+        );
+        assert_eq!(paths, [home.path().join(".cursor").join("../guards/g.sh")]);
+    }
 }
