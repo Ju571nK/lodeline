@@ -182,8 +182,8 @@ fn assess_user(
     let allowed = http_hook_allowlist(&[managed.as_ref(), Some(&merged)]);
     let mut out = Vec::new();
     if !hooks_off {
-        emit_hook_reasons_allowing(&merged, home, allowed.as_deref(), &mut out)?;
-        super::claude_components::emit_component_hook_reasons(&components, home, &mut out);
+        emit_hook_reasons_allowing(&merged, home, allowed.as_deref(), None, &mut out)?;
+        super::claude_components::emit_component_hook_reasons(&components, home, None, &mut out);
     }
     // Managed deny rules apply to every session, so the deny list is the
     // combined one.
@@ -379,7 +379,7 @@ fn mcp_server_denied(denied: &[&Value], name: &str, def: &Value) -> bool {
 
 /// Hook scripts outside `<claude_dir>/hooks` that settings or skill/subagent
 /// frontmatter hooks run, so the watcher re-assesses when one changes.
-fn external_script_paths(claude_dir: &Path) -> Vec<PathBuf> {
+fn external_script_paths(claude_dir: &Path, run_dir: Option<&Path>) -> Vec<PathBuf> {
     let hooks_dir = claude_dir.join("hooks");
     let base = super::read_json_optional(&claude_dir.join("settings.json"))
         .ok()
@@ -390,22 +390,24 @@ fn external_script_paths(claude_dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if base.is_some() || local.is_some() {
         let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
-        paths = collect_external_script_paths_from_settings(&merged, &hooks_dir);
+        paths = collect_external_script_paths_from_settings(&merged, &hooks_dir, run_dir);
     }
     paths.extend(super::claude_components::component_external_script_paths(
         &super::claude_components::component_hooks(claude_dir),
         &hooks_dir,
+        run_dir,
     ));
     paths
 }
 
 /// [`external_script_paths`] plus the scripts managed hooks run.
 fn user_external_script_paths(claude_dir: &Path, policy_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = external_script_paths(claude_dir);
+    let mut paths = external_script_paths(claude_dir, None);
     if let Ok(managed) = super::policy_controls::claude_managed_settings(policy_dir) {
         paths.extend(collect_external_script_paths_from_settings(
             &managed,
             &claude_dir.join("hooks"),
+            None,
         ));
     }
     paths
@@ -444,15 +446,16 @@ pub(crate) fn emit_hook_reasons(
     home: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) -> Result<(), AssessError> {
-    emit_hook_reasons_allowing(settings, home, None, out)
+    emit_hook_reasons_allowing(settings, home, None, None, out)
 }
 
 /// `allowed` is the merged `allowedHttpHookUrls` of every scope, when one
 /// sets it. A caller that cannot see every scope passes `None`.
-fn emit_hook_reasons_allowing(
+pub(crate) fn emit_hook_reasons_allowing(
     settings: &Value,
     home: Option<&Path>,
     allowed: Option<&[String]>,
+    run_dir: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) -> Result<(), AssessError> {
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
@@ -524,7 +527,7 @@ fn emit_hook_reasons_allowing(
                         if let Some(cmd) = h.get("command").and_then(Value::as_str) {
                             // Exec form (`args` set) spawns `command` with no shell.
                             let home = home.filter(|_| h.get("args").is_none());
-                            classify_command(cmd, event_name, home, None, out);
+                            classify_command(cmd, event_name, home, run_dir, out);
                         }
                     }
                     // `prompt` and `agent` hand the payload to the model the
@@ -786,9 +789,9 @@ fn destination_is_loopback(url: &str) -> bool {
 /// Decide whether `cmd` is inline shell, a convention-dir script (we read it),
 /// or an external script (we mark unscanned). Codex hooks share it. `home` is
 /// the home whose settings hold `cmd`; `None` leaves a leading `~` as written.
-/// `run_dir` is the folder the tool runs the hook in, when its docs name one;
-/// a relative script path is read from there, and from the agent's own working
-/// directory when it is `None`.
+/// `run_dir` is the folder a relative script path resolves from: the folder the
+/// tool's docs name, or a project's root. With `None` no folder is right, so a
+/// relative script is reported as not scanned and nothing is read.
 pub(crate) fn classify_command(
     cmd: &str,
     event_name: &str,
@@ -808,13 +811,13 @@ pub(crate) fn classify_command(
     let inline = match hook_script_path(cmd) {
         Some(script) => {
             let own = crate::ai_guard::own_entries::is_own_hook_command(cmd);
+            let file = script_file(cmd, script, home, run_dir);
             out.extend(
-                crate::ai_guard::ext_script::scan_hook_script(
-                    &script_file(cmd, script, home, run_dir),
-                    event_name,
-                )
-                .into_iter()
-                .filter(|r| !own || !matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })),
+                scan_script_file(file, run_dir.is_some(), event_name)
+                    .into_iter()
+                    .filter(|r| {
+                        !own || !matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })
+                    }),
             );
             // The script's own arguments are data (a guard often receives the
             // patterns it blocks), but a command chained after it runs too:
@@ -830,6 +833,23 @@ pub(crate) fn classify_command(
             snippet: truncate_for_snippet(inline),
         });
     }
+}
+
+/// Scan `file`, unless it is relative and no folder resolves it: that file is
+/// reported as not scanned, and nothing is read.
+fn scan_script_file(file: PathBuf, has_run_dir: bool, event_name: &str) -> Vec<AiGuardReason> {
+    if has_run_dir || has_fixed_location(&file) {
+        return crate::ai_guard::ext_script::scan_hook_script(&file, event_name);
+    }
+    vec![AiGuardReason::ExternalScriptUnscanned {
+        hook_event: event_name.to_string(),
+        script_path: file,
+    }]
+}
+
+/// True when `path` names one file whatever the working directory is.
+fn has_fixed_location(path: &Path) -> bool {
+    path.is_absolute() || path.has_root()
 }
 
 /// The file `script`, a word of `cmd`, names.
@@ -887,6 +907,7 @@ fn path_is_inside(candidate: &Path, root: &Path) -> bool {
 pub(crate) fn collect_external_script_paths_from_settings(
     settings: &serde_json::Value,
     hooks_dir: &std::path::Path,
+    run_dir: Option<&Path>,
 ) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Some(hooks) = settings.get("hooks").and_then(serde_json::Value::as_object) else {
@@ -904,7 +925,7 @@ pub(crate) fn collect_external_script_paths_from_settings(
                 let Some(cmd) = h.get("command").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
-                if let Some(p) = external_path_from_command(cmd, hooks_dir, None) {
+                if let Some(p) = external_path_from_command(cmd, hooks_dir, run_dir) {
                     out.push(p);
                 }
             }
@@ -916,7 +937,8 @@ pub(crate) fn collect_external_script_paths_from_settings(
 /// Returns Some(path) if `cmd`'s first token is a path that lies OUTSIDE
 /// `hooks_dir` (i.e., would be classified as external by `classify_command`).
 /// Shares `hook_script_path` with `classify_command`. A relative path is
-/// resolved from `run_dir` when given.
+/// resolved from `run_dir`; without one it names no file to watch, except a
+/// `~` or `$VAR` path the caller expands.
 pub(crate) fn external_path_from_command(
     cmd: &str,
     hooks_dir: &std::path::Path,
@@ -924,6 +946,13 @@ pub(crate) fn external_path_from_command(
 ) -> Option<std::path::PathBuf> {
     let script = hook_script_path(cmd)?;
     let candidate = run_dir.map_or_else(|| PathBuf::from(script), |dir| dir.join(script));
+    if run_dir.is_none()
+        && !has_fixed_location(&candidate)
+        && !script.starts_with('~')
+        && !script.contains('$')
+    {
+        return None;
+    }
     if path_is_inside(&candidate, hooks_dir) {
         None
     } else {
@@ -950,6 +979,7 @@ fn hook_script_path(cmd: &str) -> Option<&str> {
         };
     }
     if !is_sh_interpreter(first) {
+        let first = unquote(first);
         return looks_pathish(first).then_some(first);
     }
     let mut takes_arg = false;
@@ -1022,6 +1052,19 @@ fn is_assignment(token: &str) -> bool {
         name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     })
+}
+
+/// `word` without one pair of matching quotes around it. An unmatched quote
+/// stays.
+fn unquote(word: &str) -> &str {
+    ['"', '\'']
+        .into_iter()
+        .find_map(|quote| {
+            word.strip_prefix(quote)?
+                .strip_suffix(quote)
+                .filter(|inner| !inner.contains(quote))
+        })
+        .unwrap_or(word)
 }
 
 /// The part of `cmd` that runs besides `script` (a subslice of `cmd`): from
@@ -1561,17 +1604,19 @@ impl AiGuardParser for ClaudeCodeProjectParser {
 
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         let hooks_dir = self.repo_root.join(".claude").join("hooks");
-        let mut paths = external_script_paths(&self.repo_root.join(".claude"));
+        let run_dir = Some(self.repo_root.as_path());
+        let mut paths = external_script_paths(&self.repo_root.join(".claude"), run_dir);
         let shared = shared_local_settings(&self.repo_root, home_dir)
             .and_then(|p| super::read_json_optional(&p).ok().flatten());
         if let Some(shared) = shared {
             paths.extend(collect_external_script_paths_from_settings(
-                &shared, &hooks_dir,
+                &shared, &hooks_dir, run_dir,
             ));
         }
         paths.extend(super::claude_components::component_external_script_paths(
             &super::claude_components::nested_skill_hooks(&self.repo_root),
             &hooks_dir,
+            run_dir,
         ));
         paths
     }
@@ -1634,8 +1679,14 @@ fn emit_user_hooks_admitted_here(
     }
     let (mut admitted, mut blocked) = (Vec::new(), Vec::new());
     // An unreadable user hook is the user row's to report.
-    let _ = emit_hook_reasons_allowing(user_all, Some(home), merged_list, &mut admitted);
-    let _ = emit_hook_reasons_allowing(user_all, Some(home), user_list.as_deref(), &mut blocked);
+    let _ = emit_hook_reasons_allowing(user_all, Some(home), merged_list, None, &mut admitted);
+    let _ = emit_hook_reasons_allowing(
+        user_all,
+        Some(home),
+        user_list.as_deref(),
+        None,
+        &mut blocked,
+    );
     for reason in blocked {
         if let Some(i) = admitted.iter().position(|a| *a == reason) {
             admitted.remove(i);
@@ -1751,7 +1802,13 @@ fn assess_project(
     let allowed = http_hook_allowlist(&[managed.as_ref(), Some(&user_all), Some(&merged)]);
     let mut out = Vec::new();
     if !hooks_off {
-        emit_hook_reasons_allowing(&merged, Some(home), allowed.as_deref(), &mut out)?;
+        emit_hook_reasons_allowing(
+            &merged,
+            Some(home),
+            allowed.as_deref(),
+            Some(repo_root),
+            &mut out,
+        )?;
         emit_user_hooks_admitted_here(
             &user_all,
             home,
@@ -1759,7 +1816,12 @@ fn assess_project(
             allowed.as_deref(),
             &mut out,
         );
-        super::claude_components::emit_component_hook_reasons(&components, Some(home), &mut out);
+        super::claude_components::emit_component_hook_reasons(
+            &components,
+            Some(home),
+            Some(repo_root),
+            &mut out,
+        );
     }
     emit_permission_reasons(&merged, &mut out);
     emit_start_mode_reason(start, &mut out);
@@ -3098,7 +3160,7 @@ mod tests {
                 }]
             }
         });
-        let paths = collect_external_script_paths_from_settings(&settings, &hooks_dir);
+        let paths = collect_external_script_paths_from_settings(&settings, &hooks_dir, None);
         assert_eq!(
             paths,
             vec![std::path::PathBuf::from("/opt/lodeline-tools/pre.sh")]

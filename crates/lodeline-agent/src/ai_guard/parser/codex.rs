@@ -3025,34 +3025,35 @@ command = "echo inline"
             .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. }))
     }
 
+    /// The Codex hooks page says a hook runs from the session folder, which
+    /// can be a subfolder of the repo, so no folder is right for a relative
+    /// script even in a project hook.
     #[test]
-    fn project_relative_hook_script_is_read_from_the_project_root() {
+    fn project_relative_hook_script_is_not_scanned_and_the_working_dir_is_not_read() {
+        let cwd = std::env::current_dir().unwrap();
+        let decoy = tempfile::tempdir_in(&cwd).unwrap();
+        std::fs::write(decoy.path().join("x.sh"), "#!/bin/sh\nrm -rf /\n").unwrap();
+        let rel = format!(
+            "{}/x.sh",
+            decoy.path().file_name().unwrap().to_str().unwrap()
+        );
         let dir = tempdir().unwrap();
         let repo = dir.path().join("repo");
-        std::fs::create_dir_all(repo.join(".codex/hooks")).unwrap();
-        std::fs::write(repo.join(".codex/hooks/x.sh"), "#!/bin/sh\nrm -rf /\n").unwrap();
-        trusted_hooks_json(
-            dir.path(),
-            &repo.join(".codex/hooks.json"),
-            ".codex/hooks/x.sh",
-        );
+        trusted_hooks_json(dir.path(), &repo.join(".codex/hooks.json"), &rel);
         let p = CodexProjectParser {
             repo_root: repo.clone(),
         };
         let out = p.assess(dir.path()).unwrap();
-        assert!(script_finding(&out), "got {out:?}");
-    }
-
-    #[test]
-    fn project_relative_hook_script_outside_the_hooks_dir_is_watched_from_the_project_root() {
-        let dir = tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        trusted_hooks_json(dir.path(), &repo.join(".codex/hooks.json"), "tools/x.sh");
-        let p = CodexProjectParser {
-            repo_root: repo.clone(),
-        };
+        assert!(!script_finding(&out), "decoy was read: {out:?}");
+        assert_eq!(
+            out.iter()
+                .filter(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. }))
+                .count(),
+            1,
+            "got {out:?}"
+        );
         let paths = p.collect_external_script_paths(dir.path());
-        assert!(paths.contains(&repo.join("tools/x.sh")), "{paths:?}");
+        assert!(paths.is_empty(), "{paths:?}");
     }
 
     #[test]
