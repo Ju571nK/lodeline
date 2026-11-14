@@ -54,8 +54,10 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ### Option B — build from source
 
 ```sh
-cargo build --release -p lodeline-agent   # → target/release/lodeline
+cargo build --release --locked -p lodeline-agent   # → target/release/lodeline
 ```
+
+> Build with `--locked`. Without the lockfile, cargo resolves a newer `notify-types` that needs Rust 1.91, and the build fails on Rust 1.88.
 
 > **Intel Macs** are not shipped as prebuilt binaries — build from source.
 > Apple Silicon prebuilt binaries are provided by `install.sh`.

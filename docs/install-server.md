@@ -93,8 +93,10 @@ systemd unit and config by hand (sections 4–6).
 ### Option C — build from source
 
 ```sh
-cargo build --release -p lodeline-server   # → target/release/lodeline-server
+cargo build --release --locked -p lodeline-server   # → target/release/lodeline-server
 ```
+
+> Build with `--locked`. Without the lockfile, cargo resolves a newer `notify-types` that needs Rust 1.91, and the build fails on Rust 1.88.
 
 > **aarch64 (ARM) servers:** releases ship `aarch64` RPMs and `arm64` debs
 > alongside the x86_64 ones, so an ARM server can use the packages above.

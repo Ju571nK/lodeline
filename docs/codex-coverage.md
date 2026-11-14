@@ -12,6 +12,10 @@ Files passed with `--profile`, such as `p.config.toml`, are not read. The flag i
 
 The granular `approval_policy` table is read on purpose. It only turns prompts into rejections, so it is not a finding by itself. The requirements allowlist still names `untrusted`.
 
+## Hook scripts
+
+A hook command that names a script by an absolute path, in matching quotes or not, is read and scanned. A script named by a relative path gives `external_script_unscanned`, and the agent never reads a file from its own working directory. Codex runs a hook from the session folder, which can be a subfolder of the repo, and its hooks page advises against a relative path for a repo-local hook, so no single folder is right for one.
+
 ## Hook trust
 
 Lodeline reads hook trust from the trust state in the user config. A hook whose stored hash no longer matches is still reported as running. Codex is expected to skip such a hook, so Lodeline over-reports a modified hook. It does not compare the hash, because the input to that hash changes between Codex releases and a wrong mismatch would hide a hook that runs. The skip behaviour comes from the Codex source at rust-v0.164 and was not checked on 0.167.0.
