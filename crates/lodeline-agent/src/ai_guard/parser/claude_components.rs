@@ -7,7 +7,7 @@
 //! Either way they execute on the host, so they are scored with the same
 //! emitter as settings hooks.
 
-use super::claude_code::{collect_external_script_paths_from_settings, emit_hook_reasons};
+use super::claude_code::{collect_external_script_paths_from_settings, emit_hook_reasons_allowing};
 use lodeline_core::event::AiGuardReason;
 use serde_json::Value;
 use std::io::Read;
@@ -94,11 +94,14 @@ fn hooks_of(path: PathBuf) -> Option<ComponentHooks> {
 pub(crate) fn emit_component_hook_reasons(
     components: &[ComponentHooks],
     home: Option<&Path>,
+    run_dir: Option<&Path>,
     out: &mut Vec<AiGuardReason>,
 ) {
     for component in components {
         let mut found = Vec::new();
-        if let Err(e) = emit_hook_reasons(&component.settings, home, &mut found) {
+        if let Err(e) =
+            emit_hook_reasons_allowing(&component.settings, home, None, run_dir, &mut found)
+        {
             tracing::warn!(path = %component.path.display(), error = %e,
                 "claude components: hook classification failed");
             continue;
@@ -119,10 +122,11 @@ pub(crate) fn emit_component_hook_reasons(
 pub(crate) fn component_external_script_paths(
     components: &[ComponentHooks],
     hooks_dir: &Path,
+    run_dir: Option<&Path>,
 ) -> Vec<PathBuf> {
     components
         .iter()
-        .flat_map(|c| collect_external_script_paths_from_settings(&c.settings, hooks_dir))
+        .flat_map(|c| collect_external_script_paths_from_settings(&c.settings, hooks_dir, run_dir))
         .collect()
 }
 
@@ -348,7 +352,7 @@ mod tests {
 
     fn reasons(claude_dir: &Path) -> Vec<AiGuardReason> {
         let mut out = Vec::new();
-        emit_component_hook_reasons(&component_hooks(claude_dir), None, &mut out);
+        emit_component_hook_reasons(&component_hooks(claude_dir), None, None, &mut out);
         out
     }
 
@@ -433,7 +437,7 @@ mod tests {
         let mut out = vec![AiGuardReason::NoSandbox {
             executor: "host_shell".into(),
         }];
-        emit_component_hook_reasons(&component_hooks(d.path()), None, &mut out);
+        emit_component_hook_reasons(&component_hooks(d.path()), None, None, &mut out);
         let sandbox = out
             .iter()
             .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))
@@ -552,8 +556,11 @@ mod tests {
             "agents/x.md",
             "---\nhooks:\n  Stop:\n    - hooks:\n        - command: \"bash /opt/tools/notify.sh\"\n---\n",
         );
-        let paths =
-            component_external_script_paths(&component_hooks(d.path()), &d.path().join("hooks"));
+        let paths = component_external_script_paths(
+            &component_hooks(d.path()),
+            &d.path().join("hooks"),
+            None,
+        );
         assert_eq!(paths, vec![PathBuf::from("/opt/tools/notify.sh")]);
     }
 

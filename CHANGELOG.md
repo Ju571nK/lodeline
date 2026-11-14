@@ -7,6 +7,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- AI Guard no longer reads a hook script that a relative path names from the agent's own working
+  directory (#614). A relative script in a Claude Code project hook is read from the project root.
+  A relative script in a Claude Code user or managed hook, and in any Codex hook, is reported as not
+  scanned, because no single folder is right for it.
+- AI Guard now reads a hook script whose path is the first word of the command and is in quotes,
+  such as `"/opt/hooks/check.sh" arg`, for Claude Code, Codex and Cursor hooks (#616).
+
 ## [0.15.0] - 2026-11-14
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,
