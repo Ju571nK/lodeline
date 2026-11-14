@@ -7,6 +7,24 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-15
+
+**Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,
+and changes no event format and no fleet API response. No package script, unit file, tmpfiles
+entry or SELinux module changed, so the packaged policy is the one of v0.15.0. No package or
+release asset is added or removed. The server, the sender and the console change only in their
+version, so the hosts, the server and the console can be upgraded in any order. Only the agent
+changes behavior.
+
+**Hosts.** After the upgrade a burst of writes to one critical-tier file can be recorded as one
+merged `file_change` event whose evidence quality is `best_effort`. An AI Guard score can drop
+where a Cursor `hooks.json` names one script in several entries, because the script now counts
+once. A relative script in a Codex hook, or in a Claude Code user or managed hook, is now reported
+as not scanned. The agent depends on `notify` 8.2.0 instead of 6.1.1, and a build from source on
+Rust 1.88 needs `--locked`. On Windows, after a read error that the watcher library does not
+recognise, the library stops watching that folder and logs the error, and the watch does not
+resume until the folder is replaced.
+
 ### Fixed
 
 - **Agent.** The polling backend (`--poll`) and the inotify backend no longer follow a link inside
@@ -15,16 +33,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   where the agent registers it, such as a linked skill folder or subagent file. The `notify`
   dependency moves from 6.1.1 to 8.2.0 for the option that turns link following off. The native
   macOS backend (FSEvents) is unchanged. A build from source on Rust 1.88 must use `--locked`:
-  without the lockfile, cargo resolves a newer `notify-types` that needs Rust 1.91.
+  without the lockfile, cargo resolves a newer `notify-types` that needs Rust 1.91. (#617)
+- **Stopping the agent right after a burst of writes to one critical-tier file no longer runs into the 30 s shutdown limit.** The hasher now merges the Created and Modified events already queued for one path into one event, with one hash and one recheck, so the backlog clears in well under a second and the agent exits with code 0. The merged event keeps the kind of the first event of the run and its evidence quality is `best_effort`, the value `PendingEvent::evidence_quality()` gives any event that stands for more than one raw event. A change to another critical-tier file during such a burst is no longer queued behind it. A burst over many distinct files still takes 100 ms per critical file and can still reach the stop limit. (#613)
 - AI Guard no longer reads a hook script that a relative path names from the agent's own working
   directory (#614). A relative script in a Claude Code project hook is read from the project root.
   A relative script in a Claude Code user or managed hook, and in any Codex hook, is reported as not
   scanned, because no single folder is right for it.
 - AI Guard now reads a hook script whose path is the first word of the command and is in quotes,
   such as `"/opt/hooks/check.sh" arg`, for Claude Code, Codex and Cursor hooks (#616).
-- The load generator repeats a counters read that fails on a connection error, up to two more times, so a transient reset of that read no longer fails the run. This made `the_run_fails_on_errors_and_upstream_mismatches` fail about once in a few hundred runs.
 - **A script named by two hook entries in one Cursor `hooks.json` is reported once.** Two entries that run the same script gave one finding each. The assessment now keeps one finding per script for each `hooks.json`, and the kept finding names the first of those events in alphabetical order. The same script in the user, enterprise and project files is still reported once for each file. A file with one entry is scored as before, but a `hooks.json` that names one script in several entries can now score lower, for example critical to high, because the duplicates no longer count. (#615)
-- **Stopping the agent right after a burst of writes to one critical-tier file no longer runs into the 30 s shutdown limit.** The hasher now merges the Created and Modified events already queued for one path into one event, with one hash and one recheck, so the backlog clears in well under a second and the agent exits with code 0. The merged event keeps the kind of the first event of the run and its evidence quality is `best_effort`, the value `PendingEvent::evidence_quality()` gives any event that stands for more than one raw event. A change to another critical-tier file during such a burst is no longer queued behind it. A burst over many distinct files still takes 100 ms per critical file and can still reach the stop limit. (#613)
+- The load generator repeats a counters read that fails on a connection error, up to two more times, so a transient reset of that read no longer fails the run. This made `the_run_fails_on_errors_and_upstream_mismatches` fail about once in a few hundred runs. (#618)
 
 ## [0.15.0] - 2026-11-14
 
