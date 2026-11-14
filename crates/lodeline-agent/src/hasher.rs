@@ -5,6 +5,8 @@ use lodeline_core::debounce::PendingEvent;
 use lodeline_core::event::{EvidenceQuality, FileChangeKind};
 use lodeline_core::hashing::{hash_path, HashOutcome};
 use lodeline_core::stats::Stats;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -31,7 +33,7 @@ pub async fn run(
         while let Ok(next) = rx.try_recv() {
             batch.push(next);
         }
-        for pending in coalesce_adjacent(batch) {
+        for pending in coalesce_queued(batch) {
             let path = pending.path.clone();
             let started = Instant::now();
             let outcome = tokio::task::spawn_blocking(move || hash_path(&path)).await;
@@ -94,25 +96,36 @@ pub async fn run(
     }
 }
 
-/// Merges runs of already-queued events for one path and kind into the last of
-/// the run. Hashing reads the file as it is now, so each event of a run would
-/// read the same bytes; one hash and one recheck cover them all.
-fn coalesce_adjacent(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
+/// Merges already-queued `Created` and `Modified` events for one path into the
+/// first of them. Hashing reads the file as it is now, so each event of such a
+/// run would read the same bytes; one hash and one recheck cover them all. A
+/// `Removed` or `Renamed` event ends the run for its path, and events for
+/// different paths never merge.
+fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
     let mut out: Vec<PendingEvent> = Vec::with_capacity(batch.len());
+    let mut open: HashMap<PathBuf, usize> = HashMap::new();
     for next in batch {
-        match out.last_mut() {
-            Some(last)
-                if last.path == next.path
-                    && last.kind == next.kind
-                    && last.critical == next.critical =>
-            {
-                last.last_seen_ms = next.last_seen_ms;
-                last.coalesced_count = last.coalesced_count.saturating_add(next.coalesced_count);
-                if next.rename_from.is_some() {
-                    last.rename_from = next.rename_from;
+        let mergeable = matches!(
+            next.kind,
+            FileChangeKind::Created | FileChangeKind::Modified
+        );
+        match open.get(&next.path) {
+            Some(&at) if mergeable && out[at].critical == next.critical => {
+                let run = &mut out[at];
+                run.last_seen_ms = next.last_seen_ms;
+                run.coalesced_count = run.coalesced_count.saturating_add(next.coalesced_count);
+                if next.kind == FileChangeKind::Created {
+                    run.kind = FileChangeKind::Created;
                 }
             }
-            _ => out.push(next),
+            _ => {
+                if mergeable {
+                    open.insert(next.path.clone(), out.len());
+                } else {
+                    open.remove(&next.path);
+                }
+                out.push(next);
+            }
         }
     }
     out
@@ -193,7 +206,14 @@ mod tests {
         let file = dir.path().join("settings.json");
         std::fs::write(&file, b"last content").unwrap();
         let burst: Vec<_> = (0..330)
-            .map(|i| pending(&file, FileChangeKind::Modified, i))
+            .map(|i| {
+                let kind = if i % 2 == 0 {
+                    FileChangeKind::Modified
+                } else {
+                    FileChangeKind::Created
+                };
+                pending(&file, kind, i)
+            })
             .collect();
 
         let (out, elapsed) = run_to_end(burst).await;
@@ -209,17 +229,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn events_for_different_paths_and_kinds_are_not_merged() {
+    async fn merging_keeps_paths_apart_and_stops_at_a_removal() {
         let dir = tempfile::tempdir().unwrap();
-        let a: PathBuf = dir.path().join("a.json");
-        let b: PathBuf = dir.path().join("b.json");
+        let a = dir.path().join("a.json");
+        let b = dir.path().join("b.json");
         std::fs::write(&a, b"a").unwrap();
         std::fs::write(&b, b"b").unwrap();
         let events = vec![
             pending(&a, FileChangeKind::Modified, 0),
             pending(&b, FileChangeKind::Modified, 1),
-            pending(&a, FileChangeKind::Modified, 2),
-            pending(&a, FileChangeKind::Created, 3),
+            pending(&a, FileChangeKind::Created, 2),
+            pending(&a, FileChangeKind::Removed, 3),
+            pending(&a, FileChangeKind::Modified, 4),
         ];
 
         let (out, _) = run_to_end(events).await;
@@ -231,10 +252,10 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                (a.clone(), FileChangeKind::Modified),
+                (a.clone(), FileChangeKind::Created),
                 (b, FileChangeKind::Modified),
-                (a.clone(), FileChangeKind::Modified),
-                (a, FileChangeKind::Created),
+                (a.clone(), FileChangeKind::Removed),
+                (a, FileChangeKind::Modified),
             ]
         );
     }
