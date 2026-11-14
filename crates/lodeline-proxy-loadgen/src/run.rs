@@ -114,24 +114,33 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-/// Reads the load server's counters on a connection of its own. A pooled lane
-/// connection may be one the server is closing after it refused a body, and a
-/// read on it fails with a reset instead of returning the count.
+/// Retries after a failed connection, so a reset that lands on the read does
+/// not fail the run.
+const COUNTERS_RETRIES: usize = 2;
+const COUNTERS_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// Reads the load server's counters on a client of its own. A connection the
+/// server resets (for example one that just carried a refused body) fails the
+/// read, so the read is repeated; a status or JSON error is not.
 async fn upstream_calls(timeout: Duration, url: &Option<String>) -> anyhow::Result<Option<u64>> {
     let Some(url) = url else { return Ok(None) };
-    let http = reqwest::Client::builder()
-        .timeout(timeout)
-        .no_proxy()
-        .pool_max_idle_per_host(0)
-        .build()?;
-    let v: serde_json::Value = http
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?
-        .json()
-        .await
-        .context("counters body")?;
+    let http = http_client(timeout)?;
+    let mut retries = 0;
+    let body = loop {
+        let got = match http.get(url).send().await {
+            Ok(r) => r.bytes().await,
+            Err(e) => Err(e),
+        };
+        match got {
+            Ok(b) => break b,
+            Err(_) if retries < COUNTERS_RETRIES => {
+                retries += 1;
+                tokio::time::sleep(COUNTERS_RETRY_DELAY).await;
+            }
+            Err(e) => return Err(e).with_context(|| format!("GET {url}")),
+        }
+    };
+    let v: serde_json::Value = serde_json::from_slice(&body).context("counters body")?;
     Ok(v["tools_calls"].as_u64())
 }
 
