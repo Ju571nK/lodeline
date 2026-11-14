@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- The load generator reads the load server's counters on a fresh connection, so a lane connection that the server reset after refusing a body no longer fails the run. This made `the_run_fails_on_errors_and_upstream_mismatches` fail about once in a few hundred runs.
+
 ## [0.15.0] - 2026-11-14
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,

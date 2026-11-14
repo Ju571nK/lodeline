@@ -114,11 +114,16 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-async fn upstream_calls(
-    http: &reqwest::Client,
-    url: &Option<String>,
-) -> anyhow::Result<Option<u64>> {
+/// Reads the load server's counters on a connection of its own. A pooled lane
+/// connection may be one the server is closing after it refused a body, and a
+/// read on it fails with a reset instead of returning the count.
+async fn upstream_calls(timeout: Duration, url: &Option<String>) -> anyhow::Result<Option<u64>> {
     let Some(url) = url else { return Ok(None) };
+    let http = reqwest::Client::builder()
+        .timeout(timeout)
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .build()?;
     let v: serde_json::Value = http
         .get(url)
         .send()
@@ -147,7 +152,7 @@ async fn run_one(plan: &Plan, side: &Side, round: usize) -> anyhow::Result<RunRe
         );
     }
     let lanes = Arc::new(lanes);
-    let before = upstream_calls(&http, &plan.counters_url).await?;
+    let before = upstream_calls(plan.timeout, &plan.counters_url).await?;
     let tag = match side.name {
         SideName::Direct => 'd',
         SideName::Proxied => 'p',
@@ -162,7 +167,7 @@ async fn run_one(plan: &Plan, side: &Side, round: usize) -> anyhow::Result<RunRe
         }
     })
     .await;
-    let after = upstream_calls(&http, &plan.counters_url).await?;
+    let after = upstream_calls(plan.timeout, &plan.counters_url).await?;
     for lane in lanes.iter() {
         lane.close().await;
     }
