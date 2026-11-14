@@ -9,7 +9,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
-- Stopping the agent right after a burst of writes to one critical-tier file no longer runs into the 30 s shutdown limit. The hasher now merges already-queued events for the same path and kind into one hash and one recheck, so the backlog clears in well under a second and the agent exits with code 0. A change to another critical-tier file during a burst is no longer queued behind it. (#613)
+- **A script named by two hook entries in one Cursor `hooks.json` is reported once.** Two entries that run the same script gave one finding each. The assessment now keeps one finding per script for each `hooks.json`, and the kept finding names the first of those events in alphabetical order. The same script in the user, enterprise and project files is still reported once for each file. A file with one entry is scored as before, but a `hooks.json` that names one script in several entries can now score lower, for example critical to high, because the duplicates no longer count. (#615)
+
+- Stopping the agent right after a burst of writes to one critical-tier file no longer runs into the 30 s shutdown limit. The hasher now merges the Created and Modified events already queued for one path into one hash and one recheck, so the backlog clears in well under a second and the agent exits with code 0. A change to another critical-tier file during a burst is no longer queued behind it. (#613)
 
 ## [0.15.0] - 2026-11-14
 
