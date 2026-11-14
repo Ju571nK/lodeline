@@ -3039,7 +3039,7 @@ command = "echo inline"
         );
         let dir = tempdir().unwrap();
         let repo = dir.path().join("repo");
-        trusted_hooks_json(dir.path(), &repo.join(".codex/hooks.json"), &rel);
+        trusted_hooks_json(dir.path(), &repo.join(".codex").join("hooks.json"), &rel);
         let p = CodexProjectParser {
             repo_root: repo.clone(),
         };
@@ -3066,7 +3066,11 @@ command = "echo inline"
             decoy.path().file_name().unwrap().to_str().unwrap()
         );
         let home = tempdir().unwrap();
-        trusted_hooks_json(home.path(), &home.path().join(".codex/hooks.json"), &rel);
+        trusted_hooks_json(
+            home.path(),
+            &home.path().join(".codex").join("hooks.json"),
+            &rel,
+        );
         let out = CodexParser::default().assess(home.path()).unwrap();
         assert!(!script_finding(&out), "decoy was read: {out:?}");
         assert_eq!(
