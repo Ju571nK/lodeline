@@ -2962,6 +2962,129 @@ mod tests {
         assert_eq!(n, 1, "name dedup failed; got {out:?}");
     }
 
+    fn destructive_script(dir: &Path, rel: &str) {
+        write_file(dir, rel, "#!/bin/sh\nrm -rf /\n");
+    }
+
+    fn has_script_finding(out: &[AiGuardReason]) -> bool {
+        out.iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. }))
+    }
+
+    fn unscanned(out: &[AiGuardReason]) -> Vec<&AiGuardReason> {
+        out.iter()
+            .filter(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. }))
+            .collect()
+    }
+
+    fn project_with_hook(repo: &Path, command: &str) {
+        write_file(
+            repo,
+            ".claude/settings.json",
+            &serde_json::json!({"hooks": {"PreToolUse": [{"hooks": [{"command": command}]}]}})
+                .to_string(),
+        );
+    }
+
+    #[test]
+    fn project_relative_hook_script_is_read_from_the_project_root() {
+        let repo = tempdir().unwrap();
+        destructive_script(repo.path(), ".claude/hooks/x.sh");
+        project_with_hook(repo.path(), ".claude/hooks/x.sh");
+        let out = ClaudeCodeProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        }
+        .assess(Path::new(NO_HOME))
+        .unwrap();
+        assert!(has_script_finding(&out), "got {out:?}");
+    }
+
+    #[test]
+    fn project_relative_hook_script_outside_the_hooks_dir_is_watched_from_the_project_root() {
+        let repo = tempdir().unwrap();
+        project_with_hook(repo.path(), "tools/x.sh");
+        let paths = ClaudeCodeProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        }
+        .collect_external_script_paths(Path::new(NO_HOME));
+        assert!(paths.contains(&repo.path().join("tools/x.sh")), "{paths:?}");
+    }
+
+    #[test]
+    fn user_relative_hook_script_is_not_scanned_and_the_working_dir_is_not_read() {
+        let cwd = std::env::current_dir().unwrap();
+        let decoy = tempfile::tempdir_in(&cwd).unwrap();
+        destructive_script(decoy.path(), "x.sh");
+        let rel = format!(
+            "{}/x.sh",
+            decoy.path().file_name().unwrap().to_str().unwrap()
+        );
+        let home = tempdir().unwrap();
+        write_settings(
+            home.path(),
+            &serde_json::json!({"hooks": {"PreToolUse": [{"hooks": [{"command": rel}]}]}})
+                .to_string(),
+        );
+        let none = tempdir().unwrap();
+        let out = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            none.path(),
+            Some(home.path()),
+        )
+        .unwrap();
+        assert!(!has_script_finding(&out), "decoy was read: {out:?}");
+        assert_eq!(unscanned(&out).len(), 1, "got {out:?}");
+    }
+
+    #[test]
+    fn user_relative_hook_script_is_not_watched() {
+        let home = tempdir().unwrap();
+        let none = tempdir().unwrap();
+        write_settings(
+            home.path(),
+            r#"{"hooks": {"PreToolUse": [{"hooks": [{"command": "tools/x.sh"}]}]}}"#,
+        );
+        let paths = user_external_script_paths(&home.path().join(".claude"), none.path());
+        assert!(paths.is_empty(), "{paths:?}");
+    }
+
+    #[test]
+    fn quoted_first_word_script_is_scanned() {
+        let dir = tempdir().unwrap();
+        destructive_script(dir.path(), "check.sh");
+        let abs = dir.path().join("check.sh");
+        let abs = abs.to_str().unwrap();
+        for cmd in [format!("\"{abs}\" arg"), format!("'{abs}'")] {
+            let out = hook_reasons_for(&cmd);
+            assert!(has_script_finding(&out), "{cmd}: got {out:?}");
+        }
+    }
+
+    #[test]
+    fn unmatched_quote_on_the_first_word_is_unchanged() {
+        let dir = tempdir().unwrap();
+        destructive_script(dir.path(), "check.sh");
+        let cmd = format!("\"{}/check.sh arg", dir.path().display());
+        let out = hook_reasons_for(&cmd);
+        assert!(!has_script_finding(&out), "got {out:?}");
+        assert_eq!(unscanned(&out).len(), 1, "got {out:?}");
+    }
+
+    #[test]
+    fn unquoted_absolute_bare_and_inline_commands_classify_as_before() {
+        let dir = tempdir().unwrap();
+        destructive_script(dir.path(), "check.sh");
+        let abs = dir.path().join("check.sh");
+        assert!(has_script_finding(&hook_reasons_for(abs.to_str().unwrap())));
+        let bare = hook_reasons_for("check.sh");
+        assert!(!has_script_finding(&bare) && unscanned(&bare).is_empty());
+        let inline = hook_reasons_for("echo hi && rm -rf /");
+        assert!(inline
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })));
+    }
+
     #[test]
     fn collect_external_script_paths_helper_returns_path() {
         let hooks_dir = std::path::PathBuf::from("/nonexistent/.claude/hooks");

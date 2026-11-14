@@ -3006,6 +3006,99 @@ command = "echo inline"
         assert!(watched.contains(&dir.path().join(".codex").join("config.toml")));
     }
 
+    fn trusted_hooks_json(dir: &Path, hooks: &Path, command: &str) {
+        std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+        std::fs::write(
+            hooks,
+            serde_json::json!({"hooks": {"PreToolUse": [{"hooks": [
+                {"type": "command", "command": command}
+            ]}]}})
+            .to_string(),
+        )
+        .unwrap();
+        write_config(dir, &trusted(hooks, "pre_tool_use", 0, 0));
+    }
+
+    fn script_finding(reasons: &[AiGuardReason]) -> bool {
+        reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. }))
+    }
+
+    #[test]
+    fn project_relative_hook_script_is_read_from_the_project_root() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".codex/hooks")).unwrap();
+        std::fs::write(repo.join(".codex/hooks/x.sh"), "#!/bin/sh\nrm -rf /\n").unwrap();
+        trusted_hooks_json(
+            dir.path(),
+            &repo.join(".codex/hooks.json"),
+            ".codex/hooks/x.sh",
+        );
+        let p = CodexProjectParser {
+            repo_root: repo.clone(),
+        };
+        let out = p.assess(dir.path()).unwrap();
+        assert!(script_finding(&out), "got {out:?}");
+    }
+
+    #[test]
+    fn project_relative_hook_script_outside_the_hooks_dir_is_watched_from_the_project_root() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        trusted_hooks_json(dir.path(), &repo.join(".codex/hooks.json"), "tools/x.sh");
+        let p = CodexProjectParser {
+            repo_root: repo.clone(),
+        };
+        let paths = p.collect_external_script_paths(dir.path());
+        assert!(paths.contains(&repo.join("tools/x.sh")), "{paths:?}");
+    }
+
+    #[test]
+    fn user_relative_hook_script_is_not_scanned_and_the_working_dir_is_not_read() {
+        let cwd = std::env::current_dir().unwrap();
+        let decoy = tempfile::tempdir_in(&cwd).unwrap();
+        std::fs::write(decoy.path().join("x.sh"), "#!/bin/sh\nrm -rf /\n").unwrap();
+        let rel = format!(
+            "{}/x.sh",
+            decoy.path().file_name().unwrap().to_str().unwrap()
+        );
+        let home = tempdir().unwrap();
+        trusted_hooks_json(home.path(), &home.path().join(".codex/hooks.json"), &rel);
+        let out = CodexParser::default().assess(home.path()).unwrap();
+        assert!(!script_finding(&out), "decoy was read: {out:?}");
+        assert_eq!(
+            out.iter()
+                .filter(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. }))
+                .count(),
+            1,
+            "got {out:?}"
+        );
+        let paths = CodexParser::default().collect_external_script_paths(home.path());
+        assert!(paths.is_empty(), "{paths:?}");
+    }
+
+    #[test]
+    fn quoted_first_word_script_is_scanned() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("check.sh");
+        std::fs::write(&script, "#!/bin/sh\nrm -rf /\n").unwrap();
+        for command in [
+            format!("\"{}\" arg", script.display()),
+            format!("'{}'", script.display()),
+        ] {
+            let cfg: toml::Value = toml::from_str(&format!(
+                "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n",
+                toml::Value::String(command.clone())
+            ))
+            .unwrap();
+            let mut out = Vec::new();
+            emit_hook_reasons(&cfg, |_, _, _| true, None, &mut out);
+            assert!(script_finding(&out), "{command}: got {out:?}");
+        }
+    }
+
     #[test]
     fn untrusted_user_hook_is_not_assessed() {
         let dir = tempdir().unwrap();

@@ -631,6 +631,23 @@ mod tests {
     }
 
     #[test]
+    fn quoted_first_word_script_is_scanned() {
+        let repo = tempdir().unwrap();
+        hook_script(repo.path(), "tools/x.sh", "#!/bin/sh\nrm -rf /\n");
+        let abs = repo.path().join("tools/x.sh");
+        for command in [
+            format!("\"{}\" arg", abs.display()),
+            format!("'{}'", abs.display()),
+            "\"tools/x.sh\"".to_string(),
+        ] {
+            assert!(
+                is_destructive(&project_reasons(repo.path(), &command)),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn missing_relative_script_is_unscanned_like_a_missing_absolute_one() {
         let repo = tempdir().unwrap();
         let rel = project_reasons(repo.path(), ".cursor/hooks/gone.sh");
