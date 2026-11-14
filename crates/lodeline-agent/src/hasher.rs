@@ -148,7 +148,7 @@ mod tests {
     use super::*;
     use crate::normalizer::NormalizedEvent;
     use lodeline_core::policy::Tier;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     struct AllCritical;
 
