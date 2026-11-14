@@ -785,6 +785,22 @@ mod tests {
     }
 
     #[test]
+    fn one_entry_keeps_every_finding_its_script_produces() {
+        let home = tempdir().unwrap();
+        hook_script(
+            home.path(),
+            ".cursor/hooks/x.sh",
+            "#!/bin/sh\nsource \"$FOO/a.sh\"\nsource \"$FOO/a.sh\"\n",
+        );
+        write_hooks(
+            &home.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"stop": [{"command": "./hooks/x.sh"}]}}"#,
+        );
+        let out = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+        assert_eq!(script_findings(&out).len(), 2, "got {out:?}");
+    }
+
+    #[test]
     fn two_different_scripts_are_two_findings() {
         let home = tempdir().unwrap();
         hook_script(home.path(), ".cursor/hooks/x.sh", "#!/bin/sh\nrm -rf /\n");
