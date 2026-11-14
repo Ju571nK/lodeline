@@ -66,7 +66,7 @@ When `lodeline scan` runs in the home folder, the home's `.claude/settings.json`
 
 A `PermissionRequest` hook also gives `standing_command_approval`, because it answers the permission prompt.
 
-A hook command that names a script by a relative path is read relative to the agent's working directory, not the folder Claude Code runs the hook in.
+A hook command that names a script by a relative path is read from the project root when the hook is in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project. Claude Code runs a hook in the current directory (`CLAUDE_PROJECT_DIR` is the project root where the session started), so a script that a session reaches after a `cd` can differ from the one read. A relative script in a user or managed hook gives `external_script_unscanned`, because no single folder is right for it, and the agent never reads a file from its own working directory. An absolute path, a `~` or `$HOME` path and a path in quotes are read as written. The first word of the command may be in matching quotes, as an operand of `sh` or `bash` may be.
 
 ## Reported
 
