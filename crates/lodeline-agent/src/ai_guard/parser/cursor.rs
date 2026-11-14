@@ -48,6 +48,41 @@ fn hook_commands(hooks_json: &Value) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// Whether `a` and `b` report one script scan result, whichever hook entry
+/// named the script. The kept finding names the first entry's event.
+fn same_script_finding(a: &AiGuardReason, b: &AiGuardReason) -> bool {
+    use AiGuardReason::{DestructiveInHookScript, ExternalScriptUnscanned};
+    match (a, b) {
+        (
+            DestructiveInHookScript {
+                hook_event: _,
+                pattern: p1,
+                script_path: s1,
+                snippet: n1,
+                source_chain: c1,
+            },
+            DestructiveInHookScript {
+                hook_event: _,
+                pattern: p2,
+                script_path: s2,
+                snippet: n2,
+                source_chain: c2,
+            },
+        ) => (p1, s1, n1, c1) == (p2, s2, n2, c2),
+        (
+            ExternalScriptUnscanned {
+                hook_event: _,
+                script_path: s1,
+            },
+            ExternalScriptUnscanned {
+                hook_event: _,
+                script_path: s2,
+            },
+        ) => s1 == s2,
+        _ => false,
+    }
+}
+
 /// Cursor skips a `hooks.json` it cannot parse (it also accepts JSONC, which
 /// strict JSON rejects), so one is skipped here too rather than failing the
 /// MCP findings beside it, as Codex `hooks.json` is. `run_dir` is where Cursor
@@ -61,9 +96,17 @@ fn emit_hook_reasons(
 ) {
     match super::read_json_optional(path) {
         Ok(Some(val)) => {
+            let mut found = Vec::new();
             for (event, cmd) in hook_commands(&val) {
-                classify_command(cmd, event, home, Some(run_dir), out);
+                classify_command(cmd, event, home, Some(run_dir), &mut found);
             }
+            let mut kept: Vec<AiGuardReason> = Vec::new();
+            for reason in found {
+                if !kept.iter().any(|seen| same_script_finding(seen, &reason)) {
+                    kept.push(reason);
+                }
+            }
+            out.extend(kept);
         }
         Ok(None) => {}
         Err(error) => tracing::warn!(path = %path.display(), %error, "cursor hooks.json skipped"),
@@ -732,7 +775,10 @@ mod tests {
         let home = tempdir().unwrap();
         write_hooks(
             &home.path().join(".cursor"),
-            &two_entries(["./hooks/gone.sh", "bash ./hooks/gone.sh"], ["stop", "stop"]),
+            &two_entries(
+                ["./hooks/gone.sh", "bash ./hooks/gone.sh"],
+                ["stop", "stop"],
+            ),
         );
         let out = assess_user(home.path(), &home.path().join("none.json")).unwrap();
         assert_eq!(script_findings(&out).len(), 1, "got {out:?}");
