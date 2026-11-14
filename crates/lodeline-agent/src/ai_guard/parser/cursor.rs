@@ -49,7 +49,9 @@ fn hook_commands(hooks_json: &Value) -> Vec<(&str, &str)> {
 }
 
 /// Whether `a` and `b` report one script scan result, whichever hook entry
-/// named the script. The kept finding names the first entry's event.
+/// named the script. Only findings from different entries are compared, and the
+/// kept finding names the first event in alphabetical order, the order
+/// `hook_commands` walks.
 fn same_script_finding(a: &AiGuardReason, b: &AiGuardReason) -> bool {
     use AiGuardReason::{DestructiveInHookScript, ExternalScriptUnscanned};
     match (a, b) {
@@ -96,14 +98,18 @@ fn emit_hook_reasons(
 ) {
     match super::read_json_optional(path) {
         Ok(Some(val)) => {
-            let mut found = Vec::new();
-            for (event, cmd) in hook_commands(&val) {
-                classify_command(cmd, event, home, Some(run_dir), &mut found);
-            }
             let mut kept: Vec<AiGuardReason> = Vec::new();
-            for reason in found {
-                if !kept.iter().any(|seen| same_script_finding(seen, &reason)) {
-                    kept.push(reason);
+            for (event, cmd) in hook_commands(&val) {
+                let earlier = kept.len();
+                let mut entry = Vec::new();
+                classify_command(cmd, event, home, Some(run_dir), &mut entry);
+                for reason in entry {
+                    if !kept[..earlier]
+                        .iter()
+                        .any(|seen| same_script_finding(seen, &reason))
+                    {
+                        kept.push(reason);
+                    }
                 }
             }
             out.extend(kept);
