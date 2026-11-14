@@ -1527,6 +1527,68 @@ mod tests {
         .await;
     }
 
+    /// A recursive root holding a link to a folder of files reports nothing from
+    /// behind the link, while an edit inside the root still comes through.
+    #[cfg(unix)]
+    async fn a_recursive_root_does_not_walk_a_link(poll: Option<Duration>) {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (root, behind) = (dir.join("root"), dir.join("behind"));
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::create_dir_all(&behind).unwrap();
+        let outside_files: Vec<PathBuf> = (0..50).map(|n| behind.join(format!("{n}.md"))).collect();
+        for file in &outside_files {
+            fs::write(file, b"0").unwrap();
+        }
+        let link = root.join("linked");
+        std::os::unix::fs::symlink(&behind, &link).unwrap();
+        let real = root.join("real/SKILL.md");
+        fs::write(&real, b"0").unwrap();
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            4096,
+            poll,
+        )
+        .unwrap();
+        let (mut saw_real, mut saw_behind) = (false, Vec::new());
+        // A write in the startup gap can be lost, so keep writing until one lands.
+        for n in 1..=40 {
+            fs::write(&real, format!("change-{n}")).unwrap();
+            for file in &outside_files {
+                fs::write(file, format!("change-{n}")).unwrap();
+            }
+            while let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+            {
+                saw_real |= event.path == real;
+                if event.path.starts_with(&behind) || event.path.starts_with(&link) {
+                    saw_behind.push(event.path);
+                }
+            }
+            if saw_real && n > 8 {
+                break;
+            }
+        }
+        assert!(saw_real, "the edit inside the root was not reported");
+        assert!(
+            saw_behind.is_empty(),
+            "events from behind a link: {saw_behind:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_a_recursive_root_does_not_walk_a_link() {
+        a_recursive_root_does_not_walk_a_link(None).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polling_a_recursive_root_does_not_walk_a_link() {
+        a_recursive_root_does_not_walk_a_link(Some(Duration::from_millis(100))).await;
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_links_to_one_folder_follow_the_first_and_warn_once() {
