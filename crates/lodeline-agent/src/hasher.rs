@@ -252,11 +252,27 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                (a.clone(), FileChangeKind::Created),
+                (a.clone(), FileChangeKind::Modified),
                 (b, FileChangeKind::Modified),
                 (a.clone(), FileChangeKind::Removed),
                 (a, FileChangeKind::Modified),
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_merged_run_keeps_the_kind_of_its_first_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        std::fs::write(&a, b"a").unwrap();
+        let events = vec![
+            pending(&a, FileChangeKind::Modified, 0),
+            pending(&a, FileChangeKind::Created, 1),
+        ];
+
+        let (out, _) = run_to_end(events).await;
+
+        let seen: Vec<_> = out.iter().map(|e| e.norm.kind).collect();
+        assert_eq!(seen, vec![FileChangeKind::Modified]);
     }
 }
