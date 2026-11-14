@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopping the agent right after a burst of writes to one critical-tier file no longer runs into the 30 s shutdown limit. The hasher now merges already-queued events for the same path and kind into one hash and one recheck, so the backlog clears in well under a second and the agent exits with code 0. A change to another critical-tier file during a burst is no longer queued behind it. (#613)
+
 ## [0.15.0] - 2026-11-14
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,
