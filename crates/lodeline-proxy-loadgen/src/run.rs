@@ -114,19 +114,33 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-async fn upstream_calls(
-    http: &reqwest::Client,
-    url: &Option<String>,
-) -> anyhow::Result<Option<u64>> {
+/// Retries after a failed connection, so a reset that lands on the read does
+/// not fail the run.
+const COUNTERS_RETRIES: usize = 2;
+const COUNTERS_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// Reads the load server's counters on a client of its own. A connection the
+/// server resets (for example one that just carried a refused body) fails the
+/// read, so the read is repeated; a status or JSON error is not.
+async fn upstream_calls(timeout: Duration, url: &Option<String>) -> anyhow::Result<Option<u64>> {
     let Some(url) = url else { return Ok(None) };
-    let v: serde_json::Value = http
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?
-        .json()
-        .await
-        .context("counters body")?;
+    let http = http_client(timeout)?;
+    let mut retries = 0;
+    let body = loop {
+        let got = match http.get(url).send().await {
+            Ok(r) => r.bytes().await,
+            Err(e) => Err(e),
+        };
+        match got {
+            Ok(b) => break b,
+            Err(_) if retries < COUNTERS_RETRIES => {
+                retries += 1;
+                tokio::time::sleep(COUNTERS_RETRY_DELAY).await;
+            }
+            Err(e) => return Err(e).with_context(|| format!("GET {url}")),
+        }
+    };
+    let v: serde_json::Value = serde_json::from_slice(&body).context("counters body")?;
     Ok(v["tools_calls"].as_u64())
 }
 
@@ -147,7 +161,7 @@ async fn run_one(plan: &Plan, side: &Side, round: usize) -> anyhow::Result<RunRe
         );
     }
     let lanes = Arc::new(lanes);
-    let before = upstream_calls(&http, &plan.counters_url).await?;
+    let before = upstream_calls(plan.timeout, &plan.counters_url).await?;
     let tag = match side.name {
         SideName::Direct => 'd',
         SideName::Proxied => 'p',
@@ -162,7 +176,7 @@ async fn run_one(plan: &Plan, side: &Side, round: usize) -> anyhow::Result<RunRe
         }
     })
     .await;
-    let after = upstream_calls(&http, &plan.counters_url).await?;
+    let after = upstream_calls(plan.timeout, &plan.counters_url).await?;
     for lane in lanes.iter() {
         lane.close().await;
     }
@@ -383,4 +397,59 @@ pub fn summary(rep: &Report) -> String {
         "measured errors: {errs}, upstream count mismatches: {mism}"
     );
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// Serves `answers` connections in order: `false` drops the connection
+    /// after reading the request, `true` answers with counters. Counts the
+    /// connections it accepted.
+    async fn counters_server(script: Vec<bool>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/_load/counters", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let n = accepted.clone();
+        tokio::spawn(async move {
+            for answer in script {
+                let (mut s, _) = listener.accept().await.unwrap();
+                n.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                if answer {
+                    let body = r#"{"tools_calls":7}"#;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    s.write_all(reply.as_bytes()).await.unwrap();
+                }
+            }
+        });
+        (url, accepted)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_counters_connection_is_retried() {
+        let (url, accepted) = counters_server(vec![false, true]).await;
+        let got = upstream_calls(Duration::from_secs(5), &Some(url)).await;
+        assert_eq!(got.unwrap(), Some(7));
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn counters_that_always_drop_fail_after_two_retries() {
+        let (url, accepted) = counters_server(vec![false; 5]).await;
+        let started = std::time::Instant::now();
+        let got = upstream_calls(Duration::from_secs(2), &Some(url)).await;
+        assert!(got.is_err());
+        assert_eq!(accepted.load(Ordering::SeqCst), 3);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }

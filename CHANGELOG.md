@@ -22,6 +22,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   scanned, because no single folder is right for it.
 - AI Guard now reads a hook script whose path is the first word of the command and is in quotes,
   such as `"/opt/hooks/check.sh" arg`, for Claude Code, Codex and Cursor hooks (#616).
+- The load generator repeats a counters read that fails on a connection error, up to two more times, so a transient reset of that read no longer fails the run. This made `the_run_fails_on_errors_and_upstream_mismatches` fail about once in a few hundred runs.
 - **A script named by two hook entries in one Cursor `hooks.json` is reported once.** Two entries that run the same script gave one finding each. The assessment now keeps one finding per script for each `hooks.json`, and the kept finding names the first of those events in alphabetical order. The same script in the user, enterprise and project files is still reported once for each file. A file with one entry is scored as before, but a `hooks.json` that names one script in several entries can now score lower, for example critical to high, because the duplicates no longer count. (#615)
 
 ## [0.15.0] - 2026-11-14
