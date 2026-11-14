@@ -860,7 +860,17 @@ fn script_file(cmd: &str, script: &str, home: Option<&Path>, run_dir: Option<&Pa
     let word = &cmd[cmd[..start].trim_end_matches(['"', '\'']).len()..start + script.len()];
     match (home, home_relative(word, script)) {
         (Some(home), Some(rest)) => home.join(rest.trim_start_matches('/')),
-        _ => run_dir.map_or_else(|| PathBuf::from(script), |dir| dir.join(script)),
+        _ => resolve_from(script, run_dir),
+    }
+}
+
+/// `script` joined onto `run_dir`, unless it is not a path yet: a word that
+/// still starts with a quote (an unmatched quote, or a quoted word holding a
+/// space) or holds `$` is kept as written.
+fn resolve_from(script: &str, run_dir: Option<&Path>) -> PathBuf {
+    match run_dir {
+        Some(dir) if !script.starts_with(['"', '\'']) && !script.contains('$') => dir.join(script),
+        _ => PathBuf::from(script),
     }
 }
 
@@ -945,7 +955,7 @@ pub(crate) fn external_path_from_command(
     run_dir: Option<&Path>,
 ) -> Option<std::path::PathBuf> {
     let script = hook_script_path(cmd)?;
-    let candidate = run_dir.map_or_else(|| PathBuf::from(script), |dir| dir.join(script));
+    let candidate = resolve_from(script, run_dir);
     if run_dir.is_none()
         && !has_fixed_location(&candidate)
         && !script.starts_with('~')
