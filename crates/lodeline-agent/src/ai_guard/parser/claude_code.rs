@@ -3072,6 +3072,60 @@ mod tests {
         assert!(paths.contains(&repo.path().join("tools/x.sh")), "{paths:?}");
     }
 
+    /// A word that is not a path (a variable, an unmatched quote, a quoted word
+    /// with a space) keeps trunk's result under a project root: nothing is joined
+    /// onto the root, and nothing under the root is watched.
+    fn assert_word_not_joined_to_project_root(cmd: &str, written: &str) {
+        let repo = tempdir().unwrap();
+        let run_dir = Some(repo.path());
+        let script = hook_script_path(cmd).unwrap();
+        assert_eq!(
+            script_file(cmd, script, None, run_dir),
+            PathBuf::from(written),
+            "{cmd}"
+        );
+        let hooks_dir = repo.path().join(".claude/hooks");
+        let watched = external_path_from_command(cmd, &hooks_dir, run_dir);
+        assert!(
+            watched.as_ref().is_none_or(|p| !p.starts_with(repo.path())),
+            "{cmd}: {watched:?}"
+        );
+    }
+
+    #[test]
+    fn project_dir_variable_hook_word_is_not_joined_to_the_project_root() {
+        assert_word_not_joined_to_project_root(
+            "$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh",
+            "$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh",
+        );
+    }
+
+    #[test]
+    fn braced_project_dir_variable_hook_word_is_not_joined_to_the_project_root() {
+        assert_word_not_joined_to_project_root(
+            "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh",
+            "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh",
+        );
+    }
+
+    #[test]
+    fn quoted_project_dir_variable_hook_word_is_not_joined_to_the_project_root() {
+        assert_word_not_joined_to_project_root(
+            "\"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh\"",
+            "$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh",
+        );
+    }
+
+    #[test]
+    fn unmatched_quote_hook_word_is_not_joined_to_the_project_root() {
+        assert_word_not_joined_to_project_root("\"/abs/x.sh", "\"/abs/x.sh");
+    }
+
+    #[test]
+    fn quoted_hook_word_with_a_space_is_not_joined_to_the_project_root() {
+        assert_word_not_joined_to_project_root("\"/abs dir/x.sh\"", "\"/abs");
+    }
+
     #[test]
     fn user_relative_hook_script_is_not_scanned_and_the_working_dir_is_not_read() {
         let cwd = std::env::current_dir().unwrap();
