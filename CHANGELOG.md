@@ -9,7 +9,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+<<<<<<< HEAD
 - The load generator reads the load server's counters on a fresh connection, so a lane connection that the server reset after refusing a body no longer fails the run. This made `the_run_fails_on_errors_and_upstream_mismatches` fail about once in a few hundred runs.
+=======
+- **A script named by two hook entries in one Cursor `hooks.json` is reported once.** Two entries that run the same script gave one finding each. The assessment now keeps one finding per script for each `hooks.json`, and the kept finding names the first of those events in alphabetical order. The same script in the user, enterprise and project files is still reported once for each file. A file with one entry is scored as before, but a `hooks.json` that names one script in several entries can now score lower, for example critical to high, because the duplicates no longer count. (#615)
+>>>>>>> refs/remotes/origin/main
 
 ## [0.15.0] - 2026-11-14
 
