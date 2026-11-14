@@ -99,8 +99,8 @@ pub async fn run(
 /// Merges already-queued `Created` and `Modified` events for one path into the
 /// first of them. Hashing reads the file as it is now, so each event of such a
 /// run would read the same bytes; one hash and one recheck cover them all. A
-/// `Removed` or `Renamed` event ends the run for its path, and events for
-/// different paths never merge.
+/// `Removed` event ends the run for its path, a `Renamed` event ends it for
+/// both of its paths, and events for different paths never merge.
 fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
     let mut out: Vec<PendingEvent> = Vec::with_capacity(batch.len());
     let mut open: HashMap<PathBuf, usize> = HashMap::new();
@@ -120,6 +120,9 @@ fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
                     open.insert(next.path.clone(), out.len());
                 } else {
                     open.remove(&next.path);
+                    if let Some(from) = &next.rename_from {
+                        open.remove(from);
+                    }
                 }
                 out.push(next);
             }
