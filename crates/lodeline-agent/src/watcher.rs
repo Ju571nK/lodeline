@@ -34,7 +34,7 @@ pub struct WatcherHandle {
     watcher: BackendWatcher,
     desired: BTreeMap<PathBuf, bool>,
     resolved: BTreeMap<PathBuf, bool>,
-    active: BTreeMap<PathBuf, (bool, RootIdentity)>,
+    active: BTreeMap<PathBuf, (bool, RootIdentity, PathBuf)>,
     catchups: BTreeMap<PathBuf, tokio::task::JoinHandle<()>>,
     tx: Arc<mpsc::Sender<RawFsEvent>>,
     runtime: tokio::runtime::Handle,
@@ -130,14 +130,14 @@ impl WatcherHandle {
     fn refresh_root(&mut self, root: &Path, catch_up: bool) -> notify::Result<()> {
         let recursive = self.resolved[root];
         let identity = RootIdentity::read(root);
-        if let (Some((mode, previous)), Ok(current)) = (self.active.get(root), &identity) {
+        if let (Some((mode, previous, _)), Ok(current)) = (self.active.get(root), &identity) {
             if *mode == recursive && previous == current {
                 return Ok(());
             }
         }
         // A deleted/replaced directory may retain a stale backend subscription.
-        if self.active.remove(root).is_some() {
-            let _ = self.watcher.as_watcher_mut().unwatch(root);
+        if let Some((_, _, registered)) = self.active.remove(root) {
+            let _ = self.watcher.as_watcher_mut().unwatch(&registered);
         }
         if let Some(task) = self.catchups.remove(root) {
             task.abort();
@@ -148,9 +148,10 @@ impl WatcherHandle {
         } else {
             RecursiveMode::NonRecursive
         };
-        self.watcher.as_watcher_mut().watch(root, mode)?;
+        let registered = self.backend_path(root);
+        self.watcher.as_watcher_mut().watch(&registered, mode)?;
         self.active
-            .insert(root.to_path_buf(), (recursive, identity));
+            .insert(root.to_path_buf(), (recursive, identity, registered));
         if catch_up {
             // Register first, then replay current files to cover the subscription gap.
             let task = self.runtime.spawn(catch_up_files(
@@ -340,11 +341,26 @@ impl WatcherHandle {
         if let Some(task) = self.catchups.remove(root) {
             task.abort();
         }
-        if self.active.remove(root).is_some() {
-            self.watcher.as_watcher_mut().unwatch(root)
-        } else {
-            Ok(())
+        match self.active.remove(root) {
+            Some((_, _, registered)) => self.watcher.as_watcher_mut().unwatch(&registered),
+            None => Ok(()),
         }
+    }
+
+    /// The path the backend watches for `root`. The polling backend does not
+    /// follow links, and reads the modification time of a linked file from the
+    /// link itself, so it watches the file the link points to. Events under it are
+    /// spelled as the link through the alias table.
+    fn backend_path(&self, root: &Path) -> PathBuf {
+        let linked_file = matches!(self.watcher, BackendWatcher::Poll(_))
+            && std::fs::symlink_metadata(root).is_ok_and(|m| m.is_symlink())
+            && std::fs::metadata(root).is_ok_and(|m| !m.is_dir());
+        if linked_file {
+            if let Ok(real) = dunce::canonicalize(root) {
+                return real;
+            }
+        }
+        root.to_path_buf()
     }
 }
 
@@ -548,7 +564,9 @@ async fn catch_up_file(path: PathBuf, tx: &mpsc::Sender<RawFsEvent>) -> bool {
 /// `poll_interval = Some(d)` forces a polling watcher with interval `d` — use
 /// this where OS-native FS events are unreliable (NFS, `virtiofs`/`9p`,
 /// bind-mounts in VM-backed container engines). `None` uses the OS-native
-/// backend (inotify / FSEvents / ReadDirectoryChangesW).
+/// backend (inotify / FSEvents / ReadDirectoryChangesW). No backend follows a
+/// link inside a recursive root, so a link is followed only where the agent
+/// registers it.
 pub fn spawn_watcher(
     roots: Vec<(PathBuf, bool)>,
     runtime_handle: tokio::runtime::Handle,
@@ -600,11 +618,15 @@ pub fn spawn_watcher(
 
     let (backend, backend_name): (BackendWatcher, &'static str) = match poll_interval {
         Some(interval) => {
-            let w = PollWatcher::new(on_event, Config::default().with_poll_interval(interval))?;
+            let config = Config::default()
+                .with_poll_interval(interval)
+                .with_follow_symlinks(false);
+            let w = PollWatcher::new(on_event, config)?;
             (BackendWatcher::Poll(w), "polling")
         }
         None => {
-            let w = RecommendedWatcher::new(on_event, Config::default())?;
+            let w =
+                RecommendedWatcher::new(on_event, Config::default().with_follow_symlinks(false))?;
             (BackendWatcher::Native(w), os_backend_name())
         }
     };
@@ -1466,9 +1488,7 @@ mod tests {
     }
 
     /// A link inside a recursive root to the folder that holds the root is
-    /// refused with one warning, and the watcher keeps reporting real edits. A
-    /// polling backend still walks the link itself, so what the agent records
-    /// from behind it is checked in `tests/follow_wildcard_link.rs`.
+    /// refused with one warning, and the watcher keeps reporting real edits.
     #[cfg(unix)]
     async fn a_loop_link_in_a_recursive_root_is_refused_and_the_watcher_keeps_working(
         poll: Option<Duration>,
