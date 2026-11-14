@@ -272,4 +272,35 @@ mod tests {
         let seen: Vec<_> = out.iter().map(|e| e.norm.kind).collect();
         assert_eq!(seen, vec![FileChangeKind::Modified]);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rename_ends_the_run_for_both_of_its_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        let b = dir.path().join("b.json");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let mut renamed = pending(&b, FileChangeKind::Renamed, 1);
+        renamed.rename_from = Some(a.clone());
+        let events = vec![
+            pending(&a, FileChangeKind::Modified, 0),
+            renamed,
+            pending(&a, FileChangeKind::Created, 2),
+        ];
+
+        let (out, _) = run_to_end(events).await;
+
+        let seen: Vec<_> = out
+            .iter()
+            .map(|e| (e.norm.path.clone(), e.norm.kind))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (a.clone(), FileChangeKind::Modified),
+                (b, FileChangeKind::Renamed),
+                (a, FileChangeKind::Created),
+            ]
+        );
+    }
 }
