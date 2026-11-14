@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- **A script named by two hook entries in one Cursor `hooks.json` is reported once.** Two entries that run the same script gave one finding each. The assessment now keeps one finding per script for each `hooks.json`, and the kept finding names the event of the first entry. The same script in the user, enterprise and project files is still reported once for each file. A file with one entry is scored as before. (#615)
+
 ## [0.15.0] - 2026-11-14
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,

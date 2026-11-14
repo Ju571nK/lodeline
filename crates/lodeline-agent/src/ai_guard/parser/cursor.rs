@@ -48,6 +48,41 @@ fn hook_commands(hooks_json: &Value) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// Whether `a` and `b` report one script scan result, whichever hook entry
+/// named the script. The kept finding names the first entry's event.
+fn same_script_finding(a: &AiGuardReason, b: &AiGuardReason) -> bool {
+    use AiGuardReason::{DestructiveInHookScript, ExternalScriptUnscanned};
+    match (a, b) {
+        (
+            DestructiveInHookScript {
+                hook_event: _,
+                pattern: p1,
+                script_path: s1,
+                snippet: n1,
+                source_chain: c1,
+            },
+            DestructiveInHookScript {
+                hook_event: _,
+                pattern: p2,
+                script_path: s2,
+                snippet: n2,
+                source_chain: c2,
+            },
+        ) => (p1, s1, n1, c1) == (p2, s2, n2, c2),
+        (
+            ExternalScriptUnscanned {
+                hook_event: _,
+                script_path: s1,
+            },
+            ExternalScriptUnscanned {
+                hook_event: _,
+                script_path: s2,
+            },
+        ) => s1 == s2,
+        _ => false,
+    }
+}
+
 /// Cursor skips a `hooks.json` it cannot parse (it also accepts JSONC, which
 /// strict JSON rejects), so one is skipped here too rather than failing the
 /// MCP findings beside it, as Codex `hooks.json` is. `run_dir` is where Cursor
@@ -61,9 +96,17 @@ fn emit_hook_reasons(
 ) {
     match super::read_json_optional(path) {
         Ok(Some(val)) => {
+            let mut found = Vec::new();
             for (event, cmd) in hook_commands(&val) {
-                classify_command(cmd, event, home, Some(run_dir), out);
+                classify_command(cmd, event, home, Some(run_dir), &mut found);
             }
+            let mut kept: Vec<AiGuardReason> = Vec::new();
+            for reason in found {
+                if !kept.iter().any(|seen| same_script_finding(seen, &reason)) {
+                    kept.push(reason);
+                }
+            }
+            out.extend(kept);
         }
         Ok(None) => {}
         Err(error) => tracing::warn!(path = %path.display(), %error, "cursor hooks.json skipped"),
@@ -686,5 +729,109 @@ mod tests {
             &home.path().join(".cursor"),
         );
         assert_eq!(paths, [home.path().join(".cursor").join("../guards/g.sh")]);
+    }
+
+    fn script_findings(out: &[AiGuardReason]) -> Vec<&AiGuardReason> {
+        out.iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    AiGuardReason::DestructiveInHookScript { .. }
+                        | AiGuardReason::ExternalScriptUnscanned { .. }
+                )
+            })
+            .collect()
+    }
+
+    fn two_entries(commands: [&str; 2], events: [&str; 2]) -> String {
+        let mut hooks = serde_json::Map::new();
+        for (event, command) in events.into_iter().zip(commands) {
+            hooks
+                .entry(event)
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"command": command}));
+        }
+        serde_json::json!({"version": 1, "hooks": hooks}).to_string()
+    }
+
+    #[test]
+    fn one_script_named_by_two_entries_is_one_finding() {
+        let home = tempdir().unwrap();
+        hook_script(home.path(), ".cursor/hooks/x.sh", "#!/bin/sh\nrm -rf /\n");
+        for events in [["stop", "stop"], ["stop", "afterFileEdit"]] {
+            write_hooks(
+                &home.path().join(".cursor"),
+                &two_entries(["./hooks/x.sh", "./hooks/x.sh"], events),
+            );
+            let out = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+            assert_eq!(script_findings(&out).len(), 1, "{events:?}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn one_missing_script_named_twice_is_one_finding() {
+        let home = tempdir().unwrap();
+        write_hooks(
+            &home.path().join(".cursor"),
+            &two_entries(
+                ["./hooks/gone.sh", "bash ./hooks/gone.sh"],
+                ["stop", "stop"],
+            ),
+        );
+        let out = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+        assert_eq!(script_findings(&out).len(), 1, "got {out:?}");
+    }
+
+    #[test]
+    fn two_different_scripts_are_two_findings() {
+        let home = tempdir().unwrap();
+        hook_script(home.path(), ".cursor/hooks/x.sh", "#!/bin/sh\nrm -rf /\n");
+        hook_script(home.path(), ".cursor/hooks/y.sh", "#!/bin/sh\nrm -rf /\n");
+        write_hooks(
+            &home.path().join(".cursor"),
+            &two_entries(["./hooks/x.sh", "./hooks/y.sh"], ["stop", "stop"]),
+        );
+        let out = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+        assert_eq!(script_findings(&out).len(), 2, "got {out:?}");
+    }
+
+    #[test]
+    fn the_same_script_in_the_user_and_the_enterprise_file_is_one_finding_each() {
+        let home = tempdir().unwrap();
+        let ent = tempdir().unwrap();
+        let script = ent.path().join("x.sh");
+        std::fs::write(&script, "#!/bin/sh\nrm -rf /\n").unwrap();
+        let body = serde_json::json!({"version": 1, "hooks": {"stop": [
+            {"command": script}, {"command": script}
+        ]}})
+        .to_string();
+        write_hooks(&home.path().join(".cursor"), &body);
+        let enterprise = write_hooks(ent.path(), &body);
+        let out = assess_user(home.path(), &enterprise).unwrap();
+        assert_eq!(script_findings(&out).len(), 2, "got {out:?}");
+    }
+
+    #[test]
+    fn the_same_script_in_the_user_and_the_project_file_is_one_finding_each() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let script = home.path().join("x.sh");
+        std::fs::write(&script, "#!/bin/sh\nrm -rf /\n").unwrap();
+        let body = serde_json::json!({"version": 1, "hooks": {"stop": [
+            {"command": script}, {"command": script}
+        ]}})
+        .to_string();
+        write_hooks(&home.path().join(".cursor"), &body);
+        write_hooks(&repo.path().join(".cursor"), &body);
+        let user = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+        let project = CursorProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        }
+        .assess(home.path())
+        .unwrap();
+        assert_eq!(script_findings(&user).len(), 1, "got {user:?}");
+        assert_eq!(script_findings(&project).len(), 1, "got {project:?}");
     }
 }
