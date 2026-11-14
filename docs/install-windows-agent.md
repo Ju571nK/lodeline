@@ -50,14 +50,16 @@ One-time toolchain setup:
 Then build:
 
 ```powershell
-cargo build --release -p lodeline-agent   # → target\release\lodeline.exe
+cargo build --release --locked -p lodeline-agent   # → target\release\lodeline.exe
 ```
+
+> Build with `--locked`. Without the lockfile, cargo resolves a newer `notify-types` that needs Rust 1.91, and the build fails on Rust 1.88.
 
 For a self-contained, redistributable binary (no VC++ runtime dependency):
 
 ```powershell
 $env:RUSTFLAGS = "-C target-feature=+crt-static"
-cargo build --release -p lodeline-agent
+cargo build --release --locked -p lodeline-agent
 ```
 
 ---

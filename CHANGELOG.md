@@ -9,6 +9,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- **Agent.** The polling backend (`--poll`) and the inotify backend no longer follow a link inside
+  a recursive watch root. A link to a large folder, or to `/`, made the agent walk everything behind
+  it and could grow its memory to gigabytes before it became ready. A link is now followed only
+  where the agent registers it, such as a linked skill folder or subagent file. The `notify`
+  dependency moves from 6.1.1 to 8.2.0 for the option that turns link following off. The native
+  macOS backend (FSEvents) is unchanged. A build from source on Rust 1.88 must use `--locked`:
+  without the lockfile, cargo resolves a newer `notify-types` that needs Rust 1.91.
 - AI Guard no longer reads a hook script that a relative path names from the agent's own working
   directory (#614). A relative script in a Claude Code project hook is read from the project root.
   A relative script in a Claude Code user or managed hook, and in any Codex hook, is reported as not
