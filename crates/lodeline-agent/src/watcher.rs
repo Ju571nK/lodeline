@@ -1582,7 +1582,9 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
             {
                 saw_real |= event.path == real;
-                if event.path.starts_with(&behind) || event.path.starts_with(&link) {
+                if event.path.starts_with(&behind)
+                    || (event.path != link && event.path.starts_with(&link))
+                {
                     saw_behind.push(event.path);
                 }
             }
