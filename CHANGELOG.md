@@ -7,6 +7,24 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-14
+
+**Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,
+and changes no event format and no fleet API response. No package script, unit file, tmpfiles
+entry or SELinux module changed, so the packaged policy is the one of v0.14.5. No package or
+release asset is added or removed. The server, the sender and the console change only in their
+version, so the hosts, the server and the console can be upgraded in any order. Only the agent
+changes behavior.
+
+**Hosts.** After the upgrade a host's `events_emitted_total`, the `file_change` count in
+`events_by_kind`, `lodeline show stats` and the `status` line can look lower for the same activity,
+because a write that leaves the bytes unchanged is no longer recorded. A host can record new
+`file_change` events under the path of a watched link, and for the scripts a Cursor project hook
+runs. An AI Guard score can change where a Claude Code `http` hook is not allowed by
+`allowedHttpHookUrls` (the hook is no longer reported) or where a relative Cursor hook script is
+now read (the script is assessed); the new Claude Code controls change the controls an assessment
+reports, not its score.
+
 ### Changed
 
 - **Agent.** The agent records a write to a watched file only when the bytes differ from the last
@@ -14,7 +32,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   the bytes alone, is no longer recorded, so `events_emitted_total`, `events_by_kind` and the
   `show stats` totals are lower than before for the same activity. AI Guard still reassesses on every
   write. A file that is gone or unreadable forgets its baseline, and so does the old path of a rename, so
-  recreating that path with the same bytes is recorded. No event or wire format changes.
+  recreating that path with the same bytes is recorded. No event or wire format changes. (#601)
 
 - The Claude Code assessment reads `allowedHttpHookUrls` from the managed, user and project
   settings files and merges the lists. An `http` hook whose URL no pattern can match, or any
@@ -25,25 +43,26 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   that holds the number of patterns and never a URL. No reason kind or event field is added.
   A project row also reports a user `http` hook that the project's own list admits, because
   Claude Code merges the lists and runs it there. The path and query of a URL match a pattern
-  without case.
+  without case. (#600)
 - The Claude Code assessment reports a control for each of `permissions.blockReadsOutsideWorkingDirectories`
   and `permissions.blockWritesOutsideWorkingDirectories` that a user or project settings file sets to
   `true`, as `claude_code.configured.permissions.<key>`. Claude Code honors `true` from any scope. The
   control names the first file that sets it. A project that sets neither key reports no controls, as
-  before. The score does not change. No reason kind or event field is added.
-- The agent follows a watched file that is a link to a regular file. It watches the link path, so a write to the target is recorded under the link path, with the baseline and the AI Guard reassessment keyed the same way, and the target need not sit in the home folder. Every 5 seconds it re-reads the link, so a retarget, a late link or a target that appears later is picked up and records the current state once. A link whose target is missing, or already covered by another watched root, is left unfollowed with one warning. A link to a file in its own folder is followed. Two links to one target both stay, and the first one listed in the policy names the event.
-- The agent follows a link at the first wildcard component of a watched path: a skill folder such as `skills/foo` linked to a folder elsewhere, and a subagent file such as `agents/a.md` linked to a file elsewhere. It watches the link path, so an edit behind the link is recorded under the link path with its baseline and AI Guard reassessment keyed the same way, and a link added or removed while the agent runs is picked up within 5 seconds. A link is followed one level only: a link under a followed folder, and a link in the middle of a literal part of a path, stay unfollowed. A link to `/` or to a folder that holds a watched folder is refused with one warning, as is a link whose target a watched root already covers. A second link to a folder that another link already follows is left out with one warning, so the folder gets one subscription.
+  before. The score does not change. No reason kind or event field is added. (#607)
+- The agent follows a watched file that is a link to a regular file. It watches the link path, so a write to the target is recorded under the link path, with the baseline and the AI Guard reassessment keyed the same way, and the target need not sit in the home folder. Every 5 seconds it re-reads the link, so a retarget, a late link or a target that appears later is picked up and records the current state once. A link whose target is missing, or already covered by another watched root, is left unfollowed with one warning. A link to a file in its own folder is followed. Two links to one target both stay, and the first one listed in the policy names the event. A table of link spellings, which this entry and the next one share, maps a path that an event reports back to the link a policy names. (#599, #606)
+- The agent follows a link at the first wildcard component of a watched path: a skill folder such as `skills/foo` linked to a folder elsewhere, and a subagent file such as `agents/a.md` linked to a file elsewhere. It watches the link path, so an edit behind the link is recorded under the link path with its baseline and AI Guard reassessment keyed the same way, and a link added or removed while the agent runs is picked up within 5 seconds. A link is followed one level only: a link under a followed folder, and a link in the middle of a literal part of a path, stay unfollowed. A link to `/` or to a folder that holds a watched folder is refused with one warning, as is a link whose target a watched root already covers. A second link to a folder that another link already follows is left out with one warning, so the folder gets one subscription. (#611)
 
 ### Fixed
 
-- **Cursor project hook scripts are watched.** The agent now watches the scripts that a repo's `.cursor/hooks.json` runs, in the repo or outside it, and the `.cursor/hooks/` folder. An edit to a script that `hooks.json` names by an absolute path triggers a new assessment. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns.
+- **Cursor project hook scripts are watched.** The agent now watches the scripts that a repo's `.cursor/hooks.json` runs, in the repo or outside it, and the `.cursor/hooks/` folder. An edit to a script that `hooks.json` names by an absolute path triggers a new assessment. Team hooks stay unread, because Cursor holds them in memory and not in a file the agent owns. (#605)
 
-- **Cursor hook scripts named by a relative path are read from the folder Cursor runs the hook in.** A project hook is read from the project root, a user hook from `~/.cursor/` and an enterprise hook from the folder that holds the enterprise `hooks.json`, as the Cursor hooks page describes. Before, the agent read the script relative to its own working directory, so a project script such as `.cursor/hooks/x.sh` was reported as unscanned and its edits did not change the result. The Claude Code and Codex assessments are unchanged. The Claude Code hooks page says only that a hook runs in the current directory, which can change during a session, so a relative script path there is still read relative to the agent's working directory. An unquoted absolute path behaves as before. No reason kind or event field is added.
+- **Cursor hook scripts named by a relative path are read from the folder Cursor runs the hook in.** A project hook is read from the project root, a user hook from `~/.cursor/` and an enterprise hook from the folder that holds the enterprise `hooks.json`, as the Cursor hooks page describes. Before, the agent read the script relative to its own working directory, so a project script such as `.cursor/hooks/x.sh` was reported as unscanned and its edits did not change the result. The Claude Code and Codex assessments are unchanged. The Claude Code hooks page says only that a hook runs in the current directory, which can change during a session, so a relative script path there is still read relative to the agent's working directory. An unquoted absolute path behaves as before. No reason kind or event field is added. (#608)
 
 ### Documentation
 
-- `docs/claude-code-coverage.md` lists each security-relevant key on the Claude Code settings page as assessed, reported as a control, or not read, with the reason for each key that is not read. It was checked against Claude Code 2.1.323 on 2026-11-14 and is linked from the README.
-- `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied.
+- `docs/claude-code-coverage.md` lists each security-relevant key on the Claude Code settings page as assessed, reported as a control, or not read, with the reason for each key that is not read. It was checked against Claude Code 2.1.323 on 2026-11-14 and is linked from the README. (#609)
+- `docs/codex-coverage.md` records what AI Guard reads from Codex configuration and where its reading stops, checked on Codex 0.167.0. Legacy `profile` keys, `[profiles.<name>]` tables and `--profile` files are not applied. (#603)
+- `ROADMAP.md` states the 0.14.x status and lists the goals of v0.15 (#598).
 
 ## [0.14.5] - 2026-11-12
 

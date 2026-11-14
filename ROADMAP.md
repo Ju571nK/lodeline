@@ -6,7 +6,7 @@ merge SHA for each shipped phase.
 
 ## Status
 
-- **0.14.x, alpha.** The latest release is 0.14.5 (2026-11-12). The event
+- **0.15.x, alpha.** The latest release is 0.15.0 (2026-11-14). The event
   schema and CLI surface can still change between minor releases.
   `schema_version` in every event lets downstream consumers detect this.
 - **Platforms.** macOS, Linux and Windows at runtime. Some Linux refinements are marked
@@ -34,11 +34,17 @@ trust what a scan reports on a real host. v0.15 is done when all seven hold:
 3. **Claude Code coverage page.** Every security-relevant key on the official
    Claude Code settings page is either assessed or listed in a "not assessed,
    and why" table in the docs.
-4. **Codex.** Granular `approval_policy`, profile layers and hook trust state
-   are read correctly and checked against an installed Codex version.
+4. **Codex.** `docs/codex-coverage.md` says what Lodeline reads from Codex
+   configuration and where its reading stops, with the profile claims checked
+   on Codex 0.167.0. Profile tables are not applied, because 0.167.0 refuses
+   the legacy `profile` key. Files passed with `--profile` are not read,
+   because the flag is runtime state that a daemon cannot see. The granular
+   `approval_policy` table is read. Hook trust is read from the user config,
+   and a modified hook is over-reported. The skip behavior comes from Codex
+   source, not from a check on 0.167.0.
 5. **Cursor.** Project-level hooks are scanned, or the open issue records why
    not.
-6. **An honest roadmap.** This file states the 0.14.x status, the proxy at
+6. **An honest roadmap.** This file states the current status, the proxy at
    P1, and these criteria.
 7. **Tested changes.** Each change has a test that failed before it, CI is
    green on every leg, and the v0.15.0 notes are checked against the
