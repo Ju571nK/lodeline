@@ -114,9 +114,6 @@ fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
                 let run = &mut out[at];
                 run.last_seen_ms = next.last_seen_ms;
                 run.coalesced_count = run.coalesced_count.saturating_add(next.coalesced_count);
-                if next.kind == FileChangeKind::Created {
-                    run.kind = FileChangeKind::Created;
-                }
             }
             _ => {
                 if mergeable {
