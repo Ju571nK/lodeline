@@ -87,6 +87,7 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         AiGuardReason::UnattendedLoopPrompt { .. } => "unattended_loop_prompt",
         AiGuardReason::StandingCommandApproval { .. } => "standing_command_approval",
         AiGuardReason::McpToolsAutoApproved { .. } => "mcp_tools_auto_approved",
+        AiGuardReason::McpServerStaticCredential { .. } => "mcp_server_static_credential",
         AiGuardReason::ProjectSettingsPluginEnabled { .. } => "project_settings_plugin_enabled",
         AiGuardReason::ProjectSettingsHelperCommand { .. } => "project_settings_helper_command",
         AiGuardReason::ProjectSettingsEnvOverride { .. } => "project_settings_env_override",
@@ -149,7 +150,7 @@ pub fn dangerous_toggles(reasons: &[AiGuardReason]) -> std::collections::BTreeSe
 #[derive(Debug, Clone)]
 pub struct Rubric {
     /// kind_key → weight. Keys are static strings owned by the rubric
-    /// module (returned by `kind_key()`). Defaults populate all 39 known
+    /// module (returned by `kind_key()`). Defaults populate all 40 known
     /// kinds; with_overrides() may replace values but never adds keys.
     pub weights: HashMap<&'static str, f32>,
     /// Subset of `weights` whose value came from an operator override
@@ -214,6 +215,9 @@ impl Rubric {
         w.insert("standing_command_approval", 2.0);
         // #200 — named tools only, so below `trusted_mcp_server`, which covers every tool.
         w.insert("mcp_tools_auto_approved", 1.0);
+        // #200: a credential stored as plain text in a config file. It names
+        // one server, like `mcp_server_remote`.
+        w.insert("mcp_server_static_credential", 1.0);
         // #199 — repository settings keys, ranked by consent. A plugin enable
         // applies in every session before trust; helpers and `env` apply
         // before trust only in `claude -p`, like a project hook (`no_sandbox`
@@ -600,7 +604,8 @@ mod tests {
             Some(&2.0)
         );
         assert_eq!(r.weights.get("mcp_tools_auto_approved"), Some(&1.0));
-        assert_eq!(r.weights.len(), 39);
+        assert_eq!(r.weights.get("mcp_server_static_credential"), Some(&1.0));
+        assert_eq!(r.weights.len(), 40);
     }
 
     #[test]

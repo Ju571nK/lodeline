@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- The Codex scanner reports an MCP server whose `http_headers` table sends a credential header with a static value, because that credential is stored in the config file as plain text. A header counts as a credential header when its name contains `auth`, `token`, `key` or `secret`, in any case, and its value is not empty. A new reason kind, `mcp_server_static_credential` (1.0), records the server name and the header name. It never records the value. Headers in `env_http_headers` name environment variables and are not reported. This applies to every Codex layer the scanner reads: the system and user config, and a repository's `.codex/config.toml`. Upgrade `lodeline-server` before the agents. A server older than v0.13.0 rejects an event that carries the new kind. Refs #200.
+
 ### Documentation
 
 - Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states that the daemon does not find Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.

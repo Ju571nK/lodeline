@@ -1551,7 +1551,30 @@ pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
             continue;
         };
         super::mcp_scan::emit_one_server(name, &json_def, out);
+        emit_static_credential_reasons(name, def, out);
         emit_mcp_approval_reasons(name.to_string(), def, None, false, out);
+    }
+}
+
+/// #200: `http_headers` maps header names to static values that Codex sends
+/// with each request, so a credential header there is plain text on disk.
+/// `env_http_headers` holds variable names, not values. Only the header name
+/// is recorded.
+fn emit_static_credential_reasons(server_name: &str, def: &Value, out: &mut Vec<AiGuardReason>) {
+    let Some(headers) = def.get("http_headers").and_then(Value::as_table) else {
+        return;
+    };
+    for (header, value) in headers {
+        let lower = header.to_ascii_lowercase();
+        let credential = ["auth", "token", "key", "secret"]
+            .iter()
+            .any(|word| lower.contains(word));
+        if credential && value.as_str().is_some_and(|v| !v.trim().is_empty()) {
+            out.push(AiGuardReason::McpServerStaticCredential {
+                server_name: server_name.to_string(),
+                header_name: super::claude_project_settings::safe_name(header),
+            });
+        }
     }
 }
 

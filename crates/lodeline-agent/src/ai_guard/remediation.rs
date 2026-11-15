@@ -105,6 +105,9 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         McpToolsAutoApproved { .. } => {
             "Named MCP tools run without approval — set their approval_mode back to prompt or auto unless required."
         }
+        McpServerStaticCredential { .. } => {
+            "An MCP server header holds a credential as plain text in the config file. Read it from an environment variable with env_http_headers instead, and rotate it."
+        }
         ProjectSettingsPluginEnabled { .. } => {
             "The repository's Claude Code settings enable a plugin, which loads before the trust dialog — review the plugin, or set it to false in .claude/settings.local.json."
         }

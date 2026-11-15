@@ -1645,3 +1645,16 @@ answer, and returns the file's bytes. It never retries the call, because a retry
 answer would make a second token. It keeps no token and no file. A console that predates this
 route, or a server that predates `enroll_mint`, is unaffected: no read endpoint and no read
 type changed.
+
+### 14.16 Reason kind `mcp_server_static_credential` (Unreleased, #200)
+
+One additive reason kind of `ai_guard_risk_assessed`. It adds no event kind, no
+event field and no `AiTool` or `AiGuardScope` variant.
+
+| Reason `kind` | Payload fields | Meaning |
+|---|---|---|
+| `mcp_server_static_credential` | `server_name`, `header_name` | A Codex MCP server sends a header whose name marks a credential with a static value from `http_headers`. The header value is never sent. |
+
+A server from v0.13.0 on keeps an unknown reason kind as an unknown reason, so
+an older console still receives it. `ReasonList` renders any kind and any
+field, so it shows the new reason without a change.
