@@ -93,20 +93,23 @@ Read from the official Grok Build pages at https://docs.x.ai/build. Grok
 - The enterprise page orders the layers `/etc/grok/managed_config.toml`,
   `~/.grok/managed_config.toml`, `~/.grok/config.toml`,
   `~/.grok/requirements.toml`, `/etc/grok/requirements.toml`, lowest to
-  highest. Where hooks sit inside the managed and requirements files is on
-  no official page that was read.
+  highest. Measured on Grok 1.0.77 on 2026-11-15 (`grok inspect --json`,
+  scratch home): `[[hooks.<Event>]]` tables load from `managed_config.toml`,
+  `requirements.toml` and `config.toml`, managed always and the other two
+  only in a trusted folder. Grok's bundled `10-hooks.md` says the same.
 - The settings reference lists `[compat.claude]` and `[compat.cursor]` with
   `skills`, `rules`, `agents`, `mcps` and `hooks`, default `true`.
 - A hook entry has `type` `command` or `http` (with a `url`), and `timeout`
   defaults to 5 seconds.
-- Cursor's hooks page documents `failClosed`. It does not say that `allow` or
-  `ask` are ignored. Forum reports on that differ by version and mode.
+- Cursor's hooks page (https://cursor.com/docs/hooks) documents `failClosed`.
+  It says `ask` is accepted by the schema but not enforced for `preToolUse`
+  today, that `ask` is not supported for `subagentStart` and is treated as
+  `deny`, and that `preToolUse` can deny the call but Cursor ignores
+  `updated_input`. The deny path was not run on an installed Desktop build.
 
 ## Not verified
 
 - Cursor runtime behavior. No Cursor session was started, so the bundle
   reading is static.
 - Whether Cursor 3.11 Desktop enforces only `deny`.
-- Grok 1.0.70 folder-trust storage, and whether a declined trust prompt
-  leaves `~/.grok/hooks/lodeline-hook.json` unloaded for that session.
-- Grok `managed_config.toml` and `requirements.toml` hooks.
+- Grok 1.0.70 folder-trust storage format.
