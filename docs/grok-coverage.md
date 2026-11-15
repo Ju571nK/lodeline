@@ -20,9 +20,9 @@ Checked on 2026-11-15 against the official Grok Build documentation at https://d
 | `[compat.claude]` and `[compat.cursor]` switches | None | No. |
 | `GROK_HOME` | None | Not followed. `~/.grok` is always read. |
 
-A hook file uses Claude Code's matcher groups, and the `config.toml` table uses Codex's shape, so each goes through that tool's reader and the existing hook reason kinds. A file that does not parse is skipped with a warning and does not hide the other files or the MCP servers. A `config.toml` that does not parse is reported as a read error for that row.
+A hook file uses Claude Code's matcher groups, and the `config.toml` table uses Codex's shape, so each goes through that tool's reader and the existing hook reason kinds. A file that does not parse is skipped with a warning and does not hide the other files or the MCP servers. A `config.toml`, `managed_config.toml` or `requirements.toml` that does not parse is reported as a read error for that row.
 
-An entry of type `http` (the hooks page lists `command` and `http`) is scored only in `hooks/*.json`, where it goes through the same reader as a Claude Code `http` hook. An `http` hook in `~/.grok/config.toml` is not scored today, because the `config.toml` table goes through the Codex reader, which reports no `http` hook.
+An entry of type `http` (the hooks page lists `command` and `http`) is scored only in `hooks/*.json`, where it goes through the same reader as a Claude Code `http` hook. An `http` hook in `~/.grok/config.toml`, `managed_config.toml` or `requirements.toml` (or the same names under `/etc/grok`) is not scored today, because those tables go through the Codex reader, which reports no `http` hook. Grok loads an `http` hook from these files.
 
 ## Grok Build: what is not read
 

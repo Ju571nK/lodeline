@@ -22,6 +22,7 @@
 //! hooks and MCP servers, which the Claude and Cursor parsers already score.
 
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
+use crate::ai_guard::rule_pack::selector::toml_parse_error;
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -81,22 +82,7 @@ fn read_config(path: &Path) -> Result<Option<toml::Value>, AssessError> {
     };
     toml::from_str(&text)
         .map(Some)
-        .map_err(|e| AssessError::Parse {
-            path: path.to_path_buf(),
-            message: parse_message(&text, &e),
-        })
-}
-
-/// toml's `Display` quotes the source line, which can hold a secret, so a
-/// parse error keeps only where it is and its first message line.
-fn parse_message(text: &str, error: &toml::de::Error) -> String {
-    let kind = error.message().lines().next().unwrap_or("invalid TOML");
-    let Some(before) = error.span().and_then(|span| text.get(..span.start)) else {
-        return kind.to_string();
-    };
-    let line = before.matches('\n').count() + 1;
-    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-    format!("line {line}, column {column}: {kind}")
+        .map_err(|e| toml_parse_error(path, &text, &e))
 }
 
 fn emit_mcp_reasons(config: &toml::Value, out: &mut Vec<AiGuardReason>) {
@@ -500,19 +486,22 @@ enabled = false
         let body = format!(
             "[mcp_servers.x]\ncommand = \"node\"\nheaders = {{ a = \"{SECRET}\" \nbroken\n"
         );
-        for name in ["config.toml", "managed_config.toml", "requirements.toml"] {
-            let home = tempdir().unwrap();
-            write(&home.path().join(".grok").join(name), &body);
-            let error = GrokParser.assess(home.path()).unwrap_err();
-            let shown = error.to_string();
-            let AssessError::Parse { message, .. } = &error else {
-                panic!("{error:?}");
-            };
-            let json = serde_json::to_string(message).unwrap();
-            for text in [&shown, message, &json] {
-                assert_eq!(text.matches(SECRET).count(), 0, "{name}: {text}");
+        let duplicate = format!("{SECRET} = 1\n{SECRET} = 2\n");
+        for body in [body, duplicate] {
+            for name in ["config.toml", "managed_config.toml", "requirements.toml"] {
+                let home = tempdir().unwrap();
+                write(&home.path().join(".grok").join(name), &body);
+                let error = GrokParser.assess(home.path()).unwrap_err();
+                let shown = error.to_string();
+                let AssessError::Parse { message, .. } = &error else {
+                    panic!("{error:?}");
+                };
+                let json = serde_json::to_string(message).unwrap();
+                for text in [&shown, message, &json] {
+                    assert_eq!(text.matches(SECRET).count(), 0, "{name}: {text}");
+                }
+                assert!(message.contains("line "), "{name}: {message}");
             }
-            assert!(message.contains("line "), "{name}: {message}");
         }
     }
 }
