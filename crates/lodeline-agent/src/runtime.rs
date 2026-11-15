@@ -1163,8 +1163,32 @@ fn files_matching_pattern(
 }
 
 /// True for the per-project skills and agents target `push_claude_code_synthetic_targets`
-/// builds: its id and its exact two paths, which fix the repository root.
+/// builds (its id and its exact two paths, which fix the repository root) and
+/// for the nested and inherited folders target.
 pub(crate) fn is_claude_code_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
+    is_root_skills_target(t) || is_component_target(t)
+}
+
+const NESTED_TARGET_PREFIX: &str = "claude_code-nested-components-";
+
+/// True for the nested and inherited folders target of
+/// `push_claude_code_component_target`: its id and paths that are each a
+/// plain folder path followed by `.claude/skills/*/SKILL.md` or
+/// `.claude/agents/*.md`.
+fn is_component_target(t: &lodeline_core::policy::WatchTarget) -> bool {
+    let plain = |p: &std::path::Path| !p.to_string_lossy().contains(['*', '?', '[', ']', '{', '}']);
+    let skills = std::path::Path::new(".claude/skills/*/SKILL.md");
+    let agents = std::path::Path::new(".claude/agents/*.md");
+    t.id.starts_with(NESTED_TARGET_PREFIX)
+        && !t.paths.is_empty()
+        && t.paths.iter().all(|p| {
+            let p = std::path::Path::new(p);
+            (p.ends_with(skills) && p.ancestors().nth(4).is_some_and(plain))
+                || (p.ends_with(agents) && p.ancestors().nth(3).is_some_and(plain))
+        })
+}
+
+fn is_root_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
     let Some(h) = t.id.strip_prefix("claude_code-skills-agents-") else {
         return false;
     };
@@ -1907,7 +1931,8 @@ pub(crate) fn push_continue_synthetic_target(
     });
 }
 
-/// Phase 3b.6.2: push THREE synthetic WatchTargets for a Claude Code per-repo
+/// Phase 3b.6.2: push THREE synthetic WatchTargets, and a fourth for nested and
+/// inherited skills and agents when there are any, for a Claude Code per-repo
 /// config: one for `settings.json` + `settings.local.json` (not recursive),
 /// one for `.claude/hooks/*` (recursive; the pattern matches every file below the folder),
 /// one for `.claude/skills/` and `.claude/agents/` (recursive).
@@ -1970,6 +1995,57 @@ pub(crate) fn push_claude_code_synthetic_targets(
                 .to_string(),
             cd.join("agents").join("*.md").to_string_lossy().to_string(),
         ],
+        recursive: true,
+        follow_symlinks: false,
+        disabled: false,
+    });
+    push_claude_code_component_target(effective, repo_root);
+}
+
+/// #539: the target for skills and agents folders the repository's own
+/// `.claude` target does not reach: nested folders and the parent and main
+/// checkout folders a session started here also loads. It lists the folders
+/// that exist now, so a folder created later is covered from the next build,
+/// which a policy reload or a restart runs. The home folder is not excluded
+/// here: its `.claude` folders are watched by the default policy and the
+/// parser leaves them out of the project row.
+fn push_claude_code_component_target(
+    effective: &mut lodeline_core::policy::EffectivePolicy,
+    repo_root: &std::path::Path,
+) {
+    let no_home = std::path::Path::new("");
+    let paths: Vec<String> =
+        crate::ai_guard::parser::claude_components::walk_watched_component_dirs(repo_root, no_home)
+            .iter()
+            .filter(|dir| {
+                !dir.to_string_lossy()
+                    .contains(['*', '?', '[', ']', '{', '}'])
+            })
+            .map(|dir| {
+                if dir.file_name().is_some_and(|n| n == "agents") {
+                    dir.join("*.md")
+                } else {
+                    dir.join("*").join("SKILL.md")
+                }
+                .to_string_lossy()
+                .to_string()
+            })
+            .collect();
+    if paths.is_empty() {
+        return;
+    }
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!(
+            "{NESTED_TARGET_PREFIX}{}",
+            synthetic_target_id_suffix(repo_root)
+        ),
+        description: format!(
+            "synthetic nested and inherited skills and agents: {}",
+            repo_root.display()
+        ),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths,
         recursive: true,
         follow_symlinks: false,
         disabled: false,
@@ -2445,6 +2521,15 @@ mod tests {
             ),
             "a nested skills entry names one folder"
         );
+        let mut forged = effective
+            .targets
+            .iter()
+            .find(|t| t.id.starts_with("claude_code-nested-components-"))
+            .unwrap()
+            .clone();
+        assert!(crate::normalizer::uses_one_folder_rule(&forged));
+        forged.paths = vec!["/other/*/SKILL.md".into()];
+        assert!(!crate::normalizer::uses_one_folder_rule(&forged));
     }
 
     #[test]
