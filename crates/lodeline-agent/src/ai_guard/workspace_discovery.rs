@@ -316,6 +316,22 @@ mod tests {
     }
 
     #[test]
+    fn discover_codex_repos_finds_a_git_repo_with_only_a_subfolder_codex() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("services/api/.codex")).unwrap();
+        std::fs::write(repo.join("services/api/.codex/hooks.json"), "{}").unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(plain.join("services/api/.codex")).unwrap();
+        std::fs::write(plain.join("services/api/.codex/hooks.json"), "{}").unwrap();
+        let roots = [dir.path().to_string_lossy().into_owned()];
+        let found = discover_codex_repos(&roots);
+        assert!(found.contains(&dunce::canonicalize(&repo).unwrap()));
+        assert!(!found.contains(&dunce::canonicalize(&plain).unwrap()));
+    }
+
+    #[test]
     fn discover_codex_repos_finds_agents_md_only() {
         let root = tempdir().unwrap();
         let repo = root.path().join("only-agents");

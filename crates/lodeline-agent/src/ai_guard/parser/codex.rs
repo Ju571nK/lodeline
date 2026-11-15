@@ -3006,6 +3006,108 @@ command = "echo inline"
         assert!(watched.contains(&dir.path().join(".codex").join("config.toml")));
     }
 
+    fn subfolder_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let nested = repo.join("services").join("api").join(".codex");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("hooks.json"), DESTRUCTIVE_HOOKS_JSON).unwrap();
+        (dir, repo, nested)
+    }
+
+    #[test]
+    fn subfolder_hooks_json_is_scanned_when_the_user_config_trusts_it() {
+        let (dir, repo, nested) = subfolder_repo();
+        write_config(
+            dir.path(),
+            &trusted(&nested.join("hooks.json"), "pre_tool_use", 0, 0),
+        );
+        let p = CodexProjectParser {
+            repo_root: repo.clone(),
+        };
+        assert!(has_destructive_inline(&p.assess(dir.path()).unwrap()));
+        let watched = p.watched_paths(dir.path());
+        assert!(watched.contains(&nested.join("hooks.json")), "{watched:?}");
+        assert!(watched.contains(&nested.join("config.toml")), "{watched:?}");
+        assert!(watched.contains(&nested.join("rules")), "{watched:?}");
+    }
+
+    #[test]
+    fn subfolder_hooks_json_without_a_trusted_hash_is_not_reported() {
+        let (dir, repo, _nested) = subfolder_repo();
+        write_config(dir.path(), "");
+        let p = CodexProjectParser { repo_root: repo };
+        assert!(!has_destructive_inline(&p.assess(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn subfolder_config_toml_is_scanned_as_a_project_layer() {
+        let (dir, repo, nested) = subfolder_repo();
+        std::fs::write(
+            nested.join("config.toml"),
+            "[mcp_servers.x]\ncommand = \"node\"\nargs = [\"m.js\"]\n",
+        )
+        .unwrap();
+        write_config(dir.path(), "");
+        let out = CodexProjectParser { repo_root: repo }
+            .assess(dir.path())
+            .unwrap();
+        assert!(
+            out.iter()
+                .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_subfolder_config_does_not_fail_the_repo() {
+        let (dir, repo, nested) = subfolder_repo();
+        std::fs::write(nested.join("config.toml"), "[unterminated").unwrap();
+        write_config(dir.path(), "");
+        assert!(CodexProjectParser { repo_root: repo }
+            .assess(dir.path())
+            .is_ok());
+    }
+
+    #[test]
+    fn subfolder_codex_dirs_in_pruned_or_linked_folders_are_not_read() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        for pruned in ["node_modules/pkg", "target/debug", "vendor/lib", ".git/x"] {
+            let nested = repo.join(pruned).join(".codex");
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(nested.join("hooks.json"), DESTRUCTIVE_HOOKS_JSON).unwrap();
+        }
+        let outside = dir.path().join("outside").join(".codex");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("hooks.json"), DESTRUCTIVE_HOOKS_JSON).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("outside"), repo.join("linked")).unwrap();
+        let p = CodexProjectParser { repo_root: repo };
+        let watched = p.watched_paths(dir.path());
+        assert!(
+            !watched.iter().any(|w| w.ends_with("hooks.json")
+                && w.parent().and_then(Path::parent) != Some(p.repo_root.as_path())),
+            "got {watched:?}"
+        );
+    }
+
+    #[test]
+    fn a_subfolder_codex_that_is_the_codex_home_is_skipped() {
+        let (dir, repo, nested) = subfolder_repo();
+        write_config(
+            dir.path(),
+            &trusted(&nested.join("hooks.json"), "pre_tool_use", 0, 0),
+        );
+        let p = CodexHomeProjectParser {
+            project: CodexProjectParser {
+                repo_root: repo.clone(),
+            },
+            codex_home: Some(nested.clone()),
+        };
+        assert!(!has_destructive_inline(&p.assess(dir.path()).unwrap()));
+    }
+
     fn trusted_hooks_json(dir: &Path, hooks: &Path, command: &str) {
         std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
         std::fs::write(
