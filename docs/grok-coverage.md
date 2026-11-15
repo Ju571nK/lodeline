@@ -34,9 +34,18 @@ An entry of type `http` (the hooks page lists `command` and `http`) is scored on
 
 **`GROK_HOME`.** The settings page says `$GROK_HOME` moves the home folder. Lodeline reads `~/.grok` only.
 
-## Grok Build: the daemon does not find projects
+## Grok Build: how the daemon finds projects
 
-`lodeline scan` finds a Grok project when the current folder has `.grok/hooks/` or `.grok/config.toml`. The daemon has no Grok project list, because there is no `grok_workspaces` policy key, so it never watches or re-assesses a Grok project. The Cursor and Codex equivalents are `cursor_workspaces` and `codex_workspaces`. Until a key exists, run `lodeline scan` in a Grok project to see its row.
+`lodeline scan` finds a Grok project when the current folder has `.grok/hooks/` or `.grok/config.toml`. The daemon finds Grok projects through the `grok_workspaces` policy field, which works like `cursor_workspaces` and `codex_workspaces`. It lists workspace roots:
+
+```yaml
+grok_workspaces:
+  - "~/src"
+```
+
+The daemon looks one level below each root. A folder that has a `.grok/hooks/` folder or a `.grok/config.toml` file is a Grok project: the daemon scores it in the project row and watches its hook files and its `config.toml`, so a change to one of them scores the project again. A folder that has neither, such as one with only other files under `.grok/`, is not a project and gets no row.
+
+The daemon lists the projects when it starts and again on each policy reload, which `lodeline reload` or an applied signed policy starts. A project created after that is found at the next reload or restart. An agent older than the field ignores it, so upgrade agents before you sign a policy that sets it.
 
 ## Grok Build: hooks fail open
 

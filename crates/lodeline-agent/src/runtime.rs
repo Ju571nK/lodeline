@@ -197,6 +197,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     );
     let cursor_repos =
         crate::ai_guard::workspace_discovery::discover_cursor_repos(&effective.cursor_workspaces);
+    let grok_repos =
+        crate::ai_guard::workspace_discovery::discover_grok_repos(&effective.grok_workspaces);
     let antigravity_repos = crate::ai_guard::workspace_discovery::discover_per_repo(
         &effective.antigravity_workspaces,
         ".antigravity/settings.json",
@@ -216,6 +218,9 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     }
     for repo_root in &cursor_repos {
         push_cursor_synthetic_target(&mut effective, repo_root);
+    }
+    for repo_root in &grok_repos {
+        push_grok_synthetic_target(&mut effective, repo_root);
     }
     for repo_root in &antigravity_repos {
         push_antigravity_synthetic_target(&mut effective, repo_root);
@@ -268,6 +273,11 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             repo_root: repo_root.clone(),
         }));
     }
+    for repo_root in &grok_repos {
+        parsers_vec.push(Arc::new(crate::ai_guard::GrokProjectParser {
+            repo_root: repo_root.clone(),
+        }));
+    }
     for repo_root in &antigravity_repos {
         parsers_vec.push(Arc::new(crate::ai_guard::AntigravityProjectParser {
             repo_root: repo_root.clone(),
@@ -292,7 +302,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             Cursor => &cursor_repos,
             Antigravity => &antigravity_repos,
             ClaudeDesktop => &[],
-            Grok => &[], // #203: no grok_workspaces policy key; `lodeline scan` reads Grok projects
+            Grok => &grok_repos,
             Other => &[],
         }
     };
@@ -2120,6 +2130,36 @@ pub(crate) fn push_cursor_synthetic_target(
     });
 }
 
+/// #203: push synthetic WatchTargets for a Grok per-repo folder: the
+/// `config.toml` and every file under `.grok/hooks`.
+pub(crate) fn push_grok_synthetic_target(
+    effective: &mut lodeline_core::policy::EffectivePolicy,
+    repo_root: &std::path::Path,
+) {
+    let grok = repo_root.join(".grok");
+    let h = synthetic_target_id_suffix(repo_root);
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!("grok-project-{h}"),
+        description: format!("#203 synthetic: {}", repo_root.display()),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths: vec![grok.join("config.toml").to_string_lossy().to_string()],
+        recursive: false,
+        follow_symlinks: false,
+        disabled: false,
+    });
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!("grok-hooks-{h}"),
+        description: format!("#203 synthetic Grok hook files: {}", repo_root.display()),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths: vec![grok.join("hooks").join("*").to_string_lossy().to_string()],
+        recursive: true,
+        follow_symlinks: false,
+        disabled: false,
+    });
+}
+
 /// Phase 3b.3 — push ONE synthetic WatchTarget for an external hook-script
 /// path. The id encodes the owning tool's display name and a blake3 hash of
 /// the canonical path. In-memory only; never written back to disk.
@@ -2352,6 +2392,28 @@ mod tests {
             100,
         );
         assert_eq!(listed, vec![skill.join("SKILL.md")]);
+    }
+
+    #[test]
+    fn grok_project_target_watches_config_and_hook_files() {
+        let repo = std::path::Path::new("/repo");
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_grok_synthetic_target(&mut effective, repo);
+        let paths: Vec<&std::path::Path> = effective
+            .targets
+            .iter()
+            .filter(|t| t.id.starts_with("grok-"))
+            .flat_map(|t| &t.paths)
+            .map(std::path::Path::new)
+            .collect();
+        assert!(paths.contains(&repo.join(".grok").join("config.toml").as_path()));
+        assert!(paths.contains(&repo.join(".grok").join("hooks").join("*").as_path()));
     }
 
     #[test]
