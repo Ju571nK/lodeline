@@ -388,4 +388,14 @@ mod tests {
         assert_eq!(m[0].value, "Bash");
         assert_eq!(m[1].value, ".*");
     }
+
+    #[test]
+    fn eval_toml_parse_error_names_the_place_and_not_the_source_line() {
+        let text = "ok = 1\nkey = \"test-value-0\" trailing\n";
+        let err = eval_toml(text, "$.key", &p()).unwrap_err();
+        for shown in [err.to_string(), format!("{err:?}")] {
+            assert_eq!(shown.matches("test-value-0").count(), 0, "{shown}");
+            assert!(shown.contains("line 2, column"), "{shown}");
+        }
+    }
 }

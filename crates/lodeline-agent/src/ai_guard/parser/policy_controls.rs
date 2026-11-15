@@ -606,4 +606,16 @@ mod tests {
         std::fs::write(&path, " ".repeat(MAX_POLICY_BYTES as usize + 1)).unwrap();
         assert!(claude_controls(dir.path()).is_err());
     }
+
+    #[test]
+    fn codex_toml_parse_error_names_the_place_and_not_the_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("requirements.toml");
+        std::fs::write(&path, "ok = 1\nallow_remote_control = test-value-0\n").unwrap();
+        let err = codex_controls(&path).unwrap_err();
+        for shown in [err.to_string(), format!("{err:?}")] {
+            assert_eq!(shown.matches("test-value-0").count(), 0, "{shown}");
+            assert!(shown.contains("line 2, column"), "{shown}");
+        }
+    }
 }
