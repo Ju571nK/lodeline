@@ -8,6 +8,13 @@
 //! - MCP servers: `[mcp_servers.<name>]` in the user and project
 //!   `config.toml`, except one with `enabled = false`.
 //!
+//! - managed and requirements files: `~/.grok/managed_config.toml`,
+//!   `~/.grok/requirements.toml` and the same names under `/etc/grok`. Grok 1.0.77
+//!   reads the same `[[hooks.<Event>]]` and `[mcp_servers]` tables from them. A
+//!   managed hook always runs; the others wait for folder trust, and a file here
+//!   is scored either way. A hook group without an inner `hooks` array does not
+//!   load, so it adds nothing.
+//!
 //! Hook files hold Claude's matcher groups and the `config.toml` table Codex's,
 //! so each goes through that tool's emitter. Grok runs a hook only in a trusted
 //! folder; like the other project parsers, a committed file is scored whether
@@ -15,6 +22,7 @@
 //! hooks and MCP servers, which the Claude and Cursor parsers already score.
 
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
+use crate::ai_guard::rule_pack::selector::toml_parse_error;
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -74,10 +82,7 @@ fn read_config(path: &Path) -> Result<Option<toml::Value>, AssessError> {
     };
     toml::from_str(&text)
         .map(Some)
-        .map_err(|e| AssessError::Parse {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })
+        .map_err(|e| toml_parse_error(path, &text, &e))
 }
 
 fn emit_mcp_reasons(config: &toml::Value, out: &mut Vec<AiGuardReason>) {
@@ -111,6 +116,34 @@ fn assess_dir(grok: &Path, config_hooks: bool) -> Result<Vec<AiGuardReason>, Ass
     Ok(out)
 }
 
+/// `/etc/grok` holds the root-owned layer. Windows has no such layer.
+fn system_dir() -> Option<PathBuf> {
+    cfg!(not(windows)).then(|| PathBuf::from("/etc/grok"))
+}
+
+const POLICY_FILES: [&str; 2] = ["managed_config.toml", "requirements.toml"];
+
+fn emit_policy_file(path: &Path, out: &mut Vec<AiGuardReason>) -> Result<(), AssessError> {
+    if let Some(config) = read_config(path)? {
+        super::codex::emit_hook_reasons(&config, |_, _, _| true, None, out);
+        emit_mcp_reasons(&config, out);
+    }
+    Ok(())
+}
+
+/// The user folder plus the managed and requirements files of the user and
+/// system layers, which Grok loads for every session.
+fn assess_user(home_dir: &Path, system: Option<&Path>) -> Result<Vec<AiGuardReason>, AssessError> {
+    let grok = home_dir.join(".grok");
+    let mut out = assess_dir(&grok, true)?;
+    for dir in system.into_iter().chain([grok.as_path()]) {
+        for name in POLICY_FILES {
+            emit_policy_file(&dir.join(name), &mut out)?;
+        }
+    }
+    Ok(out)
+}
+
 fn watched(grok: &Path) -> Vec<PathBuf> {
     vec![grok.join("hooks"), grok.join("config.toml")]
 }
@@ -127,10 +160,15 @@ impl AiGuardParser for GrokParser {
     // shortcut: `GROK_HOME` moves `~/.grok` and is not followed, as for the
     // installer; read it here if a host is found relying on it.
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
-        watched(&home_dir.join(".grok"))
+        let grok = home_dir.join(".grok");
+        let mut paths = watched(&grok);
+        for dir in system_dir().into_iter().chain([grok]) {
+            paths.extend(POLICY_FILES.map(|name| dir.join(name)));
+        }
+        paths
     }
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        assess_dir(&home_dir.join(".grok"), true)
+        assess_user(home_dir, system_dir().as_deref())
     }
 }
 
@@ -326,5 +364,144 @@ command = "rm -rf /tmp/project-config"
                 .any(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })),
             "{out:?}"
         );
+    }
+
+    const MANAGED: &str = r#"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+hooks = [{ type = "command", command = "rm -rf /tmp/managed" }]
+
+[mcp_servers.org]
+command = "org-mcp"
+
+[mcp_servers.off]
+url = "https://off.example/mcp"
+enabled = false
+"#;
+
+    fn user_assess(home: &Path, etc: &Path) -> Vec<AiGuardReason> {
+        assess_user(home, Some(etc)).unwrap()
+    }
+
+    #[test]
+    fn user_managed_and_requirements_files_are_read() {
+        let home = tempdir().unwrap();
+        let grok = home.path().join(".grok");
+        write(&grok.join("managed_config.toml"), MANAGED);
+        write(
+            &grok.join("requirements.toml"),
+            &MANAGED.replace("managed", "pinned"),
+        );
+        let out = GrokParser.assess(home.path()).unwrap();
+        assert_eq!(
+            destructive(&out),
+            ["rm -rf /tmp/managed", "rm -rf /tmp/pinned"],
+            "{out:?}"
+        );
+        assert!(out.iter().any(|r| matches!(
+            r,
+            AiGuardReason::McpServerLocalCommand { server_name, .. } if server_name == "org"
+        )));
+        assert!(
+            !out.iter()
+                .any(|r| matches!(r, AiGuardReason::McpServerRemote { .. })),
+            "a disabled server does not start; got {out:?}"
+        );
+    }
+
+    #[test]
+    fn system_managed_and_requirements_files_are_read() {
+        let home = tempdir().unwrap();
+        let etc = tempdir().unwrap();
+        write(&etc.path().join("managed_config.toml"), MANAGED);
+        write(
+            &etc.path().join("requirements.toml"),
+            &MANAGED.replace("managed", "system"),
+        );
+        let out = user_assess(home.path(), etc.path());
+        assert_eq!(
+            destructive(&out),
+            ["rm -rf /tmp/managed", "rm -rf /tmp/system"],
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn hook_group_without_inner_hooks_adds_nothing() {
+        let home = tempdir().unwrap();
+        write(
+            &home.path().join(".grok").join("managed_config.toml"),
+            "[[hooks.PreToolUse]]\ntype = \"command\"\ncommand = \"rm -rf /tmp/flat\"\n",
+        );
+        let out = GrokParser.assess(home.path()).unwrap();
+        assert!(destructive(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn corrupt_managed_file_is_a_parse_error() {
+        let home = tempdir().unwrap();
+        let etc = tempdir().unwrap();
+        write(&etc.path().join("requirements.toml"), "[[hooks.PreToolUse");
+        assert!(matches!(
+            assess_user(home.path(), Some(etc.path())).unwrap_err(),
+            AssessError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn project_folder_does_not_read_managed_files() {
+        let repo = tempdir().unwrap();
+        write(
+            &repo.path().join(".grok").join("managed_config.toml"),
+            MANAGED,
+        );
+        let p = GrokProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        };
+        assert!(p.assess(Path::new("/unused")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn watched_paths_include_both_managed_files_of_each_layer() {
+        let home = Path::new("/home/alice");
+        let watched = GrokParser.watched_paths(home);
+        for name in ["managed_config.toml", "requirements.toml"] {
+            assert!(
+                watched.contains(&home.join(".grok").join(name)),
+                "{watched:?}"
+            );
+        }
+        #[cfg(unix)]
+        for name in ["managed_config.toml", "requirements.toml"] {
+            assert!(
+                watched.contains(&Path::new("/etc/grok").join(name)),
+                "{watched:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_file_error_names_the_place_and_never_echoes_the_line() {
+        const SECRET: &str = "test-value-0";
+        let body = format!(
+            "[mcp_servers.x]\ncommand = \"node\"\nheaders = {{ a = \"{SECRET}\" \nbroken\n"
+        );
+        let duplicate = format!("{SECRET} = 1\n{SECRET} = 2\n");
+        for body in [body, duplicate] {
+            for name in ["config.toml", "managed_config.toml", "requirements.toml"] {
+                let home = tempdir().unwrap();
+                write(&home.path().join(".grok").join(name), &body);
+                let error = GrokParser.assess(home.path()).unwrap_err();
+                let shown = error.to_string();
+                let AssessError::Parse { message, .. } = &error else {
+                    panic!("{error:?}");
+                };
+                let json = serde_json::to_string(message).unwrap();
+                for text in [&shown, message, &json] {
+                    assert_eq!(text.matches(SECRET).count(), 0, "{name}: {text}");
+                }
+                assert!(message.contains("line "), "{name}: {message}");
+            }
+        }
     }
 }
