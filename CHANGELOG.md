@@ -17,6 +17,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   is written, and the 64-folder watch limit for each project is now shared by skills, subagents and
   commands. A score can rise where a command file declares hooks.
 
+### Fixed
+
+- `lodeline scan` at the root of a repository whose only Codex file is `.codex/hooks.json` or a `.codex/rules/` folder now reports the Codex project row. It gave no row before, though the Codex project parser reads those files.
+
 ## [0.16.0] - 2026-11-15
 
 **Upgrade.** This release adds one policy field, `grok_workspaces`, and one reason kind,
