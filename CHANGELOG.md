@@ -34,6 +34,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   agent are unaffected. An agent that predates the field ignores it. Upgrade agents before you
   sign a policy that sets it; an older agent accepts it and skips Grok projects without a warning.
 
+- **AI Guard reads the Grok Build managed and requirements files.** The Grok user row now also
+  reads `managed_config.toml` and `requirements.toml` from `~/.grok` and from `/etc/grok`, and
+  reports the hooks and MCP servers an organization pins there through the existing hook and MCP
+  reasons. A file here is scored whether or not Grok trusts the folder, and a signed and an unsigned
+  `requirements.toml` are scored alike. A host with none of these files scores as before. A file
+  that does not parse is a read error for that row. A project's `.grok` folder is unchanged. Under
+  the default policy no watch target covers `~/.grok`, so a created or edited file is scored at
+  the next 24 hour heartbeat or at agent start, unless a policy target covers the folder.
+
 - **The agent watches nested and inherited Claude Code skill and subagent folders.** With the agent
   running, a skill or subagent file in a `.claude/skills` or `.claude/agents` folder of a subfolder,
   of a parent folder up to the repository root, or of the main checkout of a worktree is assessed
@@ -79,7 +88,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 ### Fixed
 
 - **The Codex scanner no longer echoes a line of a malformed `config.toml`.** A parse error of a Codex config file used to carry the TOML library's quote of the bad line, so a line that held a header value or another secret reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line and the column and says the file is invalid TOML, and never the line or a key name.
-
+- **The Grok scanner no longer echoes a line of a malformed TOML file.** A parse error of `config.toml`, `managed_config.toml` or `requirements.toml` under `~/.grok` or `/etc/grok` used to carry the TOML library's quote of the bad line, so a secret on that line reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line, the column and a short kind of error, and never the line itself. Refs #203.
 - **AI Guard reads a project hook script that is named through `CLAUDE_PROJECT_DIR`.** A Claude Code hook in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project, such as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`, was reported as not scanned (`external_script_unscanned`), and `bash "$CLAUDE_PROJECT_DIR"/x.sh` was read as an inline command, so the script was never read. The variable now stands for the project root, in the spellings the hook's shell expands (`$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, each bare or in double quotes). A hook with `args` has no shell, so only the unquoted `${CLAUDE_PROJECT_DIR}` form is read, and on Windows only the braced form. A user or managed hook, a Codex hook and a Cursor hook keep the old result, because the agent does not know their project root. A project score can rise where a script that was never read holds a destructive command. (#628)
 - **A TOML parse error in an AI Guard file no longer quotes the source line.** When a rule pack file or a Codex `requirements.toml` was not valid TOML, the error carried the `toml` crate's text, which prints the offending line. A line that held a credential reached the `lodeline scan` error and the daemon log. The error now names the file, the line and the column and says the file is invalid TOML. No reason kind, event field or policy field is added.
 
@@ -87,7 +96,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Documentation
 
-- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
+- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
 
 ## [0.15.1] - 2026-11-15
 
