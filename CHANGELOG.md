@@ -24,8 +24,8 @@ or SELinux module changed.
 skill or subagent, a script named through `$CLAUDE_PROJECT_DIR`, a subfolder `.codex/` layer, a
 static credential header on a Codex MCP server, or a Grok Build managed or requirements file
 holds a finding that was not read before. The agent walks more folders at start and at each
-policy reload (nested Claude Code components and Codex subfolder layers), bounded by the caps the
-entries below name, and `lodeline scan` at the root of a Git repository that has no root Codex
+policy reload (nested Claude Code components and Codex subfolder layers), bounded by fixed caps
+(20,000 folders and depth 8 for Claude Code components, 2,000 folders and depth 5 for Codex layers), and `lodeline scan` at the root of a Git repository that has no root Codex
 files walks up to 2,000 folders. A parse error in a Codex, Grok or rule pack TOML
 file now names only the place of the error.
 
