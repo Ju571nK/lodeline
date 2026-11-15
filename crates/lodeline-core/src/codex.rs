@@ -97,8 +97,8 @@ pub enum HooksFeature {
     },
 }
 
-/// The `toml` error message can quote the offending key or value, which can
-/// be a credential, so keep only the kind and where it is.
+/// The `toml` error message can quote the offending key, value or source
+/// line, which can hold a credential, so keep only the kind and where it is.
 pub fn toml_error_place(text: &str, e: &toml::de::Error) -> String {
     let place = e
         .span()
@@ -376,6 +376,16 @@ mod tests {
         };
         assert_eq!(path, &root.path().join("home").join("config.toml"));
         assert!(got.warning().unwrap().starts_with("cannot read "));
+    }
+
+    #[test]
+    fn toml_error_place_counts_line_and_column_in_characters() {
+        let text = "ok = 1\nname = \"\u{e9}\" trailing\n";
+        let e = toml::from_str::<Value>(text).unwrap_err();
+        assert_eq!(
+            toml_error_place(text, &e),
+            "invalid TOML at line 2, column 12"
+        );
     }
 
     #[test]
