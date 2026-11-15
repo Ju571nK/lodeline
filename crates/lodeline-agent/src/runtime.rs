@@ -2130,7 +2130,7 @@ pub(crate) fn push_cursor_synthetic_target(
     });
 }
 
-/// #203 — push synthetic WatchTargets for a Grok per-repo folder: the
+/// #203: push synthetic WatchTargets for a Grok per-repo folder: the
 /// `config.toml` and every file under `.grok/hooks`.
 pub(crate) fn push_grok_synthetic_target(
     effective: &mut lodeline_core::policy::EffectivePolicy,

@@ -112,7 +112,7 @@ pub fn discover_cursor_repos(roots: &[String]) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
-/// #203 — Grok repos by a `.grok/hooks` folder or a `.grok/config.toml`,
+/// #203: Grok repos by a `.grok/hooks` folder or a `.grok/config.toml`,
 /// the two project sources `GrokProjectParser` reads. Union, deduped by
 /// canonical path.
 pub fn discover_grok_repos(roots: &[String]) -> Vec<PathBuf> {
