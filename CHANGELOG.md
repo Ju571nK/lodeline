@@ -28,6 +28,18 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   went from 0.0 to 4.0, and one that holds it at the root and in two subfolders went from 4.0 to
   10.0. Refs #200.
 
+- **The AI Guard user score of a host that has `~/.claude/settings.local.json` changes.** The Claude
+  Code user row now reads `~/.claude/settings.json` only, as the Claude Code settings page defines
+  the user scope. Before, it also merged `~/.claude/settings.local.json`, which Claude Code treats
+  as project-local settings, so a `defaultMode`, a hook, a broad allow rule or an
+  `allowedHttpHookUrls` list in that file moved the score of every session on the host. The file is
+  still read as the local file of a project whose folder is the home folder, so `lodeline scan` run
+  in the home folder, or a workspace entry for it, still reports it in the `project` row. A
+  `settings.local.json` in a `CLAUDE_CONFIG_DIR` folder is not read. The user score drops where that
+  file added a finding, and it rises where the file turned off a finding that `settings.json` gives,
+  for example through a `defaultMode`, `disableAllHooks`, `disableAutoMode` or a deny rule. No
+  reason kind, event field or policy field is added. The default watch targets are unchanged.
+
 ### Fixed
 
 - **AI Guard reads a project hook script that is named through `CLAUDE_PROJECT_DIR`.** A Claude Code hook in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project, such as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`, was reported as not scanned (`external_script_unscanned`), and `bash "$CLAUDE_PROJECT_DIR"/x.sh` was read as an inline command, so the script was never read. The variable now stands for the project root, in the spellings the hook's shell expands (`$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, each bare or in double quotes). A hook with `args` has no shell, so only the unquoted `${CLAUDE_PROJECT_DIR}` form is read, and on Windows only the braced form. A user or managed hook, a Codex hook and a Cursor hook keep the old result, because the agent does not know their project root. A project score can rise where a script that was never read holds a destructive command. (#628)
