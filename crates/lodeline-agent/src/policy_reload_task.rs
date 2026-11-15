@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 /// existing parsers we examine).
 /// `new_repos`: the freshly-discovered repo set from `discover_per_repo`.
 /// `make_parser`: closure that builds the per-tool parser from a repo root.
-fn reconcile_per_repo<P, F>(
+fn reconcile_per_repo<F>(
     guard: &mut parking_lot::RwLockWriteGuard<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>,
     state: &Arc<parking_lot::RwLock<crate::ai_guard::task::StateMap>>,
     tool: lodeline_core::event::AiTool,
@@ -37,8 +37,7 @@ fn reconcile_per_repo<P, F>(
     make_parser: F,
 ) -> (Vec<PathBuf>, Vec<PathBuf>)
 where
-    P: crate::ai_guard::parser::AiGuardParser + 'static,
-    F: Fn(PathBuf) -> P,
+    F: Fn(PathBuf) -> Arc<dyn crate::ai_guard::parser::AiGuardParser>,
 {
     let mut old_repos: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     guard.retain(|p| {
@@ -62,7 +61,7 @@ where
     let added: Vec<PathBuf> = new_repos.difference(&old_repos).cloned().collect();
     let removed: Vec<PathBuf> = old_repos.difference(new_repos).cloned().collect();
     for repo_root in &added {
-        guard.push(Arc::new(make_parser(repo_root.clone())));
+        guard.push(make_parser(repo_root.clone()));
     }
     if !removed.is_empty() {
         let mut s = state.write();
@@ -238,6 +237,9 @@ pub struct ReloadCtx {
     /// The rule-pack file the last load read, as [`rule_packs_on_disk`] gives it. A
     /// root tick reloads when the disk no longer matches it.
     pub rule_packs_read: (PathBuf, Option<Vec<u8>>),
+    /// The agent's own home, the user scope whose `.claude` folders no project
+    /// target watches a second time.
+    pub home_dir: PathBuf,
 }
 
 /// The rule-pack file in force and its bytes, `None` when it cannot be read. Take it
@@ -475,6 +477,34 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         }
     };
 
+    // The nested and subfolder walks run here, before the parsers guard, so a
+    // reader of `ctx.parsers` is never held across a directory walk.
+    let claude_built: std::collections::BTreeMap<
+        PathBuf,
+        Arc<crate::ai_guard::ClaudeCodeProjectParser>,
+    > = new_claude
+        .iter()
+        .map(|p| {
+            (
+                p.clone(),
+                Arc::new(crate::ai_guard::ClaudeCodeProjectParser::new(
+                    p.clone(),
+                    ctx.home_dir.clone(),
+                )),
+            )
+        })
+        .collect();
+    let codex_built: std::collections::BTreeMap<PathBuf, Arc<crate::ai_guard::CodexProjectParser>> =
+        new_codex
+            .iter()
+            .map(|p| {
+                (
+                    p.clone(),
+                    Arc::new(crate::ai_guard::CodexProjectParser::new(p.clone())),
+                )
+            })
+            .collect();
+
     let (
         continue_added,
         continue_removed,
@@ -499,67 +529,77 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::ContinueDev,
             &new_continue,
-            |p| crate::ai_guard::ContinueDevProjectParser { repo_root: p },
+            |p| Arc::new(crate::ai_guard::ContinueDevProjectParser { repo_root: p }),
         );
-        let (a2, r2) = reconcile_per_repo(
-            &mut guard,
-            &ctx.ai_guard_state,
-            lodeline_core::event::AiTool::ClaudeCode,
-            &new_claude,
-            |p| crate::ai_guard::ClaudeCodeProjectParser { repo_root: p },
-        );
-        // #200. A kept Codex parser is built again, so its subfolder `.codex/`
-        // layers are walked again at this discovery.
+        // A kept Claude Code parser is swapped for the one built above, so its
+        // nested component folders are those of this discovery. Codex is the
+        // same, for its subfolder `.codex/` layers (#200).
         for p in guard.iter_mut() {
             let is_pack = p
                 .as_any()
                 .downcast_ref::<crate::ai_guard::rule_pack::parser::RulePackParser>()
                 .is_some();
-            if let (
-                false,
-                lodeline_core::event::AiTool::Codex,
-                lodeline_core::event::AiGuardScope::Project { path },
-            ) = (is_pack, p.tool(), p.scope())
-            {
-                if new_codex.contains(&path) {
-                    *p = Arc::new(crate::ai_guard::CodexProjectParser::new(path));
+            if is_pack {
+                continue;
+            }
+            let lodeline_core::event::AiGuardScope::Project { path } = p.scope() else {
+                continue;
+            };
+            match p.tool() {
+                lodeline_core::event::AiTool::ClaudeCode => {
+                    if let Some(built) = claude_built.get(&path) {
+                        *p = built.clone();
+                    }
                 }
+                lodeline_core::event::AiTool::Codex => {
+                    if let Some(built) = codex_built.get(&path) {
+                        *p = built.clone();
+                    }
+                }
+                _ => {}
             }
         }
+        let (a2, r2) = reconcile_per_repo(
+            &mut guard,
+            &ctx.ai_guard_state,
+            lodeline_core::event::AiTool::ClaudeCode,
+            &new_claude,
+            |p| claude_built[&p].clone(),
+        );
         let (a3, r3) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Codex,
             &new_codex,
-            crate::ai_guard::CodexProjectParser::new,
+            |p| codex_built[&p].clone(),
         );
         let (a4, r4) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Gemini,
             &new_gemini,
-            |p| crate::ai_guard::GeminiProjectParser { repo_root: p },
+            |p| Arc::new(crate::ai_guard::GeminiProjectParser { repo_root: p }),
         );
         let (a5, r5) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Cursor,
             &new_cursor,
-            |p| crate::ai_guard::CursorProjectParser { repo_root: p },
+            |p| Arc::new(crate::ai_guard::CursorProjectParser { repo_root: p }),
         );
         let (a6, r6) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Grok,
             &new_grok,
-            |p| crate::ai_guard::GrokProjectParser { repo_root: p },
+            |p| Arc::new(crate::ai_guard::GrokProjectParser { repo_root: p }),
         );
         let (a7, r7) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Antigravity,
             &new_antigravity,
-            |p| crate::ai_guard::AntigravityProjectParser { repo_root: p },
+            |p| Arc::new(crate::ai_guard::AntigravityProjectParser { repo_root: p }),
         );
         let (rp_added, rp_removed) = reconcile_rule_packs(
             &mut guard,
@@ -576,8 +616,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     for repo_root in &new_continue {
         crate::runtime::push_continue_synthetic_target(&mut effective, repo_root);
     }
-    for repo_root in &new_claude {
-        crate::runtime::push_claude_code_synthetic_targets(&mut effective, repo_root);
+    for parser in claude_built.values() {
+        crate::runtime::push_claude_code_synthetic_targets(&mut effective, parser);
     }
     for repo_root in &new_codex {
         crate::runtime::push_codex_synthetic_target(&mut effective, repo_root);
@@ -642,13 +682,9 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     {
         let parsers_snapshot: Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>> =
             ctx.parsers.read().clone();
-        let home_dir = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
         crate::runtime::discover_and_register_ext_scripts(
             &parsers_snapshot,
-            &home_dir,
+            &ctx.home_dir,
             &ctx.ext_scripts,
             &mut effective,
         );
@@ -808,6 +844,7 @@ mod tests {
                 last_good_bundle: None,
                 unfinished: Vec::new(),
                 applied_policy: None,
+                home_dir: dir.join("home"),
             },
             plat,
             targets_rx,
@@ -876,6 +913,7 @@ mod tests {
                 last_good_bundle: None,
                 unfinished: Vec::new(),
                 applied_policy: None,
+                home_dir: dir.join("home"),
             },
             plat,
             targets_rx,
@@ -1435,6 +1473,141 @@ mod tests {
             has,
             "expected ClaudeCodeProjectParser for repoA after reload"
         );
+    }
+
+    fn nested_target_matches(
+        targets: &watch::Receiver<Arc<Vec<CompiledTarget>>>,
+        file: &std::path::Path,
+    ) -> bool {
+        targets.borrow().iter().any(|t| {
+            t.id.starts_with("claude_code-nested-components-")
+                && t.globs.iter().any(|g| g.is_match(file))
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_watches_nested_skill_folder_of_a_repo_under_an_added_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dunce::canonicalize(dir.path()).unwrap().join("ws");
+        let repo = workspace.join("repoA");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        let nested = repo.join("apps/web/.claude/skills/x/SKILL.md");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "x").unwrap();
+
+        let initial = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, targets, _parsers, _state) =
+            build_ctx_with_parsers(dir.path(), initial);
+        reload(&mut ctx, &plat);
+        assert!(!nested_target_matches(&targets, &nested));
+
+        let updated = format!(
+            "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(nested_target_matches(&targets, &nested));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_rebuilds_the_kept_claude_parser_so_a_new_nested_folder_is_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dunce::canonicalize(dir.path()).unwrap().join("ws");
+        let repo = workspace.join("repoA");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        let policy = format!(
+            "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        let (mut ctx, plat, targets, _parsers, _state) =
+            build_ctx_with_parsers(dir.path(), &policy);
+        reload(&mut ctx, &plat);
+        let later = repo.join("apps/web/.claude/skills/x/SKILL.md");
+        std::fs::create_dir_all(later.parent().unwrap()).unwrap();
+        std::fs::write(&later, "x").unwrap();
+        assert!(!nested_target_matches(&targets, &later));
+        reload(&mut ctx, &plat);
+        assert!(nested_target_matches(&targets, &later));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_walks_the_repositories_without_the_parsers_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dunce::canonicalize(dir.path()).unwrap().join("ws");
+        let claude_repo = workspace.join("claudeRepo");
+        std::fs::create_dir_all(claude_repo.join(".claude/skills/a")).unwrap();
+        std::fs::write(claude_repo.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(claude_repo.join("apps/web/.claude/skills/x")).unwrap();
+        let codex_repo = workspace.join("codexRepo");
+        std::fs::create_dir_all(codex_repo.join(".codex")).unwrap();
+        std::fs::write(codex_repo.join(".codex/config.toml"), "").unwrap();
+        std::fs::create_dir_all(codex_repo.join("svc/.codex")).unwrap();
+        std::fs::write(codex_repo.join("svc/.codex/hooks.json"), "{}").unwrap();
+        let policy = format!(
+            "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{ws}'\ncodex_workspaces:\n  - '{ws}'\ntargets: []\n",
+            ws = workspace.display()
+        );
+        let (mut ctx, plat, _targets, parsers, _state) =
+            build_ctx_with_parsers(dir.path(), &policy);
+
+        let walks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let free_walks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let parsers = parsers.clone();
+            let walks = walks.clone();
+            let free_walks = free_walks.clone();
+            crate::ai_guard::workspace_discovery::walk_probe::set(move || {
+                walks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if parsers.try_write().is_some() {
+                    free_walks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+        }
+        reload(&mut ctx, &plat);
+        crate::ai_guard::workspace_discovery::walk_probe::clear();
+
+        let walked = walks.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(walked >= 2, "reload walked {walked} times");
+        assert_eq!(
+            free_walks.load(std::sync::atomic::Ordering::SeqCst),
+            walked,
+            "every walk must run with the parsers guard free"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_leaves_the_home_claude_folders_to_the_user_row() {
+        use crate::ai_guard::parser::AiGuardParser;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dunce::canonicalize(dir.path()).unwrap().join("home");
+        let repo = home.join("code/proj");
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        let user_skill = home.join(".claude/skills/x/SKILL.md");
+        std::fs::create_dir_all(user_skill.parent().unwrap()).unwrap();
+        std::fs::write(&user_skill, "x").unwrap();
+        let own_skill = repo.join("sub/.claude/skills/y/SKILL.md");
+        std::fs::create_dir_all(own_skill.parent().unwrap()).unwrap();
+        std::fs::write(&own_skill, "x").unwrap();
+
+        let policy = format!(
+            "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+            home.join("code").display()
+        );
+        let (mut ctx, plat, targets, _parsers, _state) =
+            build_ctx_with_parsers(dir.path(), &policy);
+        ctx.home_dir = home.clone();
+        reload(&mut ctx, &plat);
+
+        assert!(nested_target_matches(&targets, &own_skill));
+        assert!(!nested_target_matches(&targets, &user_skill));
+        let user_row = crate::ai_guard::ClaudeCodeParser::default().watched_paths(&home);
+        assert!(user_row.contains(&home.join(".claude/skills")));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

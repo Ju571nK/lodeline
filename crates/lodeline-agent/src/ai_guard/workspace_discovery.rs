@@ -137,6 +137,31 @@ const SUBFOLDER_WALK_MAX_DEPTH: usize = 5;
 const SUBFOLDER_WALK_MAX_DIRS: usize = 2_000;
 const SUBFOLDER_WALK_SKIP: [&str; 3] = ["node_modules", "target", "vendor"];
 
+#[cfg(test)]
+pub(crate) mod walk_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set(hook: impl Fn() + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(crate) fn clear() {
+        HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    pub(crate) fn fire() {
+        HOOK.with(|h| {
+            if let Some(hook) = h.borrow().as_ref() {
+                hook();
+            }
+        });
+    }
+}
+
 /// #200. The `.codex/` folders strictly below `repo_root` that hold a
 /// `config.toml`, a `hooks.json` or a `rules` folder. Codex layers every
 /// `.codex/` from the project root down to the folder a session starts in, and
@@ -146,6 +171,8 @@ const SUBFOLDER_WALK_SKIP: [&str; 3] = ["node_modules", "target", "vendor"];
 /// its own `.git` entry is a nested repository or submodule, which Codex takes
 /// as its own project root, so the walk does not enter it.
 pub fn codex_subfolder_dirs(repo_root: &Path) -> Vec<PathBuf> {
+    #[cfg(test)]
+    walk_probe::fire();
     let mut found = Vec::new();
     let mut queue = std::collections::VecDeque::from([(repo_root.to_path_buf(), 0usize)]);
     let mut visited = 0usize;

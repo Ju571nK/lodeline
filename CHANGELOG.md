@@ -20,6 +20,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- When the agent's own home folder is in a repository's parent chain, the home `.claude` skills, subagents and commands folders are left to the user row and are no longer also watch roots of the project. With the default user target on, events were already deduplicated, so the visible change is fewer watch roots and, with the user target off, no project-row event for a user file.
+- A policy reload no longer holds the AI Guard parser list while it walks repositories for Codex subfolder layers. Since v0.16.0 that walk ran under the lock, up to about 0.2 seconds per repository at the 2,000-folder cap, and AI Guard assessments waited for it.
 - The agent now finds a repository in a Codex workspace whose only Codex file is a `.codex/rules/` folder at its root, so its standing command approvals are scored and a later rule change is reassessed. Only `lodeline scan` found such a repository before.
 - `lodeline scan` at the root of a repository whose only Codex file is `.codex/hooks.json` or a `.codex/rules/` folder now reports the Codex project row. It gave no row before, though the Codex project parser reads those files.
 
