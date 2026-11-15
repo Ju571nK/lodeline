@@ -180,6 +180,7 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
 /// daemon (`workspace_discovery`), but applied to `dir` directly rather than to
 /// its subdirectories.
 fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<dyn AiGuardParser>> {
+    use crate::ai_guard::workspace_discovery::codex_subfolder_dirs;
     use crate::ai_guard::{
         AntigravityProjectParser, ClaudeCodeProjectParser, CodexHomeProjectParser,
         CodexProjectParser, ContinueDevProjectParser, CursorProjectParser, GeminiProjectParser,
@@ -205,8 +206,13 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
     {
         out.push(Arc::new(ClaudeCodeProjectParser { repo_root: root() }));
     }
-    // Codex: .codex/config.toml | AGENTS.md
-    if has(".codex/config.toml") || has("AGENTS.md") {
+    // Codex: .codex/config.toml | AGENTS.md | a Git repository whose only Codex
+    // files sit in a subfolder `.codex/`. The walk runs only for a Git repository
+    // with neither root marker, as the daemon's discovery does.
+    if has(".codex/config.toml")
+        || has("AGENTS.md")
+        || (has(".git") && !codex_subfolder_dirs(dir).is_empty())
+    {
         out.push(Arc::new(CodexHomeProjectParser {
             project: CodexProjectParser::new(root()),
             codex_home,
