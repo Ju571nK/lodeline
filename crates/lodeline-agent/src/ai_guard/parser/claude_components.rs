@@ -74,6 +74,8 @@ fn nested_component_dirs(repo_root: &Path) -> Vec<PathBuf> {
 /// [`MAX_WATCHED_COMPONENT_DIRS`]. A folder created after this call is not
 /// covered until the next call.
 pub(crate) fn watched_nested_dirs(repo_root: &Path, home: &Path) -> Vec<PathBuf> {
+    #[cfg(test)]
+    crate::ai_guard::workspace_discovery::walk_probe::fire();
     let room =
         MAX_WATCHED_COMPONENT_DIRS.saturating_sub(inherited_component_dirs(repo_root, home).len());
     let mut nested = nested_component_dirs(repo_root);

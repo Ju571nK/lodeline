@@ -77,8 +77,7 @@ pub trait AiGuardParser: Send + Sync {
     /// Phase 3b.7 — downcast hook for hot-reload reconciliation. Default
     /// returns a static unit reference; RulePackParser overrides to return
     /// `self` so policy_reload_task can identify rule pack parsers and
-    /// reconcile them by id, and ClaudeCodeProjectParser so reload can read
-    /// the nested folders it found. The other hardcoded parsers don't need
+    /// reconcile them by id. The other hardcoded parsers don't need
     /// downcasting (they're identified structurally by tool+scope).
     fn as_any(&self) -> &dyn std::any::Any {
         &()

@@ -1676,14 +1676,19 @@ pub struct ClaudeCodeProjectParser {
     /// parser is built at discovery or reload, so a file change does not walk
     /// the tree.
     nested: Vec<PathBuf>,
+    /// The user's home, whose `.claude` folders belong to the user row.
+    home: PathBuf,
 }
 
 impl ClaudeCodeProjectParser {
-    /// Walks `repo_root` for nested component folders. `home` is the user's
-    /// home, whose `.claude` folders belong to the user row.
-    pub fn new(repo_root: PathBuf, home: &Path) -> Self {
-        let nested = super::claude_components::watched_nested_dirs(&repo_root, home);
-        Self { repo_root, nested }
+    /// Walks `repo_root` for nested component folders.
+    pub fn new(repo_root: PathBuf, home: PathBuf) -> Self {
+        let nested = super::claude_components::watched_nested_dirs(&repo_root, &home);
+        Self {
+            repo_root,
+            nested,
+            home,
+        }
     }
 
     /// A parser that assesses `repo_root` and does not report nested folders
@@ -1692,11 +1697,16 @@ impl ClaudeCodeProjectParser {
         Self {
             repo_root,
             nested: Vec::new(),
+            home: PathBuf::new(),
         }
     }
 
     pub(crate) fn nested_dirs(&self) -> &[PathBuf] {
         &self.nested
+    }
+
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
     }
 }
 
@@ -1709,10 +1719,6 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         AiGuardScope::Project {
             path: self.repo_root.clone(),
         }
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {

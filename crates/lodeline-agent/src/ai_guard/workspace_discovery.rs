@@ -145,7 +145,34 @@ const SUBFOLDER_WALK_SKIP: [&str; 3] = ["node_modules", "target", "vendor"];
 /// `node_modules`, `target` and `vendor`, and follows no symlink. A folder with
 /// its own `.git` entry is a nested repository or submodule, which Codex takes
 /// as its own project root, so the walk does not enter it.
+#[cfg(test)]
+pub(crate) mod walk_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set(hook: impl Fn() + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(crate) fn clear() {
+        HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    pub(crate) fn fire() {
+        HOOK.with(|h| {
+            if let Some(hook) = h.borrow().as_ref() {
+                hook();
+            }
+        });
+    }
+}
+
 pub fn codex_subfolder_dirs(repo_root: &Path) -> Vec<PathBuf> {
+    #[cfg(test)]
+    walk_probe::fire();
     let mut found = Vec::new();
     let mut queue = std::collections::VecDeque::from([(repo_root.to_path_buf(), 0usize)]);
     let mut visited = 0usize;
