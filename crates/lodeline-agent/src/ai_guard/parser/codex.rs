@@ -1577,17 +1577,45 @@ fn emit_static_credential_reasons(server_name: &str, def: &Value, out: &mut Vec<
         return;
     };
     for (header, value) in headers {
-        let lower = header.to_ascii_lowercase();
-        let credential = ["auth", "token", "key", "secret"]
-            .iter()
-            .any(|word| lower.contains(word));
-        if credential && value.as_str().is_some_and(|v| !v.trim().is_empty()) {
+        if is_credential_header(header) && value.as_str().is_some_and(|v| !v.trim().is_empty()) {
             out.push(AiGuardReason::McpServerStaticCredential {
                 server_name: server_name.to_string(),
                 header_name: super::claude_project_settings::safe_name(header),
             });
         }
     }
+}
+
+/// Name tokens, split on `-` and `_`, that mark a credential header alone.
+const CREDENTIAL_TOKENS: &[&str] = &[
+    "authorization",
+    "auth",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "cookie",
+    "apikey",
+    "credential",
+    "credentials",
+];
+
+/// A `key` token marks a credential only next to one of these, so
+/// `X-Api-Key` counts and `Idempotency-Key` does not.
+const KEY_QUALIFIERS: &[&str] = &[
+    "api",
+    "access",
+    "private",
+    "secret",
+    "client",
+    "subscription",
+];
+
+fn is_credential_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower.split(['-', '_']).collect();
+    let has_any = |set: &[&str]| tokens.iter().any(|token| set.contains(token));
+    has_any(CREDENTIAL_TOKENS) || (tokens.contains(&"key") && has_any(KEY_QUALIFIERS))
 }
 
 /// #200 — `[apps.<id>]` connector tools take the same approval modes. A

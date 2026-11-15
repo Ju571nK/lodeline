@@ -1653,7 +1653,7 @@ event field and no `AiTool` or `AiGuardScope` variant.
 
 | Reason `kind` | Payload fields | Meaning |
 |---|---|---|
-| `mcp_server_static_credential` | `server_name`, `header_name` | A Codex MCP server sends a header whose name marks a credential with a static value from `http_headers`. The header value is never sent. |
+| `mcp_server_static_credential` | `server_name`, `header_name` | A Codex MCP server has a static value in `http_headers` for a header that, judged from its name, carries a credential. One reason per such header. The header value is never sent. |
 
 A server from v0.13.0 on keeps an unknown reason kind as an unknown reason, so
 an older console still receives it. `ReasonList` renders any kind and any
