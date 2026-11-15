@@ -7,6 +7,28 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-15
+
+**Upgrade.** This release adds one policy field, `grok_workspaces`, and one reason kind,
+`mcp_server_static_credential`. It adds no event field and no event kind, and changes no event
+format and no fleet API response. The field is optional, so a policy that does not set it is
+unaffected. An older agent accepts a policy that sets `grok_workspaces` and skips Grok projects
+without a warning, so upgrade the agents before you sign such a policy. A `lodeline-server` older
+than v0.13.0 rejects an event that carries the new reason kind, so upgrade such a server before
+the agents. A server from v0.13.0 on accepts it, and the console needs no change. Hosts, server
+and console can otherwise be upgraded in any order. No package script, unit file, tmpfiles entry
+or SELinux module changed.
+
+**Hosts.** After the upgrade a score can change. The Claude Code user score of a host that has
+`~/.claude/settings.local.json` can drop or rise. A project score can rise where an inherited
+skill or subagent, a script named through `$CLAUDE_PROJECT_DIR`, a subfolder `.codex/` layer, a
+static credential header on a Codex MCP server, or a Grok Build managed or requirements file
+holds a finding that was not read before. The agent walks more folders at start and at each
+policy reload (nested Claude Code components and Codex subfolder layers), bounded by fixed caps
+(20,000 folders and depth 8 for Claude Code components, 2,000 folders and depth 5 for Codex layers), and `lodeline scan` at the root of a Git repository that has no root Codex
+files walks up to 2,000 folders. A parse error in a Codex, Grok or rule pack TOML
+file now names only the place of the error.
+
 ### Added
 
 - **Codex MCP servers with a static credential header.** The Codex scanner reports an MCP server
@@ -24,16 +46,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `.codex/config.toml` and its subfolder `.codex/` layers. On a stdio server, where Codex refuses
   `http_headers` and does not load the config, the hint says to remove the entry and to forward the
   credential through `env_vars`. Upgrade `lodeline-server` before the agents. A server older than
-  v0.13.0 rejects an event that carries the new kind. Refs #200.
-
+  v0.13.0 rejects an event that carries the new kind. Refs #200. (#635)
 - **`grok_workspaces` policy field.** The daemon now scores Grok Build projects. List workspace
   roots under `grok_workspaces`, and the agent scans each root one level deep for a
   `<subdir>/.grok/hooks` folder or a `<subdir>/.grok/config.toml`, reads that folder with the Grok
   project parser, and watches it, as it does for `cursor_workspaces`. Before this, only
   `lodeline scan` read a Grok project. The field is optional, so an older policy and an older
   agent are unaffected. An agent that predates the field ignores it. Upgrade agents before you
-  sign a policy that sets it; an older agent accepts it and skips Grok projects without a warning.
-
+  sign a policy that sets it; an older agent accepts it and skips Grok projects without a warning. (#633)
 - **AI Guard reads the Grok Build managed and requirements files.** The Grok user row now also
   reads `managed_config.toml` and `requirements.toml` from `~/.grok` and from `/etc/grok`, and
   reports the hooks and MCP servers an organization pins there through the existing hook and MCP
@@ -41,15 +61,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `requirements.toml` are scored alike. A host with none of these files scores as before. A file
   that does not parse is a read error for that row. A project's `.grok` folder is unchanged. Under
   the default policy no watch target covers `~/.grok`, so a created or edited file is scored at
-  the next 24 hour heartbeat or at agent start, unless a policy target covers the folder.
-
+  the next 24 hour heartbeat or at agent start, unless a policy target covers the folder. (#638)
 - **The agent watches nested and inherited Claude Code skill and subagent folders.** With the agent
   running, a skill or subagent file in a `.claude/skills` or `.claude/agents` folder of a subfolder,
   of a parent folder up to the repository root, or of the main checkout of a worktree is assessed
   when it is written, as the repository's own folders already were. Before, a change there waited
   for the next periodic assessment, which runs once a day. The agent builds the folder list when it
   starts and on each policy reload, watches at most 64 such folders for each project, and picks up a
-  folder created later at the next reload, restart or periodic assessment. No policy field changes.
+  folder created later at the next reload, restart or periodic assessment. No policy field changes. (#640)
 
 ### Changed
 
@@ -71,8 +90,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   in several layers is one finding per layer, and a repeated finding adds to the score, as for
   every tool. Measured with one destructive hook, a repository that holds it only in a subfolder
   went from 0.0 to 4.0, and one that holds it at the root and in two subfolders went from 4.0 to
-  10.0. Refs #200.
-
+  10.0. Refs #200. (#634)
 - **The AI Guard user score of a host that has `~/.claude/settings.local.json` changes.** The Claude
   Code user row now reads `~/.claude/settings.json` only, as the Claude Code settings page defines
   the user scope. Before, it also merged `~/.claude/settings.local.json`, which Claude Code treats
@@ -83,25 +101,22 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `settings.local.json` in a `CLAUDE_CONFIG_DIR` folder is not read. The user score drops where that
   file added a finding, and it rises where the file turned off a finding that `settings.json` gives,
   for example through a `defaultMode`, `disableAllHooks`, `disableAutoMode` or a deny rule. No
-  reason kind, event field or policy field is added. The default watch targets are unchanged.
+  reason kind, event field or policy field is added. The default watch targets are unchanged. (#631)
 
 ### Fixed
 
-- **The Codex scanner no longer echoes a line of a malformed `config.toml`.** A parse error of a Codex config file used to carry the TOML library's quote of the bad line, so a line that held a header value or another secret reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line and the column and says the file is invalid TOML, and never the line or a key name.
-- **The Grok scanner no longer echoes a line of a malformed TOML file.** A parse error of `config.toml`, `managed_config.toml` or `requirements.toml` under `~/.grok` or `/etc/grok` used to carry the TOML library's quote of the bad line, so a secret on that line reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line, the column and a short kind of error, and never the line itself. Refs #203.
-- **AI Guard reads a project hook script that is named through `CLAUDE_PROJECT_DIR`.** A Claude Code hook in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project, such as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`, was reported as not scanned (`external_script_unscanned`), and `bash "$CLAUDE_PROJECT_DIR"/x.sh` was read as an inline command, so the script was never read. The variable now stands for the project root, in the spellings the hook's shell expands (`$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, each bare or in double quotes). A hook with `args` has no shell, so only the unquoted `${CLAUDE_PROJECT_DIR}` form is read, and on Windows only the braced form. A user or managed hook, a Codex hook and a Cursor hook keep the old result, because the agent does not know their project root. A project score can rise where a script that was never read holds a destructive command. (#628)
-- **A TOML parse error in an AI Guard file no longer quotes the source line.** When a rule pack file or a Codex `requirements.toml` was not valid TOML, the error carried the `toml` crate's text, which prints the offending line. A line that held a credential reached the `lodeline scan` error and the daemon log. The error now names the file, the line and the column and says the file is invalid TOML. No reason kind, event field or policy field is added.
-- **A Codex `config.toml` or `requirements.toml` that is not valid TOML no longer has its key quoted.** `lodeline doctor` and the `lodeline-hook install` warning used to carry the `toml` crate's message, which names a duplicate key, so a key that was itself a secret reached that output. The message now names the line and the column and says the file is invalid TOML. No reason kind, event field or policy field is added.
-
-- **AI Guard reads the Claude Code skills and subagents that a project inherits.** A Claude Code session started in a subfolder of a repository loads `.claude/skills` and `.claude/agents` from every parent folder up to the repository root, and a linked worktree without its own `.claude/skills` or `.claude/agents` folder loads the main checkout's. The project row read only its own folder and the folders below it, so the hooks of those skills and subagents were not scored. The row now reads them too, and the agent watches the scripts they run. The same skill can show in the repository row and in a subfolder or worktree row, because each row is what a session started there loads. A project score can rise where an inherited skill or subagent holds a risky hook. Command files in `.claude/commands/` are still not read. Refs #539.
-
-- **`lodeline scan` reads a Git repository whose only Codex files are in a subfolder.** The daemon already found a repository whose only Codex files sit in a subfolder `.codex/`, such as `services/api/.codex/hooks.json`, but `lodeline scan` run in that repository gave no Codex project row, because it looked for `.codex/config.toml` or `AGENTS.md` at the scanned folder only. It now builds the Codex project parser for a Git repository with a subfolder `.codex/` layer, using the daemon's folder walk (bounded to 2,000 folders, five levels deep). The walk runs only in a Git repository that has neither root marker. A folder that is not a Git repository is unchanged. A scan score can rise where a trusted hook in such a layer holds a risky command. No reason kind, event field or policy field is added. Refs #200.
+- **The Codex scanner no longer echoes a line of a malformed `config.toml`.** A parse error of a Codex config file used to carry the TOML library's quote of the bad line, so a line that held a header value or another secret reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line and the column and says the file is invalid TOML, and never the line or a key name. (#635)
+- **The Grok scanner no longer echoes a line of a malformed TOML file.** A parse error of `config.toml`, `managed_config.toml` or `requirements.toml` under `~/.grok` or `/etc/grok` used to carry the TOML library's quote of the bad line, so a secret on that line reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line, the column and a short kind of error, and never the line itself. Refs #203. (#638)
+- **AI Guard reads a project hook script that is named through `CLAUDE_PROJECT_DIR`.** A Claude Code hook in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project, such as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`, was reported as not scanned (`external_script_unscanned`), and `bash "$CLAUDE_PROJECT_DIR"/x.sh` was read as an inline command, so the script was never read. The variable now stands for the project root, in the spellings the hook's shell expands (`$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, each bare or in double quotes). A hook with `args` has no shell, so only the unquoted `${CLAUDE_PROJECT_DIR}` form is read, and on Windows only the braced form. A user or managed hook, a Codex hook and a Cursor hook keep the old result, because the agent does not know their project root. A project score can rise where a script that was never read holds a destructive command. (#632)
+- **A TOML parse error in an AI Guard file no longer quotes the source line.** When a rule pack file or a Codex `requirements.toml` was not valid TOML, the error carried the `toml` crate's text, which prints the offending line. A line that held a credential reached the `lodeline scan` error and the daemon log. The error now names the file, the line and the column and says the file is invalid TOML. No reason kind, event field or policy field is added. (#639)
+- **A Codex `config.toml` or `requirements.toml` that is not valid TOML no longer has its key quoted.** `lodeline doctor` and the `lodeline-hook install` warning used to carry the `toml` crate's message, which names a duplicate key, so a key that was itself a secret reached that output. The message now names the line and the column and says the file is invalid TOML. No reason kind, event field or policy field is added. (#643)
+- **AI Guard reads the Claude Code skills and subagents that a project inherits.** A Claude Code session started in a subfolder of a repository loads `.claude/skills` and `.claude/agents` from every parent folder up to the repository root, and a linked worktree without its own `.claude/skills` or `.claude/agents` folder loads the main checkout's. The project row read only its own folder and the folders below it, so the hooks of those skills and subagents were not scored. The row now reads them too, and the agent watches the scripts they run. The same skill can show in the repository row and in a subfolder or worktree row, because each row is what a session started there loads. A project score can rise where an inherited skill or subagent holds a risky hook. Command files in `.claude/commands/` are still not read. Refs #539. (#636)
+- **`lodeline scan` reads a Git repository whose only Codex files are in a subfolder.** The daemon already found a repository whose only Codex files sit in a subfolder `.codex/`, such as `services/api/.codex/hooks.json`, but `lodeline scan` run in that repository gave no Codex project row, because it looked for `.codex/config.toml` or `AGENTS.md` at the scanned folder only. It now builds the Codex project parser for a Git repository with a subfolder `.codex/` layer, using the daemon's folder walk (bounded to 2,000 folders, five levels deep). The walk runs only in a Git repository that has neither root marker. A folder that is not a Git repository is unchanged. A scan score can rise where a trusted hook in such a layer holds a risky command. No reason kind, event field or policy field is added. Refs #200. (#642)
 
 ### Documentation
 
-- Updated `docs/codex-coverage.md`. It now lists the Codex layers Lodeline reads, including the subfolder `.codex/` layers and their limits, and the ones it does not (`${PWD}/config.toml`, `--profile` files, managed preferences and cloud defaults). It records what is a finding for an MCP credential and what is not, that Codex 0.167.0 refuses an inline `bearer_token`, that remote-control pairing state is not read, and why hook hashes are not compared. Refs #200.
-
-- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
+- Updated `docs/codex-coverage.md`. It now lists the Codex layers Lodeline reads, including the subfolder `.codex/` layers and their limits, and the ones it does not (`${PWD}/config.toml`, `--profile` files, managed preferences and cloud defaults). It records what is a finding for an MCP credential and what is not, that Codex 0.167.0 refuses an inline `bearer_token`, that remote-control pairing state is not read, and why hook hashes are not compared. Refs #200. (#644)
+- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203. (#630 and #633)
 
 ## [0.15.1] - 2026-11-15
 

@@ -1646,7 +1646,7 @@ answer would make a second token. It keeps no token and no file. A console that 
 route, or a server that predates `enroll_mint`, is unaffected: no read endpoint and no read
 type changed.
 
-### 14.16 Reason kind `mcp_server_static_credential` (Unreleased, #200)
+### 14.16 Reason kind `mcp_server_static_credential` (since v0.16.0, #200 and #635)
 
 One additive reason kind of `ai_guard_risk_assessed`. It adds no event kind, no
 event field and no `AiTool` or `AiGuardScope` variant.
