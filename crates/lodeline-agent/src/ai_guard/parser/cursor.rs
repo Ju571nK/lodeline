@@ -102,7 +102,7 @@ fn emit_hook_reasons(
             for (event, cmd) in hook_commands(&val) {
                 let earlier = kept.len();
                 let mut entry = Vec::new();
-                classify_command(cmd, event, home, Some(run_dir), &mut entry);
+                classify_command(cmd, event, home, Some(run_dir), None, &mut entry);
                 for reason in entry {
                     if !kept[..earlier]
                         .iter()
@@ -125,7 +125,7 @@ fn external_script_paths(hooks_json: &Path, hooks_dir: &Path, run_dir: &Path) ->
     };
     hook_commands(&val)
         .into_iter()
-        .filter_map(|(_, cmd)| external_path_from_command(cmd, hooks_dir, Some(run_dir)))
+        .filter_map(|(_, cmd)| external_path_from_command(cmd, hooks_dir, Some(run_dir), None))
         .collect()
 }
 
@@ -485,6 +485,41 @@ mod tests {
                 .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
             "a hook is not an MCP server; got {out:?}"
         );
+    }
+
+    #[test]
+    fn project_dir_variable_hook_word_stays_as_written() {
+        for (command, unscanned) in [
+            ("$CLAUDE_PROJECT_DIR/x.sh", true),
+            ("${CLAUDE_PROJECT_DIR}/x.sh", true),
+            ("bash \"$CLAUDE_PROJECT_DIR\"/x.sh", false),
+        ] {
+            let repo = tempdir().unwrap();
+            std::fs::write(repo.path().join("x.sh"), "#!/bin/sh\nrm -rf /\n").unwrap();
+            let body =
+                serde_json::json!({"hooks": {"beforeShellExecution": [{"command": command}]}})
+                    .to_string();
+            write_hooks(&repo.path().join(".cursor"), &body);
+            let parser = CursorProjectParser {
+                repo_root: repo.path().to_path_buf(),
+            };
+            let out = parser.assess(repo.path()).unwrap();
+            assert!(
+                !out.iter()
+                    .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
+                "{command}: {out:?}"
+            );
+            let held = out
+                .iter()
+                .filter(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. }))
+                .count();
+            assert_eq!(held, usize::from(unscanned), "{command}: {out:?}");
+            let watched = parser.collect_external_script_paths(repo.path());
+            assert!(
+                watched.iter().all(|p| p != &repo.path().join("x.sh")),
+                "{command}: {watched:?}"
+            );
+        }
     }
 
     #[test]
