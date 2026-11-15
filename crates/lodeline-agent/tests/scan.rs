@@ -477,16 +477,29 @@ fn subfolder_only_codex_repo(
     if git {
         fs::create_dir_all(repo.join(".git")).unwrap();
     }
-    let hooks = repo.join("services/api/.codex/hooks.json");
+    let in_repo = |root: &Path| {
+        root.join("services")
+            .join("api")
+            .join(".codex")
+            .join("hooks.json")
+    };
+    let hooks = in_repo(&repo);
     write(&hooks, DESTRUCTIVE_HOOKS_JSON);
     if trust {
-        write(
-            &home.join(".codex").join("config.toml"),
-            &format!(
-                "[hooks.state.'{}:pre_tool_use:0:0']\ntrusted_hash = \"sha256:00\"\n",
-                hooks.display()
-            ),
-        );
+        // The scan child reports the folder as the system gives it, which on
+        // Windows can be the short form of the canonical path.
+        let mut keys = vec![hooks.clone(), in_repo(proj)];
+        keys.dedup();
+        let config: String = keys
+            .iter()
+            .map(|k| {
+                format!(
+                    "[hooks.state.'{}:pre_tool_use:0:0']\ntrusted_hash = \"sha256:00\"\n",
+                    k.display()
+                )
+            })
+            .collect();
+        write(&home.join(".codex").join("config.toml"), &config);
     }
     repo
 }
