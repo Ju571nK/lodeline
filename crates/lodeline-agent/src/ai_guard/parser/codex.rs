@@ -1589,6 +1589,25 @@ fn emit_static_credential_reasons(server_name: &str, def: &Value, out: &mut Vec<
     }
 }
 
+/// Codex sends an `http_headers` value as literal text, so a value that is
+/// only `${NAME}` or `$NAME`, after an optional `Bearer ` or `Basic `, holds
+/// no credential.
+fn is_variable_reference(value: &str) -> bool {
+    let value = value.trim();
+    let rest = ["Bearer ", "Basic "]
+        .iter()
+        .find_map(|scheme| value.strip_prefix(scheme))
+        .unwrap_or(value);
+    let name = rest
+        .strip_prefix("${")
+        .and_then(|r| r.strip_suffix('}'))
+        .or_else(|| rest.strip_prefix('$'));
+    name.is_some_and(|name| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 /// Name tokens, split on `-` and `_`, that mark a credential header alone.
 const CREDENTIAL_TOKENS: &[&str] = &[
     "authorization",
@@ -1613,25 +1632,6 @@ const KEY_QUALIFIERS: &[&str] = &[
     "client",
     "subscription",
 ];
-
-/// Codex sends an `http_headers` value as literal text, so a value that is
-/// only `${NAME}` or `$NAME`, after an optional `Bearer ` or `Basic `, holds
-/// no credential.
-fn is_variable_reference(value: &str) -> bool {
-    let value = value.trim();
-    let rest = ["Bearer ", "Basic "]
-        .iter()
-        .find_map(|scheme| value.strip_prefix(scheme))
-        .unwrap_or(value);
-    let name = rest
-        .strip_prefix("${")
-        .and_then(|r| r.strip_suffix('}'))
-        .or_else(|| rest.strip_prefix('$'));
-    name.is_some_and(|name| {
-        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
-}
 
 fn is_credential_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
