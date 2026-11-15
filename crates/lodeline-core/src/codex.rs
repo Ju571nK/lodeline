@@ -362,4 +362,20 @@ mod tests {
         assert_eq!(path, &root.path().join("home").join("config.toml"));
         assert!(got.warning().unwrap().starts_with("cannot read "));
     }
+
+    #[test]
+    fn toml_errors_name_the_place_and_never_the_source() {
+        for user in [
+            "[features]\ntest-value-0 = 1\ntest-value-0 = 2\n",
+            "[features]\nhooks = test-value-0\n",
+        ] {
+            let (_root, got) = feature("", "", user);
+            let HooksFeature::Unreadable { error, .. } = &got else {
+                panic!("{got:?}")
+            };
+            assert!(error.starts_with("invalid TOML at line "), "{error}");
+            let shown = format!("{got:?} {}", got.warning().unwrap());
+            assert_eq!(shown.matches("test-value-0").count(), 0, "{shown}");
+        }
+    }
 }
