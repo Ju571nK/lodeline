@@ -23,6 +23,8 @@ const MAX_AGENT_DEPTH: usize = 8;
 const MAX_NESTED_DEPTH: usize = 8;
 const MAX_NESTED_WALK_DIRS: usize = 20_000;
 const NESTED_WALK_SKIPPED: &[&str] = &["node_modules", "target"];
+/// Most inherited and nested folders one repository's watch targets cover.
+pub(crate) const MAX_WATCHED_COMPONENT_DIRS: usize = 64;
 /// Frontmatter sits at the top of the file, so only this much is read.
 const FRONTMATTER_READ_CAP: u64 = 256 * 1024;
 
@@ -48,12 +50,56 @@ pub(crate) fn component_hooks(claude_dir: &Path) -> Vec<ComponentHooks> {
 /// session started in `<subdir>`, so a session in the repository can pick up
 /// their hooks. The repository's own `.claude/` is left to [`component_hooks`].
 pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
+    hooks_in(repo_root, nested_component_dirs(repo_root), "nested")
+}
+
+/// The bounded walk for `.claude/skills` and `.claude/agents` folders below
+/// `repo_root`, in path order.
+fn nested_component_dirs(repo_root: &Path) -> Vec<PathBuf> {
     let mut component_dirs = Vec::new();
     let mut dir_budget = MAX_NESTED_WALK_DIRS;
     if !collect_nested_skill_dirs(repo_root, 0, &mut dir_budget, &mut component_dirs) {
         warn_capped(repo_root, "nested directories");
     }
-    hooks_in(repo_root, component_dirs, "nested")
+    component_dirs
+}
+
+/// Nested folders each repository's watch targets were last built with. The
+/// walk runs when the targets are built, at boot and on a policy reload, and
+/// never when a file changes: [`recorded_nested_dirs`] only reads this.
+static RECORDED_NESTED: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<PathBuf, Vec<PathBuf>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// #539: the skills and agents folders the watch targets of the repository at
+/// `repo_root` cover, at most [`MAX_WATCHED_COMPONENT_DIRS`]. They are the
+/// inherited folders of [`inherited_component_dirs`] and the nested folders of
+/// one bounded walk, which this call records for [`recorded_nested_dirs`].
+/// A folder created after this call is not covered until the next call.
+pub(crate) fn walk_watched_component_dirs(repo_root: &Path, home: &Path) -> Vec<PathBuf> {
+    let mut dirs = inherited_component_dirs(repo_root, home);
+    let mut nested = nested_component_dirs(repo_root);
+    let room = MAX_WATCHED_COMPONENT_DIRS.saturating_sub(dirs.len());
+    if nested.len() > room {
+        tracing::warn!(dir = %repo_root.display(), cap = MAX_WATCHED_COMPONENT_DIRS,
+            "claude components: watch cap reached; remaining folders are read at the next periodic assessment");
+        nested.truncate(room);
+    }
+    RECORDED_NESTED
+        .lock()
+        .insert(repo_root.to_path_buf(), nested.clone());
+    dirs.extend(nested);
+    dirs
+}
+
+/// The nested folders recorded by the last [`walk_watched_component_dirs`] for
+/// `repo_root`, without touching the disk.
+pub(crate) fn recorded_nested_dirs(repo_root: &Path) -> Vec<PathBuf> {
+    RECORDED_NESTED
+        .lock()
+        .get(repo_root)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// #539: `.claude/skills` and `.claude/agents` folders outside `start` that
