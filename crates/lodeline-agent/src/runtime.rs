@@ -197,6 +197,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     );
     let cursor_repos =
         crate::ai_guard::workspace_discovery::discover_cursor_repos(&effective.cursor_workspaces);
+    let grok_repos =
+        crate::ai_guard::workspace_discovery::discover_grok_repos(&effective.grok_workspaces);
     let antigravity_repos = crate::ai_guard::workspace_discovery::discover_per_repo(
         &effective.antigravity_workspaces,
         ".antigravity/settings.json",
@@ -216,6 +218,9 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     }
     for repo_root in &cursor_repos {
         push_cursor_synthetic_target(&mut effective, repo_root);
+    }
+    for repo_root in &grok_repos {
+        push_grok_synthetic_target(&mut effective, repo_root);
     }
     for repo_root in &antigravity_repos {
         push_antigravity_synthetic_target(&mut effective, repo_root);
@@ -254,9 +259,9 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         }));
     }
     for repo_root in &codex_repos {
-        parsers_vec.push(Arc::new(crate::ai_guard::CodexProjectParser {
-            repo_root: repo_root.clone(),
-        }));
+        parsers_vec.push(Arc::new(crate::ai_guard::CodexProjectParser::new(
+            repo_root.clone(),
+        )));
     }
     for repo_root in &gemini_repos {
         parsers_vec.push(Arc::new(crate::ai_guard::GeminiProjectParser {
@@ -265,6 +270,11 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     }
     for repo_root in &cursor_repos {
         parsers_vec.push(Arc::new(crate::ai_guard::CursorProjectParser {
+            repo_root: repo_root.clone(),
+        }));
+    }
+    for repo_root in &grok_repos {
+        parsers_vec.push(Arc::new(crate::ai_guard::GrokProjectParser {
             repo_root: repo_root.clone(),
         }));
     }
@@ -292,7 +302,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             Cursor => &cursor_repos,
             Antigravity => &antigravity_repos,
             ClaudeDesktop => &[],
-            Grok => &[], // #203: no grok_workspaces policy key; `lodeline scan` reads Grok projects
+            Grok => &grok_repos,
             Other => &[],
         }
     };
@@ -1966,22 +1976,35 @@ pub(crate) fn push_claude_code_synthetic_targets(
     });
 }
 
-/// Phase 3b.6.2 — push ONE synthetic WatchTarget for a Codex per-repo config.
+/// Phase 3b.6.2. Push ONE synthetic WatchTarget for a Codex per-repo config.
+/// #200. It lists the files of the root `.codex/` and of every subfolder
+/// `.codex/` layer the walk finds, so creating, editing or removing one of
+/// them re-assesses the repository. A subfolder layer added later is found by
+/// the next discovery.
 pub(crate) fn push_codex_synthetic_target(
     effective: &mut lodeline_core::policy::EffectivePolicy,
     repo_root: &std::path::Path,
 ) {
-    let config = repo_root.join(".codex").join("config.toml");
+    let layers = std::iter::once(repo_root.join(".codex")).chain(
+        crate::ai_guard::workspace_discovery::codex_subfolder_dirs(repo_root),
+    );
+    let mut paths = vec![repo_root.join("AGENTS.md").to_string_lossy().to_string()];
+    for dir in layers {
+        for file in [
+            dir.join("config.toml"),
+            dir.join("hooks.json"),
+            dir.join("rules").join("*.rules"),
+        ] {
+            paths.push(file.to_string_lossy().to_string());
+        }
+    }
     let h = synthetic_target_id_suffix(repo_root);
     effective.targets.push(lodeline_core::policy::WatchTarget {
         id: format!("codex-project-{h}"),
         description: format!("Phase 3b.6.2 synthetic: {}", repo_root.display()),
         tier: lodeline_core::policy::Tier::Critical,
         platform: lodeline_core::policy::Platform::Any,
-        paths: vec![
-            config.to_string_lossy().to_string(),
-            repo_root.join("AGENTS.md").to_string_lossy().to_string(),
-        ],
+        paths,
         recursive: false,
         follow_symlinks: false,
         disabled: false,
@@ -2114,6 +2137,36 @@ pub(crate) fn push_cursor_synthetic_target(
         tier: lodeline_core::policy::Tier::Critical,
         platform: lodeline_core::policy::Platform::Any,
         paths: vec![rules_glob.to_string_lossy().to_string()],
+        recursive: true,
+        follow_symlinks: false,
+        disabled: false,
+    });
+}
+
+/// #203: push synthetic WatchTargets for a Grok per-repo folder: the
+/// `config.toml` and every file under `.grok/hooks`.
+pub(crate) fn push_grok_synthetic_target(
+    effective: &mut lodeline_core::policy::EffectivePolicy,
+    repo_root: &std::path::Path,
+) {
+    let grok = repo_root.join(".grok");
+    let h = synthetic_target_id_suffix(repo_root);
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!("grok-project-{h}"),
+        description: format!("#203 synthetic: {}", repo_root.display()),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths: vec![grok.join("config.toml").to_string_lossy().to_string()],
+        recursive: false,
+        follow_symlinks: false,
+        disabled: false,
+    });
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!("grok-hooks-{h}"),
+        description: format!("#203 synthetic Grok hook files: {}", repo_root.display()),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths: vec![grok.join("hooks").join("*").to_string_lossy().to_string()],
         recursive: true,
         follow_symlinks: false,
         disabled: false,
@@ -2352,6 +2405,66 @@ mod tests {
             100,
         );
         assert_eq!(listed, vec![skill.join("SKILL.md")]);
+    }
+
+    #[test]
+    fn codex_project_target_watches_the_files_of_every_layer() {
+        use lodeline_core::policy::glob::CompiledGlob;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let api = repo.join("services").join("api").join(".codex");
+        std::fs::create_dir_all(&api).unwrap();
+        std::fs::write(api.join("config.toml"), "").unwrap();
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_codex_synthetic_target(&mut effective, &repo);
+        let target = effective
+            .targets
+            .iter()
+            .find(|t| t.id.starts_with("codex-project-"))
+            .expect("codex project target");
+        for layer in [repo.join(".codex"), api] {
+            for file in [
+                layer.join("config.toml"),
+                layer.join("hooks.json"),
+                layer.join("rules").join("x.rules"),
+            ] {
+                assert!(
+                    target
+                        .paths
+                        .iter()
+                        .any(|p| CompiledGlob::new(p).unwrap().is_match(&file)),
+                    "an edit of {file:?} must reach the parser"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grok_project_target_watches_config_and_hook_files() {
+        let repo = std::path::Path::new("/repo");
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_grok_synthetic_target(&mut effective, repo);
+        let paths: Vec<&std::path::Path> = effective
+            .targets
+            .iter()
+            .filter(|t| t.id.starts_with("grok-"))
+            .flat_map(|t| &t.paths)
+            .map(std::path::Path::new)
+            .collect();
+        assert!(paths.contains(&repo.join(".grok").join("config.toml").as_path()));
+        assert!(paths.contains(&repo.join(".grok").join("hooks").join("*").as_path()));
     }
 
     #[test]

@@ -208,7 +208,7 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
     // Codex: .codex/config.toml | AGENTS.md
     if has(".codex/config.toml") || has("AGENTS.md") {
         out.push(Arc::new(CodexHomeProjectParser {
-            project: CodexProjectParser { repo_root: root() },
+            project: CodexProjectParser::new(root()),
             codex_home,
         }));
     }

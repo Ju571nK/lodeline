@@ -9,9 +9,36 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
-- The Codex scanner reports an MCP server whose `http_headers` table sends a credential header with a static value, because that credential is stored in the config file as plain text. Whether a header carries a credential is a judgment from its name. The name is split on `-` and `_`, and it counts when one part is `authorization`, `auth`, `token`, `secret`, `password`, `passwd`, `cookie`, `apikey`, `credential` or `credentials`, in any case, or when it has a `key` part together with `api`, `access`, `private`, `secret`, `client` or `subscription`. So `X-Api-Key` and `Ocp-Apim-Subscription-Key` count, and `Idempotency-Key` and `X-Author` do not. A header with an empty value is not reported, and neither is a value that is only a variable reference such as `${MCP_TOKEN}` or `Bearer $MCP_TOKEN`, because Codex sends it as literal text. Each reported header gives its own reason of a new kind, `mcp_server_static_credential` (1.0), which records the server name and the header name. It never records the value. Headers in `env_http_headers` name environment variables and are not reported. A stdio server, one with `command`, is reported too, because the credential is on disk. It gets its own hint, because Codex does not load a config in which a stdio server sets `http_headers`. That hint says to remove the entry and pass the credential through `env_vars`. This applies to every Codex layer the scanner reads: the system and user config, and a repository's `.codex/config.toml`. Upgrade `lodeline-server` before the agents. A server older than v0.13.0 rejects an event that carries the new kind. Refs #200.
+
+- **`grok_workspaces` policy field.** The daemon now scores Grok Build projects. List workspace
+  roots under `grok_workspaces`, and the agent scans each root one level deep for a
+  `<subdir>/.grok/hooks` folder or a `<subdir>/.grok/config.toml`, reads that folder with the Grok
+  project parser, and watches it, as it does for `cursor_workspaces`. Before this, only
+  `lodeline scan` read a Grok project. The field is optional, so an older policy and an older
+  agent are unaffected. An agent that predates the field ignores it. Upgrade agents before you
+  sign a policy that sets it; an older agent accepts it and skips Grok projects without a warning.
 
 ### Changed
+
+- **Agent.** A repository's `.codex/config.toml`, `hooks.json` and `rules/` in a subfolder, such as
+  `services/api/.codex/`, are now assessed with the repository's own `.codex/` folder, in the
+  repository's row. Codex layers every `.codex/` from the project root down to the folder a session
+  starts in, and the agent cannot know that folder, so a hook below `services/web/` can be
+  reported although a session at `services/api/` never runs it. A hook is reported only when the
+  user config records a `trusted_hash` for it, as for the repository root. A Git repository whose
+  only Codex files sit in a subfolder is now discovered. Creating, editing or removing a file in a
+  found layer, or in the root `.codex/`, re-assesses the repository. A subfolder `.codex/` created
+  later is found at the next discovery, when the agent starts or reloads its policy, and it is
+  not watched before then.
+  **Limits.** The walk goes at most five folders deep and visits at most 2,000 folders per
+  repository, and a layer past either limit is not read. It skips hidden folders, `node_modules`,
+  `target` and `vendor`, follows no link, and does not enter a folder with its own `.git` entry,
+  because Codex takes a nested repository or a submodule as its own project. **Score.** A
+  repository score can rise. A subfolder hook, MCP server or rule is a new finding. The same hook
+  in several layers is one finding per layer, and a repeated finding adds to the score, as for
+  every tool. Measured with one destructive hook, a repository that holds it only in a subfolder
+  went from 0.0 to 4.0, and one that holds it at the root and in two subfolders went from 4.0 to
+  10.0. Refs #200.
 
 - **The AI Guard user score of a host that has `~/.claude/settings.local.json` changes.** The Claude
   Code user row now reads `~/.claude/settings.json` only, as the Claude Code settings page defines
@@ -27,13 +54,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
-- **The Codex scanner no longer echoes a line of a malformed `config.toml`.** A parse error of a Codex config file used to carry the TOML library's quote of the bad line, so a line that held a header value or another secret reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line, the column and a short kind of error, and never the line itself.
+- **The Codex scanner no longer echoes a line of a malformed `config.toml`.** A parse error of a Codex config file used to carry the TOML library's quote of the bad line, so a line that held a header value or another secret reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line and the column and says the file is invalid TOML, and never the line or a key name.
 
 - **AI Guard reads a project hook script that is named through `CLAUDE_PROJECT_DIR`.** A Claude Code hook in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project, such as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`, was reported as not scanned (`external_script_unscanned`), and `bash "$CLAUDE_PROJECT_DIR"/x.sh` was read as an inline command, so the script was never read. The variable now stands for the project root, in the spellings the hook's shell expands (`$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, each bare or in double quotes). A hook with `args` has no shell, so only the unquoted `${CLAUDE_PROJECT_DIR}` form is read, and on Windows only the braced form. A user or managed hook, a Codex hook and a Cursor hook keep the old result, because the agent does not know their project root. A project score can rise where a script that was never read holds a destructive command. (#628)
+- **A TOML parse error in an AI Guard file no longer quotes the source line.** When a rule pack file or a Codex `requirements.toml` was not valid TOML, the error carried the `toml` crate's text, which prints the offending line. A line that held a credential reached the `lodeline scan` error and the daemon log. The error now names the file, the line and the column and says the file is invalid TOML. No reason kind, event field or policy field is added.
+
+- **AI Guard reads the Claude Code skills and subagents that a project inherits.** A Claude Code session started in a subfolder of a repository loads `.claude/skills` and `.claude/agents` from every parent folder up to the repository root, and a linked worktree without its own `.claude/skills` or `.claude/agents` folder loads the main checkout's. The project row read only its own folder and the folders below it, so the hooks of those skills and subagents were not scored. The row now reads them too, and the agent watches the scripts they run. The same skill can show in the repository row and in a subfolder or worktree row, because each row is what a session started there loads. A project score can rise where an inherited skill or subagent holds a risky hook. Command files in `.claude/commands/` are still not read. Refs #539.
 
 ### Documentation
 
-- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states that the daemon does not find Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
+- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
 
 ## [0.15.1] - 2026-11-15
 

@@ -739,6 +739,7 @@ mod tests {
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: std::collections::HashMap::new(),

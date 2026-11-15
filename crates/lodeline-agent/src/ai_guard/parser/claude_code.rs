@@ -1702,6 +1702,10 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             home_dir.join(".claude").join("settings.json"),
         ];
         paths.extend(shared_local_settings(&self.repo_root, home_dir));
+        paths.extend(super::claude_components::inherited_component_dirs(
+            &self.repo_root,
+            home_dir,
+        ));
         paths
     }
 
@@ -1716,8 +1720,13 @@ impl AiGuardParser for ClaudeCodeProjectParser {
                 &shared, &hooks_dir, run_dir,
             ));
         }
+        let mut components = super::claude_components::nested_skill_hooks(&self.repo_root);
+        components.extend(super::claude_components::inherited_skill_hooks(
+            &self.repo_root,
+            home_dir,
+        ));
         paths.extend(super::claude_components::component_external_script_paths(
-            &super::claude_components::nested_skill_hooks(&self.repo_root),
+            &components,
             &hooks_dir,
             run_dir,
         ));
@@ -1757,7 +1766,7 @@ fn shared_local_settings(repo_root: &Path, home: &Path) -> Option<PathBuf> {
 /// True when `dir` is the home folder `home`, whose `.claude` is the user scope.
 // shortcut: only the agent's own home is compared, so a git repository at
 // another user's home is still read; pass every user's home if that matters.
-fn is_home(dir: &Path, home: &Path) -> bool {
+pub(crate) fn is_home(dir: &Path, home: &Path) -> bool {
     // Both sides, since a scan's root is the raw current folder (an 8.3 short
     // name on Windows) while discovery hands over canonical paths.
     let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -1832,6 +1841,9 @@ fn assess_project(
     let has_loop = !is_home(repo_root, home) && cd.join("loop.md").is_file();
     let mut components = super::claude_components::component_hooks(&cd);
     components.extend(super::claude_components::nested_skill_hooks(repo_root));
+    components.extend(super::claude_components::inherited_skill_hooks(
+        repo_root, home,
+    ));
     // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
     // abort the whole assess and thereby blind us to a malicious
     // `.claude/settings.json` in the same repo (a corrupt-sidecar evasion
@@ -5917,5 +5929,183 @@ mod tests {
             .filter(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
             .count();
         assert_eq!(destructive, 1, "{reasons:?}");
+    }
+
+    const DESTRUCTIVE_SKILL: &str = "---\nname: clean\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: rm -rf ~/cache\n---\n";
+    const DESTRUCTIVE_AGENT: &str = "---\nname: web\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: rm -rf ~/build\n---\n";
+
+    /// Inline destructive commands the project row at `row` reports, as
+    /// snippets in report order.
+    fn destructive_commands(row: &Path, home: &Path) -> Vec<String> {
+        let policy = tempdir().unwrap();
+        assess_project(row, home, policy.path())
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                AiGuardReason::DestructiveInInlineCommand { snippet, .. } => Some(snippet),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The layout `git worktree add` writes: `<dir>/main` with its `.git`
+    /// folder and `<dir>/wt` with a `.git` file whose git dir has a
+    /// `commondir` pointing back at the main `.git`.
+    fn linked_worktree(dir: &Path) -> (PathBuf, PathBuf) {
+        let main = dir.join("main");
+        let git_dir = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        let wt = dir.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
+        (main, wt)
+    }
+
+    /// #539: Claude Code loads `.claude/skills` and `.claude/agents` from
+    /// every parent folder up to the repository root, so a session started
+    /// in `packages/web` runs the hooks of the root's skills and subagents.
+    #[test]
+    fn subfolder_row_scores_parent_skill_and_subagent_hooks() {
+        let repo = tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        write_file(
+            repo.path(),
+            ".claude/skills/clean/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
+        write_file(
+            repo.path(),
+            "packages/.claude/agents/web.md",
+            DESTRUCTIVE_AGENT,
+        );
+        let row = repo.path().join("packages/web");
+        std::fs::create_dir_all(&row).unwrap();
+        assert_eq!(
+            destructive_commands(&row, Path::new(NO_HOME)),
+            ["rm -rf ~/cache", "rm -rf ~/build"]
+        );
+    }
+
+    #[test]
+    fn repository_root_row_reads_no_folder_above_it() {
+        let outer = tempdir().unwrap();
+        write_file(
+            outer.path(),
+            ".claude/skills/outer/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
+        let repo = outer.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert!(destructive_commands(&repo, Path::new(NO_HOME)).is_empty());
+        let row = repo.join("packages/web");
+        std::fs::create_dir_all(&row).unwrap();
+        assert!(destructive_commands(&row, Path::new(NO_HOME)).is_empty());
+    }
+
+    #[test]
+    fn row_outside_a_repository_reads_no_parent_folder() {
+        let outer = tempdir().unwrap();
+        write_file(
+            outer.path(),
+            ".claude/skills/outer/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
+        write_file(outer.path(), ".claude/agents/outer.md", DESTRUCTIVE_AGENT);
+        let row = outer.path().join("work");
+        std::fs::create_dir_all(&row).unwrap();
+        assert!(destructive_commands(&row, Path::new(NO_HOME)).is_empty());
+    }
+
+    /// The home folder's `.claude` is the user scope, which the user row
+    /// already reports, so a repository at home adds nothing from it.
+    #[test]
+    fn parent_walk_skips_the_home_folder() {
+        let home = tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".git")).unwrap();
+        write_file(
+            home.path(),
+            ".claude/skills/clean/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
+        let row = home.path().join("projects/web");
+        std::fs::create_dir_all(&row).unwrap();
+        assert!(destructive_commands(&row, home.path()).is_empty());
+    }
+
+    /// #539: a linked worktree with no `.claude/skills` or `.claude/agents`
+    /// folder at its root loads the main checkout's, also for a session
+    /// started in a subfolder of the worktree.
+    #[test]
+    fn worktree_without_own_folders_scores_the_main_checkout_components() {
+        let dir = tempdir().unwrap();
+        let (main, wt) = linked_worktree(dir.path());
+        write_file(&main, ".claude/skills/clean/SKILL.md", DESTRUCTIVE_SKILL);
+        write_file(&main, ".claude/agents/web.md", DESTRUCTIVE_AGENT);
+        let expected = ["rm -rf ~/cache", "rm -rf ~/build"];
+        assert_eq!(destructive_commands(&wt, Path::new(NO_HOME)), expected);
+        let sub = wt.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(destructive_commands(&sub, Path::new(NO_HOME)), expected);
+    }
+
+    /// Only an absent folder reads through: an empty `.claude/skills` in the
+    /// worktree hides the main checkout's skills but not its subagents.
+    #[test]
+    fn worktree_with_its_own_skills_folder_skips_the_main_checkout_skills() {
+        let dir = tempdir().unwrap();
+        let (main, wt) = linked_worktree(dir.path());
+        write_file(&main, ".claude/skills/clean/SKILL.md", DESTRUCTIVE_SKILL);
+        write_file(&main, ".claude/agents/web.md", DESTRUCTIVE_AGENT);
+        std::fs::create_dir_all(wt.join(".claude/skills")).unwrap();
+        assert_eq!(
+            destructive_commands(&wt, Path::new(NO_HOME)),
+            ["rm -rf ~/build"]
+        );
+    }
+
+    /// A worktree inside the main checkout, where `claude --worktree` puts
+    /// one: the walk up stops at the worktree root.
+    #[test]
+    fn worktree_parent_walk_stops_at_the_worktree_root() {
+        let dir = tempdir().unwrap();
+        let main = dir.path().join("main");
+        let git_dir = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        let wt = main.join(".claude/worktrees/wt");
+        std::fs::create_dir_all(wt.join(".claude/skills")).unwrap();
+        std::fs::create_dir_all(wt.join(".claude/agents")).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
+        write_file(&main, ".claude/skills/clean/SKILL.md", DESTRUCTIVE_SKILL);
+        let row = wt.join("src");
+        std::fs::create_dir_all(&row).unwrap();
+        assert!(destructive_commands(&row, Path::new(NO_HOME)).is_empty());
+    }
+
+    /// The watcher learns the folders and the scripts the inherited hooks
+    /// run. A relative script runs from the folder the session started in.
+    #[test]
+    fn parent_components_are_watched_with_their_scripts() {
+        let repo = tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        write_file(
+            repo.path(),
+            ".claude/agents/notify.md",
+            "---\nhooks:\n  Stop:\n    - hooks:\n        - command: \"bash tools/notify.sh\"\n---\n",
+        );
+        let row = repo.path().join("packages/web");
+        std::fs::create_dir_all(&row).unwrap();
+        let parser = ClaudeCodeProjectParser {
+            repo_root: row.clone(),
+        };
+        let home = Path::new(NO_HOME);
+        assert!(parser
+            .watched_paths(home)
+            .contains(&repo.path().join(".claude/agents")));
+        assert_eq!(
+            parser.collect_external_script_paths(home),
+            [row.join("tools/notify.sh")]
+        );
     }
 }
