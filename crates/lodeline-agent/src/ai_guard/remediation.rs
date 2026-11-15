@@ -105,6 +105,9 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         McpToolsAutoApproved { .. } => {
             "Named MCP tools run without approval — set their approval_mode back to prompt or auto unless required."
         }
+        McpServerStaticCredential { .. } => {
+            "An MCP server header holds a credential as plain text in the config file. Read it from an environment variable with env_http_headers instead, and rotate it."
+        }
         ProjectSettingsPluginEnabled { .. } => {
             "The repository's Claude Code settings enable a plugin, which loads before the trust dialog — review the plugin, or set it to false in .claude/settings.local.json."
         }
@@ -131,6 +134,22 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         }
         Unknown(_) => "This Lodeline build does not recognize this finding. Upgrade it to see a hint.",
     }
+}
+
+/// [`hint_for_reason`] with the other reasons of the finding's row. Codex
+/// refuses `http_headers` on a stdio server and then does not load the config,
+/// so a credential header on a server that the row reports as a local command
+/// gets its own hint.
+pub fn hint_in_row(reason: &AiGuardReason, row: &[AiGuardReason]) -> &'static str {
+    if let AiGuardReason::McpServerStaticCredential { server_name, .. } = reason {
+        let stdio = row.iter().any(|r| {
+            matches!(r, AiGuardReason::McpServerLocalCommand { server_name: s, .. } if s == server_name)
+        });
+        if stdio {
+            return "A stdio MCP server sets http_headers, so Codex does not load this config, and the credential sits in the file as plain text. Remove the http_headers entry, pass the credential to the server from your environment with env_vars, and rotate it.";
+        }
+    }
+    hint_for_reason(reason)
 }
 
 #[cfg(test)]

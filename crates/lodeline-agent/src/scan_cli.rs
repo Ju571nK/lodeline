@@ -180,6 +180,7 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
 /// daemon (`workspace_discovery`), but applied to `dir` directly rather than to
 /// its subdirectories.
 fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<dyn AiGuardParser>> {
+    use crate::ai_guard::workspace_discovery::codex_subfolder_dirs;
     use crate::ai_guard::{
         AntigravityProjectParser, ClaudeCodeProjectParser, CodexHomeProjectParser,
         CodexProjectParser, ContinueDevProjectParser, CursorProjectParser, GeminiProjectParser,
@@ -205,8 +206,13 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
     {
         out.push(Arc::new(ClaudeCodeProjectParser { repo_root: root() }));
     }
-    // Codex: .codex/config.toml | AGENTS.md
-    if has(".codex/config.toml") || has("AGENTS.md") {
+    // Codex: .codex/config.toml | AGENTS.md | a Git repository whose only Codex
+    // files sit in a subfolder `.codex/`. The walk runs only for a Git repository
+    // with neither root marker, as the daemon's discovery does.
+    if has(".codex/config.toml")
+        || has("AGENTS.md")
+        || (has(".git") && !codex_subfolder_dirs(dir).is_empty())
+    {
         out.push(Arc::new(CodexHomeProjectParser {
             project: CodexProjectParser::new(root()),
             codex_home,
@@ -452,14 +458,15 @@ fn render_human(report: &Report) -> String {
         // How to reduce: the distinct finding kinds across all rows (rows are
         // score-descending, so higher-impact fixes surface first), each with a
         // one-line advisory hint. Advisory only — Lodeline suggests, never edits.
-        // Keyed by the wire `kind` for the label; the hint comes from the reason
-        // variant (general per variant), so per-kind dedup is unambiguous.
+        // Keyed by the wire `kind` and the hint, so a kind whose hint depends
+        // on its fields or its row lists each distinct hint once.
         let mut seen: Vec<(String, &'static str)> = Vec::new();
         for r in &report.rows {
             for reason in &r.reasons {
                 let kind = reason_kind(reason);
-                if kind != "unknown" && !seen.iter().any(|(k, _)| k == &kind) {
-                    seen.push((kind, crate::ai_guard::remediation::hint_for_reason(reason)));
+                let hint = crate::ai_guard::remediation::hint_in_row(reason, &r.reasons);
+                if kind != "unknown" && !seen.iter().any(|(k, h)| k == &kind && *h == hint) {
+                    seen.push((kind, hint));
                 }
             }
         }
@@ -503,7 +510,8 @@ fn report_json(report: &Report) -> serde_json::Value {
                     obj.insert(
                         "hint".to_string(),
                         serde_json::Value::String(
-                            crate::ai_guard::remediation::hint_for_reason(reason).to_string(),
+                            crate::ai_guard::remediation::hint_in_row(reason, &r.reasons)
+                                .to_string(),
                         ),
                     );
                 }
