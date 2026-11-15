@@ -131,27 +131,35 @@ const SUBFOLDER_WALK_MAX_DEPTH: usize = 5;
 const SUBFOLDER_WALK_MAX_DIRS: usize = 2_000;
 const SUBFOLDER_WALK_SKIP: [&str; 3] = ["node_modules", "target", "vendor"];
 
-/// #200 — the `.codex/` folders strictly below `repo_root` that hold a
+/// #200. The `.codex/` folders strictly below `repo_root` that hold a
 /// `config.toml`, a `hooks.json` or a `rules` folder. Codex layers every
 /// `.codex/` from the project root down to the folder a session starts in, and
 /// a daemon cannot know that folder, so every one is returned. The walk is
 /// bounded in depth and in folders visited, skips hidden folders,
-/// `node_modules`, `target` and `vendor`, and follows no symlink.
+/// `node_modules`, `target` and `vendor`, and follows no symlink. A folder with
+/// its own `.git` entry is a nested repository or submodule, which Codex takes
+/// as its own project root, so the walk does not enter it.
 pub fn codex_subfolder_dirs(repo_root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut queue = std::collections::VecDeque::from([(repo_root.to_path_buf(), 0usize)]);
     let mut visited = 0usize;
     while let Some((dir, depth)) = queue.pop_front() {
-        visited += 1;
-        if visited > SUBFOLDER_WALK_MAX_DIRS {
-            tracing::warn!(repo = %repo_root.display(),
-                "workspace_discovery: subfolder .codex walk capped");
+        if visited == SUBFOLDER_WALK_MAX_DIRS {
+            tracing::warn!(
+                visited,
+                "workspace_discovery: subfolder .codex walk stopped at the folder cap"
+            );
             break;
         }
+        visited += 1;
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
+        let entries: Vec<_> = entries.flatten().collect();
+        if depth > 0 && entries.iter().any(|e| e.file_name() == ".git") {
+            continue;
+        }
+        for entry in entries {
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
