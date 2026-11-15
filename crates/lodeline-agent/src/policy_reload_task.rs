@@ -444,6 +444,10 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         crate::ai_guard::workspace_discovery::discover_cursor_repos(&effective.cursor_workspaces)
             .into_iter()
             .collect();
+    let new_grok: std::collections::BTreeSet<PathBuf> =
+        crate::ai_guard::workspace_discovery::discover_grok_repos(&effective.grok_workspaces)
+            .into_iter()
+            .collect();
     // #93 — reconciled like the other five tools (built-in
     // AntigravityProjectParser) AND used for Project rule-pack expansion.
     let new_antigravity: std::collections::BTreeSet<PathBuf> =
@@ -466,7 +470,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             Cursor => new_cursor.iter().cloned().collect(),
             Antigravity => new_antigravity.iter().cloned().collect(),
             ClaudeDesktop => Vec::new(),
-            Grok => Vec::new(), // #110: no Grok project parser/workspace yet
+            Grok => new_grok.iter().cloned().collect(),
             Other => Vec::new(),
         }
     };
@@ -482,6 +486,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         gemini_removed,
         cursor_added,
         cursor_removed,
+        grok_added,
+        grok_removed,
         antigravity_added,
         antigravity_removed,
         rule_packs_added,
@@ -544,6 +550,13 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         let (a6, r6) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
+            lodeline_core::event::AiTool::Grok,
+            &new_grok,
+            |p| crate::ai_guard::GrokProjectParser { repo_root: p },
+        );
+        let (a7, r7) = reconcile_per_repo(
+            &mut guard,
+            &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Antigravity,
             &new_antigravity,
             |p| crate::ai_guard::AntigravityProjectParser { repo_root: p },
@@ -555,7 +568,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             &repos_for_tool,
         );
         (
-            a1, r1, a2, r2, a3, r3, a4, r4, a5, r5, a6, r6, rp_added, rp_removed,
+            a1, r1, a2, r2, a3, r3, a4, r4, a5, r5, a6, r6, a7, r7, rp_added, rp_removed,
         )
     };
 
@@ -574,6 +587,9 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     }
     for repo_root in &new_cursor {
         crate::runtime::push_cursor_synthetic_target(&mut effective, repo_root);
+    }
+    for repo_root in &new_grok {
+        crate::runtime::push_grok_synthetic_target(&mut effective, repo_root);
     }
     for repo_root in &new_antigravity {
         crate::runtime::push_antigravity_synthetic_target(&mut effective, repo_root);
@@ -608,6 +624,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         gemini_removed = gemini_removed.len(),
         cursor_added = cursor_added.len(),
         cursor_removed = cursor_removed.len(),
+        grok_added = grok_added.len(),
+        grok_removed = grok_removed.len(),
         antigravity_added = antigravity_added.len(),
         antigravity_removed = antigravity_removed.len(),
         rule_packs_added = rule_packs_added.len(),
@@ -711,29 +729,6 @@ mod tests {
     use crate::runtime::expand_targets;
     use crate::watcher::test_logs::logs_of;
     use std::time::Duration;
-
-    /// Verify the repos_for_tool closure (as defined in reload()) returns an
-    /// empty Vec for AiTool::Grok — no project parser/workspace registered yet (#110).
-    #[test]
-    fn repos_for_tool_grok_is_empty() {
-        // Mirror the closure shape from reload(): all empty BTreeSets.
-        let empty: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
-        let repos_for_tool = |tool: lodeline_core::event::AiTool| -> Vec<PathBuf> {
-            use lodeline_core::event::AiTool::*;
-            match tool {
-                ContinueDev => empty.iter().cloned().collect(),
-                ClaudeCode => empty.iter().cloned().collect(),
-                Codex => empty.iter().cloned().collect(),
-                Gemini => empty.iter().cloned().collect(),
-                Cursor => empty.iter().cloned().collect(),
-                Antigravity => empty.iter().cloned().collect(),
-                ClaudeDesktop => Vec::new(),
-                Grok => Vec::new(), // #110: no Grok project parser/workspace yet
-                Other => Vec::new(),
-            }
-        };
-        assert!(repos_for_tool(lodeline_core::event::AiTool::Grok).is_empty());
-    }
 
     fn policy_yaml(target_id: &str, watch_path: &str, tier: &str) -> String {
         format!(
@@ -1591,6 +1586,56 @@ mod tests {
         assert!(has, "expected CursorProjectParser for repoA after reload");
     }
 
+    fn has_grok_project_parser(
+        parsers: &parking_lot::RwLock<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>,
+        repo: &std::path::Path,
+    ) -> bool {
+        parsers.read().iter().any(|p| {
+            p.tool() == lodeline_core::event::AiTool::Grok
+                && matches!(
+                    p.scope(),
+                    lodeline_core::event::AiGuardScope::Project { ref path } if path == repo
+                )
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_adds_and_drops_grok_project_parser_with_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let hooks_repo = workspace.join("hooksRepo");
+        std::fs::create_dir_all(hooks_repo.join(".grok").join("hooks")).unwrap();
+        std::fs::write(hooks_repo.join(".grok").join("hooks").join("x.json"), "{}").unwrap();
+        let config_repo = workspace.join("configRepo");
+        std::fs::create_dir_all(config_repo.join(".grok")).unwrap();
+        std::fs::write(config_repo.join(".grok").join("config.toml"), "").unwrap();
+        let plain_repo = workspace.join("plainRepo");
+        std::fs::create_dir_all(&plain_repo).unwrap();
+        let hooks_repo = dunce::canonicalize(&hooks_repo).unwrap();
+        let config_repo = dunce::canonicalize(&config_repo).unwrap();
+        let plain_repo = dunce::canonicalize(&plain_repo).unwrap();
+
+        let initial = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, _trx, parsers, _state) = build_ctx_with_parsers(dir.path(), initial);
+        reload(&mut ctx, &plat);
+        assert!(!has_grok_project_parser(&parsers, &hooks_repo));
+
+        let updated = format!(
+            "version: 1\nhost_id_strategy: machine_id\ngrok_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(has_grok_project_parser(&parsers, &hooks_repo));
+        assert!(has_grok_project_parser(&parsers, &config_repo));
+        assert!(!has_grok_project_parser(&parsers, &plain_repo));
+
+        std::fs::write(&ctx.paths.policy.applied, initial).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(!has_grok_project_parser(&parsers, &hooks_repo));
+        assert!(!has_grok_project_parser(&parsers, &config_repo));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reload_adds_antigravity_project_parser_when_workspace_added() {
         let dir = tempfile::tempdir().unwrap();
@@ -1663,6 +1708,52 @@ mod tests {
                 .unwrap_or(false)
         });
         assert!(has_extra, "expected my-extra rule pack after reload");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_adds_grok_project_rule_pack_for_each_grok_repo() {
+        use crate::ai_guard::parser::AiGuardParser;
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let grok_repo = workspace.join("grokRepo");
+        std::fs::create_dir_all(grok_repo.join(".grok").join("hooks")).unwrap();
+        std::fs::create_dir_all(workspace.join("plainRepo")).unwrap();
+        let grok_repo = dunce::canonicalize(&grok_repo).unwrap();
+
+        let base = format!(
+            "version: 1\nhost_id_strategy: machine_id\ngrok_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        let (mut ctx, plat, _trx, parsers, _state) = build_ctx_with_parsers(dir.path(), &base);
+        let pack_scopes = |parsers: &parking_lot::RwLock<
+            Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>,
+        >| {
+            parsers
+                .read()
+                .iter()
+                .filter_map(|p| {
+                    p.as_any()
+                        .downcast_ref::<crate::ai_guard::rule_pack::parser::RulePackParser>()
+                })
+                .filter(|rpp| rpp.pack.id == "grok-proj")
+                .map(|rpp| (rpp.tool(), rpp.scope()))
+                .collect::<Vec<_>>()
+        };
+        reload(&mut ctx, &plat);
+        assert_eq!(pack_scopes(&parsers), vec![]);
+
+        let updated = format!(
+            "{base}rule_packs:\n  - id: grok-proj\n    pack_version: 1\n    tool: grok\n    scope:\n      kind: project\n    watched_paths:\n      - '.grok/hooks/x.json'\n    rules:\n      - id: r1\n        on_file: '.grok/hooks/x.json'\n        format: json\n        selector: '$.hooks'\n        matcher:\n          kind: exists\n        emit:\n          kind: sandbox_disabled\n"
+        );
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
+        reload(&mut ctx, &plat);
+        assert_eq!(
+            pack_scopes(&parsers),
+            vec![(
+                lodeline_core::event::AiTool::Grok,
+                lodeline_core::event::AiGuardScope::Project { path: grok_repo }
+            )]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
