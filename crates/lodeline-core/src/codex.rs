@@ -97,6 +97,21 @@ pub enum HooksFeature {
     },
 }
 
+/// The `toml` error message can quote the offending key or value, which can
+/// be a credential, so keep only the kind and where it is.
+pub fn toml_error_place(text: &str, e: &toml::de::Error) -> String {
+    let place = e
+        .span()
+        .map(|span| {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            format!(" at line {line}, column {column}")
+        })
+        .unwrap_or_default();
+    format!("invalid TOML{place}")
+}
+
 impl HooksFeature {
     pub fn read(system_dir: &Path, codex_home: &Path) -> Self {
         let files = [
@@ -120,7 +135,7 @@ impl HooksFeature {
             match toml::from_str::<Value>(&text) {
                 Ok(value) => parsed.push((path, Some(value))),
                 Err(e) => {
-                    let error = e.message().to_string();
+                    let error = toml_error_place(&text, &e);
                     return Self::Unreadable { path, error };
                 }
             }
@@ -361,5 +376,21 @@ mod tests {
         };
         assert_eq!(path, &root.path().join("home").join("config.toml"));
         assert!(got.warning().unwrap().starts_with("cannot read "));
+    }
+
+    #[test]
+    fn toml_errors_name_the_place_and_never_the_source() {
+        for user in [
+            "[features]\ntest-value-0 = 1\ntest-value-0 = 2\n",
+            "[features]\nhooks = test-value-0\n",
+        ] {
+            let (_root, got) = feature("", "", user);
+            let HooksFeature::Unreadable { error, .. } = &got else {
+                panic!("{got:?}")
+            };
+            assert!(error.starts_with("invalid TOML at line "), "{error}");
+            let shown = format!("{got:?} {}", got.warning().unwrap());
+            assert_eq!(shown.matches("test-value-0").count(), 0, "{shown}");
+        }
     }
 }
