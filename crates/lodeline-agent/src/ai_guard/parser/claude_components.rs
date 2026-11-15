@@ -23,6 +23,8 @@ const MAX_AGENT_DEPTH: usize = 8;
 const MAX_NESTED_DEPTH: usize = 8;
 const MAX_NESTED_WALK_DIRS: usize = 20_000;
 const NESTED_WALK_SKIPPED: &[&str] = &["node_modules", "target"];
+/// Most inherited and nested folders one repository's watch targets cover.
+pub(crate) const MAX_WATCHED_COMPONENT_DIRS: usize = 64;
 /// Frontmatter sits at the top of the file, so only this much is read.
 const FRONTMATTER_READ_CAP: u64 = 256 * 1024;
 

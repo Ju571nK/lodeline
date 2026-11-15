@@ -2376,6 +2376,137 @@ mod tests {
         }
     }
 
+    fn claude_targets_for(repo: &std::path::Path) -> lodeline_core::policy::EffectivePolicy {
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        effective
+    }
+
+    fn touch(root: &std::path::Path, rel: &str) {
+        let file = root.join(rel);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "x").unwrap();
+    }
+
+    fn watches(effective: &lodeline_core::policy::EffectivePolicy, file: &std::path::Path) -> bool {
+        let compiled = crate::normalizer::compile_targets(
+            effective,
+            &effective
+                .targets
+                .iter()
+                .map(|t| {
+                    (
+                        t.id.clone(),
+                        t.paths.iter().map(std::path::PathBuf::from).collect(),
+                    )
+                })
+                .collect(),
+        );
+        compiled
+            .iter()
+            .any(|t| t.globs.iter().any(|g| g.is_match(file)))
+    }
+
+    #[test]
+    fn claude_code_project_targets_watch_nested_skill_and_agent_folders() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = crate::normalizer::canonicalize_glob_prefix(td.path());
+        touch(&repo, "packages/a/.claude/skills/x/SKILL.md");
+        touch(&repo, "services/b/.claude/agents/sub/y.md");
+        touch(&repo, "packages/node_modules/z/.claude/skills/n/SKILL.md");
+        touch(&repo, ".hidden/.claude/skills/h/SKILL.md");
+        touch(&repo, "target/.claude/skills/t/SKILL.md");
+        let effective = claude_targets_for(&repo);
+        assert!(watches(
+            &effective,
+            &repo.join("packages/a/.claude/skills/x/SKILL.md")
+        ));
+        assert!(watches(
+            &effective,
+            &repo.join("services/b/.claude/agents/sub/y.md")
+        ));
+        for skipped in [
+            "packages/node_modules/z/.claude/skills/n/SKILL.md",
+            ".hidden/.claude/skills/h/SKILL.md",
+            "target/.claude/skills/t/SKILL.md",
+        ] {
+            assert!(!watches(&effective, &repo.join(skipped)), "{skipped}");
+        }
+        assert!(
+            !watches(
+                &effective,
+                &repo.join("packages/a/.claude/skills/x/deep/SKILL.md")
+            ),
+            "a nested skills entry names one folder"
+        );
+    }
+
+    #[test]
+    fn claude_code_project_targets_cap_the_nested_folders() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let cap = crate::ai_guard::parser::claude_components::MAX_WATCHED_COMPONENT_DIRS;
+        for i in 0..cap + 5 {
+            touch(&repo, &format!("pkg{i:03}/.claude/skills/s/SKILL.md"));
+        }
+        let effective = claude_targets_for(&repo);
+        let nested: Vec<_> = effective
+            .targets
+            .iter()
+            .filter(|t| t.id.starts_with("claude_code-nested-components-"))
+            .collect();
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].paths.len(), cap);
+        assert!(watches(
+            &effective,
+            &repo.join("pkg000/.claude/skills/s/SKILL.md")
+        ));
+        assert!(!watches(
+            &effective,
+            &repo.join(format!("pkg{:03}/.claude/skills/s/SKILL.md", cap + 4))
+        ));
+    }
+
+    #[test]
+    fn claude_code_project_targets_watch_parent_component_folders() {
+        let td = tempfile::tempdir().unwrap();
+        let top = crate::normalizer::canonicalize_glob_prefix(td.path());
+        std::fs::create_dir_all(top.join(".git")).unwrap();
+        touch(&top, ".claude/skills/p/SKILL.md");
+        let repo = top.join("apps/web");
+        std::fs::create_dir_all(&repo).unwrap();
+        let effective = claude_targets_for(&repo);
+        assert!(watches(&effective, &top.join(".claude/skills/p/SKILL.md")));
+    }
+
+    #[test]
+    fn a_folder_created_after_the_targets_were_built_is_not_watched_until_they_are_rebuilt() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = crate::normalizer::canonicalize_glob_prefix(td.path());
+        touch(&repo, "a/.claude/skills/x/SKILL.md");
+        let parser = crate::ai_guard::ClaudeCodeProjectParser {
+            repo_root: repo.clone(),
+        };
+        use crate::ai_guard::parser::AiGuardParser;
+        let home = repo.join("nohome");
+        let first = claude_targets_for(&repo);
+        let before = parser.watched_paths(&home);
+        touch(&repo, "b/.claude/skills/y/SKILL.md");
+        assert_eq!(parser.watched_paths(&home), before, "no walk per call");
+        assert!(!watches(&first, &repo.join("b/.claude/skills/y/SKILL.md")));
+        let second = claude_targets_for(&repo);
+        assert!(watches(&second, &repo.join("b/.claude/skills/y/SKILL.md")));
+        assert!(parser
+            .watched_paths(&home)
+            .contains(&repo.join("b/.claude/skills")));
+    }
+
     #[test]
     fn warm_up_lists_one_level_of_skills_and_skips_what_is_below() {
         let td = tempfile::tempdir().unwrap();
