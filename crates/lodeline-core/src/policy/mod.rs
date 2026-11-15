@@ -1373,6 +1373,11 @@ targets:
                 r"C:\Users\alice\.claude\agents",
             ),
             (
+                r"%USERPROFILE%\.claude\commands\*.md",
+                r"C:\Users\alice\.claude\commands\deploy.md",
+                r"C:\Users\alice\.claude\commands",
+            ),
+            (
                 r"%USERPROFILE%\.claude\CLAUDE.md",
                 r"C:\Users\alice\.claude\CLAUDE.md",
                 "",
