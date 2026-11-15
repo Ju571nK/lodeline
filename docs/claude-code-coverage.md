@@ -14,8 +14,9 @@ The key list comes from the settings index at https://code.claude.com/docs/en/se
 
 | File | Rows it feeds |
 |---|---|
-| `~/.claude/settings.json`, `~/.claude/settings.local.json` | User |
+| `~/.claude/settings.json` | User |
 | `<repo>/.claude/settings.json`, `<repo>/.claude/settings.local.json`, and the `settings.local.json` at the repository root | Project |
+| `~/.claude/settings.local.json` | Project, only for a project whose folder is the home folder |
 | `~/.claude.json` (user and local MCP servers), `<repo>/.mcp.json` | User, Project |
 | `managed-settings.json`, `managed-settings.d/*.json`, `managed-mcp.json` in the managed folder | User and Project (see below) |
 | `CLAUDE.md`, `loop.md`, skill and subagent frontmatter hooks | User, Project |
@@ -26,7 +27,7 @@ The managed folder is `/Library/Application Support/ClaudeCode` on macOS, `C:\Pr
 
 When `lodeline scan` runs in the home folder, the home's `.claude/settings.json` is read as a project file, so the project-only keys are reported from it too.
 
-`CLAUDE_CONFIG_DIR` is honored for the user row. Settings passed with `--settings` are runtime state and are not read.
+`CLAUDE_CONFIG_DIR` is honored for the user row, which reads `settings.json` in that folder and no `settings.local.json`. Claude Code's user scope is `settings.json` only; a `~/.claude/settings.local.json` is the local file of a session started in the home folder, so it feeds only the project row of the home folder. Settings passed with `--settings` are runtime state and are not read.
 
 ## Assessed
 

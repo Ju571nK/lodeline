@@ -7,6 +7,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- **The AI Guard score of a host that has `~/.claude/settings.local.json` drops.** The Claude Code
+  user row now reads `~/.claude/settings.json` only, as the Claude Code settings page defines the
+  user scope. Before, it also merged `~/.claude/settings.local.json`, which Claude Code treats as
+  project-local settings, so a `defaultMode`, a hook, a broad allow rule or an
+  `allowedHttpHookUrls` list in that file moved the score of every session on the host. The file
+  is still read as the local file of a project whose folder is the home folder, so
+  `lodeline scan` run in the home folder, or a workspace entry for it, still reports it in the
+  `project` row. A `settings.local.json` in a `CLAUDE_CONFIG_DIR` folder is not read. The score never rises from
+  this change, and no reason kind, event field or policy field is added. The default watch
+  targets are unchanged.
+
 ## [0.15.1] - 2026-11-15
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,
