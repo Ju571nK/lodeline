@@ -137,14 +137,6 @@ const SUBFOLDER_WALK_MAX_DEPTH: usize = 5;
 const SUBFOLDER_WALK_MAX_DIRS: usize = 2_000;
 const SUBFOLDER_WALK_SKIP: [&str; 3] = ["node_modules", "target", "vendor"];
 
-/// #200. The `.codex/` folders strictly below `repo_root` that hold a
-/// `config.toml`, a `hooks.json` or a `rules` folder. Codex layers every
-/// `.codex/` from the project root down to the folder a session starts in, and
-/// a daemon cannot know that folder, so every one is returned. The walk is
-/// bounded in depth and in folders visited, skips hidden folders,
-/// `node_modules`, `target` and `vendor`, and follows no symlink. A folder with
-/// its own `.git` entry is a nested repository or submodule, which Codex takes
-/// as its own project root, so the walk does not enter it.
 #[cfg(test)]
 pub(crate) mod walk_probe {
     use std::cell::RefCell;
@@ -170,6 +162,14 @@ pub(crate) mod walk_probe {
     }
 }
 
+/// #200. The `.codex/` folders strictly below `repo_root` that hold a
+/// `config.toml`, a `hooks.json` or a `rules` folder. Codex layers every
+/// `.codex/` from the project root down to the folder a session starts in, and
+/// a daemon cannot know that folder, so every one is returned. The walk is
+/// bounded in depth and in folders visited, skips hidden folders,
+/// `node_modules`, `target` and `vendor`, and follows no symlink. A folder with
+/// its own `.git` entry is a nested repository or submodule, which Codex takes
+/// as its own project root, so the walk does not enter it.
 pub fn codex_subfolder_dirs(repo_root: &Path) -> Vec<PathBuf> {
     #[cfg(test)]
     walk_probe::fire();
