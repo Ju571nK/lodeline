@@ -627,6 +627,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 unfinished: Vec::new(),
                 applied_policy: None,
                 rule_packs_read,
+                home_dir: home_dir.clone(),
             },
         )),
     );

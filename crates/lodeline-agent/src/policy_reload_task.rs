@@ -238,6 +238,9 @@ pub struct ReloadCtx {
     /// The rule-pack file the last load read, as [`rule_packs_on_disk`] gives it. A
     /// root tick reloads when the disk no longer matches it.
     pub rule_packs_read: (PathBuf, Option<Vec<u8>>),
+    /// The agent's own home, the user scope whose `.claude` folders no project
+    /// target watches a second time.
+    pub home_dir: PathBuf,
 }
 
 /// The rule-pack file in force and its bytes, `None` when it cannot be read. Take it
@@ -808,6 +811,7 @@ mod tests {
                 last_good_bundle: None,
                 unfinished: Vec::new(),
                 applied_policy: None,
+                home_dir: dir.join("home"),
             },
             plat,
             targets_rx,
@@ -876,6 +880,7 @@ mod tests {
                 last_good_bundle: None,
                 unfinished: Vec::new(),
                 applied_policy: None,
+                home_dir: dir.join("home"),
             },
             plat,
             targets_rx,
@@ -1435,6 +1440,73 @@ mod tests {
             has,
             "expected ClaudeCodeProjectParser for repoA after reload"
         );
+    }
+
+    fn nested_target_matches(
+        targets: &watch::Receiver<Arc<Vec<CompiledTarget>>>,
+        file: &std::path::Path,
+    ) -> bool {
+        targets.borrow().iter().any(|t| {
+            t.id.starts_with("claude_code-nested-components-")
+                && t.globs.iter().any(|g| g.is_match(file))
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_watches_nested_skill_folder_of_a_repo_under_an_added_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dunce::canonicalize(dir.path()).unwrap().join("ws");
+        let repo = workspace.join("repoA");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        let nested = repo.join("apps/web/.claude/skills/x/SKILL.md");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "x").unwrap();
+
+        let initial = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, targets, _parsers, _state) =
+            build_ctx_with_parsers(dir.path(), initial);
+        reload(&mut ctx, &plat);
+        assert!(!nested_target_matches(&targets, &nested));
+
+        let updated = format!(
+            "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(nested_target_matches(&targets, &nested));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_leaves_the_home_claude_folders_to_the_user_row() {
+        use crate::ai_guard::parser::AiGuardParser;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dunce::canonicalize(dir.path()).unwrap().join("home");
+        let repo = home.join("code/proj");
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        let user_skill = home.join(".claude/skills/x/SKILL.md");
+        std::fs::create_dir_all(user_skill.parent().unwrap()).unwrap();
+        std::fs::write(&user_skill, "x").unwrap();
+        let own_skill = repo.join("sub/.claude/skills/y/SKILL.md");
+        std::fs::create_dir_all(own_skill.parent().unwrap()).unwrap();
+        std::fs::write(&own_skill, "x").unwrap();
+
+        let policy = format!(
+            "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+            home.join("code").display()
+        );
+        let (mut ctx, plat, targets, _parsers, _state) = build_ctx_with_parsers(dir.path(), &policy);
+        ctx.home_dir = home.clone();
+        reload(&mut ctx, &plat);
+
+        assert!(nested_target_matches(&targets, &own_skill));
+        assert!(!nested_target_matches(&targets, &user_skill));
+        let user_row = crate::ai_guard::ClaudeCodeParser::default().watched_paths(&home);
+        assert!(user_row.contains(&home.join(".claude/skills")));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
