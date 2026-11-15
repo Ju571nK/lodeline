@@ -17,7 +17,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   user config records a `trusted_hash` for it, as for the repository root. A Git repository whose
   only Codex files sit in a subfolder is now discovered. Creating, editing or removing a file in a
   found layer, or in the root `.codex/`, re-assesses the repository. A subfolder `.codex/` created
-  later is found at the next discovery, when the agent starts or reloads its policy.
+  later is found at the next discovery, when the agent starts or reloads its policy, and it is
+  not watched before then.
   **Limits.** The walk goes at most five folders deep and visits at most 2,000 folders per
   repository, and a layer past either limit is not read. It skips hidden folders, `node_modules`,
   `target` and `vendor`, follows no link, and does not enter a folder with its own `.git` entry,
