@@ -455,6 +455,39 @@ mod tests {
     }
 
     #[test]
+    fn discover_codex_repos_finds_a_root_rules_folder_only() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("only-rules");
+        std::fs::create_dir_all(repo.join(".codex/rules")).unwrap();
+        std::fs::write(
+            repo.join(".codex/rules/default.rules"),
+            "prefix_rule(pattern=[\"git\", \"push\"], decision=\"allow\")\n",
+        )
+        .unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        assert!(discover_codex_repos(&roots).contains(&dunce::canonicalize(&repo).unwrap()));
+    }
+
+    #[test]
+    fn discover_codex_repos_finds_an_empty_root_rules_folder() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("empty-rules");
+        std::fs::create_dir_all(repo.join(".codex/rules")).unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        assert!(discover_codex_repos(&roots).contains(&dunce::canonicalize(&repo).unwrap()));
+    }
+
+    #[test]
+    fn discover_codex_repos_ignores_a_rules_file() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("rules-file");
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::write(repo.join(".codex/rules"), "x").unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        assert!(!discover_codex_repos(&roots).contains(&dunce::canonicalize(&repo).unwrap()));
+    }
+
+    #[test]
     fn discover_codex_repos_finds_agents_md_only() {
         let root = tempdir().unwrap();
         let repo = root.path().join("only-agents");
