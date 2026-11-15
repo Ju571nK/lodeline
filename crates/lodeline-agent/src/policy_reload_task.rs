@@ -502,12 +502,30 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             &new_claude,
             |p| crate::ai_guard::ClaudeCodeProjectParser { repo_root: p },
         );
+        // #200. A kept Codex parser is built again, so its subfolder `.codex/`
+        // layers are walked again at this discovery.
+        for p in guard.iter_mut() {
+            let is_pack = p
+                .as_any()
+                .downcast_ref::<crate::ai_guard::rule_pack::parser::RulePackParser>()
+                .is_some();
+            if let (
+                false,
+                lodeline_core::event::AiTool::Codex,
+                lodeline_core::event::AiGuardScope::Project { path },
+            ) = (is_pack, p.tool(), p.scope())
+            {
+                if new_codex.contains(&path) {
+                    *p = Arc::new(crate::ai_guard::CodexProjectParser::new(path));
+                }
+            }
+        }
         let (a3, r3) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Codex,
             &new_codex,
-            |p| crate::ai_guard::CodexProjectParser { repo_root: p },
+            crate::ai_guard::CodexProjectParser::new,
         );
         let (a4, r4) = reconcile_per_repo(
             &mut guard,

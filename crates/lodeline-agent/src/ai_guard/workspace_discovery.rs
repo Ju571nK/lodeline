@@ -96,14 +96,18 @@ pub fn discover_codex_repos(roots: &[String]) -> Vec<PathBuf> {
             .collect();
     set.extend(discover_per_repo(roots, ".codex/hooks.json"));
     set.extend(discover_per_repo(roots, "AGENTS.md"));
-    set.extend(discover_git_repos_with_subfolder_codex(roots));
+    let subfolder_only = discover_git_repos_with_subfolder_codex(roots, &set);
+    set.extend(subfolder_only);
     set.into_iter().collect()
 }
 
 /// A repository whose only Codex files sit in a subfolder `.codex/`. Only a
-/// direct subdirectory with a `.git` entry is walked, so a plain folder of
-/// projects costs one `stat` each.
-fn discover_git_repos_with_subfolder_codex(roots: &[String]) -> Vec<PathBuf> {
+/// direct subdirectory with a `.git` entry that is not already `found` is
+/// walked, so a plain folder of projects costs one `stat` each.
+fn discover_git_repos_with_subfolder_codex(
+    roots: &[String],
+    found: &std::collections::BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for raw in roots {
         let Some(root) = expand_and_canonicalize(raw) else {
@@ -114,13 +118,14 @@ fn discover_git_repos_with_subfolder_codex(roots: &[String]) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir()
-                && path.join(".git").exists()
-                && !codex_subfolder_dirs(&path).is_empty()
-            {
-                if let Ok(c) = dunce::canonicalize(&path) {
-                    out.push(c);
-                }
+            if !path.is_dir() || !path.join(".git").exists() {
+                continue;
+            }
+            let Ok(repo) = dunce::canonicalize(&path) else {
+                continue;
+            };
+            if !found.contains(&repo) && !codex_subfolder_dirs(&repo).is_empty() {
+                out.push(repo);
             }
         }
     }

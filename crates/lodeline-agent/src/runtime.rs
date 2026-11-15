@@ -254,9 +254,9 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         }));
     }
     for repo_root in &codex_repos {
-        parsers_vec.push(Arc::new(crate::ai_guard::CodexProjectParser {
-            repo_root: repo_root.clone(),
-        }));
+        parsers_vec.push(Arc::new(crate::ai_guard::CodexProjectParser::new(
+            repo_root.clone(),
+        )));
     }
     for repo_root in &gemini_repos {
         parsers_vec.push(Arc::new(crate::ai_guard::GeminiProjectParser {
