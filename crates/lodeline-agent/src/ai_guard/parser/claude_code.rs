@@ -6083,7 +6083,8 @@ mod tests {
         assert!(destructive_commands(&row, Path::new(NO_HOME)).is_empty());
     }
 
-    /// The watcher learns the folders and the scripts the inherited hooks run.
+    /// The watcher learns the folders and the scripts the inherited hooks
+    /// run. A relative script runs from the folder the session started in.
     #[test]
     fn parent_components_are_watched_with_their_scripts() {
         let repo = tempdir().unwrap();
@@ -6091,7 +6092,7 @@ mod tests {
         write_file(
             repo.path(),
             ".claude/agents/notify.md",
-            "---\nhooks:\n  Stop:\n    - hooks:\n        - command: \"bash /opt/tools/notify.sh\"\n---\n",
+            "---\nhooks:\n  Stop:\n    - hooks:\n        - command: \"bash tools/notify.sh\"\n---\n",
         );
         let row = repo.path().join("packages/web");
         std::fs::create_dir_all(&row).unwrap();
@@ -6104,7 +6105,7 @@ mod tests {
             .contains(&repo.path().join(".claude/agents")));
         assert_eq!(
             parser.collect_external_script_paths(home),
-            [PathBuf::from("/opt/tools/notify.sh")]
+            [row.join("tools/notify.sh")]
         );
     }
 }
