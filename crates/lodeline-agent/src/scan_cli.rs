@@ -458,14 +458,15 @@ fn render_human(report: &Report) -> String {
         // How to reduce: the distinct finding kinds across all rows (rows are
         // score-descending, so higher-impact fixes surface first), each with a
         // one-line advisory hint. Advisory only — Lodeline suggests, never edits.
-        // Keyed by the wire `kind` for the label; the hint comes from the reason
-        // variant (general per variant), so per-kind dedup is unambiguous.
+        // Keyed by the wire `kind` and the hint, so a kind whose hint depends
+        // on its fields or its row lists each distinct hint once.
         let mut seen: Vec<(String, &'static str)> = Vec::new();
         for r in &report.rows {
             for reason in &r.reasons {
                 let kind = reason_kind(reason);
-                if kind != "unknown" && !seen.iter().any(|(k, _)| k == &kind) {
-                    seen.push((kind, crate::ai_guard::remediation::hint_for_reason(reason)));
+                let hint = crate::ai_guard::remediation::hint_in_row(reason, &r.reasons);
+                if kind != "unknown" && !seen.iter().any(|(k, h)| k == &kind && *h == hint) {
+                    seen.push((kind, hint));
                 }
             }
         }
@@ -509,7 +510,8 @@ fn report_json(report: &Report) -> serde_json::Value {
                     obj.insert(
                         "hint".to_string(),
                         serde_json::Value::String(
-                            crate::ai_guard::remediation::hint_for_reason(reason).to_string(),
+                            crate::ai_guard::remediation::hint_in_row(reason, &r.reasons)
+                                .to_string(),
                         ),
                     );
                 }

@@ -367,6 +367,14 @@ pub enum AiGuardReason {
         server_name: String,
         tools: Vec<String>,
     },
+    /// #200: a Codex MCP server sends a credential header with a static
+    /// value from `http_headers`, so the credential sits in the config file
+    /// as plain text. `header_name` is the header name only; the value is
+    /// never recorded. POSTURE only. Static.
+    McpServerStaticCredential {
+        server_name: String,
+        header_name: String,
+    },
     /// #199 — a repository's Claude Code settings enable a plugin. Claude Code
     /// applies a project `enabledPlugins` at session start, before the
     /// workspace trust dialog and in `claude -p`, and a plugin can ship hooks

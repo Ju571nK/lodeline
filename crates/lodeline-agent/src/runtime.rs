@@ -1163,8 +1163,32 @@ fn files_matching_pattern(
 }
 
 /// True for the per-project skills and agents target `push_claude_code_synthetic_targets`
-/// builds: its id and its exact two paths, which fix the repository root.
+/// builds (its id and its exact two paths, which fix the repository root) and
+/// for the nested and inherited folders target.
 pub(crate) fn is_claude_code_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
+    is_root_skills_target(t) || is_component_target(t)
+}
+
+const NESTED_TARGET_PREFIX: &str = "claude_code-nested-components-";
+
+/// True for the nested and inherited folders target of
+/// `push_claude_code_component_target`: its id and paths that are each a
+/// plain folder path followed by `.claude/skills/*/SKILL.md` or
+/// `.claude/agents/*.md`.
+fn is_component_target(t: &lodeline_core::policy::WatchTarget) -> bool {
+    let plain = |p: &std::path::Path| !p.to_string_lossy().contains(['*', '?', '[', ']', '{', '}']);
+    let skills = std::path::Path::new(".claude/skills/*/SKILL.md");
+    let agents = std::path::Path::new(".claude/agents/*.md");
+    t.id.starts_with(NESTED_TARGET_PREFIX)
+        && !t.paths.is_empty()
+        && t.paths.iter().all(|p| {
+            let p = std::path::Path::new(p);
+            (p.ends_with(skills) && p.ancestors().nth(4).is_some_and(plain))
+                || (p.ends_with(agents) && p.ancestors().nth(3).is_some_and(plain))
+        })
+}
+
+fn is_root_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
     let Some(h) = t.id.strip_prefix("claude_code-skills-agents-") else {
         return false;
     };
@@ -1907,7 +1931,8 @@ pub(crate) fn push_continue_synthetic_target(
     });
 }
 
-/// Phase 3b.6.2: push THREE synthetic WatchTargets for a Claude Code per-repo
+/// Phase 3b.6.2: push THREE synthetic WatchTargets, and a fourth for nested and
+/// inherited skills and agents when there are any, for a Claude Code per-repo
 /// config: one for `settings.json` + `settings.local.json` (not recursive),
 /// one for `.claude/hooks/*` (recursive; the pattern matches every file below the folder),
 /// one for `.claude/skills/` and `.claude/agents/` (recursive).
@@ -1970,6 +1995,57 @@ pub(crate) fn push_claude_code_synthetic_targets(
                 .to_string(),
             cd.join("agents").join("*.md").to_string_lossy().to_string(),
         ],
+        recursive: true,
+        follow_symlinks: false,
+        disabled: false,
+    });
+    push_claude_code_component_target(effective, repo_root);
+}
+
+/// #539: the target for skills and agents folders the repository's own
+/// `.claude` target does not reach: nested folders and the parent and main
+/// checkout folders a session started here also loads. It lists the folders
+/// that exist now, so a folder created later is covered from the next build,
+/// which a policy reload or a restart runs. The home folder is not excluded
+/// here: its `.claude` folders are watched by the default policy and the
+/// parser leaves them out of the project row.
+fn push_claude_code_component_target(
+    effective: &mut lodeline_core::policy::EffectivePolicy,
+    repo_root: &std::path::Path,
+) {
+    let no_home = std::path::Path::new("");
+    let paths: Vec<String> =
+        crate::ai_guard::parser::claude_components::walk_watched_component_dirs(repo_root, no_home)
+            .iter()
+            .filter(|dir| {
+                !dir.to_string_lossy()
+                    .contains(['*', '?', '[', ']', '{', '}'])
+            })
+            .map(|dir| {
+                if dir.file_name().is_some_and(|n| n == "agents") {
+                    dir.join("*.md")
+                } else {
+                    dir.join("*").join("SKILL.md")
+                }
+                .to_string_lossy()
+                .to_string()
+            })
+            .collect();
+    if paths.is_empty() {
+        return;
+    }
+    effective.targets.push(lodeline_core::policy::WatchTarget {
+        id: format!(
+            "{NESTED_TARGET_PREFIX}{}",
+            synthetic_target_id_suffix(repo_root)
+        ),
+        description: format!(
+            "synthetic nested and inherited skills and agents: {}",
+            repo_root.display()
+        ),
+        tier: lodeline_core::policy::Tier::Critical,
+        platform: lodeline_core::policy::Platform::Any,
+        paths,
         recursive: true,
         follow_symlinks: false,
         disabled: false,
@@ -2387,6 +2463,146 @@ mod tests {
                 "{file:?} must stay watched"
             );
         }
+    }
+
+    fn claude_targets_for(repo: &std::path::Path) -> lodeline_core::policy::EffectivePolicy {
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        effective
+    }
+
+    fn touch(root: &std::path::Path, rel: &str) {
+        let file = root.join(rel);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "x").unwrap();
+    }
+
+    fn watches(effective: &lodeline_core::policy::EffectivePolicy, file: &std::path::Path) -> bool {
+        let compiled = crate::normalizer::compile_targets(
+            effective,
+            &effective
+                .targets
+                .iter()
+                .map(|t| {
+                    (
+                        t.id.clone(),
+                        t.paths.iter().map(std::path::PathBuf::from).collect(),
+                    )
+                })
+                .collect(),
+        );
+        compiled
+            .iter()
+            .any(|t| t.globs.iter().any(|g| g.is_match(file)))
+    }
+
+    #[test]
+    fn claude_code_project_targets_watch_nested_skill_and_agent_folders() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = crate::normalizer::canonicalize_glob_prefix(td.path());
+        touch(&repo, "packages/a/.claude/skills/x/SKILL.md");
+        touch(&repo, "services/b/.claude/agents/sub/y.md");
+        touch(&repo, "packages/node_modules/z/.claude/skills/n/SKILL.md");
+        touch(&repo, ".hidden/.claude/skills/h/SKILL.md");
+        touch(&repo, "target/.claude/skills/t/SKILL.md");
+        let effective = claude_targets_for(&repo);
+        assert!(watches(
+            &effective,
+            &repo.join("packages/a/.claude/skills/x/SKILL.md")
+        ));
+        assert!(watches(
+            &effective,
+            &repo.join("services/b/.claude/agents/sub/y.md")
+        ));
+        for skipped in [
+            "packages/node_modules/z/.claude/skills/n/SKILL.md",
+            ".hidden/.claude/skills/h/SKILL.md",
+            "target/.claude/skills/t/SKILL.md",
+        ] {
+            assert!(!watches(&effective, &repo.join(skipped)), "{skipped}");
+        }
+        assert!(
+            !watches(
+                &effective,
+                &repo.join("packages/a/.claude/skills/x/deep/SKILL.md")
+            ),
+            "a nested skills entry names one folder"
+        );
+        let mut forged = effective
+            .targets
+            .iter()
+            .find(|t| t.id.starts_with("claude_code-nested-components-"))
+            .unwrap()
+            .clone();
+        assert!(crate::normalizer::uses_one_folder_rule(&forged));
+        forged.paths = vec!["/other/*/SKILL.md".into()];
+        assert!(!crate::normalizer::uses_one_folder_rule(&forged));
+    }
+
+    #[test]
+    fn claude_code_project_targets_cap_the_nested_folders() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let cap = crate::ai_guard::parser::claude_components::MAX_WATCHED_COMPONENT_DIRS;
+        for i in 0..cap + 5 {
+            touch(&repo, &format!("pkg{i:03}/.claude/skills/s/SKILL.md"));
+        }
+        let effective = claude_targets_for(&repo);
+        let nested: Vec<_> = effective
+            .targets
+            .iter()
+            .filter(|t| t.id.starts_with("claude_code-nested-components-"))
+            .collect();
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].paths.len(), cap);
+        assert!(watches(
+            &effective,
+            &repo.join("pkg000/.claude/skills/s/SKILL.md")
+        ));
+        assert!(!watches(
+            &effective,
+            &repo.join(format!("pkg{:03}/.claude/skills/s/SKILL.md", cap + 4))
+        ));
+    }
+
+    #[test]
+    fn claude_code_project_targets_watch_parent_component_folders() {
+        let td = tempfile::tempdir().unwrap();
+        let top = crate::normalizer::canonicalize_glob_prefix(td.path());
+        std::fs::create_dir_all(top.join(".git")).unwrap();
+        touch(&top, ".claude/skills/p/SKILL.md");
+        let repo = top.join("apps/web");
+        std::fs::create_dir_all(&repo).unwrap();
+        let effective = claude_targets_for(&repo);
+        assert!(watches(&effective, &top.join(".claude/skills/p/SKILL.md")));
+    }
+
+    #[test]
+    fn a_folder_created_after_the_targets_were_built_is_not_watched_until_they_are_rebuilt() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = crate::normalizer::canonicalize_glob_prefix(td.path());
+        touch(&repo, "a/.claude/skills/x/SKILL.md");
+        let parser = crate::ai_guard::ClaudeCodeProjectParser {
+            repo_root: repo.clone(),
+        };
+        use crate::ai_guard::parser::AiGuardParser;
+        let home = repo.join("nohome");
+        let first = claude_targets_for(&repo);
+        let before = parser.watched_paths(&home);
+        touch(&repo, "b/.claude/skills/y/SKILL.md");
+        assert_eq!(parser.watched_paths(&home), before, "no walk per call");
+        assert!(!watches(&first, &repo.join("b/.claude/skills/y/SKILL.md")));
+        let second = claude_targets_for(&repo);
+        assert!(watches(&second, &repo.join("b/.claude/skills/y/SKILL.md")));
+        assert!(parser
+            .watched_paths(&home)
+            .contains(&repo.join("b/.claude/skills")));
     }
 
     #[test]

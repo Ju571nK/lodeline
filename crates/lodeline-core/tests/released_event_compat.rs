@@ -81,6 +81,11 @@ const KNOWN_REASONS: &[&str] = &[
     r#"{"kind":"project_settings_marketplace","name":"m","source":"github:o/r"}"#,
 ];
 
+/// Kinds added after v0.12.6. That release rejects them, and a server from
+/// v0.13.0 on keeps them as unknown reasons.
+const NEWER_REASONS: &[&str] =
+    &[r#"{"kind":"mcp_server_static_credential","server_name":"s","header_name":"Authorization"}"#];
+
 /// Lists every known variant with its wire kind. The match has no wildcard, so
 /// a new variant fails to compile here until it gets a kind and a sample.
 macro_rules! wire_kinds {
@@ -124,6 +129,7 @@ wire_kinds! {
     UnattendedLoopPrompt => "unattended_loop_prompt",
     StandingCommandApproval => "standing_command_approval",
     McpToolsAutoApproved => "mcp_tools_auto_approved",
+    McpServerStaticCredential => "mcp_server_static_credential",
     ProjectSettingsPluginEnabled => "project_settings_plugin_enabled",
     ProjectSettingsHelperCommand => "project_settings_helper_command",
     ProjectSettingsEnvOverride => "project_settings_env_override",
@@ -140,6 +146,12 @@ fn known_reasons_keep_their_released_bytes() {
         let new: AiGuardReason = serde_json::from_str(wire).expect(wire);
         let sent: serde_json::Value = serde_json::from_str(wire).unwrap();
         assert_eq!(wire_kind(&new), sent["kind"].as_str(), "{wire}");
+        assert_eq!(serde_json::to_string(&new).unwrap(), *wire);
+        sampled.insert(wire_kind(&new).unwrap());
+    }
+    for wire in NEWER_REASONS {
+        assert!(serde_json::from_str::<released::AiGuardReason>(wire).is_err());
+        let new: AiGuardReason = serde_json::from_str(wire).expect(wire);
         assert_eq!(serde_json::to_string(&new).unwrap(), *wire);
         sampled.insert(wire_kind(&new).unwrap());
     }

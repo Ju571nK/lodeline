@@ -139,9 +139,8 @@ impl CodexLayer {
     fn read(dir: &Path) -> Result<Self, AssessError> {
         let path = dir.join("config.toml");
         let config = match std::fs::read_to_string(&path) {
-            Ok(text) => Some(toml::from_str(&text).map_err(|e| AssessError::Parse {
-                path: path.clone(),
-                message: e.to_string(),
+            Ok(text) => Some(toml::from_str(&text).map_err(|e| {
+                crate::ai_guard::rule_pack::selector::toml_parse_error(&path, &text, &e)
             })?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => return Err(AssessError::Io { path, source }),
@@ -1551,8 +1550,81 @@ pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
             continue;
         };
         super::mcp_scan::emit_one_server(name, &json_def, out);
+        emit_static_credential_reasons(name, def, out);
         emit_mcp_approval_reasons(name.to_string(), def, None, false, out);
     }
+}
+
+/// #200: `http_headers` maps header names to static values that Codex sends
+/// with each request, so a credential header there is plain text on disk.
+/// `env_http_headers` holds variable names, not values. Only the header name
+/// is recorded.
+fn emit_static_credential_reasons(server_name: &str, def: &Value, out: &mut Vec<AiGuardReason>) {
+    let Some(headers) = def.get("http_headers").and_then(Value::as_table) else {
+        return;
+    };
+    for (header, value) in headers {
+        let stored = value
+            .as_str()
+            .is_some_and(|v| !v.trim().is_empty() && !is_variable_reference(v));
+        if stored && is_credential_header(header) {
+            out.push(AiGuardReason::McpServerStaticCredential {
+                server_name: server_name.to_string(),
+                header_name: super::claude_project_settings::safe_name(header),
+            });
+        }
+    }
+}
+
+/// Codex sends an `http_headers` value as literal text, so a value that is
+/// only `${NAME}` or `$NAME`, after an optional `Bearer ` or `Basic `, holds
+/// no credential.
+fn is_variable_reference(value: &str) -> bool {
+    let value = value.trim();
+    let rest = ["Bearer ", "Basic "]
+        .iter()
+        .find_map(|scheme| value.strip_prefix(scheme))
+        .unwrap_or(value);
+    let name = rest
+        .strip_prefix("${")
+        .and_then(|r| r.strip_suffix('}'))
+        .or_else(|| rest.strip_prefix('$'));
+    name.is_some_and(|name| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Name tokens, split on `-` and `_`, that mark a credential header alone.
+const CREDENTIAL_TOKENS: &[&str] = &[
+    "authorization",
+    "auth",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "cookie",
+    "apikey",
+    "credential",
+    "credentials",
+];
+
+/// A `key` token marks a credential only next to one of these, so
+/// `X-Api-Key` counts and `Idempotency-Key` does not.
+const KEY_QUALIFIERS: &[&str] = &[
+    "api",
+    "access",
+    "private",
+    "secret",
+    "client",
+    "subscription",
+];
+
+fn is_credential_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower.split(['-', '_']).collect();
+    let has_any = |set: &[&str]| tokens.iter().any(|token| set.contains(token));
+    has_any(CREDENTIAL_TOKENS) || (tokens.contains(&"key") && has_any(KEY_QUALIFIERS))
 }
 
 /// #200 — `[apps.<id>]` connector tools take the same approval modes. A
@@ -2163,6 +2235,235 @@ command = "/usr/local/bin/my-mcp-server"
                 .any(|r| matches!(r, AiGuardReason::McpServerLocalCommand { .. })),
             "expected McpServerLocalCommand in {reasons:?}"
         );
+    }
+
+    const HEADER_VALUE: &str = "Bearer test-value-0";
+
+    fn assess_server(keys: &str) -> Vec<AiGuardReason> {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            &format!("[mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n{keys}"),
+        );
+        CodexParser::default().assess(dir.path()).unwrap()
+    }
+
+    fn credential_headers(reasons: &[AiGuardReason]) -> Vec<serde_json::Value> {
+        let wire = serde_json::to_value(reasons).unwrap();
+        wire.as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == "mcp_server_static_credential")
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn static_credential_header_is_reported_by_name_only() {
+        let reasons = assess_server(&format!(
+            "http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+        ));
+        assert_eq!(
+            credential_headers(&reasons),
+            [serde_json::json!({
+                "kind": "mcp_server_static_credential",
+                "server_name": "acme",
+                "header_name": "Authorization",
+            })]
+        );
+        let wire = serde_json::to_string(&reasons).unwrap();
+        assert!(!wire.contains("test-value-0"), "the header value leaked");
+    }
+
+    #[test]
+    fn each_credential_header_is_reported_and_others_are_not() {
+        let reasons = assess_server(&format!(
+            "[mcp_servers.acme.http_headers]\n\
+             \"X-Request-Source\" = \"codex\"\n\
+             \"Proxy-Authorization\" = \"{HEADER_VALUE}\"\n\
+             \"x-api-key\" = \"{HEADER_VALUE}\"\n\
+             \"X-Client-Secret\" = \"{HEADER_VALUE}\"\n\
+             \"X-Upstream-Token\" = \"{HEADER_VALUE}\"\n"
+        ));
+        let mut names: Vec<_> = credential_headers(&reasons)
+            .iter()
+            .map(|r| r["header_name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "Proxy-Authorization",
+                "X-Client-Secret",
+                "X-Upstream-Token",
+                "x-api-key"
+            ]
+        );
+    }
+
+    #[test]
+    fn env_headers_empty_values_and_plain_headers_are_not_credentials() {
+        for keys in [
+            "env_http_headers = { Authorization = \"MCP_TOKEN\" }\n",
+            "http_headers = { \"X-Request-Source\" = \"codex\" }\n",
+            "http_headers = { Authorization = \"\" }\n",
+        ] {
+            let reasons = assess_server(keys);
+            assert_eq!(
+                credential_headers(&reasons),
+                [] as [serde_json::Value; 0],
+                "{keys}"
+            );
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| matches!(r, AiGuardReason::McpServerRemote { .. })),
+                "the server itself is still read: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_layer_credential_header_is_reported() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".codex")).unwrap();
+        std::fs::write(
+            dir.path().join(".codex").join("config.toml"),
+            format!(
+                "[mcp_servers.team]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+            ),
+        )
+        .unwrap();
+        let p = CodexProjectParser::new(dir.path().to_path_buf());
+        let reasons = p.assess(Path::new("/unused")).unwrap();
+        let found = credential_headers(&reasons);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["server_name"], "team");
+    }
+
+    #[test]
+    fn credential_header_is_judged_from_its_name() {
+        for (name, reported) in [
+            ("Authorization", true),
+            ("Proxy-Authorization", true),
+            ("X-Api-Key", true),
+            ("X-Amz-Security-Token", true),
+            ("Cookie", true),
+            ("X-Password", true),
+            ("Ocp-Apim-Subscription-Key", true),
+            ("Idempotency-Key", false),
+            ("X-Keyboard", false),
+            ("Monkey", false),
+            ("X-Author", false),
+            ("Keep-Alive", false),
+        ] {
+            let reasons = assess_server(&format!(
+                "http_headers = {{ \"{name}\" = \"{HEADER_VALUE}\" }}\n"
+            ));
+            assert_eq!(
+                credential_headers(&reasons).len(),
+                usize::from(reported),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_only_names_a_variable_is_not_a_stored_credential() {
+        for (value, reported) in [
+            ("${MCP_TOKEN}", false),
+            ("Bearer ${MCP_TOKEN}", false),
+            ("$MCP_TOKEN", false),
+            ("Basic $MCP_TOKEN", false),
+            ("Bearer stored-literal", true),
+            ("Bearer ${MCP_TOKEN}-suffix", true),
+        ] {
+            let reasons = assess_server(&format!(
+                "http_headers = {{ Authorization = \"{value}\" }}\n"
+            ));
+            assert_eq!(
+                credential_headers(&reasons).len(),
+                usize::from(reported),
+                "{value}"
+            );
+        }
+    }
+
+    fn codex_reasons_in_scan(json: &serde_json::Value) -> Vec<serde_json::Value> {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["tool"] == "codex")
+            .flat_map(|row| row["reasons"].as_array().unwrap().clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_stdio_server_credential_header_gets_its_own_hint() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &format!(
+                "[mcp_servers.local1]\ncommand = \"npx\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n\
+                 [mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+            ),
+        );
+        let json = crate::scan_cli::report_json_for(home.path(), None);
+        let hint_of = |server: &str| {
+            codex_reasons_in_scan(&json)
+                .into_iter()
+                .find(|r| r["kind"] == "mcp_server_static_credential" && r["server_name"] == server)
+                .and_then(|r| r["hint"].as_str().map(str::to_string))
+                .unwrap_or_else(|| panic!("no credential reason for {server}"))
+        };
+        let (stdio, remote) = (hint_of("local1"), hint_of("acme"));
+        assert!(stdio.contains("env_vars"), "{stdio}");
+        assert!(!stdio.contains("env_http_headers"), "{stdio}");
+        assert!(remote.contains("env_http_headers"), "{remote}");
+        let human = crate::scan_cli::render_human_for(home.path(), None);
+        assert!(human.contains(&stdio) && human.contains(&remote));
+        assert_eq!(json.to_string().matches("test-value-0").count(), 0);
+        assert_eq!(human.matches("test-value-0").count(), 0);
+    }
+
+    #[test]
+    fn a_malformed_config_error_names_the_place_and_never_echoes_the_line() {
+        let unclosed = format!(
+            "[mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n\
+             http_headers = {{ Authorization = \"{HEADER_VALUE} }}\n"
+        );
+        let duplicate_key =
+            format!("[mcp_servers.acme]\n\"{HEADER_VALUE}\" = 1\n\"{HEADER_VALUE}\" = 2\n");
+        for (config, line) in [
+            (unclosed, "line 3, column "),
+            (duplicate_key, "line 3, column "),
+        ] {
+            let home = tempdir().unwrap();
+            write_config(home.path(), &config);
+            let err = CodexParser::default().assess(home.path()).unwrap_err();
+            for shown in [err.to_string(), format!("{err:?}")] {
+                assert_eq!(shown.matches("test-value-0").count(), 0);
+                assert!(shown.contains("config.toml"));
+                assert!(shown.contains(line));
+            }
+            let json = crate::scan_cli::report_json_for(home.path(), None);
+            let errors: Vec<_> = json["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["tool"] == "codex")
+                .collect();
+            assert_eq!(errors.len(), 1);
+            let error = errors[0]["error"].as_str().unwrap();
+            assert_eq!(error.matches("test-value-0").count(), 0);
+            assert!(error.contains(line));
+            let human = crate::scan_cli::render_human_for(home.path(), None);
+            assert_eq!(human.matches("test-value-0").count(), 0);
+        }
     }
 
     // ─── combined scenario ─────────────────────────────────────────────────
@@ -3091,6 +3392,31 @@ command = "echo inline"
                 .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
             "got {out:?}"
         );
+    }
+
+    #[test]
+    fn a_subfolder_layer_credential_header_is_reported_once_by_name_only() {
+        let (dir, repo, nested) = subfolder_repo();
+        std::fs::write(
+            nested.join("config.toml"),
+            format!(
+                "[mcp_servers.team]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+            ),
+        )
+        .unwrap();
+        write_config(dir.path(), "");
+        let reasons = CodexProjectParser::new(repo).assess(dir.path()).unwrap();
+        assert_eq!(
+            credential_headers(&reasons),
+            [serde_json::json!({
+                "kind": "mcp_server_static_credential",
+                "server_name": "team",
+                "header_name": "Authorization",
+            })]
+        );
+        let wire = serde_json::to_string(&reasons).unwrap();
+        assert!(!wire.contains("test-value-0"), "the header value leaked");
     }
 
     #[test]

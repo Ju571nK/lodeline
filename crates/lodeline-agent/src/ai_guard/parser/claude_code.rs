@@ -1706,6 +1706,9 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             &self.repo_root,
             home_dir,
         ));
+        paths.extend(super::claude_components::recorded_nested_dirs(
+            &self.repo_root,
+        ));
         paths
     }
 
