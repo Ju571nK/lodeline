@@ -417,6 +417,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_subfolder_dirs_stop_at_a_nested_repo() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let own = repo.join("services/api/.codex");
+        let inner = repo.join("libs/inner");
+        for layer in [&own, &inner.join(".codex"), &inner.join("tools/.codex")] {
+            std::fs::create_dir_all(layer).unwrap();
+            std::fs::write(layer.join("hooks.json"), "{}").unwrap();
+        }
+        std::fs::write(inner.join(".git"), "gitdir: ../../.git/modules/inner\n").unwrap();
+        assert_eq!(codex_subfolder_dirs(&repo), vec![own]);
+    }
+
+    #[test]
     fn discover_codex_repos_finds_agents_md_only() {
         let root = tempdir().unwrap();
         let repo = root.path().join("only-agents");
