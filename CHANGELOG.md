@@ -17,8 +17,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   user config records a `trusted_hash` for it, as for the repository root. A Git repository whose
   only Codex files sit in a subfolder is now discovered, and the files are watched. The walk
   goes at most five folders deep and visits at most 2,000 folders, skips hidden folders,
-  `node_modules`, `target` and `vendor`, and follows no symlink. An AI Guard score can drop or
-  rise where a subfolder holds such files. Refs #200.
+  `node_modules`, `target` and `vendor`, and follows no symlink. An AI Guard score can drop
+  where a subfolder holds such files. Refs #200.
 
 ## [0.15.1] - 2026-11-15
 
