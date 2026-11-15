@@ -102,39 +102,24 @@ pub async fn run(
 /// `Removed` event ends the run for its path, a `Renamed` event ends it for
 /// both of its paths, and events for different paths never merge.
 ///
-/// One write is often reported as a `Created` and two `Modified` events (the
-/// file is created, then truncated and written). The merged count is the larger
-/// per-kind total, and up to `EVENTS_PER_SINGLE_WRITE` of one kind still count
-/// as one write, so only a longer run marks the event as a burst.
-const EVENTS_PER_SINGLE_WRITE: u32 = 2;
-
+/// The merged count is the largest count among the merged events, so merging
+/// never changes evidence quality: the debouncer's count decides, as before.
 fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
     let mut out: Vec<PendingEvent> = Vec::with_capacity(batch.len());
-    let mut totals: Vec<[u32; 2]> = Vec::with_capacity(batch.len());
     let mut open: HashMap<PathBuf, usize> = HashMap::new();
     for next in batch {
-        let kind_slot = match next.kind {
-            FileChangeKind::Created => Some(0),
-            FileChangeKind::Modified => Some(1),
-            _ => None,
-        };
-        match (open.get(&next.path), kind_slot) {
-            (Some(&at), Some(slot)) if out[at].critical == next.critical => {
+        let mergeable = matches!(
+            next.kind,
+            FileChangeKind::Created | FileChangeKind::Modified
+        );
+        match open.get(&next.path) {
+            Some(&at) if mergeable && out[at].critical == next.critical => {
                 let run = &mut out[at];
                 run.last_seen_ms = next.last_seen_ms;
-                let per_kind = &mut totals[at];
-                per_kind[slot] = per_kind[slot].saturating_add(next.coalesced_count);
-                let longest = per_kind[0].max(per_kind[1]);
-                run.coalesced_count = if longest <= EVENTS_PER_SINGLE_WRITE {
-                    1
-                } else {
-                    longest
-                };
+                run.coalesced_count = run.coalesced_count.max(next.coalesced_count);
             }
             _ => {
-                let mut per_kind = [0; 2];
-                if let Some(slot) = kind_slot {
-                    per_kind[slot] = next.coalesced_count;
+                if mergeable {
                     open.insert(next.path.clone(), out.len());
                 } else {
                     open.remove(&next.path);
@@ -142,7 +127,6 @@ fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
                         open.remove(from);
                     }
                 }
-                totals.push(per_kind);
                 out.push(next);
             }
         }
