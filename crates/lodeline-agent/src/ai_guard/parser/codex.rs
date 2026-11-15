@@ -123,18 +123,6 @@ impl AiGuardParser for CodexParser {
 
 const HOOKS_JSON: &str = "hooks.json";
 
-/// toml's `Display` quotes the source line, which can hold a header value, so
-/// a parse error keeps only where it is and its first message line.
-fn toml_error_summary(text: &str, error: &toml::de::Error) -> String {
-    let kind = error.message().lines().next().unwrap_or("invalid TOML");
-    let Some(before) = error.span().and_then(|span| text.get(..span.start)) else {
-        return kind.to_string();
-    };
-    let line = before.matches('\n').count() + 1;
-    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-    format!("line {line}, column {column}: {kind}")
-}
-
 /// #200 — one Codex config folder (system, user, or a repo's `.codex/`).
 /// Codex loads hooks from both `config.toml` and the folder's `hooks.json`,
 /// and runs the hooks of every layer, so hooks are read per layer while
@@ -151,9 +139,8 @@ impl CodexLayer {
     fn read(dir: &Path) -> Result<Self, AssessError> {
         let path = dir.join("config.toml");
         let config = match std::fs::read_to_string(&path) {
-            Ok(text) => Some(toml::from_str(&text).map_err(|e| AssessError::Parse {
-                path: path.clone(),
-                message: toml_error_summary(&text, &e),
+            Ok(text) => Some(toml::from_str(&text).map_err(|e| {
+                crate::ai_guard::rule_pack::selector::toml_parse_error(&path, &text, &e)
             })?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => return Err(AssessError::Io { path, source }),
@@ -2348,9 +2335,7 @@ command = "/usr/local/bin/my-mcp-server"
             ),
         )
         .unwrap();
-        let p = CodexProjectParser {
-            repo_root: dir.path().to_path_buf(),
-        };
+        let p = CodexProjectParser::new(dir.path().to_path_buf());
         let reasons = p.assess(Path::new("/unused")).unwrap();
         let found = credential_headers(&reasons);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -2447,33 +2432,38 @@ command = "/usr/local/bin/my-mcp-server"
 
     #[test]
     fn a_malformed_config_error_names_the_place_and_never_echoes_the_line() {
-        let home = tempdir().unwrap();
-        write_config(
-            home.path(),
-            &format!(
-                "[mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n\
-                 http_headers = {{ Authorization = \"{HEADER_VALUE} }}\n"
-            ),
+        let unclosed = format!(
+            "[mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n\
+             http_headers = {{ Authorization = \"{HEADER_VALUE} }}\n"
         );
-        let err = CodexParser::default().assess(home.path()).unwrap_err();
-        for shown in [err.to_string(), format!("{err:?}")] {
-            assert_eq!(shown.matches("test-value-0").count(), 0);
-            assert!(shown.contains("config.toml"));
-            assert!(shown.contains("line 3, column "));
+        let duplicate_key =
+            format!("[mcp_servers.acme]\n\"{HEADER_VALUE}\" = 1\n\"{HEADER_VALUE}\" = 2\n");
+        for (config, line) in [
+            (unclosed, "line 3, column "),
+            (duplicate_key, "line 3, column "),
+        ] {
+            let home = tempdir().unwrap();
+            write_config(home.path(), &config);
+            let err = CodexParser::default().assess(home.path()).unwrap_err();
+            for shown in [err.to_string(), format!("{err:?}")] {
+                assert_eq!(shown.matches("test-value-0").count(), 0);
+                assert!(shown.contains("config.toml"));
+                assert!(shown.contains(line));
+            }
+            let json = crate::scan_cli::report_json_for(home.path(), None);
+            let errors: Vec<_> = json["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["tool"] == "codex")
+                .collect();
+            assert_eq!(errors.len(), 1);
+            let error = errors[0]["error"].as_str().unwrap();
+            assert_eq!(error.matches("test-value-0").count(), 0);
+            assert!(error.contains(line));
+            let human = crate::scan_cli::render_human_for(home.path(), None);
+            assert_eq!(human.matches("test-value-0").count(), 0);
         }
-        let json = crate::scan_cli::report_json_for(home.path(), None);
-        let errors: Vec<_> = json["errors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["tool"] == "codex")
-            .collect();
-        assert_eq!(errors.len(), 1);
-        let error = errors[0]["error"].as_str().unwrap();
-        assert_eq!(error.matches("test-value-0").count(), 0);
-        assert!(error.contains("line 3, column "));
-        let human = crate::scan_cli::render_human_for(home.path(), None);
-        assert_eq!(human.matches("test-value-0").count(), 0);
     }
 
     // ─── combined scenario ─────────────────────────────────────────────────
@@ -3402,6 +3392,31 @@ command = "echo inline"
                 .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
             "got {out:?}"
         );
+    }
+
+    #[test]
+    fn a_subfolder_layer_credential_header_is_reported_once_by_name_only() {
+        let (dir, repo, nested) = subfolder_repo();
+        std::fs::write(
+            nested.join("config.toml"),
+            format!(
+                "[mcp_servers.team]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+            ),
+        )
+        .unwrap();
+        write_config(dir.path(), "");
+        let reasons = CodexProjectParser::new(repo).assess(dir.path()).unwrap();
+        assert_eq!(
+            credential_headers(&reasons),
+            [serde_json::json!({
+                "kind": "mcp_server_static_credential",
+                "server_name": "team",
+                "header_name": "Authorization",
+            })]
+        );
+        let wire = serde_json::to_string(&reasons).unwrap();
+        assert!(!wire.contains("test-value-0"), "the header value leaked");
     }
 
     #[test]
