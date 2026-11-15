@@ -206,7 +206,7 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
     .iter()
     .any(|rel| has(rel))
     {
-        out.push(Arc::new(ClaudeCodeProjectParser { repo_root: root() }));
+        out.push(Arc::new(ClaudeCodeProjectParser::without_walk(root())));
     }
     // Codex: .codex/config.toml | .codex/hooks.json | .codex/rules/ | AGENTS.md | a
     // Git repository whose only Codex files sit in a subfolder `.codex/`. The walk

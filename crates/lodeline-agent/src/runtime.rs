@@ -207,8 +207,21 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     for repo_root in &continue_repos {
         push_continue_synthetic_target(&mut effective, repo_root);
     }
-    for repo_root in &claude_code_repos {
-        push_claude_code_synthetic_targets(&mut effective, repo_root);
+    let home_dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let claude_code_parsers: Vec<Arc<crate::ai_guard::ClaudeCodeProjectParser>> = claude_code_repos
+        .iter()
+        .map(|repo_root| {
+            Arc::new(crate::ai_guard::ClaudeCodeProjectParser::new(
+                repo_root.clone(),
+                &home_dir,
+            ))
+        })
+        .collect();
+    for parser in &claude_code_parsers {
+        push_claude_code_synthetic_targets(&mut effective, parser, &home_dir);
     }
     for repo_root in &codex_repos {
         push_codex_synthetic_target(&mut effective, repo_root);
@@ -253,10 +266,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             repo_root: repo_root.clone(),
         }));
     }
-    for repo_root in &claude_code_repos {
-        parsers_vec.push(Arc::new(crate::ai_guard::ClaudeCodeProjectParser {
-            repo_root: repo_root.clone(),
-        }));
+    for parser in &claude_code_parsers {
+        parsers_vec.push(parser.clone());
     }
     for repo_root in &codex_repos {
         parsers_vec.push(Arc::new(crate::ai_guard::CodexProjectParser::new(
@@ -334,10 +345,6 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // `ExtScriptRegistry` keyed by (AiTool, AiGuardScope) so the dispatcher
     // can route fsnotify events on script paths to the right parser.
     // Synthetic targets are in-memory only — never written back to disk.
-    let home_dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/"));
     let ext_scripts_registry = crate::ai_guard::empty_ext_script_registry();
     {
         let parsers_snapshot: Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>> =
@@ -1945,8 +1952,10 @@ pub(crate) fn push_continue_synthetic_target(
 /// one for `.claude/skills/` and `.claude/agents/` (recursive).
 pub(crate) fn push_claude_code_synthetic_targets(
     effective: &mut lodeline_core::policy::EffectivePolicy,
-    repo_root: &std::path::Path,
+    parser: &crate::ai_guard::ClaudeCodeProjectParser,
+    home: &std::path::Path,
 ) {
+    let repo_root = parser.repo_root.as_path();
     let cd = repo_root.join(".claude");
     let h = synthetic_target_id_suffix(repo_root);
     effective.targets.push(lodeline_core::policy::WatchTarget {
@@ -2010,24 +2019,26 @@ pub(crate) fn push_claude_code_synthetic_targets(
         follow_symlinks: false,
         disabled: false,
     });
-    push_claude_code_component_target(effective, repo_root);
+    push_claude_code_component_target(effective, parser, home);
 }
 
 /// #539: the target for skills and agents folders the repository's own
 /// `.claude` target does not reach: nested folders and the parent and main
 /// checkout folders a session started here also loads. It lists the folders
 /// that exist now, so a folder created later is covered from the next build,
-/// which a policy reload or a restart runs. The home folder is not excluded
-/// here: its `.claude` folders are watched by the default policy and the
-/// parser leaves them out of the project row.
+/// which a policy reload or a restart runs. The nested folders are the
+/// parser's, found when it was built. The home folder's `.claude` folders are
+/// not listed: the default policy watches them for the user row.
 fn push_claude_code_component_target(
     effective: &mut lodeline_core::policy::EffectivePolicy,
-    repo_root: &std::path::Path,
+    parser: &crate::ai_guard::ClaudeCodeProjectParser,
+    home: &std::path::Path,
 ) {
-    let no_home = std::path::Path::new("");
+    let repo_root = parser.repo_root.as_path();
     let paths: Vec<String> =
-        crate::ai_guard::parser::claude_components::walk_watched_component_dirs(repo_root, no_home)
+        crate::ai_guard::parser::claude_components::inherited_component_dirs(repo_root, home)
             .iter()
+            .chain(parser.nested_dirs())
             .filter(|dir| {
                 !dir.to_string_lossy()
                     .contains(['*', '?', '[', ']', '{', '}'])
@@ -2408,7 +2419,7 @@ mod tests {
             lodeline_core::policy::current_platform(),
         )
         .unwrap();
-        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        push_project(&mut effective, repo);
         for want in [
             repo.join(".claude/skills/*/SKILL.md"),
             repo.join(".claude/agents/*.md"),
@@ -2434,7 +2445,7 @@ mod tests {
             lodeline_core::policy::current_platform(),
         )
         .unwrap();
-        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        push_project(&mut effective, repo);
         let target = effective
             .targets
             .iter()
@@ -2479,6 +2490,15 @@ mod tests {
         }
     }
 
+    fn push_project(
+        effective: &mut lodeline_core::policy::EffectivePolicy,
+        repo: &std::path::Path,
+    ) {
+        let no_home = std::path::Path::new("");
+        let parser = crate::ai_guard::ClaudeCodeProjectParser::new(repo.to_path_buf(), no_home);
+        super::push_claude_code_synthetic_targets(effective, &parser, no_home);
+    }
+
     fn claude_targets_for(repo: &std::path::Path) -> lodeline_core::policy::EffectivePolicy {
         let mut effective = lodeline_core::policy::merge(
             lodeline_core::policy::defaults().unwrap(),
@@ -2487,7 +2507,7 @@ mod tests {
             lodeline_core::policy::current_platform(),
         )
         .unwrap();
-        super::push_claude_code_synthetic_targets(&mut effective, repo);
+        push_project(&mut effective, repo);
         effective
     }
 
@@ -2632,11 +2652,9 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let repo = crate::normalizer::canonicalize_glob_prefix(td.path());
         touch(&repo, "a/.claude/skills/x/SKILL.md");
-        let parser = crate::ai_guard::ClaudeCodeProjectParser {
-            repo_root: repo.clone(),
-        };
         use crate::ai_guard::parser::AiGuardParser;
         let home = repo.join("nohome");
+        let parser = crate::ai_guard::ClaudeCodeProjectParser::new(repo.clone(), &home);
         let first = claude_targets_for(&repo);
         let before = parser.watched_paths(&home);
         touch(&repo, "b/.claude/skills/y/SKILL.md");
@@ -2644,7 +2662,8 @@ mod tests {
         assert!(!watches(&first, &repo.join("b/.claude/skills/y/SKILL.md")));
         let second = claude_targets_for(&repo);
         assert!(watches(&second, &repo.join("b/.claude/skills/y/SKILL.md")));
-        assert!(parser
+        let rebuilt = crate::ai_guard::ClaudeCodeProjectParser::new(repo.clone(), &home);
+        assert!(rebuilt
             .watched_paths(&home)
             .contains(&repo.join("b/.claude/skills")));
     }

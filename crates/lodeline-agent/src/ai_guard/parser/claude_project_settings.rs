@@ -410,9 +410,7 @@ mod tests {
             r#"{"enabledPlugins":{"b@m":false}}"#,
         )
         .unwrap();
-        let parser = ClaudeCodeProjectParser {
-            repo_root: repo.path().to_path_buf(),
-        };
+        let parser = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
         let got: Vec<_> = parser
             .assess(repo.path())
             .unwrap()

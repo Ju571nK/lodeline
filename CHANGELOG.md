@@ -20,6 +20,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- A user `~/.claude` skills, subagents or commands folder is no longer watched twice when the home folder is in a repository's parent chain.
 - The agent now finds a repository in a Codex workspace whose only Codex file is a `.codex/rules/` folder at its root, so its standing command approvals are scored and a later rule change is reassessed. Only `lodeline scan` found such a repository before.
 - `lodeline scan` at the root of a repository whose only Codex file is `.codex/hooks.json` or a `.codex/rules/` folder now reports the Codex project row. It gave no row before, though the Codex project parser reads those files.
 

@@ -1802,9 +1802,10 @@ mod tests {
                 let repo = tempfile::tempdir().unwrap();
                 let settings = repo.path().join(".claude/settings.json");
                 std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-                let parser = crate::ai_guard::parser::claude_code::ClaudeCodeProjectParser {
-                    repo_root: repo.path().into(),
-                };
+                let parser =
+                    crate::ai_guard::parser::claude_code::ClaudeCodeProjectParser::without_walk(
+                        repo.path().into(),
+                    );
                 let (ctx, mut events) = drift_ctx();
                 std::fs::write(&settings, boot).unwrap();
                 eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
