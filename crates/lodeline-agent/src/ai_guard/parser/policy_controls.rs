@@ -297,35 +297,25 @@ pub(super) fn claude_controls(dir: &Path) -> Result<Vec<AiGuardControl>, AssessE
 /// `allowedHttpHookUrls` set in the user's own settings files: one control
 /// that carries the number of patterns in the merged list and never a pattern,
 /// because a URL can name an internal host. The managed files have no control
-/// for it. Its source is the first of `settings.json` and
-/// `settings.local.json` that sets the key.
+/// for it. Its source is the user's `settings.json`; the user's
+/// `settings.local.json` is project-local settings and is not read here.
 pub(super) fn claude_http_hook_url_control(
     claude: &Path,
     policy_dir: &Path,
 ) -> Result<Vec<AiGuardControl>, AssessError> {
     let key = "allowedHttpHookUrls";
-    let mut sources = Vec::new();
-    for name in ["settings.json", "settings.local.json"] {
-        let path = claude.join(name);
-        if let Some(value) = super::read_json_optional(&path)? {
-            if value.get(key).is_some() {
-                sources.push((path, value));
-            }
-        }
-    }
+    let path = claude.join("settings.json");
+    let Some(user) = super::read_json_optional(&path)?.filter(|v| v.get(key).is_some()) else {
+        return Ok(Vec::new());
+    };
     let managed = claude_managed_settings(policy_dir).ok();
-    let files: Vec<Option<&Value>> = std::iter::once(managed.as_ref())
-        .chain(sources.iter().map(|(_, v)| Some(v)))
-        .collect();
-    let (Some((path, _)), Some(list)) = (
-        sources.first(),
-        super::claude_code::http_hook_allowlist(&files),
-    ) else {
+    let Some(list) = super::claude_code::http_hook_allowlist(&[managed.as_ref(), Some(&user)])
+    else {
         return Ok(Vec::new());
     };
     Ok(vec![observation(
         "claude_code",
-        path,
+        &path,
         key,
         Value::from(list.len()),
     )])
@@ -436,7 +426,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "claude_code.configured.allowedHttpHookUrls");
         assert_eq!(found[0].source_path, claude.join("settings.json"));
-        assert_eq!(found[0].value, Value::from(4));
+        assert_eq!(found[0].value, Value::from(3));
         let text = serde_json::to_string(&found).unwrap();
         assert!(!text.contains("example.test"), "{text}");
     }

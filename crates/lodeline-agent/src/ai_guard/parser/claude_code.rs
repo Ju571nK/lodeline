@@ -1,6 +1,7 @@
-//! Phase 3b.1 — Claude Code parser. Reads `~/.claude/settings.json` (and
-//! `settings.local.json` overlay if present), enumerates hooks + permissions
-//! + mcp servers, and maps findings to `AiGuardReason`.
+//! Phase 3b.1: Claude Code parser. Reads `~/.claude/settings.json` (the user
+//! scope; `settings.local.json` is project-local and is read only by a project
+//! row), enumerates hooks + permissions + mcp servers, and maps findings to
+//! `AiGuardReason`.
 
 use crate::ai_guard::command_scan::launcher_basename;
 use crate::ai_guard::parser::codex::MAX_STANDING_APPROVAL_REASONS;
@@ -44,7 +45,6 @@ impl AiGuardParser for ClaudeCodeParser {
         let (claude, claude_json) = self.locate(home_dir);
         let mut paths = vec![
             claude.join("settings.json"),
-            claude.join("settings.local.json"),
             claude.join("hooks"),
             claude.join("CLAUDE.md"),
             // #191 — watch the scheduled-tasks dir so the daemon re-assesses
@@ -74,7 +74,6 @@ impl AiGuardParser for ClaudeCodeParser {
         )?);
         controls.extend(super::policy_controls::claude_outside_dir_controls(&[
             claude.join("settings.json"),
-            claude.join("settings.local.json"),
         ]));
         Ok(super::AiGuardAssessment {
             reasons: self.assess(home_dir)?,
@@ -110,10 +109,8 @@ fn assess_user(
     home: Option<&Path>,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let base_path = claude.join("settings.json");
-    let local_path = claude.join("settings.local.json");
 
     let base = super::read_json_optional(&base_path)?;
-    let local = super::read_json_optional(&local_path)?;
     let components = super::claude_components::component_hooks(claude);
     let claude_json = super::claude_json::read(claude_json);
     let claude_json_servers = claude_json.servers();
@@ -133,12 +130,11 @@ fn assess_user(
                 .any(|k| m.get(k).is_some())
         });
 
-    // Missing primary file with no overlay → operator hasn't enabled tool.
+    // Missing primary file → operator hasn't enabled tool.
     // #191 — a real unattended task (a `scheduled-tasks/<name>/SKILL.md`) is
     // still evidence of use, so it must not be short-circuited here. An empty
     // `scheduled-tasks/` dir is NOT evidence and stays short-circuited.
     if base.is_none()
-            && local.is_none()
             && !claude.join("CLAUDE.md").is_file()
             && !has_scheduled_task(claude)
             // #199 — a `loop.md` is the same kind of evidence: an unattended
@@ -152,30 +148,25 @@ fn assess_user(
     }
 
     // `disableAutoMode` takes effect from any file, managed ones included.
-    let auto_disabled = [&managed, &base, &local]
+    let auto_disabled = [&managed, &base]
         .into_iter()
         .flatten()
         .any(settings_disable_auto_mode);
     let start = start_mode(
         &[
             (ModeScope::Managed, managed.as_ref()),
-            (ModeScope::Local, local.as_ref()),
             (ModeScope::User, base.as_ref()),
         ],
         true,
         auto_disabled,
     );
-    // #199 — keep the unmerged base: the auto-mode classifier does not
-    // read the `settings.local.json` overlay, so scoring the merged view
-    // would attribute rules to a control that never sees them.
-    let base_settings = base.clone().unwrap_or(Value::Object(Default::default()));
     // #199 — a `disableAllHooks: true` outside the managed files turns off
     // every hook but the managed ones.
     // shortcut: a project file can set it back to `false` for its own
     // folder, which this host-wide scope cannot see; a per-repo scope would
     // have to re-score the user's hooks to cover that.
-    let hooks_off = hooks_disabled(&[managed.as_ref(), local.as_ref(), base.as_ref()]);
-    let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
+    let hooks_off = hooks_disabled(&[managed.as_ref(), base.as_ref()]);
+    let merged = base.unwrap_or(Value::Object(Default::default()));
 
     // A project file's list can admit a hook this list blocks; the project row
     // reports it, because this host-wide scope cannot see project files.
@@ -209,7 +200,7 @@ fn assess_user(
     // #191 signal 1 — the start mode's auto-approval posture.
     if emit_start_mode_reason(start, &mut out) {
         // #199 — the classifier's own safety rules, when auto mode is in use.
-        emit_auto_mode_reasons(&base_settings, managed.as_ref(), &mut out);
+        emit_auto_mode_reasons(&merged, managed.as_ref(), &mut out);
     }
     // #191 signal 2 — unattended recurring Claude Code scheduled tasks.
     emit_scheduled_task_reasons(claude, &mut out);
@@ -229,7 +220,7 @@ fn assess_user(
     // Deny lists from the managed and user files merge, and a match keeps even
     // a managed server from loading. `settings.local.json` here is not a
     // user-scope file, so its list is left out.
-    let denied: Vec<&Value> = [managed.as_ref(), Some(&base_settings)]
+    let denied: Vec<&Value> = [managed.as_ref(), Some(&merged)]
         .into_iter()
         .flatten()
         .filter_map(|s| s.get("deniedMcpServers").and_then(Value::as_array))
@@ -379,14 +370,23 @@ fn mcp_server_denied(denied: &[&Value], name: &str, def: &Value) -> bool {
 
 /// Hook scripts outside `<claude_dir>/hooks` that settings or skill/subagent
 /// frontmatter hooks run, so the watcher re-assesses when one changes.
-fn external_script_paths(claude_dir: &Path, run_dir: Option<&Path>) -> Vec<PathBuf> {
+fn external_script_paths(
+    claude_dir: &Path,
+    run_dir: Option<&Path>,
+    read_local: bool,
+) -> Vec<PathBuf> {
     let hooks_dir = claude_dir.join("hooks");
-    let base = super::read_json_optional(&claude_dir.join("settings.json"))
-        .ok()
-        .flatten();
-    let local = super::read_json_optional(&claude_dir.join("settings.local.json"))
-        .ok()
-        .flatten();
+    let read = |name: &str| {
+        super::read_json_optional(&claude_dir.join(name))
+            .ok()
+            .flatten()
+    };
+    let base = read("settings.json");
+    let local = if read_local {
+        read("settings.local.json")
+    } else {
+        None
+    };
     let mut paths = Vec::new();
     if base.is_some() || local.is_some() {
         let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
@@ -402,7 +402,7 @@ fn external_script_paths(claude_dir: &Path, run_dir: Option<&Path>) -> Vec<PathB
 
 /// [`external_script_paths`] plus the scripts managed hooks run.
 fn user_external_script_paths(claude_dir: &Path, policy_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = external_script_paths(claude_dir, None);
+    let mut paths = external_script_paths(claude_dir, None, false);
     if let Ok(managed) = super::policy_controls::claude_managed_settings(policy_dir) {
         paths.extend(collect_external_script_paths_from_settings(
             &managed,
@@ -1708,7 +1708,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         let hooks_dir = self.repo_root.join(".claude").join("hooks");
         let run_dir = Some(self.repo_root.as_path());
-        let mut paths = external_script_paths(&self.repo_root.join(".claude"), run_dir);
+        let mut paths = external_script_paths(&self.repo_root.join(".claude"), run_dir, true);
         let shared = shared_local_settings(&self.repo_root, home_dir)
             .and_then(|p| super::read_json_optional(&p).ok().flatten());
         if let Some(shared) = shared {
@@ -1895,13 +1895,7 @@ fn assess_project(
         )
     };
     let merged = merge_overlay(base.unwrap_or(Value::Object(Default::default())), local);
-    // The user's own `settings.local.json` merges into the user list too.
-    let user_all = merge_overlay(
-        user.clone().unwrap_or(Value::Object(Default::default())),
-        super::read_json_optional(&home.join(".claude").join("settings.local.json"))
-            .ok()
-            .flatten(),
-    );
+    let user_all = user.clone().unwrap_or(Value::Object(Default::default()));
     let allowed = http_hook_allowlist(&[managed.as_ref(), Some(&user_all), Some(&merged)]);
     let mut out = Vec::new();
     if !hooks_off {
@@ -2337,31 +2331,140 @@ mod tests {
         assert!(matches!(err, AssessError::Parse { .. }), "got {err:?}");
     }
 
+    const LOCAL_ONLY_RISK: &str = r#"{
+      "permissions": {"defaultMode": "bypassPermissions", "allow": ["Bash(*)"]},
+      "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+        {"type": "command", "command": "rm -rf /tmp/lodeline-test/*"}]}]}
+    }"#;
+
+    fn user_reasons(home: &Path) -> Vec<AiGuardReason> {
+        assess_user(
+            &home.join(".claude"),
+            &home.join(".claude.json"),
+            &home.join("no-policy"),
+            Some(home),
+        )
+        .unwrap()
+    }
+
+    /// Claude Code's user scope is `settings.json` only. A
+    /// `~/.claude/settings.local.json` is project-local settings for a session
+    /// started in the home folder, so the host-wide user row must not score it.
     #[test]
-    fn settings_local_overlay_preserves_base_lists() {
-        let dir = tempdir().unwrap();
-        let claude = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude).unwrap();
-        // Base: clean.
-        std::fs::write(
-            claude.join("settings.json"),
-            r#"{"permissions": {"allow": ["Read"], "deny": ["Bash"]}}"#,
-        )
-        .unwrap();
-        // An empty local list cannot erase inherited deny rules.
-        std::fs::write(
-            claude.join("settings.local.json"),
-            r#"{"permissions": {"deny": []}}"#,
-        )
-        .unwrap();
-        let p = ClaudeCodeParser::default();
-        let reasons = p.assess(dir.path()).unwrap();
-        assert!(
-            !reasons
-                .iter()
-                .any(|r| matches!(r, AiGuardReason::PermissionsDenyEmpty)),
-            "overlay must retain inherited deny rules: {reasons:?}"
+    fn user_row_ignores_settings_local_json() {
+        let clean = tempdir().unwrap();
+        write_settings(clean.path(), r#"{"permissions": {"allow": ["Read"]}}"#);
+        let with_local = tempdir().unwrap();
+        write_settings(with_local.path(), r#"{"permissions": {"allow": ["Read"]}}"#);
+        write_file(
+            with_local.path(),
+            ".claude/settings.local.json",
+            LOCAL_ONLY_RISK,
         );
+        let reasons = user_reasons(with_local.path());
+        assert_eq!(reasons, user_reasons(clean.path()), "{reasons:?}");
+        assert!(auto_findings(&reasons)
+            .iter()
+            .all(|f| f != "mode:bypassPermissions"));
+    }
+
+    #[test]
+    fn user_row_with_only_a_settings_local_json_assesses_nothing() {
+        let home = tempdir().unwrap();
+        write_file(home.path(), ".claude/settings.local.json", LOCAL_ONLY_RISK);
+        assert_eq!(user_reasons(home.path()), Vec::new());
+    }
+
+    #[test]
+    fn user_row_survives_an_invalid_settings_local_json() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), r#"{"permissions": {"allow": ["Read"]}}"#);
+        write_file(home.path(), ".claude/settings.local.json", "{ not json");
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+        assert_eq!(reasons, user_reasons(home.path()));
+    }
+
+    #[test]
+    fn user_row_keeps_reporting_settings_json() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), LOCAL_ONLY_RISK);
+        let reasons = user_reasons(home.path());
+        assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
+            "{reasons:?}"
+        );
+    }
+
+    /// A session started in the home folder loads `<home>/.claude/settings.local.json`
+    /// as the project's local file, so the project row at home still scores it.
+    #[test]
+    fn project_row_at_home_still_scores_settings_local_json() {
+        let home = tempdir().unwrap();
+        write_file(
+            home.path(),
+            ".claude/settings.local.json",
+            r#"{"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(*)"]},
+               "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                 {"type": "command", "command": "rm -rf /tmp/lodeline-test/*"}]}]}}"#,
+        );
+        let reasons =
+            assess_project(home.path(), home.path(), &home.path().join("no-policy")).unwrap();
+        assert_eq!(auto_findings(&reasons), ["mode:acceptEdits"], "{reasons:?}");
+        assert!(reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })));
+        assert!(reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. })));
+    }
+
+    /// The user's `settings.local.json` is not a user-scope file, so its
+    /// `allowedHttpHookUrls` does not widen the user list: a project list that
+    /// admits the user's hook is the one that makes it reachable here.
+    #[test]
+    fn user_local_allowlist_does_not_merge_into_the_project_row() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        write_settings(
+            home.path(),
+            r#"{"hooks": {"PreToolUse": [{"hooks": [{"type": "http", "url": "https://c.example.test/h"}]}]},
+                "allowedHttpHookUrls": ["https://a.example.test/*"]}"#,
+        );
+        write_file(
+            home.path(),
+            ".claude/settings.local.json",
+            r#"{"allowedHttpHookUrls": ["https://c.example.test/*"]}"#,
+        );
+        write_file(
+            repo.path(),
+            ".claude/settings.json",
+            r#"{"allowedHttpHookUrls": ["https://c.example.test/*"]}"#,
+        );
+        let reasons =
+            assess_project(repo.path(), home.path(), &home.path().join("no-policy")).unwrap();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, AiGuardReason::HookForwardsToolCalls { .. })),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn user_external_scripts_ignore_settings_local_json() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), "{}");
+        write_file(
+            home.path(),
+            ".claude/settings.local.json",
+            r#"{"hooks": {"PreToolUse": [{"hooks": [
+                {"type": "command", "command": "/opt/tools/local-only.sh"}]}]}}"#,
+        );
+        let paths =
+            user_external_script_paths(&home.path().join(".claude"), &home.path().join("p"));
+        assert!(paths.is_empty(), "{paths:?}");
     }
 
     #[test]
@@ -3706,17 +3809,20 @@ mod tests {
         assert!(auto_findings(&reasons).is_empty(), "{reasons:?}");
     }
 
-    /// `auto` and `bypassPermissions` do not take effect from a local file, and
-    /// the user file's `defaultMode` does not fill in for them: a skipped
-    /// `auto` leaves the built-in default and a skipped `bypassPermissions`
-    /// starts in `default`. `acceptEdits` takes effect from a local file.
+    /// The user row's start mode comes from `settings.json` alone, whatever
+    /// `defaultMode` a `settings.local.json` beside it sets. The project row
+    /// owns the local file's `defaultMode` rules (see
+    /// `project_default_mode_is_scored_when_it_takes_effect`).
     #[test]
-    fn local_file_cannot_set_auto_or_bypass() {
-        for (local, want) in [
-            ("auto", vec![format!("mode:{BUILT_IN_AUTO_MODE}")]),
-            ("bypassPermissions", vec![]),
-            ("acceptEdits", vec!["mode:acceptEdits".to_string()]),
-        ] {
+    fn user_start_mode_ignores_the_local_file() {
+        let user_only = tempdir().unwrap();
+        write_settings(
+            user_only.path(),
+            r#"{"permissions": {"defaultMode": "bypassPermissions"}}"#,
+        );
+        let want = auto_findings(&user_reasons(user_only.path()));
+        assert_eq!(want, ["mode:bypassPermissions"]);
+        for local in ["auto", "bypassPermissions", "acceptEdits", "default"] {
             let dir = tempdir().unwrap();
             write_settings(
                 dir.path(),
@@ -3727,14 +3833,7 @@ mod tests {
                 ".claude/settings.local.json",
                 &format!(r#"{{"permissions": {{"defaultMode": "{local}"}}}}"#),
             );
-            let reasons = assess_user(
-                &dir.path().join(".claude"),
-                &dir.path().join(".claude.json"),
-                &dir.path().join("no-policy"),
-                None,
-            )
-            .unwrap();
-            assert_eq!(auto_findings(&reasons), want, "{local}");
+            assert_eq!(auto_findings(&user_reasons(dir.path())), want, "{local}");
         }
     }
 
