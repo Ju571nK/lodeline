@@ -2109,6 +2109,113 @@ command = "/usr/local/bin/my-mcp-server"
         );
     }
 
+    const HEADER_VALUE: &str = "Bearer test-value-0";
+
+    fn assess_server(keys: &str) -> Vec<AiGuardReason> {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            &format!("[mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n{keys}"),
+        );
+        CodexParser::default().assess(dir.path()).unwrap()
+    }
+
+    fn credential_headers(reasons: &[AiGuardReason]) -> Vec<serde_json::Value> {
+        let wire = serde_json::to_value(reasons).unwrap();
+        wire.as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == "mcp_server_static_credential")
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn static_credential_header_is_reported_by_name_only() {
+        let reasons = assess_server(&format!(
+            "http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+        ));
+        assert_eq!(
+            credential_headers(&reasons),
+            [serde_json::json!({
+                "kind": "mcp_server_static_credential",
+                "server_name": "acme",
+                "header_name": "Authorization",
+            })]
+        );
+        let wire = serde_json::to_string(&reasons).unwrap();
+        assert!(!wire.contains("test-value-0"), "the header value leaked");
+    }
+
+    #[test]
+    fn each_credential_header_is_reported_and_others_are_not() {
+        let reasons = assess_server(&format!(
+            "[mcp_servers.acme.http_headers]\n\
+             \"X-Request-Source\" = \"codex\"\n\
+             \"Proxy-Authorization\" = \"{HEADER_VALUE}\"\n\
+             \"x-api-key\" = \"{HEADER_VALUE}\"\n\
+             \"X-Client-Secret\" = \"{HEADER_VALUE}\"\n\
+             \"X-Upstream-Token\" = \"{HEADER_VALUE}\"\n"
+        ));
+        let mut names: Vec<_> = credential_headers(&reasons)
+            .iter()
+            .map(|r| r["header_name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "Proxy-Authorization",
+                "X-Client-Secret",
+                "X-Upstream-Token",
+                "x-api-key"
+            ]
+        );
+    }
+
+    #[test]
+    fn env_headers_empty_values_and_plain_headers_are_not_credentials() {
+        for keys in [
+            "env_http_headers = { Authorization = \"MCP_TOKEN\" }\n",
+            "http_headers = { \"X-Request-Source\" = \"codex\" }\n",
+            "http_headers = { Authorization = \"\" }\n",
+        ] {
+            let reasons = assess_server(keys);
+            assert_eq!(
+                credential_headers(&reasons),
+                [] as [serde_json::Value; 0],
+                "{keys}"
+            );
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| matches!(r, AiGuardReason::McpServerRemote { .. })),
+                "the server itself is still read: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_layer_credential_header_is_reported() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".codex")).unwrap();
+        std::fs::write(
+            dir.path().join(".codex").join("config.toml"),
+            format!(
+                "[mcp_servers.team]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+            ),
+        )
+        .unwrap();
+        let p = CodexProjectParser {
+            repo_root: dir.path().to_path_buf(),
+        };
+        let reasons = p.assess(Path::new("/unused")).unwrap();
+        let found = credential_headers(&reasons);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["server_name"], "team");
+    }
+
     // ─── combined scenario ─────────────────────────────────────────────────
 
     #[test]
