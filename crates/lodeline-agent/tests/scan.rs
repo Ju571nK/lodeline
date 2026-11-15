@@ -473,7 +473,7 @@ fn subfolder_only_codex_repo(
     trust: bool,
     git: bool,
 ) -> std::path::PathBuf {
-    let repo = proj.canonicalize().unwrap();
+    let repo = dunce::canonicalize(proj).unwrap();
     if git {
         fs::create_dir_all(repo.join(".git")).unwrap();
     }
