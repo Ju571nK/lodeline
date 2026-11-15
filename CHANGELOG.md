@@ -24,8 +24,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `requirements.toml` are scored alike. A host with none of these files scores as before. A file
   that does not parse is a read error for that row. A project's `.grok` folder is unchanged. Under
   the default policy no watch target covers `~/.grok`, so a created or edited file is scored at
-  the next 24 hour heartbeat, at agent start or at a policy reload, unless a policy target covers
-  the folder.
+  the next 24 hour heartbeat or at agent start, unless a policy target covers the folder.
 
 ### Changed
 
