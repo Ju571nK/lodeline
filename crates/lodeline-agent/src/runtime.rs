@@ -1173,18 +1173,20 @@ const NESTED_TARGET_PREFIX: &str = "claude_code-nested-components-";
 
 /// True for the nested and inherited folders target of
 /// `push_claude_code_component_target`: its id and paths that are each a
-/// plain folder path followed by `.claude/skills/*/SKILL.md` or
-/// `.claude/agents/*.md`.
+/// plain folder path followed by `.claude/skills/*/SKILL.md`,
+/// `.claude/agents/*.md` or `.claude/commands/*.md`.
 fn is_component_target(t: &lodeline_core::policy::WatchTarget) -> bool {
     let plain = |p: &std::path::Path| !p.to_string_lossy().contains(['*', '?', '[', ']', '{', '}']);
     let skills = std::path::Path::new(".claude/skills/*/SKILL.md");
     let agents = std::path::Path::new(".claude/agents/*.md");
+    let commands = std::path::Path::new(".claude/commands/*.md");
     t.id.starts_with(NESTED_TARGET_PREFIX)
         && !t.paths.is_empty()
         && t.paths.iter().all(|p| {
             let p = std::path::Path::new(p);
             (p.ends_with(skills) && p.ancestors().nth(4).is_some_and(plain))
-                || (p.ends_with(agents) && p.ancestors().nth(3).is_some_and(plain))
+                || ((p.ends_with(agents) || p.ends_with(commands))
+                    && p.ancestors().nth(3).is_some_and(plain))
         })
 }
 
@@ -1209,6 +1211,10 @@ fn is_root_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
                     .to_string_lossy()
                     .to_string(),
                 cd.join("agents").join("*.md").to_string_lossy().to_string(),
+                cd.join("commands")
+                    .join("*.md")
+                    .to_string_lossy()
+                    .to_string(),
             ]
 }
 
@@ -1994,6 +2000,10 @@ pub(crate) fn push_claude_code_synthetic_targets(
                 .to_string_lossy()
                 .to_string(),
             cd.join("agents").join("*.md").to_string_lossy().to_string(),
+            cd.join("commands")
+                .join("*.md")
+                .to_string_lossy()
+                .to_string(),
         ],
         recursive: true,
         follow_symlinks: false,
@@ -2022,7 +2032,10 @@ fn push_claude_code_component_target(
                     .contains(['*', '?', '[', ']', '{', '}'])
             })
             .map(|dir| {
-                if dir.file_name().is_some_and(|n| n == "agents") {
+                if dir
+                    .file_name()
+                    .is_some_and(|n| n == "agents" || n == "commands")
+                {
                     dir.join("*.md")
                 } else {
                     dir.join("*").join("SKILL.md")
@@ -2569,6 +2582,36 @@ mod tests {
             &effective,
             &repo.join(format!("pkg{:03}/.claude/skills/s/SKILL.md", cap + 4))
         ));
+    }
+
+    #[test]
+    fn claude_code_project_targets_watch_command_files() {
+        let td = tempfile::tempdir().unwrap();
+        let top = crate::normalizer::canonicalize_glob_prefix(td.path());
+        std::fs::create_dir_all(top.join(".git")).unwrap();
+        touch(&top, "apps/web/.claude/commands/ops/ship.md");
+        touch(&top, ".claude/commands/parent.md");
+        let repo = top.join("apps/web");
+        std::fs::create_dir_all(&repo).unwrap();
+        let effective = claude_targets_for(&repo);
+        for file in [
+            "apps/web/.claude/commands/own.md",
+            "apps/web/.claude/commands/ops/ship.md",
+            ".claude/commands/parent.md",
+        ] {
+            assert!(watches(&effective, &top.join(file)), "{file}");
+        }
+        assert!(!watches(
+            &effective,
+            &top.join("apps/web/.claude/commands/own.txt")
+        ));
+        for t in effective
+            .targets
+            .iter()
+            .filter(|t| t.id.contains("skills-agents-") || t.id.contains("nested-components-"))
+        {
+            assert!(crate::normalizer::uses_one_folder_rule(t), "{}", t.id);
+        }
     }
 
     #[test]
