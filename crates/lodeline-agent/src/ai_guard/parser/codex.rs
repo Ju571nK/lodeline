@@ -1770,7 +1770,7 @@ impl CodexProjectParser {
         paths
     }
 
-    /// #200 — `.codex/` folders below the repository root, minus any that is
+    /// #200. The `.codex/` folders below the repository root, minus any that is
     /// the user's own Codex home.
     fn subfolder_layer_dirs(&self, codex_dir: &Path) -> Vec<PathBuf> {
         let mut dirs = crate::ai_guard::workspace_discovery::codex_subfolder_dirs(&self.repo_root);
@@ -1834,7 +1834,7 @@ impl CodexProjectParser {
         ];
         let mut out = Vec::new();
         self.assess_project_layer(system_dir, &all, home_dir, &mut out);
-        // #200 — Codex layers every `.codex/` from the project root down to the
+        // #200. Codex layers every `.codex/` from the project root down to the
         // folder a session starts in. That folder is runtime state, so each
         // subfolder layer is assessed on its own over the same system and user
         // layers. A corrupt subfolder file is skipped, as for hooks.json.
@@ -1842,7 +1842,7 @@ impl CodexProjectParser {
             all[2] = CodexLayer::read_lenient(&dir);
             self.assess_project_layer(system_dir, &all, home_dir, &mut out);
         }
-        // #146 — AGENTS.md is Codex's first-class instruction file.
+        // #146. AGENTS.md is Codex's first-class instruction file.
         super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
         Ok(out)
     }
@@ -3137,10 +3137,11 @@ command = "echo inline"
     #[test]
     fn a_subfolder_codex_that_is_the_codex_home_is_skipped() {
         let (dir, repo, nested) = subfolder_repo();
-        write_config(
-            dir.path(),
-            &trusted(&nested.join("hooks.json"), "pre_tool_use", 0, 0),
-        );
+        std::fs::write(
+            nested.join("config.toml"),
+            trusted(&nested.join("hooks.json"), "pre_tool_use", 0, 0),
+        )
+        .unwrap();
         let p = CodexHomeProjectParser {
             project: CodexProjectParser {
                 repo_root: repo.clone(),
