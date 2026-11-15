@@ -40,6 +40,7 @@ targets:
       - "~/.claude/hooks/*"
       - "~/.claude/skills/*/SKILL.md"
       - "~/.claude/agents/*.md"
+      - "~/.claude/commands/*.md"
       - "~/.claude/CLAUDE.md"
       - "~/.claude/loop.md"
       - "~/.claude/scheduled-tasks/*/SKILL.md"
