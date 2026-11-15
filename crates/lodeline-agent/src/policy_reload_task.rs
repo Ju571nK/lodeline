@@ -1478,6 +1478,45 @@ mod tests {
         assert!(has, "expected CodexProjectParser for repoA after reload");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_rebuilds_the_kept_codex_parser_so_a_new_subfolder_layer_is_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let repo_a = workspace.join("repoA");
+        std::fs::create_dir_all(repo_a.join(".codex")).unwrap();
+        std::fs::write(repo_a.join(".codex").join("config.toml"), "").unwrap();
+        let canonical_a = dunce::canonicalize(&repo_a).unwrap();
+
+        let initial = format!(
+            "version: 1\nhost_id_strategy: machine_id\ncodex_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        let (mut ctx, plat, _trx, parsers, _state) = build_ctx_with_parsers(dir.path(), &initial);
+        reload(&mut ctx, &plat);
+
+        let layer = canonical_a.join("services").join("api").join(".codex");
+        std::fs::create_dir_all(&layer).unwrap();
+        std::fs::write(layer.join("config.toml"), "").unwrap();
+        reload(&mut ctx, &plat);
+
+        let watched: Vec<_> = parsers
+            .read()
+            .iter()
+            .filter(|p| {
+                p.tool() == lodeline_core::event::AiTool::Codex
+                    && matches!(
+                        p.scope(),
+                        lodeline_core::event::AiGuardScope::Project { ref path } if path == &canonical_a
+                    )
+            })
+            .flat_map(|p| p.watched_paths(dir.path()))
+            .collect();
+        assert!(
+            watched.contains(&layer.join("config.toml")),
+            "the kept parser should list the layer created after the first reload"
+        );
+    }
+
     // Phase 3b.8 — per-repo Gemini + Cursor parser hot-reload reconciliation.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
