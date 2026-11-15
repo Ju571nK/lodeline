@@ -101,22 +101,32 @@ pub async fn run(
 /// run would read the same bytes; one hash and one recheck cover them all. A
 /// `Removed` event ends the run for its path, a `Renamed` event ends it for
 /// both of its paths, and events for different paths never merge.
+///
+/// One write often arrives as a `Created` plus a `Modified`. The merged count
+/// is the larger of the two per-kind totals, so that pair stays a single write
+/// and only a repeat of one kind marks the event as a burst.
 fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
     let mut out: Vec<PendingEvent> = Vec::with_capacity(batch.len());
+    let mut totals: Vec<[u32; 2]> = Vec::with_capacity(batch.len());
     let mut open: HashMap<PathBuf, usize> = HashMap::new();
     for next in batch {
-        let mergeable = matches!(
-            next.kind,
-            FileChangeKind::Created | FileChangeKind::Modified
-        );
-        match open.get(&next.path) {
-            Some(&at) if mergeable && out[at].critical == next.critical => {
+        let kind_slot = match next.kind {
+            FileChangeKind::Created => Some(0),
+            FileChangeKind::Modified => Some(1),
+            _ => None,
+        };
+        match (open.get(&next.path), kind_slot) {
+            (Some(&at), Some(slot)) if out[at].critical == next.critical => {
                 let run = &mut out[at];
                 run.last_seen_ms = next.last_seen_ms;
-                run.coalesced_count = run.coalesced_count.saturating_add(next.coalesced_count);
+                let per_kind = &mut totals[at];
+                per_kind[slot] = per_kind[slot].saturating_add(next.coalesced_count);
+                run.coalesced_count = per_kind[0].max(per_kind[1]);
             }
             _ => {
-                if mergeable {
+                let mut per_kind = [0; 2];
+                if let Some(slot) = kind_slot {
+                    per_kind[slot] = next.coalesced_count;
                     open.insert(next.path.clone(), out.len());
                 } else {
                     open.remove(&next.path);
@@ -124,6 +134,7 @@ fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
                         open.remove(from);
                     }
                 }
+                totals.push(per_kind);
                 out.push(next);
             }
         }
