@@ -277,6 +277,45 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn one_created_and_one_modified_for_a_path_stay_definitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        std::fs::write(&a, b"a").unwrap();
+        let events = vec![
+            pending(&a, FileChangeKind::Created, 0),
+            pending(&a, FileChangeKind::Modified, 1),
+        ];
+
+        let (out, _) = run_to_end(events).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].quality, EvidenceQuality::Definitive);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_writes_to_a_path_are_best_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        std::fs::write(&a, b"a").unwrap();
+        let repeated = vec![
+            pending(&a, FileChangeKind::Modified, 0),
+            pending(&a, FileChangeKind::Modified, 1),
+        ];
+        let alternating = vec![
+            pending(&a, FileChangeKind::Created, 0),
+            pending(&a, FileChangeKind::Modified, 1),
+            pending(&a, FileChangeKind::Created, 2),
+            pending(&a, FileChangeKind::Modified, 3),
+        ];
+
+        for events in [repeated, alternating] {
+            let (out, _) = run_to_end(events).await;
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].quality, EvidenceQuality::BestEffort);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_rename_ends_the_run_for_both_of_its_paths() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.json");
