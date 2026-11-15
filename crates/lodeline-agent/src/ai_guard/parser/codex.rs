@@ -123,6 +123,18 @@ impl AiGuardParser for CodexParser {
 
 const HOOKS_JSON: &str = "hooks.json";
 
+/// toml's `Display` quotes the source line, which can hold a header value, so
+/// a parse error keeps only where it is and its first message line.
+fn toml_error_summary(text: &str, error: &toml::de::Error) -> String {
+    let kind = error.message().lines().next().unwrap_or("invalid TOML");
+    let Some(before) = error.span().and_then(|span| text.get(..span.start)) else {
+        return kind.to_string();
+    };
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    format!("line {line}, column {column}: {kind}")
+}
+
 /// #200 — one Codex config folder (system, user, or a repo's `.codex/`).
 /// Codex loads hooks from both `config.toml` and the folder's `hooks.json`,
 /// and runs the hooks of every layer, so hooks are read per layer while
@@ -141,7 +153,7 @@ impl CodexLayer {
         let config = match std::fs::read_to_string(&path) {
             Ok(text) => Some(toml::from_str(&text).map_err(|e| AssessError::Parse {
                 path: path.clone(),
-                message: e.to_string(),
+                message: toml_error_summary(&text, &e),
             })?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => return Err(AssessError::Io { path, source }),
