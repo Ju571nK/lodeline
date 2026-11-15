@@ -102,9 +102,12 @@ pub async fn run(
 /// `Removed` event ends the run for its path, a `Renamed` event ends it for
 /// both of its paths, and events for different paths never merge.
 ///
-/// One write often arrives as a `Created` plus a `Modified`. The merged count
-/// is the larger of the two per-kind totals, so that pair stays a single write
-/// and only a repeat of one kind marks the event as a burst.
+/// One write is often reported as a `Created` and two `Modified` events (the
+/// file is created, then truncated and written). The merged count is the larger
+/// per-kind total, and up to `EVENTS_PER_SINGLE_WRITE` of one kind still count
+/// as one write, so only a longer run marks the event as a burst.
+const EVENTS_PER_SINGLE_WRITE: u32 = 2;
+
 fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
     let mut out: Vec<PendingEvent> = Vec::with_capacity(batch.len());
     let mut totals: Vec<[u32; 2]> = Vec::with_capacity(batch.len());
@@ -121,7 +124,12 @@ fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
                 run.last_seen_ms = next.last_seen_ms;
                 let per_kind = &mut totals[at];
                 per_kind[slot] = per_kind[slot].saturating_add(next.coalesced_count);
-                run.coalesced_count = per_kind[0].max(per_kind[1]);
+                let longest = per_kind[0].max(per_kind[1]);
+                run.coalesced_count = if longest <= EVENTS_PER_SINGLE_WRITE {
+                    1
+                } else {
+                    longest
+                };
             }
             _ => {
                 let mut per_kind = [0; 2];
@@ -288,13 +296,14 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn one_created_and_one_modified_for_a_path_stay_definitive() {
+    async fn one_created_and_two_modified_for_a_path_stay_definitive() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.json");
         std::fs::write(&a, b"a").unwrap();
         let events = vec![
             pending(&a, FileChangeKind::Created, 0),
             pending(&a, FileChangeKind::Modified, 1),
+            pending(&a, FileChangeKind::Modified, 2),
         ];
 
         let (out, _) = run_to_end(events).await;
@@ -311,12 +320,15 @@ mod tests {
         let repeated = vec![
             pending(&a, FileChangeKind::Modified, 0),
             pending(&a, FileChangeKind::Modified, 1),
+            pending(&a, FileChangeKind::Modified, 2),
         ];
         let alternating = vec![
             pending(&a, FileChangeKind::Created, 0),
             pending(&a, FileChangeKind::Modified, 1),
             pending(&a, FileChangeKind::Created, 2),
             pending(&a, FileChangeKind::Modified, 3),
+            pending(&a, FileChangeKind::Created, 4),
+            pending(&a, FileChangeKind::Modified, 5),
         ];
 
         for events in [repeated, alternating] {
