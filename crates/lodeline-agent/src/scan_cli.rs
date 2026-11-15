@@ -176,9 +176,10 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
 }
 
 /// Build the project parsers for `dir` if (and only if) `dir` itself carries a
-/// tool's project markers. Mirrors the per-repo discovery markers used by the
-/// daemon (`workspace_discovery`), but applied to `dir` directly rather than to
-/// its subdirectories.
+/// tool's project markers. Applies the per-repo discovery markers of the daemon
+/// (`workspace_discovery`) to `dir` directly rather than to its subdirectories.
+/// The one addition is the Codex root `.codex/rules/` folder, which the Codex
+/// project parser reads but the daemon's discovery does not use as a marker.
 fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<dyn AiGuardParser>> {
     use crate::ai_guard::workspace_discovery::codex_subfolder_dirs;
     use crate::ai_guard::{
@@ -206,10 +207,13 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
     {
         out.push(Arc::new(ClaudeCodeProjectParser { repo_root: root() }));
     }
-    // Codex: .codex/config.toml | AGENTS.md | a Git repository whose only Codex
-    // files sit in a subfolder `.codex/`. The walk runs only for a Git repository
-    // with neither root marker, as the daemon's discovery does.
+    // Codex: .codex/config.toml | .codex/hooks.json | .codex/rules/ | AGENTS.md | a
+    // Git repository whose only Codex files sit in a subfolder `.codex/`. The walk
+    // runs only for a Git repository with no root marker, as the daemon's discovery
+    // does.
     if has(".codex/config.toml")
+        || has(".codex/hooks.json")
+        || dir.join(".codex").join("rules").is_dir()
         || has("AGENTS.md")
         || (has(".git") && !codex_subfolder_dirs(dir).is_empty())
     {

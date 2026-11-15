@@ -597,7 +597,11 @@ fn scan_reads_a_repo_whose_only_codex_file_is_a_root_hooks_json() {
 fn scan_reads_a_repo_whose_only_codex_file_is_a_root_rules_folder() {
     let (home, proj) = (tempdir().unwrap(), tempdir().unwrap());
     write(
-        &proj.path().join(".codex").join("rules").join("default.rules"),
+        &proj
+            .path()
+            .join(".codex")
+            .join("rules")
+            .join("default.rules"),
         "prefix_rule(pattern=[\"terraform\", \"apply\"], decision=\"allow\")\n",
     );
     let v = scan_bin(home.path(), proj.path(), None);
