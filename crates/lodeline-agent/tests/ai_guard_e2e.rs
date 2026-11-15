@@ -1261,8 +1261,8 @@ async fn claude_project_loop_md_edit_triggers_reassessment() {
     agent.join.abort();
 }
 
-/// #539: a skill or subagent file created in a discovered repository's
-/// `.claude/skills` or `.claude/agents` reaches the project parser through its
+/// #539: a skill, subagent or command file created in a discovered repository's
+/// `.claude/skills`, `.claude/agents` or `.claude/commands` reaches the project parser through its
 /// per-repository target. With the folder present at boot only the new file
 /// (and the skill's own folder) is written afterwards, so the event can match
 /// only the target's file pattern. With the folder missing at boot the folder
@@ -1274,8 +1274,10 @@ async fn claude_project_skill_and_agent_files_trigger_reassessment() {
     let cases = [
         ("skills/demo/SKILL.md", Some("skills")),
         ("agents/demo.md", Some("agents")),
+        ("commands/demo.md", Some("commands")),
         ("skills/demo/SKILL.md", None),
         ("agents/demo.md", None),
+        ("commands/ops/demo.md", None),
     ];
     for (rel, folder_at_boot) in cases {
         let td = tempfile::TempDir::new().unwrap();
