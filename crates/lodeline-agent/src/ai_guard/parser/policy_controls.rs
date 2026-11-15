@@ -2,6 +2,7 @@
 //! Cloud policy, MDM, parent hosts, and running-session state are not resolved here.
 
 use super::AssessError;
+use crate::ai_guard::rule_pack::selector::toml_parse_error;
 use lodeline_core::event::AiGuardControl;
 use serde_json::Value;
 use std::io::{ErrorKind, Read};
@@ -20,10 +21,8 @@ pub(super) fn codex_controls(path: &Path) -> Result<Vec<AiGuardControl>, AssessE
     let Some(text) = read_policy(path)? else {
         return Ok(Vec::new());
     };
-    let policy: toml::Value = toml::from_str(&text).map_err(|e| AssessError::Parse {
-        path: path.into(),
-        message: e.to_string(),
-    })?;
+    let policy: toml::Value =
+        toml::from_str(&text).map_err(|e| toml_parse_error(path, &text, &e))?;
     let mut out = Vec::new();
     for (key, expected) in [
         ("allow_managed_hooks_only", true),
@@ -605,5 +604,17 @@ mod tests {
         }
         std::fs::write(&path, " ".repeat(MAX_POLICY_BYTES as usize + 1)).unwrap();
         assert!(claude_controls(dir.path()).is_err());
+    }
+
+    #[test]
+    fn codex_toml_parse_error_names_the_place_and_not_the_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("requirements.toml");
+        std::fs::write(&path, "ok = 1\nallow_remote_control = test-value-0\n").unwrap();
+        let err = codex_controls(&path).unwrap_err();
+        for shown in [err.to_string(), format!("{err:?}")] {
+            assert_eq!(shown.matches("test-value-0").count(), 0, "{shown}");
+            assert!(shown.contains("line 2, column"), "{shown}");
+        }
     }
 }
