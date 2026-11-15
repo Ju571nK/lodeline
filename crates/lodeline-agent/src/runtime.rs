@@ -2355,6 +2355,44 @@ mod tests {
     }
 
     #[test]
+    fn codex_project_target_watches_the_files_of_every_layer() {
+        use lodeline_core::policy::glob::CompiledGlob;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let api = repo.join("services").join("api").join(".codex");
+        std::fs::create_dir_all(&api).unwrap();
+        std::fs::write(api.join("config.toml"), "").unwrap();
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_codex_synthetic_target(&mut effective, &repo);
+        let target = effective
+            .targets
+            .iter()
+            .find(|t| t.id.starts_with("codex-project-"))
+            .expect("codex project target");
+        for layer in [repo.join(".codex"), api] {
+            for file in [
+                layer.join("config.toml"),
+                layer.join("hooks.json"),
+                layer.join("rules").join("x.rules"),
+            ] {
+                assert!(
+                    target
+                        .paths
+                        .iter()
+                        .any(|p| CompiledGlob::new(p).unwrap().is_match(&file)),
+                    "an edit of {file:?} must reach the parser"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cursor_project_target_watches_hooks_json() {
         let repo = std::path::Path::new("/repo");
         let mut effective = lodeline_core::policy::merge(
