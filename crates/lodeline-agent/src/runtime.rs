@@ -259,9 +259,9 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         }));
     }
     for repo_root in &codex_repos {
-        parsers_vec.push(Arc::new(crate::ai_guard::CodexProjectParser {
-            repo_root: repo_root.clone(),
-        }));
+        parsers_vec.push(Arc::new(crate::ai_guard::CodexProjectParser::new(
+            repo_root.clone(),
+        )));
     }
     for repo_root in &gemini_repos {
         parsers_vec.push(Arc::new(crate::ai_guard::GeminiProjectParser {
@@ -1976,22 +1976,35 @@ pub(crate) fn push_claude_code_synthetic_targets(
     });
 }
 
-/// Phase 3b.6.2 — push ONE synthetic WatchTarget for a Codex per-repo config.
+/// Phase 3b.6.2. Push ONE synthetic WatchTarget for a Codex per-repo config.
+/// #200. It lists the files of the root `.codex/` and of every subfolder
+/// `.codex/` layer the walk finds, so creating, editing or removing one of
+/// them re-assesses the repository. A subfolder layer added later is found by
+/// the next discovery.
 pub(crate) fn push_codex_synthetic_target(
     effective: &mut lodeline_core::policy::EffectivePolicy,
     repo_root: &std::path::Path,
 ) {
-    let config = repo_root.join(".codex").join("config.toml");
+    let layers = std::iter::once(repo_root.join(".codex")).chain(
+        crate::ai_guard::workspace_discovery::codex_subfolder_dirs(repo_root),
+    );
+    let mut paths = vec![repo_root.join("AGENTS.md").to_string_lossy().to_string()];
+    for dir in layers {
+        for file in [
+            dir.join("config.toml"),
+            dir.join("hooks.json"),
+            dir.join("rules").join("*.rules"),
+        ] {
+            paths.push(file.to_string_lossy().to_string());
+        }
+    }
     let h = synthetic_target_id_suffix(repo_root);
     effective.targets.push(lodeline_core::policy::WatchTarget {
         id: format!("codex-project-{h}"),
         description: format!("Phase 3b.6.2 synthetic: {}", repo_root.display()),
         tier: lodeline_core::policy::Tier::Critical,
         platform: lodeline_core::policy::Platform::Any,
-        paths: vec![
-            config.to_string_lossy().to_string(),
-            repo_root.join("AGENTS.md").to_string_lossy().to_string(),
-        ],
+        paths,
         recursive: false,
         follow_symlinks: false,
         disabled: false,
@@ -2392,6 +2405,44 @@ mod tests {
             100,
         );
         assert_eq!(listed, vec![skill.join("SKILL.md")]);
+    }
+
+    #[test]
+    fn codex_project_target_watches_the_files_of_every_layer() {
+        use lodeline_core::policy::glob::CompiledGlob;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let api = repo.join("services").join("api").join(".codex");
+        std::fs::create_dir_all(&api).unwrap();
+        std::fs::write(api.join("config.toml"), "").unwrap();
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        super::push_codex_synthetic_target(&mut effective, &repo);
+        let target = effective
+            .targets
+            .iter()
+            .find(|t| t.id.starts_with("codex-project-"))
+            .expect("codex project target");
+        for layer in [repo.join(".codex"), api] {
+            for file in [
+                layer.join("config.toml"),
+                layer.join("hooks.json"),
+                layer.join("rules").join("x.rules"),
+            ] {
+                assert!(
+                    target
+                        .paths
+                        .iter()
+                        .any(|p| CompiledGlob::new(p).unwrap().is_match(&file)),
+                    "an edit of {file:?} must reach the parser"
+                );
+            }
+        }
     }
 
     #[test]

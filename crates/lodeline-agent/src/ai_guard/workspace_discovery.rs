@@ -2,7 +2,7 @@
 //! Claude Code, and Codex per-repo parsers. Extracted from the
 //! per-tool `continue_discovery` module shipped in 3b.6.1.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DISCOVERY_WARN_THRESHOLD: usize = 50;
 
@@ -96,7 +96,105 @@ pub fn discover_codex_repos(roots: &[String]) -> Vec<PathBuf> {
             .collect();
     set.extend(discover_per_repo(roots, ".codex/hooks.json"));
     set.extend(discover_per_repo(roots, "AGENTS.md"));
+    let subfolder_only = discover_git_repos_with_subfolder_codex(roots, &set);
+    set.extend(subfolder_only);
     set.into_iter().collect()
+}
+
+/// A repository whose only Codex files sit in a subfolder `.codex/`. Only a
+/// direct subdirectory with a `.git` entry that is not already `found` is
+/// walked, so a plain folder of projects costs one `stat` each.
+fn discover_git_repos_with_subfolder_codex(
+    roots: &[String],
+    found: &std::collections::BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for raw in roots {
+        let Some(root) = expand_and_canonicalize(raw) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || !path.join(".git").exists() {
+                continue;
+            }
+            let Ok(repo) = dunce::canonicalize(&path) else {
+                continue;
+            };
+            if !found.contains(&repo) && !codex_subfolder_dirs(&repo).is_empty() {
+                out.push(repo);
+            }
+        }
+    }
+    out
+}
+
+const SUBFOLDER_WALK_MAX_DEPTH: usize = 5;
+const SUBFOLDER_WALK_MAX_DIRS: usize = 2_000;
+const SUBFOLDER_WALK_SKIP: [&str; 3] = ["node_modules", "target", "vendor"];
+
+/// #200. The `.codex/` folders strictly below `repo_root` that hold a
+/// `config.toml`, a `hooks.json` or a `rules` folder. Codex layers every
+/// `.codex/` from the project root down to the folder a session starts in, and
+/// a daemon cannot know that folder, so every one is returned. The walk is
+/// bounded in depth and in folders visited, skips hidden folders,
+/// `node_modules`, `target` and `vendor`, and follows no symlink. A folder with
+/// its own `.git` entry is a nested repository or submodule, which Codex takes
+/// as its own project root, so the walk does not enter it.
+pub fn codex_subfolder_dirs(repo_root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(repo_root.to_path_buf(), 0usize)]);
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        if visited == SUBFOLDER_WALK_MAX_DIRS {
+            tracing::warn!(
+                visited,
+                "workspace_discovery: subfolder .codex walk stopped at the folder cap"
+            );
+            break;
+        }
+        visited += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let entries: Vec<_> = entries.flatten().collect();
+        if depth > 0 && entries.iter().any(|e| e.file_name() == ".git") {
+            continue;
+        }
+        for entry in entries {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".codex" {
+                if depth > 0 && holds_codex_layer(&entry.path()) {
+                    found.push(entry.path());
+                }
+                continue;
+            }
+            if depth < SUBFOLDER_WALK_MAX_DEPTH
+                && !name.starts_with('.')
+                && !SUBFOLDER_WALK_SKIP.contains(&name.as_ref())
+            {
+                queue.push_back((entry.path(), depth + 1));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn holds_codex_layer(dot_codex: &Path) -> bool {
+    dot_codex.join("config.toml").is_file()
+        || dot_codex.join("hooks.json").is_file()
+        || dot_codex.join("rules").is_dir()
 }
 
 /// #146 — Cursor repos by `.cursor/mcp.json`, `.cursor/hooks.json` (#203) OR
@@ -324,6 +422,36 @@ mod tests {
         std::fs::write(repo.join(".codex/hooks.json"), "{}").unwrap();
         let roots = vec![root.path().to_string_lossy().to_string()];
         assert!(discover_codex_repos(&roots).contains(&dunce::canonicalize(&repo).unwrap()));
+    }
+
+    #[test]
+    fn discover_codex_repos_finds_a_git_repo_with_only_a_subfolder_codex() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("services/api/.codex")).unwrap();
+        std::fs::write(repo.join("services/api/.codex/hooks.json"), "{}").unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(plain.join("services/api/.codex")).unwrap();
+        std::fs::write(plain.join("services/api/.codex/hooks.json"), "{}").unwrap();
+        let roots = [dir.path().to_string_lossy().into_owned()];
+        let found = discover_codex_repos(&roots);
+        assert!(found.contains(&dunce::canonicalize(&repo).unwrap()));
+        assert!(!found.contains(&dunce::canonicalize(&plain).unwrap()));
+    }
+
+    #[test]
+    fn codex_subfolder_dirs_stop_at_a_nested_repo() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let own = repo.join("services/api/.codex");
+        let inner = repo.join("libs/inner");
+        for layer in [&own, &inner.join(".codex"), &inner.join("tools/.codex")] {
+            std::fs::create_dir_all(layer).unwrap();
+            std::fs::write(layer.join("hooks.json"), "{}").unwrap();
+        }
+        std::fs::write(inner.join(".git"), "gitdir: ../../.git/modules/inner\n").unwrap();
+        assert_eq!(codex_subfolder_dirs(&repo), vec![own]);
     }
 
     #[test]
