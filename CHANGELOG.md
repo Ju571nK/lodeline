@@ -9,6 +9,23 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- **Codex MCP servers with a static credential header.** The Codex scanner reports an MCP server
+  whose `http_headers` table sends a credential header with a static value, because that credential
+  is stored in the config file as plain text. Whether a header is a credential header is a judgment
+  from its name: split on `-` and `_`, the name has a token such as `authorization`, `auth`,
+  `token`, `secret`, `password`, `cookie`, `apikey` or `credential`, or the token `key` next to
+  `api`, `access`, `private`, `secret`, `client` or `subscription`. So `X-Api-Key` and `Cookie`
+  count and `Idempotency-Key` does not. An empty value, or a value that only names a variable
+  (`${NAME}` or `$NAME`, with an optional `Bearer ` or `Basic ` prefix), is not reported, because
+  Codex sends it as literal text. A new reason kind, `mcp_server_static_credential` (1.0), records
+  the server name and the header name and never the value, and each such header is its own reason.
+  Headers in `env_http_headers` name environment variables and are not reported. This applies to
+  every Codex layer the scanner reads: the system and user config, a repository's
+  `.codex/config.toml` and its subfolder `.codex/` layers. On a stdio server, where Codex refuses
+  `http_headers` and does not load the config, the hint says to remove the entry and to forward the
+  credential through `env_vars`. Upgrade `lodeline-server` before the agents. A server older than
+  v0.13.0 rejects an event that carries the new kind. Refs #200.
+
 - **`grok_workspaces` policy field.** The daemon now scores Grok Build projects. List workspace
   roots under `grok_workspaces`, and the agent scans each root one level deep for a
   `<subdir>/.grok/hooks` folder or a `<subdir>/.grok/config.toml`, reads that folder with the Grok
@@ -70,6 +87,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- **The Codex scanner no longer echoes a line of a malformed `config.toml`.** A parse error of a Codex config file used to carry the TOML library's quote of the bad line, so a line that held a header value or another secret reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line and the column and says the file is invalid TOML, and never the line or a key name.
 - **The Grok scanner no longer echoes a line of a malformed TOML file.** A parse error of `config.toml`, `managed_config.toml` or `requirements.toml` under `~/.grok` or `/etc/grok` used to carry the TOML library's quote of the bad line, so a secret on that line reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line, the column and a short kind of error, and never the line itself. Refs #203.
 - **AI Guard reads a project hook script that is named through `CLAUDE_PROJECT_DIR`.** A Claude Code hook in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project, such as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`, was reported as not scanned (`external_script_unscanned`), and `bash "$CLAUDE_PROJECT_DIR"/x.sh` was read as an inline command, so the script was never read. The variable now stands for the project root, in the spellings the hook's shell expands (`$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, each bare or in double quotes). A hook with `args` has no shell, so only the unquoted `${CLAUDE_PROJECT_DIR}` form is read, and on Windows only the braced form. A user or managed hook, a Codex hook and a Cursor hook keep the old result, because the agent does not know their project root. A project score can rise where a script that was never read holds a destructive command. (#628)
 - **A TOML parse error in an AI Guard file no longer quotes the source line.** When a rule pack file or a Codex `requirements.toml` was not valid TOML, the error carried the `toml` crate's text, which prints the offending line. A line that held a credential reached the `lodeline scan` error and the daemon log. The error now names the file, the line and the column and says the file is invalid TOML. No reason kind, event field or policy field is added.
