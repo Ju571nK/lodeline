@@ -508,12 +508,30 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             &new_claude,
             |p| crate::ai_guard::ClaudeCodeProjectParser { repo_root: p },
         );
+        // #200. A kept Codex parser is built again, so its subfolder `.codex/`
+        // layers are walked again at this discovery.
+        for p in guard.iter_mut() {
+            let is_pack = p
+                .as_any()
+                .downcast_ref::<crate::ai_guard::rule_pack::parser::RulePackParser>()
+                .is_some();
+            if let (
+                false,
+                lodeline_core::event::AiTool::Codex,
+                lodeline_core::event::AiGuardScope::Project { path },
+            ) = (is_pack, p.tool(), p.scope())
+            {
+                if new_codex.contains(&path) {
+                    *p = Arc::new(crate::ai_guard::CodexProjectParser::new(path));
+                }
+            }
+        }
         let (a3, r3) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Codex,
             &new_codex,
-            |p| crate::ai_guard::CodexProjectParser { repo_root: p },
+            crate::ai_guard::CodexProjectParser::new,
         );
         let (a4, r4) = reconcile_per_repo(
             &mut guard,
@@ -1453,6 +1471,45 @@ mod tests {
                 )
         });
         assert!(has, "expected CodexProjectParser for repoA after reload");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_rebuilds_the_kept_codex_parser_so_a_new_subfolder_layer_is_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let repo_a = workspace.join("repoA");
+        std::fs::create_dir_all(repo_a.join(".codex")).unwrap();
+        std::fs::write(repo_a.join(".codex").join("config.toml"), "").unwrap();
+        let canonical_a = dunce::canonicalize(&repo_a).unwrap();
+
+        let initial = format!(
+            "version: 1\nhost_id_strategy: machine_id\ncodex_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        let (mut ctx, plat, _trx, parsers, _state) = build_ctx_with_parsers(dir.path(), &initial);
+        reload(&mut ctx, &plat);
+
+        let layer = canonical_a.join("services").join("api").join(".codex");
+        std::fs::create_dir_all(&layer).unwrap();
+        std::fs::write(layer.join("config.toml"), "").unwrap();
+        reload(&mut ctx, &plat);
+
+        let watched: Vec<_> = parsers
+            .read()
+            .iter()
+            .filter(|p| {
+                p.tool() == lodeline_core::event::AiTool::Codex
+                    && matches!(
+                        p.scope(),
+                        lodeline_core::event::AiGuardScope::Project { ref path } if path == &canonical_a
+                    )
+            })
+            .flat_map(|p| p.watched_paths(dir.path()))
+            .collect();
+        assert!(
+            watched.contains(&layer.join("config.toml")),
+            "the kept parser should list the layer created after the first reload"
+        );
     }
 
     // Phase 3b.8 — per-repo Gemini + Cursor parser hot-reload reconciliation.
