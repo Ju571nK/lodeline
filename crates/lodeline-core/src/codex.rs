@@ -97,6 +97,21 @@ pub enum HooksFeature {
     },
 }
 
+/// The `toml` error message can quote the offending key or value, which can
+/// be a credential, so keep only the kind and where it is.
+pub fn toml_error_place(text: &str, e: &toml::de::Error) -> String {
+    let place = e
+        .span()
+        .map(|span| {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            format!(" at line {line}, column {column}")
+        })
+        .unwrap_or_default();
+    format!("invalid TOML{place}")
+}
+
 impl HooksFeature {
     pub fn read(system_dir: &Path, codex_home: &Path) -> Self {
         let files = [
@@ -120,7 +135,7 @@ impl HooksFeature {
             match toml::from_str::<Value>(&text) {
                 Ok(value) => parsed.push((path, Some(value))),
                 Err(e) => {
-                    let error = e.message().to_string();
+                    let error = toml_error_place(&text, &e);
                     return Self::Unreadable { path, error };
                 }
             }
