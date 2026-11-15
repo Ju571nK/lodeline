@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Documentation
+
+- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states that the daemon does not find Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
+
 ## [0.15.1] - 2026-11-15
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,
