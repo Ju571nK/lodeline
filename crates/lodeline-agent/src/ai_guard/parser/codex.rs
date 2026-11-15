@@ -2239,6 +2239,125 @@ command = "/usr/local/bin/my-mcp-server"
         assert_eq!(found[0]["server_name"], "team");
     }
 
+    #[test]
+    fn credential_header_is_judged_from_its_name() {
+        for (name, reported) in [
+            ("Authorization", true),
+            ("Proxy-Authorization", true),
+            ("X-Api-Key", true),
+            ("X-Amz-Security-Token", true),
+            ("Cookie", true),
+            ("X-Password", true),
+            ("Ocp-Apim-Subscription-Key", true),
+            ("Idempotency-Key", false),
+            ("X-Keyboard", false),
+            ("Monkey", false),
+            ("X-Author", false),
+            ("Keep-Alive", false),
+        ] {
+            let reasons = assess_server(&format!(
+                "http_headers = {{ \"{name}\" = \"{HEADER_VALUE}\" }}\n"
+            ));
+            assert_eq!(
+                credential_headers(&reasons).len(),
+                usize::from(reported),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_only_names_a_variable_is_not_a_stored_credential() {
+        for (value, reported) in [
+            ("${MCP_TOKEN}", false),
+            ("Bearer ${MCP_TOKEN}", false),
+            ("$MCP_TOKEN", false),
+            ("Basic $MCP_TOKEN", false),
+            ("Bearer stored-literal", true),
+            ("Bearer ${MCP_TOKEN}-suffix", true),
+        ] {
+            let reasons = assess_server(&format!(
+                "http_headers = {{ Authorization = \"{value}\" }}\n"
+            ));
+            assert_eq!(
+                credential_headers(&reasons).len(),
+                usize::from(reported),
+                "{value}"
+            );
+        }
+    }
+
+    fn codex_reasons_in_scan(json: &serde_json::Value) -> Vec<serde_json::Value> {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["tool"] == "codex")
+            .flat_map(|row| row["reasons"].as_array().unwrap().clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_stdio_server_credential_header_gets_its_own_hint() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &format!(
+                "[mcp_servers.local1]\ncommand = \"npx\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n\
+                 [mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE}\" }}\n"
+            ),
+        );
+        let json = crate::scan_cli::report_json_for(home.path(), None);
+        let hint_of = |server: &str| {
+            codex_reasons_in_scan(&json)
+                .into_iter()
+                .find(|r| r["kind"] == "mcp_server_static_credential" && r["server_name"] == server)
+                .and_then(|r| r["hint"].as_str().map(str::to_string))
+                .unwrap_or_else(|| panic!("no credential reason for {server}"))
+        };
+        let (stdio, remote) = (hint_of("local1"), hint_of("acme"));
+        assert!(stdio.contains("env_vars"), "{stdio}");
+        assert!(!stdio.contains("env_http_headers"), "{stdio}");
+        assert!(remote.contains("env_http_headers"), "{remote}");
+        let human = crate::scan_cli::render_human_for(home.path(), None);
+        assert!(human.contains(&stdio) && human.contains(&remote));
+        assert_eq!(json.to_string().matches("test-value-0").count(), 0);
+        assert_eq!(human.matches("test-value-0").count(), 0);
+    }
+
+    #[test]
+    fn a_malformed_config_error_names_the_place_and_never_echoes_the_line() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &format!(
+                "[mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers = {{ Authorization = \"{HEADER_VALUE} }}\n"
+            ),
+        );
+        let err = CodexParser::default().assess(home.path()).unwrap_err();
+        for shown in [err.to_string(), format!("{err:?}")] {
+            assert_eq!(shown.matches("test-value-0").count(), 0);
+            assert!(shown.contains("config.toml"));
+            assert!(shown.contains("line 3, column "));
+        }
+        let json = crate::scan_cli::report_json_for(home.path(), None);
+        let errors: Vec<_> = json["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tool"] == "codex")
+            .collect();
+        assert_eq!(errors.len(), 1);
+        let error = errors[0]["error"].as_str().unwrap();
+        assert_eq!(error.matches("test-value-0").count(), 0);
+        assert!(error.contains("line 3, column "));
+        let human = crate::scan_cli::render_human_for(home.path(), None);
+        assert_eq!(human.matches("test-value-0").count(), 0);
+    }
+
     // ─── combined scenario ─────────────────────────────────────────────────
 
     #[test]
