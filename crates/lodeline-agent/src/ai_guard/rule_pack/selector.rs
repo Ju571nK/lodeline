@@ -104,15 +104,30 @@ pub fn eval_json(
     Ok(walk_json(&value, &selector.segments, ""))
 }
 
+/// The `toml` error's `Display` quotes the offending source line, which can
+/// hold a credential, so keep only where the syntax error is.
+pub(crate) fn toml_parse_error(path: &Path, text: &str, e: &toml::de::Error) -> AssessError {
+    let place = e
+        .span()
+        .map(|span| {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            format!(" at line {line}, column {column}")
+        })
+        .unwrap_or_default();
+    AssessError::Parse {
+        path: path.to_path_buf(),
+        message: format!("invalid TOML{place}"),
+    }
+}
+
 pub fn eval_toml(
     text: &str,
     selector_str: &str,
     path: &Path,
 ) -> Result<Vec<MatchedValue>, AssessError> {
-    let value: toml::Value = toml::from_str(text).map_err(|e| AssessError::Parse {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
+    let value: toml::Value = toml::from_str(text).map_err(|e| toml_parse_error(path, text, &e))?;
     let selector = Selector::parse(selector_str).map_err(|e| AssessError::Parse {
         path: path.to_path_buf(),
         message: format!("selector parse: {e}"),
@@ -387,5 +402,15 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].value, "Bash");
         assert_eq!(m[1].value, ".*");
+    }
+
+    #[test]
+    fn eval_toml_parse_error_names_the_place_and_not_the_source_line() {
+        let text = "ok = 1\nkey = \"test-value-0\" trailing\n";
+        let err = eval_toml(text, "$.key", &p()).unwrap_err();
+        for shown in [err.to_string(), format!("{err:?}")] {
+            assert_eq!(shown.matches("test-value-0").count(), 0, "{shown}");
+            assert!(shown.contains("line 2, column"), "{shown}");
+        }
     }
 }
