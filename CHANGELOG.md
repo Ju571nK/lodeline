@@ -17,6 +17,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   agent are unaffected. An agent that predates the field ignores it. Upgrade agents before you
   sign a policy that sets it; an older agent accepts it and skips Grok projects without a warning.
 
+- **The agent watches nested and inherited Claude Code skill and subagent folders.** With the agent
+  running, a skill or subagent file in a `.claude/skills` or `.claude/agents` folder of a subfolder,
+  of a parent folder up to the repository root, or of the main checkout of a worktree is assessed
+  when it is written, as the repository's own folders already were. Before, a change there waited
+  for the next periodic assessment, which runs once a day. The agent builds the folder list when it
+  starts and on each policy reload, watches at most 64 such folders for each project, and picks up a
+  folder created later at the next reload, restart or periodic assessment. No policy field changes.
+
 ### Changed
 
 - **Agent.** A repository's `.codex/config.toml`, `hooks.json` and `rules/` in a subfolder, such as
