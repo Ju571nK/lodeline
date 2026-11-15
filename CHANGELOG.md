@@ -17,6 +17,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   agent are unaffected. An agent that predates the field ignores it. Upgrade agents before you
   sign a policy that sets it; an older agent accepts it and skips Grok projects without a warning.
 
+- **AI Guard reads the Grok Build managed and requirements files.** The Grok user row now also
+  reads `managed_config.toml` and `requirements.toml` from `~/.grok` and from `/etc/grok`, and
+  reports the hooks and MCP servers an organization pins there through the existing hook and MCP
+  reasons. The daemon watches the four paths. A host with none of these files scores as before. A
+  file that does not parse is a read error for that row. A project's `.grok` folder is unchanged.
+
 ### Changed
 
 - **The AI Guard user score of a host that has `~/.claude/settings.local.json` changes.** The Claude
@@ -37,7 +43,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Documentation
 
-- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
+- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
 
 ## [0.15.1] - 2026-11-15
 
