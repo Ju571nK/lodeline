@@ -53,13 +53,54 @@ pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
     if !collect_nested_skill_dirs(repo_root, 0, &mut dir_budget, &mut component_dirs) {
         warn_capped(repo_root, "nested directories");
     }
+    hooks_in(repo_root, component_dirs, "nested")
+}
+
+/// #539: `.claude/skills` and `.claude/agents` folders outside `start` that
+/// Claude Code loads for a session started there. That is the folder in each
+/// parent up to the root of the checkout, and in a linked worktree whose root
+/// has no folder of that kind, the main checkout's. The home folder's
+/// `.claude` is the user scope and is left out.
+pub(crate) fn inherited_component_dirs(start: &Path, home: &Path) -> Vec<PathBuf> {
+    let Some(checkout) = super::claude_repo::checkout(start) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for kind in ["skills", "agents"] {
+        let parents = start
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| dir.starts_with(checkout.top));
+        let main = checkout
+            .main
+            .as_deref()
+            .filter(|_| !checkout.top.join(".claude").join(kind).is_dir());
+        dirs.extend(
+            parents
+                .chain(main)
+                .filter(|root| !super::claude_code::is_home(root, home))
+                .map(|root| root.join(".claude").join(kind))
+                .filter(|dir| dir.is_dir()),
+        );
+    }
+    dirs
+}
+
+/// Skills and subagents in [`inherited_component_dirs`] that declare hooks.
+pub(crate) fn inherited_skill_hooks(start: &Path, home: &Path) -> Vec<ComponentHooks> {
+    hooks_in(start, inherited_component_dirs(start, home), "inherited")
+}
+
+/// Component hooks in `.claude/skills` and `.claude/agents` folders, skills
+/// first, each kind in path order and under its own file budget.
+fn hooks_in(root: &Path, component_dirs: Vec<PathBuf>, label: &str) -> Vec<ComponentHooks> {
     let (agent_dirs, skill_dirs): (Vec<_>, Vec<_>) = component_dirs
         .into_iter()
         .partition(|d| d.file_name().is_some_and(|n| n == "agents"));
     let mut files = Vec::new();
     for dir in skill_dirs {
         if !push_skill_files(&dir, &mut files) {
-            warn_capped(repo_root, "nested skills");
+            warn_capped(root, &format!("{label} skills"));
             break;
         }
     }
@@ -68,7 +109,7 @@ pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
         collect_agent_files(&dir, 0, &mut agents);
     }
     if agents.len() == MAX_AGENT_FILES {
-        warn_capped(repo_root, "nested agents");
+        warn_capped(root, &format!("{label} agents"));
     }
     files.sort();
     agents.sort();
@@ -653,6 +694,47 @@ mod tests {
                 "{deepest}/.claude/skills/s/SKILL.md"
             ))]
         );
+    }
+
+    const NO_HOME: &str = "/nonexistent-lodeline-home";
+
+    /// A submodule is its own repository, so the walk up stops at its root.
+    #[test]
+    fn inherited_dirs_stop_at_a_submodule_root() {
+        let d = tempdir().unwrap();
+        let outer = d.path();
+        std::fs::create_dir_all(outer.join(".git/modules/lib")).unwrap();
+        write(
+            outer,
+            ".claude/skills/s/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        write(outer, "lib/.claude/agents/a.md", "body\n");
+        std::fs::write(outer.join("lib/.git"), "gitdir: ../.git/modules/lib\n").unwrap();
+        let start = outer.join("lib/src");
+        std::fs::create_dir_all(&start).unwrap();
+        assert_eq!(
+            inherited_component_dirs(&start, Path::new(NO_HOME)),
+            [outer.join("lib/.claude/agents")]
+        );
+    }
+
+    /// A worktree of a bare repository has no main checkout to read through to.
+    #[test]
+    fn worktree_of_a_bare_repository_reads_no_main_checkout() {
+        let d = tempdir().unwrap();
+        let git_dir = d.path().join("repo.git/worktrees/wt");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        write(
+            d.path(),
+            "repo.git/.claude/skills/s/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        let wt = d.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
+        assert!(inherited_component_dirs(&wt, Path::new(NO_HOME)).is_empty());
     }
 
     /// Each folder walked into costs one from the budget, in name order; a

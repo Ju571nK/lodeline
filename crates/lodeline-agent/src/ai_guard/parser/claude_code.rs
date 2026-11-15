@@ -1702,6 +1702,10 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             home_dir.join(".claude").join("settings.json"),
         ];
         paths.extend(shared_local_settings(&self.repo_root, home_dir));
+        paths.extend(super::claude_components::inherited_component_dirs(
+            &self.repo_root,
+            home_dir,
+        ));
         paths
     }
 
@@ -1716,8 +1720,13 @@ impl AiGuardParser for ClaudeCodeProjectParser {
                 &shared, &hooks_dir, run_dir,
             ));
         }
+        let mut components = super::claude_components::nested_skill_hooks(&self.repo_root);
+        components.extend(super::claude_components::inherited_skill_hooks(
+            &self.repo_root,
+            home_dir,
+        ));
         paths.extend(super::claude_components::component_external_script_paths(
-            &super::claude_components::nested_skill_hooks(&self.repo_root),
+            &components,
             &hooks_dir,
             run_dir,
         ));
@@ -1757,7 +1766,7 @@ fn shared_local_settings(repo_root: &Path, home: &Path) -> Option<PathBuf> {
 /// True when `dir` is the home folder `home`, whose `.claude` is the user scope.
 // shortcut: only the agent's own home is compared, so a git repository at
 // another user's home is still read; pass every user's home if that matters.
-fn is_home(dir: &Path, home: &Path) -> bool {
+pub(crate) fn is_home(dir: &Path, home: &Path) -> bool {
     // Both sides, since a scan's root is the raw current folder (an 8.3 short
     // name on Windows) while discovery hands over canonical paths.
     let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -1832,6 +1841,9 @@ fn assess_project(
     let has_loop = !is_home(repo_root, home) && cd.join("loop.md").is_file();
     let mut components = super::claude_components::component_hooks(&cd);
     components.extend(super::claude_components::nested_skill_hooks(repo_root));
+    components.extend(super::claude_components::inherited_skill_hooks(
+        repo_root, home,
+    ));
     // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
     // abort the whole assess and thereby blind us to a malicious
     // `.claude/settings.json` in the same repo (a corrupt-sidecar evasion
@@ -5957,8 +5969,16 @@ mod tests {
     fn subfolder_row_scores_parent_skill_and_subagent_hooks() {
         let repo = tempdir().unwrap();
         std::fs::create_dir(repo.path().join(".git")).unwrap();
-        write_file(repo.path(), ".claude/skills/clean/SKILL.md", DESTRUCTIVE_SKILL);
-        write_file(repo.path(), "packages/.claude/agents/web.md", DESTRUCTIVE_AGENT);
+        write_file(
+            repo.path(),
+            ".claude/skills/clean/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
+        write_file(
+            repo.path(),
+            "packages/.claude/agents/web.md",
+            DESTRUCTIVE_AGENT,
+        );
         let row = repo.path().join("packages/web");
         std::fs::create_dir_all(&row).unwrap();
         assert_eq!(
@@ -5970,7 +5990,11 @@ mod tests {
     #[test]
     fn repository_root_row_reads_no_folder_above_it() {
         let outer = tempdir().unwrap();
-        write_file(outer.path(), ".claude/skills/outer/SKILL.md", DESTRUCTIVE_SKILL);
+        write_file(
+            outer.path(),
+            ".claude/skills/outer/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
         let repo = outer.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         assert!(destructive_commands(&repo, Path::new(NO_HOME)).is_empty());
@@ -5982,7 +6006,11 @@ mod tests {
     #[test]
     fn row_outside_a_repository_reads_no_parent_folder() {
         let outer = tempdir().unwrap();
-        write_file(outer.path(), ".claude/skills/outer/SKILL.md", DESTRUCTIVE_SKILL);
+        write_file(
+            outer.path(),
+            ".claude/skills/outer/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
         write_file(outer.path(), ".claude/agents/outer.md", DESTRUCTIVE_AGENT);
         let row = outer.path().join("work");
         std::fs::create_dir_all(&row).unwrap();
@@ -5995,7 +6023,11 @@ mod tests {
     fn parent_walk_skips_the_home_folder() {
         let home = tempdir().unwrap();
         std::fs::create_dir(home.path().join(".git")).unwrap();
-        write_file(home.path(), ".claude/skills/clean/SKILL.md", DESTRUCTIVE_SKILL);
+        write_file(
+            home.path(),
+            ".claude/skills/clean/SKILL.md",
+            DESTRUCTIVE_SKILL,
+        );
         let row = home.path().join("projects/web");
         std::fs::create_dir_all(&row).unwrap();
         assert!(destructive_commands(&row, home.path()).is_empty());
