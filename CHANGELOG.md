@@ -15,10 +15,18 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   starts in, and the agent cannot know that folder, so a hook below `services/web/` can be
   reported although a session at `services/api/` never runs it. A hook is reported only when the
   user config records a `trusted_hash` for it, as for the repository root. A Git repository whose
-  only Codex files sit in a subfolder is now discovered, and the files are watched. The walk
-  goes at most five folders deep and visits at most 2,000 folders, skips hidden folders,
-  `node_modules`, `target` and `vendor`, and follows no symlink. An AI Guard score can drop
-  where a subfolder holds such files. Refs #200.
+  only Codex files sit in a subfolder is now discovered. Creating, editing or removing a file in a
+  found layer, or in the root `.codex/`, re-assesses the repository. A subfolder `.codex/` created
+  later is found at the next discovery, when the agent starts or reloads its policy.
+  **Limits.** The walk goes at most five folders deep and visits at most 2,000 folders per
+  repository, and a layer past either limit is not read. It skips hidden folders, `node_modules`,
+  `target` and `vendor`, follows no link, and does not enter a folder with its own `.git` entry,
+  because Codex takes a nested repository or a submodule as its own project. **Score.** A
+  repository score can rise. A subfolder hook, MCP server or rule is a new finding. The same hook
+  in several layers is one finding per layer, and a repeated finding adds to the score, as for
+  every tool. Measured with one destructive hook, a repository that holds it only in a subfolder
+  went from 0.0 to 4.0, and one that holds it at the root and in two subfolders went from 4.0 to
+  10.0. Refs #200.
 
 ### Fixed
 
