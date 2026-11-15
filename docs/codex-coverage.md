@@ -12,7 +12,7 @@ Lodeline reads these Codex layers:
 | `config.toml`, `hooks.json` and `rules/` in `~/.codex` (or `CODEX_HOME`) | User | Yes. |
 | `config.toml`, `hooks.json` and `rules/` in `<repo>/.codex/` | Project | Yes. |
 | The same files in `.codex/` folders below the repo root, such as `services/api/.codex/` | Project, with the repo's row | Yes. See below. |
-| `${PWD}/config.toml` | None | No. The configuration page does not list it. The Codex source reads `<folder>/.codex/` for each parent folder and shows no load of a bare `config.toml`. This is from source and was not run. |
+| `${PWD}/config.toml` | None | No. The configuration page does not list it. From source, `discover_project_layers` reads `<folder>/.codex/` for each parent folder and no bare `config.toml`, although a comment in `codex-rs/config/src/loader/mod.rs` still lists `${PWD}/config.toml` and may be stale. This was not run. |
 | Files passed with `--profile` | None | No. The flag is runtime state that a daemon cannot see. |
 | macOS managed preferences | None | No. MDM delivers them, and no file on the host holds them. |
 | Cloud-managed `config.toml` defaults | None | No. Codex fetches them for the signed-in workspace, and the agent cannot see them. |
@@ -21,7 +21,7 @@ Codex layers every `.codex/` from the project root down to the folder a session 
 
 The walk below the repo root goes at most five folders deep and visits at most 2,000 folders. A layer past either limit is not read. It skips hidden folders, `node_modules`, `target` and `vendor`, follows no link, and does not enter a folder that has its own `.git` entry, because Codex takes a nested repository or a submodule as its own project. The agent finds the layers when it starts and when it reloads its policy. A `.codex/` folder created later is not watched until the next reload. A change to a file in a found layer re-assesses the repo.
 
-Reading the subfolders can raise a repo score. A hook, MCP server or rule there is a new finding, and the same hook in several layers is one finding per layer. A repo whose only Codex files sit in a subfolder is found by the daemon, and `lodeline scan` run in a Git repository builds a Codex project row for it too. A `.codex/hooks.json` at the repo root with no `.codex/config.toml` and no `AGENTS.md` still gives no `scan` row, while the daemon finds it. A `config.toml` that does not parse is a read error for its row. The error names the file, the line and the column, and never the text of the line.
+Reading the subfolders can raise a repo score. A hook, MCP server or rule there is a new finding, and the same hook in several layers is one finding per layer. A repo whose only Codex files sit in a subfolder is found by the daemon, and `lodeline scan` run in a Git repository builds a Codex project row for it too. A `.codex/hooks.json` at the repo root with no `.codex/config.toml` and no `AGENTS.md` still gives no `scan` row, while the daemon finds it. A root or user `config.toml` that does not parse is a read error for its row. The error names the file, the line and the column, and never the text of the line. A subfolder `config.toml` that does not parse is skipped with no error and no finding.
 
 No finding names the layer it came from. The event scope separates user and project findings, but the system and user layers share the user event.
 
@@ -47,13 +47,13 @@ The hash input is the part that moves. The `hook_hash` function in `codex-rs/hoo
 
 ## MCP credentials
 
-Lodeline reports a credential that an MCP server in a Codex config stores as plain text. That is a static `http_headers` entry, as the CHANGELOG describes for the `mcp_server_static_credential` finding. The finding names the server and the header and never the value. Whether a header holds a credential is a judgment from its name. An empty value, or a value that only names a variable, is not reported, because Codex sends an `http_headers` value as literal text. Headers in `env_http_headers` name environment variables and are not reported. On a stdio server, Codex refuses `http_headers` and does not load the config, and the hint says to remove the entry.
+Lodeline reports a credential that an MCP server in a Codex config stores as plain text. That is a static `http_headers` entry, as the CHANGELOG describes for the `mcp_server_static_credential` finding. The finding names the server and the header and never the value. Whether a header holds a credential is a judgment from its name. An empty value, or a value that only names a variable, is not reported, because Codex sends an `http_headers` value as literal text (from source, `codex-rs/rmcp-client/src/utils.rs`). Headers in `env_http_headers` name environment variables (Codex MCP docs, https://developers.openai.com/codex/mcp) and are not reported. On a stdio server, Codex refuses `http_headers` and does not load the config (from source, `mcp_types.rs` in the Codex repository), and the hint says to remove the entry. A server with `enabled = false` is skipped.
 
 These keys are not findings. `bearer_token_env_var` names an environment variable, so the config holds no secret. `auth` takes a fixed set of values, such as `chatgpt`, and holds no secret either. An inline `bearer_token` is refused by Codex. On 0.167.0, a scratch `CODEX_HOME` with an MCP server that sets `bearer_token` made `codex debug prompt-input` stop with `bearer_token is not supported for streamable_http`, and the same server without that key loaded. Lodeline reads the file as TOML and does not report the key, because Codex does not run that server. `http_headers_helper` runs a local command, and Lodeline does not read it.
 
 ## Remote control
 
-The `allow_remote_control` constraint in the system `requirements.toml` is read, as one of the `configured` observations.
+The `allow_remote_control` constraint in the system `requirements.toml` is read. Set to false, it is one of the `configured` observations.
 
 Whether a session is paired for remote control is not read. From source, the daemon keeps its settings in `app-server-daemon/settings.json` under `CODEX_HOME`, with a `remoteControlEnabled` key that records intent, and the pairing state is the `remote_control_enrollments` table of Codex's state database. Lodeline reads neither. The file shows what was asked for, not an active pairing, and the table is a database that no check here opened. The name and place of the state database were not checked. These paths and keys are from source on main and were not checked on 0.167.0.
 
