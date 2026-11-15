@@ -178,9 +178,9 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
 /// Build the project parsers for `dir` if (and only if) `dir` itself carries a
 /// tool's project markers. Applies the per-repo discovery markers of the daemon
 /// (`workspace_discovery`) to `dir` directly rather than to its subdirectories.
-/// One difference remains. A file marker here only has to exist, where the daemon
-/// asks for a file, so a folder with a marker file's name gives a row with
-/// nothing to score.
+/// One difference remains. A marker here only has to exist, where the daemon asks
+/// for a file or a folder, so a marker of the other kind gives a row with nothing
+/// to score.
 fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<dyn AiGuardParser>> {
     use crate::ai_guard::workspace_discovery::codex_subfolder_dirs;
     use crate::ai_guard::{
