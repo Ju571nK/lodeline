@@ -1,8 +1,8 @@
-//! #199 — hooks declared in Claude Code skill, subagent and command frontmatter.
+//! Hooks declared in Claude Code skill, subagent and command frontmatter (#199).
 //!
-//! Skills (`skills/<name>/SKILL.md`), subagents (`agents/**/*.md`) and command
-//! files (`commands/**/*.md`) can carry a `hooks:` block in their YAML frontmatter, in the same shape as the
-//! `hooks` object in `settings.json`. A skill's hooks stay registered for the
+//! Skills (`skills/<name>/SKILL.md`), subagents (`agents/**/*.md`) and command files
+//! (`commands/**/*.md`) can carry a `hooks:` block in their YAML frontmatter, in the same
+//! shape as the `hooks` object in `settings.json`. A skill's hooks stay registered for the
 //! rest of the session once it is invoked; a subagent's run while it runs.
 //! Either way they execute on the host, so they are scored with the same
 //! emitter as settings hooks.
