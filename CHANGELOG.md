@@ -7,6 +7,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- **Agent.** A repository's `.codex/config.toml`, `hooks.json` and `rules/` in a subfolder, such as
+  `services/api/.codex/`, are now assessed with the repository's own `.codex/` folder, in the
+  repository's row. Codex layers every `.codex/` from the project root down to the folder a session
+  starts in, and the agent cannot know that folder, so a hook below `services/web/` can be
+  reported although a session at `services/api/` never runs it. A hook is reported only when the
+  user config records a `trusted_hash` for it, as for the repository root. A Git repository whose
+  only Codex files sit in a subfolder is now discovered, and the files are watched. The walk
+  goes at most five folders deep and visits at most 2,000 folders, skips hidden folders,
+  `node_modules`, `target` and `vendor`, and follows no symlink. An AI Guard score can drop or
+  rise where a subfolder holds such files. Refs #200.
+
 ## [0.15.1] - 2026-11-15
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,

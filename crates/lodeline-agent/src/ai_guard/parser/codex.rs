@@ -1748,7 +1748,7 @@ impl AiGuardParser for CodexHomeProjectParser {
 impl CodexProjectParser {
     /// `codex_dir` is the user's Codex folder.
     fn watched_paths_in(&self, codex_dir: &Path) -> Vec<PathBuf> {
-        vec![
+        let mut paths = vec![
             self.repo_root.join(".codex").join("config.toml"),
             self.repo_root.join(".codex").join(HOOKS_JSON),
             self.repo_root.join(".codex").join("rules"),
@@ -1759,7 +1759,24 @@ impl CodexProjectParser {
             super::policy_controls::codex_system_dir().join("config.toml"),
             // A `[features] hooks` pin there decides whether the project's hooks run.
             super::policy_controls::codex_requirements_path(),
-        ]
+        ];
+        for dir in self.subfolder_layer_dirs(codex_dir) {
+            paths.extend([
+                dir.join("config.toml"),
+                dir.join(HOOKS_JSON),
+                dir.join("rules"),
+            ]);
+        }
+        paths
+    }
+
+    /// #200 — `.codex/` folders below the repository root, minus any that is
+    /// the user's own Codex home.
+    fn subfolder_layer_dirs(&self, codex_dir: &Path) -> Vec<PathBuf> {
+        let mut dirs = crate::ai_guard::workspace_discovery::codex_subfolder_dirs(&self.repo_root);
+        let home = dunce::canonicalize(codex_dir).ok();
+        dirs.retain(|dir| dir != codex_dir && dunce::canonicalize(dir).ok() != home);
+        dirs
     }
 
     fn script_paths_in(&self, codex_dir: &Path) -> Vec<PathBuf> {
@@ -1776,7 +1793,14 @@ impl CodexProjectParser {
         if !hooks_feature_enabled(&system_dir, configs) {
             return Vec::new();
         }
-        layer.external_script_paths()
+        let mut paths = layer.external_script_paths();
+        for dir in self.subfolder_layer_dirs(codex_dir) {
+            let sub = CodexLayer::read_lenient(&dir);
+            if hooks_feature_enabled(&system_dir, [configs[0], configs[1], &sub.config]) {
+                paths.extend(sub.external_script_paths());
+            }
+        }
+        paths
     }
 
     /// Codex skips a project `.codex` that is its own home, `CODEX_HOME` or
@@ -1803,14 +1827,35 @@ impl CodexProjectParser {
             super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
             return Ok(out);
         }
-        let all = [
+        let mut all = [
             CodexLayer::read_lenient(system_dir),
             CodexLayer::read_lenient(codex_dir),
             CodexLayer::read(&self.repo_root.join(".codex"))?,
         ];
-        let [system, user, layer] = &all;
-        let layers = std::slice::from_ref(layer);
         let mut out = Vec::new();
+        self.assess_project_layer(system_dir, &all, home_dir, &mut out);
+        // #200 — Codex layers every `.codex/` from the project root down to the
+        // folder a session starts in. That folder is runtime state, so each
+        // subfolder layer is assessed on its own over the same system and user
+        // layers. A corrupt subfolder file is skipped, as for hooks.json.
+        for dir in self.subfolder_layer_dirs(codex_dir) {
+            all[2] = CodexLayer::read_lenient(&dir);
+            self.assess_project_layer(system_dir, &all, home_dir, &mut out);
+        }
+        // #146 — AGENTS.md is Codex's first-class instruction file.
+        super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
+        Ok(out)
+    }
+
+    fn assess_project_layer(
+        &self,
+        system_dir: &Path,
+        all: &[CodexLayer; 3],
+        home_dir: &Path,
+        out: &mut Vec<AiGuardReason>,
+    ) {
+        let [system, user, layer] = all;
+        let layers = std::slice::from_ref(layer);
         // #200 — scored whatever `[projects."<path>"].trust_level` says: Codex
         // re-asks for folder trust on every launch in an undecided or untrusted
         // folder without listing these settings, so they are one keypress from
@@ -1823,22 +1868,22 @@ impl CodexProjectParser {
                 merge_layer(&mut permissions, table);
             }
         }
-        emit_sandbox_reasons(layers, Some(&permissions), home_dir, &mut out);
+        emit_sandbox_reasons(layers, Some(&permissions), home_dir, out);
         // The system and user layers can still pick the mode the project's table needs.
-        emit_workspace_write_reasons(&all, layers, true, home_dir, &mut out);
+        emit_workspace_write_reasons(all, layers, true, home_dir, out);
         if let Some(val) = &layer.config {
             let inherited_policy = [&user.config, &system.config]
                 .into_iter()
                 .flatten()
                 .find_map(|c| c.get("approval_policy"));
-            emit_approval_policy_reasons(val, inherited_policy, &mut out);
-            emit_shell_environment_reasons(val, &mut out);
+            emit_approval_policy_reasons(val, inherited_policy, out);
+            emit_shell_environment_reasons(val, out);
         }
         if hooks_feature_enabled(system_dir, [&system.config, &user.config, &layer.config]) {
             layer.emit_hook_reasons(
                 &HookTrust::from_user_config(user.config.as_ref()),
                 Some(home_dir),
-                &mut out,
+                out,
             );
         }
         if let Some(val) = &layer.config {
@@ -1852,17 +1897,14 @@ impl CodexProjectParser {
             // amplify — but only off the MCP-derived reasons (slice from
             // mcp_start), never hook/sandbox findings in the same `out`.
             let mcp_start = out.len();
-            emit_mcp_reasons(val, &mut out);
+            emit_mcp_reasons(val, out);
             if super::mcp_scan::has_local_or_risky_mcp(&out[mcp_start..]) {
                 out.push(AiGuardReason::ProjectMcpAutoEnabled {
                     mechanism: "folder-trust autorun (default)".to_string(),
                 });
             }
         }
-        emit_rules_reasons(&[layer], &mut out);
-        // #146 — AGENTS.md is Codex's first-class instruction file.
-        super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
-        Ok(out)
+        emit_rules_reasons(&[layer], out);
     }
 }
 
