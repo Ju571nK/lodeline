@@ -88,9 +88,7 @@ their contents were not read.
 
 ## Not covered
 
-- `.codex/` folders below a repository root, which apply when Codex starts
-  in that subfolder.
 - A field naming the layer behind each reason. The event scope separates
   user and project findings, but system and user findings share one event.
 - Profile files, `${PWD}/config.toml`, and remote-control state.
-- MCP `writes` mode, `http_headers` with literal credentials, and `/import`.
+- MCP `writes` mode and `/import`.

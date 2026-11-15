@@ -98,6 +98,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Documentation
 
+- Updated `docs/codex-coverage.md`. It now lists the Codex layers Lodeline reads, including the subfolder `.codex/` layers and their limits, and the ones it does not (`${PWD}/config.toml`, `--profile` files, managed preferences and cloud defaults). It records what is a finding for an MCP credential and what is not, that Codex 0.167.0 refuses an inline `bearer_token`, that remote-control pairing state is not read, and why hook hashes are not compared. Refs #200.
+
 - Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
 
 ## [0.15.1] - 2026-11-15
