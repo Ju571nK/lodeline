@@ -20,16 +20,40 @@ pub(crate) fn local_settings_root(start: &Path) -> Option<PathBuf> {
     if cfg!(windows) {
         return None;
     }
-    let (top, dot_git) = start.ancestors().find_map(|dir| {
-        let dot_git = dir.join(".git");
-        dot_git.symlink_metadata().ok().map(|_| (dir, dot_git))
-    })?;
+    let (top, dot_git) = git_top(start)?;
     let root = if dot_git.is_dir() {
         top.to_path_buf()
     } else {
         main_checkout_root(top, &dot_git)?
     };
     (root != start && same_owner(start, &root)).then_some(root)
+}
+
+/// The git checkout a session started at `start` runs in.
+pub(crate) struct Checkout<'a> {
+    /// The nearest folder at or above `start` with a `.git` entry: the
+    /// repository root, or the root of a linked worktree.
+    pub top: &'a Path,
+    /// The main checkout's root when `top` is a linked worktree.
+    pub main: Option<PathBuf>,
+}
+
+/// `None` outside a git repository.
+pub(crate) fn checkout(start: &Path) -> Option<Checkout<'_>> {
+    let (top, dot_git) = git_top(start)?;
+    let main = if dot_git.is_dir() {
+        None
+    } else {
+        main_checkout_root(top, &dot_git).filter(|main| main != top)
+    };
+    Some(Checkout { top, main })
+}
+
+fn git_top(start: &Path) -> Option<(&Path, PathBuf)> {
+    start.ancestors().find_map(|dir| {
+        let dot_git = dir.join(".git");
+        dot_git.symlink_metadata().ok().map(|_| (dir, dot_git))
+    })
 }
 
 /// The checkout a `.git` file belongs to: the main checkout for a linked
