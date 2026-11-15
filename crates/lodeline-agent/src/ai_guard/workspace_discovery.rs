@@ -112,6 +112,17 @@ pub fn discover_cursor_repos(roots: &[String]) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
+/// #203 — Grok repos by a `.grok/hooks` folder or a `.grok/config.toml`,
+/// the two project sources `GrokProjectParser` reads. Union, deduped by
+/// canonical path.
+pub fn discover_grok_repos(roots: &[String]) -> Vec<PathBuf> {
+    let mut set: std::collections::BTreeSet<PathBuf> = discover_per_repo_dir(roots, ".grok/hooks")
+        .into_iter()
+        .collect();
+    set.extend(discover_per_repo(roots, ".grok/config.toml"));
+    set.into_iter().collect()
+}
+
 /// Like [`discover_per_repo`], but the marker is a directory.
 fn discover_per_repo_dir(roots: &[String], marker_subpath: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -340,6 +351,27 @@ mod tests {
         assert!(found.contains(&dunce::canonicalize(&r1).unwrap()));
         assert!(found.contains(&dunce::canonicalize(&r2).unwrap()));
         assert!(found.contains(&dunce::canonicalize(&r3).unwrap()));
+    }
+
+    #[test]
+    fn discover_grok_repos_finds_hooks_dir_or_config_toml_only() {
+        let root = tempdir().unwrap();
+        let hooks = root.path().join("hooks");
+        std::fs::create_dir_all(hooks.join(".grok").join("hooks")).unwrap();
+        let config = root.path().join("config");
+        std::fs::create_dir_all(config.join(".grok")).unwrap();
+        std::fs::write(config.join(".grok").join("config.toml"), "").unwrap();
+        let bare = root.path().join("bare");
+        std::fs::create_dir_all(bare.join(".grok")).unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        let found = discover_grok_repos(&roots);
+        assert_eq!(
+            found,
+            vec![
+                dunce::canonicalize(&config).unwrap(),
+                dunce::canonicalize(&hooks).unwrap()
+            ]
+        );
     }
 
     #[test]

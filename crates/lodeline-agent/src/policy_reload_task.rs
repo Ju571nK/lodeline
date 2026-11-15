@@ -444,6 +444,10 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         crate::ai_guard::workspace_discovery::discover_cursor_repos(&effective.cursor_workspaces)
             .into_iter()
             .collect();
+    let new_grok: std::collections::BTreeSet<PathBuf> =
+        crate::ai_guard::workspace_discovery::discover_grok_repos(&effective.grok_workspaces)
+            .into_iter()
+            .collect();
     // #93 — reconciled like the other five tools (built-in
     // AntigravityProjectParser) AND used for Project rule-pack expansion.
     let new_antigravity: std::collections::BTreeSet<PathBuf> =
@@ -466,7 +470,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             Cursor => new_cursor.iter().cloned().collect(),
             Antigravity => new_antigravity.iter().cloned().collect(),
             ClaudeDesktop => Vec::new(),
-            Grok => Vec::new(), // #110: no Grok project parser/workspace yet
+            Grok => new_grok.iter().cloned().collect(),
             Other => Vec::new(),
         }
     };
@@ -482,6 +486,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         gemini_removed,
         cursor_added,
         cursor_removed,
+        grok_added,
+        grok_removed,
         antigravity_added,
         antigravity_removed,
         rule_packs_added,
@@ -526,6 +532,13 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         let (a6, r6) = reconcile_per_repo(
             &mut guard,
             &ctx.ai_guard_state,
+            lodeline_core::event::AiTool::Grok,
+            &new_grok,
+            |p| crate::ai_guard::GrokProjectParser { repo_root: p },
+        );
+        let (a7, r7) = reconcile_per_repo(
+            &mut guard,
+            &ctx.ai_guard_state,
             lodeline_core::event::AiTool::Antigravity,
             &new_antigravity,
             |p| crate::ai_guard::AntigravityProjectParser { repo_root: p },
@@ -537,7 +550,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             &repos_for_tool,
         );
         (
-            a1, r1, a2, r2, a3, r3, a4, r4, a5, r5, a6, r6, rp_added, rp_removed,
+            a1, r1, a2, r2, a3, r3, a4, r4, a5, r5, a6, r6, a7, r7, rp_added, rp_removed,
         )
     };
 
@@ -556,6 +569,9 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
     }
     for repo_root in &new_cursor {
         crate::runtime::push_cursor_synthetic_target(&mut effective, repo_root);
+    }
+    for repo_root in &new_grok {
+        crate::runtime::push_grok_synthetic_target(&mut effective, repo_root);
     }
     for repo_root in &new_antigravity {
         crate::runtime::push_antigravity_synthetic_target(&mut effective, repo_root);
@@ -590,6 +606,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         gemini_removed = gemini_removed.len(),
         cursor_added = cursor_added.len(),
         cursor_removed = cursor_removed.len(),
+        grok_added = grok_added.len(),
+        grok_removed = grok_removed.len(),
         antigravity_added = antigravity_added.len(),
         antigravity_removed = antigravity_removed.len(),
         rule_packs_added = rule_packs_added.len(),
@@ -693,29 +711,6 @@ mod tests {
     use crate::runtime::expand_targets;
     use crate::watcher::test_logs::logs_of;
     use std::time::Duration;
-
-    /// Verify the repos_for_tool closure (as defined in reload()) returns an
-    /// empty Vec for AiTool::Grok — no project parser/workspace registered yet (#110).
-    #[test]
-    fn repos_for_tool_grok_is_empty() {
-        // Mirror the closure shape from reload(): all empty BTreeSets.
-        let empty: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
-        let repos_for_tool = |tool: lodeline_core::event::AiTool| -> Vec<PathBuf> {
-            use lodeline_core::event::AiTool::*;
-            match tool {
-                ContinueDev => empty.iter().cloned().collect(),
-                ClaudeCode => empty.iter().cloned().collect(),
-                Codex => empty.iter().cloned().collect(),
-                Gemini => empty.iter().cloned().collect(),
-                Cursor => empty.iter().cloned().collect(),
-                Antigravity => empty.iter().cloned().collect(),
-                ClaudeDesktop => Vec::new(),
-                Grok => Vec::new(), // #110: no Grok project parser/workspace yet
-                Other => Vec::new(),
-            }
-        };
-        assert!(repos_for_tool(lodeline_core::event::AiTool::Grok).is_empty());
-    }
 
     fn policy_yaml(target_id: &str, watch_path: &str, tier: &str) -> String {
         format!(

@@ -207,6 +207,10 @@ pub struct PolicyDocument {
     /// `<subdir>/.cursor/mcp.json` marker.
     #[serde(default)]
     pub cursor_workspaces: Vec<String>,
+    /// Grok Build workspace roots. 1-level scan for a
+    /// `<subdir>/.grok/hooks` folder or a `<subdir>/.grok/config.toml`.
+    #[serde(default)]
+    pub grok_workspaces: Vec<String>,
     /// Antigravity workspace roots. 1-level scan for
     /// `<subdir>/.antigravity/settings.json` marker.
     #[serde(default)]
@@ -459,6 +463,7 @@ pub struct EffectivePolicy {
     pub codex_workspaces: Vec<String>,
     pub gemini_workspaces: Vec<String>,
     pub cursor_workspaces: Vec<String>,
+    pub grok_workspaces: Vec<String>,
     pub antigravity_workspaces: Vec<String>,
     pub rule_packs: Vec<RulePack>,
     /// Phase 3b.5 — operator-tunable rubric weights (merged from user
@@ -540,6 +545,10 @@ pub fn merge(
         .as_ref()
         .map(|u| u.cursor_workspaces.clone())
         .unwrap_or_default();
+    let grok_workspaces = user
+        .as_ref()
+        .map(|u| u.grok_workspaces.clone())
+        .unwrap_or_default();
     let antigravity_workspaces = user
         .as_ref()
         .map(|u| u.antigravity_workspaces.clone())
@@ -607,6 +616,7 @@ pub fn merge(
         codex_workspaces,
         gemini_workspaces,
         cursor_workspaces,
+        grok_workspaces,
         antigravity_workspaces,
         rule_packs,
         rubric_overrides,
@@ -650,6 +660,7 @@ pub fn defaults() -> Result<PolicyDocument, PolicyError> {
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs,
             rubric_overrides: HashMap::new(),
@@ -886,6 +897,7 @@ targets:
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -956,6 +968,7 @@ targets:
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -984,6 +997,7 @@ targets:
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -1011,6 +1025,7 @@ targets:
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -1034,6 +1049,7 @@ targets:
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -1061,6 +1077,7 @@ targets:
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -1699,6 +1716,7 @@ host_id_strategy: hostname
             codex_workspaces: vec![],
             gemini_workspaces: vec![],
             cursor_workspaces: vec![],
+            grok_workspaces: vec![],
             antigravity_workspaces: vec![],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -1721,6 +1739,13 @@ host_id_strategy: hostname
         let doc = parse(yaml).unwrap();
         assert_eq!(doc.gemini_workspaces, vec!["~/src/a".to_string()]);
         assert_eq!(doc.cursor_workspaces, vec!["~/src/b".to_string()]);
+    }
+
+    #[test]
+    fn policy_document_grok_workspaces_round_trip() {
+        let doc = parse("version: 1\ngrok_workspaces:\n  - \"~/src/g\"\n").unwrap();
+        assert_eq!(doc.grok_workspaces, vec!["~/src/g".to_string()]);
+        assert!(parse("version: 1\n").unwrap().grok_workspaces.is_empty());
     }
 
     #[test]
@@ -1795,6 +1820,7 @@ host_id_strategy: hostname
             codex_workspaces: vec![],
             gemini_workspaces: vec!["~/src/a".to_string()],
             cursor_workspaces: vec!["~/src/b".to_string()],
+            grok_workspaces: vec!["~/src/g".to_string()],
             antigravity_workspaces: vec!["~/src/c".to_string()],
             rule_packs: vec![],
             rubric_overrides: HashMap::new(),
@@ -1805,6 +1831,7 @@ host_id_strategy: hostname
         let eff = merge(defaults().unwrap(), Some(user), None, current_platform()).unwrap();
         assert_eq!(eff.gemini_workspaces, vec!["~/src/a".to_string()]);
         assert_eq!(eff.cursor_workspaces, vec!["~/src/b".to_string()]);
+        assert_eq!(eff.grok_workspaces, vec!["~/src/g".to_string()]);
         assert_eq!(eff.antigravity_workspaces, vec!["~/src/c".to_string()]);
     }
 

@@ -7,6 +7,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- **`grok_workspaces` policy field.** The daemon now scores Grok Build projects. List workspace
+  roots under `grok_workspaces`, and the agent scans each root one level deep for a
+  `<subdir>/.grok/hooks` folder or a `<subdir>/.grok/config.toml`, reads that folder with the Grok
+  project parser, and watches it, as it does for `cursor_workspaces`. Before this, only
+  `lodeline scan` read a Grok project. The field is optional, so an older policy and an older
+  agent are unaffected. An agent that predates the field ignores it.
+
 ## [0.15.1] - 2026-11-15
 
 **Upgrade.** This release adds no event kind, no reason kind, no event field and no policy field,
