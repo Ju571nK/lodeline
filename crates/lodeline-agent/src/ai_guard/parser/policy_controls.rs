@@ -2,6 +2,7 @@
 //! Cloud policy, MDM, parent hosts, and running-session state are not resolved here.
 
 use super::AssessError;
+use crate::ai_guard::rule_pack::selector::toml_parse_error;
 use lodeline_core::event::AiGuardControl;
 use serde_json::Value;
 use std::io::{ErrorKind, Read};
@@ -20,10 +21,8 @@ pub(super) fn codex_controls(path: &Path) -> Result<Vec<AiGuardControl>, AssessE
     let Some(text) = read_policy(path)? else {
         return Ok(Vec::new());
     };
-    let policy: toml::Value = toml::from_str(&text).map_err(|e| AssessError::Parse {
-        path: path.into(),
-        message: e.to_string(),
-    })?;
+    let policy: toml::Value =
+        toml::from_str(&text).map_err(|e| toml_parse_error(path, &text, &e))?;
     let mut out = Vec::new();
     for (key, expected) in [
         ("allow_managed_hooks_only", true),

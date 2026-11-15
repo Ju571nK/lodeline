@@ -104,15 +104,30 @@ pub fn eval_json(
     Ok(walk_json(&value, &selector.segments, ""))
 }
 
+/// The `toml` error's `Display` quotes the offending source line, which can
+/// hold a credential, so keep only where the syntax error is.
+pub(crate) fn toml_parse_error(path: &Path, text: &str, e: &toml::de::Error) -> AssessError {
+    let place = e
+        .span()
+        .map(|span| {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            format!(" at line {line}, column {column}")
+        })
+        .unwrap_or_default();
+    AssessError::Parse {
+        path: path.to_path_buf(),
+        message: format!("invalid TOML{place}"),
+    }
+}
+
 pub fn eval_toml(
     text: &str,
     selector_str: &str,
     path: &Path,
 ) -> Result<Vec<MatchedValue>, AssessError> {
-    let value: toml::Value = toml::from_str(text).map_err(|e| AssessError::Parse {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
+    let value: toml::Value = toml::from_str(text).map_err(|e| toml_parse_error(path, text, &e))?;
     let selector = Selector::parse(selector_str).map_err(|e| AssessError::Parse {
         path: path.to_path_buf(),
         message: format!("selector parse: {e}"),
