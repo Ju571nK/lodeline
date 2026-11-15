@@ -9,6 +9,22 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- **Codex MCP servers with a static credential header.** The Codex scanner reports an MCP server
+  whose `http_headers` table sends a credential header with a static value, because that credential
+  is stored in the config file as plain text. Whether a header is a credential header is a judgment
+  from its name: split on `-` and `_`, the name has a token such as `authorization`, `auth`,
+  `token`, `secret`, `password`, `cookie`, `apikey` or `credential`, or the token `key` next to
+  `api`, `access`, `private`, `secret`, `client` or `subscription`. So `X-Api-Key` and `Cookie`
+  count and `Idempotency-Key` does not. An empty value, or a value that only names a variable
+  (`${NAME}` or `$NAME`, with an optional `Bearer ` or `Basic ` prefix), is not reported, because
+  Codex sends it as literal text. A new reason kind, `mcp_server_static_credential` (1.0), records
+  the server name and the header name and never the value, and each such header is its own reason.
+  Headers in `env_http_headers` name environment variables and are not reported. This applies to
+  every Codex layer the scanner reads: the system and user config, a repository's
+  `.codex/config.toml` and its subfolder `.codex/` layers. On a stdio server, where Codex refuses
+  `http_headers` and does not load the config, the hint says to remove the entry and to forward the
+  credential through `env_vars`. Upgrade `lodeline-server` before the agents. A server older than
+  v0.13.0 rejects an event that carries the new kind. Refs #200.
 
 - **`grok_workspaces` policy field.** The daemon now scores Grok Build projects. List workspace
   roots under `grok_workspaces`, and the agent scans each root one level deep for a
