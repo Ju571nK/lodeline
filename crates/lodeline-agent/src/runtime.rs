@@ -1966,22 +1966,35 @@ pub(crate) fn push_claude_code_synthetic_targets(
     });
 }
 
-/// Phase 3b.6.2 — push ONE synthetic WatchTarget for a Codex per-repo config.
+/// Phase 3b.6.2. Push ONE synthetic WatchTarget for a Codex per-repo config.
+/// #200. It lists the files of the root `.codex/` and of every subfolder
+/// `.codex/` layer the walk finds, so creating, editing or removing one of
+/// them re-assesses the repository. A subfolder layer added later is found by
+/// the next discovery.
 pub(crate) fn push_codex_synthetic_target(
     effective: &mut lodeline_core::policy::EffectivePolicy,
     repo_root: &std::path::Path,
 ) {
-    let config = repo_root.join(".codex").join("config.toml");
+    let layers = std::iter::once(repo_root.join(".codex")).chain(
+        crate::ai_guard::workspace_discovery::codex_subfolder_dirs(repo_root),
+    );
+    let mut paths = vec![repo_root.join("AGENTS.md").to_string_lossy().to_string()];
+    for dir in layers {
+        for file in [
+            dir.join("config.toml"),
+            dir.join("hooks.json"),
+            dir.join("rules").join("*.rules"),
+        ] {
+            paths.push(file.to_string_lossy().to_string());
+        }
+    }
     let h = synthetic_target_id_suffix(repo_root);
     effective.targets.push(lodeline_core::policy::WatchTarget {
         id: format!("codex-project-{h}"),
         description: format!("Phase 3b.6.2 synthetic: {}", repo_root.display()),
         tier: lodeline_core::policy::Tier::Critical,
         platform: lodeline_core::policy::Platform::Any,
-        paths: vec![
-            config.to_string_lossy().to_string(),
-            repo_root.join("AGENTS.md").to_string_lossy().to_string(),
-        ],
+        paths,
         recursive: false,
         follow_symlinks: false,
         disabled: false,
