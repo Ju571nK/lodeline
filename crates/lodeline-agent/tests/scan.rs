@@ -556,3 +556,61 @@ fn scan_with_a_root_codex_config_still_reads_the_subfolder_layer_once() {
         "{v}"
     );
 }
+
+fn codex_project_rows(v: &serde_json::Value) -> usize {
+    v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["tool"] == "codex" && r["scope"].as_str().unwrap().starts_with("project:"))
+        .count()
+}
+
+#[test]
+fn scan_reads_a_repo_whose_only_codex_file_is_a_root_hooks_json() {
+    let (home, proj) = (tempdir().unwrap(), tempdir().unwrap());
+    let in_repo = |root: &Path| root.join(".codex").join("hooks.json");
+    write(&in_repo(proj.path()), DESTRUCTIVE_HOOKS_JSON);
+    let mut keys = vec![
+        in_repo(&dunce::canonicalize(proj.path()).unwrap()),
+        in_repo(proj.path()),
+    ];
+    keys.dedup();
+    let config: String = keys
+        .iter()
+        .map(|k| {
+            format!(
+                "[hooks.state.'{}:pre_tool_use:0:0']\ntrusted_hash = \"sha256:00\"\n",
+                k.display()
+            )
+        })
+        .collect();
+    write(&home.path().join(".codex").join("config.toml"), &config);
+    let v = scan_bin(home.path(), proj.path(), None);
+    assert!(
+        codex_kinds(&v, "project:").contains(&"destructive_in_inline_command".to_string()),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_reads_a_repo_whose_only_codex_file_is_a_root_rules_folder() {
+    let (home, proj) = (tempdir().unwrap(), tempdir().unwrap());
+    write(
+        &proj.path().join(".codex").join("rules").join("default.rules"),
+        "prefix_rule(pattern=[\"terraform\", \"apply\"], decision=\"allow\")\n",
+    );
+    let v = scan_bin(home.path(), proj.path(), None);
+    assert!(
+        codex_kinds(&v, "project:").contains(&"standing_command_approval".to_string()),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_gives_no_codex_project_row_for_a_folder_without_codex_files() {
+    let (home, proj) = (tempdir().unwrap(), tempdir().unwrap());
+    write(&proj.path().join(".codex").join("notes.txt"), "x");
+    let v = scan_bin(home.path(), proj.path(), None);
+    assert_eq!(codex_project_rows(&v), 0, "{v}");
+}
