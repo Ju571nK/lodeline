@@ -17,9 +17,9 @@ version, so the hosts, the server and the console can be upgraded in any order. 
 changes behavior.
 
 **Hosts.** After the upgrade a burst of writes to one critical-tier file can be recorded as one
-merged `file_change` event whose evidence quality is `best_effort`. An AI Guard score can drop
-where a Cursor `hooks.json` names one script in several entries, because the script now counts
-once. A relative script in a Codex hook, or in a Claude Code user or managed hook, is now reported
+merged `file_change` event, which keeps the evidence quality v0.15.0 gave it. An AI Guard score
+can drop where a Cursor `hooks.json` names one script in several entries, because the script now
+counts once. A relative script in a Codex hook, or in a Claude Code user or managed hook, is now reported
 as not scanned. The agent depends on `notify` 8.2.0 instead of 6.1.1, and a build from source on
 Rust 1.88 needs `--locked`. On Windows, after a read error that the watcher library does not
 recognise, the library stops watching that folder and logs the error, and the watch does not
@@ -34,7 +34,7 @@ resume until the folder is replaced.
   dependency moves from 6.1.1 to 8.2.0 for the option that turns link following off. The native
   macOS backend (FSEvents) is unchanged. A build from source on Rust 1.88 must use `--locked`:
   without the lockfile, cargo resolves a newer `notify-types` that needs Rust 1.91. (#617)
-- **Stopping the agent right after a burst of writes to one critical-tier file no longer runs into the 30 s shutdown limit.** The hasher now merges the Created and Modified events already queued for one path into one event, with one hash and one recheck, so the backlog clears in well under a second and the agent exits with code 0. The merged event keeps the kind of the first event of the run and its evidence quality is `best_effort`, the value `PendingEvent::evidence_quality()` gives any event that stands for more than one raw event. A change to another critical-tier file during such a burst is no longer queued behind it. A burst over many distinct files still takes 100 ms per critical file and can still reach the stop limit. (#613)
+- **Stopping the agent right after a burst of writes to one critical-tier file no longer runs into the 30 s shutdown limit.** The hasher now merges the Created and Modified events already queued for one path into one event, with one hash and one recheck, so the backlog clears in well under a second and the agent exits with code 0. The merged event keeps the kind of the first event of the run and the evidence quality v0.15.0 gave: the debouncer alone decides whether it is `best_effort`. A change to another critical-tier file during such a burst is no longer queued behind it. A burst over many distinct files still takes 100 ms per critical file and can still reach the stop limit. (#613)
 - AI Guard no longer reads a hook script that a relative path names from the agent's own working
   directory (#614). A relative script in a Claude Code project hook is read from the project root.
   A relative script in a Claude Code user or managed hook, and in any Codex hook, is reported as not

@@ -101,6 +101,9 @@ pub async fn run(
 /// run would read the same bytes; one hash and one recheck cover them all. A
 /// `Removed` event ends the run for its path, a `Renamed` event ends it for
 /// both of its paths, and events for different paths never merge.
+///
+/// The merged count is the largest count among the merged events, so merging
+/// never changes evidence quality: the debouncer's count decides, as before.
 fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
     let mut out: Vec<PendingEvent> = Vec::with_capacity(batch.len());
     let mut open: HashMap<PathBuf, usize> = HashMap::new();
@@ -113,7 +116,7 @@ fn coalesce_queued(batch: Vec<PendingEvent>) -> Vec<PendingEvent> {
             Some(&at) if mergeable && out[at].critical == next.critical => {
                 let run = &mut out[at];
                 run.last_seen_ms = next.last_seen_ms;
-                run.coalesced_count = run.coalesced_count.saturating_add(next.coalesced_count);
+                run.coalesced_count = run.coalesced_count.max(next.coalesced_count);
             }
             _ => {
                 if mergeable {
@@ -274,6 +277,53 @@ mod tests {
 
         let seen: Vec<_> = out.iter().map(|e| e.norm.kind).collect();
         assert_eq!(seen, vec![FileChangeKind::Modified]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_created_and_two_modified_for_a_path_stay_definitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        std::fs::write(&a, b"a").unwrap();
+        let events = vec![
+            pending(&a, FileChangeKind::Created, 0),
+            pending(&a, FileChangeKind::Modified, 1),
+            pending(&a, FileChangeKind::Modified, 2),
+        ];
+
+        let (out, _) = run_to_end(events).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].quality, EvidenceQuality::Definitive);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_critical_burst_keeps_the_quality_of_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        std::fs::write(&a, b"a").unwrap();
+        let burst: Vec<_> = (0..10)
+            .map(|i| pending(&a, FileChangeKind::Modified, i))
+            .collect();
+
+        let (out, _) = run_to_end(burst).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].quality, EvidenceQuality::Definitive);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_debounced_event_in_a_run_keeps_the_run_best_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        std::fs::write(&a, b"a").unwrap();
+        let mut debounced = pending(&a, FileChangeKind::Modified, 1);
+        debounced.coalesced_count = 3;
+        let events = vec![pending(&a, FileChangeKind::Created, 0), debounced];
+
+        let (out, _) = run_to_end(events).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].quality, EvidenceQuality::BestEffort);
     }
 
     #[tokio::test(start_paused = true)]
