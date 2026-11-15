@@ -1534,6 +1534,56 @@ mod tests {
         assert!(has, "expected CursorProjectParser for repoA after reload");
     }
 
+    fn has_grok_project_parser(
+        parsers: &parking_lot::RwLock<Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>>,
+        repo: &std::path::Path,
+    ) -> bool {
+        parsers.read().iter().any(|p| {
+            p.tool() == lodeline_core::event::AiTool::Grok
+                && matches!(
+                    p.scope(),
+                    lodeline_core::event::AiGuardScope::Project { ref path } if path == repo
+                )
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_adds_and_drops_grok_project_parser_with_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let hooks_repo = workspace.join("hooksRepo");
+        std::fs::create_dir_all(hooks_repo.join(".grok").join("hooks")).unwrap();
+        std::fs::write(hooks_repo.join(".grok").join("hooks").join("x.json"), "{}").unwrap();
+        let config_repo = workspace.join("configRepo");
+        std::fs::create_dir_all(config_repo.join(".grok")).unwrap();
+        std::fs::write(config_repo.join(".grok").join("config.toml"), "").unwrap();
+        let plain_repo = workspace.join("plainRepo");
+        std::fs::create_dir_all(&plain_repo).unwrap();
+        let hooks_repo = dunce::canonicalize(&hooks_repo).unwrap();
+        let config_repo = dunce::canonicalize(&config_repo).unwrap();
+        let plain_repo = dunce::canonicalize(&plain_repo).unwrap();
+
+        let initial = "version: 1\nhost_id_strategy: machine_id\ntargets: []\n";
+        let (mut ctx, plat, _trx, parsers, _state) = build_ctx_with_parsers(dir.path(), initial);
+        reload(&mut ctx, &plat);
+        assert!(!has_grok_project_parser(&parsers, &hooks_repo));
+
+        let updated = format!(
+            "version: 1\nhost_id_strategy: machine_id\ngrok_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(has_grok_project_parser(&parsers, &hooks_repo));
+        assert!(has_grok_project_parser(&parsers, &config_repo));
+        assert!(!has_grok_project_parser(&parsers, &plain_repo));
+
+        std::fs::write(&ctx.paths.policy.applied, initial).unwrap();
+        reload(&mut ctx, &plat);
+        assert!(!has_grok_project_parser(&parsers, &hooks_repo));
+        assert!(!has_grok_project_parser(&parsers, &config_repo));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reload_adds_antigravity_project_parser_when_workspace_added() {
         let dir = tempfile::tempdir().unwrap();
