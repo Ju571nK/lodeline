@@ -1654,6 +1654,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_adds_grok_project_rule_pack_for_each_grok_repo() {
+        use crate::ai_guard::parser::AiGuardParser;
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let grok_repo = workspace.join("grokRepo");
+        std::fs::create_dir_all(grok_repo.join(".grok").join("hooks")).unwrap();
+        std::fs::create_dir_all(workspace.join("plainRepo")).unwrap();
+        let grok_repo = dunce::canonicalize(&grok_repo).unwrap();
+
+        let base = format!(
+            "version: 1\nhost_id_strategy: machine_id\ngrok_workspaces:\n  - '{}'\ntargets: []\n",
+            workspace.display()
+        );
+        let (mut ctx, plat, _trx, parsers, _state) = build_ctx_with_parsers(dir.path(), &base);
+        let pack_scopes = |parsers: &parking_lot::RwLock<
+            Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>>,
+        >| {
+            parsers
+                .read()
+                .iter()
+                .filter_map(|p| {
+                    p.as_any()
+                        .downcast_ref::<crate::ai_guard::rule_pack::parser::RulePackParser>()
+                })
+                .filter(|rpp| rpp.pack.id == "grok-proj")
+                .map(|rpp| (rpp.tool(), rpp.scope()))
+                .collect::<Vec<_>>()
+        };
+        reload(&mut ctx, &plat);
+        assert_eq!(pack_scopes(&parsers), vec![]);
+
+        let updated = format!(
+            "{base}rule_packs:\n  - id: grok-proj\n    pack_version: 1\n    tool: grok\n    scope:\n      kind: project\n    watched_paths:\n      - '.grok/hooks/x.json'\n    rules:\n      - id: r1\n        on_file: '.grok/hooks/x.json'\n        format: json\n        selector: '$.hooks'\n        matcher:\n          kind: exists\n        emit:\n          kind: sandbox_disabled\n"
+        );
+        std::fs::write(&ctx.paths.policy.applied, &updated).unwrap();
+        reload(&mut ctx, &plat);
+        assert_eq!(
+            pack_scopes(&parsers),
+            vec![(
+                lodeline_core::event::AiTool::Grok,
+                lodeline_core::event::AiGuardScope::Project { path: grok_repo }
+            )]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reload_removes_user_rule_pack_when_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let initial = "version: 1\nhost_id_strategy: machine_id\ntargets:\n  - id: t1\n    description: x\n    tier: standard\n    platform: any\n    paths: [\"/tmp/x\"]\nrule_packs:\n  - id: my-extra\n    pack_version: 1\n    tool: gemini\n    scope:\n      kind: user_global\n    watched_paths: []\n    rules: []\n";
