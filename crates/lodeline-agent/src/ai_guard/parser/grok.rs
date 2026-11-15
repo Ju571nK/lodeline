@@ -83,8 +83,20 @@ fn read_config(path: &Path) -> Result<Option<toml::Value>, AssessError> {
         .map(Some)
         .map_err(|e| AssessError::Parse {
             path: path.to_path_buf(),
-            message: e.to_string(),
+            message: parse_message(&text, &e),
         })
+}
+
+/// toml's `Display` quotes the source line, which can hold a secret, so a
+/// parse error keeps only where it is and its first message line.
+fn parse_message(text: &str, error: &toml::de::Error) -> String {
+    let kind = error.message().lines().next().unwrap_or("invalid TOML");
+    let Some(before) = error.span().and_then(|span| text.get(..span.start)) else {
+        return kind.to_string();
+    };
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    format!("line {line}, column {column}: {kind}")
 }
 
 fn emit_mcp_reasons(config: &toml::Value, out: &mut Vec<AiGuardReason>) {
@@ -479,6 +491,28 @@ enabled = false
                 watched.contains(&Path::new("/etc/grok").join(name)),
                 "{watched:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_malformed_file_error_names_the_place_and_never_echoes_the_line() {
+        const SECRET: &str = "sk-fake-0123456789";
+        let body = format!(
+            "[mcp_servers.x]\ncommand = \"node\"\nheaders = {{ a = \"{SECRET}\" \nbroken\n"
+        );
+        for name in ["config.toml", "managed_config.toml", "requirements.toml"] {
+            let home = tempdir().unwrap();
+            write(&home.path().join(".grok").join(name), &body);
+            let error = GrokParser.assess(home.path()).unwrap_err();
+            let shown = error.to_string();
+            let AssessError::Parse { message, .. } = &error else {
+                panic!("{error:?}");
+            };
+            let json = serde_json::to_string(message).unwrap();
+            for text in [&shown, message, &json] {
+                assert_eq!(text.matches(SECRET).count(), 0, "{name}: {text}");
+            }
+            assert!(message.contains("line "), "{name}: {message}");
         }
     }
 }

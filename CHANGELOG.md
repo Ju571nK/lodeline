@@ -39,6 +39,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- **The Grok scanner no longer echoes a line of a malformed TOML file.** A parse error of `config.toml`, `managed_config.toml` or `requirements.toml` under `~/.grok` or `/etc/grok` used to carry the TOML library's quote of the bad line, so a secret on that line reached the `errors` list of `lodeline scan` and the agent log. The error now names the file, the line, the column and a short kind of error, and never the line itself. Refs #203.
+
 - **AI Guard reads a project hook script that is named through `CLAUDE_PROJECT_DIR`.** A Claude Code hook in a project's `.claude/settings.json` or `.claude/settings.local.json`, or in a skill or subagent of that project, such as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`, was reported as not scanned (`external_script_unscanned`), and `bash "$CLAUDE_PROJECT_DIR"/x.sh` was read as an inline command, so the script was never read. The variable now stands for the project root, in the spellings the hook's shell expands (`$CLAUDE_PROJECT_DIR`, `${CLAUDE_PROJECT_DIR}`, each bare or in double quotes). A hook with `args` has no shell, so only the unquoted `${CLAUDE_PROJECT_DIR}` form is read, and on Windows only the braced form. A user or managed hook, a Codex hook and a Cursor hook keep the old result, because the agent does not know their project root. A project score can rise where a script that was never read holds a destructive command. (#628)
 
 ### Documentation
