@@ -80,6 +80,28 @@ code 2), per both versions' guides.
 Command hooks reuse the existing hook reason kinds. A Cursor prompt hook adds
 no reason.
 
+## Update 2026-11-15
+
+Read from the official Grok Build pages at https://docs.x.ai/build. Grok
+0.2.32 and Cursor Agent CLI 2026.11.11 are installed; neither was run beyond
+`--version`. The reader-facing result is in
+[../grok-coverage.md](../grok-coverage.md).
+
+- The hooks page names `~/.grok/trusted_folders.toml` as the folder-trust
+  store, and says the decision also covers project MCP and LSP servers. The
+  file format is still not documented.
+- The enterprise page orders the layers `/etc/grok/managed_config.toml`,
+  `~/.grok/managed_config.toml`, `~/.grok/config.toml`,
+  `~/.grok/requirements.toml`, `/etc/grok/requirements.toml`, lowest to
+  highest. Where hooks sit inside the managed and requirements files is on
+  no official page that was read.
+- The settings reference lists `[compat.claude]` and `[compat.cursor]` with
+  `skills`, `rules`, `agents`, `mcps` and `hooks`, default `true`.
+- A hook entry has `type` `command` or `http` (with a `url`), and `timeout`
+  defaults to 5 seconds.
+- Cursor's hooks page documents `failClosed`. It does not say that `allow` or
+  `ask` are ignored. Forum reports on that differ by version and mode.
+
 ## Not verified
 
 - Cursor runtime behavior. No Cursor session was started, so the bundle
