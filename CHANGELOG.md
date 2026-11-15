@@ -7,6 +7,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- **`grok_workspaces` policy field.** The daemon now scores Grok Build projects. List workspace
+  roots under `grok_workspaces`, and the agent scans each root one level deep for a
+  `<subdir>/.grok/hooks` folder or a `<subdir>/.grok/config.toml`, reads that folder with the Grok
+  project parser, and watches it, as it does for `cursor_workspaces`. Before this, only
+  `lodeline scan` read a Grok project. The field is optional, so an older policy and an older
+  agent are unaffected. An agent that predates the field ignores it. Upgrade agents before you
+  sign a policy that sets it; an older agent accepts it and skips Grok projects without a warning.
+
 ### Changed
 
 - **The AI Guard user score of a host that has `~/.claude/settings.local.json` changes.** The Claude
@@ -27,7 +37,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Documentation
 
-- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states that the daemon does not find Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
+- Added `docs/grok-coverage.md`. It lists which Grok Build files Lodeline reads and which it does not (the managed and requirements files, the folder-trust file, the `[compat.*]` switches and `GROK_HOME`), says that a project hook is scored whether or not Grok trusts the folder, and says that Grok hooks fail open on anything but an explicit deny. It also states how the daemon finds Grok projects, and that the Cursor deny path was not run on an installed Cursor Desktop build. Refs #203.
 
 ## [0.15.1] - 2026-11-15
 

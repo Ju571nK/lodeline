@@ -74,7 +74,7 @@ code 2), per both versions' guides.
 | Cursor | Project `.cursor/hooks.json` | Yes, in the project row. It is also a discovery marker for `lodeline scan` and `cursor_workspaces`. |
 | Cursor | Team hooks | No. They are remote state. |
 | Grok | `~/.grok/hooks/*.json`, `~/.grok/config.toml` hooks and MCP | Yes, in the user row |
-| Grok | `<repo>/.grok/hooks/*.json`, `<repo>/.grok/config.toml` MCP | Yes, in `lodeline scan` only. The daemon has no `grok_workspaces` policy key. |
+| Grok | `<repo>/.grok/hooks/*.json`, `<repo>/.grok/config.toml` MCP | Yes, in the project row. A `.grok/hooks/` folder or a `.grok/config.toml` is the discovery marker for `lodeline scan` and `grok_workspaces`. |
 | Grok | Organization files, trust store | No |
 
 Command hooks reuse the existing hook reason kinds. A Cursor prompt hook adds
