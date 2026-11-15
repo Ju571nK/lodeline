@@ -29,6 +29,17 @@ When `lodeline scan` runs in the home folder, the home's `.claude/settings.json`
 
 `CLAUDE_CONFIG_DIR` is honored for the user row, which reads `settings.json` in that folder and no `settings.local.json`. Claude Code's user scope is `settings.json` only; a `~/.claude/settings.local.json` is the local file of a session started in the home folder, so it feeds only the project row of the home folder. Settings passed with `--settings` are runtime state and are not read.
 
+A project row reads the hooks in skill (`.claude/skills/<name>/SKILL.md`) and subagent (`.claude/agents/**/*.md`) frontmatter from these folders, which are the ones Claude Code loads for a session started in the row's folder:
+
+- The row's own `.claude`.
+- The `.claude` of each subfolder, down to eight levels. Hidden folders, `node_modules` and `target` are skipped.
+- The `.claude` of each parent folder up to the repository root, or up to the worktree root in a linked worktree. Outside a git repository no parent folder is read. The home folder's `.claude` is the user scope, so the user row reads it and a project row does not.
+- In a linked worktree whose root has no `.claude/skills` folder, the main checkout's `.claude/skills`. The same holds for `.claude/agents`. Only a missing folder reads through: an empty one does not. Claude Code reads skills through from version 2.1.277, and the agent does not know the installed version, so it reads them through for every worktree.
+
+So a skill or subagent at the repository root shows in the root's row and again in the row of each subfolder that has a row of its own, and a main checkout's skills show again in the row of a worktree. That is intended: each row is what a session started in its folder loads. A folder gets a row only when it has a project file of its own, such as `CLAUDE.md` or `.claude/settings.json`. When two subagents share a `name`, Claude Code uses the one nearest the start folder; Lodeline does not model this, so a hook in the subagent that is not used is still reported. With the agent running, a change in a parent or main checkout folder is picked up at the next periodic assessment, because those folders are not watched yet.
+
+Command files in `.claude/commands/` are not read. The skills page says a command file accepts the same frontmatter as a skill except `name` and `paths`, so a command can declare hooks that Lodeline does not see.
+
 ## Assessed
 
 | Key | Read from | Effect |
