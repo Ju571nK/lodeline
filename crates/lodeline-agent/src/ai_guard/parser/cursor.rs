@@ -102,7 +102,7 @@ fn emit_hook_reasons(
             for (event, cmd) in hook_commands(&val) {
                 let earlier = kept.len();
                 let mut entry = Vec::new();
-                classify_command(cmd, event, home, Some(run_dir), &mut entry);
+                classify_command(cmd, event, home, Some(run_dir), None, &mut entry);
                 for reason in entry {
                     if !kept[..earlier]
                         .iter()
@@ -125,7 +125,7 @@ fn external_script_paths(hooks_json: &Path, hooks_dir: &Path, run_dir: &Path) ->
     };
     hook_commands(&val)
         .into_iter()
-        .filter_map(|(_, cmd)| external_path_from_command(cmd, hooks_dir, Some(run_dir)))
+        .filter_map(|(_, cmd)| external_path_from_command(cmd, hooks_dir, Some(run_dir), None))
         .collect()
 }
 
