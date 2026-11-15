@@ -3082,6 +3082,178 @@ mod tests {
         assert!(paths.contains(&repo.path().join("tools/x.sh")), "{paths:?}");
     }
 
+    const PROJECT_DIR_SCRIPT: &str = ".claude/hooks/x.sh";
+
+    /// A project at `<tmp>/my project` (a space, so word splitting would show)
+    /// whose settings hold one hook, `command` with or without `args`, and a
+    /// destructive script at `PROJECT_DIR_SCRIPT`. Returns what AI Guard
+    /// reports for it.
+    fn project_dir_reasons(command: &str, args: bool) -> Vec<AiGuardReason> {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("my project");
+        destructive_script(&repo, PROJECT_DIR_SCRIPT);
+        let mut hook = serde_json::json!({"command": command});
+        if args {
+            hook["args"] = serde_json::json!([]);
+        }
+        write_file(
+            &repo,
+            ".claude/settings.json",
+            &serde_json::json!({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}).to_string(),
+        );
+        ClaudeCodeProjectParser { repo_root: repo }
+            .assess(Path::new(NO_HOME))
+            .unwrap()
+    }
+
+    #[test]
+    fn project_dir_braced_spellings_in_a_project_hook_are_read() {
+        for command in [
+            "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh",
+            "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh\"",
+            "env A=1 bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh",
+        ] {
+            let out = project_dir_reasons(command, false);
+            assert!(has_script_finding(&out), "{command}: {out:?}");
+            assert!(unscanned(&out).is_empty(), "{command}: {out:?}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn project_dir_every_shell_spelling_in_a_project_hook_is_read() {
+        for command in [
+            "$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh",
+            "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh",
+            "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/x.sh",
+            "\"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh\"",
+            "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh\"",
+            "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/x.sh",
+            "bash $CLAUDE_PROJECT_DIR/.claude/hooks/x.sh",
+        ] {
+            let out = project_dir_reasons(command, false);
+            assert!(has_script_finding(&out), "{command}: {out:?}");
+            assert!(unscanned(&out).is_empty(), "{command}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn project_dir_lookalikes_are_not_expanded() {
+        for command in [
+            "$CLAUDE_PROJECT_DIRX/.claude/hooks/x.sh",
+            "'$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh'",
+            "$CLAUDE_PROJECT_DIR_/.claude/hooks/x.sh",
+        ] {
+            let out = project_dir_reasons(command, false);
+            assert!(!has_script_finding(&out), "{command}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn project_dir_exec_form_expands_only_the_braced_placeholder() {
+        let out = project_dir_reasons("${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh", true);
+        assert!(has_script_finding(&out), "{out:?}");
+        for command in [
+            "$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh",
+            "\"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh\"",
+            "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh\"",
+        ] {
+            let out = project_dir_reasons(command, true);
+            assert!(!has_script_finding(&out), "{command}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn project_dir_script_outside_the_hooks_dir_is_watched_from_the_project_root() {
+        for (command, watched) in [
+            ("${CLAUDE_PROJECT_DIR}/scripts/x.sh", true),
+            ("${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh", false),
+        ] {
+            let tmp = tempdir().unwrap();
+            let repo = tmp.path().join("my project");
+            project_with_hook(&repo, command);
+            let paths = ClaudeCodeProjectParser {
+                repo_root: repo.clone(),
+            }
+            .collect_external_script_paths(Path::new(NO_HOME));
+            assert_eq!(
+                paths.contains(&repo.join("scripts/x.sh")),
+                watched,
+                "{command}: {paths:?}"
+            );
+            assert!(
+                paths.iter().all(|p| !p.to_string_lossy().contains('$')),
+                "{command}: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_dir_in_a_user_hook_stays_unscanned() {
+        let home = tempdir().unwrap();
+        let cmd = "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh";
+        write_settings(
+            home.path(),
+            &serde_json::json!({"hooks": {"PreToolUse": [{"hooks": [{"command": cmd}]}]}})
+                .to_string(),
+        );
+        let none = tempdir().unwrap();
+        let out = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            none.path(),
+            Some(home.path()),
+        )
+        .unwrap();
+        assert!(!has_script_finding(&out), "{out:?}");
+        assert!(
+            matches!(unscanned(&out).as_slice(),
+                [AiGuardReason::ExternalScriptUnscanned { script_path, .. }]
+                    if script_path == Path::new(cmd)),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn project_dir_with_a_missing_script_is_unscanned_without_error() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("my project");
+        project_with_hook(&repo, "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh");
+        let out = ClaudeCodeProjectParser { repo_root: repo }
+            .assess(Path::new(NO_HOME))
+            .unwrap();
+        assert_eq!(unscanned(&out).len(), 1, "{out:?}");
+    }
+
+    const PROJECT_DIR_SKILL: &str = "---\nname: g\ndescription: x\nhooks:\n  PreToolUse:\n    - hooks:\n        - type: command\n          command: \"${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh\"\n---\n# body\n";
+
+    #[test]
+    fn project_dir_in_a_project_skill_hook_is_read_and_in_a_user_skill_is_not() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("my project");
+        destructive_script(&repo, PROJECT_DIR_SCRIPT);
+        write_file(&repo, ".claude/skills/g/SKILL.md", PROJECT_DIR_SKILL);
+        let out = ClaudeCodeProjectParser {
+            repo_root: repo.clone(),
+        }
+        .assess(Path::new(NO_HOME))
+        .unwrap();
+        assert!(has_script_finding(&out), "{out:?}");
+
+        let home = tempdir().unwrap();
+        write_file(home.path(), ".claude/skills/g/SKILL.md", PROJECT_DIR_SKILL);
+        let none = tempdir().unwrap();
+        let out = assess_user(
+            &home.path().join(".claude"),
+            &home.path().join(".claude.json"),
+            none.path(),
+            Some(home.path()),
+        )
+        .unwrap();
+        assert!(!has_script_finding(&out), "{out:?}");
+        assert_eq!(unscanned(&out).len(), 1, "{out:?}");
+    }
+
     /// A word that is not a path (a variable, an unmatched quote, a quoted word
     /// with a space) keeps trunk's result under a project root: nothing is joined
     /// onto the root, and nothing under the root is watched.
