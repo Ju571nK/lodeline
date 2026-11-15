@@ -7,6 +7,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- **Hooks in Claude Code command files.** The Claude Code scanner now reads the `hooks` field in the
+  frontmatter of command files in `.claude/commands/`, which Claude Code accepts as it does in a
+  skill. A risky hook there is scored with the same reasons as a skill hook, in the user row for
+  `~/.claude/commands` and in the project row for the row's own, parent, nested and worktree
+  fallback folders. With the agent running, a change to a project command file is assessed when it
+  is written, and the 64-folder watch limit for each project is now shared by skills, subagents and
+  commands. A score can rise where a command file declares hooks.
+
 ## [0.16.0] - 2026-11-15
 
 **Upgrade.** This release adds one policy field, `grok_workspaces`, and one reason kind,

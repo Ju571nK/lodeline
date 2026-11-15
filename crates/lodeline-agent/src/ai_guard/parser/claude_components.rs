@@ -1,7 +1,7 @@
-//! #199 — hooks declared in Claude Code skill and subagent frontmatter.
+//! #199 — hooks declared in Claude Code skill, subagent and command frontmatter.
 //!
-//! Skills (`skills/<name>/SKILL.md`) and subagents (`agents/**/*.md`) can carry
-//! a `hooks:` block in their YAML frontmatter, in the same shape as the
+//! Skills (`skills/<name>/SKILL.md`), subagents (`agents/**/*.md`) and command
+//! files (`commands/**/*.md`) can carry a `hooks:` block in their YAML frontmatter, in the same shape as the
 //! `hooks` object in `settings.json`. A skill's hooks stay registered for the
 //! rest of the session once it is invoked; a subagent's run while it runs.
 //! Either way they execute on the host, so they are scored with the same
@@ -17,9 +17,13 @@ use std::path::{Path, PathBuf};
 /// every skill out of the scan, or the reverse.
 const MAX_SKILL_FILES: usize = 1000;
 const MAX_AGENT_FILES: usize = 1000;
-/// `agents/` is scanned recursively by Claude Code; this bounds the walk.
+const MAX_COMMAND_FILES: usize = 1000;
+/// `agents/` and `commands/` are scanned recursively by Claude Code (a command
+/// in a subfolder is namespaced); this bounds the walk.
 const MAX_AGENT_DEPTH: usize = 8;
-/// Bounds on the walk for nested `.claude/skills` and `.claude/agents` folders.
+/// The folder kinds under a `.claude` folder that carry component files.
+const COMPONENT_KINDS: [&str; 3] = ["skills", "agents", "commands"];
+/// Bounds on the walk for nested `.claude/skills`, `.claude/agents` and `.claude/commands` folders.
 const MAX_NESTED_DEPTH: usize = 8;
 const MAX_NESTED_WALK_DIRS: usize = 20_000;
 const NESTED_WALK_SKIPPED: &[&str] = &["node_modules", "target"];
@@ -35,7 +39,7 @@ pub(crate) struct ComponentHooks {
     pub settings: Value,
 }
 
-/// Every skill and subagent under `claude_dir` whose frontmatter declares
+/// Every skill, subagent and command file under `claude_dir` whose frontmatter declares
 /// hooks, in path order.
 pub(crate) fn component_hooks(claude_dir: &Path) -> Vec<ComponentHooks> {
     component_files(claude_dir)
@@ -44,16 +48,16 @@ pub(crate) fn component_hooks(claude_dir: &Path) -> Vec<ComponentHooks> {
         .collect()
 }
 
-/// Skills in `<subdir>/.claude/skills/` and subagents in
-/// `<subdir>/.claude/agents/` below `repo_root`. Claude Code loads a skill the
-/// first time Claude reads or edits a file in `<subdir>`, and a subagent for a
-/// session started in `<subdir>`, so a session in the repository can pick up
-/// their hooks. The repository's own `.claude/` is left to [`component_hooks`].
+/// Skills in `<subdir>/.claude/skills/`, subagents in
+/// `<subdir>/.claude/agents/` and command files in `<subdir>/.claude/commands/`
+/// below `repo_root`. Claude Code loads a skill the first time Claude reads or
+/// edits a file in `<subdir>`, and a subagent or command for a session started
+/// in `<subdir>`, so a session in the repository can pick up their hooks. The repository's own `.claude/` is left to [`component_hooks`].
 pub(crate) fn nested_skill_hooks(repo_root: &Path) -> Vec<ComponentHooks> {
     hooks_in(repo_root, nested_component_dirs(repo_root), "nested")
 }
 
-/// The bounded walk for `.claude/skills` and `.claude/agents` folders below
+/// The bounded walk for `.claude/skills`, `.claude/agents` and `.claude/commands` folders below
 /// `repo_root`, in path order.
 fn nested_component_dirs(repo_root: &Path) -> Vec<PathBuf> {
     let mut component_dirs = Vec::new();
@@ -71,7 +75,7 @@ static RECORDED_NESTED: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<PathBuf, Vec<PathBuf>>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// #539: the skills and agents folders the watch targets of the repository at
+/// #539: the skills, agents and commands folders the watch targets of the repository at
 /// `repo_root` cover, at most [`MAX_WATCHED_COMPONENT_DIRS`]. They are the
 /// inherited folders of [`inherited_component_dirs`] and the nested folders of
 /// one bounded walk, which this call records for [`recorded_nested_dirs`].
@@ -102,7 +106,7 @@ pub(crate) fn recorded_nested_dirs(repo_root: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// #539: `.claude/skills` and `.claude/agents` folders outside `start` that
+/// #539: `.claude/skills`, `.claude/agents` and `.claude/commands` folders outside `start` that
 /// Claude Code loads for a session started there. That is the folder in each
 /// parent up to the root of the checkout, and in a linked worktree whose root
 /// has no folder of that kind, the main checkout's. The home folder's
@@ -112,7 +116,7 @@ pub(crate) fn inherited_component_dirs(start: &Path, home: &Path) -> Vec<PathBuf
         return Vec::new();
     };
     let mut dirs = Vec::new();
-    for kind in ["skills", "agents"] {
+    for kind in COMPONENT_KINDS {
         let parents = start
             .ancestors()
             .skip(1)
@@ -132,17 +136,21 @@ pub(crate) fn inherited_component_dirs(start: &Path, home: &Path) -> Vec<PathBuf
     dirs
 }
 
-/// Skills and subagents in [`inherited_component_dirs`] that declare hooks.
+/// Skills, subagents and commands in [`inherited_component_dirs`] that declare hooks.
 pub(crate) fn inherited_skill_hooks(start: &Path, home: &Path) -> Vec<ComponentHooks> {
     hooks_in(start, inherited_component_dirs(start, home), "inherited")
 }
 
-/// Component hooks in `.claude/skills` and `.claude/agents` folders, skills
-/// first, each kind in path order and under its own file budget.
+/// Component hooks in `.claude/skills`, `.claude/agents` and `.claude/commands`
+/// folders, skills first, then subagents, then commands, each kind in path
+/// order and under its own file budget.
 fn hooks_in(root: &Path, component_dirs: Vec<PathBuf>, label: &str) -> Vec<ComponentHooks> {
-    let (agent_dirs, skill_dirs): (Vec<_>, Vec<_>) = component_dirs
+    let is_kind = |d: &Path, kind: &str| d.file_name().is_some_and(|n| n == kind);
+    let (agent_dirs, rest): (Vec<_>, Vec<_>) = component_dirs
         .into_iter()
-        .partition(|d| d.file_name().is_some_and(|n| n == "agents"));
+        .partition(|d| is_kind(d, "agents"));
+    let (command_dirs, skill_dirs): (Vec<_>, Vec<_>) =
+        rest.into_iter().partition(|d| is_kind(d, "commands"));
     let mut files = Vec::new();
     for dir in skill_dirs {
         if !push_skill_files(&dir, &mut files) {
@@ -152,14 +160,23 @@ fn hooks_in(root: &Path, component_dirs: Vec<PathBuf>, label: &str) -> Vec<Compo
     }
     let mut agents = Vec::new();
     for dir in agent_dirs {
-        collect_agent_files(&dir, 0, &mut agents);
+        collect_markdown_files(&dir, 0, MAX_AGENT_FILES, &mut agents);
     }
     if agents.len() == MAX_AGENT_FILES {
         warn_capped(root, &format!("{label} agents"));
     }
+    let mut commands = Vec::new();
+    for dir in command_dirs {
+        collect_markdown_files(&dir, 0, MAX_COMMAND_FILES, &mut commands);
+    }
+    if commands.len() == MAX_COMMAND_FILES {
+        warn_capped(root, &format!("{label} commands"));
+    }
     files.sort();
     agents.sort();
+    commands.sort();
     files.extend(agents);
+    files.extend(commands);
     files.into_iter().filter_map(hooks_of).collect()
 }
 
@@ -223,13 +240,25 @@ fn component_files(claude_dir: &Path) -> Vec<PathBuf> {
         warn_capped(claude_dir, "skills");
     }
     let mut agents = Vec::new();
-    collect_agent_files(&claude_dir.join("agents"), 0, &mut agents);
+    collect_markdown_files(&claude_dir.join("agents"), 0, MAX_AGENT_FILES, &mut agents);
     if agents.len() == MAX_AGENT_FILES {
         warn_capped(claude_dir, "agents");
     }
+    let mut commands = Vec::new();
+    collect_markdown_files(
+        &claude_dir.join("commands"),
+        0,
+        MAX_COMMAND_FILES,
+        &mut commands,
+    );
+    if commands.len() == MAX_COMMAND_FILES {
+        warn_capped(claude_dir, "commands");
+    }
     skills.sort();
     agents.sort();
+    commands.sort();
     skills.extend(agents);
+    skills.extend(commands);
     skills
 }
 
@@ -250,7 +279,7 @@ fn push_skill_files(skills_dir: &Path, out: &mut Vec<PathBuf>) -> bool {
     true
 }
 
-/// Walks `dir` for `.claude/skills` and `.claude/agents` folders below it, without following
+/// Walks `dir` for `.claude/skills`, `.claude/agents` and `.claude/commands` folders below it, without following
 /// symlinked directories and skipping hidden, dependency and build folders,
 /// which Claude rarely works in. `budget` bounds how many folders are read;
 /// returns false when it ran out before a folder could be read.
@@ -269,7 +298,7 @@ fn collect_nested_skill_dirs(
             continue;
         };
         if name == ".claude" {
-            for kind in ["skills", "agents"] {
+            for kind in COMPONENT_KINDS {
                 let dir = entry.path().join(kind);
                 if depth > 0 && dir.is_dir() {
                     out.push(dir);
@@ -306,9 +335,9 @@ fn warn_capped(claude_dir: &Path, kind: &str) {
         "claude components: file cap reached; remaining files not scanned");
 }
 
-/// Walks `agents/` without descending into symlinked directories, which keeps
-/// the walk loop-free. Stops once the budget is spent.
-fn collect_agent_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+/// Walks an `agents/` or `commands/` folder without descending into symlinked
+/// directories, which keeps the walk loop-free. Stops once `out` holds `limit`.
+fn collect_markdown_files(dir: &Path, depth: usize, limit: usize, out: &mut Vec<PathBuf>) {
     if depth > MAX_AGENT_DEPTH {
         return;
     }
@@ -316,7 +345,7 @@ fn collect_agent_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         return;
     };
     for entry in entries.flatten() {
-        if out.len() == MAX_AGENT_FILES {
+        if out.len() == limit {
             return;
         }
         let path = entry.path();
@@ -324,7 +353,7 @@ fn collect_agent_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             continue;
         };
         if file_type.is_dir() {
-            collect_agent_files(&path, depth + 1, out);
+            collect_markdown_files(&path, depth + 1, limit, out);
         } else if path.extension().is_some_and(|e| e == "md") && path.is_file() {
             out.push(path);
         }
@@ -714,6 +743,37 @@ mod tests {
             found,
             [PathBuf::from("apps/web/.claude/agents/team/web.md")]
         );
+    }
+
+    #[test]
+    fn command_flood_does_not_push_skills_or_agents_out_of_the_scan() {
+        let d = tempdir().unwrap();
+        for i in 0..MAX_COMMAND_FILES + 5 {
+            write(
+                d.path(),
+                &format!("commands/c{i:04}.md"),
+                "no frontmatter\n",
+            );
+        }
+        write(
+            d.path(),
+            "skills/cleanup/SKILL.md",
+            SKILL_WITH_DESTRUCTIVE_HOOK,
+        );
+        assert!(has_destructive(&reasons(d.path())));
+    }
+
+    #[test]
+    fn watch_walk_shares_one_cap_across_skills_agents_and_commands() {
+        let d = tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        for i in 0..MAX_WATCHED_COMPONENT_DIRS {
+            write(&root, &format!("p{i:03}/.claude/commands/c.md"), "x\n");
+        }
+        write(&root, "q/.claude/skills/s/SKILL.md", "x\n");
+        let dirs = walk_watched_component_dirs(&root, Path::new(NO_HOME));
+        assert_eq!(dirs.len(), MAX_WATCHED_COMPONENT_DIRS);
     }
 
     #[test]
