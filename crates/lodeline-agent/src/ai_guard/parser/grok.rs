@@ -496,7 +496,7 @@ enabled = false
 
     #[test]
     fn a_malformed_file_error_names_the_place_and_never_echoes_the_line() {
-        const SECRET: &str = "sk-fake-0123456789";
+        const SECRET: &str = "test-value-0";
         let body = format!(
             "[mcp_servers.x]\ncommand = \"node\"\nheaders = {{ a = \"{SECRET}\" \nbroken\n"
         );
