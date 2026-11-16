@@ -844,25 +844,29 @@ fn signing_and_the_audit_write_wait_for_the_mint_lock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn renewals_and_enrollments_at_once_leave_one_unbroken_chain() {
     let env = Env::new();
-    let hosts: Vec<String> = (0..6)
-        .map(|i| format!("018f9c1a-0000-7000-8000-00000000bb{i:02}"))
+    let host = |kind: &str, i: usize| format!("018f9c1a-0000-7000-8000-{kind}{i:010}");
+    let renewing: Vec<String> = (0..6).map(|i| host("bb", i)).collect();
+    let enrolling: Vec<String> = (0..6).map(|i| host("cc", i)).collect();
+    let refs: Vec<&str> = renewing
+        .iter()
+        .chain(&enrolling)
+        .map(String::as_str)
         .collect();
-    let refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
     let st = env.state(&refs);
-    for h in &hosts {
+    for (renew_host, enroll_host) in renewing.iter().zip(&enrolling) {
         let old = peer(&aged(
             &env,
             &KeyPair::generate().unwrap(),
-            h,
+            renew_host,
             Duration::days(20),
         ));
-        let csr_pem = csr(h, &KeyPair::generate().unwrap());
+        let csr_pem = csr(renew_host, &KeyPair::generate().unwrap());
         let st1 = st.clone();
         let renew = tokio::task::spawn_blocking(move || {
             renew_at(&st1, Some(&old), &csr_pem, now()).status()
         });
         let enroll_key = KeyPair::generate().unwrap();
-        let enroll = env.enroll(&st, h, &enroll_key);
+        let enroll = env.enroll(&st, enroll_host, &enroll_key);
         let (r, _) = tokio::join!(renew, enroll);
         assert_eq!(r.unwrap(), StatusCode::OK);
     }
@@ -877,6 +881,25 @@ async fn renewals_and_enrollments_at_once_leave_one_unbroken_chain() {
         n += 1;
     }
     assert_eq!(n, 12, "six renewals and six enrollments");
+}
+
+#[tokio::test]
+async fn an_enrollment_supersedes_the_older_certificate_of_the_same_host() {
+    let env = Env::new();
+    let st = env.state(&[HOST]);
+    let old = peer(&aged(
+        &env,
+        &KeyPair::generate().unwrap(),
+        HOST,
+        Duration::days(20),
+    ));
+    env.enroll(&st, HOST, &KeyPair::generate().unwrap()).await;
+    let csr_pem = csr(HOST, &KeyPair::generate().unwrap());
+    let status =
+        tokio::task::spawn_blocking(move || renew_at(&st, Some(&old), &csr_pem, now()).status())
+            .await
+            .unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
