@@ -6,7 +6,7 @@ merge SHA for each shipped phase.
 
 ## Status
 
-- **0.16.x, alpha.** The latest release is 0.16.0 (2026-11-15). The event
+- **0.17.x, alpha.** The latest release is 0.17.0 (2026-11-16). The event
   schema and CLI surface can still change between minor releases.
   `schema_version` in every event lets downstream consumers detect this.
 - **Platforms.** macOS, Linux and Windows at runtime. Some Linux refinements are marked

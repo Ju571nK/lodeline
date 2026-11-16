@@ -7,6 +7,23 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-16
+
+**Upgrade.** This release adds no policy field, no reason kind, no event field and no event kind,
+and changes no event format and no fleet API response. No package script, unit file, tmpfiles
+entry or SELinux module changed. Hosts, server and console can be upgraded in any order.
+
+**Hosts.** After the upgrade a score can change. A host that runs the built-in default policy
+now also watches `~/.claude/commands/*.md` in the user-global Claude Code target. A signed policy
+cannot drop a path from a built-in target. It keeps the new path unless it disables the target
+`ai-guard-claude-code-user-global`. A user or project score can rise where a Claude Code command
+file declares a risky hook, and with the agent running, a change to such a file is assessed when
+it is written. When the agent's home folder is in a repository's parent chain, the agent has
+fewer watch roots. A policy reload no longer holds the AI Guard parser list while it walks
+repositories for Codex subfolder layers, which removes the stall of v0.16.0. The scan and the
+agent now find a repository whose only Codex file is a root `.codex/rules/` folder, and
+`lodeline scan` also finds one whose only Codex file is a root `.codex/hooks.json`.
+
 ### Added
 
 - **Hooks in Claude Code command files.** The Claude Code scanner now reads the `hooks` field in the
@@ -16,14 +33,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   fallback folders. With the agent running, a change to a user or project command file is assessed
   when it is written. The default policy now watches `~/.claude/commands`, and the 64-folder watch
   limit for each project is now shared by skills, subagents and commands. A score can rise where a
-  command file declares hooks.
+  command file declares hooks. (#650)
 
 ### Fixed
 
-- When the agent's own home folder is in a repository's parent chain, the home `.claude` skills, subagents and commands folders are left to the user row and are no longer also watch roots of the project. With the default user target on, events were already deduplicated, so the visible change is fewer watch roots and, with the user target off, no project-row event for a user file.
-- A policy reload no longer holds the AI Guard parser list while it walks repositories for Codex subfolder layers. Since v0.16.0 that walk ran under the lock, up to about 0.2 seconds per repository at the 2,000-folder cap, and AI Guard assessments waited for it.
-- The agent now finds a repository in a Codex workspace whose only Codex file is a `.codex/rules/` folder at its root, so its standing command approvals are scored and a later rule change is reassessed. Only `lodeline scan` found such a repository before.
-- `lodeline scan` at the root of a repository whose only Codex file is `.codex/hooks.json` or a `.codex/rules/` folder now reports the Codex project row. It gave no row before, though the Codex project parser reads those files.
+- When the agent's own home folder is in a repository's parent chain, the home `.claude` skills, subagents and commands folders are left to the user row and are no longer also watch roots of the project. With the default user target on, events were already deduplicated, so the visible change is fewer watch roots and, with the user target off, no project-row event for a user file. (#652)
+- A policy reload no longer holds the AI Guard parser list while it walks repositories for Codex subfolder layers. Since v0.16.0 that walk ran under the lock, up to about 0.2 seconds per repository at the 2,000-folder cap, and AI Guard assessments waited for it. (#652)
+- The agent now finds a repository in a Codex workspace whose only Codex file is a `.codex/rules/` folder at its root, so its standing command approvals are scored and a later rule change is reassessed. Only `lodeline scan` found such a repository before. (#651)
+- `lodeline scan` at the root of a repository whose only Codex file is `.codex/hooks.json` or a `.codex/rules/` folder now reports the Codex project row. It gave no row before, though the Codex project parser reads those files. (#648)
 
 ## [0.16.0] - 2026-11-15
 
