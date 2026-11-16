@@ -49,7 +49,6 @@ jobs:
 
   build:
     name: build ${{ matrix.target }}
-    needs: web
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
