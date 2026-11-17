@@ -37,6 +37,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `GET /v1/fleet/risk` and `GET /v1/fleet/hosts` return hosts in one fixed order. Hosts that tie
+  on the sort key (bucket and score, or last seen) sort by `host_id` ascending, where before
+  their order could change between requests and restarts, so paging with `cursor` could skip
+  or repeat a host. A risk row now shows its host's
+  highest score inside its top bucket, where before it showed the first tool in that bucket even
+  when a later tool scored higher. Scores that tie keep the first tool in the server's tool order.
 - An agent run as root on macOS and Linux no longer reads or watches another user's `.claude`
   skills, agents and commands folders, `settings.local.json` or `loop.md` as project components
   when a repository's checkout root is that user's home. Before, only the agent's own home was

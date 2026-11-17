@@ -312,7 +312,7 @@ async fn risk_source_names_the_newest_top_reading_live_and_after_rebuild() {
     }
 }
 
-/// `get` with `rows` sorted by host, since risk rows that tie have no fixed order.
+/// `get` with `rows` sorted by host, for the lists that have no fixed order.
 async fn get_rows_by_host(app: &axum::Router, path: &str) -> serde_json::Value {
     let (status, mut body) = get(app, path, Some("tok")).await;
     assert_eq!(status, StatusCode::OK, "{path}: {body}");
@@ -936,6 +936,144 @@ async fn by_tool_carries_config_found_only_when_known() {
         assert!(
             by_tool["claude_code"].get("config_found").is_none(),
             "{by_tool}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn risk_rows_with_equal_bucket_and_score_come_back_by_host_id_on_every_run() {
+    let now = time::OffsetDateTime::now_utc();
+    let mut hosts: Vec<String> = (0..24).map(|_| uuid::Uuid::now_v7().to_string()).collect();
+    let mut tied_orders = Vec::new();
+    for _ in 0..2 {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build_router(state_with_token(dir.path(), "tok"));
+        for host in &hosts {
+            let reading = ai_reading("claude_code", "alice", 5.0, "high");
+            post_evidence(&app, host, &[(now, reading)]).await;
+        }
+        let (status, body) = get(&app, "/v1/fleet/risk", Some("tok")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let order: Vec<String> = body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["host_id"].as_str().unwrap().to_string())
+            .collect();
+        let (again_status, again) = get(&app, "/v1/fleet/risk", Some("tok")).await;
+        assert_eq!(again_status, StatusCode::OK);
+        assert_eq!(again, body, "two requests on one server differ");
+
+        let mut paged = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let (status, page) = get(
+                &app,
+                &format!("/v1/fleet/risk?limit=1{cursor}"),
+                Some("tok"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            for row in page["rows"].as_array().unwrap() {
+                paged.push(row["host_id"].as_str().unwrap().to_string());
+            }
+            match page["next_cursor"].as_str() {
+                Some(next) => cursor = format!("&cursor={next}"),
+                None => break,
+            }
+        }
+        assert_eq!(
+            paged, order,
+            "paging with limit=1 must visit each host once"
+        );
+        tied_orders.push(order);
+        hosts.reverse();
+    }
+    hosts.sort();
+    for order in &tied_orders {
+        assert_eq!(order, &hosts, "tied rows must sort by host_id ascending");
+    }
+}
+
+#[tokio::test]
+async fn risk_row_takes_the_highest_score_inside_the_top_bucket_then_the_first_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = build_router(state_with_token(dir.path(), "tok"));
+    let now = time::OffsetDateTime::now_utc();
+    let higher_later_tool = uuid::Uuid::now_v7().to_string();
+    let tied_score = uuid::Uuid::now_v7().to_string();
+    post_evidence(
+        &app,
+        &higher_later_tool,
+        &[
+            (now, ai_reading("claude_code", "alice", 4.0, "medium")),
+            (now, ai_reading("codex", "alice", 6.0, "medium")),
+            (now, ai_reading("cursor", "alice", 9.0, "low")),
+        ],
+    )
+    .await;
+    post_evidence(
+        &app,
+        &tied_score,
+        &[
+            (now, ai_reading("codex", "alice", 4.0, "medium")),
+            (now, ai_reading("claude_code", "alice", 4.0, "medium")),
+        ],
+    )
+    .await;
+    let body = get_rows_by_host(&app, "/v1/fleet/risk").await;
+    let row = |host: &str| {
+        body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["host_id"] == host)
+            .unwrap()
+            .clone()
+    };
+    let higher = row(&higher_later_tool);
+    assert_eq!(higher["top_tool"], "codex", "{higher}");
+    assert_eq!(higher["score"], 6.0, "{higher}");
+    let tied = row(&tied_score);
+    assert_eq!(tied["top_tool"], "claude_code", "{tied}");
+}
+
+#[tokio::test]
+async fn host_list_pages_tied_hosts_in_host_id_order_on_every_sort() {
+    let past = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+    let mut hosts: Vec<String> = (0..24).map(|_| uuid::Uuid::now_v7().to_string()).collect();
+    let mut orders: Vec<(&str, Vec<String>)> = Vec::new();
+    for _ in 0..2 {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build_router(state_with_token(dir.path(), "tok"));
+        for host in &hosts {
+            let reading = ai_reading("claude_code", "alice", 5.0, "high");
+            post_evidence(&app, host, &[(past, reading)]).await;
+        }
+        for sort in ["risk", "last_seen"] {
+            let mut paged = Vec::new();
+            let mut cursor = String::new();
+            loop {
+                let path = format!("/v1/fleet/hosts?sort={sort}&limit=1{cursor}");
+                let (status, page) = get(&app, &path, Some("tok")).await;
+                assert_eq!(status, StatusCode::OK, "{page}");
+                for host in page["hosts"].as_array().unwrap() {
+                    paged.push(host["host_id"].as_str().unwrap().to_string());
+                }
+                match page["next_cursor"].as_str() {
+                    Some(next) => cursor = format!("&cursor={next}"),
+                    None => break,
+                }
+            }
+            orders.push((sort, paged));
+        }
+        hosts.reverse();
+    }
+    hosts.sort();
+    for (sort, order) in &orders {
+        assert_eq!(
+            order, &hosts,
+            "sort={sort}: tied hosts must page by host_id"
         );
     }
 }

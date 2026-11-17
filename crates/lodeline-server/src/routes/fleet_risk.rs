@@ -1,7 +1,7 @@
-//! GET /v1/fleet/risk — 1-row-per-host sorted by max bucket descending.
+//! GET /v1/fleet/risk: 1-row-per-host sorted by bucket, then score, then host id.
 
 use crate::app::SharedState;
-use crate::fleet_index::HostSummary;
+use crate::fleet_index::{HostSummary, RiskEntry};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -31,6 +31,15 @@ fn bucket_rank(b: AiGuardBucket) -> u8 {
     }
 }
 
+/// Whether `entry` beats `held` for a host's top tool: a higher bucket, then a higher score.
+/// Readings that tie on both keep the tool visited first, which is `AiTool` order.
+fn outranks(entry: &RiskEntry, held: &RiskEntry) -> bool {
+    bucket_rank(entry.bucket)
+        .cmp(&bucket_rank(held.bucket))
+        .then_with(|| entry.score.total_cmp(&held.score))
+        .is_gt()
+}
+
 pub async fn get_fleet_risk(
     State(state): State<SharedState>,
     Query(q): Query<RiskQuery>,
@@ -49,11 +58,7 @@ pub async fn get_fleet_risk(
     let mut not_assessed: u64 = 0;
 
     // Collect (host, top_tool, top_entry) for each host that has any risk meeting filters.
-    let mut rows: Vec<(
-        HostSummary,
-        lodeline_core::event::AiTool,
-        crate::fleet_index::RiskEntry,
-    )> = Vec::new();
+    let mut rows: Vec<(HostSummary, lodeline_core::event::AiTool, RiskEntry)> = Vec::new();
     for h in state.fleet_index.snapshot_all() {
         let failing = h
             .risk_sources
@@ -62,7 +67,7 @@ pub async fn get_fleet_risk(
         if failing && !h.current_risk.keys().any(selected) {
             not_assessed += 1;
         }
-        let mut top: Option<(lodeline_core::event::AiTool, crate::fleet_index::RiskEntry)> = None;
+        let mut top: Option<(lodeline_core::event::AiTool, RiskEntry)> = None;
         for (tool, entry) in &h.current_risk {
             if !selected(tool) {
                 continue;
@@ -72,7 +77,7 @@ pub async fn get_fleet_risk(
             }
             let pick = top
                 .as_ref()
-                .map(|(_, e)| bucket_rank(entry.bucket) > bucket_rank(e.bucket))
+                .map(|(_, e)| outranks(entry, e))
                 .unwrap_or(true);
             if pick {
                 top = Some((*tool, entry.clone()));
@@ -85,11 +90,8 @@ pub async fn get_fleet_risk(
     rows.sort_by(|a, b| {
         bucket_rank(b.2.bucket)
             .cmp(&bucket_rank(a.2.bucket))
-            .then_with(|| {
-                b.2.score
-                    .partial_cmp(&a.2.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| b.2.score.total_cmp(&a.2.score))
+            .then_with(|| a.0.host_id.cmp(&b.0.host_id))
     });
 
     let start = match &q.cursor {

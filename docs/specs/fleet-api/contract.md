@@ -219,6 +219,8 @@ client-side configuration. Two consequences flow from F10:
   bucket. Defaults: all.
 - `sort` — `last_seen|risk|host_id`. Default `last_seen`. Unrecognised
   values silently fall back to `last_seen` (not validated server-side in v1).
+  Hosts that tie on the sort key come back by `host_id` ascending, so the order
+  is the same on every request and `cursor` paging visits each host once.
 
 **Status semantics** (computed from `last_seen_ts`, the newest agent-side
 `event.ts` with each `ts` capped at the time the server received that event.
@@ -451,7 +453,11 @@ This is the host-detail page's primary fetch. UI tabs (`Alerts`/`Events`/
 
 ### 5.5 `GET /v1/fleet/risk`
 
-Per F14, this is **1-row-per-host** sorted by `max_score desc`. Per-tool
+Per F14, this is **1-row-per-host** sorted by `bucket desc`, then `score desc`,
+then `host_id asc`, so the order is the same on every request and `cursor`
+paging visits each host once. A host's row is its highest reading: the highest
+bucket among the selected tools, then the highest score inside it, then the first
+tool in the server's fixed tool order, which starts `claude_code`, `codex`. Per-tool
 breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
 
 **Query params:**
