@@ -170,7 +170,7 @@ Queries the running daemon and prints the current AI Guard risk assessment for e
 
 `lodeline-mcp` in local mode (auto-detected when no server URL is configured) registers as **`lodeline-check`** and exposes three read-only tools to an AI client such as Claude Desktop or Claude Code:
 
-- `my_risk` — per-tool risk band and score
+- `my_risk`: per-tool risk band and score, and `config_found` when the agent knows it
 - `my_guard_detail` — rubric breakdown and reasons
 - `my_findings` — full finding list
 

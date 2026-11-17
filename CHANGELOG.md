@@ -29,7 +29,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   as `low (no config found)` in the bucket column, and the JSON output carries the field. A tool
   with `true`, or whose agent sends no value, prints as before. The control reply adds the field
   only when it is known, so an older agent and a newer `lodeline`, or the reverse, still read each
-  other's replies.
+  other's replies. The `my_risk` MCP tool returns the field too.
 - The console host page shows a quiet tool whose `config_found` is `false` in one muted line,
   "No config found (n)", and leaves it out of the "Low (n)" strip. A tool with `true`, or with
   no field because its server or agent is older, shows as before. The console relays the field
@@ -59,8 +59,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `docs/install-personal.md`, `docs/install-macos-agent.md` and `docs/install-windows-agent.md` no
   longer say it assesses only detected tools, and `docs/runbook/siem-rules.md` lists the set.
 - The docs now explain `config_found`. `docs/runbook/siem-rules.md` gives its three values and a
-  SIEM filter for `false`, the install docs say that `lodeline show risk` does not print it and
-  `lodeline show events` does, and the status line of `docs/design/assess-failed-signal.md` says
+  SIEM filter for `false`, the install docs say that `lodeline show risk` and `lodeline show events`
+  print it, and the status line of `docs/design/assess-failed-signal.md` says
   the design is implemented except step 1 for `AiTool`, `AiGuardBucket` and `AiGuardScope`.
 
 ## [0.17.0] - 2026-11-16
