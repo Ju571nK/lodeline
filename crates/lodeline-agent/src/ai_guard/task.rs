@@ -398,6 +398,7 @@ async fn eval_and_maybe_emit(
             rule_pack_id: key.2.clone(),
             tool_label: parser.tool_label().map(|s| s.to_string()),
             user: key.3.clone(),
+            config_found: None,
         },
     )
     .await;

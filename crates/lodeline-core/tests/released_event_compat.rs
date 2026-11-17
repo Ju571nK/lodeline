@@ -42,6 +42,29 @@ fn released_server_accepts_ai_guard_assess_failed_as_unknown() {
     assert_eq!(old.event_id, ev.event_id);
 }
 
+#[test]
+fn released_server_ignores_config_found_on_a_risk_reading() {
+    let wire = serde_json::json!({
+        "schema_version": 1, "event_id": uuid::Uuid::now_v7(), "ts": "2026-11-17T10:00:00Z",
+        "host_id": "h", "agent_version": "0.18.0", "severity": "info",
+        "source": {"kind": "agent"}, "subject": {"kind": "self"},
+        "evidence": {"kind": "ai_guard_risk_assessed", "tool": "gemini",
+            "scope": {"kind": "user_global"}, "score": 0.0, "bucket": "low",
+            "reasons": [], "is_reattestation": false, "config_found": false}
+    });
+    let old: released::Event =
+        serde_json::from_value(wire.clone()).expect("v0.12.6 rejects config_found");
+    assert!(matches!(
+        old.evidence,
+        released::Evidence::AiGuardRiskAssessed { .. }
+    ));
+    let ev: Event = serde_json::from_value(wire).unwrap();
+    let Evidence::AiGuardRiskAssessed { config_found, .. } = ev.evidence else {
+        panic!("{:?}", ev.evidence)
+    };
+    assert_eq!(config_found, Some(false));
+}
+
 /// One sample per reason kind, fields in declaration order, so the bytes a
 /// build writes can be compared with these strings.
 const KNOWN_REASONS: &[&str] = &[

@@ -795,6 +795,11 @@ pub enum Evidence {
         /// home and for project scopes, the shape older agents emit.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user: Option<String>,
+        /// `Some(false)` = none of this parser's watched config paths exists
+        /// for the assessed home; `Some(true)` = at least one does. None
+        /// (omitted) = unknown, the shape older agents emit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_found: Option<bool>,
     },
     /// #147 — a dangerous self-config toggle flipped OFF→ON between snapshots
     /// (auto-approve / sandbox-off / broad-allow / project-MCP-autorun). One-time
@@ -1232,6 +1237,7 @@ mod tests {
             rule_pack_id: None,
             tool_label: None,
             user: None,
+            config_found: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(
@@ -1314,10 +1320,52 @@ mod tests {
             rule_pack_id: None,
             tool_label: None,
             user: None,
+            config_found: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(!s.contains("tool_label"));
         assert_eq!(ev, serde_json::from_str::<Evidence>(&s).unwrap());
+    }
+
+    fn risk_assessed(config_found: Option<bool>) -> Evidence {
+        Evidence::AiGuardRiskAssessed {
+            controls: None,
+            tool: AiTool::Gemini,
+            scope: AiGuardScope::UserGlobal,
+            score: 0.0,
+            bucket: AiGuardBucket::Low,
+            reasons: vec![],
+            is_reattestation: false,
+            rule_pack_id: None,
+            tool_label: None,
+            user: None,
+            config_found,
+        }
+    }
+
+    #[test]
+    fn ai_guard_risk_assessed_round_trips_config_found() {
+        for found in [false, true] {
+            let ev = risk_assessed(Some(found));
+            let s = serde_json::to_string(&ev).unwrap();
+            assert!(s.contains(&format!(r#""config_found":{found}"#)), "{s}");
+            assert_eq!(ev, serde_json::from_str::<Evidence>(&s).unwrap());
+        }
+    }
+
+    #[test]
+    fn ai_guard_risk_assessed_omits_config_found_when_unknown() {
+        let s = serde_json::to_string(&risk_assessed(None)).unwrap();
+        assert!(!s.contains("config_found"), "{s}");
+    }
+
+    #[test]
+    fn ai_guard_risk_assessed_without_config_found_decodes_as_unknown() {
+        let wire = r#"{"kind":"ai_guard_risk_assessed","tool":"gemini","scope":{"kind":"user_global"},"score":0.0,"bucket":"low","reasons":[],"is_reattestation":false}"#;
+        assert_eq!(
+            serde_json::from_str::<Evidence>(wire).unwrap(),
+            risk_assessed(None)
+        );
     }
 
     #[test]
@@ -1333,6 +1381,7 @@ mod tests {
             rule_pack_id: Some("p".into()),
             tool_label: Some("acme-ai".into()),
             user: None,
+            config_found: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains(r#""tool":"other""#) && s.contains(r#""tool_label":"acme-ai""#));
@@ -1377,6 +1426,7 @@ mod tests {
             rule_pack_id: None,
             tool_label: None,
             user: None,
+            config_found: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"reasons\":[]"), "got: {s}");
@@ -1707,6 +1757,7 @@ mod tests {
             rule_pack_id: None,
             tool_label: None,
             user: None,
+            config_found: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(!s.contains("rule_pack_id"));
@@ -1726,6 +1777,7 @@ mod tests {
             rule_pack_id: Some("my-pack".into()),
             tool_label: None,
             user: None,
+            config_found: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains(r#""rule_pack_id":"my-pack""#));
