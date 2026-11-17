@@ -61,6 +61,13 @@ pub trait AiGuardParser: Send + Sync {
     /// this parser.
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf>;
 
+    /// Whether any config this parser watches exists for `home_dir`, so a
+    /// reading can say "looked, nothing there" apart from "looked, clean".
+    /// `None` when the parser watches nothing.
+    fn config_found(&self, home_dir: &Path) -> Option<bool> {
+        paths_found(&self.watched_paths(home_dir))
+    }
+
     /// Read current state from disk and return reasons. Empty Vec = clean.
     /// Missing primary config file = empty Vec (operator hasn't enabled the
     /// tool — not a finding). I/O / parse errors bubble up.
@@ -108,6 +115,61 @@ pub trait AiGuardParser: Send + Sync {
     /// and for Other parsers without a label. Stamped onto the emitted event.
     fn tool_label(&self) -> Option<&str> {
         None
+    }
+}
+
+/// Whether any of `paths` exists. See `AiGuardParser::config_found`.
+///
+/// A path is missing only when its stat says not found or not a directory; any
+/// other error (permission, I/O) means something is there. A glob is judged by
+/// the folder before its first wildcard, and a glob with no folder part is
+/// missing.
+pub(crate) fn paths_found(paths: &[PathBuf]) -> Option<bool> {
+    if paths.is_empty() {
+        return None;
+    }
+    Some(paths.iter().any(|p| path_present(p)))
+}
+
+fn path_present(path: &Path) -> bool {
+    let root = glob_root_dir(path);
+    if root != path && !has_folder_part(path) {
+        return false;
+    }
+    match root.symlink_metadata() {
+        Ok(_) => true,
+        Err(e) => !matches!(
+            e.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
+/// A glob with no separator before its first wildcard, such as `*.json`, names
+/// no folder. Watched paths are absolute, so it is judged missing instead of
+/// by whatever the agent's current directory holds.
+fn has_folder_part(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.find(GLOB_CHARS)
+        .is_some_and(|i| text[..i].contains(['/', '\\']))
+}
+
+const GLOB_CHARS: [char; 6] = ['*', '?', '[', ']', '{', '}'];
+
+/// The directory prefix of a (possibly glob) path: everything before the path
+/// segment that holds the first glob metacharacter. `.cursor/rules/**` becomes
+/// `.cursor/rules`; a plain path with no glob is returned unchanged. Used to
+/// pick the recursive watch root for a glob target (#156) and to judge whether
+/// a glob's folder exists.
+pub(crate) fn glob_root_dir(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.find(GLOB_CHARS) {
+        Some(idx) => {
+            let head = &s[..idx];
+            let cut = head.rfind(['/', '\\']).map(|i| &s[..i]).unwrap_or(head);
+            PathBuf::from(cut)
+        }
+        None => p.to_path_buf(),
     }
 }
 
@@ -254,5 +316,71 @@ mod tests {
         let p = d.path().join("c.md");
         std::fs::write(&p, "hello").unwrap();
         assert_eq!(read_text_optional(&p).unwrap().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn no_paths_means_unknown() {
+        assert_eq!(paths_found(&[]), None);
+    }
+
+    #[test]
+    fn found_when_any_path_exists_and_false_when_all_are_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.json");
+        std::fs::write(&present, "{}").unwrap();
+        let missing = dir.path().join("missing.json");
+        assert_eq!(paths_found(std::slice::from_ref(&missing)), Some(false));
+        assert_eq!(paths_found(&[missing, present]), Some(true));
+    }
+
+    #[test]
+    fn a_folder_counts_and_a_dangling_link_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("hooks");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(paths_found(&[folder]), Some(true));
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.json");
+            std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+            assert_eq!(paths_found(&[link]), Some(true));
+        }
+    }
+
+    #[test]
+    fn a_path_below_a_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(paths_found(&[file.join("settings.json")]), Some(false));
+    }
+
+    #[test]
+    fn a_glob_with_no_folder_part_is_not_found() {
+        assert_eq!(paths_found(&[PathBuf::from("*.nothing")]), Some(false));
+        assert_eq!(paths_found(&[PathBuf::from("c*.json")]), Some(false));
+    }
+
+    #[test]
+    fn a_glob_is_judged_by_the_folder_before_its_first_wildcard() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules");
+        assert_eq!(paths_found(&[rules.join("*.toml")]), Some(false));
+        std::fs::create_dir(&rules).unwrap();
+        assert_eq!(paths_found(&[rules.join("*.toml")]), Some(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn any_other_stat_error_counts_as_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("settings.json"), "{}").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let found = paths_found(&[locked.join("settings.json")]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(found, Some(true));
     }
 }
