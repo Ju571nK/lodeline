@@ -288,7 +288,10 @@ Notes:
   with no reading (see `ai_guard_unassessed`), and `by_tool` never holds a
   tool without a score.
 - `by_tool` only includes tools that have been assessed. Missing key = no
-  data, not "low".
+  data, not "low". Every host reports the start set, so `by_tool` holds a
+  key for each built-in tool (eight keys, because the two Codex subjects
+  share one), and an entry is low on a host with none of them. See
+  [AI Guard assessments at start](../../runbook/siem-rules.md#ai-guard-assessments-at-start).
 - Each `by_tool` entry is the riskiest current reading for that tool. When
   readings tie on score, the newest one is shown. A failure report counts as
   a newer report for its source, so on a tie `source` and `unassessed_since`
