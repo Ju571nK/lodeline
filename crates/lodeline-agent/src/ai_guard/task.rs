@@ -2011,4 +2011,138 @@ mod tests {
         assert!(saw_risk, "drift is IN ADDITION to AiGuardRiskAssessed");
         h.abort();
     }
+
+    fn risk_events(events: &mut mpsc::Receiver<CommittableEvent>) -> Vec<Evidence> {
+        let mut out = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if matches!(ev.event.evidence, Evidence::AiGuardRiskAssessed { .. }) {
+                out.push(ev.event.evidence);
+            }
+        }
+        out
+    }
+
+    fn found_of(evidence: &Evidence) -> Option<bool> {
+        match evidence {
+            Evidence::AiGuardRiskAssessed { config_found, .. } => *config_found,
+            other => panic!("expected a risk reading, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn boot_in_an_empty_home_says_not_found_for_every_built_in_subject() {
+        let home = tempfile::tempdir().unwrap();
+        let parsers = crate::ai_guard::user_global_parsers(None, None);
+        assert_eq!(parsers.len(), 9);
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(
+            ScriptedParser {
+                tool: AiTool::Other,
+                scope: AiGuardScope::UserGlobal,
+                pack_id: None,
+                tool_label: None,
+                scripts: StdMutex::new(Vec::new()),
+                watched: Vec::new(),
+            },
+            fc_rx,
+            Duration::from_secs(3600),
+        );
+        ctx.parsers = Arc::new(RwLock::new(parsers));
+        ctx.home_dir = home.path().to_path_buf();
+        let snapshot = ctx.parsers.read().clone();
+        for parser in &snapshot {
+            eval_and_maybe_emit(parser.as_ref(), &ctx, &own_home(&ctx), true).await;
+        }
+        let seen = risk_events(&mut events);
+        assert_eq!(seen.len(), 9);
+        let mut checked = 0;
+        for (parser, ev) in snapshot.iter().zip(&seen) {
+            let outside_home = parser
+                .watched_paths(home.path())
+                .iter()
+                .any(|p| !p.starts_with(home.path()) && p.symlink_metadata().is_ok());
+            if !outside_home {
+                assert_eq!(found_of(ev), Some(false), "{:?}", parser.tool());
+                checked += 1;
+            }
+        }
+        assert!(checked >= 1);
+    }
+
+    #[tokio::test]
+    async fn a_benign_config_appearing_re_emits_found_without_a_reason_change() {
+        let home = tempfile::tempdir().unwrap();
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(
+            crate::ai_guard::parser::gemini::GeminiParser,
+            fc_rx,
+            Duration::from_secs(3600),
+        );
+        ctx.home_dir = home.path().to_path_buf();
+        let parser = ctx.parsers.read()[0].clone();
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &own_home(&ctx), true).await;
+        let boot = risk_events(&mut events);
+        assert_eq!(boot.len(), 1);
+        assert_eq!(found_of(&boot[0]), Some(false));
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &own_home(&ctx), false).await;
+        assert!(risk_events(&mut events).is_empty(), "nothing changed");
+
+        std::fs::create_dir_all(home.path().join(".gemini")).unwrap();
+        std::fs::write(
+            home.path().join(".gemini/settings.json"),
+            r#"{"theme":"dark"}"#,
+        )
+        .unwrap();
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &own_home(&ctx), false).await;
+        let after = risk_events(&mut events);
+        assert_eq!(after.len(), 1, "the appearance re-emits at once");
+        assert_eq!(found_of(&after[0]), Some(true));
+        let reasons = |e: &Evidence| match e {
+            Evidence::AiGuardRiskAssessed {
+                reasons,
+                is_reattestation,
+                ..
+            } => (reasons.clone(), *is_reattestation),
+            _ => unreachable!(),
+        };
+        assert_eq!(reasons(&after[0]), reasons(&boot[0]));
+        assert!(!reasons(&after[0]).1);
+    }
+
+    #[tokio::test]
+    async fn a_project_parser_reports_what_its_watched_paths_imply() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let (_fc_tx, fc_rx) = broadcast::channel(8);
+        let (mut ctx, mut events) = ctx_with(
+            crate::ai_guard::parser::claude_code::ClaudeCodeProjectParser::without_walk(
+                repo.path().to_path_buf(),
+            ),
+            fc_rx,
+            Duration::from_secs(3600),
+        );
+        ctx.home_dir = home.path().to_path_buf();
+        let parser = ctx.parsers.read()[0].clone();
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &own_home(&ctx), true).await;
+        assert_eq!(found_of(&risk_events(&mut events)[0]), Some(false));
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(home.path().join(".claude/settings.json"), "{}").unwrap();
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &own_home(&ctx), false).await;
+        let after = risk_events(&mut events);
+        assert_eq!(after.len(), 1);
+        assert_eq!(found_of(&after[0]), Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_failing_parser_sends_the_failure_and_no_reading() {
+        let (ctx, parser, mut events) =
+            flaky_ctx(vec![unparsable("/tmp/test-home/.codex/config.toml")]);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &own_home(&ctx), true).await;
+        let ev = events.try_recv().expect("an event").event;
+        assert!(events.try_recv().is_err(), "one event");
+        let j = serde_json::to_value(&ev).unwrap();
+        assert_eq!(j["evidence"]["kind"], "ai_guard_assess_failed");
+        assert!(j["evidence"].get("config_found").is_none());
+    }
 }

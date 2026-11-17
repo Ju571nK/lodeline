@@ -6330,4 +6330,32 @@ mod tests {
             [row.join("tools/notify.sh")]
         );
     }
+
+    #[test]
+    fn claude_watches_its_managed_files_and_they_alone_make_it_found() {
+        let policy = tempdir().unwrap();
+        let managed = super::super::policy_controls::claude_paths(policy.path());
+        assert_eq!(super::super::paths_found(&managed), Some(false));
+        std::fs::write(policy.path().join("managed-settings.json"), "{}").unwrap();
+        assert_eq!(super::super::paths_found(&managed), Some(true));
+
+        let home = tempdir().unwrap();
+        let watched = ClaudeCodeParser::default().watched_paths(home.path());
+        let real = super::super::policy_controls::claude_paths(
+            &super::super::policy_controls::claude_policy_dir(),
+        );
+        assert!(real.iter().all(|p| watched.contains(p)));
+    }
+
+    #[test]
+    fn project_parser_found_follows_its_watched_paths_user_settings_included() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let parser = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
+        let own = |p: &ClaudeCodeProjectParser| p.config_found(home.path());
+        assert_eq!(own(&parser), Some(false));
+        write_settings(home.path(), "{}");
+        assert!(!repo.path().join(".claude").exists());
+        assert_eq!(own(&parser), Some(true));
+    }
 }
