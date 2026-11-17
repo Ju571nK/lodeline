@@ -60,6 +60,27 @@ severity: medium
 note:     a process is generating events faster than 100/sec for one target
 ```
 
+## AI Guard assessments at start
+
+When the agent starts, it sends one `ai_guard_risk_assessed` event for each built-in user-global or
+application subject, whether or not that tool is installed. It also sends one for each project
+subject of every configured workspace repository. A root agent does this for each user home.
+The set does not depend on policy targets. There are nine built-in subjects (`tool`, `scope`):
+
+- `claude_code`, user global
+- `codex`, user global
+- `codex`, application `codex-mcp-tools`
+- `claude_desktop`, application `claude_desktop`
+- `continue_dev`, application `continue`
+- `gemini`, user global
+- `cursor`, application `cursor`
+- `antigravity`, user global
+- `grok`, user global
+
+A tool with no config on the host gets a low assessment with no reasons. The event does not say the
+tool is absent, so a low score does not mean the tool is present. Lodeline measures posture and does
+not block by default.
+
 ## AI Guard assessment failed
 
 ```
