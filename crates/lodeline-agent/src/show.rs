@@ -1046,6 +1046,7 @@ mod tests {
                 reasons_count: 2,
                 last_assessed_ts: "2026-05-16T06:00:00Z".into(),
                 user: Some("alice".into()),
+                config_found: None,
             }],
         };
         let mut buf = Vec::new();
@@ -1056,6 +1057,50 @@ mod tests {
             out.contains("claude-code\tuser-global@alice\t3.5\tmedium\t2\t2026-05-16T06:00:00Z"),
             "got: {out}"
         );
+    }
+
+    #[cfg(feature = "operator-cli")]
+    fn risk_row(config_found: Option<bool>) -> String {
+        use crate::control::{RiskPayload, RiskSummary};
+        use lodeline_core::event::{AiGuardBucket, AiGuardScope, AiTool};
+        let payload = RiskPayload {
+            assessments: vec![RiskSummary {
+                controls: None,
+                tool: AiTool::Gemini,
+                scope: AiGuardScope::UserGlobal,
+                score: 0.0,
+                bucket: AiGuardBucket::Low,
+                reasons_count: 0,
+                last_assessed_ts: "2026-11-17T00:00:00Z".into(),
+                user: None,
+                config_found,
+            }],
+        };
+        let mut buf = Vec::new();
+        write_risk_pretty(&mut buf, &payload).unwrap();
+        String::from_utf8(buf)
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap()
+            .to_string()
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn write_risk_pretty_marks_a_tool_with_no_config() {
+        assert_eq!(
+            risk_row(Some(false)),
+            "gemini\tuser-global\t0.0\tlow (no config found)\t0\t2026-11-17T00:00:00Z"
+        );
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn write_risk_pretty_prints_found_and_unknown_as_before() {
+        let as_before = "gemini\tuser-global\t0.0\tlow\t0\t2026-11-17T00:00:00Z";
+        assert_eq!(risk_row(Some(true)), as_before);
+        assert_eq!(risk_row(None), as_before);
     }
 
     #[cfg(feature = "operator-cli")]
@@ -1091,6 +1136,7 @@ mod tests {
                 reasons_count: 5,
                 last_assessed_ts: "2026-05-16T06:01:00Z".into(),
                 user: None,
+                config_found: None,
             }],
         };
         let mut buf = Vec::new();

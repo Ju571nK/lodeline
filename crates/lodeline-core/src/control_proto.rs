@@ -178,6 +178,9 @@ pub struct RiskSummary {
     /// #329 — the user whose home a root agent assessed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Whether any config the parser watches exists. Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_found: Option<bool>,
 }
 
 /// Phase 3b.5 — serializable snapshot of the agent's AI Guard subsystem
@@ -429,6 +432,7 @@ mod tests {
                     reasons_count: 1,
                     last_assessed_ts: "2026-05-16T06:00:00Z".into(),
                     user: None,
+                    config_found: None,
                 }],
             }),
             doctor_ai_guard: None,
@@ -458,6 +462,50 @@ mod tests {
                 controls
             );
         }
+    }
+
+    fn risk_reply_json(extra: &str) -> String {
+        format!(
+            r#"{{"ok":true,"risk":{{"assessments":[{{"tool":"gemini","scope":{{"kind":"user_global"}},"score":0.0,"bucket":"low","reasons_count":0,"last_assessed_ts":"2026-11-17T00:00:00Z"{extra}}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn risk_summary_config_found_round_trips_and_is_omitted_when_unknown() {
+        for (extra, want) in [
+            (r#","config_found":false"#, Some(false)),
+            (r#","config_found":true"#, Some(true)),
+            ("", None),
+        ] {
+            let resp: Response = serde_json::from_str(&risk_reply_json(extra)).unwrap();
+            let summary = &resp.risk.as_ref().unwrap().assessments[0];
+            assert_eq!(summary.config_found, want, "decoding {extra:?}");
+            let wire = serde_json::to_value(&resp).unwrap();
+            let sent = wire["risk"]["assessments"][0].get("config_found");
+            assert_eq!(sent.and_then(|v| v.as_bool()), want, "encoding {extra:?}");
+            assert_eq!(sent.is_none(), want.is_none());
+        }
+    }
+
+    #[test]
+    fn an_older_reader_ignores_config_found() {
+        #[derive(Deserialize)]
+        struct OlderSummary {
+            tool: AiTool,
+            reasons_count: usize,
+        }
+        #[derive(Deserialize)]
+        struct OlderPayload {
+            assessments: Vec<OlderSummary>,
+        }
+        #[derive(Deserialize)]
+        struct OlderResponse {
+            risk: Option<OlderPayload>,
+        }
+        let older: OlderResponse =
+            serde_json::from_str(&risk_reply_json(r#","config_found":false"#)).unwrap();
+        let a = &older.risk.unwrap().assessments[0];
+        assert_eq!((a.tool, a.reasons_count), (AiTool::Gemini, 0));
     }
 
     #[test]
@@ -531,6 +579,7 @@ mod tests {
                     reasons_count: 3,
                     last_assessed_ts: "2026-05-29T00:00:00Z".into(),
                     user: None,
+                    config_found: None,
                 }],
                 effective_rubric: vec![RubricEntry {
                     kind_key: "no_sandbox".into(),
