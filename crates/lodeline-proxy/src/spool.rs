@@ -3603,7 +3603,10 @@ mod tests {
         let (db, _) = spool_files(d.path());
         s.append(event(1)).unwrap();
         let db0 = crate::sync_vfs::syncs(&db);
-        std::thread::sleep(Duration::from_millis(300));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while crate::sync_vfs::syncs(&db) <= db0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             crate::sync_vfs::syncs(&db) > db0,
             "maintenance pass checkpointed"
