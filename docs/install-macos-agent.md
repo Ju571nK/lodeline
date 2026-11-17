@@ -207,8 +207,10 @@ lodeline show stats          # live heartbeat from the running daemon
 user's home, and any other path once. A path with a wildcard prints as the pattern (`~/.claude/skills/*/SKILL.md` stays a
 pattern); it does not list the files the pattern matches.
 
-`lodeline show risk` is the core AI-SPM read: it scores each detected AI tool
-(`claude-code`, `codex`, `gemini`, `cursor`) from its real on-disk config.
+`lodeline show risk` is the core AI-SPM read: it scores each AI tool the agent assesses
+(for example `claude-code`, `codex`, `gemini`, `cursor`) from its real on-disk config.
+A tool with no config on the host reads as low with no reasons, so a low score does not
+mean the tool is present.
 Without a running daemon, `lodeline scan` produces the same per-tool scores in one
 shot (and exits 0) — handy for a quick check before the daemon is set up.
 

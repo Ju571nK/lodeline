@@ -164,7 +164,7 @@ back to this one. The signed version stays on record, so only a higher version l
 lodeline show risk
 ```
 
-Queries the running daemon and prints the current AI Guard risk assessment for each detected tool. Add `--tool claude-code` (or `codex`, etc.) to filter to one tool.
+Queries the running daemon and prints the current AI Guard risk assessment for each tool the agent assesses. The agent assesses a fixed set of tools whether or not they are installed, and a tool with no config reads as low (see [AI Guard assessments at start](runbook/siem-rules.md#ai-guard-assessments-at-start)). Add `--tool claude-code` (or `codex`, etc.) to filter to one tool.
 
 ### MCP client integration
 

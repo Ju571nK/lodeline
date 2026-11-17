@@ -120,7 +120,7 @@ lodeline run
 lodeline status                 # components, agent, fleet link; add --json for the data
 lodeline show config            # merged effective policy
 lodeline show paths             # policy files in force, then each target's paths (patterns stay patterns)
-lodeline show risk              # AI Guard risk score per detected AI tool
+lodeline show risk              # AI Guard risk score per assessed AI tool
 lodeline show stats             # live heartbeat from the running agent
 ```
 

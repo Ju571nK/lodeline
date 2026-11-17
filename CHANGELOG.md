@@ -7,6 +7,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Documentation
+
+- The docs now say which AI Guard assessments the agent sends at start. It assesses nine built-in
+  user-global and application subjects whether or not the tool is installed, plus the project
+  subjects of configured repositories, and a tool with no config reads as low with no reasons.
+  `docs/install-personal.md`, `docs/install-macos-agent.md` and `docs/install-windows-agent.md` no
+  longer say it assesses only detected tools, and `docs/runbook/siem-rules.md` lists the set.
+
 ## [0.17.0] - 2026-11-16
 
 **Upgrade.** This release adds no policy field, no reason kind, no event field and no event kind,

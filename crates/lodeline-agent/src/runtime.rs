@@ -250,7 +250,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // `expand_targets` → `watch_roots` → `spawn_watcher` at boot. Otherwise
     // the OS watcher never subscribes to ext-script paths until the first
     // hot-reload. Per-repo synth above follows the same ordering rule.
-    // The seven built-in user-global parsers (shared with `lodeline scan` via
+    // The nine built-in user-global parsers (shared with `lodeline scan` via
     // `user_global_parsers()`); per-repo parsers are appended below.
     let mut parsers_vec: Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>> =
         // The daemon's env is not a user's shell, and one parser is assessed
