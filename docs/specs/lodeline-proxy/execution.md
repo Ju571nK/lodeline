@@ -626,6 +626,17 @@ gap queue·registry handle 수를 남긴다(N2). 유닛 주석과 `config/proxy.
 시험: `lifecycle::tests::shutdown_phases_share_one_grace`(grace 2초, 요청 head 중간에 멈춘 client가 relay drain을 잡고, 시험 전용
 `RunTuning::gaps_out`으로 받은 gap queue 사본이 blocking 작업 대기를 잡음). 수정 전 4.05초(2 × grace)로 실패, 수정 후 통과(시험 전체 2.3초). 상한은 floor와 느린 CI를 감안해 grace + 1.5초.
 
+## 2026-11-17 종료 단계별 시간 기록 (`fix/proxy-shutdown-phase-timing`)
+
+`shutdown_phases_share_one_grace`가 Rocky 9 CI에서 한 번 7.0초(grace 2초 + 5초)로 실패했다(최근 60회 중 1회). 실패 출력에 panic뿐이라 어느 단계인지
+알 수 없었다. 원인은 찾지 못했다. 감사 producer의 5초 gap handover 대기(`invocation_sink.rs`)는 이 시험에서 닿지 않는다(호출이 없어
+`lost.count == 0`, `gap_slot`은 permit 1). drain이 늦어 abort 경로로 들어가도 Stop 작업은 집계 대상이 아니라 같은 결과다.
+단계 시간은 macOS에서 부하(CPU 점유 6개, 병렬 8개로 480회)에도 모두 grace 이후 35ms 이하였고 재현되지 않았다.
+
+수정(`lifecycle.rs`): 종료 단계(relay drain, 감사 drain, inventory drain, task 정지, blocking 작업 대기, spool close, `stopped` 기록)마다 걸린 시간을 한 줄
+`shutdown phase durations`(info, 시간만)로 남긴다. 시험은 `tracing` 출력을 모아 실패 메시지에 붙인다. 동작은 바뀌지 않는다. 다음 실패가 단계를
+이름으로 알려준다. 오류로 끝나는 종료도 한 줄을 남긴다.
+
 ## 2026-11-07 spool start 기록 group commit (`perf/proxy-group-commit`)
 
 목표: AWS gp3에서 closed loop 처리량이 초당 약 400회(동시성 32에서 378, tmpfs 2,049)에 묶인 것을 푼다. 내구성 계약([decisions.md](decisions.md)
