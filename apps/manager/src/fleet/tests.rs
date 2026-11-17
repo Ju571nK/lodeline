@@ -515,6 +515,7 @@ fn current_risk(r: api::CurrentRisk) -> CurrentRisk {
                         api::ToolRisk {
                             assessed_ts,
                             bucket,
+                            config_found: _,
                             score,
                             source,
                             unassessed_since,
@@ -683,6 +684,7 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
     let api::AiGuardAssessment {
         assessed_ts,
         bucket,
+        config_found: _,
         controls,
         is_reattestation,
         reasons,
