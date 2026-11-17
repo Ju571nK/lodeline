@@ -219,6 +219,8 @@ client-side configuration. Two consequences flow from F10:
   bucket. Defaults: all.
 - `sort` — `last_seen|risk|host_id`. Default `last_seen`. Unrecognised
   values silently fall back to `last_seen` (not validated server-side in v1).
+  Hosts that tie on the sort key come back by `host_id` ascending, so the order
+  is the same on every request and `cursor` paging visits each host once.
 
 **Status semantics** (computed from `last_seen_ts`, the newest agent-side
 `event.ts` with each `ts` capped at the time the server received that event.

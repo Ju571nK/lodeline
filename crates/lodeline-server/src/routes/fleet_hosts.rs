@@ -115,14 +115,19 @@ pub async fn get_fleet_hosts(
 
     match sort {
         "risk" => {
-            all.sort_by_key(|h| std::cmp::Reverse(bucket_rank(top_bucket(h))));
+            all.sort_by_key(|h| {
+                (
+                    std::cmp::Reverse(bucket_rank(top_bucket(h))),
+                    h.host_id.clone(),
+                )
+            });
         }
         "host_id" => {
             all.sort_by_key(|h| h.host_id.clone());
         }
         _ => {
             // last_seen desc
-            all.sort_by_key(|h| std::cmp::Reverse(h.last_seen_ts));
+            all.sort_by_key(|h| (std::cmp::Reverse(h.last_seen_ts), h.host_id.clone()));
         }
     }
 
