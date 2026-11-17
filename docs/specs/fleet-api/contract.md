@@ -451,7 +451,11 @@ This is the host-detail page's primary fetch. UI tabs (`Alerts`/`Events`/
 
 ### 5.5 `GET /v1/fleet/risk`
 
-Per F14, this is **1-row-per-host** sorted by `max_score desc`. Per-tool
+Per F14, this is **1-row-per-host** sorted by `bucket desc`, then `score desc`,
+then `host_id asc`, so the order is the same on every request and `cursor`
+paging visits each host once. A host's row is its highest reading: the highest
+bucket among the selected tools, then the highest score inside it, then the first
+tool in the server's fixed tool order, which starts `claude_code`, `codex`. Per-tool
 breakdown is in `/v1/fleet/hosts/{host_id}.ai_guard.by_tool`.
 
 **Query params:**
