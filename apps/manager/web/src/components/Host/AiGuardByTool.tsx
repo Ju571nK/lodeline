@@ -15,9 +15,9 @@ interface Props {
 /**
  * AI Guard per-tool risk (UI/UX §5.3). Risky tools (bucket > low) get a card
  * with their reasons inline; quiet (low/0) tools collapse into one strip so
- * the signal isn't drowned out — most tools are quiet in real fleets. A quiet
- * tool whose config the agent did not find (`config_found === false`) is a
- * plain line instead, so absence is not read as a clean score.
+ * the signal isn't drowned out — most tools are quiet in real fleets.
+ * A quiet tool whose config the agent did not find (`config_found === false`)
+ * is a plain line instead, so absence is not read as a clean score.
  */
 export function AiGuardByTool({ byTool, unassessed = {} }: Props) {
   const tools = Object.entries(byTool);
