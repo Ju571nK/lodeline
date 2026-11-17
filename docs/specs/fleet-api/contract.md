@@ -253,6 +253,7 @@ from a batch that arrives late. See §13 gap on clock skew and #442):
             "score": 2.1, "bucket": "medium", "assessed_ts": "2026-05-17T12:30:11Z",
             "source": { "scope": { "kind": "user_global" }, "user": null,
                         "rule_pack_id": null, "tool_label": null },
+            "config_found": true,
             "unassessed_since": "2026-05-17T12:31:00Z"
           }
         }
@@ -317,6 +318,15 @@ Notes:
   good reading, and it still counts toward `max_score` and `max_bucket`, so a
   failing source never looks clean. The next `ai_guard_risk_assessed` for the
   source removes the field. Servers before this field never send it.
+- `config_found` is present on a `by_tool` entry when the agents say whether
+  the tool's config exists on the host. `false` means no config path of the
+  tool exists for any home the agents assessed, so a low score there means
+  "not found", not "looked and clean". `true` means at least one exists.
+  The server derives it from all of the tool's current sources, not only
+  the one `source` names: `true` when any source says `true` or has failed,
+  `false` only when every source says `false`. The field is absent when any
+  source does not say, which older agents do not, and from servers before
+  this field existed.
 - `ai_guard_unassessed` lists, per tool, the sources whose latest report is an
   `ai_guard_assess_failed` event, whether or not the source has a reading.
   It is `null` when no source is failing, and absent from servers before this
@@ -427,8 +437,8 @@ Notes:
   and replaced with a top-level `signature_failures_24h` in
   `/v1/fleet/compliance` (see §5.6 / F13).
 - `ai_guard.by_tool` holds the same reading per tool as
-  `current_risk.by_tool`, with its `reasons`. Its `source` and
-  `unassessed_since` have the same shape and rules as in §5.3.
+  `current_risk.by_tool`, with its `reasons`. Its `source`, `config_found`
+  and `unassessed_since` have the same shape and rules as in §5.3.
 - `ai_guard_unassessed` is the same as in §5.3.
 - `null` semantics in every block: the host hasn't yet emitted that variant.
   UI should distinguish "no data yet" from "data unavailable".

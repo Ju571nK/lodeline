@@ -7,6 +7,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- `ai_guard_risk_assessed` has one optional field, `config_found`. `false` means none of the
+  parser's config paths exists for the assessed home, and `true` means at least one does. The
+  field is omitted when unknown, as older agents send it, and an older server ignores it. The
+  server rolls it up per tool on a host and the fleet API returns it as `config_found` on each
+  `by_tool` entry of `GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}`, omitted when
+  unknown. A tool is `false` only when every source says `false`, and `true` when any source says
+  `true` or has failed. The agent does not send the field yet, and the console does not show it.
+
 ### Fixed
 
 - An agent run as root on macOS and Linux no longer reads or watches another user's `.claude`
