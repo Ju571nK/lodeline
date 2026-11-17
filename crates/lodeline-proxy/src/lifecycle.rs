@@ -508,7 +508,8 @@ const SPOOL_GAP_PUMP_INTERVAL: Duration = Duration::from_secs(5);
 const SPOOL_VIEW_INTERVAL: Duration = Duration::from_secs(1);
 /// Registry entry retention pass, as often as the spool's maintenance.
 const ENTRY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
-/// Time spent in each phase of the shutdown after the signal, in order.
+/// Time spent in each phase of the shutdown after the signal, in order. Logged
+/// once when it goes out of scope, so an error return logs it too.
 struct PhaseClock {
     last: tokio::time::Instant,
     phases: Vec<(&'static str, Duration)>,
@@ -526,6 +527,12 @@ impl PhaseClock {
         let now = tokio::time::Instant::now();
         self.phases.push((phase, now.duration_since(self.last)));
         self.last = now;
+    }
+}
+
+impl Drop for PhaseClock {
+    fn drop(&mut self) {
+        tracing::info!(phases = ?self.phases, "shutdown phase durations");
     }
 }
 
@@ -964,10 +971,11 @@ async fn run_inner(
     // pool (not in a drop on a worker) before `stopped` is published.
     spool.close().await;
     clock.end("spool_close");
-    tracing::info!(phases = ?clock.phases, "shutdown phase durations");
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
-    lock(&lc).finish_shutdown(invocation_accounted, invocation_gaps.as_ref())?;
+    let finished = lock(&lc).finish_shutdown(invocation_accounted, invocation_gaps.as_ref());
+    clock.end("finish");
+    finished?;
     Ok(())
 }
 

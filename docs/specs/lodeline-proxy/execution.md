@@ -633,9 +633,9 @@ gap queue·registry handle 수를 남긴다(N2). 유닛 주석과 `config/proxy.
 `lost.count == 0`, `gap_slot`은 permit 1). drain이 늦어 abort 경로로 들어가도 Stop 작업은 집계 대상이 아니라 같은 결과다.
 단계 시간은 macOS에서 부하(CPU 점유 6개, 병렬 8개로 480회)에도 모두 grace 이후 35ms 이하였고 재현되지 않았다.
 
-수정(`lifecycle.rs`): 종료 단계(relay drain, 감사 drain, inventory drain, task 정지, blocking 작업 대기, spool close)마다 걸린 시간을 한 줄
+수정(`lifecycle.rs`): 종료 단계(relay drain, 감사 drain, inventory drain, task 정지, blocking 작업 대기, spool close, `stopped` 기록)마다 걸린 시간을 한 줄
 `shutdown phase durations`(info, 시간만)로 남긴다. 시험은 `tracing` 출력을 모아 실패 메시지에 붙인다. 동작은 바뀌지 않는다. 다음 실패가 단계를
-이름으로 알려준다.
+이름으로 알려준다. 오류로 끝나는 종료도 한 줄을 남긴다.
 
 ## 2026-11-07 spool start 기록 group commit (`perf/proxy-group-commit`)
 
