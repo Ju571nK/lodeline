@@ -1170,7 +1170,11 @@ targets:
                 .iter()
                 .find(|t| t.id.starts_with(CLAUDE_USER_GLOBAL))
                 .unwrap();
-            for (dir, tail) in [("skills", "SKILL.md"), ("agents", ".md")] {
+            for (dir, tail) in [
+                ("skills", "SKILL.md"),
+                ("agents", ".md"),
+                ("commands", ".md"),
+            ] {
                 assert!(
                     user_global
                         .paths
