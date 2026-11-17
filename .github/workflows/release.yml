@@ -75,6 +75,15 @@ jobs:
         if: ${{ endsWith(matrix.target, '-linux-musl') }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      # Restore only. The cache comes from release-cache.yml on main; a tag run can
+      # read main's caches but not an earlier tag's, so a release leg never saves one.
+      # Keep these inputs identical to release-cache.yml or the keys stop matching.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          cache-bin: false
+          save-if: false
+
       - name: Build
         run: cargo build --release --locked --workspace --target ${{ matrix.target }}
 

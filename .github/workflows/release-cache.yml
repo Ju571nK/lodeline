@@ -1,0 +1,76 @@
+name: Release cache
+
+# Builds the release targets on main and saves the third-party dependency build
+# for each one. release.yml restores it, read only, on a tag run. A tag run can
+# read caches saved on main but not caches saved by an earlier tag, and a pull
+# request cannot write to main's cache, so main is the only source.
+# The cache key hashes Cargo.lock, the workspace manifests, the rustc version and
+# the CARGO*/RUST* environment, so this runs when the manifests change and twice
+# a week, which also picks up a new stable rustc and keeps the entry from expiring
+# after seven days without use. A pull request that edits this file runs it too,
+# and saves into that pull request's own scope.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**/Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/release-cache.yml
+  pull_request:
+    paths:
+      - .github/workflows/release-cache.yml
+  schedule:
+    - cron: '17 3 * * 1,4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  warm:
+    name: warm ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # Keep these inputs identical to the build job in release.yml.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          cache-bin: false
+
+      - name: Build
+        run: cargo build --release --locked --workspace --target ${{ matrix.target }}
