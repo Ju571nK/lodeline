@@ -43,6 +43,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   subjects of configured repositories, and a tool with no config reads as low with no reasons.
   `docs/install-personal.md`, `docs/install-macos-agent.md` and `docs/install-windows-agent.md` no
   longer say it assesses only detected tools, and `docs/runbook/siem-rules.md` lists the set.
+- The docs now explain `config_found`. `docs/runbook/siem-rules.md` gives its three values and a
+  SIEM filter for `false`, the install docs say that `lodeline show risk` does not print it and
+  `lodeline show events` does, and the status line of `docs/design/assess-failed-signal.md` says
+  the design is implemented except step 1 for `AiTool`, `AiGuardBucket` and `AiGuardScope`.
 
 ## [0.17.0] - 2026-11-16
 
