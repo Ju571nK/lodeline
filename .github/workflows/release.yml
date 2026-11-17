@@ -221,6 +221,12 @@ jobs:
           mkdir -p pkgs
           cp target/${{ matrix.target }}/debian/*.deb pkgs/
           cp target/generate-rpm/*.rpm pkgs/
+          # A pre-release version carries a tilde in the package metadata so it sorts
+          # before the release. GitHub may rename an asset with a tilde in its name,
+          # which would break SHA256SUMS, so the file names use a hyphen instead.
+          for f in pkgs/*; do
+            case "$f" in *~*) mv "$f" "${f//\~/-}" ;; esac
+          done
           # The proxy is not released until T-16; remove then.
           rm -f pkgs/lodeline-proxy*
           ls -l pkgs/

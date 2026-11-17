@@ -211,6 +211,8 @@ jobs:
           # Upgrade from the published $OLD_RELEASE packages (proxy is not among
           # them; it installs fresh afterwards) to the packages built above.
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          # Package metadata spells a pre-release with a tilde; `lodeline --version` keeps the hyphen.
+          pkgwant=${want/-/\~}
           old="$OLD_RELEASE"
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
           dl=/opt/old-release
@@ -239,7 +241,7 @@ jobs:
           echo applied-marker > /var/lib/lodeline/applied/policy.yaml
           rpm -U "${newrpms[@]}"
           for pkg in "${upg[@]}"; do
-            test "$(rpm -q --qf '%{VERSION}' "$pkg")" = "$want"
+            test "$(rpm -q --qf '%{VERSION}' "$pkg")" = "$pkgwant"
             test "$(rpm -q "$pkg" | wc -l)" = 1
           done
           /usr/bin/lodeline --version | grep -F "$want"
@@ -431,6 +433,8 @@ jobs:
           # Upgrade from the published $OLD_RELEASE packages (proxy is not among
           # them; it installs fresh afterwards) to the packages built above.
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          # Package metadata spells a pre-release with a tilde; `lodeline --version` keeps the hyphen.
+          pkgwant=${want/-/\~}
           old="$OLD_RELEASE"
           arch=$(dpkg --print-architecture)
           base=https://github.com/Ju571nK/lodeline/releases/download/v${old}
@@ -465,7 +469,7 @@ jobs:
           # --force-confold answers dpkg's conffile prompt, which has no tty here.
           apt-get install -y -o Dpkg::Options::=--force-confold "${newdebs[@]}"
           for pkg in "${upg[@]}"; do
-            case "$(dpkg-query -W -f='${Version}' "$pkg")" in "$want"-*) ;; *) exit 1 ;; esac
+            case "$(dpkg-query -W -f='${Version}' "$pkg")" in "$pkgwant"-*) ;; *) exit 1 ;; esac
           done
           /usr/bin/lodeline --version | grep -F "$want"
           agent_assert_disabled_and_stopped
