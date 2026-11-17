@@ -10,11 +10,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 ### Fixed
 
 - An agent run as root on macOS and Linux no longer reads or watches another user's `.claude`
-  skills, agents and commands folders as project components when a repository's checkout root is
-  that user's home. Before, only the agent's own home was left out, so a dotfiles repository at
-  `/home/alice` was read once in her user row and again in each project row below it, and its
-  folders were watched twice. The agent leaves out the homes it assesses, at start and at each
-  policy reload, and the reload that follows a change of the user list updates the set.
+  skills, agents and commands folders, `settings.local.json` or `loop.md` as project components
+  when a repository's checkout root is that user's home. Before, only the agent's own home was
+  left out, so a dotfiles repository at `/home/alice` was read once in her user row and again in
+  each project row below it, and its files were watched twice. The agent leaves out the homes it
+  assesses, at start and at each policy reload, and the reload that follows a change of the user
+  list updates the set.
 
 ### Documentation
 
