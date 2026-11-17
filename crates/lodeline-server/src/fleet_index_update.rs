@@ -63,7 +63,39 @@ fn put_source(
             top.insert(*t, (*seen, r));
         }
     }
-    host.current_risk = top.into_iter().map(|(t, r)| (t, r.1.clone())).collect();
+    host.current_risk = top
+        .into_iter()
+        .map(|(t, r)| {
+            let mut entry = r.1.clone();
+            entry.config_found = config_found_rollup(&host.risk_sources, t);
+            (t, entry)
+        })
+        .collect();
+}
+
+/// Whether a tool's config is present on the host, over all of its sources:
+/// `true` when any source says so, `false` only when every source says so.
+/// A source whose parser failed reads a file that exists, so it counts as
+/// `true`. One source that does not say leaves the tool unknown.
+fn config_found_rollup(
+    sources: &std::collections::HashMap<RiskSourceKey, (OffsetDateTime, SourceState)>,
+    tool: lodeline_core::event::AiTool,
+) -> Option<bool> {
+    let mut all_false = true;
+    for ((t, ..), (_, state)) in sources {
+        if *t != tool {
+            continue;
+        }
+        match state {
+            SourceState::Stale(..) | SourceState::Unassessed(_) => return Some(true),
+            SourceState::Assessed(r) => match r.config_found {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => all_false = false,
+            },
+        }
+    }
+    all_false.then_some(false)
 }
 
 /// Apply one event to a HostSummary. Caller (FleetIndex in Task 5 / boot_rebuild
@@ -122,6 +154,7 @@ pub fn apply_event_received_between(
             user,
             rule_pack_id,
             tool_label,
+            config_found,
         } => {
             let entry = RiskEntry {
                 controls: controls.clone(),
@@ -134,6 +167,7 @@ pub fn apply_event_received_between(
                 user: user.clone(),
                 rule_pack_id: rule_pack_id.clone(),
                 tool_label: tool_label.clone(),
+                config_found: *config_found,
             };
             let key = (*tool, scope.clone(), user.clone(), rule_pack_id.clone());
             put_source(host, event, earliest, latest, key, |_| {
@@ -275,6 +309,7 @@ mod tests {
                 rule_pack_id: None,
                 tool_label: None,
                 user: None,
+                config_found: None,
             }
         }
 
@@ -431,6 +466,7 @@ mod tests {
                 rule_pack_id: None,
                 tool_label: None,
                 user: None,
+                config_found: None,
             },
             Severity::Warn,
             datetime!(2026-05-17 12:00 UTC),
@@ -461,6 +497,7 @@ mod tests {
                     rule_pack_id: pack.map(Into::into),
                     tool_label: None,
                     user: Some(user.into()),
+                    config_found: None,
                 },
                 Severity::Warn,
                 datetime!(2026-05-17 12:00 UTC) + time::Duration::minutes(minutes),
@@ -505,6 +542,7 @@ mod tests {
                     rule_pack_id: None,
                     tool_label: None,
                     user: Some(user.into()),
+                    config_found: None,
                 },
                 Severity::Warn,
                 ts,
@@ -687,6 +725,7 @@ mod tests {
                     rule_pack_id: None,
                     tool_label: None,
                     user: None,
+                    config_found: None,
                 },
                 Severity::Warn,
                 t,
@@ -765,6 +804,7 @@ mod tests {
                     rule_pack_id: None,
                     tool_label: None,
                     user: None,
+                    config_found: None,
                 },
                 Severity::Warn,
                 t,
@@ -772,5 +812,142 @@ mod tests {
         );
         assert_eq!(h.counts_24h.sum_alerts(), 0);
         assert_eq!(h.counts_24h.sum_warn(), 1);
+    }
+
+    fn config_reading(tool: AiTool, user: &str, config_found: Option<bool>, minutes: i64) -> Event {
+        ev(
+            Evidence::AiGuardRiskAssessed {
+                controls: None,
+                tool,
+                scope: AiGuardScope::UserGlobal,
+                score: 0.0,
+                bucket: AiGuardBucket::Low,
+                reasons: vec![],
+                is_reattestation: false,
+                rule_pack_id: None,
+                tool_label: None,
+                user: Some(user.into()),
+                config_found,
+            },
+            Severity::Info,
+            datetime!(2026-05-17 12:00 UTC) + time::Duration::minutes(minutes),
+        )
+    }
+
+    fn rolled_up(h: &HostSummary, tool: AiTool) -> Option<bool> {
+        h.current_risk[&tool].config_found
+    }
+
+    #[test]
+    fn config_found_is_false_only_when_every_reading_says_false() {
+        let mut h = HostSummary::new("h".into());
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "alice", Some(false), 0),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(false));
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "bob", Some(false), 1),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(false));
+    }
+
+    #[test]
+    fn config_found_is_true_when_any_reading_says_true() {
+        let mut h = HostSummary::new("h".into());
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "alice", Some(false), 0),
+        );
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "bob", Some(true), 1),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(true));
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "bob", Some(false), 2),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(false), "bob removed it");
+    }
+
+    #[test]
+    fn config_found_true_survives_a_newer_false_reading() {
+        let mut h = HostSummary::new("h".into());
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "bob", Some(true), 0),
+        );
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "alice", Some(false), 1),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(true));
+    }
+
+    #[test]
+    fn config_found_stays_unknown_while_any_reading_is_unknown() {
+        let mut h = HostSummary::new("h".into());
+        apply(&mut h, &config_reading(AiTool::Gemini, "alice", None, 0));
+        assert_eq!(rolled_up(&h, AiTool::Gemini), None);
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "bob", Some(false), 1),
+        );
+        assert_eq!(
+            rolled_up(&h, AiTool::Gemini),
+            None,
+            "an older agent's reading hides a false"
+        );
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "carol", Some(true), 2),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(true));
+    }
+
+    #[test]
+    fn config_found_is_rolled_up_per_tool() {
+        let mut h = HostSummary::new("h".into());
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "alice", Some(false), 0),
+        );
+        apply(
+            &mut h,
+            &config_reading(AiTool::Codex, "alice", Some(true), 1),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(false));
+        assert_eq!(rolled_up(&h, AiTool::Codex), Some(true));
+    }
+
+    #[test]
+    fn a_stale_source_counts_as_config_found() {
+        let mut h = HostSummary::new("h".into());
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "alice", Some(false), 0),
+        );
+        apply(
+            &mut h,
+            &ev(
+                Evidence::AiGuardAssessFailed {
+                    tool: AiTool::Gemini,
+                    scope: AiGuardScope::UserGlobal,
+                    user: Some("alice".into()),
+                    rule_pack_id: None,
+                    tool_label: None,
+                    error_kind: "parse".into(),
+                    path: "/Users/alice/.gemini/settings.json".into(),
+                    failing_since: datetime!(2026-05-17 12:01 UTC),
+                    last_assessed_ts: Some(datetime!(2026-05-17 12:00 UTC)),
+                    is_reattestation: false,
+                },
+                Severity::Warn,
+                datetime!(2026-05-17 12:01 UTC),
+            ),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(true));
     }
 }

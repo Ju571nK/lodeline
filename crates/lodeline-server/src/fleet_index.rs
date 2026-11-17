@@ -27,6 +27,10 @@ pub struct RiskEntry {
     pub user: Option<String>,
     pub rule_pack_id: Option<String>,
     pub tool_label: Option<String>,
+    /// The event's `config_found`. In `current_risk` it is the tool's rollup
+    /// over every source (see `put_source`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_found: Option<bool>,
 }
 
 /// A source whose parser failed (#333): the latest `AiGuardAssessFailed`.

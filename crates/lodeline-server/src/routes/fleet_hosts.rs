@@ -174,6 +174,7 @@ fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {
             let risk = api::ToolRisk {
                 assessed_ts: rfc3339(entry.assessed_ts),
                 bucket: wire_str(&entry.bucket),
+                config_found: entry.config_found,
                 score: f64::from(entry.score),
                 source: Some(risk_source(entry)),
                 unassessed_since: h.unassessed_since(*tool).map(rfc3339),
@@ -313,6 +314,7 @@ fn render_assessment(
         user: _,
         rule_pack_id: _,
         tool_label: _,
+        config_found,
     } = entry;
     let controls = controls.as_ref().map(|cs| {
         cs.iter()
@@ -336,6 +338,7 @@ fn render_assessment(
     api::AiGuardAssessment {
         assessed_ts: rfc3339(*assessed_ts),
         bucket: wire_str(bucket),
+        config_found: *config_found,
         controls,
         is_reattestation: *is_reattestation,
         reasons: reasons

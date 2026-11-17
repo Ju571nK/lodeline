@@ -268,6 +268,45 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_rolls_config_found_up_as_live_ingest_does() {
+        use lodeline_core::event::AiTool;
+        let with = |tool: &str, user: &str, found: Option<bool>, ts: &str| {
+            let mut line = reading(tool, user, ts);
+            if let Some(f) = found {
+                line["evidence"]["config_found"] = json!(f);
+            }
+            line
+        };
+        let lines = [
+            with("gemini", "alice", Some(false), "2026-05-17T12:00:00Z"),
+            with("gemini", "bob", Some(true), "2026-05-17T12:01:00Z"),
+            with("gemini", "alice", Some(false), "2026-05-17T12:02:00Z"),
+            with("cursor", "alice", Some(false), "2026-05-17T12:03:00Z"),
+            with("codex", "alice", None, "2026-05-17T12:04:00Z"),
+        ];
+        let dir = tempdir().unwrap();
+        let host_dir = dir.path().join(HID);
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let file = host_dir.join("received-2026-05-17.jsonl");
+        let mut live = HostSummary::new(HID.into());
+        for line in &lines {
+            write_line(&file, line);
+            let e: Event = serde_json::from_value(line.clone()).unwrap();
+            apply_event(&mut live, &e, e.ts);
+        }
+        let rebuilt = rebuild_from_jsonl(dir.path()).unwrap();
+        let found = |h: &HostSummary, t: AiTool| h.current_risk[&t].config_found;
+        for (tool, want) in [
+            (AiTool::Gemini, Some(true)),
+            (AiTool::Cursor, Some(false)),
+            (AiTool::Codex, None),
+        ] {
+            assert_eq!(found(&live, tool), want, "live {tool:?}");
+            assert_eq!(found(&rebuilt[HID], tool), want, "rebuild {tool:?}");
+        }
+    }
+
+    #[test]
     fn rebuild_keeps_a_reading_live_ingest_keeps() {
         use lodeline_core::event::AiTool;
         // Codex at T. Claude Code arrives at T+25h, just after midnight, dated

@@ -172,6 +172,11 @@ pub struct CurrentRisk {
 pub struct ToolRisk {
     pub assessed_ts: String,
     pub bucket: String,
+    /// `false` when no config of this tool exists on the host, `true` when
+    /// one does. Absent when the agents do not say, which older agents do
+    /// not, and from servers before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_found: Option<bool>,
     pub score: f64,
     /// Absent from servers before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +243,11 @@ pub struct AiGuard {
 pub struct AiGuardAssessment {
     pub assessed_ts: String,
     pub bucket: String,
+    /// `false` when no config of this tool exists on the host, `true` when
+    /// one does. Absent when the agents do not say, which older agents do
+    /// not, and from servers before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_found: Option<bool>,
     /// Absent when the agent did not report controls, which older agents do
     /// not; an empty list means it looked and found none.
     #[serde(default, skip_serializing_if = "Option::is_none")]

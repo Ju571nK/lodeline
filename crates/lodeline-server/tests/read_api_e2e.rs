@@ -902,3 +902,40 @@ async fn unknown_reason_kind_is_accepted_and_served_as_the_same_value() {
         "a rebuild must match live ingest"
     );
 }
+
+#[tokio::test]
+async fn by_tool_carries_config_found_only_when_known() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = build_router(state_with_token(dir.path(), "tok"));
+    let now = time::OffsetDateTime::now_utc();
+    let m = |mins: i64| now - time::Duration::minutes(mins);
+    let host = uuid::Uuid::now_v7().to_string();
+    let with_found = |tool: &str, user: &str, found: bool| {
+        let mut reading = ai_reading(tool, user, 0.0, "low");
+        reading["config_found"] = serde_json::json!(found);
+        reading
+    };
+    post_evidence(
+        &app,
+        &host,
+        &[
+            (m(5), with_found("gemini", "alice", false)),
+            (m(4), with_found("codex", "alice", false)),
+            (m(3), with_found("codex", "bob", true)),
+            (m(2), ai_reading("claude_code", "alice", 0.0, "low")),
+        ],
+    )
+    .await;
+    let [row, detail, _] = host_views(&app, &host).await;
+    for by_tool in [
+        &row["current_risk"]["by_tool"],
+        &detail["ai_guard"]["by_tool"],
+    ] {
+        assert_eq!(by_tool["gemini"]["config_found"], false, "{by_tool}");
+        assert_eq!(by_tool["codex"]["config_found"], true, "{by_tool}");
+        assert!(
+            by_tool["claude_code"].get("config_found").is_none(),
+            "{by_tool}"
+        );
+    }
+}
