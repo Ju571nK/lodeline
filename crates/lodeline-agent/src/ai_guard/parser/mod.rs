@@ -122,7 +122,8 @@ pub trait AiGuardParser: Send + Sync {
 ///
 /// A path is missing only when its stat says not found or not a directory; any
 /// other error (permission, I/O) means something is there. A glob is judged by
-/// the folder before its first wildcard.
+/// the folder before its first wildcard, and a glob with no folder part is
+/// missing.
 pub(crate) fn paths_found(paths: &[PathBuf]) -> Option<bool> {
     if paths.is_empty() {
         return None;
@@ -131,7 +132,11 @@ pub(crate) fn paths_found(paths: &[PathBuf]) -> Option<bool> {
 }
 
 fn path_present(path: &Path) -> bool {
-    match glob_folder(path).symlink_metadata() {
+    let root = glob_root_dir(path);
+    if root != path && !has_folder_part(path) {
+        return false;
+    }
+    match root.symlink_metadata() {
         Ok(_) => true,
         Err(e) => !matches!(
             e.kind(),
@@ -140,15 +145,31 @@ fn path_present(path: &Path) -> bool {
     }
 }
 
-fn glob_folder(path: &Path) -> PathBuf {
+/// A glob with no separator before its first wildcard, such as `*.json`, names
+/// no folder. Watched paths are absolute, so it is judged missing instead of
+/// by whatever the agent's current directory holds.
+fn has_folder_part(path: &Path) -> bool {
     let text = path.to_string_lossy();
-    let Some(wildcard) = text.find(['*', '?', '[', ']', '{', '}']) else {
-        return path.to_path_buf();
-    };
-    let head = &text[..wildcard];
-    match head.rfind(std::path::is_separator) {
-        Some(sep) => PathBuf::from(&head[..=sep]),
-        None => PathBuf::from("."),
+    text.find(GLOB_CHARS)
+        .is_some_and(|i| text[..i].contains(['/', '\\']))
+}
+
+const GLOB_CHARS: [char; 6] = ['*', '?', '[', ']', '{', '}'];
+
+/// The directory prefix of a (possibly glob) path: everything before the path
+/// segment that holds the first glob metacharacter. `.cursor/rules/**` becomes
+/// `.cursor/rules`; a plain path with no glob is returned unchanged. Used to
+/// pick the recursive watch root for a glob target (#156) and to judge whether
+/// a glob's folder exists.
+pub(crate) fn glob_root_dir(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.find(GLOB_CHARS) {
+        Some(idx) => {
+            let head = &s[..idx];
+            let cut = head.rfind(['/', '\\']).map(|i| &s[..i]).unwrap_or(head);
+            PathBuf::from(cut)
+        }
+        None => p.to_path_buf(),
     }
 }
 
@@ -332,6 +353,12 @@ mod tests {
         let file = dir.path().join("file");
         std::fs::write(&file, "x").unwrap();
         assert_eq!(paths_found(&[file.join("settings.json")]), Some(false));
+    }
+
+    #[test]
+    fn a_glob_with_no_folder_part_is_not_found() {
+        assert_eq!(paths_found(&[PathBuf::from("*.nothing")]), Some(false));
+        assert_eq!(paths_found(&[PathBuf::from("c*.json")]), Some(false));
     }
 
     #[test]

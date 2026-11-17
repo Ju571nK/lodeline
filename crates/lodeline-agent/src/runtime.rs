@@ -1,5 +1,6 @@
 //! Pipeline assembly. Owns channel topology and task spawning.
 
+use crate::ai_guard::parser::glob_root_dir;
 use crate::{
     debouncer,
     hasher::{HashedEvent, TargetLookup},
@@ -1227,22 +1228,6 @@ fn is_root_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
                     .to_string_lossy()
                     .to_string(),
             ]
-}
-
-/// The directory prefix of a (possibly glob) path: everything before the path
-/// segment that holds the first glob metacharacter. `.cursor/rules/**` →
-/// `.cursor/rules`; a plain path with no glob is returned unchanged. Used to
-/// pick the recursive watch root for a glob target (#156).
-fn glob_root_dir(p: &Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    match s.find(['*', '?', '[', ']', '{', '}']) {
-        Some(idx) => {
-            let head = &s[..idx];
-            let cut = head.rfind(['/', '\\']).map(|i| &s[..i]).unwrap_or(head);
-            PathBuf::from(cut)
-        }
-        None => p.to_path_buf(),
-    }
 }
 
 /// How often a running agent re-lists the host's users (#333).

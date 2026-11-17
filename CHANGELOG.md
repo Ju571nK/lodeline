@@ -19,9 +19,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   agent can show `true` for a tool whose parser failed. The console does not show it yet.
 - The agent sets `config_found` on every `ai_guard_risk_assessed` it sends, for user-global,
   application, project and rule pack subjects. It is `true` when any path the parser watches
-  exists (a managed or system file counts, and so does an empty `scheduled-tasks` folder for
-  Claude Code), `false` when every one is missing, and `true` on a stat error other than not
-  found. A project subject also counts the user-level files it reads. The field joins the agent's
+  exists (a managed or system file counts, and so does an empty watched folder, such as
+  `scheduled-tasks` or `skills`), `false` when every one is missing, and `true` on a stat error
+  other than not found. `false` means no watched config file was found, not that the tool is not
+  installed. A project subject also counts the user-level files it reads. The field joins the agent's
   change test, so a tool that appears with benign content is reported at once, not at the next
   heartbeat. `lodeline show events` prints it.
 
