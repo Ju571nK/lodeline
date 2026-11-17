@@ -87,6 +87,9 @@ pub struct CachedAssessment {
     /// #147 — the dangerous-toggle kinds present at this assessment. Compared
     /// against the next assessment's set to detect OFF→ON transitions (drift).
     pub dangerous_toggles: std::collections::BTreeSet<String>,
+    /// Whether any watched config existed at this assessment. Part of the
+    /// change test, so a tool that appears with benign content re-emits at once.
+    pub config_found: Option<bool>,
 }
 
 /// Bundle of shared dependencies the task needs at construction. Built once
@@ -294,6 +297,7 @@ async fn eval_and_maybe_emit(
     let rubric_snapshot = ctx.rubric.read().clone();
     let score = rubric_snapshot.score(&reasons);
     let bucket = rubric::bucket(score);
+    let config_found = parser.config_found(&home.dir);
     let reasons_hash = rubric::canonical_hash(&reasons);
     let SourceState {
         reading: prev,
@@ -304,7 +308,11 @@ async fn eval_and_maybe_emit(
     let changed = failure.is_some()
         || prev
             .as_ref()
-            .map(|p| p.reasons_blake3 != reasons_hash || p.controls_blake3 != controls_hash)
+            .map(|p| {
+                p.reasons_blake3 != reasons_hash
+                    || p.controls_blake3 != controls_hash
+                    || p.config_found != config_found
+            })
             .unwrap_or(true);
     if !changed && !force_emit {
         return;
@@ -360,6 +368,7 @@ async fn eval_and_maybe_emit(
                 reasons_count: reasons.len(),
                 last_assessed_ts: now,
                 dangerous_toggles: new_toggles,
+                config_found,
             }),
             failure: None,
         },
@@ -398,7 +407,7 @@ async fn eval_and_maybe_emit(
             rule_pack_id: key.2.clone(),
             tool_label: parser.tool_label().map(|s| s.to_string()),
             user: key.3.clone(),
-            config_found: None,
+            config_found,
         },
     )
     .await;

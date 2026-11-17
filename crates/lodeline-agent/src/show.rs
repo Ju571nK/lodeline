@@ -519,9 +519,17 @@ fn evidence_summary(e: &lodeline_core::event::Evidence) -> (&'static str, String
         Evidence::SenderLagCritical { lag_events, .. } => {
             ("sender_lag_critical", format!("events={lag_events}"))
         }
-        Evidence::AiGuardRiskAssessed { tool, bucket, .. } => (
+        Evidence::AiGuardRiskAssessed {
+            tool,
+            bucket,
+            config_found,
+            ..
+        } => (
             "ai_guard_risk_assessed",
-            format!("tool={tool:?} bucket={bucket:?}"),
+            match config_found {
+                Some(found) => format!("tool={tool:?} bucket={bucket:?} config_found={found}"),
+                None => format!("tool={tool:?} bucket={bucket:?}"),
+            },
         ),
         Evidence::AiGuardToggleDrift { tool, toggle, .. } => (
             "ai_guard_toggle_drift",
@@ -1148,5 +1156,29 @@ mod tests {
             accepted,
             "claude-code, codex, claude-desktop, continue-dev, gemini, cursor, antigravity, grok, other"
         );
+    }
+
+    #[test]
+    fn risk_summary_line_prints_config_found_only_when_known() {
+        use lodeline_core::event::{AiGuardBucket, AiGuardScope, AiTool, Evidence};
+        let line = |config_found| {
+            evidence_summary(&Evidence::AiGuardRiskAssessed {
+                controls: None,
+                tool: AiTool::Gemini,
+                scope: AiGuardScope::UserGlobal,
+                score: 0.0,
+                bucket: AiGuardBucket::Low,
+                reasons: vec![],
+                is_reattestation: false,
+                rule_pack_id: None,
+                tool_label: None,
+                user: None,
+                config_found,
+            })
+            .1
+        };
+        assert!(line(Some(false)).ends_with("config_found=false"));
+        assert!(line(Some(true)).ends_with("config_found=true"));
+        assert!(!line(None).contains("config_found"));
     }
 }

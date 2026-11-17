@@ -61,9 +61,11 @@ pub trait AiGuardParser: Send + Sync {
     /// this parser.
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf>;
 
-    /// Whether any config this parser watches exists for `home_dir`.
-    fn config_found(&self, _home_dir: &Path) -> Option<bool> {
-        None
+    /// Whether any config this parser watches exists for `home_dir`, so a
+    /// reading can say "looked, nothing there" apart from "looked, clean".
+    /// `None` when the parser watches nothing.
+    fn config_found(&self, home_dir: &Path) -> Option<bool> {
+        paths_found(&self.watched_paths(home_dir))
     }
 
     /// Read current state from disk and return reasons. Empty Vec = clean.
@@ -117,8 +119,37 @@ pub trait AiGuardParser: Send + Sync {
 }
 
 /// Whether any of `paths` exists. See `AiGuardParser::config_found`.
-pub(crate) fn paths_found(_paths: &[PathBuf]) -> Option<bool> {
-    None
+///
+/// A path is missing only when its stat says not found or not a directory; any
+/// other error (permission, I/O) means something is there. A glob is judged by
+/// the folder before its first wildcard.
+pub(crate) fn paths_found(paths: &[PathBuf]) -> Option<bool> {
+    if paths.is_empty() {
+        return None;
+    }
+    Some(paths.iter().any(|p| path_present(p)))
+}
+
+fn path_present(path: &Path) -> bool {
+    match glob_folder(path).symlink_metadata() {
+        Ok(_) => true,
+        Err(e) => !matches!(
+            e.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
+fn glob_folder(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(wildcard) = text.find(['*', '?', '[', ']', '{', '}']) else {
+        return path.to_path_buf();
+    };
+    let head = &text[..wildcard];
+    match head.rfind(std::path::is_separator) {
+        Some(sep) => PathBuf::from(&head[..=sep]),
+        None => PathBuf::from("."),
+    }
 }
 
 /// Read + parse a JSON config file with the AI Guard's "absent = clean"
@@ -277,7 +308,7 @@ mod tests {
         let present = dir.path().join("present.json");
         std::fs::write(&present, "{}").unwrap();
         let missing = dir.path().join("missing.json");
-        assert_eq!(paths_found(&[missing.clone()]), Some(false));
+        assert_eq!(paths_found(std::slice::from_ref(&missing)), Some(false));
         assert_eq!(paths_found(&[missing, present]), Some(true));
     }
 
