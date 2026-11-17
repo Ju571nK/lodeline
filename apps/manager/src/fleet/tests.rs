@@ -515,7 +515,7 @@ fn current_risk(r: api::CurrentRisk) -> CurrentRisk {
                         api::ToolRisk {
                             assessed_ts,
                             bucket,
-                            config_found: _,
+                            config_found,
                             score,
                             source,
                             unassessed_since,
@@ -528,6 +528,7 @@ fn current_risk(r: api::CurrentRisk) -> CurrentRisk {
                                 score,
                                 bucket,
                                 assessed_ts: ts,
+                                config_found,
                                 source: source.map(risk_source),
                                 unassessed_since: unassessed_since.map(time),
                             },
@@ -684,7 +685,7 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
     let api::AiGuardAssessment {
         assessed_ts,
         bucket,
-        config_found: _,
+        config_found,
         controls,
         is_reattestation,
         reasons,
@@ -714,6 +715,7 @@ fn assessment(a: api::AiGuardAssessment) -> ToolAiGuard {
         score,
         bucket,
         assessed_ts: time(assessed_ts),
+        config_found,
         is_reattestation,
         scope: raw(scope),
         reasons: Some(reasons.into_iter().map(raw).collect()),

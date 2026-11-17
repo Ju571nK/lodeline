@@ -478,6 +478,10 @@ pub struct ToolRisk {
     pub score: f64,
     pub bucket: String,
     pub assessed_ts: GoTime,
+    /// Relayed as written, so a missing field (an older server) stays missing and `false` stays
+    /// `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_found: Option<bool>,
     /// Relayed as written, so a missing `source` (an older server) stays distinct from one with
     /// `user: null`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -601,6 +605,10 @@ pub struct ToolAiGuard {
     pub is_reattestation: bool,
     pub scope: Raw,
     pub reasons: Option<Vec<Raw>>,
+    /// Relayed as written, so a missing field (an older server) stays missing and `false` stays
+    /// `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_found: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Raw>,
     #[serde(skip_serializing_if = "Option::is_none")]

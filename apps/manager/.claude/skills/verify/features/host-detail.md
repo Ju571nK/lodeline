@@ -9,6 +9,7 @@ The host page shows one host's metadata, its AI Guard risk, its policy and agent
 - `host-not-found` shows a panel for an unknown id.
 - `host-null-heavy` renders a disconnected host with no metadata and no assessments.
 - `host-observed-controls` shows the observed settings that the host API returns.
+- `host-no-config` lists quiet tools whose `config_found` is `false` in one "No config found (n)" line under the AI Guard panel, outside the "Low (n)" strip. `eve-workstation` (`...555555555555`) shows `Gemini` there and `Cursor` in the Low strip.
 
 ## How to get to it (user POV)
 
@@ -25,7 +26,7 @@ Preconditions:
 - For the API steps, log in for the API as [Login and session](./login-session.md) shows.
 - The fixtures hold `alice-mbp` as `5a7c3e91-aaaa-bbbb-cccc-111111111111` and a host with a null hostname as `5a7c3e91-aaaa-bbbb-cccc-444444444444`. `carol-dev` (`...333333333333`) has a stale score, and `frank-ci` (`...666666666666`) has only a failing source and one `ai_guard_assess_failed` event.
 
-- **Browser journey.** Run `drive.sh e2e "$RUN" host-browser tests/e2e/fleet.spec.ts -g 'hostname opens|host detail shows|unknown host id|null-heavy|observed controls survive'`. Exit code `0`, and the runner prints `6 passed`: the `setup` login and 5 tests.
+- **Browser journey.** Run `drive.sh e2e "$RUN" host-browser tests/e2e/fleet.spec.ts -g 'hostname opens|host detail shows|host detail puts a tool|unknown host id|null-heavy|observed controls survive'`. Exit code `0`, and the runner prints `7 passed`: the `setup` login and 6 tests.
 - **Score sources and unassessed parsers.** Run `drive.sh e2e "$RUN" host-sources tests/e2e/fleet.spec.ts -g 'host panel shows|only failing sources'`. Exit code `0`, and the runner prints `3 passed`. The second test opens the `ai_guard_assess_failed` event from the host's recent events.
 - **Host read.** Run `drive.sh api "$RUN" host GET /api/v1/fleet/hosts/5a7c3e91-aaaa-bbbb-cccc-111111111111`. Status `200` with `hostname` set to `alice-mbp`.
 - **Null-heavy host.** Run `drive.sh api "$RUN" host-null GET /api/v1/fleet/hosts/5a7c3e91-aaaa-bbbb-cccc-444444444444`. Status `200` with `hostname` set to `null`.

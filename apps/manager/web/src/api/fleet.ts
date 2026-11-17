@@ -457,6 +457,8 @@ export interface ToolAiGuard {
   reasons: ReasonLike[] | null;
   source?: RiskSource;
   unassessed_since?: string;
+  /** `false`: no config file of this tool was found on the host. Absent: not reported. */
+  config_found?: boolean;
 }
 
 /**
@@ -479,6 +481,7 @@ export interface ToolRisk {
   source?: RiskSource;
   /** The parser behind this reading has failed since then; the score is the last good one. */
   unassessed_since?: string;
+  config_found?: boolean;
 }
 
 /** One source whose parser fails (§5.3 `ai_guard_unassessed`). */
