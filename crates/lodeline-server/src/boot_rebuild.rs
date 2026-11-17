@@ -307,6 +307,50 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_counts_a_failed_only_source_as_config_found() {
+        use lodeline_core::event::AiTool;
+        let mut ok = reading("gemini", "alice", "2026-05-17T12:00:00Z");
+        ok["evidence"]["config_found"] = json!(false);
+        let failed = json!({
+            "schema_version": 1,
+            "event_id": uuid::Uuid::now_v7().to_string(),
+            "ts": "2026-05-17T12:01:00Z",
+            "host_id": HID,
+            "agent_version": "0.5.0",
+            "severity": "warn",
+            "source": {"kind": "agent"},
+            "subject": {"kind": "self"},
+            "evidence": {
+                "kind": "ai_guard_assess_failed",
+                "tool": "gemini",
+                "scope": {"kind": "user_global"},
+                "user": "bob",
+                "error_kind": "parse",
+                "path": "/Users/bob/.gemini/settings.json",
+                "failing_since": "2026-05-17T12:01:00Z",
+                "is_reattestation": false
+            },
+            "target_id": null
+        });
+        let dir = tempdir().unwrap();
+        let host_dir = dir.path().join(HID);
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let file = host_dir.join("received-2026-05-17.jsonl");
+        let mut live = HostSummary::new(HID.into());
+        for line in [&ok, &failed] {
+            write_line(&file, line);
+            let e: Event = serde_json::from_value(line.clone()).unwrap();
+            apply_event(&mut live, &e, e.ts);
+        }
+        let rebuilt = rebuild_from_jsonl(dir.path()).unwrap();
+        assert_eq!(live.current_risk[&AiTool::Gemini].config_found, Some(true));
+        assert_eq!(
+            rebuilt[HID].current_risk[&AiTool::Gemini].config_found,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn rebuild_keeps_a_reading_live_ingest_keeps() {
         use lodeline_core::event::AiTool;
         // Codex at T. Claude Code arrives at T+25h, just after midnight, dated

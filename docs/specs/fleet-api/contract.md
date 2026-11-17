@@ -324,9 +324,11 @@ Notes:
   "not found", not "looked and clean". `true` means at least one exists.
   The server derives it from all of the tool's current sources, not only
   the one `source` names: `true` when any source says `true` or has failed,
-  `false` only when every source says `false`. The field is absent when any
-  source does not say, which older agents do not, and from servers before
-  this field existed.
+  `false` only when every source says `false`. A failed or stale source
+  counts as `true` even when its agent sends no field, so a host with an
+  older agent can show `true` for a tool whose parser failed. Otherwise the
+  field is absent when any source does not say, which older agents do not,
+  and from servers before this field existed.
 - `ai_guard_unassessed` lists, per tool, the sources whose latest report is an
   `ai_guard_assess_failed` event, whether or not the source has a reading.
   It is `null` when no source is failing, and absent from servers before this

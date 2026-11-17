@@ -950,4 +950,34 @@ mod tests {
         );
         assert_eq!(rolled_up(&h, AiTool::Gemini), Some(true));
     }
+
+    #[test]
+    fn a_failed_only_source_counts_as_config_found() {
+        let mut h = HostSummary::new("h".into());
+        apply(
+            &mut h,
+            &config_reading(AiTool::Gemini, "alice", Some(false), 0),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(false));
+        apply(
+            &mut h,
+            &ev(
+                Evidence::AiGuardAssessFailed {
+                    tool: AiTool::Gemini,
+                    scope: AiGuardScope::UserGlobal,
+                    user: Some("bob".into()),
+                    rule_pack_id: None,
+                    tool_label: None,
+                    error_kind: "parse".into(),
+                    path: "/Users/bob/.gemini/settings.json".into(),
+                    failing_since: datetime!(2026-05-17 12:01 UTC),
+                    last_assessed_ts: None,
+                    is_reattestation: false,
+                },
+                Severity::Warn,
+                datetime!(2026-05-17 12:01 UTC),
+            ),
+        );
+        assert_eq!(rolled_up(&h, AiTool::Gemini), Some(true));
+    }
 }

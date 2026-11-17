@@ -15,7 +15,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   server rolls it up per tool on a host and the fleet API returns it as `config_found` on each
   `by_tool` entry of `GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}`, omitted when
   unknown. A tool is `false` only when every source says `false`, and `true` when any source says
-  `true` or has failed. The agent does not send the field yet, and the console does not show it.
+  `true` or has failed or gone stale, also when its agent sends no field, so a host with an older
+  agent can show `true` for a tool whose parser failed. The agent does not send the field yet, and the console does not show it.
 
 ### Fixed
 
