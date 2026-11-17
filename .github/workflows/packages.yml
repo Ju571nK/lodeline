@@ -41,7 +41,7 @@ jobs:
       - name: install build deps
         # rpm-build provides /usr/lib/rpm/find-requires for packaging/build.sh (#234).
         # openssl is a lodeline-server requirement, and rpm -i does not resolve it.
-        run: dnf -y install git gcc perl rpm-build openssl
+        run: dnf -y install bash git gcc perl rpm-build openssl
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

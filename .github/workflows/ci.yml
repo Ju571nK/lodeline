@@ -141,7 +141,7 @@ jobs:
     container: rockylinux:9
     steps:
       - name: install build deps
-        run: dnf -y install git gcc perl
+        run: dnf -y install bash git gcc perl
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
