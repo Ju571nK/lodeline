@@ -16,6 +16,8 @@ interface Props {
  * AI Guard per-tool risk (UI/UX §5.3). Risky tools (bucket > low) get a card
  * with their reasons inline; quiet (low/0) tools collapse into one strip so
  * the signal isn't drowned out — most tools are quiet in real fleets.
+ * A quiet tool whose config the agent did not find (`config_found === false`)
+ * is a plain line instead, so absence is not read as a clean score.
  */
 export function AiGuardByTool({ byTool, unassessed = {} }: Props) {
   const tools = Object.entries(byTool);
@@ -30,7 +32,8 @@ export function AiGuardByTool({ byTool, unassessed = {} }: Props) {
   // A stale low score stays out of the collapsed strip, so it never reads as quiet.
   const isQuiet = (t: ToolAiGuard) => t.bucket === 'low' && !t.unassessed_since;
   const risky = tools.filter(([, t]) => !isQuiet(t)).sort((a, b) => b[1].score - a[1].score);
-  const quiet = tools.filter(([, t]) => isQuiet(t));
+  const noConfig = tools.filter(([, t]) => isQuiet(t) && t.config_found === false);
+  const quiet = tools.filter(([, t]) => isQuiet(t) && t.config_found !== false);
 
   return (
     <Section>
@@ -56,6 +59,12 @@ export function AiGuardByTool({ byTool, unassessed = {} }: Props) {
             ))}
           </div>
         </details>
+      )}
+      {noConfig.length > 0 && (
+        <p className="mt-3 text-xs text-text-muted">
+          No config found ({noConfig.length}):{' '}
+          {noConfig.map(([tool]) => humanTool(tool)).join(' · ')}
+        </p>
       )}
       {failing.length > 0 && <UnassessedSources failing={failing} />}
     </Section>

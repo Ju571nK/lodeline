@@ -1248,6 +1248,28 @@
                 "kind": "user_global"
               },
               "score": 8.4
+            },
+            "cursor": {
+              "assessed_ts": -600,
+              "bucket": "low",
+              "config_found": true,
+              "is_reattestation": false,
+              "reasons": null,
+              "scope": {
+                "kind": "user_global"
+              },
+              "score": 0
+            },
+            "gemini": {
+              "assessed_ts": -600,
+              "bucket": "low",
+              "config_found": false,
+              "is_reattestation": false,
+              "reasons": null,
+              "scope": {
+                "kind": "user_global"
+              },
+              "score": 0
             }
           }
         },

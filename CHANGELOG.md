@@ -16,7 +16,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `by_tool` entry of `GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}`, omitted when
   unknown. A tool is `false` only when every source says `false`, and `true` when any source says
   `true` or has failed or gone stale, also when its agent sends no field, so a host with an older
-  agent can show `true` for a tool whose parser failed. The console does not show it yet.
+  agent can show `true` for a tool whose parser failed.
 - The agent sets `config_found` on every `ai_guard_risk_assessed` it sends, for user-global,
   application, project and rule pack subjects. It is `true` when any path the parser watches
   exists (a managed or system file counts, and so does an empty watched folder, such as
@@ -25,6 +25,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   installed. A project subject also counts the user-level files it reads. The field joins the agent's
   change test, so a tool that appears with benign content is reported at once, not at the next
   heartbeat. `lodeline show events` prints it.
+- The console host page shows a quiet tool whose `config_found` is `false` in one muted line,
+  "No config found (n)", and leaves it out of the "Low (n)" strip. A tool with `true`, or with
+  no field because its server or agent is older, shows as before. The console relays the field
+  as the server sent it.
 
 ### Fixed
 

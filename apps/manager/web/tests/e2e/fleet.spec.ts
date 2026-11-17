@@ -108,6 +108,21 @@ test.describe('fleet pages', () => {
     await expect(page.getByText(/Recent events/i)).toBeVisible();
   });
 
+  test('host detail puts a tool with no config in its own line, not the Low strip', async ({
+    page,
+  }) => {
+    await openAlerts(page);
+    await page.goto('/hosts/5a7c3e91-aaaa-bbbb-cccc-555555555555');
+    await expect(page.getByText('No config found (1): Gemini', { exact: true })).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(page.locator('summary').filter({ hasText: 'Low (1): Cursor' })).toBeVisible();
+    await page.screenshot({
+      path: test.info().outputPath('host-no-config-found.png'),
+      fullPage: true,
+    });
+  });
+
   test('unknown host id shows the not-found panel', async ({ page }) => {
     await openAlerts(page);
     await page.goto('/hosts/00000000-0000-0000-0000-000000000000');
