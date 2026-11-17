@@ -208,7 +208,8 @@ jobs:
       - name: Install musl tools + packagers
         run: |
           sudo apt-get update && sudo apt-get install -y musl-tools
-          cargo install cargo-deb cargo-generate-rpm
+          cargo install --locked --version 3.8.0 cargo-deb
+          cargo install --locked --version 0.21.1 cargo-generate-rpm
 
       # Static (musl) binaries so the .rpm/.deb run on any glibc — incl. RHEL/Rocky 9.
       # build.sh cross-builds into target/<triple>/release, stages into

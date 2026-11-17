@@ -49,7 +49,7 @@ jobs:
           key: rocky9-rpm
       - name: build .rpm
         run: |
-          cargo install cargo-generate-rpm --locked
+          cargo install --locked --version 0.21.1 cargo-generate-rpm
           packaging/build.sh rpm
       # GitHub's release downloads answer 5xx now and then, and a retry loop
       # cannot outlast it. Files are checked against SHA256SUMS after restore.
@@ -273,7 +273,7 @@ jobs:
           key: debian12
       - name: build .deb (all 5 packages)
         run: |
-          cargo install cargo-deb --locked
+          cargo install --locked --version 3.8.0 cargo-deb
           packaging/build.sh deb
       # GitHub's release downloads answer 5xx now and then, and a retry loop
       # cannot outlast it. Files are checked against SHA256SUMS after restore.
