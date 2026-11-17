@@ -138,7 +138,12 @@ jobs:
   rocky9:
     name: rockylinux:9 / stable
     runs-on: ubuntu-latest
-    container: rockylinux:9
+    container:
+      image: rockylinux:9
+      # The image sets no PATH, so the runner would build PATH from
+      # GITHUB_PATH entries alone and lose /usr/bin.
+      env:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
       - name: install build deps
         run: dnf -y install git gcc perl
