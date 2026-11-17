@@ -80,9 +80,31 @@ subjects (`tool`, `scope`):
 - `grok`, user global
 
 A tool with no user or managed config on the host gets a low assessment with no reasons. A parser
-that fails sends a failure report instead of an assessment. The event does not say the
-tool is absent, so a low score does not mean the tool is present. Lodeline measures posture and does
+that fails sends a failure report instead of an assessment. Lodeline measures posture and does
 not block by default.
+
+The event carries an optional boolean, `evidence.config_found`, that tells a low score for a tool
+with no config apart from a low score for a tool whose config was read:
+
+- `false`: none of the paths the parser watches exists for the assessed home. This means no watched
+  config file was found. It does not prove the tool is not installed.
+- `true`: at least one watched path exists. A managed or system file counts, and so does an empty
+  watched folder such as `scheduled-tasks` or `skills`.
+- absent: the agent did not say. Agents from before this field omit it, and so does a parser that
+  watches no path. A low score with the field absent does not tell you whether the tool is present.
+
+The agent sends a new event when `config_found` changes, so a tool that appears on the host is
+reported at once, not at the next 24h re-send.
+
+```
+trigger:  evidence.kind == "ai_guard_risk_assessed"
+          AND evidence.config_found == false
+action:   list by (host_id, evidence.tool), not an alert
+note:     these low scores mean no config found, not a clean config
+```
+
+Match `false` as a boolean. A source whose parser failed sends the failure event below, not this
+one.
 
 ## AI Guard assessment failed
 
