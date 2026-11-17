@@ -508,6 +508,27 @@ const SPOOL_GAP_PUMP_INTERVAL: Duration = Duration::from_secs(5);
 const SPOOL_VIEW_INTERVAL: Duration = Duration::from_secs(1);
 /// Registry entry retention pass, as often as the spool's maintenance.
 const ENTRY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
+/// Time spent in each phase of the shutdown after the signal, in order.
+struct PhaseClock {
+    last: tokio::time::Instant,
+    phases: Vec<(&'static str, Duration)>,
+}
+
+impl PhaseClock {
+    fn start(signaled: tokio::time::Instant) -> PhaseClock {
+        PhaseClock {
+            last: signaled,
+            phases: Vec::new(),
+        }
+    }
+
+    fn end(&mut self, phase: &'static str) {
+        let now = tokio::time::Instant::now();
+        self.phases.push((phase, now.duration_since(self.last)));
+        self.last = now;
+    }
+}
+
 /// Least time the audit drain gets after the relay drain used the grace: a
 /// drain that ends in milliseconds appends its completions instead of counting them.
 const AUDIT_DRAIN_FLOOR: Duration = Duration::from_millis(500);
@@ -868,11 +889,13 @@ async fn run_inner(
             let _ = lock(&lc3).set_run_state(RunState::Stopping);
         })
         .await;
-    let deadline = signaled
+    let signaled = signaled
         .get()
         .copied()
-        .unwrap_or_else(tokio::time::Instant::now)
-        + Duration::from_secs(b.limits.shutdown_grace_secs);
+        .unwrap_or_else(tokio::time::Instant::now);
+    let mut clock = PhaseClock::start(signaled);
+    clock.end("relay_drain");
+    let deadline = signaled + Duration::from_secs(b.limits.shutdown_grace_secs);
     // NOTE: Signal handlers stay installed during drain, so a second SIGTERM is
     // swallowed and only SIGKILL ends the process. Fine under systemd
     // (TimeoutStopSec); revisit if an operator needs a second signal to force exit.
@@ -888,11 +911,13 @@ async fn run_inner(
     } else {
         true
     };
+    clock.end("audit_drain");
     // No page is arriving any more: end the open listing chains
     // (`session_ended`), drain the queue and stop the engine worker.
     if let Some(h) = inventory_handle.take() {
         h.shutdown().await;
     }
+    clock.end("inventory_drain");
     let _ = stop_tx.send(true);
     if let Some(t) = sync_task {
         let _ = t.await;
@@ -913,6 +938,7 @@ async fn run_inner(
     {
         let _ = t.await;
     }
+    clock.end("tasks_stop");
     // A step the shutdown cancelled can still run on the blocking pool with a
     // clone of the gap queue (whose persister holds this state_dir lock) or of
     // the registry. Wait for it, so no write lands after `stopped` and a restart
@@ -930,12 +956,15 @@ async fn run_inner(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    clock.end("blocking_work_wait");
     // The relay stops appending once `serve` returned; the spool closes when its
     // last handle goes.
     drop(admission);
     // Every task holding the spool is done: close the writer on the blocking
     // pool (not in a drop on a worker) before `stopped` is published.
     spool.close().await;
+    clock.end("spool_close");
+    tracing::info!(phases = ?clock.phases, "shutdown phase durations");
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
     lock(&lc).finish_shutdown(invocation_accounted, invocation_gaps.as_ref())?;
@@ -1625,6 +1654,36 @@ mod tests {
         assert_eq!(n, 1);
     }
 
+    /// What `tracing` events of the test's thread wrote, as text.
+    #[derive(Clone, Default)]
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl LogBuffer {
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+            let buf = self.clone();
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || buf.clone())
+                .finish()
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// The shutdown after the signal has one grace budget. A client stuck in its
     /// request head holds the relay drain and blocking work holds the gap queue:
     /// together they still end within one grace, not one grace each.
@@ -1639,6 +1698,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let (gaps_tx, gaps_rx) = tokio::sync::oneshot::channel();
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let log = LogBuffer::default();
+        let _log = tracing::subscriber::set_default(log.subscriber());
         let tuning = RunTuning {
             listener: Some(listener),
             gaps_out: Some(gaps_tx),
@@ -1664,6 +1725,7 @@ mod tests {
         };
         let (ran, (signaled, _held, _client)) = tokio::join!(run, drive);
         let took = signaled.elapsed();
+        let phases = log.text();
         ran.unwrap();
         // Holds while `server::HEADER_READ_TIMEOUT` is longer than grace.
         assert!(
@@ -1674,7 +1736,7 @@ mod tests {
         // (before the fix) is about 2 x grace.
         assert!(
             took < grace + Duration::from_millis(1500),
-            "shutdown took {took:?}, more than one grace of {grace:?}"
+            "shutdown took {took:?}, more than one grace of {grace:?}; log:\n{phases}"
         );
     }
 }
