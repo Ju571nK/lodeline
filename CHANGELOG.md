@@ -25,6 +25,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   installed. A project subject also counts the user-level files it reads. The field joins the agent's
   change test, so a tool that appears with benign content is reported at once, not at the next
   heartbeat. `lodeline show events` prints it.
+- `lodeline show risk` now reports `config_found`. The table marks a tool whose value is `false`
+  as `low (no config found)` in the bucket column, and the JSON output carries the field. A tool
+  with `true`, or whose agent sends no value, prints as before. The control reply adds the field
+  only when it is known, so an older agent and a newer `lodeline`, or the reverse, still read each
+  other's replies.
 - The console host page shows a quiet tool whose `config_found` is `false` in one muted line,
   "No config found (n)", and leaves it out of the "Low (n)" strip. A tool with `true`, or with
   no field because its server or agent is older, shows as before. The console relays the field

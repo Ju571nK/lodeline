@@ -109,6 +109,29 @@ pub struct ControlContext {
     pub deny: crate::hook_deny::SharedEvaluator,
 }
 
+#[cfg(feature = "operator-cli")]
+fn risk_summary(
+    (tool, scope, _pid, user): &crate::ai_guard::task::StateKey,
+    source: &crate::ai_guard::task::SourceState,
+) -> Option<RiskSummary> {
+    let cached = source.reading.as_ref()?;
+    let last = cached
+        .last_assessed_ts
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    Some(RiskSummary {
+        controls: cached.controls.clone(),
+        tool: *tool,
+        scope: scope.clone(),
+        score: cached.score,
+        bucket: cached.bucket,
+        reasons_count: cached.reasons_count,
+        last_assessed_ts: last,
+        user: user.clone(),
+        config_found: cached.config_found,
+    })
+}
+
 /// Shared dispatch logic. Returns the `Response` for a given `Request`.
 /// Both platform `serve` functions call this to avoid duplicating logic.
 async fn handle(ctx: &ControlContext, req: Request) -> Response {
@@ -292,23 +315,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
                     Some(filter) => *t == filter,
                     None => true,
                 })
-                .filter_map(|((t, scope, _pid, user), source)| {
-                    let cached = source.reading.as_ref()?;
-                    let last = cached
-                        .last_assessed_ts
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default();
-                    Some(RiskSummary {
-                        controls: cached.controls.clone(),
-                        tool: *t,
-                        scope: scope.clone(),
-                        score: cached.score,
-                        bucket: cached.bucket,
-                        reasons_count: cached.reasons_count,
-                        last_assessed_ts: last,
-                        user: user.clone(),
-                    })
-                })
+                .filter_map(|(key, source)| risk_summary(key, source))
                 .collect();
             assessments.sort_by(|a, b| {
                 serde_json::to_string(&a.tool)
@@ -394,23 +401,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
             let snapshot = ctx.ai_guard_state.read();
             let mut latest_risk: Vec<RiskSummary> = snapshot
                 .iter()
-                .filter_map(|((t, scope, _pid, user), source)| {
-                    let cached = source.reading.as_ref()?;
-                    let last = cached
-                        .last_assessed_ts
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default();
-                    Some(RiskSummary {
-                        controls: cached.controls.clone(),
-                        tool: *t,
-                        scope: scope.clone(),
-                        score: cached.score,
-                        bucket: cached.bucket,
-                        reasons_count: cached.reasons_count,
-                        last_assessed_ts: last,
-                        user: user.clone(),
-                    })
-                })
+                .filter_map(|(key, source)| risk_summary(key, source))
                 .collect();
             drop(snapshot);
             latest_risk.sort_by(|a, b| {
@@ -652,4 +643,42 @@ pub async fn serve_until(
     // Release the name before draining, so a restarting agent can claim it.
     drop(listening);
     connections.drain().await
+}
+
+#[cfg(all(test, feature = "operator-cli"))]
+mod tests {
+    use super::*;
+    use crate::ai_guard::task::{CachedAssessment, SourceState};
+    use lodeline_core::event::{AiGuardBucket, AiGuardScope, AiTool};
+
+    fn source(config_found: Option<bool>) -> SourceState {
+        SourceState {
+            reading: Some(CachedAssessment {
+                controls: None,
+                controls_blake3: [0; 32],
+                score: 0.0,
+                bucket: AiGuardBucket::Low,
+                reasons_blake3: [0; 32],
+                reasons_count: 0,
+                last_assessed_ts: time::OffsetDateTime::UNIX_EPOCH,
+                dangerous_toggles: Default::default(),
+                config_found,
+            }),
+            failure: None,
+        }
+    }
+
+    fn found_in_reply(config_found: Option<bool>) -> Option<bool> {
+        let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None, None);
+        risk_summary(&key, &source(config_found))
+            .unwrap()
+            .config_found
+    }
+
+    #[test]
+    fn risk_reply_carries_the_cached_config_found() {
+        assert_eq!(found_in_reply(Some(false)), Some(false));
+        assert_eq!(found_in_reply(Some(true)), Some(true));
+        assert_eq!(found_in_reply(None), None);
+    }
 }

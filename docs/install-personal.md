@@ -164,7 +164,7 @@ back to this one. The signed version stays on record, so only a higher version l
 lodeline show risk
 ```
 
-Queries the running daemon and prints the current AI Guard risk assessment for each tool the agent assesses. The agent assesses a fixed set of tools whether or not they are installed, and a tool with no config reads as low here, so a low score does not mean the tool is present. `lodeline show events` prints `config_found` for each assessment, and `false` means no watched config file was found (see [AI Guard assessments at start](runbook/siem-rules.md#ai-guard-assessments-at-start)). Add `--tool claude-code` (or `codex`, etc.) to filter to one tool.
+Queries the running daemon and prints the current AI Guard risk assessment for each tool the agent assesses. The agent assesses a fixed set of tools whether or not they are installed, and a tool with no config reads as low, so a low score does not mean the tool is present. A tool whose assessment has `config_found` set to `false` prints as `low (no config found)`, and the JSON output carries the field. `false` means no watched config file was found, and `lodeline show events` prints it for each assessment (see [AI Guard assessments at start](runbook/siem-rules.md#ai-guard-assessments-at-start)). Add `--tool claude-code` (or `codex`, etc.) to filter to one tool.
 
 ### MCP client integration
 
