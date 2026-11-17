@@ -96,6 +96,9 @@ with no config apart from a low score for a tool whose config was read:
 The agent sends a new event when `config_found` changes, so a tool that appears on the host is
 reported at once, not at the next 24h re-send.
 
+The console host page lists a tool with `config_found` set to `false` and a low bucket in a "No
+config found (n)" line, apart from the Low list.
+
 ```
 trigger:  evidence.kind == "ai_guard_risk_assessed"
           AND evidence.config_found == false
