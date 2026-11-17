@@ -240,6 +240,10 @@ pub struct ReloadCtx {
     /// The agent's own home, the user scope whose `.claude` folders no project
     /// target watches a second time.
     pub home_dir: PathBuf,
+    /// The other users' homes a root agent assesses, as the AI Guard task
+    /// holds them. A project parser built here leaves their `.claude` folders
+    /// to those users' rows, and a change of this set triggers a reload.
+    pub users_rx: watch::Receiver<Vec<crate::ai_guard::task::AssessHome>>,
 }
 
 /// The rule-pack file in force and its bytes, `None` when it cannot be read. Take it
@@ -479,6 +483,12 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
 
     // The nested and subfolder walks run here, before the parsers guard, so a
     // reader of `ctx.parsers` is never held across a directory walk.
+    let other_homes: Vec<PathBuf> = ctx
+        .users_rx
+        .borrow()
+        .iter()
+        .map(|h| h.dir.clone())
+        .collect();
     let claude_built: std::collections::BTreeMap<
         PathBuf,
         Arc<crate::ai_guard::ClaudeCodeProjectParser>,
@@ -490,6 +500,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
                 Arc::new(crate::ai_guard::ClaudeCodeProjectParser::new(
                     p.clone(),
                     ctx.home_dir.clone(),
+                    other_homes.clone(),
                 )),
             )
         })
@@ -845,6 +856,7 @@ mod tests {
                 unfinished: Vec::new(),
                 applied_policy: None,
                 home_dir: dir.join("home"),
+                users_rx: watch::channel(Vec::new()).1,
             },
             plat,
             targets_rx,
@@ -914,6 +926,7 @@ mod tests {
                 unfinished: Vec::new(),
                 applied_policy: None,
                 home_dir: dir.join("home"),
+                users_rx: watch::channel(Vec::new()).1,
             },
             plat,
             targets_rx,
@@ -1608,6 +1621,38 @@ mod tests {
         assert!(!nested_target_matches(&targets, &user_skill));
         let user_row = crate::ai_guard::ClaudeCodeParser::default().watched_paths(&home);
         assert!(user_row.contains(&home.join(".claude/skills")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_leaves_another_users_claude_folders_to_that_users_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = dunce::canonicalize(dir.path()).unwrap().join("alice");
+        let repo = alice.join("code/proj");
+        std::fs::create_dir_all(alice.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        let user_skill = alice.join(".claude/skills/x/SKILL.md");
+        std::fs::create_dir_all(user_skill.parent().unwrap()).unwrap();
+        std::fs::write(&user_skill, "x").unwrap();
+
+        let policy = format!(
+            "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+            alice.join("code").display()
+        );
+        let (mut ctx, plat, targets, _parsers, _state) =
+            build_ctx_with_parsers(dir.path(), &policy);
+        ctx.home_dir = dir.path().join("root");
+        reload(&mut ctx, &plat);
+        assert!(nested_target_matches(&targets, &user_skill), "control");
+
+        let (tx, rx) = watch::channel(vec![crate::ai_guard::task::AssessHome {
+            user: Some("alice".into()),
+            dir: alice,
+        }]);
+        ctx.users_rx = rx;
+        reload(&mut ctx, &plat);
+        assert!(!nested_target_matches(&targets, &user_skill));
+        drop(tx);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

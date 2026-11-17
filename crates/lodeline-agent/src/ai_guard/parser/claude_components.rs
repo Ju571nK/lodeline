@@ -73,11 +73,11 @@ fn nested_component_dirs(repo_root: &Path) -> Vec<PathBuf> {
 /// inherited folders of [`inherited_component_dirs`] they are at most
 /// [`MAX_WATCHED_COMPONENT_DIRS`]. A folder created after this call is not
 /// covered until the next call.
-pub(crate) fn watched_nested_dirs(repo_root: &Path, home: &Path) -> Vec<PathBuf> {
+pub(crate) fn watched_nested_dirs(repo_root: &Path, homes: &[PathBuf]) -> Vec<PathBuf> {
     #[cfg(test)]
     crate::ai_guard::workspace_discovery::walk_probe::fire();
     let room =
-        MAX_WATCHED_COMPONENT_DIRS.saturating_sub(inherited_component_dirs(repo_root, home).len());
+        MAX_WATCHED_COMPONENT_DIRS.saturating_sub(inherited_component_dirs(repo_root, homes).len());
     let mut nested = nested_component_dirs(repo_root);
     if nested.len() > room {
         tracing::warn!(dir = %repo_root.display(), cap = MAX_WATCHED_COMPONENT_DIRS,
@@ -90,9 +90,9 @@ pub(crate) fn watched_nested_dirs(repo_root: &Path, home: &Path) -> Vec<PathBuf>
 /// #539: `.claude/skills`, `.claude/agents` and `.claude/commands` folders outside `start` that
 /// Claude Code loads for a session started there. That is the folder in each
 /// parent up to the root of the checkout, and in a linked worktree whose root
-/// has no folder of that kind, the main checkout's. The home folder's
-/// `.claude` is the user scope and is left out.
-pub(crate) fn inherited_component_dirs(start: &Path, home: &Path) -> Vec<PathBuf> {
+/// has no folder of that kind, the main checkout's. The `.claude` of each
+/// folder in `homes` is a user scope and is left out.
+pub(crate) fn inherited_component_dirs(start: &Path, homes: &[PathBuf]) -> Vec<PathBuf> {
     let Some(checkout) = super::claude_repo::checkout(start) else {
         return Vec::new();
     };
@@ -109,7 +109,11 @@ pub(crate) fn inherited_component_dirs(start: &Path, home: &Path) -> Vec<PathBuf
         dirs.extend(
             parents
                 .chain(main)
-                .filter(|root| !super::claude_code::is_home(root, home))
+                .filter(|root| {
+                    !homes
+                        .iter()
+                        .any(|home| super::claude_code::is_home(root, home))
+                })
                 .map(|root| root.join(".claude").join(kind))
                 .filter(|dir| dir.is_dir()),
         );
@@ -118,8 +122,8 @@ pub(crate) fn inherited_component_dirs(start: &Path, home: &Path) -> Vec<PathBuf
 }
 
 /// Skills, subagents and commands in [`inherited_component_dirs`] that declare hooks.
-pub(crate) fn inherited_skill_hooks(start: &Path, home: &Path) -> Vec<ComponentHooks> {
-    hooks_in(start, inherited_component_dirs(start, home), "inherited")
+pub(crate) fn inherited_skill_hooks(start: &Path, homes: &[PathBuf]) -> Vec<ComponentHooks> {
+    hooks_in(start, inherited_component_dirs(start, homes), "inherited")
 }
 
 /// Component hooks in `.claude/skills`, `.claude/agents` and `.claude/commands`
@@ -753,7 +757,7 @@ mod tests {
             write(&root, &format!("p{i:03}/.claude/commands/c.md"), "x\n");
         }
         write(&root, "q/.claude/skills/s/SKILL.md", "x\n");
-        let dirs = watched_nested_dirs(&root, Path::new(NO_HOME));
+        let dirs = watched_nested_dirs(&root, &[PathBuf::from(NO_HOME)]);
         assert_eq!(dirs.len(), MAX_WATCHED_COMPONENT_DIRS);
     }
 
@@ -785,6 +789,26 @@ mod tests {
 
     const NO_HOME: &str = "/nonexistent-lodeline-home";
 
+    /// The `.claude` folders of every home in the list are user scopes, not
+    /// only the first.
+    #[test]
+    fn inherited_dirs_leave_out_every_listed_home() {
+        let d = tempdir().unwrap();
+        let alice = d.path().join("alice");
+        std::fs::create_dir_all(alice.join(".git")).unwrap();
+        for kind in ["skills/s/SKILL.md", "agents/a.md", "commands/c.md"] {
+            write(&alice, &format!(".claude/{kind}"), "body\n");
+        }
+        let start = alice.join("proj");
+        std::fs::create_dir_all(&start).unwrap();
+        let own = d.path().join("root");
+        assert_eq!(
+            inherited_component_dirs(&start, std::slice::from_ref(&own)).len(),
+            3
+        );
+        assert!(inherited_component_dirs(&start, &[own, alice]).is_empty());
+    }
+
     /// A submodule is its own repository, so the walk up stops at its root.
     #[test]
     fn inherited_dirs_stop_at_a_submodule_root() {
@@ -801,7 +825,7 @@ mod tests {
         let start = outer.join("lib/src");
         std::fs::create_dir_all(&start).unwrap();
         assert_eq!(
-            inherited_component_dirs(&start, Path::new(NO_HOME)),
+            inherited_component_dirs(&start, &[PathBuf::from(NO_HOME)]),
             [outer.join("lib/.claude/agents")]
         );
     }
@@ -821,7 +845,7 @@ mod tests {
         let wt = d.path().join("wt");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
-        assert!(inherited_component_dirs(&wt, Path::new(NO_HOME)).is_empty());
+        assert!(inherited_component_dirs(&wt, &[PathBuf::from(NO_HOME)]).is_empty());
     }
 
     /// Each folder walked into costs one from the budget, in name order; a

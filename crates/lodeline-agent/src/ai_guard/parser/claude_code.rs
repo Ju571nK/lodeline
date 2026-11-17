@@ -1676,19 +1676,28 @@ pub struct ClaudeCodeProjectParser {
     /// parser is built at discovery or reload, so a file change does not walk
     /// the tree.
     nested: Vec<PathBuf>,
-    /// The user's home, whose `.claude` folders belong to the user row.
+    /// The agent's own home, whose `.claude` folders belong to the user row.
     home: PathBuf,
+    /// Every other user's home a root agent assesses, whose `.claude` folders
+    /// belong to that user's row.
+    other_homes: Vec<PathBuf>,
 }
 
 impl ClaudeCodeProjectParser {
-    /// Walks `repo_root` for nested component folders.
-    pub fn new(repo_root: PathBuf, home: PathBuf) -> Self {
-        let nested = super::claude_components::watched_nested_dirs(&repo_root, &home);
-        Self {
+    /// Walks `repo_root` for nested component folders. `other_homes` are the
+    /// other users' homes the agent assesses, empty unless it runs as root.
+    pub fn new(repo_root: PathBuf, home: PathBuf, other_homes: Vec<PathBuf>) -> Self {
+        let mut parser = Self {
             repo_root,
-            nested,
+            nested: Vec::new(),
             home,
-        }
+            other_homes,
+        };
+        parser.nested = super::claude_components::watched_nested_dirs(
+            &parser.repo_root,
+            &parser.skip_homes(&parser.home),
+        );
+        parser
     }
 
     /// A parser that assesses `repo_root` and does not report nested folders
@@ -1698,11 +1707,20 @@ impl ClaudeCodeProjectParser {
             repo_root,
             nested: Vec::new(),
             home: PathBuf::new(),
+            other_homes: Vec::new(),
         }
     }
 
     pub(crate) fn nested_dirs(&self) -> &[PathBuf] {
         &self.nested
+    }
+
+    /// The homes whose `.claude` folders a user row reads: `home_dir` and the
+    /// other users' homes.
+    pub(crate) fn skip_homes(&self, home_dir: &Path) -> Vec<PathBuf> {
+        std::iter::once(home_dir.to_path_buf())
+            .chain(self.other_homes.iter().cloned())
+            .collect()
     }
 
     pub(crate) fn home(&self) -> &Path {
@@ -1742,7 +1760,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         paths.extend(shared_local_settings(&self.repo_root, home_dir));
         paths.extend(super::claude_components::inherited_component_dirs(
             &self.repo_root,
-            home_dir,
+            &self.skip_homes(home_dir),
         ));
         paths.extend(self.nested.iter().cloned());
         paths
@@ -1762,7 +1780,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         let mut components = super::claude_components::nested_skill_hooks(&self.repo_root);
         components.extend(super::claude_components::inherited_skill_hooks(
             &self.repo_root,
-            home_dir,
+            &self.skip_homes(home_dir),
         ));
         paths.extend(super::claude_components::component_external_script_paths(
             &components,
@@ -1786,9 +1804,10 @@ impl AiGuardParser for ClaudeCodeProjectParser {
     }
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        assess_project(
+        assess_project_skipping(
             &self.repo_root,
             home_dir,
+            &self.other_homes,
             &super::policy_controls::claude_policy_dir(),
         )
     }
@@ -1803,8 +1822,6 @@ fn shared_local_settings(repo_root: &Path, home: &Path) -> Option<PathBuf> {
 }
 
 /// True when `dir` is the home folder `home`, whose `.claude` is the user scope.
-// shortcut: only the agent's own home is compared, so a git repository at
-// another user's home is still read; pass every user's home if that matters.
 pub(crate) fn is_home(dir: &Path, home: &Path) -> bool {
     // Both sides, since a scan's root is the raw current folder (an 8.3 short
     // name on Windows) while discovery hands over canonical paths.
@@ -1850,9 +1867,19 @@ fn emit_user_hooks_admitted_here(
     }
 }
 
+#[cfg(test)]
 fn assess_project(
     repo_root: &Path,
     home: &Path,
+    policy_dir: &Path,
+) -> Result<Vec<AiGuardReason>, AssessError> {
+    assess_project_skipping(repo_root, home, &[], policy_dir)
+}
+
+fn assess_project_skipping(
+    repo_root: &Path,
+    home: &Path,
+    other_homes: &[PathBuf],
     policy_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let cd = repo_root.join(".claude");
@@ -1880,8 +1907,12 @@ fn assess_project(
     let has_loop = !is_home(repo_root, home) && cd.join("loop.md").is_file();
     let mut components = super::claude_components::component_hooks(&cd);
     components.extend(super::claude_components::nested_skill_hooks(repo_root));
+    let skip_homes: Vec<PathBuf> = std::iter::once(home.to_path_buf())
+        .chain(other_homes.iter().cloned())
+        .collect();
     components.extend(super::claude_components::inherited_skill_hooks(
-        repo_root, home,
+        repo_root,
+        &skip_homes,
     ));
     // #145 — read `.mcp.json` DEFENSIVELY: a malformed payload must not
     // abort the whole assess and thereby blind us to a malicious
@@ -6140,6 +6171,26 @@ mod tests {
         let row = home.path().join("projects/web");
         std::fs::create_dir_all(&row).unwrap();
         assert!(destructive_commands(&row, home.path()).is_empty());
+    }
+
+    /// A root agent assesses every user's home, so a repository inside another
+    /// user's home leaves that home's `.claude` folders to that user's row.
+    #[test]
+    fn parent_walk_skips_every_assessed_home() {
+        let users = tempdir().unwrap();
+        let alice = users.path().join("alice");
+        std::fs::create_dir_all(alice.join(".git")).unwrap();
+        write_file(&alice, ".claude/skills/clean/SKILL.md", DESTRUCTIVE_SKILL);
+        write_file(&alice, ".claude/agents/web.md", DESTRUCTIVE_AGENT);
+        let row = alice.join("projects/web");
+        std::fs::create_dir_all(&row).unwrap();
+        let own = users.path().join("root");
+        let policy = tempdir().unwrap();
+        let skipped = assess_project_skipping(&row, &own, &[alice], policy.path()).unwrap();
+        assert!(!skipped
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })));
+        assert_eq!(destructive_commands(&row, &own).len(), 2);
     }
 
     /// #539: a linked worktree with no `.claude/skills` or `.claude/agents`

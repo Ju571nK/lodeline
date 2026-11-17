@@ -211,12 +211,16 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let user_homes = other_user_homes(&plat);
+    let (users_tx, users_rx) = watch::channel(user_homes.clone());
+    let other_homes: Vec<PathBuf> = user_homes.iter().map(|h| h.dir.clone()).collect();
     let claude_code_parsers: Vec<Arc<crate::ai_guard::ClaudeCodeProjectParser>> = claude_code_repos
         .iter()
         .map(|repo_root| {
             Arc::new(crate::ai_guard::ClaudeCodeProjectParser::new(
                 repo_root.clone(),
                 home_dir.clone(),
+                other_homes.clone(),
             ))
         })
         .collect();
@@ -635,6 +639,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 applied_policy: None,
                 rule_packs_read,
                 home_dir: home_dir.clone(),
+                users_rx: users_rx.clone(),
             },
         )),
     );
@@ -684,8 +689,6 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     // Phase 3b.6.1 — `parsers` is shared with `policy_reload_task` via an
     // `Arc<RwLock<..>>` so hot-reload can mutate the live parser set.
     {
-        let user_homes = other_user_homes(&plat);
-        let (users_tx, users_rx) = watch::channel(user_homes.clone());
         // #333 — accounts come and go while the agent runs, and directory
         // (LDAP, SSSD) users never touch /etc/passwd, so re-list them. A new set
         // goes to ai_guard and triggers a policy reload, which re-expands the
@@ -2035,7 +2038,7 @@ fn push_claude_code_component_target(
     let repo_root = parser.repo_root.as_path();
     let paths: Vec<String> = crate::ai_guard::parser::claude_components::inherited_component_dirs(
         repo_root,
-        parser.home(),
+        &parser.skip_homes(parser.home()),
     )
     .iter()
     .chain(parser.nested_dirs())
@@ -2498,8 +2501,56 @@ mod tests {
         let parser = crate::ai_guard::ClaudeCodeProjectParser::new(
             repo.to_path_buf(),
             no_home.to_path_buf(),
+            Vec::new(),
         );
         super::push_claude_code_synthetic_targets(effective, &parser);
+    }
+
+    #[test]
+    fn a_root_agent_leaves_every_users_claude_folders_to_that_users_row() {
+        let td = tempfile::tempdir().unwrap();
+        let alice = crate::normalizer::canonicalize_glob_prefix(td.path()).join("alice");
+        std::fs::create_dir_all(alice.join(".git")).unwrap();
+        let repo = alice.join("proj");
+        touch(&repo, "sub/.claude/skills/own/SKILL.md");
+        let user_files = [
+            alice.join(".claude/skills/u/SKILL.md"),
+            alice.join(".claude/agents/u.md"),
+            alice.join(".claude/commands/u.md"),
+        ];
+        for file in &user_files {
+            touch(&alice, file.strip_prefix(&alice).unwrap().to_str().unwrap());
+        }
+        let own_home = alice.parent().unwrap().join("root");
+        let target_for = |others: Vec<std::path::PathBuf>| {
+            let mut effective = lodeline_core::policy::merge(
+                lodeline_core::policy::defaults().unwrap(),
+                None,
+                None,
+                lodeline_core::policy::current_platform(),
+            )
+            .unwrap();
+            effective.targets.clear();
+            let parser = crate::ai_guard::ClaudeCodeProjectParser::new(
+                repo.clone(),
+                own_home.clone(),
+                others,
+            );
+            super::push_claude_code_synthetic_targets(&mut effective, &parser);
+            effective
+        };
+        let listed = target_for(vec![]);
+        for file in &user_files {
+            assert!(watches(&listed, file), "control: {file:?} is watched");
+        }
+        let skipped = target_for(vec![alice.clone()]);
+        for file in &user_files {
+            assert!(!watches(&skipped, file), "{file:?} must not be watched");
+        }
+        assert!(watches(
+            &skipped,
+            &repo.join("sub/.claude/skills/own/SKILL.md")
+        ));
     }
 
     fn claude_targets_for(repo: &std::path::Path) -> lodeline_core::policy::EffectivePolicy {
@@ -2657,7 +2708,8 @@ mod tests {
         touch(&repo, "a/.claude/skills/x/SKILL.md");
         use crate::ai_guard::parser::AiGuardParser;
         let home = repo.join("nohome");
-        let parser = crate::ai_guard::ClaudeCodeProjectParser::new(repo.clone(), home.clone());
+        let parser =
+            crate::ai_guard::ClaudeCodeProjectParser::new(repo.clone(), home.clone(), Vec::new());
         let first = claude_targets_for(&repo);
         let before = parser.watched_paths(&home);
         touch(&repo, "b/.claude/skills/y/SKILL.md");
@@ -2665,7 +2717,8 @@ mod tests {
         assert!(!watches(&first, &repo.join("b/.claude/skills/y/SKILL.md")));
         let second = claude_targets_for(&repo);
         assert!(watches(&second, &repo.join("b/.claude/skills/y/SKILL.md")));
-        let rebuilt = crate::ai_guard::ClaudeCodeProjectParser::new(repo.clone(), home.clone());
+        let rebuilt =
+            crate::ai_guard::ClaudeCodeProjectParser::new(repo.clone(), home.clone(), Vec::new());
         assert!(rebuilt
             .watched_paths(&home)
             .contains(&repo.join("b/.claude/skills")));
