@@ -128,7 +128,7 @@ fn risk_summary(
         reasons_count: cached.reasons_count,
         last_assessed_ts: last,
         user: user.clone(),
-        config_found: None,
+        config_found: cached.config_found,
     })
 }
 

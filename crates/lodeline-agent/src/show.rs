@@ -696,10 +696,13 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
         // against future multi-word AiGuardBucket variants (e.g., "very_high")
         // where Debug would emit "Veryhigh" but the SIEM filter expects
         // "very_high".
-        let bucket_str = serde_json::to_string(&s.bucket)
+        let mut bucket_str = serde_json::to_string(&s.bucket)
             .unwrap_or_default()
             .trim_matches('"')
             .to_string();
+        if s.config_found == Some(false) {
+            bucket_str.push_str(" (no config found)");
+        }
         writeln!(
             w,
             "{}\t{}\t{:.1}\t{}\t{}\t{}",

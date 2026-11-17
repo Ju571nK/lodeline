@@ -210,8 +210,9 @@ pattern); it does not list the files the pattern matches.
 `lodeline show risk` is the core AI-SPM read: it scores each AI tool the agent assesses
 (for example `claude-code`, `codex`, `gemini`, `cursor`) from its real on-disk config.
 A tool with no config on the host reads as low with no reasons, so a low score from this command does
-not mean the tool is present. The event behind it carries `config_found`, which this command does not
-print: `false` means no watched config file was found. `lodeline show events` prints it.
+not mean the tool is present. The event behind it carries `config_found`. `lodeline show risk` marks a
+tool with `false` as "no config found" next to its bucket, and its JSON output carries the field.
+`false` means no watched config file was found, and `lodeline show events` prints it too.
 Without a running daemon, `lodeline scan` produces the same per-tool scores in one
 shot (and exits 0) — handy for a quick check before the daemon is set up.
 
