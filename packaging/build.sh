@@ -140,6 +140,15 @@ fi
 
 mkdir -p "$ROOT/target/generate-rpm"
 
+# rpm rejects a hyphen in Version. A Cargo pre-release (0.17.0-rc.1) becomes
+# 0.17.0~rc.1, which rpm sorts before 0.17.0. cargo-deb already writes the same
+# `~` form. A plain release version leaves the Cargo version untouched.
+VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -n 1)
+RPM_VERSION_ARG=""
+case "$VERSION" in
+    *-*) RPM_VERSION_ARG="--set-metadata version=\"$(printf '%s' "$VERSION" | sed 's/-/~/')\"" ;;
+esac
+
 # Requires generation for .rpm (#234). A static musl build has no shared-library
 # requirements, so the default is fine. A dynamic (glibc) build must use rpm's
 # own find-requires: cargo-generate-rpm's builtin fallback, used when
@@ -181,7 +190,7 @@ for c in $CRATES; do
             RPM_ARCH_ARG=""
             [ -n "$RPM_ARCH" ] && RPM_ARCH_ARG="--arch $RPM_ARCH"
             # shellcheck disable=SC2086
-            cargo generate-rpm $RPM_ARCH_ARG $RPM_AUTO_REQ_ARG --output "$ROOT/target/generate-rpm/"
+            cargo generate-rpm $RPM_ARCH_ARG $RPM_AUTO_REQ_ARG $RPM_VERSION_ARG --output "$ROOT/target/generate-rpm/"
             ;;
     esac
 done
