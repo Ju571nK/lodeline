@@ -1,7 +1,7 @@
 name: Release cache
 
-# Builds the release targets on main and saves the third-party dependency build
-# for each one. release.yml restores it, read only, on a tag run. A tag run can
+# Builds the release targets on main and saves the third-party dependency build of
+# each one. release.yml restores it, read only, on a tag run. A tag run can
 # read caches saved on main but not caches saved by an earlier tag, and a pull
 # request cannot write to main's cache, so main is the only source.
 # The cache key hashes Cargo.lock, the workspace manifests, the rustc version and
