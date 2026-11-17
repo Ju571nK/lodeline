@@ -851,6 +851,35 @@ mod tests {
             .is_none());
     }
 
+    /// `config_found` is relayed as written: `false` stays `false`, `true` stays `true`, and a
+    /// missing field (an older server) stays missing, for both by-tool shapes.
+    #[test]
+    fn config_found_passes_through_and_missing_stays_missing() {
+        let entry = |extra: &str| {
+            format!(
+                r#"{{"score": 0, "bucket": "low", "assessed_ts": "2026-01-01T00:00:00Z"{extra}}}"#
+            )
+        };
+        let body = format!(
+            r#"{{"current_risk": {{"max_score": 0, "max_bucket": "low", "by_tool": {{
+                "gemini": {}, "cursor": {}, "codex": {}}}}},
+            "ai_guard": {{"by_tool": {{"gemini": {}, "cursor": {}, "codex": {}}}}}}}"#,
+            entry(r#", "config_found": false"#),
+            entry(r#", "config_found": true"#),
+            entry(""),
+            entry(r#", "config_found": false"#),
+            entry(r#", "config_found": true"#),
+            entry(""),
+        );
+        let host: HostDetail = decode(&body).unwrap();
+        let out = serde_json::to_value(&host).unwrap();
+        for block in [&out["current_risk"]["by_tool"], &out["ai_guard"]["by_tool"]] {
+            assert_eq!(block["gemini"]["config_found"], false);
+            assert_eq!(block["cursor"]["config_found"], true);
+            assert!(block["codex"].get("config_found").is_none(), "{block}");
+        }
+    }
+
     /// Raw and typed values share one nesting limit: the one `serde_json::Value` set when this
     /// decode parsed the whole body into it.
     #[test]
