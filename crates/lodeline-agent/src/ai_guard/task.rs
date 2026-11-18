@@ -372,7 +372,7 @@ async fn eval_and_maybe_emit(
                 last_assessed_ts: now,
                 dangerous_toggles: new_toggles,
                 config_found,
-                reason_kinds: Vec::new(),
+                reason_kinds: rubric::reason_kinds(&reasons),
             }),
             failure: None,
         },

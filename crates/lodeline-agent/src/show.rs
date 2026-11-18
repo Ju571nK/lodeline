@@ -676,7 +676,10 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
         writeln!(w, "(no assessments yet)")?;
         return Ok(());
     }
-    writeln!(w, "TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED")?;
+    writeln!(
+        w,
+        "TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED\tTOP_REASONS"
+    )?;
     let with_user = |scope: String, user: &Option<String>| match user {
         Some(u) => format!("{scope}@{u}"),
         None => scope,
@@ -703,15 +706,23 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
         if s.config_found == Some(false) {
             bucket_str.push_str(" (no config found)");
         }
+        let top_reasons = if s.reasons_count == 0 {
+            "(clean)".to_string()
+        } else if s.reason_kinds.is_empty() {
+            "-".to_string()
+        } else {
+            crate::ai_guard::rubric::top_kinds(&s.reason_kinds)
+        };
         writeln!(
             w,
-            "{}\t{}\t{:.1}\t{}\t{}\t{}",
+            "{}\t{}\t{:.1}\t{}\t{}\t{}\t{}",
             tool_str,
             with_user(scope_str, &s.user),
             s.score,
             bucket_str,
             s.reasons_count,
-            s.last_assessed_ts
+            s.last_assessed_ts,
+            top_reasons
         )?;
     }
     Ok(())

@@ -46,7 +46,7 @@ impl LodelineLocal {
 
     #[tool(
         description = "This machine's AI-tool risk headline: per (tool, scope) risk band + score, \
-                          plus reasons_count and last-assessed time. Use for 'what's my AI risk?'."
+                          plus reasons_count, the distinct reason_kinds and last-assessed time. Use for 'what's my AI risk?'."
     )]
     async fn my_risk(&self) -> Result<CallToolResult, McpError> {
         let r = self.upstream.doctor_report().await?;

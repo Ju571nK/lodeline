@@ -164,13 +164,13 @@ back to this one. The signed version stays on record, so only a higher version l
 lodeline show risk
 ```
 
-Queries the running daemon and prints the current AI Guard risk assessment for each tool the agent assesses. The agent assesses a fixed set of tools whether or not they are installed, and a tool with no config reads as low, so a low score does not mean the tool is present. A tool whose assessment has `config_found` set to `false` prints as `low (no config found)`, and the JSON output carries the field. `false` means no watched config file was found, and `lodeline show events` prints it for each assessment (see [AI Guard assessments at start](runbook/siem-rules.md#ai-guard-assessments-at-start)). Add `--tool claude-code` (or `codex`, etc.) to filter to one tool.
+Queries the running daemon and prints the current AI Guard risk assessment for each tool the agent assesses. The agent assesses a fixed set of tools whether or not they are installed, and a tool with no config reads as low, so a low score does not mean the tool is present. A tool whose assessment has `config_found` set to `false` prints as `low (no config found)`, and the JSON output carries the field. `false` means no watched config file was found, and `lodeline show events` prints it for each assessment (see [AI Guard assessments at start](runbook/siem-rules.md#ai-guard-assessments-at-start)). The `--pretty` table ends with a `TOP_REASONS` column that names the first two reason kinds, and the JSON output lists every kind in `reason_kinds`. Add `--tool claude-code` (or `codex`, etc.) to filter to one tool.
 
 ### MCP client integration
 
 `lodeline-mcp` in local mode (auto-detected when no server URL is configured) registers as **`lodeline-check`** and exposes three read-only tools to an AI client such as Claude Desktop or Claude Code:
 
-- `my_risk`: per-tool risk band and score, and `config_found` when the agent knows it
+- `my_risk`: per-tool risk band and score, `config_found` when the agent knows it, and `reason_kinds`, the distinct reason kinds behind `reasons_count`
 - `my_guard_detail` — rubric breakdown and reasons
 - `my_findings` — full finding list
 
