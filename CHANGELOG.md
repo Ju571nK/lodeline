@@ -83,6 +83,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-sender enroll` no longer warns that the certificate starts seconds after this host's
+  clock on a healthy enroll. It judged the issued certificate against the time it read when the
+  run began, so a certificate signed a second or more later looked as if it started in the
+  future. It now reads the clock when the certificate arrives. A host whose clock is behind the
+  server's still gets the warning.
 - The console Fleet header no longer reads "0 active hosts" for minutes after a host enrolls. The
   console cached `/v1/meta` for five minutes and never re-read it while a page stayed open, so
   the header kept the count from before the host arrived. It now re-reads every 30 seconds.

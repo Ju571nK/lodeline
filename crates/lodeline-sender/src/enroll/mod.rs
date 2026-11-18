@@ -59,6 +59,14 @@ pub struct Env<'a> {
     pub top: PathBuf,
     /// Where the trust block goes: stderr outside tests.
     pub trust_out: &'a dyn Fn(&str),
+    /// Where a warning goes: stderr outside tests.
+    pub warn_out: &'a dyn Fn(&str),
+}
+
+impl Env<'_> {
+    fn warn(&self, msg: impl AsRef<str>) {
+        (self.warn_out)(msg.as_ref());
+    }
 }
 
 type R<T> = Result<T, i32>;
@@ -110,6 +118,7 @@ pub async fn main(args: Args) -> i32 {
         pacing: net::Pacing::default(),
         top: PathBuf::from("/"),
         trust_out: &|t| eprint!("{t}"),
+        warn_out: &|m| eprintln!("warning: {m}"),
     };
     run(&args, &env).await
 }
@@ -249,7 +258,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
         Err(m) => return die(2, format!("{}: {m}", args.file.display())),
     };
     for w in &parsed.warnings {
-        warn(w);
+        env.warn(w);
     }
     let host_id = parsed.file.host_id.as_str();
 
@@ -376,7 +385,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
         match check {
             Ok(w) => {
                 if let Some(w) = w {
-                    warn(w);
+                    env.warn(w);
                 }
                 have_cert = true;
             }
@@ -405,7 +414,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
         (keystore_dir, 0o755),
     ] {
         match write::ensure_dir(dir, mode, env.root) {
-            Ok(true) if env.root && dir == l.sender_dir.as_path() => warn(format!(
+            Ok(true) if env.root && dir == l.sender_dir.as_path() => env.warn(format!(
                 "created {} as root. The key stays root-owned until systemd or \
                  `systemd-tmpfiles --create` gives that directory to the sender account",
                 dir.display()
@@ -460,11 +469,11 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
             key.public_key_raw(),
             host_id,
             &parsed.file.server_ca_pem,
-            now,
+            OffsetDateTime::now_utc(),
         ) {
             Ok(w) => {
                 if let Some(w) = w {
-                    warn(w);
+                    env.warn(w);
                 }
             }
             Err(why) => {
@@ -536,7 +545,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
     // E12.
     summary(&l, &parsed, args, wrote);
     if old_config {
-        warn(format!(
+        env.warn(format!(
             "{} does not set `renew_client_cert: true` (an older enroll did not write it), so \
              this sender will not renew its certificate. Set it there and restart the sender.",
             l.config.display()
