@@ -6,7 +6,7 @@ The Downloads page lists the release files in the server's `artifacts_dir` and l
 
 - `downloads-list` lists every file name the server sends, each as a link to `/api/v1/fleet/artifacts/<name>`.
 - `downloads-save` saves a file through the browser's download manager, with the server's name and bytes.
-- `downloads-not-configured` names the `server.yaml` setting and the install guide section when the server has no `artifacts_dir`.
+- `downloads-not-configured` shows a numbered setup guide when the server has no `artifacts_dir`: the folder, the `server.yaml` setting, the restart, a copy button for each snippet and the README link.
 - `downloads-bad-name` refuses a name the server would refuse with 400 `bad_filename`, before any request leaves the console.
 
 ## How to get to it (user POV)
@@ -23,7 +23,7 @@ Preconditions:
 - For the API steps, log in for the API as [Login and session](./login-session.md) shows.
 
 - **List and save.** Run `drive.sh e2e "$RUN" downloads-browser tests/e2e/downloads.spec.ts -g 'saves one'`. Exit code `0`, and the runner prints `2 passed`: the `setup` login and this test. The test saves `build-manifest.json` and compares its text. `downloads.png` shows the list.
-- **Not configured.** Run `drive.sh e2e "$RUN" downloads-off tests/e2e/downloads.spec.ts -g 'without artifacts_dir'`. Exit code `0`. This test stubs `/api/v1/fleet/artifacts`, so it proves rendering only.
+- **Not configured.** Run `drive.sh e2e "$RUN" downloads-off tests/e2e/downloads.spec.ts -g 'without artifacts_dir'`, then `drive.sh e2e "$RUN" guides tests/e2e/setup-guides.spec.ts -g downloads`. Exit code `0`. These tests stub `/api/v1/fleet/artifacts`, so they prove rendering only. The second also drives the copy button from the keyboard and checks phone width.
 - **Index.** Run `drive.sh api "$RUN" downloads-index GET /api/v1/fleet/artifacts`. Status `200` with the four mock names under `artifacts`.
 - **One file.** Run `drive.sh api "$RUN" downloads-file GET /api/v1/fleet/artifacts/SHA256SUMS`. Status `200`, `content-type: application/octet-stream`, `content-disposition: attachment; filename="SHA256SUMS"` and a one-line mock text body.
 - **Bad name.** Run `drive.sh api "$RUN" downloads-bad GET '/api/v1/fleet/artifacts/..%2Fserver.yaml'`. Status `400` with code `bad_filename`.

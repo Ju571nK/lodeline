@@ -83,6 +83,7 @@ A passing spec proves a server response only if the spec did not replace that re
 | `investigation.spec.ts` | Only the first step of `Settings labels stale...`. Every other test stubs the endpoint it asserts on. |
 | `devices.spec.ts` | Login only. The hosts endpoint is stubbed for the whole test. |
 | `proxies.spec.ts` | Everything, except `a server without proxy reads is named as such`, which stubs the proxy endpoints. |
+| `setup-guides.spec.ts` | Rendering only: every test stubs the answer of the endpoint that makes its off state. |
 | `proxy-invocations.spec.ts` | Everything. No stubs. |
 | `proxy-inventory.spec.ts` | Everything. No stubs. |
 | `downloads.spec.ts` | Everything, except `a server without artifacts_dir is named as such`, which stubs the index. |

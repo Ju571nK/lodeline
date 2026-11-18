@@ -9,7 +9,7 @@ The Proxies pages list the Lodeline Proxy instances that `lodeline-server` knows
 - `proxy-detail` shows one proxy's report, with a degraded spool labeled as a stopped ingest when the proxy says so.
 - `proxy-older` labels what an older proxy leaves out, and a gap list the server capped.
 - `proxy-not-found` shows one panel for an unknown proxy and one outside the read range.
-- `proxy-reads-unavailable` names a server that does not serve proxy reads.
+- `proxy-reads-unavailable` names a server that does not serve proxy reads and shows a numbered setup guide (the server's `proxy:` section, the console's client certificate and variables, the restart, a copy button for the variables and the README link) on the proxy and invocation pages. The inventory panel keeps its one sentence.
 - `invocations-list` lists invocations newest first, for all proxies or one, and narrows them by lifecycle, outcome and method through the URL.
 - `invocation-flagged` shows a `completion_without_start` or `integrity_conflict` invocation as flagged, with the proxy's claim as secondary text and never as success.
 - `invocation-truncated` says how many events the server did not return when `events_truncated` is true.

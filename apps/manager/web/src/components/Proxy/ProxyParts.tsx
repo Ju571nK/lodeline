@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { ApiError, NotFoundError } from '@/api/client';
 import type { ProxySummary } from '@/api/proxies';
+import { SetupGuide } from '@/components/SetupGuide/SetupGuide';
 import { connectionLabel, connectionTone, type Tone } from '@/lib/proxy';
 import { certificateRefused } from '@/lib/server-status';
 import { relativeAge, shortTime } from '@/lib/time';
@@ -117,6 +118,49 @@ export const settled = (error: Error) =>
   (error instanceof ApiError &&
     ['proxy_reads_unavailable', 'upstream_forbidden', 'certificate_refused'].includes(error.code));
 
+const consoleVariables = `LODELINE_SERVER_BASE_URL=https://lodeline.example.com:8443
+LODELINE_SERVER_CLIENT_CERT_PATH=/etc/lodeline-manager/console.crt
+LODELINE_SERVER_CLIENT_KEY_PATH=/etc/lodeline-manager/console.key
+# only when a private CA signed the server's certificate
+LODELINE_SERVER_CA_PATH=/etc/lodeline-manager/ca.crt
+LODELINE_SERVER_READ_TOKEN=<the read token that the fleet reads use>`;
+
+/** The server runs without a proxy section: what its operator and the console's operator do. */
+function NoProxySection({ text }: { text: string }) {
+  return (
+    <SetupGuide
+      role="alert"
+      lead={text}
+      steps={[
+        {
+          text: (
+            <>
+              On the server, add a <code>proxy:</code> section to <code>server.yaml</code> (see{' '}
+              <code>docs/specs/lodeline-proxy/</code>) and restart lodeline-server. A server with
+              that section always requires mutual TLS.
+            </>
+          ),
+        },
+        {
+          text: (
+            <>
+              Issue the console a client certificate from the host client CA, the CA in the server's{' '}
+              <code>client_ca_path</code>. A certificate from the proxy CA gets a 404 from the
+              server.
+            </>
+          ),
+        },
+        {
+          text: <>In the console's environment, set the variables below.</>,
+          snippet: { label: 'console variables', code: consoleVariables },
+        },
+        { text: <>Restart the console and reload this page.</> },
+      ]}
+      readme={{ anchor: 'proxy-reads', section: 'Proxy reads' }}
+    />
+  );
+}
+
 /** The panel for a failed proxy or invocation read, by the console's error code. */
 export function ProxyReadError({
   error,
@@ -138,6 +182,9 @@ export function ProxyReadError({
           : code === 'certificate_refused'
             ? certificateRefused
             : `Could not load ${what}: ${error.message}`;
+  if (code === 'proxy_reads_unavailable' && target !== 'inventory') {
+    return <NoProxySection text={text} />;
+  }
   return (
     <p role="alert" className="rounded-md border border-border bg-bg-surface p-6 text-sm">
       {text}
