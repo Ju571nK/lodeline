@@ -88,8 +88,10 @@ pub fn run(args: ScanArgs) -> i32 {
 }
 
 fn fail_on_exit(report: &Report, fail_on: Option<AiGuardBucket>) -> i32 {
-    let _ = (report, fail_on);
-    0
+    match fail_on {
+        Some(threshold) if report.rows.iter().any(|r| r.bucket >= threshold) => FAIL_ON_EXIT,
+        _ => 0,
+    }
 }
 
 /// Test seam — assemble the JSON report for a given home + optional project dir
