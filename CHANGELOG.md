@@ -83,6 +83,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The console Fleet header no longer reads "0 active hosts" for minutes after a host enrolls. The
+  console cached `/v1/meta` for five minutes and never re-read it while a page stayed open, so
+  the header kept the count from before the host arrived. It now re-reads every 30 seconds.
 - `GET /v1/fleet/risk` and `GET /v1/fleet/hosts` return hosts in one fixed order. Hosts that tie
   on the sort key (bucket and score, or last seen) sort by `host_id` ascending, where before
   their order could change between requests and restarts, so paging with `cursor` could skip
