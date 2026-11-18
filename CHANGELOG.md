@@ -7,18 +7,25 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-19
+
+**Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind
+and no fleet API field. `lodeline-server` writes the same JSONL lines as 0.18.0, so it reads the
+files a 0.18.0 server wrote and the other way round. No package script, unit file, tmpfiles entry
+or SELinux module changed. Upgrade the server, the console and the agents in any order.
+
 ### Fixed
 
 - `lodeline-server` now applies each event batch to the live fleet index while it still holds the
   write lock, so two batches sent at once leave the same state live as after a restart. A
   write that fails midway no longer leaves part of the batch in the JSONL, so the agent's retry
-  does not store those events twice.
+  does not store those events twice. (#691)
 - `lodeline-mcp --print-config codex` now says the block goes into `$CODEX_HOME/config.toml`, with
   `~/.codex/config.toml` as the default. It named only `~/.codex/config.toml`, which Codex does not
-  read when `CODEX_HOME` is set.
+  read when `CODEX_HOME` is set. (#688)
 - `lodeline-mcp` no longer passes a `lodeline-server` error response through whole. The error
   text an AI agent sees now holds the first 512 characters of the body with control characters
-  such as terminal escapes shown as spaces, followed by ` [truncated]` when the body was longer.
+  such as terminal escapes shown as spaces, followed by ` [truncated]` when the body was longer. (#687)
 
 ## [0.18.0] - 2026-11-18
 
