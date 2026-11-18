@@ -116,7 +116,7 @@ pub fn append_events<'e, 'p>(
 
     let mut f = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
         .open(&path)
         .map_err(|source| PersistError::Io {
             path: path.clone(),
@@ -156,8 +156,10 @@ trait BatchSink: Write {
 }
 
 impl BatchSink for std::fs::File {
+    /// Moves to the end and returns the length. The file is opened for plain
+    /// write, not append: on Windows an append handle cannot be truncated.
     fn len(&mut self) -> std::io::Result<u64> {
-        Ok(self.metadata()?.len())
+        std::io::Seek::seek(self, std::io::SeekFrom::End(0))
     }
     fn truncate(&mut self, len: u64) -> std::io::Result<()> {
         self.set_len(len)
@@ -265,6 +267,7 @@ mod tests {
     struct FailAfter {
         file: std::fs::File,
         budget: usize,
+        truncated: Option<std::io::Result<()>>,
     }
 
     impl Write for FailAfter {
@@ -286,7 +289,12 @@ mod tests {
             self.file.len()
         }
         fn truncate(&mut self, len: u64) -> std::io::Result<()> {
-            self.file.truncate(len)
+            let r = self.file.truncate(len);
+            self.truncated = Some(match &r {
+                Ok(()) => Ok(()),
+                Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            });
+            r
         }
         fn sync(&mut self) -> std::io::Result<()> {
             self.file.sync()
@@ -322,12 +330,14 @@ mod tests {
         let mut sink = FailAfter {
             file: std::fs::OpenOptions::new()
                 .create(true)
-                .append(true)
+                .write(true)
                 .open(&seg)
                 .unwrap(),
             budget: first_line_len,
+            truncated: None,
         };
         assert!(write_batch(&mut sink, &batch).is_err());
+        assert!(matches!(sink.truncated, Some(Ok(()))), "truncate failed");
         assert_eq!(std::fs::read_to_string(&seg).unwrap(), "");
         assert_eq!(hw.get("h1"), 0);
 
