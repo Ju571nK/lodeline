@@ -9,6 +9,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-server` now applies each event batch to the live fleet index while it still holds the
+  per-host write lock, so two batches sent at once leave the same state live as after a restart. A
+  write that fails midway no longer leaves part of the batch in the JSONL, so the agent's retry
+  does not store those events twice.
 - `lodeline-mcp --print-config codex` now says the block goes into `$CODEX_HOME/config.toml`, with
   `~/.codex/config.toml` as the default. It named only `~/.codex/config.toml`, which Codex does not
   read when `CODEX_HOME` is set.

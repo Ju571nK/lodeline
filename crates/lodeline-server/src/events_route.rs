@@ -76,23 +76,24 @@ fn ingest_batch(
     received: OffsetDateTime,
     between: impl FnOnce(),
 ) -> Result<(), PersistError> {
-    let written = {
-        let mut hw = match state.high_water.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(), // poisoned: recover, this is a reference server
-        };
-        let written = append_events(
-            &state.events_out_dir,
-            host_id,
-            to_persist,
-            &mut hw,
-            received,
-        )?;
-        if let Err(e) = hw.store(&state.high_water_path) {
-            tracing::warn!(error = ?e, "high_water store failed (non-fatal)");
-        }
-        written
+    // The guard stays held through the apply so a second batch for the same
+    // host cannot write after this one yet reach the index before it. Lock
+    // order is `high_water`, then the fleet index's own lock; the index never
+    // takes `high_water`.
+    let mut hw = match state.high_water.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(), // poisoned: recover, this is a reference server
     };
+    let written = append_events(
+        &state.events_out_dir,
+        host_id,
+        to_persist,
+        &mut hw,
+        received,
+    )?;
+    if let Err(e) = hw.store(&state.high_water_path) {
+        tracing::warn!(error = ?e, "high_water store failed (non-fatal)");
+    }
 
     between();
 

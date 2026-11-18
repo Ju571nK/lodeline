@@ -167,10 +167,20 @@ impl BatchSink for std::fs::File {
     }
 }
 
-/// Append `batch` and make it durable.
+/// Append `batch` and make it durable, or leave the file as it was. On a
+/// write or sync error the file is cut back to its length before the batch, so
+/// the sender's retry does not append the lines that did land a second time.
+/// If the cut itself fails the error is logged and the write error returned;
+/// the retry may then duplicate those lines.
 fn write_batch(f: &mut impl BatchSink, batch: &[u8]) -> std::io::Result<()> {
-    f.write_all(batch)?;
-    f.sync()
+    let before = f.len()?;
+    let result = f.write_all(batch).and_then(|()| f.sync());
+    if result.is_err() {
+        if let Err(e) = f.truncate(before) {
+            tracing::error!(error = ?e, "could not cut a failed batch off the JSONL");
+        }
+    }
+    result
 }
 
 /// The file beside `jsonl` that holds when the server received each batch
