@@ -37,6 +37,15 @@ describe('AiGuardByTool config_found', () => {
     expect(screen.getByText(/^No config found/)).not.toHaveTextContent('Claude Code');
   });
 
+  it('says a missing config does not mean the tool is not installed', () => {
+    render(<AiGuardByTool byTool={{ gemini: low({ config_found: false }) }} />);
+    expect(
+      screen.getByText(
+        'No watched config file was found on this host, which does not mean the tool is not installed.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('counts a missing field as present', () => {
     render(<AiGuardByTool byTool={{ claude_code: low(), codex: low() }} />);
     expect(screen.getByText(/^Low \(2\): /)).toBeInTheDocument();

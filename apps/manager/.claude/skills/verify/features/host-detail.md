@@ -9,7 +9,8 @@ The host page shows one host's metadata, its AI Guard risk, its policy and agent
 - `host-not-found` shows a panel for an unknown id.
 - `host-null-heavy` renders a disconnected host with no metadata and no assessments.
 - `host-observed-controls` shows the observed settings that the host API returns.
-- `host-no-config` lists quiet tools whose `config_found` is `false` in one "No config found (n)" line under the AI Guard panel, outside the "Low (n)" strip. `eve-workstation` (`...555555555555`) shows `Gemini` there and `Cursor` in the Low strip.
+- `host-reason-groups` shows each tool card's reasons grouped by kind, as the alert slide-over does.
+- `host-no-config` lists quiet tools whose `config_found` is `false` in one "No config found (n)" line under the AI Guard panel, outside the "Low (n)" strip, with a sentence that a missing config file does not mean the tool is not installed. `eve-workstation` (`...555555555555`) shows `Gemini` there and `Cursor` in the Low strip.
 
 ## How to get to it (user POV)
 

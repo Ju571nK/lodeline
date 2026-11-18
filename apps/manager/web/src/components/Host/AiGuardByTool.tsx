@@ -61,10 +61,16 @@ export function AiGuardByTool({ byTool, unassessed = {} }: Props) {
         </details>
       )}
       {noConfig.length > 0 && (
-        <p className="mt-3 text-xs text-text-muted">
-          No config found ({noConfig.length}):{' '}
-          {noConfig.map(([tool]) => humanTool(tool)).join(' · ')}
-        </p>
+        <div className="mt-3 text-xs text-text-muted">
+          <p>
+            No config found ({noConfig.length}):{' '}
+            {noConfig.map(([tool]) => humanTool(tool)).join(' · ')}
+          </p>
+          <p className="text-text-subtle">
+            No watched config file was found on this host, which does not mean the tool is not
+            installed.
+          </p>
+        </div>
       )}
       {failing.length > 0 && <UnassessedSources failing={failing} />}
     </Section>
