@@ -8,6 +8,7 @@
 //! not a gate).
 
 use crate::ai_guard::parser::AiGuardParser;
+use crate::ai_guard::rubric::{reason_kind, reason_kinds};
 use crate::ai_guard::{rubric, tool_cli_label, user_global_parsers};
 use lodeline_core::event::{AiGuardBucket, AiGuardReason, AiGuardScope, AiTool};
 use std::ffi::OsString;
@@ -275,39 +276,12 @@ fn round1(x: f32) -> f64 {
     (x as f64 * 10.0).round() / 10.0
 }
 
-/// The serde `kind` tag of a single reason (e.g. "no_sandbox").
-fn reason_kind(reason: &AiGuardReason) -> String {
-    serde_json::to_value(reason)
-        .ok()
-        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Distinct reason kinds (the serde `kind` tag) for a row, in first-seen order.
-fn reason_kinds(reasons: &[AiGuardReason]) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for r in reasons {
-        let kind = reason_kind(r);
-        if !seen.contains(&kind) {
-            seen.push(kind);
-        }
-    }
-    seen
-}
-
 /// Short "top findings" cell: up to two distinct kinds, then "(+N more)".
 fn reasons_summary(reasons: &[AiGuardReason]) -> String {
     if reasons.is_empty() {
         return "(clean)".to_string();
     }
-    let kinds = reason_kinds(reasons);
-    let shown = kinds.iter().take(2).cloned().collect::<Vec<_>>().join(", ");
-    let extra = kinds.len().saturating_sub(2);
-    if extra > 0 {
-        format!("{shown} (+{extra} more)")
-    } else {
-        shown
-    }
+    rubric::top_kinds(&reason_kinds(reasons))
 }
 
 /// (bucket, score, tools_assessed, findings) — the headline. The bucket/score

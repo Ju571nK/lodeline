@@ -90,6 +90,9 @@ pub struct CachedAssessment {
     /// Whether any watched config existed at this assessment. Part of the
     /// change test, so a tool that appears with benign content re-emits at once.
     pub config_found: Option<bool>,
+    /// Distinct reason kinds of this assessment, in first-seen order. Not part
+    /// of the change test: `reasons_blake3` already covers them.
+    pub reason_kinds: Vec<String>,
 }
 
 /// Bundle of shared dependencies the task needs at construction. Built once
@@ -369,6 +372,7 @@ async fn eval_and_maybe_emit(
                 last_assessed_ts: now,
                 dangerous_toggles: new_toggles,
                 config_found,
+                reason_kinds: Vec::new(),
             }),
             failure: None,
         },
@@ -2036,6 +2040,33 @@ mod tests {
             Evidence::AiGuardRiskAssessed { config_found, .. } => *config_found,
             other => panic!("expected a risk reading, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn the_cached_reading_keeps_the_distinct_reason_kinds() {
+        let (_tx, fc_rx) = broadcast::channel(8);
+        let parser = ScriptedParser {
+            tool: AiTool::ClaudeCode,
+            scope: AiGuardScope::UserGlobal,
+            pack_id: None,
+            tool_label: None,
+            scripts: StdMutex::new(vec![vec![
+                AiGuardReason::SandboxDisabled,
+                AiGuardReason::PermissionsDenyEmpty,
+                AiGuardReason::SandboxDisabled,
+            ]]),
+            watched: Vec::new(),
+        };
+        let (ctx, _events) = ctx_with(parser, fc_rx, Duration::from_secs(3600));
+        let snapshot = ctx.parsers.read().clone();
+        eval_and_maybe_emit(snapshot[0].as_ref(), &ctx, &own_home(&ctx), true).await;
+        let state = ctx.state.read();
+        let reading = state.values().next().unwrap().reading.as_ref().unwrap();
+        assert_eq!(reading.reasons_count, 3);
+        assert_eq!(
+            reading.reason_kinds,
+            vec!["sandbox_disabled", "permissions_deny_empty"]
+        );
     }
 
     #[tokio::test]
