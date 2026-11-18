@@ -1,6 +1,6 @@
 import type { EventWithTriage, ReasonLike } from '@/api/fleet';
 import { extractAiGuard } from '@/api/fleet';
-import { DEFAULT_REASON_WEIGHTS } from './reasonWeights';
+import { humanKind } from './labels';
 
 export type SortMode = 'severity_desc' | 'age_desc' | 'age_asc';
 
@@ -56,16 +56,23 @@ export function sortAlertGroups(groups: AlertGroup[], mode: SortMode): AlertGrou
   }
 }
 
-/** The reason that names an alert: the heaviest by default weight, the earliest emitted on a tie. */
-export function alertTitleReason(reasons: ReasonLike[] | null | undefined): ReasonLike | undefined {
-  let best: ReasonLike | undefined;
-  for (const r of reasons ?? []) {
-    if (!best || weightOf(r) > weightOf(best)) best = r;
-  }
-  return best;
+/**
+ * The reason part of a row title: the first reason kind the agent sent, and how many other
+ * kinds the row has, such as "No Sandbox +2 more". A weight does not travel with an event, so
+ * the title does not rank reasons; the drawer lists them all.
+ */
+export function reasonTitle(reasons: ReasonLike[] | null | undefined): string | undefined {
+  const first = reasons?.[0];
+  if (!first) return undefined;
+  const others = new Set((reasons ?? []).map((r) => r.kind));
+  others.delete(first.kind);
+  return others.size > 0 ? `${humanKind(first.kind)} +${others.size} more` : humanKind(first.kind);
 }
 
-const weightOf = (r: ReasonLike): number => DEFAULT_REASON_WEIGHTS[r.kind] ?? 0;
+/** The Alerts header count: rows on screen and the events they stand for. */
+export function rowsSummary(rows: number, events: number): string {
+  return `${rows} ${rows === 1 ? 'row' : 'rows'} from ${events} ${events === 1 ? 'event' : 'events'}`;
+}
 
 function groupKey(ev: EventWithTriage): string {
   const ag = extractAiGuard(ev);

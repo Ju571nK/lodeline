@@ -27,6 +27,7 @@ const ignoreFocus = (_fn: () => void) => undefined;
 interface Props {
   eventID: string | null;
   rows: EventWithTriage[];
+  groupEvents?: EventWithTriage[];
   onClose: () => void;
   hostID?: string;
   registerFocusAssign?: (fn: () => void) => void;
@@ -39,6 +40,7 @@ interface Props {
 export function EventDetails({
   eventID,
   rows,
+  groupEvents,
   onClose,
   hostID,
   registerFocusAssign = ignoreFocus,
@@ -52,6 +54,7 @@ export function EventDetails({
     return (
       <SlideOver
         event={event}
+        groupEvents={groupEvents}
         onClose={onClose}
         registerFocusAssign={registerFocusAssign}
         registerFocusNote={registerFocusNote}

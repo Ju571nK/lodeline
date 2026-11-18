@@ -6,7 +6,7 @@ import {
   extractToggleDrift,
 } from '@/api/fleet';
 import type { AlertGroup } from '@/lib/alertGroups';
-import { alertTitleReason } from '@/lib/alertGroups';
+import { reasonTitle } from '@/lib/alertGroups';
 import { hookTitle, humanKind, humanTool, scopeLabel } from '@/lib/labels';
 import { bucketTextColor } from '@/lib/severity';
 import { relativeAge } from '@/lib/time';
@@ -165,8 +165,8 @@ const KIND_TITLES: Record<string, string> = {
 function computeTitle(ev: EventWithTriage, ag: ReturnType<typeof extractAiGuard>): string {
   if (ag) {
     const tool = humanTool(ag.tool, ag.tool_label);
-    const reason = alertTitleReason(ag.reasons)?.kind;
-    return reason ? `AI Guard risk: ${humanKind(reason)} · ${tool}` : `AI Guard risk · ${tool}`;
+    const reason = reasonTitle(ag.reasons);
+    return reason ? `AI Guard risk: ${reason} · ${tool}` : `AI Guard risk · ${tool}`;
   }
   const hook = extractHook(ev);
   if (hook) return hookTitle(hook);

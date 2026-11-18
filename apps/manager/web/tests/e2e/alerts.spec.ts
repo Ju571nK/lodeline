@@ -212,21 +212,28 @@ test.describe('repeated alerts', () => {
     await expect(page).toHaveURL(new RegExp(`alert=${latest.event_id}`));
   });
 
-  test('acknowledging the latest event leaves the older open one in its own row', async ({
-    page,
-  }) => {
-    const [latest, older] = await repeatEvents(page);
+  test('the drawer position and the header both count rows', async ({ page }) => {
+    await openAlerts(page);
+    await page.locator('button', { hasText: REPEAT }).click();
+    const rows = Number(
+      (await page.getByText(/^\d+ rows? from \d+ events?$/).textContent())?.match(/^\d+/)?.[0],
+    );
+    await expect(page.getByTestId('alert-position')).toHaveText(new RegExp(`^\\d+ of ${rows}$`));
+    await page.keyboard.press('Escape');
+  });
+
+  test('acknowledging a repeated row acknowledges every event of it', async ({ page }) => {
+    const [latest] = await repeatEvents(page);
     await page.goto(`/alerts?alert=${latest.event_id}`);
     await page.getByRole('button', { name: /^Acknowledge$/ }).click();
     await expect(page.getByText(/^acknowledged$/i).first()).toBeVisible({ timeout: 5_000 });
     await page.keyboard.press('Escape');
 
     const rows = page.locator('button', { hasText: REPEAT });
-    await expect(rows).toHaveCount(2, { timeout: 10_000 });
-    await expect(rows.filter({ has: page.getByText('open', { exact: true }) })).toHaveCount(1);
-    await expect(rows.filter({ has: page.getByText('ack', { exact: true }) })).toHaveCount(1);
-    await expect(rows.getByTestId('alert-count')).toHaveCount(0);
-    expect(older.event_id).not.toBe(latest.event_id);
+    await expect(rows).toHaveCount(1, { timeout: 10_000 });
+    await expect(rows.getByTestId('alert-count')).toHaveText('×2');
+    await expect(rows.getByText('ack', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('open', { exact: true })).not.toHaveCount(0);
   });
 });
 

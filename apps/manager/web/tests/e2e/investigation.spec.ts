@@ -138,7 +138,7 @@ test('Alerts can search beyond the first page without claiming no alerts', async
     page.getByText(/Search and status filters apply to loaded results only/),
   ).toBeVisible();
   await page.getByRole('button', { name: 'Load more', exact: true }).click();
-  await expect(page.getByText('1 shown of 101 fetched')).toBeVisible();
+  await expect(page.getByText('1 row from 1 event')).toBeVisible();
   await page.locator('button:has-text("AI Guard risk")').first().click();
   await expect(page.getByLabel('Assignee')).toBeVisible();
 });

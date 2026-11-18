@@ -51,14 +51,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   config found (n)" now says that no watched config file was found on the host, which does not
   mean the tool is not installed. (#675)
 - The console Alerts list shows one row for events that repeat one finding. Events with the same host,
-  tool, scope, user, rule pack, reasons and triage status (and assignee) collapse into one row with a
+  tool, scope, user, rule pack, reasons and triage status and assignee collapse into one row with a
   count such as `×2`, the time of the latest event, and the latest event opened on click. A restart
   of the agent sends every reading again, which made each tool show twice. Rows that differ in scope
-  or user stay apart, and every row now shows its scope, and its user when it has one. An event with a different triage
-  status stays in its own row, so acknowledging the latest event leaves an older open one visible.
-  A row is titled by its heaviest reason, by the agent's default weights, where before it used the
-  first reason sent. An operator's weight override does not reach the console, so a tuned
-  weight does not change the title.
+  or user stay apart, and every row now shows its scope, and its user when it has one. Acknowledge,
+  Investigating, Resolve, Reopen and a new assignee apply to every event of a collapsed row, and a
+  write that fails is named in the drawer while the list refetches what the server holds. The
+  header reads "15 rows from 17 events", and the position in the drawer counts rows. A row is
+  titled by the first reason the agent sent and the number of other kinds, such as
+  "No Sandbox +2 more", where before it named the first reason only.
 
 ### Fixed
 

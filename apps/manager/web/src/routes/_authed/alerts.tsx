@@ -8,7 +8,7 @@ import { EventDetails } from '@/components/EventDetails';
 import { Pagination } from '@/components/Fleet/Pagination';
 import { type AlertFilter, DEFAULT_FILTER, useAlerts } from '@/hooks/useAlerts';
 import { useShortcuts } from '@/hooks/useShortcuts';
-import { groupAlerts, type SortMode, sortAlertGroups } from '@/lib/alertGroups';
+import { groupAlerts, rowsSummary, type SortMode, sortAlertGroups } from '@/lib/alertGroups';
 import { type AlertsSearch, validateAlertsSearch } from '@/lib/alertsSearch';
 import { cn } from '@/lib/utils';
 
@@ -150,9 +150,7 @@ function AlertsPage() {
         <div>
           <h1 className="text-lg font-semibold text-text-primary">Alerts</h1>
           <p className="text-xs text-text-muted">
-            {isPending
-              ? 'Loading…'
-              : `${groups.length} shown${rawCount !== groups.length ? ` of ${rawCount} fetched` : ''}`}
+            {isPending ? 'Loading…' : rowsSummary(groups.length, rows.length)}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -210,6 +208,7 @@ function AlertsPage() {
       <EventDetails
         eventID={selectedAlertID}
         rows={rows}
+        groupEvents={cursorIndex < 0 ? undefined : groups[cursorIndex].events}
         onClose={closeSlideOver}
         registerFocusAssign={registerFocusAssign}
         registerFocusNote={registerFocusNote}

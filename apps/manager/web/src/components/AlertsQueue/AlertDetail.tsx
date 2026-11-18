@@ -12,7 +12,7 @@ import {
   type HookEvidence,
   type ToggleDriftEvidence,
 } from '@/api/fleet';
-import type { TriageStatus } from '@/api/triage';
+import type { TriageStatus, UpsertPayload } from '@/api/triage';
 import { ObservedControls } from '@/components/ObservedControls';
 import { ReasonList } from '@/components/ReasonList';
 import { Button } from '@/components/ui/button';
@@ -54,10 +54,13 @@ export function AlertBadges({ event }: { event: EventWithTriage }) {
 
 export function AlertDetail({
   event,
+  groupEvents,
   assignInputRef,
   noteInputRef,
 }: {
   event: EventWithTriage;
+  /** Every event of the collapsed row this one stands for; status and assignee changes apply to all. */
+  groupEvents?: EventWithTriage[];
   assignInputRef: React.MutableRefObject<HTMLInputElement | null>;
   noteInputRef: React.MutableRefObject<HTMLTextAreaElement | null>;
 }) {
@@ -87,25 +90,27 @@ export function AlertDetail({
     return event.evidence;
   };
 
+  const groupPayloads = (change: Partial<UpsertPayload>): UpsertPayload[] =>
+    (groupEvents && groupEvents.length > 0 ? groupEvents : [event]).map((ev) => ({
+      host_id: ev.host_id,
+      event_id: ev.event_id,
+      ...change,
+      evidence_snapshot: ev.event_id === event.event_id && triage.data ? undefined : ev.evidence,
+    }));
+
   const setStatus = (status: TriageStatus) => {
-    upsert.mutate({
-      host_id: event.host_id,
-      event_id: event.event_id,
-      status,
-      evidence_snapshot: triage.data ? undefined : ensureSnapshot(),
-    });
+    upsert.mutate(groupPayloads({ status }));
   };
 
   const onAssign = (e: FormEvent) => {
     e.preventDefault();
     const trimmed = assigneeDraft.trim();
-    upsert.mutate({
-      host_id: event.host_id,
-      event_id: event.event_id,
-      assignee: trimmed === '' ? undefined : trimmed,
-      clear_assignee: trimmed === '',
-      evidence_snapshot: triage.data ? undefined : ensureSnapshot(),
-    });
+    upsert.mutate(
+      groupPayloads({
+        assignee: trimmed === '' ? undefined : trimmed,
+        clear_assignee: trimmed === '',
+      }),
+    );
   };
 
   const onSubmitNote = (e: FormEvent) => {
@@ -116,12 +121,14 @@ export function AlertDetail({
     // when this is an un-actioned alert so the FK is satisfied.
     if (!triage.data) {
       upsert.mutate(
-        {
-          host_id: event.host_id,
-          event_id: event.event_id,
-          status: 'open',
-          evidence_snapshot: ensureSnapshot(),
-        },
+        [
+          {
+            host_id: event.host_id,
+            event_id: event.event_id,
+            status: 'open',
+            evidence_snapshot: ensureSnapshot(),
+          },
+        ],
         {
           onSuccess: () => {
             appendNote.mutate(
