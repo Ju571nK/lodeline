@@ -273,4 +273,50 @@ mod tests {
             assert!(!msg.contains(leaked), "{msg}");
         }
     }
+
+    async fn hostile_body_error_text(status: u16) -> String {
+        let mut body = String::from("<html>\u{1b}[31mred\u{1b}[0m\0nul\ttab\nnl");
+        body.push_str(&"x".repeat(300 * 1024));
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1/events");
+                then.status(status).body(body);
+            })
+            .await;
+        let up = Upstream::for_test(server.base_url());
+        let err = up.get("/v1/events", &[]).await.unwrap_err();
+        McpError::from(err).message.to_string()
+    }
+
+    #[tokio::test]
+    async fn error_bodies_are_capped_and_stripped_of_control_characters() {
+        for status in [400, 503, 418] {
+            let msg = hostile_body_error_text(status).await;
+            assert!(msg.chars().count() <= 640, "HTTP {status}: {} chars", msg.chars().count());
+            assert!(
+                !msg.chars().any(char::is_control),
+                "HTTP {status}: control character in {msg:?}"
+            );
+            assert!(msg.ends_with(" [truncated]"), "HTTP {status}: {msg:?}");
+            assert!(msg.contains("red"), "HTTP {status}: {msg:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn short_error_body_is_kept_intact() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1/events");
+                then.status(400).body("{\"error\":\"cursor must be a UUID\"}");
+            })
+            .await;
+        let up = Upstream::for_test(server.base_url());
+        let err = up.get("/v1/events", &[]).await.unwrap_err();
+        assert_eq!(
+            McpError::from(err).message.to_string(),
+            "invalid query (HTTP 400): {\"error\":\"cursor must be a UUID\"}"
+        );
+    }
 }
