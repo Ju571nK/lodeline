@@ -110,7 +110,7 @@ pub struct ControlContext {
 }
 
 #[cfg(feature = "operator-cli")]
-fn risk_summary(
+pub(crate) fn risk_summary(
     (tool, scope, _pid, user): &crate::ai_guard::task::StateKey,
     source: &crate::ai_guard::task::SourceState,
 ) -> Option<RiskSummary> {

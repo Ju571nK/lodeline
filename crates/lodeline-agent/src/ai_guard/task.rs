@@ -709,6 +709,23 @@ mod tests {
         h.abort();
     }
 
+    #[cfg(feature = "operator-cli")]
+    #[tokio::test]
+    async fn control_reports_the_timestamp_of_the_emitted_reading() {
+        let (ctx, parser, mut events) = flaky_ctx(vec![Ok(vec![AiGuardReason::SandboxDisabled])]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        let event_ts = recv_next_risk_assessed(&mut events).await.event.ts;
+
+        let state = ctx.state.read();
+        let (key, source) = state.iter().next().expect("one cached reading");
+        let summary = crate::control::risk_summary(key, source).expect("summary");
+        let expected = event_ts
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        assert_eq!(summary.last_assessed_ts, expected);
+    }
+
     #[tokio::test]
     async fn a_failure_after_a_reading_names_it_and_never_resends_it() {
         let (ctx, parser, mut events) = flaky_ctx(vec![
