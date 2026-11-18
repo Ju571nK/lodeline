@@ -691,3 +691,25 @@ fn an_unknown_bucket_is_a_usage_error_not_the_fail_on_code() {
     let (code, _) = scan_exit(home.path(), &["--fail-on", "severe"]);
     assert_eq!(code, Some(2));
 }
+
+#[test]
+fn a_corrupt_config_exits_4_with_the_flag_and_0_without() {
+    let home = tempdir().unwrap();
+    write(&home.path().join(".cursor").join("mcp.json"), "{bad");
+    assert_eq!(scan_exit(home.path(), &[]).0, Some(0));
+    assert_eq!(scan_exit(home.path(), &["--fail-on", "low"]).0, Some(4));
+}
+
+#[test]
+fn a_tool_over_the_threshold_beats_a_corrupt_config() {
+    let home = tempdir().unwrap();
+    write(&home.path().join(".cursor").join("mcp.json"), "{bad");
+    write(
+        &home.path().join(".claude").join("settings.json"),
+        r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#,
+    );
+    let (_, json) = scan_exit(home.path(), &["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(!v["errors"].as_array().unwrap().is_empty(), "{v}");
+    assert_eq!(scan_exit(home.path(), &["--fail-on", "medium"]).0, Some(3));
+}

@@ -32,6 +32,10 @@ pub struct ScanArgs {
 /// usage errors exit 2, so 3 stays distinct.
 pub const FAIL_ON_EXIT: i32 = 3;
 
+/// Exit code of `lodeline scan --fail-on` when a config could not be read and no
+/// assessed tool reached the threshold, so posture is unknown.
+pub const FAIL_ON_UNKNOWN_EXIT: i32 = 4;
+
 /// One assessed (tool, scope) — a configured tool, even if it scored clean.
 struct Row {
     controls: Option<Vec<lodeline_core::event::AiGuardControl>>,
@@ -749,6 +753,31 @@ mod fail_on_tests {
             not_configured: vec![AiTool::Cursor],
             errors: vec![],
         }
+    }
+
+    fn with_error(mut r: Report) -> Report {
+        r.errors
+            .push((AiTool::Cursor, AiGuardScope::UserGlobal, "parse".into()));
+        r
+    }
+
+    #[test]
+    #[test]
+    fn an_unreadable_config_exits_4_when_no_row_reaches_the_threshold() {
+        use AiGuardBucket::*;
+        assert_eq!(fail_on_exit(&with_error(report(&[])), Some(Low)), 4);
+        assert_eq!(fail_on_exit(&with_error(report(&[Medium])), Some(High)), 4);
+    }
+
+    #[test]
+    fn a_row_over_the_threshold_wins_over_an_unreadable_config() {
+        use AiGuardBucket::*;
+        assert_eq!(fail_on_exit(&with_error(report(&[High])), Some(High)), 3);
+    }
+
+    #[test]
+    fn an_unreadable_config_without_the_flag_exits_0() {
+        assert_eq!(fail_on_exit(&with_error(report(&[])), None), 0);
     }
 
     #[test]
