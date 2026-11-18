@@ -83,6 +83,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-sender enroll` no longer warns that the certificate starts seconds after this host's
+  clock on a healthy enroll. It judged the issued certificate against the time it read when the
+  run began, so a certificate signed a second or more later looked as if it started in the
+  future. It now reads the clock when the certificate arrives. A host whose clock is behind the
+  server's still gets the warning.
 - `GET /v1/fleet/risk` and `GET /v1/fleet/hosts` return hosts in one fixed order. Hosts that tie
   on the sort key (bucket and score, or last seen) sort by `host_id` ascending, where before
   their order could change between requests and restarts, so paging with `cursor` could skip

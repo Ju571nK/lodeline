@@ -469,7 +469,7 @@ async fn enroll(args: &Args, env: &Env<'_>) -> R<()> {
             key.public_key_raw(),
             host_id,
             &parsed.file.server_ca_pem,
-            now,
+            OffsetDateTime::now_utc(),
         ) {
             Ok(w) => {
                 if let Some(w) = w {
