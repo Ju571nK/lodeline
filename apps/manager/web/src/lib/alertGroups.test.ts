@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EventWithTriage, ReasonLike, Scope } from '@/api/fleet';
-import { alertTitleReason, groupAlerts, sortAlertGroups } from './alertGroups';
+import { groupAlerts, reasonTitle, rowsSummary, sortAlertGroups } from './alertGroups';
 
 let seq = 0;
 
@@ -143,32 +143,45 @@ describe('sortAlertGroups', () => {
   });
 });
 
-describe('alertTitleReason', () => {
-  it('picks the heaviest reason, not the first one emitted', () => {
+describe('reasonTitle', () => {
+  it('names the only reason', () => {
+    expect(reasonTitle([{ kind: 'no_sandbox' }])).toBe('No Sandbox');
+  });
+
+  it('names the first reason sent and counts the other kinds', () => {
     const reasons: ReasonLike[] = [
-      { kind: 'mcp_server_local_command' },
-      { kind: 'destructive_in_inline_command' },
       { kind: 'no_sandbox' },
+      { kind: 'mcp_server_remote' },
+      { kind: 'sandbox_disabled' },
     ];
-    expect(alertTitleReason(reasons)?.kind).toBe('destructive_in_inline_command');
+    expect(reasonTitle(reasons)).toBe('No Sandbox +2 more');
   });
 
-  it('keeps emit order between reasons of equal weight', () => {
-    const reasons: ReasonLike[] = [{ kind: 'mcp_launcher_shell' }, { kind: 'sandbox_disabled' }];
-    expect(alertTitleReason(reasons)?.kind).toBe('mcp_launcher_shell');
+  it('counts a kind once however often it repeats', () => {
+    const reasons: ReasonLike[] = [
+      { kind: 'no_sandbox', executor: 'bash' },
+      { kind: 'no_sandbox', executor: 'zsh' },
+      { kind: 'mcp_server_remote' },
+      { kind: 'no_sandbox', executor: 'sh' },
+    ];
+    expect(reasonTitle(reasons)).toBe('No Sandbox +1 more');
   });
 
-  it('ranks a kind with no known weight below every weighted kind', () => {
-    const reasons: ReasonLike[] = [{ kind: 'a_future_kind' }, { kind: 'mcp_server_local_command' }];
-    expect(alertTitleReason(reasons)?.kind).toBe('mcp_server_local_command');
-  });
-
-  it('falls back to the first reason when no kind has a known weight', () => {
-    expect(alertTitleReason([{ kind: 'x_new' }, { kind: 'y_new' }])?.kind).toBe('x_new');
+  it('adds no count when every reason has the same kind', () => {
+    expect(reasonTitle([{ kind: 'no_sandbox' }, { kind: 'no_sandbox' }])).toBe('No Sandbox');
   });
 
   it('returns undefined for no reasons', () => {
-    expect(alertTitleReason([])).toBeUndefined();
-    expect(alertTitleReason(undefined)).toBeUndefined();
+    expect(reasonTitle([])).toBeUndefined();
+    expect(reasonTitle(undefined)).toBeUndefined();
+    expect(reasonTitle(null)).toBeUndefined();
+  });
+});
+
+describe('rowsSummary', () => {
+  it('says rows and events plainly', () => {
+    expect(rowsSummary(15, 17)).toBe('15 rows from 17 events');
+    expect(rowsSummary(1, 101)).toBe('1 row from 101 events');
+    expect(rowsSummary(1, 1)).toBe('1 row from 1 event');
   });
 });
