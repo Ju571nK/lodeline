@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { NotFoundError } from '@/api/client';
 import { type EventWithTriage, fleetEventByID } from '@/api/fleet';
-import { SlideOver } from '@/components/AlertsQueue/SlideOver';
+import { type DrawerPosition, SlideOver } from '@/components/AlertsQueue/SlideOver';
 import {
   Sheet,
   SheetContent,
@@ -9,6 +9,19 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import type { AlertsSearch } from '@/lib/alertsSearch';
+
+/** Finds an event in the loaded rows, or fetches it by id when the URL points outside them. */
+export function useEventByID(eventID: string | null, rows: EventWithTriage[]) {
+  const loaded = rows.find((row) => row.event_id === eventID);
+  const q = useQuery({
+    queryKey: ['fleet', 'event', eventID],
+    queryFn: ({ signal }) => fleetEventByID(eventID as string, signal),
+    enabled: !!eventID && !loaded,
+    retry: false,
+  });
+  return { event: loaded ?? q.data, query: q };
+}
 
 const ignoreFocus = (_fn: () => void) => undefined;
 interface Props {
@@ -18,6 +31,8 @@ interface Props {
   hostID?: string;
   registerFocusAssign?: (fn: () => void) => void;
   registerFocusNote?: (fn: () => void) => void;
+  position?: DrawerPosition;
+  fullPageSearch?: AlertsSearch;
 }
 
 /** Resolve a shared URL even when the event is outside the loaded pages. */
@@ -28,16 +43,11 @@ export function EventDetails({
   hostID,
   registerFocusAssign = ignoreFocus,
   registerFocusNote = ignoreFocus,
+  position,
+  fullPageSearch,
 }: Props) {
-  const loaded = rows.find((row) => row.event_id === eventID);
-  const q = useQuery({
-    queryKey: ['fleet', 'event', eventID],
-    queryFn: ({ signal }) => fleetEventByID(eventID as string, signal),
-    enabled: !!eventID && !loaded,
-    retry: false,
-  });
+  const { event, query: q } = useEventByID(eventID, rows);
   if (!eventID) return null;
-  const event = loaded ?? q.data;
   if (event && (!hostID || hostID === event.host_id)) {
     return (
       <SlideOver
@@ -45,6 +55,8 @@ export function EventDetails({
         onClose={onClose}
         registerFocusAssign={registerFocusAssign}
         registerFocusNote={registerFocusNote}
+        position={position}
+        fullPageSearch={fullPageSearch}
       />
     );
   }
