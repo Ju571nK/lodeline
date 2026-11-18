@@ -66,9 +66,10 @@ fn main() -> anyhow::Result<()> {
         cli::Command::Version => {
             println!("lodeline {}", env!("CARGO_PKG_VERSION"));
         }
-        cli::Command::Scan { json } => {
+        cli::Command::Scan { json, fail_on } => {
             let code = lodeline_agent::scan_cli::run(lodeline_agent::scan_cli::ScanArgs {
                 json,
+                fail_on: fail_on.map(Into::into),
                 home_override: None,
                 cwd_override: None,
             });

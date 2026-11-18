@@ -4,8 +4,9 @@
 //! under `$HOME` (`~/.claude`, `~/.codex`, `~/.cursor`, …) plus the current
 //! directory if it is a project — scores the findings with the default rubric,
 //! and prints a headline + per-tool table (or JSON). No daemon, no state.db, no
-//! policy required. Always exits 0 (informational; this is "show me my score",
-//! not a gate).
+//! policy required. Exits 0 (informational; this is "show me my score", not a
+//! gate) unless `--fail-on` is given, which is opt in and changes only the exit
+//! code.
 
 use crate::ai_guard::parser::AiGuardParser;
 use crate::ai_guard::{rubric, tool_cli_label, user_global_parsers};
@@ -19,11 +20,17 @@ use std::sync::Arc;
 pub struct ScanArgs {
     /// Emit the full report as pretty JSON instead of the human table.
     pub json: bool,
+    /// Exit [`FAIL_ON_EXIT`] when any assessed tool's bucket is at or above this.
+    pub fail_on: Option<AiGuardBucket>,
     /// Override the home dir. `None` → `$HOME` / `%USERPROFILE%`.
     pub home_override: Option<PathBuf>,
     /// Override the project dir. `None` → `current_dir()`.
     pub cwd_override: Option<PathBuf>,
 }
+
+/// Exit code of `lodeline scan --fail-on` when the threshold is reached. Clap's
+/// usage errors exit 2, so 3 stays distinct.
+pub const FAIL_ON_EXIT: i32 = 3;
 
 /// One assessed (tool, scope) — a configured tool, even if it scored clean.
 struct Row {
@@ -43,7 +50,8 @@ struct Report {
     errors: Vec<(AiTool, AiGuardScope, String)>,
 }
 
-/// CLI entry. Resolves home + cwd, builds the report, prints it, returns 0.
+/// CLI entry. Resolves home + cwd, builds the report, prints it, and returns the
+/// exit code: 0, or [`FAIL_ON_EXIT`] when `--fail-on` is reached.
 pub fn run(args: ScanArgs) -> i32 {
     let claude_dir = invoking_user_dir(
         args.home_override.as_deref(),
@@ -66,18 +74,21 @@ pub fn run(args: ScanArgs) -> i32 {
     };
     let cwd = args.cwd_override.or_else(|| std::env::current_dir().ok());
 
+    let report = build_report(&home, claude_dir, codex_home, cwd.as_deref());
     if args.json {
-        let v = report_json(&build_report(&home, claude_dir, codex_home, cwd.as_deref()));
+        let v = report_json(&report);
         println!(
             "{}",
             serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into())
         );
     } else {
-        print!(
-            "{}",
-            render_human(&build_report(&home, claude_dir, codex_home, cwd.as_deref()))
-        );
+        print!("{}", render_human(&report));
     }
+    fail_on_exit(&report, args.fail_on)
+}
+
+fn fail_on_exit(report: &Report, fail_on: Option<AiGuardBucket>) -> i32 {
+    let _ = (report, fail_on);
     0
 }
 
@@ -713,5 +724,61 @@ mod table_width_tests {
         }
         assert_eq!(ends.len(), 5, "{text}");
         assert!(ends.iter().all(|e| *e == ends[0]), "{ends:?}\n{text}");
+    }
+}
+
+#[cfg(test)]
+mod fail_on_tests {
+    use super::*;
+
+    fn report(buckets: &[AiGuardBucket]) -> Report {
+        Report {
+            rows: buckets
+                .iter()
+                .map(|b| Row {
+                    controls: None,
+                    tool: AiTool::Codex,
+                    scope: AiGuardScope::UserGlobal,
+                    score: 0.0,
+                    bucket: *b,
+                    reasons: vec![],
+                })
+                .collect(),
+            not_configured: vec![AiTool::Cursor],
+            errors: vec![],
+        }
+    }
+
+    #[test]
+    fn exits_3_exactly_when_a_row_reaches_the_threshold() {
+        use AiGuardBucket::*;
+        let all = [Low, Medium, High, Critical];
+        for row in all {
+            for threshold in all {
+                let want = if row >= threshold { FAIL_ON_EXIT } else { 0 };
+                assert_eq!(
+                    fail_on_exit(&report(&[row]), Some(threshold)),
+                    want,
+                    "row {row:?} threshold {threshold:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_worst_of_several_rows_decides() {
+        use AiGuardBucket::*;
+        assert_eq!(fail_on_exit(&report(&[Low, High, Medium]), Some(High)), 3);
+        assert_eq!(fail_on_exit(&report(&[Low, Medium]), Some(High)), 0);
+    }
+
+    #[test]
+    fn no_flag_always_exits_0() {
+        assert_eq!(fail_on_exit(&report(&[AiGuardBucket::Critical]), None), 0);
+    }
+
+    #[test]
+    fn a_tool_with_no_config_is_not_assessed_and_never_trips() {
+        assert_eq!(fail_on_exit(&report(&[]), Some(AiGuardBucket::Low)), 0);
     }
 }

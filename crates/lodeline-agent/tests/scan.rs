@@ -618,3 +618,76 @@ fn scan_gives_no_codex_project_row_for_a_folder_without_codex_files() {
     let v = scan_bin(home.path(), proj.path(), None);
     assert_eq!(codex_project_rows(&v), 0, "{v}");
 }
+
+fn scan_exit(home: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lodeline"))
+        .arg("scan")
+        .args(args)
+        .current_dir(home)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        String::from_utf8(out.stdout).unwrap_or_default(),
+    )
+}
+
+const BUCKETS: [&str; 4] = ["low", "medium", "high", "critical"];
+
+fn rank(bucket: &str) -> usize {
+    BUCKETS.iter().position(|b| *b == bucket).unwrap()
+}
+
+#[test]
+fn fail_on_exits_3_exactly_at_and_below_the_row_bucket() {
+    let home = tempdir().unwrap();
+    write(
+        &home.path().join(".cursor").join("mcp.json"),
+        r#"{"mcpServers":{"x":{"command":"npx","args":["-y","evil"]}}}"#,
+    );
+    let (code, json) = scan_exit(home.path(), &["--json"]);
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = rank(v["results"][0]["bucket"].as_str().unwrap());
+    assert!(row >= 1, "fixture must score above low: {v}");
+
+    for (threshold, name) in BUCKETS.iter().enumerate() {
+        let (code, _) = scan_exit(home.path(), &["--fail-on", name]);
+        let want = if row >= threshold { 3 } else { 0 };
+        assert_eq!(code, Some(want), "row {row} --fail-on {name}");
+    }
+}
+
+#[test]
+fn fail_on_leaves_the_json_output_unchanged() {
+    let home = tempdir().unwrap();
+    write(
+        &home.path().join(".cursor").join("mcp.json"),
+        r#"{"mcpServers":{"x":{"command":"npx","args":["-y","evil"]}}}"#,
+    );
+    let (plain_code, plain) = scan_exit(home.path(), &["--json"]);
+    let (code, with_flag) = scan_exit(home.path(), &["--json", "--fail-on", "low"]);
+    assert_eq!(plain_code, Some(0));
+    assert_eq!(code, Some(3));
+    assert_eq!(plain, with_flag);
+}
+
+#[test]
+fn fail_on_never_trips_for_a_home_with_no_config() {
+    let home = tempdir().unwrap();
+    for name in BUCKETS {
+        let (code, _) = scan_exit(home.path(), &["--fail-on", name]);
+        assert_eq!(code, Some(0), "--fail-on {name}");
+    }
+}
+
+#[test]
+fn an_unknown_bucket_is_a_usage_error_not_the_fail_on_code() {
+    let home = tempdir().unwrap();
+    let (code, _) = scan_exit(home.path(), &["--fail-on", "severe"]);
+    assert_eq!(code, Some(2));
+}
