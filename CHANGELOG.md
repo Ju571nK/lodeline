@@ -14,15 +14,16 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 `GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}`. It adds no policy field, no reason
 kind, no other event field and no event kind. An older server ignores the field when it reads an
 event, and a reading from a 0.17.0 agent carries none, so a 0.18.0 server leaves it out of the
-fleet API for that tool. The console changes need the 0.18.0 console. A 0.18.0 console reads
+fleet API for that tool, unless a source of that tool failed or went stale, which reads as `true`.
+The console changes need the 0.18.0 console. A 0.18.0 console reads
 `config_found` as optional, so with a 0.17.0 server it shows what it showed before and "No config
 found" does not appear. Server and console first, then agents, is the order that shows the field from
 the first reading, and any order is safe. A Cargo pre-release version now maps to an rpm tilde
 version in `packaging/build.sh`, which leaves the 0.18.0 packages unchanged because the version
 has no pre-release part. No package script, unit file, tmpfiles entry or SELinux module changed.
 
-**Hosts.** After the upgrade every `ai_guard_risk_assessed` event carries `config_found`, and a
-tool whose config appears or disappears is reported at once. A SIEM rule can match
+**Hosts.** After the upgrade every `ai_guard_risk_assessed` event whose parser watches a path
+carries `config_found`, and a tool whose config appears or disappears is reported at once. A SIEM rule can match
 `evidence.config_found == false` to tell a low score with no config from a clean config. An agent
 run as root on macOS and Linux sends fewer project readings and has fewer watch roots, because it
 no longer reads or watches another user's `.claude` folders when a repository's checkout root is
