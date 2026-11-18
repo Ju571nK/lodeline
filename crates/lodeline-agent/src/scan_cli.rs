@@ -766,7 +766,6 @@ mod fail_on_tests {
     }
 
     #[test]
-    #[test]
     fn an_unreadable_config_exits_4_when_no_row_reaches_the_threshold() {
         use AiGuardBucket::*;
         assert_eq!(fail_on_exit(&with_error(report(&[])), Some(Low)), 4);
