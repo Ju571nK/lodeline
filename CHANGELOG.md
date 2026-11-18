@@ -35,6 +35,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   no field because its server or agent is older, shows as before. The console relays the field
   as the server sent it.
 
+### Changed
+
+- **Console.** The reasons of an alert, in the alert drawer and on the host page, are grouped by
+  kind. A kind that appears more than once shows one collapsed header with its count, and the
+  entries open under it. Identical entries show once with a "×n" count. The host page line "No
+  config found (n)" now says that no watched config file was found on the host, which does not
+  mean the tool is not installed. (#675)
+
 ### Fixed
 
 - `GET /v1/fleet/risk` and `GET /v1/fleet/hosts` return hosts in one fixed order. Hosts that tie
