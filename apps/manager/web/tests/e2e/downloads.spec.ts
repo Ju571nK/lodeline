@@ -38,9 +38,10 @@ test.describe('downloads page', () => {
       }),
     );
     await page.goto('/downloads');
-    await expect(page.getByText(/does not serve release files/)).toContainText(
-      'sets artifacts_dir in server.yaml',
-    );
+    const guide = page.getByRole('status');
+    await expect(guide).toContainText('lodeline-server does not serve release files.');
+    await expect(guide.getByRole('listitem')).toHaveCount(3);
+    await expect(guide).toContainText('set artifacts_dir to that folder');
     await expect(page.locator('main li a')).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath('downloads-not-configured.png'),
