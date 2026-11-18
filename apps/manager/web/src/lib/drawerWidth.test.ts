@@ -36,6 +36,12 @@ describe('drawer width', () => {
     expect(defaultWidth(1000)).toBeGreaterThan(MIN_WIDTH);
   });
 
+  it('never starts outside the range a drag can reach', () => {
+    for (const vw of [900, 1000, 1280, 1600, 1800, 2560]) {
+      expect(defaultWidth(vw)).toBe(clampWidth(defaultWidth(vw), vw));
+    }
+  });
+
   it('takes the full width under 900 px only', () => {
     expect(isFullWidth(899)).toBe(true);
     expect(isFullWidth(900)).toBe(false);
@@ -43,7 +49,8 @@ describe('drawer width', () => {
 
   it('keeps a dragged width between the minimum and the room beside the list', () => {
     expect(clampWidth(100, 1800)).toBe(MIN_WIDTH);
-    expect(clampWidth(5000, 1800)).toBeLessThan(1800);
+    expect(clampWidth(5000, 1800)).toBe(960);
+    expect(clampWidth(5000, 1000)).toBe(760);
     expect(clampWidth(700, 1800)).toBe(700);
   });
 

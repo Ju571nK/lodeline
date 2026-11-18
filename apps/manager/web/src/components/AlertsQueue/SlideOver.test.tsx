@@ -58,7 +58,7 @@ const baseEvent: EventWithTriage = {
 
 interface DetailOptions {
   evidence?: Evidence;
-  position?: { index: number; total: number; onPrev: () => void; onNext: () => void };
+  position?: { index: number; total: number; partial?: boolean; onPrev: () => void; onNext: () => void };
   fullPageSearch?: AlertsSearch;
 }
 
@@ -134,6 +134,11 @@ describe('alert drawer navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Previous alert' }));
     expect(p.onNext).toHaveBeenCalledTimes(1);
     expect(p.onPrev).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the count is of the loaded rows when more can load', async () => {
+    await renderDrawer({ position: { ...position(16, 17), partial: true } });
+    expect(screen.getByTestId('alert-position').textContent).toBe('17 of 17 loaded');
   });
 
   it('disables previous on the first alert and next on the last', async () => {
