@@ -116,25 +116,23 @@ pub fn append_events<'e, 'p>(
 
     let mut f = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(false)
         .open(&path)
         .map_err(|source| PersistError::Io {
             path: path.clone(),
             source,
         })?;
     let mut max_seq = cur;
+    let mut batch = Vec::new();
     for e in &to_write {
-        let mut line = serde_json::to_vec(e.payload).map_err(PersistError::Json)?;
-        line.push(b'\n');
-        f.write_all(&line).map_err(|source| PersistError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        serde_json::to_writer(&mut batch, e.payload).map_err(PersistError::Json)?;
+        batch.push(b'\n');
         if e.sequence > max_seq {
             max_seq = e.sequence;
         }
     }
-    f.sync_all().map_err(|source| PersistError::Io {
+    write_batch(&mut f, &batch).map_err(|source| PersistError::Io {
         path: path.clone(),
         source,
     })?;
@@ -148,6 +146,44 @@ pub fn append_events<'e, 'p>(
     }
     high_water.set(host_id, max_seq);
     Ok(to_write)
+}
+
+/// The file operations `write_batch` needs. A trait so a test can fail a write
+/// midway, which a real file cannot be made to do.
+trait BatchSink: Write {
+    fn len(&mut self) -> std::io::Result<u64>;
+    fn truncate(&mut self, len: u64) -> std::io::Result<()>;
+    fn sync(&mut self) -> std::io::Result<()>;
+}
+
+impl BatchSink for std::fs::File {
+    /// Moves to the end and returns the length. The file is opened for plain
+    /// write, not append: on Windows an append handle cannot be truncated.
+    fn len(&mut self) -> std::io::Result<u64> {
+        std::io::Seek::seek(self, std::io::SeekFrom::End(0))
+    }
+    fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_len(len)
+    }
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.sync_all()
+    }
+}
+
+/// Append `batch` and make it durable, or leave the file as it was. On a
+/// write or sync error the file is cut back to its length before the batch, so
+/// the sender's retry does not append the lines that did land a second time.
+/// If the cut itself fails the error is logged and the write error returned;
+/// the retry may then duplicate those lines.
+fn write_batch(f: &mut impl BatchSink, batch: &[u8]) -> std::io::Result<()> {
+    let before = f.len()?;
+    let result = f.write_all(batch).and_then(|()| f.sync());
+    if result.is_err() {
+        if let Err(e) = f.truncate(before) {
+            tracing::error!(error = ?e, "could not cut a failed batch off the JSONL");
+        }
+    }
+    result
 }
 
 /// The file beside `jsonl` that holds when the server received each batch
@@ -227,6 +263,91 @@ mod tests {
         let seg = dir.path().join("h1").join("received-2026-05-11.jsonl");
         let body = std::fs::read_to_string(seg).unwrap();
         assert_eq!(body.matches('\n').count(), 3);
+    }
+
+    struct FailAfter {
+        file: std::fs::File,
+        budget: usize,
+        truncated: Option<std::io::Result<()>>,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.budget == 0 {
+                return Err(std::io::Error::other("disk full"));
+            }
+            let n = buf.len().min(self.budget);
+            self.budget -= n;
+            self.file.write(&buf[..n])
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    impl BatchSink for FailAfter {
+        fn len(&mut self) -> std::io::Result<u64> {
+            self.file.len()
+        }
+        fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+            let r = self.file.truncate(len);
+            self.truncated = Some(match &r {
+                Ok(()) => Ok(()),
+                Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            });
+            r
+        }
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.file.sync()
+        }
+    }
+
+    #[test]
+    fn failed_write_leaves_no_partial_batch_and_retry_writes_each_line_once() {
+        let dir = tempdir().unwrap();
+        let now = datetime!(2026-05-11 12:00 UTC);
+        let seg = dir.path().join("h1").join("received-2026-05-11.jsonl");
+        std::fs::create_dir_all(seg.parent().unwrap()).unwrap();
+        let p1 = json!({"event_id":"a","sequence":1});
+        let p2 = json!({"event_id":"b","sequence":2});
+        let evs = [
+            PersistEvent {
+                sequence: 1,
+                payload: &p1,
+            },
+            PersistEvent {
+                sequence: 2,
+                payload: &p2,
+            },
+        ];
+        let mut hw = HighWater::default();
+        let first_line_len = serde_json::to_vec(&p1).unwrap().len() + 1;
+
+        let mut batch = Vec::new();
+        for e in &evs {
+            serde_json::to_writer(&mut batch, e.payload).unwrap();
+            batch.push(b'\n');
+        }
+        let mut sink = FailAfter {
+            file: std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&seg)
+                .unwrap(),
+            budget: first_line_len,
+            truncated: None,
+        };
+        assert!(write_batch(&mut sink, &batch).is_err());
+        assert!(matches!(sink.truncated, Some(Ok(()))), "truncate failed");
+        assert_eq!(std::fs::read_to_string(&seg).unwrap(), "");
+        assert_eq!(hw.get("h1"), 0);
+
+        let n = append_events(dir.path(), "h1", &evs, &mut hw, now)
+            .unwrap()
+            .len();
+        assert_eq!(n, 2);
+        assert_eq!(std::fs::read_to_string(&seg).unwrap().lines().count(), 2);
     }
 
     #[test]
