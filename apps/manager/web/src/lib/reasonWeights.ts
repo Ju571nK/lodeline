@@ -1,1 +1,48 @@
-export const DEFAULT_REASON_WEIGHTS: Record<string, number> = {};
+/**
+ * The agent's default rubric weight for each reason kind. A weight does not travel
+ * with an event, and an operator override does not reach the console, so this
+ * orders reasons by the defaults only. `tests/reason-weights.test.ts` keeps it equal
+ * to `Rubric::defaults()`.
+ */
+export const DEFAULT_REASON_WEIGHTS: Record<string, number> = {
+  destructive_in_inline_command: 4,
+  destructive_in_hook_script: 4,
+  sandbox_disabled: 3,
+  no_sandbox: 2,
+  permissions_allow_broad: 2,
+  external_script_unscanned: 1.5,
+  broad_matcher_pre_tool_use: 1.5,
+  broad_matcher_other: 0.5,
+  permissions_deny_empty: 1,
+  mcp_server_remote: 1,
+  mcp_server_local_command: 0.5,
+  mcp_launcher_shell: 3,
+  mcp_launcher_transient_path: 3,
+  project_mcp_auto_enabled: 2.5,
+  instruction_fetch_pipe: 3,
+  instruction_destructive: 3,
+  instruction_obfuscation: 2.5,
+  instruction_override_marker: 2,
+  trusted_mcp_server: 1.5,
+  auto_approval_enabled: 2,
+  unattended_scheduled_task: 2.5,
+  mcp_tool_instruction_override: 3.5,
+  mcp_tool_hidden_text: 3.5,
+  mcp_tool_name_shadow: 3,
+  mcp_tool_surface_drift: 2,
+  mcp_unapproved_new_tool: 2,
+  mcp_schema_privilege_expansion: 3,
+  mcp_read_only_hint_contradiction: 2,
+  auto_approval_enabled_classifier: 1.5,
+  auto_mode_defaults_dropped: 2.5,
+  hook_forwards_tool_calls: 3,
+  unattended_loop_prompt: 2.5,
+  standing_command_approval: 2,
+  mcp_tools_auto_approved: 1,
+  mcp_server_static_credential: 1,
+  project_settings_plugin_enabled: 2.5,
+  project_settings_helper_command: 2,
+  project_settings_env_override: 2,
+  project_settings_ui_command: 1,
+  project_settings_marketplace: 1,
+};

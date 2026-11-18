@@ -5,13 +5,15 @@ import {
   extractHook,
   extractToggleDrift,
 } from '@/api/fleet';
-import { hookTitle, humanKind, humanTool } from '@/lib/labels';
+import type { AlertGroup } from '@/lib/alertGroups';
+import { alertTitleReason } from '@/lib/alertGroups';
+import { hookTitle, humanKind, humanTool, scopeLabel } from '@/lib/labels';
 import { bucketTextColor } from '@/lib/severity';
 import { relativeAge } from '@/lib/time';
 import { cn } from '@/lib/utils';
 
 interface Props {
-  event: EventWithTriage;
+  group: AlertGroup;
   selected: boolean;
   onSelect: (event: EventWithTriage) => void;
   onHoverEnter: () => void;
@@ -21,18 +23,21 @@ interface Props {
 }
 
 /**
- * One row of the Alerts queue at 28px height per UI/UX §6.4.
+ * One row of the Alerts queue at 28px height per UI/UX §6.4. A row stands for a
+ * group of repeated events: it shows the latest one, opens it on click, and
+ * carries a count when the group holds more than one.
  * Layout (left → right):
  *   severity dot · age · title · host · severity label · triage status pill · assignee.
  */
 export function QueueRow({
-  event,
+  group,
   selected,
   onSelect,
   onHoverEnter,
   onHoverLeave,
   isFresh,
 }: Props) {
+  const event = group.latest;
   const ag = extractAiGuard(event);
   const bucket = ag?.bucket ?? severityToBucket(event.severity);
 
@@ -61,7 +66,21 @@ export function QueueRow({
     >
       <SeverityDot bucket={bucket} />
       <span className="font-mono text-text-muted">{age}</span>
-      <span className="truncate text-text-primary">{title}</span>
+      <span className="truncate text-text-primary">
+        {title}
+        {ag && (
+          <span className="text-text-muted" data-testid="alert-scope">
+            {' · '}
+            {ag.user ? `${ag.user} · ` : ''}
+            {scopeLabel(ag.scope)}
+          </span>
+        )}
+        {group.count > 1 && (
+          <span className="ml-2 font-mono text-text-muted" data-testid="alert-count">
+            ×{group.count}
+          </span>
+        )}
+      </span>
       <span className="truncate font-mono text-text-muted" title={event.host_id}>
         {host}
       </span>
@@ -146,7 +165,7 @@ const KIND_TITLES: Record<string, string> = {
 function computeTitle(ev: EventWithTriage, ag: ReturnType<typeof extractAiGuard>): string {
   if (ag) {
     const tool = humanTool(ag.tool, ag.tool_label);
-    const reason = ag.reasons?.[0]?.kind;
+    const reason = alertTitleReason(ag.reasons)?.kind;
     return reason ? `AI Guard risk: ${humanKind(reason)} · ${tool}` : `AI Guard risk · ${tool}`;
   }
   const hook = extractHook(ev);

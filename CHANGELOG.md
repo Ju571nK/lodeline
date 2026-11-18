@@ -35,6 +35,18 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   no field because its server or agent is older, shows as before. The console relays the field
   as the server sent it.
 
+### Changed
+
+- The console Alerts list shows one row for events that repeat one finding. Events with the same host,
+  tool, scope, user, rule pack, reasons and triage status (and assignee) collapse into one row with a
+  count such as `×2`, the time of the latest event, and the latest event opened on click. A restart
+  of the agent sends every reading again, which made each tool show twice. Rows that differ in scope
+  or user stay apart, and every row now shows its scope, and its user when it has one. An event with a different triage
+  status stays in its own row, so acknowledging the latest event leaves an older open one visible.
+  A row is titled by its heaviest reason, by the agent's default weights, where before it used the
+  first reason sent. An operator's weight override does not reach the console, so a tuned
+  weight does not change the title.
+
 ### Fixed
 
 - `GET /v1/fleet/risk` and `GET /v1/fleet/hosts` return hosts in one fixed order. Hosts that tie

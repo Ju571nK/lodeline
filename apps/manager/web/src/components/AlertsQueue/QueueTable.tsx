@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { EventWithTriage } from '@/api/fleet';
+import type { AlertGroup, SortMode } from '@/lib/alertGroups';
 import { QueueRow } from './QueueRow';
 
 interface Props {
-  events: EventWithTriage[];
+  /** Rows in display order; the route sorts them. */
+  groups: AlertGroup[];
   selectedEventID: string | null;
   onSelect: (event: EventWithTriage) => void;
   onRowHoverEnter: () => void;
@@ -19,27 +21,17 @@ interface Props {
   onResetFilters?: () => void;
 }
 
-export type SortMode = 'severity_desc' | 'age_desc' | 'age_asc';
-
-const BUCKET_RANK: Record<string, number> = {
-  critical: 4,
-  high: 3,
-  medium: 2,
-  low: 1,
-  info: 0,
-};
-
 /**
- * 28px-density alerts table per UI/UX §6.4 with sticky header. Sort modes
- * follow UI/UX §7.2: default severity desc, then age desc. Clicking a
- * sortable column header toggles its direction (severity desc only — no
- * asc for severity in v1).
+ * 28px-density alerts table per UI/UX §6.4 with sticky header. The route
+ * groups and sorts the rows (UI/UX §7.2: default severity desc, then age desc);
+ * clicking a sortable column header toggles its direction (severity desc only,
+ * no asc for severity in v1).
  *
  * Rows that appear on this render but weren't in the previous render get
  * `isFresh=true` for one flash-cycle, driving a 1s box-shadow fade-in.
  */
 export function QueueTable({
-  events,
+  groups,
   selectedEventID,
   onSelect,
   onRowHoverEnter,
@@ -51,13 +43,11 @@ export function QueueTable({
   partialResults,
   onResetFilters,
 }: Props) {
-  const sorted = useMemo(() => sortEvents(events, sort), [events, sort]);
-
   const previousIDs = useRef<Set<string>>(new Set());
   const [freshIDs, setFreshIDs] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    const incoming = new Set(events.map((e) => e.event_id));
+    const incoming = new Set(groups.map((g) => g.latest.event_id));
     const newOnes = new Set<string>();
     for (const id of incoming) {
       if (!previousIDs.current.has(id)) newOnes.add(id);
@@ -69,7 +59,7 @@ export function QueueTable({
       return () => clearTimeout(t);
     }
     previousIDs.current = incoming;
-  }, [events]);
+  }, [groups]);
 
   return (
     <div className="flex flex-col overflow-hidden rounded-md border border-border bg-bg-surface">
@@ -77,22 +67,22 @@ export function QueueTable({
       <div className="max-h-[calc(100vh-220px)] overflow-y-auto">
         {isPending ? (
           <SkeletonRows />
-        ) : sorted.length === 0 ? (
+        ) : groups.length === 0 ? (
           <EmptyHint
             partialResults={partialResults}
             filtersActive={filtersActive}
             onResetFilters={onResetFilters}
           />
         ) : (
-          sorted.map((ev) => (
+          groups.map((group) => (
             <QueueRow
-              key={`${ev.host_id}:${ev.event_id}`}
-              event={ev}
-              selected={ev.event_id === selectedEventID}
+              key={group.key}
+              group={group}
+              selected={group.events.some((ev) => ev.event_id === selectedEventID)}
               onSelect={onSelect}
               onHoverEnter={onRowHoverEnter}
               onHoverLeave={onRowHoverLeave}
-              isFresh={freshIDs.has(ev.event_id)}
+              isFresh={freshIDs.has(group.latest.event_id)}
             />
           ))
         )}
@@ -200,42 +190,4 @@ function SkeletonRows() {
       ))}
     </div>
   );
-}
-
-function sortEvents(events: EventWithTriage[], mode: SortMode): EventWithTriage[] {
-  const copy = [...events];
-  switch (mode) {
-    case 'severity_desc':
-      // Severity desc, then age desc as the secondary key.
-      copy.sort((a, b) => {
-        const sa = bucketRankFor(a);
-        const sb = bucketRankFor(b);
-        if (sa !== sb) return sb - sa;
-        return tsCompareDesc(a.ts, b.ts);
-      });
-      break;
-    case 'age_desc':
-      copy.sort((a, b) => tsCompareDesc(a.ts, b.ts));
-      break;
-    case 'age_asc':
-      copy.sort((a, b) => -tsCompareDesc(a.ts, b.ts));
-      break;
-  }
-  return copy;
-}
-
-function bucketRankFor(ev: EventWithTriage): number {
-  if (ev.evidence?.kind === 'ai_guard_risk_assessed') {
-    const bucket = (ev.evidence as { bucket?: string }).bucket;
-    return bucket ? (BUCKET_RANK[bucket] ?? 0) : 0;
-  }
-  // Non-AI-guard events: warn=2, info=0.
-  return ev.severity === 'warn' ? 2 : 0;
-}
-
-function tsCompareDesc(a: string, b: string): number {
-  // Lex compare on RFC3339 is chronological-correct.
-  if (a < b) return 1;
-  if (a > b) return -1;
-  return 0;
 }
