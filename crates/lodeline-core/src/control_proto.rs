@@ -181,6 +181,10 @@ pub struct RiskSummary {
     /// Whether any config the parser watches exists. Omitted when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_found: Option<bool>,
+    /// Distinct reason kinds behind `reasons_count`, in first-seen order.
+    /// Omitted when empty, as older daemons send it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reason_kinds: Vec<String>,
 }
 
 /// Phase 3b.5 — serializable snapshot of the agent's AI Guard subsystem
@@ -433,6 +437,7 @@ mod tests {
                     last_assessed_ts: "2026-05-16T06:00:00Z".into(),
                     user: None,
                     config_found: None,
+                    reason_kinds: vec![],
                 }],
             }),
             doctor_ai_guard: None,
@@ -485,6 +490,44 @@ mod tests {
             assert_eq!(sent.and_then(|v| v.as_bool()), want, "encoding {extra:?}");
             assert_eq!(sent.is_none(), want.is_none());
         }
+    }
+
+    #[test]
+    fn risk_summary_reason_kinds_round_trip_and_are_omitted_when_empty() {
+        for (extra, want) in [
+            (r#","reason_kinds":["a","b"]"#, vec!["a", "b"]),
+            (r#","reason_kinds":[]"#, vec![]),
+            ("", vec![]),
+        ] {
+            let resp: Response = serde_json::from_str(&risk_reply_json(extra)).unwrap();
+            let summary = &resp.risk.as_ref().unwrap().assessments[0];
+            assert_eq!(summary.reason_kinds, want, "decoding {extra:?}");
+            let wire = serde_json::to_value(&resp).unwrap();
+            let sent = wire["risk"]["assessments"][0].get("reason_kinds");
+            assert_eq!(sent.is_none(), want.is_empty(), "encoding {extra:?}");
+            if let Some(sent) = sent {
+                assert_eq!(sent, &serde_json::json!(want));
+            }
+        }
+    }
+
+    #[test]
+    fn an_older_reader_ignores_reason_kinds() {
+        #[derive(Deserialize)]
+        struct OlderSummary {
+            reasons_count: usize,
+        }
+        #[derive(Deserialize)]
+        struct OlderPayload {
+            assessments: Vec<OlderSummary>,
+        }
+        #[derive(Deserialize)]
+        struct OlderResponse {
+            risk: Option<OlderPayload>,
+        }
+        let older: OlderResponse =
+            serde_json::from_str(&risk_reply_json(r#","reason_kinds":["a"]"#)).unwrap();
+        assert_eq!(older.risk.unwrap().assessments[0].reasons_count, 0);
     }
 
     #[test]
@@ -580,6 +623,7 @@ mod tests {
                     last_assessed_ts: "2026-05-29T00:00:00Z".into(),
                     user: None,
                     config_found: None,
+                    reason_kinds: vec![],
                 }],
                 effective_rubric: vec![RubricEntry {
                     kind_key: "no_sandbox".into(),

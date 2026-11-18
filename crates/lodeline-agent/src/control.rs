@@ -129,6 +129,7 @@ fn risk_summary(
         last_assessed_ts: last,
         user: user.clone(),
         config_found: cached.config_found,
+        reason_kinds: cached.reason_kinds.clone(),
     })
 }
 
@@ -663,6 +664,7 @@ mod tests {
                 last_assessed_ts: time::OffsetDateTime::UNIX_EPOCH,
                 dangerous_toggles: Default::default(),
                 config_found,
+                reason_kinds: Vec::new(),
             }),
             failure: None,
         }
@@ -673,6 +675,15 @@ mod tests {
         risk_summary(&key, &source(config_found))
             .unwrap()
             .config_found
+    }
+
+    #[test]
+    fn risk_reply_carries_the_cached_reason_kinds() {
+        let mut state = source(None);
+        state.reading.as_mut().unwrap().reason_kinds = vec!["no_sandbox".into(), "x".into()];
+        let key = (AiTool::Gemini, AiGuardScope::UserGlobal, None, None);
+        let reply = risk_summary(&key, &state).unwrap();
+        assert_eq!(reply.reason_kinds, vec!["no_sandbox", "x"]);
     }
 
     #[test]

@@ -364,6 +364,35 @@ pub fn first_destructive_pattern(cmd: &str) -> Option<&'static str> {
     None
 }
 
+/// The serde `kind` tag of a single reason (e.g. "no_sandbox").
+pub fn reason_kind(reason: &AiGuardReason) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Distinct reason kinds (the serde `kind` tag), in first-seen order.
+pub fn reason_kinds(reasons: &[AiGuardReason]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for r in reasons {
+        let kind = reason_kind(r);
+        if !seen.contains(&kind) {
+            seen.push(kind);
+        }
+    }
+    seen
+}
+
+/// Up to two kinds, then "(+N more)": the short cell `scan` and `show risk` print.
+pub fn top_kinds(kinds: &[String]) -> String {
+    let shown = kinds.iter().take(2).cloned().collect::<Vec<_>>().join(", ");
+    match kinds.len().saturating_sub(2) {
+        0 => shown,
+        extra => format!("{shown} (+{extra} more)"),
+    }
+}
+
 /// Deterministic hash of a reason set for change detection. Two permutations
 /// of the same reasons produce the same hash; any field difference (or kind
 /// difference) produces a different hash.
@@ -393,6 +422,28 @@ pub fn canonical_hash(reasons: &[AiGuardReason]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reason_kinds_are_distinct_and_in_first_seen_order() {
+        let reasons = vec![
+            AiGuardReason::SandboxDisabled,
+            AiGuardReason::PermissionsDenyEmpty,
+            AiGuardReason::SandboxDisabled,
+        ];
+        assert_eq!(
+            reason_kinds(&reasons),
+            vec!["sandbox_disabled", "permissions_deny_empty"]
+        );
+        assert!(reason_kinds(&[]).is_empty());
+    }
+
+    #[test]
+    fn top_kinds_names_two_then_counts_the_rest() {
+        let k = |n: usize| (0..n).map(|i| format!("k{i}")).collect::<Vec<_>>();
+        assert_eq!(top_kinds(&k(1)), "k0");
+        assert_eq!(top_kinds(&k(2)), "k0, k1");
+        assert_eq!(top_kinds(&k(5)), "k0, k1 (+3 more)");
+    }
     use lodeline_core::event::{AiGuardReason, LauncherShape};
     use std::collections::HashMap;
     use std::path::PathBuf;

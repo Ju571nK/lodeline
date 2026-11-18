@@ -213,6 +213,8 @@ A tool with no config on the host reads as low with no reasons, so a low score f
 not mean the tool is present. The event behind it carries `config_found`. `lodeline show risk` marks a
 tool with `false` as "no config found" next to its bucket, and its JSON output carries the field.
 `false` means no watched config file was found, and `lodeline show events` prints it too.
+With `--pretty`, the `TOP_REASONS` column names the first two distinct reason kinds behind the count, then `(+N more)`,
+and the JSON output lists every kind in `reason_kinds`.
 Without a running daemon, `lodeline scan` produces the same per-tool scores in one
 shot (and exits 0) — handy for a quick check before the daemon is set up.
 

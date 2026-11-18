@@ -30,6 +30,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   with `true`, or whose agent sends no value, prints as before. The control reply adds the field
   only when it is known, so an older agent and a newer `lodeline`, or the reverse, still read each
   other's replies. The `my_risk` MCP tool returns the field too.
+- `lodeline show risk` now names the reason kinds behind each count. With `--pretty`, the table adds a last
+  `TOP_REASONS` column with the first two distinct kinds and `(+N more)`, as `lodeline scan` does,
+  `(clean)` for a tool with no reasons, and `-` when the daemon sends no kinds. The JSON output
+  and the `my_risk` MCP tool carry the full `reason_kinds` list in first-seen order. The control
+  reply adds the list only when it is not empty, so an older daemon and a newer `lodeline`, or the
+  reverse, still read each other's replies.
 - The console host page shows a quiet tool whose `config_found` is `false` in one muted line,
   "No config found (n)", and leaves it out of the "Low (n)" strip. A tool with `true`, or with
   no field because its server or agent is older, shows as before. The console relays the field

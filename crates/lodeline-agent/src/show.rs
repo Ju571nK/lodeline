@@ -676,7 +676,10 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
         writeln!(w, "(no assessments yet)")?;
         return Ok(());
     }
-    writeln!(w, "TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED")?;
+    writeln!(
+        w,
+        "TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED\tTOP_REASONS"
+    )?;
     let with_user = |scope: String, user: &Option<String>| match user {
         Some(u) => format!("{scope}@{u}"),
         None => scope,
@@ -703,15 +706,23 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
         if s.config_found == Some(false) {
             bucket_str.push_str(" (no config found)");
         }
+        let top_reasons = if s.reasons_count == 0 {
+            "(clean)".to_string()
+        } else if s.reason_kinds.is_empty() {
+            "-".to_string()
+        } else {
+            crate::ai_guard::rubric::top_kinds(&s.reason_kinds)
+        };
         writeln!(
             w,
-            "{}\t{}\t{:.1}\t{}\t{}\t{}",
+            "{}\t{}\t{:.1}\t{}\t{}\t{}\t{}",
             tool_str,
             with_user(scope_str, &s.user),
             s.score,
             bucket_str,
             s.reasons_count,
-            s.last_assessed_ts
+            s.last_assessed_ts,
+            top_reasons
         )?;
     }
     Ok(())
@@ -1050,20 +1061,30 @@ mod tests {
                 last_assessed_ts: "2026-05-16T06:00:00Z".into(),
                 user: Some("alice".into()),
                 config_found: None,
+                reason_kinds: vec!["no_sandbox".into(), "broad_matcher_other".into()],
             }],
         };
         let mut buf = Vec::new();
         write_risk_pretty(&mut buf, &payload).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.starts_with("TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED\n"));
         assert!(
-            out.contains("claude-code\tuser-global@alice\t3.5\tmedium\t2\t2026-05-16T06:00:00Z"),
+            out.starts_with("TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED\tTOP_REASONS\n")
+        );
+        assert!(
+            out.contains(
+                "claude-code\tuser-global@alice\t3.5\tmedium\t2\t2026-05-16T06:00:00Z\tno_sandbox, broad_matcher_other\n"
+            ),
             "got: {out}"
         );
     }
 
     #[cfg(feature = "operator-cli")]
     fn risk_row(config_found: Option<bool>) -> String {
+        risk_row_with(config_found, 0, vec![])
+    }
+
+    #[cfg(feature = "operator-cli")]
+    fn risk_row_with(config_found: Option<bool>, reasons_count: usize, kinds: Vec<&str>) -> String {
         use crate::control::{RiskPayload, RiskSummary};
         use lodeline_core::event::{AiGuardBucket, AiGuardScope, AiTool};
         let payload = RiskPayload {
@@ -1073,10 +1094,11 @@ mod tests {
                 scope: AiGuardScope::UserGlobal,
                 score: 0.0,
                 bucket: AiGuardBucket::Low,
-                reasons_count: 0,
+                reasons_count,
                 last_assessed_ts: "2026-11-17T00:00:00Z".into(),
                 user: None,
                 config_found,
+                reason_kinds: kinds.into_iter().map(String::from).collect(),
             }],
         };
         let mut buf = Vec::new();
@@ -1094,16 +1116,35 @@ mod tests {
     fn write_risk_pretty_marks_a_tool_with_no_config() {
         assert_eq!(
             risk_row(Some(false)),
-            "gemini\tuser-global\t0.0\tlow (no config found)\t0\t2026-11-17T00:00:00Z"
+            "gemini\tuser-global\t0.0\tlow (no config found)\t0\t2026-11-17T00:00:00Z\t(clean)"
         );
     }
 
     #[cfg(feature = "operator-cli")]
     #[test]
     fn write_risk_pretty_prints_found_and_unknown_as_before() {
-        let as_before = "gemini\tuser-global\t0.0\tlow\t0\t2026-11-17T00:00:00Z";
+        let as_before = "gemini\tuser-global\t0.0\tlow\t0\t2026-11-17T00:00:00Z\t(clean)";
         assert_eq!(risk_row(Some(true)), as_before);
         assert_eq!(risk_row(None), as_before);
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn write_risk_pretty_shows_the_top_two_kinds_and_the_rest_as_a_count() {
+        let tail = |count, kinds: Vec<&str>| {
+            let row = risk_row_with(None, count, kinds);
+            row.rsplit('\t').next().unwrap().to_string()
+        };
+        assert_eq!(tail(1, vec!["a"]), "a");
+        assert_eq!(tail(2, vec!["a", "b"]), "a, b");
+        assert_eq!(tail(9, vec!["a", "b", "c", "d", "e"]), "a, b (+3 more)");
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn write_risk_pretty_marks_reasons_from_a_daemon_that_sends_no_kinds() {
+        let row = risk_row_with(None, 4, vec![]);
+        assert!(row.ends_with("\t4\t2026-11-17T00:00:00Z\t-"), "{row}");
     }
 
     #[cfg(feature = "operator-cli")]
@@ -1140,6 +1181,7 @@ mod tests {
                 last_assessed_ts: "2026-05-16T06:01:00Z".into(),
                 user: None,
                 config_found: None,
+                reason_kinds: vec![],
             }],
         };
         let mut buf = Vec::new();
