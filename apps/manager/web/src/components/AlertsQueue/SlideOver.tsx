@@ -27,6 +27,8 @@ export interface DrawerPosition {
 interface Props {
   /** The event being inspected, or null when nothing is selected. */
   event: EventWithTriage | null;
+  /** The events of the collapsed row `event` stands for, newest first. */
+  groupEvents?: EventWithTriage[];
   /** Closes the slide-over (e.g. by clearing the URL alert= param). */
   onClose: () => void;
   /** Imperative handle the parent can use to focus the assign input. */
@@ -50,6 +52,7 @@ const KEY_STEP_LARGE = 100;
  */
 export function SlideOver({
   event,
+  groupEvents,
   onClose,
   registerFocusAssign,
   registerFocusNote,
@@ -153,6 +156,7 @@ export function SlideOver({
             <div className="flex-1 overflow-y-auto px-5 py-4">
               <AlertDetail
                 event={event}
+                groupEvents={groupEvents}
                 assignInputRef={assignInputRef}
                 noteInputRef={noteInputRef}
               />

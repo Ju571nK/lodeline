@@ -177,6 +177,66 @@ test('an assessment failure opens in the slide-over and is not a default alert',
   });
 });
 
+test.describe('repeated alerts', () => {
+  const REPEAT = 'AI Guard risk: No Sandbox · Claude Desktop';
+
+  async function repeatEvents(page: Page) {
+    const res = await page.request.get(
+      '/api/v1/fleet/events?evidence_kind=ai_guard_risk_assessed&limit=100',
+    );
+    expect(res.ok()).toBeTruthy();
+    const { events } = await res.json();
+    const repeats = events
+      .filter(
+        (e: { evidence: { tool: string; reasons: { kind: string }[] } }) =>
+          e.evidence.tool === 'claude_desktop' && e.evidence.reasons[0]?.kind === 'no_sandbox',
+      )
+      .sort((a: { ts: string }, b: { ts: string }) => (a.ts < b.ts ? 1 : -1));
+    expect(repeats).toHaveLength(2);
+    return repeats as { event_id: string }[];
+  }
+
+  test('one finding seen twice is one row with its count and scope', async ({ page }) => {
+    await openAlerts(page);
+    const row = page.locator('button', { hasText: REPEAT });
+    await expect(row).toHaveCount(1, { timeout: 5_000 });
+    await expect(row.getByTestId('alert-count')).toHaveText('×2');
+    await expect(row.getByTestId('alert-scope')).toContainText('app · claude_desktop');
+    await page.screenshot({ path: test.info().outputPath('alerts-grouped.png'), fullPage: true });
+  });
+
+  test('opening the row opens its latest event', async ({ page }) => {
+    const [latest] = await repeatEvents(page);
+    await openAlerts(page);
+    await page.locator('button', { hasText: REPEAT }).click();
+    await expect(page).toHaveURL(new RegExp(`alert=${latest.event_id}`));
+  });
+
+  test('the drawer position and the header both count rows', async ({ page }) => {
+    await openAlerts(page);
+    await page.locator('button', { hasText: REPEAT }).click();
+    const rows = Number(
+      (await page.getByText(/^\d+ rows? from \d+ events?$/).textContent())?.match(/^\d+/)?.[0],
+    );
+    await expect(page.getByTestId('alert-position')).toHaveText(new RegExp(`^\\d+ of ${rows}$`));
+    await page.keyboard.press('Escape');
+  });
+
+  test('acknowledging a repeated row acknowledges every event of it', async ({ page }) => {
+    const [latest] = await repeatEvents(page);
+    await page.goto(`/alerts?alert=${latest.event_id}`);
+    await page.getByRole('button', { name: /^Acknowledge$/ }).click();
+    await expect(page.getByText(/^acknowledged$/i).first()).toBeVisible({ timeout: 5_000 });
+    await page.keyboard.press('Escape');
+
+    const rows = page.locator('button', { hasText: REPEAT });
+    await expect(rows).toHaveCount(1, { timeout: 10_000 });
+    await expect(rows.getByTestId('alert-count')).toHaveText('×2');
+    await expect(rows.getByText('ack', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('open', { exact: true })).not.toHaveCount(0);
+  });
+});
+
 async function openFirstAlert(page: Page) {
   await openAlerts(page);
   const firstRow = page.locator('button:has-text("AI Guard")').first();

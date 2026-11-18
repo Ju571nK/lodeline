@@ -30,15 +30,47 @@ export function useTriageDetail(hostID: string | null, eventID: string | null) {
   });
 }
 
+/** Raised when some writes of a group change failed; `failed` holds those event ids. */
+export class GroupTriageError extends Error {
+  readonly failed: string[];
+
+  constructor(failed: string[], total: number, reason: string) {
+    super(
+      total === 1
+        ? reason
+        : `${failed.length} of ${total} events not saved (${failed.join(', ')}): ${reason}`,
+    );
+    this.name = 'GroupTriageError';
+    this.failed = failed;
+  }
+}
+
+/**
+ * Applies one triage change to every event of an alert row. The events of a collapsed row share
+ * status and assignee, so each write goes through the per event upsert. Every write is tried, and
+ * the event views refetch whatever the outcome, so the list shows what the server holds.
+ */
 export function useUpsertTriage() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (payload: UpsertPayload) => upsertTriage(payload),
-    onSuccess: (row) => {
-      qc.invalidateQueries({ queryKey: ['triage', row.host_id, row.event_id] });
+    mutationFn: async (payloads: UpsertPayload[]) => {
+      const results = await Promise.allSettled(payloads.map(upsertTriage));
+      const failed: string[] = [];
+      let reason = '';
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') return;
+        failed.push(payloads[i].event_id);
+        reason ||= r.reason instanceof Error && r.reason.message ? r.reason.message : 'try again';
+      });
+      if (failed.length > 0) throw new GroupTriageError(failed, payloads.length, reason);
+    },
+    onSettled: (_data, _error, payloads) => {
+      for (const p of payloads) {
+        qc.invalidateQueries({ queryKey: ['triage', p.host_id, p.event_id] });
+        qc.invalidateQueries({ queryKey: ['fleet', 'event', p.event_id] });
+      }
       qc.invalidateQueries({ queryKey: ['fleet', 'events'] });
       qc.invalidateQueries({ queryKey: ['fleet', 'events-timeline'] });
-      qc.invalidateQueries({ queryKey: ['fleet', 'event', row.event_id] });
     },
   });
 }

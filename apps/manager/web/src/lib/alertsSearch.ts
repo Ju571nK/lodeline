@@ -1,5 +1,5 @@
-import type { SortMode } from '@/components/AlertsQueue/QueueTable';
 import type { AlertFilter } from '@/hooks/useAlerts';
+import type { SortMode } from '@/lib/alertGroups';
 
 /** The alerts list view in the URL: filters, sort and the selected alert. */
 export interface AlertsSearch {

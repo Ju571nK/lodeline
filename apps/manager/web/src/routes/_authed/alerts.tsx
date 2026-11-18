@@ -2,12 +2,13 @@ import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { EventWithTriage } from '@/api/fleet';
 import { FilterRow, SEARCH_INPUT_ID } from '@/components/AlertsQueue/FilterRow';
-import { QueueTable, type SortMode } from '@/components/AlertsQueue/QueueTable';
+import { QueueTable } from '@/components/AlertsQueue/QueueTable';
 import { ShortcutsCheatsheet } from '@/components/AlertsQueue/ShortcutsCheatsheet';
 import { EventDetails } from '@/components/EventDetails';
 import { Pagination } from '@/components/Fleet/Pagination';
 import { type AlertFilter, DEFAULT_FILTER, useAlerts } from '@/hooks/useAlerts';
 import { useShortcuts } from '@/hooks/useShortcuts';
+import { groupAlerts, rowsSummary, type SortMode, sortAlertGroups } from '@/lib/alertGroups';
 import { type AlertsSearch, validateAlertsSearch } from '@/lib/alertsSearch';
 import { cn } from '@/lib/utils';
 
@@ -85,26 +86,26 @@ function AlertsPage() {
 
   const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
 
-  // Sorted rows the user actually sees — must match QueueTable's order so
-  // j/k arrow navigation lines up with what's on screen.
-  const visibleRows = useMemo(() => sortRows(rows, sort), [rows, sort]);
+  // One group per row on screen, in the order the table shows them, so j/k
+  // navigation lines up with the rows. A row opens its group's latest event.
+  const groups = useMemo(() => sortAlertGroups(groupAlerts(rows), sort), [rows, sort]);
   const cursorIndex = useMemo(
-    () => visibleRows.findIndex((ev) => ev.event_id === selectedAlertID),
-    [visibleRows, selectedAlertID],
+    () => groups.findIndex((g) => g.events.some((ev) => ev.event_id === selectedAlertID)),
+    [groups, selectedAlertID],
   );
 
   const moveCursor = useCallback(
     (delta: number) => {
-      if (visibleRows.length === 0) return;
+      if (groups.length === 0) return;
       const next =
         cursorIndex < 0
           ? delta > 0
             ? 0
-            : visibleRows.length - 1
-          : Math.min(Math.max(0, cursorIndex + delta), visibleRows.length - 1);
-      setSearch({ alert: visibleRows[next].event_id });
+            : groups.length - 1
+          : Math.min(Math.max(0, cursorIndex + delta), groups.length - 1);
+      setSearch({ alert: groups[next].latest.event_id });
     },
-    [cursorIndex, visibleRows, setSearch],
+    [cursorIndex, groups, setSearch],
   );
 
   useShortcuts({
@@ -117,8 +118,8 @@ function AlertsPage() {
       else if (selectedAlertID) closeSlideOver();
     },
     Enter: () => {
-      if (cursorIndex < 0 && visibleRows.length > 0) {
-        setSearch({ alert: visibleRows[0].event_id });
+      if (cursorIndex < 0 && groups.length > 0) {
+        setSearch({ alert: groups[0].latest.event_id });
       }
     },
     a: () => focusAssign.current(),
@@ -149,9 +150,7 @@ function AlertsPage() {
         <div>
           <h1 className="text-lg font-semibold text-text-primary">Alerts</h1>
           <p className="text-xs text-text-muted">
-            {isPending
-              ? 'Loading…'
-              : `${rows.length} shown${rawCount !== rows.length ? ` of ${rawCount} fetched` : ''}`}
+            {isPending ? 'Loading…' : rowsSummary(groups.length, rows.length)}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -182,7 +181,7 @@ function AlertsPage() {
           </div>
         ) : (
           <QueueTable
-            events={rows}
+            groups={groups}
             selectedEventID={selectedAlertID}
             onSelect={onSelect}
             onRowHoverEnter={onRowHoverEnter}
@@ -209,6 +208,7 @@ function AlertsPage() {
       <EventDetails
         eventID={selectedAlertID}
         rows={rows}
+        groupEvents={cursorIndex < 0 ? undefined : groups[cursorIndex].events}
         onClose={closeSlideOver}
         registerFocusAssign={registerFocusAssign}
         registerFocusNote={registerFocusNote}
@@ -217,7 +217,7 @@ function AlertsPage() {
             ? undefined
             : {
                 index: cursorIndex,
-                total: visibleRows.length,
+                total: groups.length,
                 partial: alerts.hasMore || alerts.cursorRepeated,
                 onPrev: () => moveCursor(-1),
                 onNext: () => moveCursor(1),
@@ -255,48 +255,6 @@ function isFilterActive(f: AlertFilter): boolean {
     f.since !== DEFAULT_FILTER.since ||
     f.query !== DEFAULT_FILTER.query
   );
-}
-
-/**
- * Mirror of [`QueueTable`]'s sorting so we can compute j/k cursor moves
- * from the parent route. Kept in sync manually — when QueueTable's
- * algorithm changes, this must too.
- */
-const BUCKET_RANK: Record<string, number> = {
-  critical: 4,
-  high: 3,
-  medium: 2,
-  low: 1,
-  info: 0,
-};
-
-function sortRows(rows: EventWithTriage[], mode: SortMode): EventWithTriage[] {
-  const copy = [...rows];
-  const tsDesc = (a: string, b: string) => (a < b ? 1 : a > b ? -1 : 0);
-  const bucketRank = (ev: EventWithTriage): number => {
-    if (ev.evidence?.kind === 'ai_guard_risk_assessed') {
-      const bucket = (ev.evidence as { bucket?: string }).bucket;
-      return bucket ? (BUCKET_RANK[bucket] ?? 0) : 0;
-    }
-    return ev.severity === 'warn' ? 2 : 0;
-  };
-  switch (mode) {
-    case 'severity_desc':
-      copy.sort((a, b) => {
-        const sa = bucketRank(a);
-        const sb = bucketRank(b);
-        if (sa !== sb) return sb - sa;
-        return tsDesc(a.ts, b.ts);
-      });
-      break;
-    case 'age_desc':
-      copy.sort((a, b) => tsDesc(a.ts, b.ts));
-      break;
-    case 'age_asc':
-      copy.sort((a, b) => -tsDesc(a.ts, b.ts));
-      break;
-  }
-  return copy;
 }
 
 function FreshnessIndicator({
