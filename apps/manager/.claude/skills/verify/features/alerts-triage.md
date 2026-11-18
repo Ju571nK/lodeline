@@ -5,7 +5,7 @@ The queue lists high and critical AI Guard events. An analyst opens a row in a s
 ## Sub-features
 
 - `alerts-queue` renders the fixture events as rows.
-- `alerts-detail` opens a row in the slide-over, with its reasons and observed settings.
+- `alerts-detail` opens a row in the slide-over, with its reasons, grouped by kind with a count and collapsed when a kind repeats, and its observed settings.
 - `alerts-filter` narrows the queue with the `Critical` severity chip.
 - `alerts-shortcuts` opens the keyboard cheatsheet with `?`.
 - `alerts-drawer-nav` moves through the queue with the previous and next buttons and shows the position, such as `3 of 7`. `j`, `k` and the arrow keys do the same.

@@ -45,6 +45,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   same alert at full width and returns to the list with its filters. The host id links to the host
   page, and long ids, hashes, commands and the raw evidence wrap at sensible points instead of
   scrolling sideways.
+- **Console.** The reasons of an alert, in the alert drawer and on the host page, are grouped by
+  kind. A kind that appears more than once shows one collapsed header with its count, and the
+  entries open under it. Identical entries show once with a "×n" count. The host page line "No
+  config found (n)" now says that no watched config file was found on the host, which does not
+  mean the tool is not installed. (#675)
 
 ### Fixed
 
