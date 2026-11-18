@@ -3,6 +3,27 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Bucket names accepted by `lodeline scan --fail-on`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum FailOn {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl From<FailOn> for lodeline_core::event::AiGuardBucket {
+    fn from(f: FailOn) -> Self {
+        use lodeline_core::event::AiGuardBucket as B;
+        match f {
+            FailOn::Low => B::Low,
+            FailOn::Medium => B::Medium,
+            FailOn::High => B::High,
+            FailOn::Critical => B::Critical,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "lodeline",
@@ -77,11 +98,15 @@ pub enum Command {
     /// Scan installed AI agents' configs once and print a posture score, then
     /// exit. No daemon, no policy, no state.db: reads the user-global configs
     /// (`~/.claude`, `~/.codex`, `~/.cursor`, …) plus the current directory if
-    /// it is a project. Always exits 0 (informational).
+    /// it is a project. Exits 0 unless `--fail-on` is given (informational).
     Scan {
         /// Emit the full report as JSON instead of the human table.
         #[arg(long)]
         json: bool,
+        /// Exit with code 3 when any assessed tool's bucket is at or above this
+        /// one. The report prints unchanged. A tool with no config is not assessed.
+        #[arg(long, value_enum, value_name = "BUCKET")]
+        fail_on: Option<FailOn>,
     },
     /// Show whether Lodeline is healthy on this host: installed components, the
     /// agent, and the link to lodeline-server. Read-only: needs no daemon and no

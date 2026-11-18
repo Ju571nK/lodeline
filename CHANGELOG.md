@@ -9,6 +9,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- `lodeline scan --fail-on <low|medium|high|critical>` exits 3 when any assessed tool's bucket is
+  at or above the given one, so a shell or CI step can stop on posture. It is opt in: without the
+  flag `scan` still exits 0. The report and `--json` output are unchanged, and a tool with no
+  config is not assessed. A clean config reads `low`, so `--fail-on low` trips on any config. It
+  exits 4 when a config could not be read and no tool reached the bucket, because posture is
+  unknown. An unknown bucket is a usage error and exits 2.
 - `ai_guard_risk_assessed` has one optional field, `config_found`. `false` means none of the
   parser's config paths exists for the assessed home, and `true` means at least one does. The
   field is omitted when unknown, as older agents send it, and an older server ignores it. The

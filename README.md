@@ -42,6 +42,11 @@ How to reduce
 Run `lodeline scan --json` for full detail.
 ```
 
+`lodeline scan` exits 0 by default. Add `--fail-on high` (or `low`, `medium`, `critical`) to exit 3
+when any assessed tool is at or above that bucket, for a CI step. It exits 4 when a config could
+not be read and no tool reached the bucket, because posture is unknown. A clean config reads `low`,
+so `--fail-on low` trips on any config.
+
 > Your EDR sees the command that ran. Lodeline sees the permission that let it run.
 
 Runs on your machine · no account · nothing leaves the box · macOS / Linux / Windows · Rust · Apache-2.0
