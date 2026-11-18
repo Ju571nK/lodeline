@@ -61,7 +61,9 @@ describe('reason evidence', () => {
     render(
       <ReasonList reasons={[reasons[1], { ...reasons[1], server: 'other-server' }, reasons[1]]} />,
     );
-    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    fireEvent.click(screen.getByText(/Mcp Tool Hidden Text/));
+    expect(screen.getByText('×2')).toBeInTheDocument();
+    expect(screen.getByText('other-server')).toBeInTheDocument();
     expect(errors).not.toHaveBeenCalled();
     errors.mockRestore();
   });
@@ -90,5 +92,57 @@ describe('reason evidence', () => {
     render(<ReasonList reasons={[{ kind: 7, server: 'server-x' } as unknown as ReasonLike]} />);
     expect(screen.getByText('Unknown')).toBeInTheDocument();
     expect(screen.getByText('server-x')).toBeInTheDocument();
+  });
+
+  describe('grouping by kind', () => {
+    const broad = (event: string) => ({ kind: 'broad_matcher', hook_event: event, matcher: '.*' });
+
+    it('shows one collapsed header with a count for a kind that repeats', () => {
+      render(
+        <ReasonList
+          reasons={[broad('PreToolUse'), { kind: 'no_sandbox', executor: 'x' }, broad('Stop')]}
+        />,
+      );
+      const header = screen.getByText('Broad Matcher (2)');
+      expect(header.closest('details')).not.toHaveAttribute('open');
+      expect(screen.queryAllByText('Broad Matcher')).toHaveLength(0);
+      expect(screen.getByText('No Sandbox')).toBeInTheDocument();
+    });
+
+    it('expands a group to show each entry detail', () => {
+      render(<ReasonList reasons={[broad('PreToolUse'), broad('Stop')]} />);
+      fireEvent.click(screen.getByText('Broad Matcher (2)'));
+      expect(screen.getByText('Broad Matcher (2)').closest('details')).toHaveAttribute('open');
+      expect(screen.getByText('PreToolUse')).toBeVisible();
+      expect(screen.getByText('Stop')).toBeVisible();
+    });
+
+    it('shows identical entries once with a count', () => {
+      render(<ReasonList reasons={[broad('Stop'), broad('Stop'), broad('Stop')]} />);
+      expect(screen.getByText('Broad Matcher')).toBeInTheDocument();
+      expect(screen.getByText('×3')).toBeInTheDocument();
+      expect(screen.getAllByText('Stop')).toHaveLength(1);
+    });
+
+    it('counts a group by every reason it holds, duplicates included', () => {
+      render(<ReasonList reasons={[broad('Stop'), broad('Stop'), broad('PreToolUse')]} />);
+      expect(screen.getByText('Broad Matcher (3)')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Broad Matcher (3)'));
+      expect(screen.getByText('×2')).toBeInTheDocument();
+    });
+
+    it('orders groups by the first appearance of their kind', () => {
+      render(
+        <ReasonList
+          reasons={[
+            { kind: 'no_sandbox', executor: 'x' },
+            broad('Stop'),
+            { kind: 'no_sandbox', executor: 'y' },
+          ]}
+        />,
+      );
+      const text = document.body.textContent ?? '';
+      expect(text.indexOf('No Sandbox (2)')).toBeLessThan(text.indexOf('Broad Matcher'));
+    });
   });
 });
