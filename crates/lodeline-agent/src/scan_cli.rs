@@ -92,9 +92,13 @@ pub fn run(args: ScanArgs) -> i32 {
 }
 
 fn fail_on_exit(report: &Report, fail_on: Option<AiGuardBucket>) -> i32 {
-    match fail_on {
-        Some(threshold) if report.rows.iter().any(|r| r.bucket >= threshold) => FAIL_ON_EXIT,
-        _ => 0,
+    let Some(threshold) = fail_on else { return 0 };
+    if report.rows.iter().any(|r| r.bucket >= threshold) {
+        FAIL_ON_EXIT
+    } else if !report.errors.is_empty() {
+        FAIL_ON_UNKNOWN_EXIT
+    } else {
+        0
     }
 }
 
