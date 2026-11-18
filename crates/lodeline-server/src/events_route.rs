@@ -5,8 +5,8 @@
 //! last `event_id` in submission order regardless of accept/reject/dup.
 
 use crate::allowlist;
-use crate::app::SharedState;
-use crate::persist::{append_events, PersistEvent};
+use crate::app::{AppState, SharedState};
+use crate::persist::{append_events, PersistError, PersistEvent};
 use crate::tls_accept::PeerIdentity;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
 use lodeline_core::event::{Event, SCHEMA_VERSION};
@@ -62,6 +62,51 @@ fn validate(payload: &JsonValue, envelope_host_id: &str) -> Result<(), &'static 
     }
     if event.host_id != envelope_host_id {
         return Err("host_id_payload_mismatch");
+    }
+    Ok(())
+}
+
+/// Write one validated batch to the JSONL and apply what was written to the
+/// live fleet index. `between` runs after the write and before the apply; it
+/// is a test seam, and the handler passes a no-op.
+fn ingest_batch(
+    state: &AppState,
+    host_id: &str,
+    to_persist: &[PersistEvent<'_>],
+    received: OffsetDateTime,
+    between: impl FnOnce(),
+) -> Result<(), PersistError> {
+    let written = {
+        let mut hw = match state.high_water.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // poisoned: recover, this is a reference server
+        };
+        let written = append_events(
+            &state.events_out_dir,
+            host_id,
+            to_persist,
+            &mut hw,
+            received,
+        )?;
+        if let Err(e) = hw.store(&state.high_water_path) {
+            tracing::warn!(error = ?e, "high_water store failed (non-fatal)");
+        }
+        written
+    };
+
+    between();
+
+    // Phase 3b.4 — update in-memory fleet index for each event just written,
+    // so live ingest and boot rebuild count the same stored events (#441).
+    // Best-effort: a parse failure here should not roll back the persist,
+    // since the JSONL is the source of truth.
+    for e in written {
+        match serde_json::from_value::<lodeline_core::event::Event>(e.payload.clone()) {
+            Ok(event) => state.fleet_index.apply_event(&event, received),
+            Err(err) => {
+                tracing::warn!(error = ?err, sequence = e.sequence, "fleet_index apply skipped")
+            }
+        }
     }
     Ok(())
 }
@@ -142,45 +187,13 @@ pub async fn post_events(
     }
 
     let received = OffsetDateTime::now_utc();
-    let written = {
-        let mut hw = match state.high_water.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(), // poisoned: recover, this is a reference server
-        };
-        let written = match append_events(
-            &state.events_out_dir,
-            &req.envelope.host_id,
-            &to_persist,
-            &mut hw,
-            received,
-        ) {
-            Ok(written) => written,
-            Err(e) => {
-                tracing::error!(error = ?e, host_id = %req.envelope.host_id, "persist failed");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "persist_failed"})),
-                )
-                    .into_response();
-            }
-        };
-        if let Err(e) = hw.store(&state.high_water_path) {
-            tracing::warn!(error = ?e, "high_water store failed (non-fatal)");
-        }
-        written
-    };
-
-    // Phase 3b.4 — update in-memory fleet index for each event just written,
-    // so live ingest and boot rebuild count the same stored events (#441).
-    // Best-effort: a parse failure here should not roll back the persist,
-    // since the JSONL is the source of truth.
-    for e in written {
-        match serde_json::from_value::<lodeline_core::event::Event>(e.payload.clone()) {
-            Ok(event) => state.fleet_index.apply_event(&event, received),
-            Err(err) => {
-                tracing::warn!(error = ?err, sequence = e.sequence, "fleet_index apply skipped")
-            }
-        }
+    if let Err(e) = ingest_batch(&state, &req.envelope.host_id, &to_persist, received, || {}) {
+        tracing::error!(error = ?e, host_id = %req.envelope.host_id, "persist failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "persist_failed"})),
+        )
+            .into_response();
     }
 
     let resp = EventsAccepted {
@@ -189,4 +202,101 @@ pub async fn post_events(
         high_water_event_id,
     };
     (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::boot_rebuild::rebuild_from_jsonl;
+    use crate::fleet_index::FleetIndex;
+    use crate::persist::HighWater;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    const HID: &str = "0190b8a0-1111-7abc-8def-000000000001";
+
+    fn state_in(dir: &std::path::Path) -> AppState {
+        AppState {
+            events_out_dir: dir.to_path_buf(),
+            policy_bundle_path: dir.join("p.json"),
+            high_water_path: dir.join(".hw.json"),
+            allowlist: parking_lot::RwLock::new(None::<HashSet<String>>),
+            high_water: Mutex::new(HighWater::default()),
+            fleet_index: FleetIndex::new(),
+            read_token: crate::auth::ReadToken(None),
+            active_window_days: 7,
+            audit_key: None,
+            rule_packs_bundle_path: None,
+            artifacts_dir: None,
+            audit_head: Mutex::new(None),
+            allowlist_path: None,
+            enroll: None,
+            events_require_cert_host_match: false,
+        }
+    }
+
+    fn host_meta(hostname: &str) -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "event_id": Uuid::now_v7().to_string(),
+            "ts": "2026-05-17T12:00:00Z",
+            "host_id": HID,
+            "agent_version": "0.5.0",
+            "severity": "info",
+            "source": {"kind": "agent"},
+            "subject": {"kind": "self"},
+            "evidence": {
+                "kind": "host_meta_snapshot",
+                "snapshot": {
+                    "hostname": hostname,
+                    "os_name": null, "os_version": null, "kernel_version": null,
+                    "architecture": null, "interfaces": [],
+                    "default_gateway_v4": null, "default_gateway_v6": null,
+                    "dns_servers": []
+                },
+                "is_reattestation": false
+            },
+            "target_id": null
+        })
+    }
+
+    fn hostname_of(idx: &FleetIndex) -> Option<String> {
+        idx.get_host(HID)?.latest_host_meta?.hostname
+    }
+
+    #[test]
+    fn concurrent_batches_apply_in_write_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_in(dir.path());
+        let first = host_meta("first");
+        let second = host_meta("second");
+        let batch_a = [PersistEvent {
+            sequence: 1,
+            payload: &first,
+        }];
+        let batch_b = [PersistEvent {
+            sequence: 2,
+            payload: &second,
+        }];
+        let now = OffsetDateTime::now_utc();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|s| {
+            ingest_batch(&state, HID, &batch_a, now, || {
+                s.spawn(|| {
+                    ingest_batch(&state, HID, &batch_b, now, || {}).unwrap();
+                    done_tx.send(()).unwrap();
+                });
+                // Batch B finishes here only if A no longer holds the guard
+                // between its write and its apply.
+                let _ = done_rx.recv_timeout(std::time::Duration::from_millis(300));
+            })
+            .unwrap();
+        });
+
+        let rebuilt = FleetIndex::new();
+        rebuilt.replace(rebuild_from_jsonl(dir.path()).unwrap());
+        assert_eq!(hostname_of(&rebuilt).as_deref(), Some("second"));
+        assert_eq!(hostname_of(&state.fleet_index), hostname_of(&rebuilt));
+    }
 }
