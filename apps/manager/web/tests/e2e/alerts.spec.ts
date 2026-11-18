@@ -274,7 +274,9 @@ test.describe('alert detail drawer', () => {
     await page.mouse.down();
     await page.mouse.move(edge.x - 120, y, { steps: 6 });
     await page.mouse.up();
-    await expect.poll(async () => (await sheet.boundingBox())?.width ?? 0).toBeGreaterThan(before + 80);
+    await expect
+      .poll(async () => (await sheet.boundingBox())?.width ?? 0)
+      .toBeGreaterThan(before + 80);
   });
 
   test('under 900 px the drawer takes the full width', async ({ page }) => {

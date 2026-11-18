@@ -104,7 +104,9 @@ const cases: [string, Evidence, string][] = [
 ];
 
 describe('AI Guard event detail names the user whose home was assessed', () => {
-  it.each(cases)('%s shows the user when the reading carries one', async (_kind, evidence, rules) => {
+  it.each(
+    cases,
+  )('%s shows the user when the reading carries one', async (_kind, evidence, rules) => {
     await renderDetail({ ...evidence, user: 'alice' });
     expect(fact('Source')?.textContent).toBe(`user alice · ${rules}`);
   });

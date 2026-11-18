@@ -35,6 +35,17 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   no field because its server or agent is older, shows as before. The console relays the field
   as the server sent it.
 
+### Changed
+
+- **Console.** The alert detail drawer starts wider on a large window (half the window, at most
+  960 px) and is no longer fixed at 420 px. Drag its left edge, or focus the edge and press the
+  left and right arrow keys, to resize it. The console remembers the width in the browser, and the
+  drawer takes the full width under 900 px. The header has previous and next buttons with a
+  position such as `3 of 7`, and an Open full page link to `/alerts/<event id>`, which shows the
+  same alert at full width and returns to the list with its filters. The host id links to the host
+  page, and long ids, hashes, commands and the raw evidence wrap at sensible points instead of
+  scrolling sideways.
+
 ### Fixed
 
 - `GET /v1/fleet/risk` and `GET /v1/fleet/hosts` return hosts in one fixed order. Hosts that tie

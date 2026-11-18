@@ -5,8 +5,8 @@ import {
   isFullWidth,
   loadWidth,
   MIN_WIDTH,
-  saveWidth,
   STORAGE_KEY,
+  saveWidth,
 } from './drawerWidth';
 
 function memoryStorage(initial: Record<string, string> = {}) {
