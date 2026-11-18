@@ -29,7 +29,7 @@ It emits `lodeline-check` (single host, no server) as the default, with `lodelin
 shown as a commented operator add-on:
 
 ```sh
-lodeline-mcp --print-config codex     # Codex (~/.codex/config.toml)
+lodeline-mcp --print-config codex     # Codex ($CODEX_HOME/config.toml, default ~/.codex/config.toml)
 lodeline-mcp --print-config claude    # Claude Code / Claude Desktop (mcpServers JSON)
 lodeline-mcp --print-config hermes    # Hermes Agent (config.yaml mcp_servers:)
 lodeline-mcp --print-config openclaw  # OpenClaw (~/.openclaw/openclaw.json mcpServers)

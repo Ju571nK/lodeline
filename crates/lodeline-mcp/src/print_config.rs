@@ -13,7 +13,7 @@ pub const CLIENTS: &str = "codex, claude, hermes, openclaw";
 
 fn codex_block(exe: &str) -> String {
     format!(
-        "# Codex — add to ~/.codex/config.toml\n\
+        "# Codex: add to $CODEX_HOME/config.toml (default ~/.codex/config.toml)\n\
          # lodeline-check — THIS host's own Lodeline posture (single host, no server):\n\
          [mcp_servers.lodeline-check]\n\
          command = \"{exe}\"\n\
@@ -112,6 +112,14 @@ mod tests {
         // Fleet is present only as a commented operator add-on.
         assert!(out.contains("# [mcp_servers.lodeline-fleet]"));
         assert!(out.contains("LODELINE_SERVER_BASE_URL"));
+    }
+
+    #[test]
+    fn codex_header_names_codex_home_and_its_default() {
+        let out = render_config("/x/lodeline-mcp", Some("codex")).unwrap();
+        let header = out.lines().next().unwrap();
+        assert!(header.contains("$CODEX_HOME/config.toml"), "{header}");
+        assert!(header.contains("~/.codex/config.toml"), "{header}");
     }
 
     #[test]

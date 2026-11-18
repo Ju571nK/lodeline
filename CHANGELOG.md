@@ -9,6 +9,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-mcp --print-config codex` now says the block goes into `$CODEX_HOME/config.toml`, with
+  `~/.codex/config.toml` as the default. It named only `~/.codex/config.toml`, which Codex does not
+  read when `CODEX_HOME` is set.
 - `lodeline-mcp` no longer passes a `lodeline-server` error response through whole. The error
   text an AI agent sees now holds the first 512 characters of the body with control characters
   such as terminal escapes shown as spaces, followed by ` [truncated]` when the body was longer.
