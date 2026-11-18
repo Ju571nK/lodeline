@@ -269,6 +269,7 @@ async fn enroll(args: &Args, pacing: Pacing) -> i32 {
         pacing,
         top: PathBuf::from("/"),
         trust_out: &|_| {},
+        warn_out: &|_| {},
     };
     run(args, &env).await
 }
@@ -298,6 +299,7 @@ async fn go_trust(args: &Args) -> (i32, String) {
         },
         top: PathBuf::from("/"),
         trust_out: &sink,
+        warn_out: &|_| {},
     };
     let code = run(args, &env).await;
     (code, seen.into_inner().unwrap())
@@ -533,6 +535,7 @@ async fn an_existing_config_with_other_content_stops_the_run_before_the_claim() 
         pacing: Pacing::default(),
         top: PathBuf::from("/"),
         trust_out: &|_| {},
+        warn_out: &|_| {},
     };
     assert_eq!(run(&args, &env).await, 4);
     assert!(!claimed.load(Ordering::SeqCst));
@@ -645,4 +648,40 @@ async fn a_rate_limited_connection_is_retried_and_succeeds() {
         let _ = s.redeem("x", HOST).await;
     }
     assert_eq!(enroll(&args, Pacing::default()).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_certificate_issued_after_a_slow_wait_does_not_warn_about_the_clock() {
+    let s = server(None).await;
+    let h = Host::new();
+    let args = h.args(h.file("host.json", &s, &s.token(HOST), HOST, &s.ca_pem()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let st = s.st.clone();
+    let holder = std::thread::spawn(move || {
+        let _g = st.enroll.as_ref().unwrap().mint.lock().unwrap();
+        tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+    });
+    rx.recv().unwrap();
+    let warnings = Mutex::new(Vec::<String>::new());
+    let sink = |m: &str| warnings.lock().unwrap().push(m.to_string());
+    let claim = |l: &Layout, h: &str| claim_in_process(l, h);
+    let env = Env {
+        root: false,
+        claim: &claim,
+        pacing: Pacing {
+            network_waits: vec![std::time::Duration::from_millis(50); 2],
+            ..Pacing::default()
+        },
+        top: PathBuf::from("/"),
+        trust_out: &|_| {},
+        warn_out: &sink,
+    };
+    assert_eq!(run(&args, &env).await, 0);
+    holder.join().unwrap();
+    let warnings = warnings.into_inner().unwrap();
+    assert!(
+        !warnings.iter().any(|w| w.contains("clock")),
+        "{warnings:?}"
+    );
 }
