@@ -49,6 +49,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- **Console.** When a feature is off, Enroll a host, Downloads and the Proxies pages show a
+  numbered setup guide instead of one paragraph. Each guide says where the change goes (the server's
+  `server.yaml` or the console's environment), gives a snippet with placeholder values and a Copy
+  button, says what to restart, and links the README section. Enroll a host shows the missing
+  console variables and the server's `enroll_mint:` fragment. The page cannot tell a server
+  without the mint from a working one before a file is made, because `GET /api/v1/enrollment`
+  does not call the server.
 - **Console.** The alert detail drawer starts wider on a large window (half the window, at most
   960 px) and is no longer fixed at 420 px. Drag its left edge, or focus the edge and press the
   left and right arrow keys, to resize it. The console remembers the width in the browser, and the

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { artifactURL, fleetArtifacts } from '@/api/artifacts';
 import { ApiError } from '@/api/client';
+import { SetupGuide } from '@/components/SetupGuide/SetupGuide';
 import { readAPIError } from '@/lib/server-status';
 
 const box = 'rounded-md border border-border bg-bg-surface p-6 text-sm';
@@ -29,11 +30,45 @@ export function Downloads() {
           Loading the file list…
         </p>
       ) : notConfigured ? (
-        <p role="status" className={box}>
-          lodeline-server does not serve release files. To serve them, its operator sets{' '}
-          <code>artifacts_dir</code> in <code>server.yaml</code> and copies the release files into
-          that folder. See section 5.1 of <code>docs/install-server.md</code>.
-        </p>
+        <SetupGuide
+          role="status"
+          lead={<>lodeline-server does not serve release files.</>}
+          steps={[
+            {
+              text: (
+                <>
+                  On the server, copy the release files into a folder (section 5.1 of{' '}
+                  <code>docs/install-server.md</code>).
+                </>
+              ),
+              snippet: {
+                label: 'shell command',
+                code: 'sudo mkdir -p /var/lib/lodeline-server/artifacts',
+              },
+            },
+            {
+              text: (
+                <>
+                  In <code>server.yaml</code> on the server, set <code>artifacts_dir</code> to that
+                  folder.
+                </>
+              ),
+              snippet: {
+                label: 'server.yaml fragment',
+                code: 'artifacts_dir: "/var/lib/lodeline-server/artifacts"',
+              },
+            },
+            {
+              text: (
+                <>
+                  Restart lodeline-server so that it reads <code>server.yaml</code>. The console
+                  needs no change. Reload this page.
+                </>
+              ),
+            },
+          ]}
+          readme={{ anchor: 'downloads', section: 'Downloads' }}
+        />
       ) : files.isError ? (
         <p role="alert" className={box}>
           Could not load the file list. {readAPIError(files.error)}

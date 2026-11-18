@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { certificateRefused } from '@/lib/server-status';
 import { Downloads } from './Downloads';
@@ -66,13 +66,22 @@ describe('Downloads page', () => {
     expect(screen.queryByRole('link')).toBeNull();
   });
 
-  it('tells the operator what to set when the server has no artifacts_dir', async () => {
+  it('shows a setup guide when the server has no artifacts_dir', async () => {
     serve(502, consoleError('artifacts_not_configured'));
     renderPage();
-    const status = await screen.findByText(/does not serve release files/);
-    expect(status).toHaveAttribute('role', 'status');
-    expect(status).toHaveTextContent('sets artifacts_dir in server.yaml');
-    expect(status).toHaveTextContent('See section 5.1 of docs/install-server.md.');
+    await screen.findByRole('list');
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('lodeline-server does not serve release files.');
+    expect(within(status).getByRole('list').tagName).toBe('OL');
+    expect(status).toHaveTextContent('section 5.1 of docs/install-server.md');
+    expect(status).toHaveTextContent('Restart lodeline-server');
+    expect(within(status).getByText(/^artifacts_dir:/).textContent).toBe(
+      'artifacts_dir: "/var/lib/lodeline-server/artifacts"',
+    );
+    expect(within(status).getByRole('link', { name: /Downloads/ })).toHaveAttribute(
+      'href',
+      'https://github.com/Ju571nK/lodeline/blob/main/apps/manager/README.md#downloads',
+    );
     expect(screen.queryByRole('alert')).toBeNull();
   });
 

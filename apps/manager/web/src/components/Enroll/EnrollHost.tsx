@@ -10,6 +10,7 @@ import {
   type MadeFile,
   makeEnrollmentFile,
 } from '@/api/enrollment';
+import { SetupGuide } from '@/components/SetupGuide/SetupGuide';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -46,22 +47,83 @@ export function EnrollHost() {
           )}
         </p>
       ) : !status.data.enabled ? (
-        <p role="status" className={box}>
-          This console cannot make enrollment files yet. Its operator sets{' '}
-          {status.data.missing.map((name, i) => (
-            <span key={name}>
-              {i > 0 && ', '}
-              <code>{name}</code>
-            </span>
-          ))}
-          . See the Enroll a host section of the console's <code>README.md</code>.
-        </p>
+        <OffGuide missing={status.data.missing} />
       ) : !status.data.can_enroll ? (
         <NotAllowed />
       ) : (
         <Ready info={status.data} />
       )}
     </div>
+  );
+}
+
+const placeholder: Record<string, string> = {
+  LODELINE_ENROLL_MINT_TOKEN: '<bearer of the mint credential>',
+  LODELINE_ENROLL_MINT_CERT_PATH: '/etc/lodeline-manager/mint.crt',
+  LODELINE_ENROLL_MINT_KEY_PATH: '/etc/lodeline-manager/mint.key',
+  LODELINE_ENROLL_FILE_SERVER_URL: 'https://lodeline.example.com:8443',
+  LODELINE_ENROLL_FILE_ENROLL_URL: 'https://lodeline.example.com:8444',
+  LODELINE_ENROLL_FILE_CA_PATH: '/etc/lodeline-manager/ca.crt',
+  LODELINE_ENROLL_FILE_POLICY_KEYSTORE_PATH: '/etc/lodeline-manager/policy-keystore.json',
+  LODELINE_PUBLIC_ORIGIN: 'https://console.example.com',
+};
+
+const mintFragment = `enroll_mint:
+  verifiers: "/etc/lodeline/enroll-mint-verifiers.json"`;
+
+/** The console reports only its own settings, so this guide is the console side plus the server's mint. */
+function OffGuide({ missing }: { missing: string[] }) {
+  return (
+    <SetupGuide
+      role="status"
+      lead={
+        <>
+          This console cannot make enrollment files yet. Its operator sets{' '}
+          {missing.map((name, i) => (
+            <span key={name}>
+              {i > 0 && ', '}
+              <code>{name}</code>
+            </span>
+          ))}
+          .
+        </>
+      }
+      steps={[
+        {
+          text: (
+            <>
+              On the server, turn on the HTTP mint in <code>server.yaml</code> and make a mint
+              credential for this console (section 3.6 of <code>docs/install-server.md</code>). Skip
+              this step if the server already has it.
+            </>
+          ),
+          snippet: { label: 'server.yaml fragment', code: mintFragment },
+        },
+        {
+          text: (
+            <>
+              In the console's environment, set the variables below. Put the bearer in an owner-only
+              environment file. The mint certificate and key are a new pair from the host client CA,
+              not the console's read certificate (the console refuses to start when they are the
+              same), and the key file must be readable only by the console's account (mode 0600).
+            </>
+          ),
+          snippet: {
+            label: 'console variables',
+            code: missing.map((n) => `${n}=${placeholder[n] ?? '<value>'}`).join('\n'),
+          },
+        },
+        {
+          text: (
+            <>
+              Restart the console. If a setting is wrong, the start stops with a message that names
+              the variable. Reload this page.
+            </>
+          ),
+        },
+      ]}
+      readme={{ anchor: 'enroll-a-host', section: 'Enroll a host' }}
+    />
   );
 }
 

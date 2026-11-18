@@ -4,6 +4,7 @@ The Enroll a host page makes a host's single-use enrollment file and has the bro
 
 ## Sub-features
 
+- `enroll-off` shows a numbered setup guide with the missing console variables when the console's enrollment settings are off: the server's `enroll_mint:` fragment, the variables with placeholder values, the restart, a copy button for each snippet and the README link. `GET /api/v1/enrollment` does not call the server, so the page cannot tell a server without the mint from a working one before a file is made, and `enroll_unavailable` stays an error of the file request.
 - `enroll-table` lists the server URL, the enrollment URL, the CA certificates and the policy keys.
 - `enroll-make` saves `lodeline-enroll-<host_id>.json` and shows the host id, the expiry, the secret notice and the steps.
 - `enroll-bad-host-id` refuses a host id that is not a lower-case, hyphenated version 4 UUID, before any request leaves the page.

@@ -117,7 +117,7 @@ describe('Enroll a host page: states', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Loading the enrollment settings');
   });
 
-  it('names the missing variables and has no button when the console is off', async () => {
+  it('shows a numbered setup guide with the missing variables when the console is off', async () => {
     serve({
       status: () =>
         json(200, {
@@ -126,10 +126,30 @@ describe('Enroll a host page: states', () => {
         }),
     });
     await renderPage();
-    const status = await screen.findByRole('status');
+    await screen.findByRole('list');
+    const status = screen.getByRole('status');
     expect(status).toHaveTextContent('LODELINE_PUBLIC_ORIGIN, LODELINE_ENROLL_MINT_TOKEN');
-    expect(status).toHaveTextContent('Enroll a host section of the console');
-    expect(screen.queryByRole('button')).toBeNull();
+    expect(within(status).getByRole('list').tagName).toBe('OL');
+    expect(status).toHaveTextContent('Restart the console');
+    expect(status).toHaveTextContent('enroll_mint:');
+    expect(status).toHaveTextContent(
+      "a new pair from the host client CA, not the console's read certificate",
+    );
+    expect(status).toHaveTextContent('refuses to start when they are the same');
+    expect(status).toHaveTextContent('mode 0600');
+    expect(within(status).getByRole('link', { name: /Enroll a host/ })).toHaveAttribute(
+      'href',
+      'https://github.com/Ju571nK/lodeline/blob/main/apps/manager/README.md#enroll-a-host',
+    );
+    const env = within(status).getByText(/LODELINE_ENROLL_MINT_TOKEN=/);
+    expect(env.textContent).toBe(
+      'LODELINE_PUBLIC_ORIGIN=https://console.example.com\nLODELINE_ENROLL_MINT_TOKEN=<bearer of the mint credential>',
+    );
+    expect(screen.queryByRole('button', { name: 'Make an enrollment file' })).toBeNull();
+    expect(screen.getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Copy server.yaml fragment',
+      'Copy console variables',
+    ]);
   });
 
   it('shows the signed-in subject and no button when it is not on the enroll list', async () => {
