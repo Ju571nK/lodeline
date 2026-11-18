@@ -76,10 +76,13 @@ impl Upstream {
             UpstreamError::Connection(display_url(&self.base_url), err.without_url().to_string())
         })?;
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return serde_json::from_str(&body)
+                .map_err(|e| UpstreamError::Protocol(format!("non-JSON 2xx body: {e}")));
+        }
+        let body = error_body_excerpt(resp).await;
         match status {
-            s if s.is_success() => serde_json::from_str(&body)
-                .map_err(|e| UpstreamError::Protocol(format!("non-JSON 2xx body: {e}"))),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 Err(UpstreamError::Auth(status.as_u16()))
             }
@@ -91,6 +94,33 @@ impl Upstream {
             ))),
         }
     }
+}
+
+const ERROR_BODY_MAX_CHARS: usize = 512;
+const ERROR_BODY_MAX_BYTES: usize = 4096;
+
+/// Error bodies end up in an AI agent's context, so keep a short, single-line excerpt.
+async fn error_body_excerpt(mut resp: reqwest::Response) -> String {
+    let mut raw = Vec::new();
+    while raw.len() < ERROR_BODY_MAX_BYTES {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => raw.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    sanitize_error_body(&String::from_utf8_lossy(&raw))
+}
+
+fn sanitize_error_body(body: &str) -> String {
+    let mut out: String = body
+        .chars()
+        .take(ERROR_BODY_MAX_CHARS)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if body.chars().nth(ERROR_BODY_MAX_CHARS).is_some() {
+        out.push_str(" [truncated]");
+    }
+    out
 }
 
 /// `scheme://host[:port]` of a server URL, safe to log or return to a client.
@@ -293,7 +323,11 @@ mod tests {
     async fn error_bodies_are_capped_and_stripped_of_control_characters() {
         for status in [400, 503, 418] {
             let msg = hostile_body_error_text(status).await;
-            assert!(msg.chars().count() <= 640, "HTTP {status}: {} chars", msg.chars().count());
+            assert!(
+                msg.chars().count() <= 640,
+                "HTTP {status}: {} chars",
+                msg.chars().count()
+            );
             assert!(
                 !msg.chars().any(char::is_control),
                 "HTTP {status}: control character in {msg:?}"
@@ -309,7 +343,8 @@ mod tests {
         server
             .mock_async(|when, then| {
                 when.method(GET).path("/v1/events");
-                then.status(400).body("{\"error\":\"cursor must be a UUID\"}");
+                then.status(400)
+                    .body("{\"error\":\"cursor must be a UUID\"}");
             })
             .await;
         let up = Upstream::for_test(server.base_url());

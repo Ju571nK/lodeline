@@ -7,6 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- `lodeline-mcp` no longer passes a `lodeline-server` error response through whole. The error
+  text an AI agent sees now holds the first 512 characters of the body with control characters
+  such as terminal escapes shown as spaces, followed by ` [truncated]` when the body was longer.
+
 ## [0.18.0] - 2026-11-18
 
 **Upgrade.** This release adds one optional field to one event: `config_found` on
