@@ -113,6 +113,16 @@ describe('triage on a collapsed row', () => {
     expect(upserts.every((u) => u.status === 'acknowledged')).toBe(true);
   });
 
+  it('says a note stays on one event when the row holds several', async () => {
+    await renderGroup(new QueryClient(), [latest, older]);
+    expect(screen.getByText(/saved on this event only.*apply to all 2/i)).toBeInTheDocument();
+  });
+
+  it('says nothing about notes for a single event', async () => {
+    await renderGroup(new QueryClient(), [latest]);
+    expect(screen.queryByText(/saved on this event only/i)).toBeNull();
+  });
+
   it('acts on one event when the row holds one', async () => {
     await renderGroup(new QueryClient(), [latest]);
     fireEvent.click(screen.getByRole('button', { name: 'Acknowledge' }));

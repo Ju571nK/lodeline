@@ -56,7 +56,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   of the agent sends every reading again, which made each tool show twice. Rows that differ in scope
   or user stay apart, and every row now shows its scope, and its user when it has one. Acknowledge,
   Investigating, Resolve, Reopen and a new assignee apply to every event of a collapsed row, and a
-  write that fails is named in the drawer while the list refetches what the server holds. The
+  write that fails is named in the drawer while the list refetches what the server holds. A note
+  is saved on the one event the drawer shows, and the full page acts on the one event it shows. The
   header reads "15 rows from 17 events", and the position in the drawer counts rows. A row is
   titled by the first reason the agent sent and the number of other kinds, such as
   "No Sandbox +2 more", where before it named the first reason only.

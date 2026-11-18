@@ -233,6 +233,12 @@ export function AlertDetail({
             </span>
           )}
         </h3>
+        {groupEvents && groupEvents.length > 1 && (
+          <p className="mb-2 text-xs text-text-muted">
+            A note is saved on this event only. Status and assignee apply to all{' '}
+            {groupEvents.length}.
+          </p>
+        )}
         {triage.data && triage.data.notes.length > 0 && (
           <ul className="mb-3 space-y-2">
             {triage.data.notes.map((n) => (

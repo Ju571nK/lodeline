@@ -47,6 +47,7 @@ Preconditions:
 
 - No spec types in the note box, whose placeholder starts `Add a note`. Report the browser path of `triage-note` as skipped, or add a test first.
 - No spec presses `c`. The assign test clicks `Acknowledge`. Report the keyboard path as skipped.
+- The full page (`/alerts/<event_id>`) acts on the one event it shows, not on its whole row. In the drawer of a `×N` row, a note is saved on that event only, and a line under Notes says so.
 - The `repeated alerts` tests use the two Claude Desktop `No Sandbox` events of the fixture. The last test acknowledges both of them, so it writes a triage row and belongs in its own run.
 - `event_id` values change on every start. Copy them from this run.
 - The assign spec picks the first row, so a second run of it in one instance updates the same row and the log grows. Start a new run for a clean count.
