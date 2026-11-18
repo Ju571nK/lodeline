@@ -117,6 +117,7 @@ pub fn append_events<'e, 'p>(
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&path)
         .map_err(|source| PersistError::Io {
             path: path.clone(),
@@ -331,6 +332,7 @@ mod tests {
             file: std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(false)
                 .open(&seg)
                 .unwrap(),
             budget: first_line_len,
