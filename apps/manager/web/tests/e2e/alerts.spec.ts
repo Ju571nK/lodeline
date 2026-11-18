@@ -176,3 +176,110 @@ test('an assessment failure opens in the slide-over and is not a default alert',
     fullPage: true,
   });
 });
+
+async function openFirstAlert(page: Page) {
+  await openAlerts(page);
+  const firstRow = page.locator('button:has-text("AI Guard")').first();
+  await expect(firstRow).toBeVisible({ timeout: 5_000 });
+  await firstRow.click();
+  const sheet = page.getByRole('dialog');
+  await expect(sheet.getByLabel('Assignee')).toBeVisible();
+  return sheet;
+}
+
+test.describe('alert detail drawer', () => {
+  test('previous and next buttons move through the queue and show the position', async ({
+    page,
+  }) => {
+    const sheet = await openFirstAlert(page);
+    const position = sheet.getByTestId('alert-position');
+    await expect(position).toHaveText(/^1 of \d+$/);
+    await expect(sheet.getByRole('button', { name: 'Previous alert' })).toBeDisabled();
+
+    const firstUrl = page.url();
+    await sheet.getByRole('button', { name: 'Next alert' }).click();
+    await expect(position).toHaveText(/^2 of \d+$/);
+    expect(page.url()).not.toBe(firstUrl);
+
+    await sheet.getByRole('button', { name: 'Previous alert' }).click();
+    await expect(position).toHaveText(/^1 of \d+$/);
+    await expect(page).toHaveURL(firstUrl);
+  });
+
+  test('the host id links to the host page', async ({ page }) => {
+    const sheet = await openFirstAlert(page);
+    const link = sheet.locator('a[href^="/hosts/"]').first();
+    await expect(link).toBeVisible();
+    const href = await link.getAttribute('href');
+    await link.click();
+    await expect(page).toHaveURL(new RegExp(`${href}$`));
+  });
+
+  test('open full page shows the same alert, and back keeps the filters', async ({ page }) => {
+    await page.goto('/alerts?minBucket=high');
+    const row = page.locator('button:has-text("AI Guard")').first();
+    await expect(row).toBeVisible({ timeout: 5_000 });
+    await row.click();
+    const sheet = page.getByRole('dialog');
+    const title = await sheet.getByRole('heading').first().innerText();
+    await sheet.getByRole('link', { name: 'Open full page' }).click();
+
+    await expect(page).toHaveURL(/\/alerts\/[^/?]+/);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: title })).toBeVisible();
+    await expect(page.getByLabel('Assignee')).toBeVisible();
+
+    await page.getByRole('link', { name: 'Back to alerts' }).click();
+    await expect(page).toHaveURL(/\/alerts\?.*minBucket=high/);
+    await expect(row).toBeVisible();
+  });
+
+  test('a full page URL opens on its own after a reload', async ({ page }) => {
+    const sheet = await openFirstAlert(page);
+    await sheet.getByRole('link', { name: 'Open full page' }).click();
+    await expect(page.getByLabel('Assignee')).toBeVisible();
+    await page.reload();
+    await expect(page.getByLabel('Assignee')).toBeVisible();
+  });
+
+  test('the drawer is wider than the old 420 px and the width is resizable and remembered', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const sheet = await openFirstAlert(page);
+    const width = async () => (await sheet.boundingBox())?.width ?? 0;
+    const initial = await width();
+    expect(initial).toBeGreaterThan(600);
+
+    const handle = sheet.getByRole('separator', { name: 'Resize alert panel' });
+    await handle.focus();
+    await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('ArrowLeft');
+    await expect.poll(width).toBeGreaterThan(initial);
+    const widened = await width();
+
+    await page.reload();
+    await expect(page.getByRole('dialog').getByLabel('Assignee')).toBeVisible();
+    expect(Math.abs((await width()) - widened)).toBeLessThan(2);
+  });
+
+  test('the drawer can be resized by dragging its edge', async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const sheet = await openFirstAlert(page);
+    const before = (await sheet.boundingBox())?.width ?? 0;
+    const edge = await sheet.getByRole('separator', { name: 'Resize alert panel' }).boundingBox();
+    if (!edge) throw new Error('no resize handle');
+    const y = edge.y + edge.height / 2;
+    await page.mouse.move(edge.x + edge.width / 2, y);
+    await page.mouse.down();
+    await page.mouse.move(edge.x - 120, y, { steps: 6 });
+    await page.mouse.up();
+    await expect.poll(async () => (await sheet.boundingBox())?.width ?? 0).toBeGreaterThan(before + 80);
+  });
+
+  test('under 900 px the drawer takes the full width', async ({ page }) => {
+    await page.setViewportSize({ width: 800, height: 900 });
+    const sheet = await openFirstAlert(page);
+    expect((await sheet.boundingBox())?.width).toBeGreaterThanOrEqual(799);
+  });
+});
