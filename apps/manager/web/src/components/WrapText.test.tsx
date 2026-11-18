@@ -13,6 +13,5 @@ describe('WrapText', () => {
   ])('copies as exactly the input: %s', (text) => {
     const { container } = render(<pre>{<WrapText>{text}</WrapText>}</pre>);
     expect(container.textContent).toBe(text);
-    expect(container.querySelectorAll('wbr').length).toBeGreaterThanOrEqual(0);
   });
 });

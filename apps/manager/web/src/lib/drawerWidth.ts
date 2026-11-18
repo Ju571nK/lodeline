@@ -1,6 +1,7 @@
 export const STORAGE_KEY = 'lodeline.alertDrawerWidth';
 export const MIN_WIDTH = 420;
 const FULL_WIDTH_BELOW = 900;
+const MAX_WIDTH = 960;
 const LIST_MARGIN = 240;
 
 type WidthStorage = Pick<Storage, 'getItem' | 'setItem'>;
@@ -13,18 +14,18 @@ function browserStorage(): WidthStorage | null {
   }
 }
 
-/** Half the window, kept between a readable minimum and a comfortable maximum. */
+/** Half the window, inside the range a drag or the keys can reach. */
 export function defaultWidth(viewport: number): number {
-  return Math.min(Math.max(Math.round(viewport * 0.5), 520), 960);
+  return clampWidth(Math.max(Math.round(viewport * 0.5), 520), viewport);
 }
 
 export function isFullWidth(viewport: number): boolean {
   return viewport < FULL_WIDTH_BELOW;
 }
 
-/** Keeps the drawer at least MIN_WIDTH wide and leaves room for the list beside it. */
+/** Keeps the drawer between MIN_WIDTH and MAX_WIDTH, and leaves room for the list beside it. */
 export function clampWidth(width: number, viewport: number): number {
-  const max = Math.max(MIN_WIDTH, viewport - LIST_MARGIN);
+  const max = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, viewport - LIST_MARGIN));
   return Math.min(Math.max(Math.round(width), MIN_WIDTH), max);
 }
 

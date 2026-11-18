@@ -218,6 +218,7 @@ function AlertsPage() {
             : {
                 index: cursorIndex,
                 total: visibleRows.length,
+                partial: alerts.hasMore || alerts.cursorRepeated,
                 onPrev: () => moveCursor(-1),
                 onNext: () => moveCursor(1),
               }

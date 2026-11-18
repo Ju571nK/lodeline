@@ -18,6 +18,8 @@ import type { AlertsSearch } from '@/lib/alertsSearch';
 export interface DrawerPosition {
   index: number;
   total: number;
+  /** More rows can load, so the total is only the loaded rows. */
+  partial?: boolean;
   onPrev: () => void;
   onNext: () => void;
 }
@@ -168,7 +170,7 @@ export function SlideOver({
 }
 
 function PositionControls({ position }: { position: DrawerPosition }) {
-  const { index, total, onPrev, onNext } = position;
+  const { index, total, partial, onPrev, onNext } = position;
   return (
     <div className="flex items-center gap-1.5">
       <Button
@@ -182,6 +184,7 @@ function PositionControls({ position }: { position: DrawerPosition }) {
       </Button>
       <span data-testid="alert-position" className="text-xs tabular-nums text-text-muted">
         {index + 1} of {total}
+        {partial && ' loaded'}
       </span>
       <Button
         size="sm"

@@ -58,7 +58,13 @@ const baseEvent: EventWithTriage = {
 
 interface DetailOptions {
   evidence?: Evidence;
-  position?: { index: number; total: number; partial?: boolean; onPrev: () => void; onNext: () => void };
+  position?: {
+    index: number;
+    total: number;
+    partial?: boolean;
+    onPrev: () => void;
+    onNext: () => void;
+  };
   fullPageSearch?: AlertsSearch;
 }
 
