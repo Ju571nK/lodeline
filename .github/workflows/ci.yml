@@ -78,6 +78,8 @@ jobs:
         run: cargo build --release --workspace
       - name: hardened build (lodeline-agent, --no-default-features)
         run: cargo build -p lodeline-agent --no-default-features
+      - name: hardened check with tests (lodeline-agent, --no-default-features)
+        run: cargo check -p lodeline-agent --no-default-features --all-targets
 
   # The proxy wire schemas and the Rust DTOs in lodeline-proxy-api can drift apart.
   contract-schema:
@@ -172,3 +174,5 @@ jobs:
         run: cargo build --release --workspace
       - name: hardened build (lodeline-agent, --no-default-features)
         run: cargo build -p lodeline-agent --no-default-features
+      - name: hardened check with tests (lodeline-agent, --no-default-features)
+        run: cargo check -p lodeline-agent --no-default-features --all-targets

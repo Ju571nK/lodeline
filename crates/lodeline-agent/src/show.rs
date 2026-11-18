@@ -1249,6 +1249,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "operator-cli")]
     #[test]
     fn risk_summary_line_prints_config_found_only_when_known() {
         use lodeline_core::event::{AiGuardBucket, AiGuardScope, AiTool, Evidence};
