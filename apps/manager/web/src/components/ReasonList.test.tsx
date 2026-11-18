@@ -97,6 +97,22 @@ describe('reason evidence', () => {
   describe('grouping by kind', () => {
     const broad = (event: string) => ({ kind: 'broad_matcher', hook_event: event, matcher: '.*' });
 
+    it('groups reasons without a kind without React key errors', () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      render(
+        <ReasonList
+          reasons={[
+            { server: 'a' } as unknown as ReasonLike,
+            { server: 'b' } as unknown as ReasonLike,
+            broad('Stop'),
+          ]}
+        />,
+      );
+      expect(screen.getByText('Unknown (2)')).toBeInTheDocument();
+      expect(errors).not.toHaveBeenCalled();
+      errors.mockRestore();
+    });
+
     it('shows one collapsed header with a count for a kind that repeats', () => {
       render(
         <ReasonList

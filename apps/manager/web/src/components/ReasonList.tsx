@@ -53,12 +53,17 @@ interface Group {
   entries: Entry[];
 }
 
+/** A defined string per kind: a missing kind and the string "undefined" stay distinct. */
+function kindId(kind: unknown): string {
+  return String(JSON.stringify(kind));
+}
+
 /** Groups by kind in order of first appearance and folds identical entries into one with a count. */
 function groupReasons(reasons: ReasonLike[]): Group[] {
   const groups = new Map<string, Group>();
   const entries = new Map<string, Entry>();
   for (const reason of reasons) {
-    const kindKey = JSON.stringify(reason.kind);
+    const kindKey = kindId(reason.kind);
     const identity = JSON.stringify(Object.entries(reason).sort(([a], [b]) => a.localeCompare(b)));
     let group = groups.get(kindKey);
     if (!group) {
@@ -83,7 +88,7 @@ export function ReasonList({ reasons }: { reasons: ReasonLike[] }) {
   return (
     <ul className="space-y-2">
       {groupReasons(reasons).map((group) => (
-        <li key={JSON.stringify(group.kind)} className="min-w-0">
+        <li key={kindId(group.kind)} className="min-w-0">
           {group.total === 1 || group.entries.length === 1 ? (
             <ReasonItem entry={group.entries[0]} />
           ) : (
