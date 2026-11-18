@@ -9,6 +9,7 @@ import { Pagination } from '@/components/Fleet/Pagination';
 import { type AlertFilter, DEFAULT_FILTER, useAlerts } from '@/hooks/useAlerts';
 import { useShortcuts } from '@/hooks/useShortcuts';
 import { groupAlerts, type SortMode, sortAlertGroups } from '@/lib/alertGroups';
+import { type AlertsSearch, validateAlertsSearch } from '@/lib/alertsSearch';
 import { cn } from '@/lib/utils';
 
 /**
@@ -16,49 +17,8 @@ import { cn } from '@/lib/utils';
  * event live in the URL so links + reload preserve view. The slide-over
  * mounts when `?alert=:event_id` is present (UI/UX §7.4).
  */
-export interface AlertsSearch {
-  minBucket?: AlertFilter['minBucket'];
-  triageStatuses?: AlertFilter['triageStatuses'];
-  since?: string | null;
-  query?: string;
-  /** Selected alert id; presence opens the slide-over (UI/UX §7.4). */
-  alert?: string;
-  sort?: SortMode;
-}
-
-const VALID_BUCKETS: AlertFilter['minBucket'][] = ['low', 'medium', 'high', 'critical'];
-const VALID_STATUSES: AlertFilter['triageStatuses'][number][] = [
-  'open',
-  'acknowledged',
-  'investigating',
-  'resolved',
-];
-const VALID_SORTS: SortMode[] = ['severity_desc', 'age_desc', 'age_asc'];
-
 export const Route = createFileRoute('/_authed/alerts')({
-  validateSearch: (raw: Record<string, unknown>): AlertsSearch => {
-    const out: AlertsSearch = {};
-    if (typeof raw.minBucket === 'string' && (VALID_BUCKETS as string[]).includes(raw.minBucket)) {
-      out.minBucket = raw.minBucket as AlertFilter['minBucket'];
-    }
-    const rawStatuses = Array.isArray(raw.triageStatuses)
-      ? raw.triageStatuses
-      : typeof raw.triageStatuses === 'string'
-        ? raw.triageStatuses.split(',')
-        : [];
-    const triageStatuses = rawStatuses.filter(
-      (s): s is AlertFilter['triageStatuses'][number] =>
-        typeof s === 'string' && (VALID_STATUSES as string[]).includes(s),
-    );
-    if (triageStatuses.length > 0) out.triageStatuses = triageStatuses;
-    if (typeof raw.since === 'string' && raw.since.length > 0) out.since = raw.since;
-    if (typeof raw.query === 'string' && raw.query.length > 0) out.query = raw.query;
-    if (typeof raw.alert === 'string' && raw.alert.length > 0) out.alert = raw.alert;
-    if (typeof raw.sort === 'string' && (VALID_SORTS as string[]).includes(raw.sort)) {
-      out.sort = raw.sort as SortMode;
-    }
-    return out;
-  },
+  validateSearch: validateAlertsSearch,
   component: AlertsPage,
 });
 
@@ -253,6 +213,18 @@ function AlertsPage() {
         onClose={closeSlideOver}
         registerFocusAssign={registerFocusAssign}
         registerFocusNote={registerFocusNote}
+        position={
+          cursorIndex < 0
+            ? undefined
+            : {
+                index: cursorIndex,
+                total: groups.length,
+                partial: alerts.hasMore || alerts.cursorRepeated,
+                onPrev: () => moveCursor(-1),
+                onNext: () => moveCursor(1),
+              }
+        }
+        fullPageSearch={search}
       />
 
       <ShortcutsCheatsheet open={cheatsheetOpen} onOpenChange={setCheatsheetOpen} />

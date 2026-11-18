@@ -37,6 +37,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- **Console.** The alert detail drawer starts wider on a large window (half the window, at most
+  960 px) and is no longer fixed at 420 px. Drag its left edge, or focus the edge and press the
+  left and right arrow keys, to resize it. The console remembers the width in the browser, and the
+  drawer takes the full width under 900 px. The header has previous and next buttons with a
+  position such as `3 of 7`, and an Open full page link to `/alerts/<event id>`, which shows the
+  same alert at full width and returns to the list with its filters. The host id links to the host
+  page, and long ids, hashes, commands and the raw evidence wrap at sensible points instead of
+  scrolling sideways.
+- **Console.** The reasons of an alert, in the alert drawer and on the host page, are grouped by
+  kind. A kind that appears more than once shows one collapsed header with its count, and the
+  entries open under it. Identical entries show once with a "×n" count. The host page line "No
+  config found (n)" now says that no watched config file was found on the host, which does not
+  mean the tool is not installed. (#675)
 - The console Alerts list shows one row for events that repeat one finding. Events with the same host,
   tool, scope, user, rule pack, reasons and triage status (and assignee) collapse into one row with a
   count such as `×2`, the time of the latest event, and the latest event opened on click. A restart
