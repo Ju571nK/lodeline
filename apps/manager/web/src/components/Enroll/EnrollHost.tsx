@@ -103,7 +103,9 @@ function OffGuide({ missing }: { missing: string[] }) {
           text: (
             <>
               In the console's environment, set the variables below. Put the bearer in an owner-only
-              environment file.
+              environment file. The mint certificate and key are a new pair from the host client CA,
+              not the console's read certificate (the console refuses to start when they are the
+              same), and the key file must be readable only by the console's account (mode 0600).
             </>
           ),
           snippet: {

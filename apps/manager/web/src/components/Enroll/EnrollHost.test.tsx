@@ -132,6 +132,11 @@ describe('Enroll a host page: states', () => {
     expect(within(status).getByRole('list').tagName).toBe('OL');
     expect(status).toHaveTextContent('Restart the console');
     expect(status).toHaveTextContent('enroll_mint:');
+    expect(status).toHaveTextContent(
+      "a new pair from the host client CA, not the console's read certificate",
+    );
+    expect(status).toHaveTextContent('refuses to start when they are the same');
+    expect(status).toHaveTextContent('mode 0600');
     expect(within(status).getByRole('link', { name: /Enroll a host/ })).toHaveAttribute(
       'href',
       'https://github.com/Ju571nK/lodeline/blob/main/apps/manager/README.md#enroll-a-host',
