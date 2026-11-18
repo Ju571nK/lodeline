@@ -97,7 +97,7 @@ fn ingest_batch(
 
     between();
 
-    // Phase 3b.4 — update in-memory fleet index for each event just written,
+    // Phase 3b.4: update in-memory fleet index for each event just written,
     // so live ingest and boot rebuild count the same stored events (#441).
     // Best-effort: a parse failure here should not roll back the persist,
     // since the JSONL is the source of truth.
