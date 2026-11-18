@@ -216,6 +216,17 @@ tool with `false` as "no config found" next to its bucket, and its JSON output c
 Without a running daemon, `lodeline scan` produces the same per-tool scores in one
 shot (and exits 0) — handy for a quick check before the daemon is set up.
 
+`lodeline scan` exits 0 by default. It measures and does not block. To stop a shell or CI step
+when posture reaches a bucket, add `--fail-on <low|medium|high|critical>`. The scan then exits 3
+when any assessed tool is at or above that bucket, and the report prints unchanged, with `--json`
+too. A tool with no config is not assessed and never trips it, and a tool whose config is present
+and clean counts as `low`. An unknown bucket name is a usage error and exits 2.
+
+```sh
+# CI step: fail the job when any tool on the runner scores high or critical
+lodeline scan --fail-on high
+```
+
 On a fleet host, `lodeline status` also shows whether this host reaches
 `lodeline-server`. A running `lodeline-sender` writes `sender-status.json` next to
 its `offset_path`: at start, when the link state changes, and every 30 seconds. The
