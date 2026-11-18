@@ -7,6 +7,28 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-18
+
+**Upgrade.** This release adds one optional field to one event: `config_found` on
+`ai_guard_risk_assessed`. The fleet API returns the same field on each `by_tool` entry of
+`GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}`. It adds no policy field, no reason
+kind, no other event field and no event kind. An older server ignores the field when it reads an
+event, and a reading from a 0.17.0 agent carries none, so a 0.18.0 server leaves it out of the
+fleet API for that tool. The console changes need the 0.18.0 console. A 0.18.0 console reads
+`config_found` as optional, so with a 0.17.0 server it shows what it showed before and "No config
+found" does not appear. Server and console first, then agents, is the order that shows the field from
+the first reading, and any order is safe. A Cargo pre-release version now maps to an rpm tilde
+version in `packaging/build.sh`, which leaves the 0.18.0 packages unchanged because the version
+has no pre-release part. No package script, unit file, tmpfiles entry or SELinux module changed.
+
+**Hosts.** After the upgrade every `ai_guard_risk_assessed` event carries `config_found`, and a
+tool whose config appears or disappears is reported at once. A SIEM rule can match
+`evidence.config_found == false` to tell a low score with no config from a clean config. An agent
+run as root on macOS and Linux sends fewer project readings and has fewer watch roots, because it
+no longer reads or watches another user's `.claude` folders when a repository's checkout root is
+that user's home. `lodeline scan` exits 0 as before. It exits 3 or 4 only when `--fail-on` is
+given, so scripts that call `scan` see no change.
+
 ### Added
 
 - `lodeline scan --fail-on <low|medium|high|critical>` exits 3 when any assessed tool's bucket is
@@ -14,7 +36,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   flag `scan` still exits 0. The report and `--json` output are unchanged, and a tool with no
   config is not assessed. A clean config reads `low`, so `--fail-on low` trips on any config. It
   exits 4 when a config could not be read and no tool reached the bucket, because posture is
-  unknown. An unknown bucket is a usage error and exits 2.
+  unknown. An unknown bucket is a usage error and exits 2. (#677)
 - `ai_guard_risk_assessed` has one optional field, `config_found`. `false` means none of the
   parser's config paths exists for the assessed home, and `true` means at least one does. The
   field is omitted when unknown, as older agents send it, and an older server ignores it. The
@@ -22,7 +44,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `by_tool` entry of `GET /v1/fleet/hosts` and `GET /v1/fleet/hosts/{host_id}`, omitted when
   unknown. A tool is `false` only when every source says `false`, and `true` when any source says
   `true` or has failed or gone stale, also when its agent sends no field, so a host with an older
-  agent can show `true` for a tool whose parser failed.
+  agent can show `true` for a tool whose parser failed. (#666)
 - The agent sets `config_found` on every `ai_guard_risk_assessed` it sends, for user-global,
   application, project and rule pack subjects. It is `true` when any path the parser watches
   exists (a managed or system file counts, and so does an empty watched folder, such as
@@ -30,22 +52,22 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   other than not found. `false` means no watched config file was found, not that the tool is not
   installed. A project subject also counts the user-level files it reads. The field joins the agent's
   change test, so a tool that appears with benign content is reported at once, not at the next
-  heartbeat. `lodeline show events` prints it.
+  heartbeat. `lodeline show events` prints it. (#667)
 - `lodeline show risk` now reports `config_found`. The table marks a tool whose value is `false`
   as `low (no config found)` in the bucket column, and the JSON output carries the field. A tool
   with `true`, or whose agent sends no value, prints as before. The control reply adds the field
   only when it is known, so an older agent and a newer `lodeline`, or the reverse, still read each
-  other's replies. The `my_risk` MCP tool returns the field too.
+  other's replies. The `my_risk` MCP tool returns the field too. (#673)
 - `lodeline show risk` now names the reason kinds behind each count. With `--pretty`, the table adds a last
   `TOP_REASONS` column with the first two distinct kinds and `(+N more)`, as `lodeline scan` does,
   `(clean)` for a tool with no reasons, and `-` when the daemon sends no kinds. The JSON output
   and the `my_risk` MCP tool carry the full `reason_kinds` list in first-seen order. The control
   reply adds the list only when it is not empty, so an older daemon and a newer `lodeline`, or the
-  reverse, still read each other's replies.
+  reverse, still read each other's replies. (#678)
 - The console host page shows a quiet tool whose `config_found` is `false` in one muted line,
   "No config found (n)", and leaves it out of the "Low (n)" strip. A tool with `true`, or with
   no field because its server or agent is older, shows as before. The console relays the field
-  as the server sent it.
+  as the server sent it. (#668)
 
 ### Changed
 
@@ -55,7 +77,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   button, says what to restart, and links the README section. Enroll a host shows the missing
   console variables and the server's `enroll_mint:` fragment. The page cannot tell a server
   without the mint from a working one before a file is made, because `GET /api/v1/enrollment`
-  does not call the server.
+  does not call the server. (#681)
 - **Console.** The alert detail drawer starts wider on a large window (half the window, at most
   960 px) and is no longer fixed at 420 px. Drag its left edge, or focus the edge and press the
   left and right arrow keys, to resize it. The console remembers the width in the browser, and the
@@ -63,12 +85,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   position such as `3 of 7`, and an Open full page link to `/alerts/<event id>`, which shows the
   same alert at full width and returns to the list with its filters. The host id links to the host
   page, and long ids, hashes, commands and the raw evidence wrap at sensible points instead of
-  scrolling sideways.
+  scrolling sideways. (#679)
 - **Console.** The reasons of an alert, in the alert drawer and on the host page, are grouped by
   kind. A kind that appears more than once shows one collapsed header with its count, and the
   entries open under it. Identical entries show once with a "×n" count. The host page line "No
   config found (n)" now says that no watched config file was found on the host, which does not
-  mean the tool is not installed. (#675)
+  mean the tool is not installed. (#676)
 - The console Alerts list shows one row for events that repeat one finding. Events with the same host,
   tool, scope, user, rule pack, reasons and triage status and assignee collapse into one row with a
   count such as `×2`, the time of the latest event, and the latest event opened on click. A restart
@@ -79,7 +101,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   is saved on the one event the drawer shows, and the full page acts on the one event it shows. The
   header reads "15 rows from 17 events", and the position in the drawer counts rows. A row is
   titled by the first reason the agent sent and the number of other kinds, such as
-  "No Sandbox +2 more", where before it named the first reason only.
+  "No Sandbox +2 more", where before it named the first reason only. (#680)
 
 ### Fixed
 
@@ -87,23 +109,23 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   clock on a healthy enroll. It judged the issued certificate against the time it read when the
   run began, so a certificate signed a second or more later looked as if it started in the
   future. It now reads the clock when the certificate arrives. A host whose clock is behind the
-  server's still gets the warning.
+  server's still gets the warning. (#683)
 - The console Fleet header no longer reads "0 active hosts" for minutes after a host enrolls. The
   console cached `/v1/meta` for five minutes and never re-read it while a page stayed open, so
-  the header kept the count from before the host arrived. It now re-reads every 30 seconds.
+  the header kept the count from before the host arrived. It now re-reads every 30 seconds. (#682)
 - `GET /v1/fleet/risk` and `GET /v1/fleet/hosts` return hosts in one fixed order. Hosts that tie
   on the sort key (bucket and score, or last seen) sort by `host_id` ascending, where before
   their order could change between requests and restarts, so paging with `cursor` could skip
   or repeat a host. A risk row now shows its host's
   highest score inside its top bucket, where before it showed the first tool in that bucket even
-  when a later tool scored higher. Scores that tie keep the first tool in the server's tool order.
+  when a later tool scored higher. Scores that tie keep the first tool in the server's tool order. (#672)
 - An agent run as root on macOS and Linux no longer reads or watches another user's `.claude`
   skills, agents and commands folders, `settings.local.json` or `loop.md` as project components
   when a repository's checkout root is that user's home. Before, only the agent's own home was
   left out, so a dotfiles repository at `/home/alice` was read once in her user row and again in
   each project row below it, and its files were watched twice. The agent leaves out the homes it
   assesses, at start and at each policy reload, and the reload that follows a change of the user
-  list updates the set.
+  list updates the set. (#661)
 
 ### Documentation
 
@@ -111,11 +133,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   user-global and application subjects whether or not the tool is installed, plus the project
   subjects of configured repositories, and a tool with no config reads as low with no reasons.
   `docs/install-personal.md`, `docs/install-macos-agent.md` and `docs/install-windows-agent.md` no
-  longer say it assesses only detected tools, and `docs/runbook/siem-rules.md` lists the set.
+  longer say it assesses only detected tools, and `docs/runbook/siem-rules.md` lists the set. (#660)
 - The docs now explain `config_found`. `docs/runbook/siem-rules.md` gives its three values and a
   SIEM filter for `false`, the install docs say that `lodeline show risk` and `lodeline show events`
   print it, and the status line of `docs/design/assess-failed-signal.md` says
-  the design is implemented except step 1 for `AiTool`, `AiGuardBucket` and `AiGuardScope`.
+  the design is implemented except step 1 for `AiTool`, `AiGuardBucket` and `AiGuardScope`. (#669, #674)
 
 ## [0.17.0] - 2026-11-16
 
