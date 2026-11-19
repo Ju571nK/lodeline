@@ -5,9 +5,9 @@ use notify::{
     event::{CreateKind, EventKind as NEvent, ModifyKind, RenameMode},
     Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -31,7 +31,7 @@ pub struct RawFsEvent {
 /// add/remove watch roots after construction.
 pub struct WatcherHandle {
     pub backend_name: &'static str,
-    watcher: BackendWatcher,
+    watcher: Arc<Mutex<BackendWatcher>>,
     desired: BTreeMap<PathBuf, bool>,
     resolved: BTreeMap<PathBuf, bool>,
     active: BTreeMap<PathBuf, (bool, RootIdentity, PathBuf)>,
@@ -101,6 +101,10 @@ impl BackendWatcher {
 }
 
 impl WatcherHandle {
+    fn backend(&self) -> MutexGuard<'_, BackendWatcher> {
+        self.watcher.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// The `(real path, link path)` pairs of the followed file links. The pipeline
     /// spells an event under the real path as the link, as the operator wrote it.
     pub fn aliases_rx(&self) -> watch::Receiver<crate::normalizer::AliasTable> {
@@ -137,7 +141,7 @@ impl WatcherHandle {
         }
         // A deleted/replaced directory may retain a stale backend subscription.
         if let Some((_, _, registered)) = self.active.remove(root) {
-            let _ = self.watcher.as_watcher_mut().unwatch(&registered);
+            let _ = self.backend().as_watcher_mut().unwatch(&registered);
         }
         if let Some(task) = self.catchups.remove(root) {
             task.abort();
@@ -149,7 +153,7 @@ impl WatcherHandle {
             RecursiveMode::NonRecursive
         };
         let registered = self.backend_path(root);
-        self.watcher.as_watcher_mut().watch(&registered, mode)?;
+        self.backend().as_watcher_mut().watch(&registered, mode)?;
         self.active
             .insert(root.to_path_buf(), (recursive, identity, registered));
         if catch_up {
@@ -342,7 +346,7 @@ impl WatcherHandle {
             task.abort();
         }
         match self.active.remove(root) {
-            Some((_, _, registered)) => self.watcher.as_watcher_mut().unwatch(&registered),
+            Some((_, _, registered)) => self.backend().as_watcher_mut().unwatch(&registered),
             None => Ok(()),
         }
     }
@@ -352,7 +356,7 @@ impl WatcherHandle {
     /// link itself, so it watches the file the link points to. Events under it are
     /// spelled as the link through the alias table.
     fn backend_path(&self, root: &Path) -> PathBuf {
-        let linked_file = matches!(self.watcher, BackendWatcher::Poll(_))
+        let linked_file = matches!(*self.backend(), BackendWatcher::Poll(_))
             && std::fs::symlink_metadata(root).is_ok_and(|m| m.is_symlink())
             && std::fs::metadata(root).is_ok_and(|m| !m.is_dir());
         if linked_file {
@@ -579,6 +583,8 @@ pub fn spawn_watcher(
     let handle_for_cb = runtime_handle.clone();
     // The polling backend finds files in new folders by itself.
     let catch_up_new_folders = cfg!(target_os = "linux") && poll_interval.is_none();
+    let catch_up = Arc::new(NewFolderCatchUp::default());
+    let catch_up_for_backend = catch_up.clone();
 
     let on_event = move |res: notify::Result<Event>| {
         let event = match res {
@@ -591,13 +597,20 @@ pub fn spawn_watcher(
         tracing::trace!(kind = ?event.kind, paths = ?event.paths, "raw notify event");
         if catch_up_new_folders {
             // inotify places the watch on a new folder only after this callback
-            // returns, so a file already in it gives no event. List it now, before
-            // the watch exists. A file gets one event, except that a subfolder
-            // created after the new folder's watch but before notify walks it is
-            // listed again by its own creation event, and a file in it may then
-            // get a kernel event too (same content).
+            // returns, so a file already in it gives no event. List it now, then
+            // list it again once the watch exists and send what the first
+            // listing and the kernel events did not. A file gets one event,
+            // except that a file created just after the watch exists can get
+            // its kernel event and a late listing, and a subfolder created
+            // after the new folder's watch but before notify walks it is listed
+            // again by its own creation event, so a file in it may get a kernel
+            // event too (same content).
+            catch_up.record(&event.paths);
             for folder in new_folders(&event) {
-                for file in files_in_new_folder(&folder) {
+                catch_up.begin(&folder);
+                let listed = files_in_new_folder(&folder);
+                catch_up.record(&listed);
+                for file in listed {
                     let tx = tx_for_cb.clone();
                     handle_for_cb.spawn(async move {
                         catch_up_file(file, &tx).await;
@@ -605,6 +618,18 @@ pub fn spawn_watcher(
                 }
                 #[cfg(test)]
                 tests::after_new_folder_listing(&folder);
+                let catch_up = catch_up.clone();
+                let handle = handle_for_cb.clone();
+                let tx = tx_for_cb.clone();
+                handle_for_cb.spawn_blocking(move || {
+                    catch_up.wait_for_watch();
+                    for file in catch_up.finish(&folder) {
+                        let tx = tx.clone();
+                        handle.spawn(async move {
+                            catch_up_file(file, &tx).await;
+                        });
+                    }
+                });
             }
         }
         let mapped = map_notify_event(&event);
@@ -632,6 +657,8 @@ pub fn spawn_watcher(
         }
     };
 
+    let backend = Arc::new(Mutex::new(backend));
+    let _ = catch_up_for_backend.backend.set(Arc::downgrade(&backend));
     let mut handle = WatcherHandle {
         backend_name,
         watcher: backend,
@@ -650,6 +677,61 @@ pub fn spawn_watcher(
     }
     let _ = handle.rebuild_roots(false);
     Ok((rx, handle))
+}
+
+/// Folders whose watch is not yet known to be in place, each with the files already
+/// sent for it.
+#[derive(Default)]
+struct NewFolderCatchUp {
+    pending: Mutex<HashMap<PathBuf, HashSet<PathBuf>>>,
+    backend: OnceLock<Weak<Mutex<BackendWatcher>>>,
+}
+
+impl NewFolderCatchUp {
+    fn pending(&self) -> MutexGuard<'_, HashMap<PathBuf, HashSet<PathBuf>>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn begin(&self, folder: &Path) {
+        self.pending().entry(folder.to_path_buf()).or_default();
+    }
+
+    /// Note `paths` as sent for every pending folder that holds them.
+    fn record(&self, paths: &[PathBuf]) {
+        let mut pending = self.pending();
+        if pending.is_empty() {
+            return;
+        }
+        for (folder, sent) in pending.iter_mut() {
+            sent.extend(paths.iter().filter(|p| p.starts_with(folder)).cloned());
+        }
+    }
+
+    /// Return once the backend has handled every request made before this call.
+    /// The inotify backend adds the watch for a new folder at the end of the
+    /// batch that held its creation event, before it reads its next request,
+    /// and answers a request only after handling it. A `configure` round trip
+    /// therefore returns after that watch is in place. Calling it from the
+    /// notify callback itself would deadlock, so it runs on a blocking task.
+    fn wait_for_watch(&self) {
+        let Some(backend) = self.backend.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        let mut backend = backend.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = backend
+            .as_watcher_mut()
+            .configure(Config::default().with_follow_symlinks(false));
+    }
+
+    /// The files now in `folder` that nothing has sent. Ends the folder's window.
+    fn finish(&self, folder: &Path) -> Vec<PathBuf> {
+        let mut pending = self.pending();
+        let sent = pending.remove(folder).unwrap_or_default();
+        files_in_new_folder(folder)
+            .into_iter()
+            .filter(|f| !sent.contains(f))
+            .collect()
+    }
 }
 
 /// Most entries (files and folders) one new-folder listing visits. The root catch-up has no such bound.

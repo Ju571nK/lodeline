@@ -7,6 +7,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- On Linux the agent no longer misses a file that lands in a new folder between the moment the
+  agent lists the folder and the moment the kernel watch on it starts. This is the case of
+  `cp -r` of a skill folder, where a new `SKILL.md` could give no event until its next change or
+  the next rescan. The agent now lists the folder a second time once the watch is in place and
+  sends only the files not yet sent.
+
 ## [0.18.1] - 2026-11-19
 
 **Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind
