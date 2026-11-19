@@ -1382,6 +1382,17 @@ mod tests {
         }
     }
 
+    /// Waits for catch-up tasks left by an earlier test, so the peak counts only this one.
+    #[cfg(target_os = "linux")]
+    async fn reset_peak() {
+        use std::sync::atomic::Ordering;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while IN_FLIGHT.load(Ordering::SeqCst) != 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        PEAK_IN_FLIGHT.store(0, Ordering::SeqCst);
+    }
+
     #[cfg(target_os = "linux")]
     fn report_bulk(name: &str, started: std::time::Instant, counts: &HashMap<PathBuf, usize>) {
         use std::sync::atomic::Ordering;
@@ -1424,7 +1435,7 @@ mod tests {
             None,
         )
         .unwrap();
-        PEAK_IN_FLIGHT.store(0, std::sync::atomic::Ordering::SeqCst);
+        reset_peak().await;
         let started = std::time::Instant::now();
         for i in 0..BULK_FOLDERS {
             fs::rename(
@@ -1461,7 +1472,7 @@ mod tests {
             None,
         )
         .unwrap();
-        PEAK_IN_FLIGHT.store(0, std::sync::atomic::Ordering::SeqCst);
+        reset_peak().await;
         let started = std::time::Instant::now();
         for i in 0..BULK_FOLDERS {
             let dir = root.join(format!("skill-{i}"));
