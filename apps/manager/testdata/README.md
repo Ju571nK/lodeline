@@ -39,7 +39,7 @@ MOCK_DUMP_PATH=$PWD/mock-fleet.json go test -run TestDumpMock -count=1 ./interna
 
 Fixtures added after the dump are not in Go's mock: the `source`, `unassessed_since` and
 `ai_guard_unassessed` fields on alice-mbp and carol-dev, the host frank-ci, its
-`ai_guard_assess_failed` event, and two low `ai_guard.by_tool` entries on eve-workstation, `gemini`
+`ai_guard_assess_failed` event, an `ai_guard_toggle_drift` event on alice-mbp, and two low `ai_guard.by_tool` entries on eve-workstation, `gemini`
 with `config_found: false` and `cursor` with `config_found: true`. A new event must sit at its index times 44 minutes before the
 seed, the spacing the parity recorder assumes for event IDs.
 

@@ -317,6 +317,14 @@ test.describe('AI Guard score sources and unassessed parsers', () => {
     await expect(sheet.getByText('/home/frank/.claude/settings.json').first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath('host-event.png'), fullPage: true });
   });
+
+  test('a toggle drift event is labelled on the host timeline', async ({ page }) => {
+    await openAlerts(page);
+    await page.goto(`/hosts/${alice}`);
+    const event = row(page, 'AI Guard toggle drift');
+    await expect(event).toHaveCount(1, { timeout: 5_000 });
+    await expect(event.getByRole('cell').last()).toHaveText('Claude Code');
+  });
 });
 
 test('a refused client certificate is named on the fleet page', async ({ page }) => {

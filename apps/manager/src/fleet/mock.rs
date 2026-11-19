@@ -640,8 +640,8 @@ mod tests {
     fn fixtures_load_with_go_ids_times_and_addresses() {
         let seed = 1_767_225_600; // 2026-01-01T00:00:00Z
         let m = Mock::new(seed);
-        assert_eq!((m.hosts.len(), m.events.len()), (6, 33));
-        assert_eq!(m.events[0].event_id, uuidv7_at(seed * 1000, 33));
+        assert_eq!((m.hosts.len(), m.events.len()), (6, 34));
+        assert_eq!(m.events[0].event_id, uuidv7_at(seed * 1000, 34));
         assert_eq!(m.events[31].ts, GoTime::from_unix(seed - 31 * 44 * 60));
         assert!(
             m.events.windows(2).all(|w| w[0].event_id > w[1].event_id),
