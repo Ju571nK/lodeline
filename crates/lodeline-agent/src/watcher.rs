@@ -1406,12 +1406,6 @@ mod tests {
             PEAK_IN_FLIGHT.load(Ordering::SeqCst),
             started.elapsed().as_millis()
         );
-        panic!(
-            "MEASURE-NF1 {name} seen={} {by_count:?} peak={} ms={}",
-            counts.len(),
-            PEAK_IN_FLIGHT.load(Ordering::SeqCst),
-            started.elapsed().as_millis()
-        );
     }
 
     #[cfg(target_os = "linux")]
