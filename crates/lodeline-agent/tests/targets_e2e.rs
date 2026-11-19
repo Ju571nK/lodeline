@@ -1,5 +1,5 @@
-//! e2e: `targets` returns the live compiled target set (test target + the
-//! built-in defaults the agent merges in). Unix-only + feature-gated.
+//! e2e: `targets` returns the live compiled target set (the test target).
+//! Unix-only + feature-gated.
 #![cfg(all(unix, feature = "operator-cli"))]
 
 mod common;
@@ -18,8 +18,8 @@ async fn targets_returns_the_live_compiled_target_set() {
     let targets = resp["targets"]["targets"]
         .as_array()
         .expect("targets payload missing `targets` array");
-    // Defaults plus our one user-defined target — count varies by platform, so
-    // assert the test target is present rather than pinning the total.
+    // The test agent runs without the built-in defaults, so the test target is
+    // the only one.
     let mine = targets
         .iter()
         .find(|t| {

@@ -122,6 +122,7 @@ impl Host {
             // boot on a developer Mac with the tests running in parallel.
             poll_watcher: true,
             keystore_path: Some(self.path("keystore.json")),
+            home_dir: Some(self.path("home")),
         }));
         let deadline = Instant::now() + BOOT_DEADLINE;
         while Instant::now() < deadline {

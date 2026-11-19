@@ -22,6 +22,8 @@ pub struct TestAgentBuilder {
     /// no keystore (Phase 1 mode; `apply_policy` rejects every envelope).
     keystore_json: Option<Vec<u8>>,
     host_id: Option<String>,
+    home: Option<PathBuf>,
+    default_targets: bool,
 }
 
 impl Default for TestAgentBuilder {
@@ -37,7 +39,23 @@ impl TestAgentBuilder {
             poll_watcher: false,
             keystore_json: None,
             host_id: None,
+            home: None,
+            default_targets: false,
         }
+    }
+
+    /// Home the agent's AI Guard parsers assess. Defaults to an empty folder
+    /// inside the agent's tempdir, never the process `HOME`.
+    pub fn home(mut self, home: &std::path::Path) -> Self {
+        self.home = Some(home.to_path_buf());
+        self
+    }
+
+    /// Keep the built-in default targets. They expand `~` from the host's user
+    /// list, so they watch the developer's real home; off unless a test needs them.
+    pub fn default_targets(mut self) -> Self {
+        self.default_targets = true;
+        self
     }
 
     /// Claim this host_id in the agent's state.db before it boots, as
@@ -70,7 +88,14 @@ impl TestAgentBuilder {
         let events_dir = td.path().join("events");
         let state_db = td.path().join("state.db");
         let policy_file = td.path().join("policy.yaml");
-        std::fs::write(&policy_file, &self.policy_yaml).unwrap();
+        let policy_yaml = if self.default_targets {
+            self.policy_yaml.clone()
+        } else {
+            with_defaults_disabled(&self.policy_yaml, &td.path().join("placeholder.json"))
+        };
+        std::fs::write(&policy_file, policy_yaml).unwrap();
+        let home = self.home.clone().unwrap_or_else(|| td.path().join("home"));
+        std::fs::create_dir_all(&home).expect("create test home");
         if let Some(id) = &self.host_id {
             lodeline_core::state::HashCache::open(&state_db)
                 .and_then(|c| c.host_meta_claim_host_id(id))
@@ -93,6 +118,7 @@ impl TestAgentBuilder {
             hook_pipe_name: format!("{control_pipe_name}-hook"),
             poll_watcher: self.poll_watcher,
             keystore_path,
+            home_dir: Some(home),
         };
         let mut join = tokio::spawn(async move {
             let code = runtime::run(cfg).await.expect("test agent runtime failed");
@@ -125,6 +151,68 @@ impl TestAgentBuilder {
             join,
         }
     }
+}
+
+/// `yaml` with every built-in default target not already overridden set to
+/// `disabled: true`. A policy with no target of its own gets one watching
+/// `placeholder`, since a policy cannot end up with none. YAML that does not
+/// parse is returned as is, so a test of a refused policy still sees its error.
+fn with_defaults_disabled(yaml: &str, placeholder: &std::path::Path) -> String {
+    use serde_yaml::{Mapping, Value};
+    let mut doc: Mapping = if yaml.trim().is_empty() {
+        let mut m = Mapping::new();
+        m.insert("version".into(), 1.into());
+        m
+    } else {
+        match serde_yaml::from_str(yaml) {
+            Ok(Value::Mapping(m)) => m,
+            _ => return yaml.to_string(),
+        }
+    };
+    let list = |doc: &mut Mapping, key: &str| -> Vec<Value> {
+        match doc.remove(key) {
+            Some(Value::Sequence(items)) => items,
+            _ => Vec::new(),
+        }
+    };
+    let mut targets = list(&mut doc, "targets");
+    if targets.is_empty() {
+        let mut t = Mapping::new();
+        for (k, v) in [
+            ("id", "test-placeholder"),
+            ("description", "keeps the target list non-empty"),
+            ("tier", "standard"),
+            ("platform", "any"),
+        ] {
+            t.insert(k.into(), v.into());
+        }
+        t.insert(
+            "paths".into(),
+            Value::Sequence(vec![placeholder.to_string_lossy().as_ref().into()]),
+        );
+        t.insert("recursive".into(), false.into());
+        t.insert("follow_symlinks".into(), false.into());
+        targets.push(Value::Mapping(t));
+    }
+    let mut overrides = list(&mut doc, "overrides");
+    let overridden: Vec<String> = overrides
+        .iter()
+        .filter_map(|o| o.get("id").and_then(Value::as_str).map(String::from))
+        .collect();
+    for t in lodeline_core::policy::defaults()
+        .expect("default policy parses")
+        .targets
+        .iter()
+        .filter(|t| !overridden.contains(&t.id))
+    {
+        let mut o = Mapping::new();
+        o.insert("id".into(), t.id.as_str().into());
+        o.insert("disabled".into(), true.into());
+        overrides.push(Value::Mapping(o));
+    }
+    doc.insert("targets".into(), Value::Sequence(targets));
+    doc.insert("overrides".into(), Value::Sequence(overrides));
+    serde_yaml::to_string(&doc).expect("policy serializes")
 }
 
 async fn wait_for_control(
