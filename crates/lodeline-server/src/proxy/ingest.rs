@@ -492,12 +492,22 @@ mod tests {
     use super::DenyLog;
     use std::sync::{Arc, Mutex};
 
+    thread_local! {
+        static SINK: std::cell::RefCell<Option<Buf>> = const { std::cell::RefCell::new(None) };
+    }
+
     #[derive(Clone, Default)]
     struct Buf(Arc<Mutex<Vec<u8>>>);
 
-    impl std::io::Write for Buf {
+    struct ToSink;
+
+    impl std::io::Write for ToSink {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
+            SINK.with(|s| {
+                if let Some(buf) = s.borrow().as_ref() {
+                    buf.0.lock().unwrap().extend_from_slice(b);
+                }
+            });
             Ok(b.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -505,15 +515,23 @@ mod tests {
         }
     }
 
+    /// One process-wide subscriber, so every callsite's interest is always
+    /// "enabled". A subscriber scoped to one thread lets a callsite that
+    /// another test thread reaches first cache "never", and this thread's
+    /// line is then lost.
     fn capture(f: impl FnOnce()) -> String {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_writer(|| ToSink)
+                .with_ansi(false)
+                .without_time()
+                .init();
+        });
         let buf = Buf::default();
-        let w = buf.clone();
-        let sub = tracing_subscriber::fmt()
-            .with_writer(move || w.clone())
-            .with_ansi(false)
-            .without_time()
-            .finish();
-        tracing::subscriber::with_default(sub, f);
+        SINK.with(|s| *s.borrow_mut() = Some(buf.clone()));
+        f();
+        SINK.with(|s| *s.borrow_mut() = None);
         let out = buf.0.lock().unwrap().clone();
         String::from_utf8(out).unwrap()
     }
