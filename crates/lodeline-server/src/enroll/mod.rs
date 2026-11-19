@@ -310,6 +310,25 @@ fn key_matches_cert(openssl: &Path, cert: &Path, key: &Path) -> Result<(), Strin
 mod tests {
     use super::*;
 
+    /// Writes an executable script at `path` without leaving a write fd in this process.
+    /// A child forked by a parallel test between our open and close would hold that fd
+    /// until it execs, and running the script meanwhile fails with ETXTBSY on Linux.
+    /// `cp` writes the executable in its own process, so no fork here can inherit it.
+    #[cfg(unix)]
+    fn write_executable(path: &Path, content: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let src = path.with_extension("src");
+        std::fs::write(&src, content).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&src)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        std::fs::remove_file(&src).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     /// Write a restrictive (empty) allowlist file so the fix-B gate passes.
     fn write_allowlist(dir: &Path) -> PathBuf {
         let p = dir.join("hosts.json");
@@ -515,7 +534,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let fake = d.path().join("openssl");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        write_executable(&fake, "#!/bin/sh\nexit 0\n");
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o644)).unwrap();
         let msg = openssl_runs(&fake).unwrap_err();
         assert!(msg.contains("cannot run openssl"), "{msg}");
@@ -524,7 +543,7 @@ mod tests {
 
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(openssl_runs(&fake).is_ok());
-        std::fs::write(&fake, "#!/bin/sh\necho no >&2\nexit 3\n").unwrap();
+        write_executable(&fake, "#!/bin/sh\necho no >&2\nexit 3\n");
         let msg = openssl_runs(&fake).unwrap_err();
         assert!(
             msg.contains("ran but failed") && msg.contains("no"),
