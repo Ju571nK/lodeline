@@ -726,7 +726,8 @@ impl NewFolderCatchUp {
 
     /// Queue `folder` for its second listing. Starts a worker unless
     /// `CATCH_UP_WORKERS` already run; a worker drains the queue in order
-    /// and ends when it is empty.
+    /// and ends when it is empty. A folder whose catch-up panics is dropped and
+    /// the worker goes on, so a panic never uses up a worker slot.
     fn enqueue(
         self: &Arc<Self>,
         folder: PathBuf,
@@ -758,14 +759,20 @@ impl NewFolderCatchUp {
                         }
                     }
                 };
-                #[cfg(test)]
-                tests::before_catch_up(&folder);
-                this.wait_for_watch();
-                for file in this.finish(&folder) {
-                    let tx = tx.clone();
-                    handle.spawn(async move {
-                        catch_up_file(file, &tx).await;
-                    });
+                let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    tests::before_catch_up(&folder);
+                    this.wait_for_watch();
+                    for file in this.finish(&folder) {
+                        let tx = tx.clone();
+                        handle.spawn(async move {
+                            catch_up_file(file, &tx).await;
+                        });
+                    }
+                }));
+                if finished.is_err() {
+                    this.pending().remove(&folder);
+                    tracing::warn!(folder = %folder.display(), "new-folder catch-up panicked");
                 }
             }
         });
