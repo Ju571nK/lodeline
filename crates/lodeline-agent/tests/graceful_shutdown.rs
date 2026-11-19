@@ -50,6 +50,8 @@ fn shutdown_case(signal: i32, deliver: bool, late: bool, poll: bool, stall: bool
     let events = dir.path().join("events");
     let db = dir.path().join("state.db");
     let log = dir.path().join("daemon.log");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let binary = std::env::var_os("LODELINE_TEST_BIN")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_lodeline").into());
     let mut command = Command::new(binary);
@@ -65,6 +67,10 @@ fn shutdown_case(signal: i32, deliver: bool, late: bool, poll: bool, stall: bool
         .arg(&socket)
         .arg("--keystore")
         .arg(dir.path().join("keystore.json"))
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_STATE_HOME", home.join("state"))
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log).unwrap());
     if poll {
