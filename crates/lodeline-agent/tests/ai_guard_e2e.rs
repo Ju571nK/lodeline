@@ -74,7 +74,11 @@ targets:
         home = home.display()
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     // ── First emission: critical bucket ──────────────────────────────────────
     let ev = agent
@@ -189,7 +193,11 @@ targets:
         home = home.display()
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     let ev = agent
         .wait_for_event(
@@ -248,7 +256,11 @@ targets:
         home = home.display()
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     let ev = agent
         .wait_for_event(
@@ -310,7 +322,11 @@ targets: []
 "#
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     let canonical_a = dunce::canonicalize(&repo_a).unwrap().display().to_string();
     let canonical_b = dunce::canonicalize(&repo_b).unwrap().display().to_string();
@@ -388,7 +404,11 @@ targets: []
 "#
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     let canonical_a = dunce::canonicalize(&repo_a).unwrap().display().to_string();
     let canonical_b = dunce::canonicalize(&repo_b).unwrap().display().to_string();
@@ -480,7 +500,11 @@ targets: []
 "#
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     let canonical_a = dunce::canonicalize(&repo_a).unwrap().display().to_string();
     let canonical_b = dunce::canonicalize(&repo_b).unwrap().display().to_string();
@@ -556,7 +580,11 @@ targets:
 "#,
         home = home.display()
     );
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     // GeminiParser scope is UserGlobal.
     let ev = agent
@@ -613,7 +641,11 @@ targets:
 "#,
         home = home.display()
     );
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     // CursorParser scope is Application{app:"cursor"}, NOT UserGlobal.
     let ev = agent
@@ -720,7 +752,11 @@ targets:
         home = home.display()
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     // 4) Wait for the first AiGuardRiskAssessed event for claude_code and
     //    verify it carries a DestructiveInHookScript reason whose script_path
@@ -829,7 +865,11 @@ targets:
         home = home.display()
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     // 4) Wait for an AiGuardRiskAssessed event for claude_code.
     let ev = agent
@@ -957,7 +997,11 @@ targets:
         home = home.display()
     );
 
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
 
     let ev = agent
         .wait_for_event(
@@ -1084,7 +1128,11 @@ async fn claude_user_prompt_file_edits_trigger_reassessment() {
             "version: 1\nhost_id_strategy: machine_id\ntargets:\n  - id: e2e-claude-user-global\n    description: shipped user-global paths under the test home\n    tier: critical\n    platform: any\n    paths:\n{paths}    recursive: {}\n    follow_symlinks: false\n",
             shipped.recursive
         );
-        let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+        let agent = TestAgentBuilder::new()
+            .policy(&policy_yaml)
+            .home(&home)
+            .start()
+            .await;
         agent
             .wait_for_event(
                 |v| {
@@ -1153,7 +1201,11 @@ async fn claude_user_hook_script_edit_triggers_reassessment() {
     std::fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
     std::fs::write(home.join(".claude/settings.json"), hook_settings(&script)).unwrap();
     let policy_yaml = shipped_policy_under(&home, "ai-guard-claude-code-user-global");
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
     agent
         .wait_for_event(
             |v| {
@@ -1200,7 +1252,11 @@ async fn claude_project_hook_script_edit_triggers_reassessment() {
         "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
         workspace.display()
     );
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
     let repo_path = dunce::canonicalize(&repo).unwrap().display().to_string();
     let in_repo = |v: &serde_json::Value| v["evidence"]["scope"]["path"] == repo_path.as_str();
     agent
@@ -1246,7 +1302,11 @@ async fn claude_project_loop_md_edit_triggers_reassessment() {
         "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
         workspace.display()
     );
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
     let repo_path = dunce::canonicalize(&repo).unwrap().display().to_string();
     let in_repo = |v: &serde_json::Value| v["evidence"]["scope"]["path"] == repo_path.as_str();
     agent
@@ -1304,7 +1364,11 @@ async fn claude_project_skill_and_agent_files_trigger_reassessment() {
             "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
             workspace.display()
         );
-        let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+        let agent = TestAgentBuilder::new()
+            .policy(&policy_yaml)
+            .home(&home)
+            .start()
+            .await;
         let repo_path = dunce::canonicalize(&repo).unwrap().display().to_string();
         let in_repo = |v: &serde_json::Value| v["evidence"]["scope"]["path"] == repo_path.as_str();
         agent
@@ -1453,6 +1517,7 @@ async fn claude_edit_below_a_linked_watched_folder_triggers_reassessment() {
 
         let agent = TestAgentBuilder::new()
             .policy(&claude_user_policy_only_under(&home))
+            .home(&home)
             .start()
             .await;
         agent
@@ -1542,7 +1607,11 @@ async fn claude_skill_file_below_a_skill_triggers_nothing() {
     for target in lodeline_core::policy::defaults().unwrap().targets {
         policy_yaml.push_str(&format!("  - id: {}\n    disabled: true\n", target.id));
     }
-    let agent = TestAgentBuilder::new().policy(&policy_yaml).start().await;
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
     let repo_path = dunce::canonicalize(&repo).unwrap().display().to_string();
     let in_repo = |v: &serde_json::Value| v["evidence"]["scope"]["path"] == repo_path.as_str();
     agent

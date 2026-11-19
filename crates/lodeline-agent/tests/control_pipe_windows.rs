@@ -22,6 +22,7 @@ async fn agent_stops_when_another_process_holds_the_control_pipe() {
         hook_pipe_name: format!("{name}-hook"),
         poll_watcher: false,
         keystore_path: None,
+        home_dir: Some(td.path().join("home")),
     };
     let exit = tokio::time::timeout(std::time::Duration::from_secs(60), run(cfg)).await;
     assert!(

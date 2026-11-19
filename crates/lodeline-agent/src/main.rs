@@ -28,6 +28,7 @@ fn main() -> anyhow::Result<()> {
                 hook_pipe_name: lodeline_core::control_proto::DEFAULT_HOOK_PIPE.to_string(),
                 poll_watcher: cli.poll,
                 keystore_path: cli.keystore.clone(),
+                home_dir: None,
             };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

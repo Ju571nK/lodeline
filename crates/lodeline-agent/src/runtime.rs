@@ -43,6 +43,8 @@ pub struct RuntimeConfig {
     pub poll_watcher: bool,
     /// Override the policy-signing keystore path (tests). `None` → `keystore_path()`.
     pub keystore_path: Option<PathBuf>,
+    /// Home the AI Guard parsers assess (tests). `None` → `$HOME`, as `main` passes.
+    pub home_dir: Option<PathBuf>,
 }
 
 pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
@@ -208,10 +210,12 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     for repo_root in &continue_repos {
         push_continue_synthetic_target(&mut effective, repo_root);
     }
-    let home_dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let home_dir = cfg.home_dir.clone().unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"))
+    });
     let user_homes = other_user_homes(&plat);
     let (users_tx, users_rx) = watch::channel(user_homes.clone());
     let other_homes: Vec<PathBuf> = user_homes.iter().map(|h| h.dir.clone()).collect();
