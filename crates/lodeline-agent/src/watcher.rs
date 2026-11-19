@@ -622,6 +622,8 @@ pub fn spawn_watcher(
                 let handle = handle_for_cb.clone();
                 let tx = tx_for_cb.clone();
                 handle_for_cb.spawn_blocking(move || {
+                    #[cfg(test)]
+                    let _in_flight = tests::catch_up_task();
                     catch_up.wait_for_watch();
                     for file in catch_up.finish(&folder) {
                         let tx = tx.clone();
@@ -1242,6 +1244,23 @@ mod tests {
 
     static LATE_FILE: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
 
+    static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static PEAK_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    pub(super) struct InFlight;
+
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    pub(super) fn catch_up_task() -> InFlight {
+        let now = IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        PEAK_IN_FLIGHT.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        InFlight
+    }
+
     pub(super) fn after_new_folder_listing(folder: &Path) {
         let late = LATE_FILE.lock().unwrap().clone();
         if let Some((watched, file)) = late {
@@ -1332,6 +1351,135 @@ mod tests {
         let kinds = kinds_for(&mut rx, &late).await;
         *LATE_FILE.lock().unwrap() = None;
         assert_eq!(kinds, [FileChangeKind::Modified], "got {kinds:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    const BULK_FOLDERS: usize = 2000;
+
+    #[cfg(target_os = "linux")]
+    static BULK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Counts the events each `SKILL.md` under `root` gets, until every one of
+    /// `BULK_FOLDERS` has one and the stream has been quiet for 500 ms.
+    #[cfg(target_os = "linux")]
+    async fn count_bulk_events(rx: &mut mpsc::Receiver<RawFsEvent>) -> HashMap<PathBuf, usize> {
+        let mut counts: HashMap<PathBuf, usize> = HashMap::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let quiet = counts.len() >= BULK_FOLDERS;
+            let wait = if quiet {
+                Duration::from_millis(500)
+            } else {
+                deadline.saturating_duration_since(tokio::time::Instant::now())
+            };
+            match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Some(event)) if event.path.ends_with("SKILL.md") => {
+                    *counts.entry(event.path).or_default() += 1;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return counts,
+            }
+        }
+    }
+
+    /// Waits for catch-up tasks left by an earlier test, so the peak counts only this one.
+    #[cfg(target_os = "linux")]
+    async fn reset_peak() {
+        use std::sync::atomic::Ordering;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while IN_FLIGHT.load(Ordering::SeqCst) != 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        PEAK_IN_FLIGHT.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn report_bulk(name: &str, started: std::time::Instant, counts: &HashMap<PathBuf, usize>) {
+        use std::sync::atomic::Ordering;
+        let mut by_count: BTreeMap<usize, usize> = BTreeMap::new();
+        for n in counts.values() {
+            *by_count.entry(*n).or_default() += 1;
+        }
+        eprintln!(
+            "bulk-catch-up {name}: folders={BULK_FOLDERS} seen={} events_per_file={by_count:?} peak_in_flight={} elapsed_ms={}",
+            counts.len(),
+            PEAK_IN_FLIGHT.load(Ordering::SeqCst),
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_thousand_folders_moved_in_give_one_event_per_file() {
+        let _serial = BULK.lock().await;
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("root");
+        let staged = td.path().join("staged");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&staged).unwrap();
+        for i in 0..BULK_FOLDERS {
+            let dir = staged.join(format!("skill-{i}"));
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), b"x").unwrap();
+        }
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            BULK_FOLDERS * 4,
+            None,
+        )
+        .unwrap();
+        reset_peak().await;
+        let started = std::time::Instant::now();
+        for i in 0..BULK_FOLDERS {
+            fs::rename(
+                staged.join(format!("skill-{i}")),
+                root.join(format!("skill-{i}")),
+            )
+            .unwrap();
+        }
+        let counts = count_bulk_events(&mut rx).await;
+        report_bulk("moved_in", started, &counts);
+        let missing = (0..BULK_FOLDERS)
+            .filter(|i| !counts.contains_key(&root.join(format!("skill-{i}/SKILL.md"))))
+            .count();
+        assert_eq!(missing, 0, "files with no event");
+        let repeated: Vec<_> = counts.iter().filter(|(_, n)| **n != 1).take(3).collect();
+        assert!(
+            repeated.is_empty(),
+            "files with other than one event, first few: {repeated:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_thousand_folders_copied_in_all_give_an_event() {
+        let _serial = BULK.lock().await;
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            BULK_FOLDERS * 8,
+            None,
+        )
+        .unwrap();
+        reset_peak().await;
+        let started = std::time::Instant::now();
+        for i in 0..BULK_FOLDERS {
+            let dir = root.join(format!("skill-{i}"));
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), b"x").unwrap();
+        }
+        let counts = count_bulk_events(&mut rx).await;
+        report_bulk("copied_in", started, &counts);
+        let missing = (0..BULK_FOLDERS)
+            .filter(|i| !counts.contains_key(&root.join(format!("skill-{i}/SKILL.md"))))
+            .count();
+        assert_eq!(missing, 0, "files with no event");
+        assert!(started.elapsed() < Duration::from_secs(8));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
