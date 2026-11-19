@@ -1,6 +1,6 @@
 ---
 name: signed-policy
-description: Formally verify Lodeline's signed policy apply path with a TLA+ model of apply, verify_envelope, atomic_write, settle_pending, the file in force, boot, and reload. Use before you change those functions, the policy watermark, the pending envelope row, PolicyPaths or SignedFile::in_force, policy.yaml writes, or control-socket concurrency, or to check whether an older or unsigned envelope can replace the file in force across a crash, a power cut, or a restart. `NoExpiredApplied` covers only the step from verification to `record_pending`. Boot finishes a pending row even when its envelope expired after verification, and the host then reports `policy_expired_active`.
+description: Formally verify Lodeline's signed policy apply path with a TLA+ model of apply, verify_envelope, atomic_write, settle_pending, the file in force, boot, and reload. Use before you change those functions, the policy watermark, the pending envelope row, PolicyPaths or SignedFile::in_force, policy.yaml writes, or control-socket concurrency, or to check whether an older or unsigned envelope can replace the file in force across a crash, a power cut, or a restart.
 ---
 
 # Verify the signed policy apply path
