@@ -967,13 +967,23 @@ fn classifiers_are_fail_closed() {
 
 // ------------------------------------------------------------------- privacy
 
-/// A tracing subscriber that records everything any code path writes.
+thread_local! {
+    static SINK: std::cell::RefCell<Option<Capture>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What the calling thread's `tracing` events wrote, as bytes.
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
 
-impl std::io::Write for Capture {
+struct ToSink;
+
+impl std::io::Write for ToSink {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
+        SINK.with(|s| {
+            if let Some(cap) = s.borrow().as_ref() {
+                cap.0.lock().unwrap().extend_from_slice(b);
+            }
+        });
         Ok(b.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -981,10 +991,24 @@ impl std::io::Write for Capture {
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = Capture;
-    fn make_writer(&'a self) -> Capture {
-        self.clone()
+impl Capture {
+    /// Routes this thread's log lines here through one process-wide
+    /// subscriber. A subscriber scoped to one thread lets a callsite that
+    /// another test thread reaches first cache "never", and this thread's
+    /// line is then lost, which would make a "nothing was logged" check pass
+    /// for the wrong reason.
+    fn install() -> Capture {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_writer(|| ToSink)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .init();
+        });
+        let cap = Capture::default();
+        SINK.with(|s| *s.borrow_mut() = Some(cap.clone()));
+        cap
     }
 }
 
@@ -993,12 +1017,7 @@ const DESC_CANARY: &str = "CANARY_DESCRIPTION_SECRET_91bc";
 
 #[tokio::test]
 async fn definitions_and_keys_never_reach_logs_errors_reports_or_gaps() {
-    let cap = Capture::default();
-    let sub = tracing_subscriber::fmt()
-        .with_writer(cap.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    let _g = tracing::subscriber::set_default(sub);
+    let cap = Capture::install();
 
     let mut f = fx_with(vec![uuid(1)]);
     let mut seen_text = String::new();
@@ -1067,8 +1086,13 @@ async fn definitions_and_keys_never_reach_logs_errors_reports_or_gaps() {
     note(format!("{r:?}"));
     note(format!("{:?}", f.engine.store()));
 
-    // Logs: nothing was written (and nothing contains a canary or K).
+    // Logs: no line contains a canary or K.
+    tracing::warn!("capture control line");
     let logs = String::from_utf8_lossy(&cap.0.lock().unwrap()).to_string();
+    assert!(
+        logs.contains("capture control line"),
+        "the capture saw no line at all: {logs:?}"
+    );
     for hay in [logs.as_str(), seen_text.as_str()] {
         for needle in [NAME_CANARY, DESC_CANARY, key_hex.as_str()] {
             assert!(!hay.contains(needle), "leak of {needle}");
