@@ -13,6 +13,7 @@ async fn daemon_clients_connect_to_the_control_socket_flag() {
     let agent = TestAgentBuilder::new().policy(&policy).start().await;
     // An empty runtime dir makes the default socket path unreachable.
     let empty_runtime_dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
 
     for (args, expect) in [
         (&["reload"][..], "reload requested"),
@@ -26,6 +27,13 @@ async fn daemon_clients_connect_to_the_control_socket_flag() {
             .arg(&agent.control_socket)
             .arg("--policy")
             .arg(&agent.policy_file)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("APPDATA", home.path())
+            .env("LOCALAPPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("XDG_STATE_HOME", home.path().join("state"))
             .env("XDG_RUNTIME_DIR", empty_runtime_dir.path())
             .output()
             .unwrap();
