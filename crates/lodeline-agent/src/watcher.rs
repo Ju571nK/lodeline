@@ -5,7 +5,7 @@ use notify::{
     event::{CreateKind, EventKind as NEvent, ModifyKind, RenameMode},
     Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Duration;
@@ -618,20 +618,7 @@ pub fn spawn_watcher(
                 }
                 #[cfg(test)]
                 tests::after_new_folder_listing(&folder);
-                let catch_up = catch_up.clone();
-                let handle = handle_for_cb.clone();
-                let tx = tx_for_cb.clone();
-                handle_for_cb.spawn_blocking(move || {
-                    #[cfg(test)]
-                    let _in_flight = tests::catch_up_task();
-                    catch_up.wait_for_watch();
-                    for file in catch_up.finish(&folder) {
-                        let tx = tx.clone();
-                        handle.spawn(async move {
-                            catch_up_file(file, &tx).await;
-                        });
-                    }
-                });
+                catch_up.enqueue(folder, &handle_for_cb, &tx_for_cb);
             }
         }
         let mapped = map_notify_event(&event);
@@ -687,7 +674,19 @@ pub fn spawn_watcher(
 struct NewFolderCatchUp {
     pending: Mutex<HashMap<PathBuf, HashSet<PathBuf>>>,
     backend: OnceLock<Weak<Mutex<BackendWatcher>>>,
+    queue: Mutex<CatchUpQueue>,
 }
+
+/// Folders waiting for their second listing, and how many workers drain them.
+#[derive(Default)]
+struct CatchUpQueue {
+    folders: VecDeque<PathBuf>,
+    workers: usize,
+}
+
+/// Most blocking tasks that finish new-folder catch-up at once. Each one waits on the
+/// watcher lock, so more would only hold threads of the runtime's shared blocking pool.
+const CATCH_UP_WORKERS: usize = 8;
 
 impl NewFolderCatchUp {
     fn pending(&self) -> MutexGuard<'_, HashMap<PathBuf, HashSet<PathBuf>>> {
@@ -723,6 +722,51 @@ impl NewFolderCatchUp {
         let _ = backend
             .as_watcher_mut()
             .configure(Config::default().with_follow_symlinks(false));
+    }
+
+    /// Queue `folder` for its second listing. Starts a worker unless
+    /// `CATCH_UP_WORKERS` already run; a worker drains the queue in order
+    /// and ends when it is empty.
+    fn enqueue(
+        self: &Arc<Self>,
+        folder: PathBuf,
+        runtime: &tokio::runtime::Handle,
+        tx: &Arc<mpsc::Sender<RawFsEvent>>,
+    ) {
+        {
+            let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            queue.folders.push_back(folder);
+            if queue.workers >= CATCH_UP_WORKERS {
+                return;
+            }
+            queue.workers += 1;
+        }
+        let this = self.clone();
+        let handle = runtime.clone();
+        let tx = tx.clone();
+        runtime.spawn_blocking(move || {
+            #[cfg(test)]
+            let _in_flight = tests::catch_up_task();
+            loop {
+                let folder = {
+                    let mut queue = this.queue.lock().unwrap_or_else(PoisonError::into_inner);
+                    match queue.folders.pop_front() {
+                        Some(folder) => folder,
+                        None => {
+                            queue.workers -= 1;
+                            return;
+                        }
+                    }
+                };
+                this.wait_for_watch();
+                for file in this.finish(&folder) {
+                    let tx = tx.clone();
+                    handle.spawn(async move {
+                        catch_up_file(file, &tx).await;
+                    });
+                }
+            }
+        });
     }
 
     /// The files now in `folder` that nothing has sent. Ends the folder's window.

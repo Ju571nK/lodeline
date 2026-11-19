@@ -14,6 +14,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `cp -r` of a skill folder, where a new `SKILL.md` could give no event until its next change or
   the next rescan. The agent now lists the folder a second time once the watch is in place and
   sends only the files not yet sent.
+  At most 8 such second listings run at once, so a large `cp -r` no longer holds hundreds of
+  threads of the agent's blocking pool.
 
 ## [0.18.1] - 2026-11-19
 
