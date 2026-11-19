@@ -44,6 +44,7 @@ jobs:
   test:
     name: ${{ matrix.os }} / ${{ matrix.toolchain }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +86,7 @@ jobs:
   contract-schema:
     name: proxy contract schemas
     runs-on: ubuntu-22.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -99,6 +101,7 @@ jobs:
   signed-policy-model:
     name: signed-policy model check
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
@@ -124,6 +127,7 @@ jobs:
   msrv:
     name: msrv / 1.88
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.88
@@ -140,6 +144,7 @@ jobs:
   rocky9:
     name: rockylinux:9 / stable
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container:
       image: rockylinux:9
       # The image sets no PATH, so the runner would build PATH from
