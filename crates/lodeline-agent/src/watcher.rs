@@ -1394,6 +1394,16 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn assert_catch_up_capped(cap: usize) {
+        use std::sync::atomic::Ordering;
+        let peak = PEAK_IN_FLIGHT.load(Ordering::SeqCst);
+        assert!(
+            peak <= cap,
+            "catch-up tasks in flight at once: {peak}, cap {cap}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     fn report_bulk(name: &str, started: std::time::Instant, counts: &HashMap<PathBuf, usize>) {
         use std::sync::atomic::Ordering;
         let mut by_count: BTreeMap<usize, usize> = BTreeMap::new();
@@ -1450,6 +1460,7 @@ mod tests {
             "files with other than one event, first few: {repeated:?}"
         );
         assert!(started.elapsed() < Duration::from_secs(8));
+        assert_catch_up_capped(8);
     }
 
     #[cfg(target_os = "linux")]
@@ -1480,6 +1491,7 @@ mod tests {
             .count();
         assert_eq!(missing, 0, "files with no event");
         assert!(started.elapsed() < Duration::from_secs(8));
+        assert_catch_up_capped(8);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
