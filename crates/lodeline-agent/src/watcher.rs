@@ -726,7 +726,8 @@ impl NewFolderCatchUp {
 
     /// Queue `folder` for its second listing. Starts a worker unless
     /// `CATCH_UP_WORKERS` already run; a worker drains the queue in order
-    /// and ends when it is empty.
+    /// and ends when it is empty. A folder whose catch-up panics is dropped and
+    /// the worker goes on, so a panic never uses up a worker slot.
     fn enqueue(
         self: &Arc<Self>,
         folder: PathBuf,
@@ -758,12 +759,20 @@ impl NewFolderCatchUp {
                         }
                     }
                 };
-                this.wait_for_watch();
-                for file in this.finish(&folder) {
-                    let tx = tx.clone();
-                    handle.spawn(async move {
-                        catch_up_file(file, &tx).await;
-                    });
+                let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    tests::before_catch_up(&folder);
+                    this.wait_for_watch();
+                    for file in this.finish(&folder) {
+                        let tx = tx.clone();
+                        handle.spawn(async move {
+                            catch_up_file(file, &tx).await;
+                        });
+                    }
+                }));
+                if finished.is_err() {
+                    this.pending().remove(&folder);
+                    tracing::warn!(folder = %folder.display(), "new-folder catch-up panicked");
                 }
             }
         });
@@ -1288,6 +1297,17 @@ mod tests {
 
     static LATE_FILE: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
 
+    static PANIC_FOLDERS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn before_catch_up(folder: &Path) {
+        let mut doomed = PANIC_FOLDERS.lock().unwrap();
+        if let Some(at) = doomed.iter().position(|f| f == folder) {
+            doomed.remove(at);
+            drop(doomed);
+            panic!("injected catch-up panic");
+        }
+    }
+
     static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static PEAK_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1395,6 +1415,39 @@ mod tests {
         let kinds = kinds_for(&mut rx, &late).await;
         *LATE_FILE.lock().unwrap() = None;
         assert_eq!(kinds, [FileChangeKind::Modified], "got {kinds:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn folders_whose_catch_up_panics_do_not_stop_later_catch_up() {
+        let td = TempDir::new().unwrap();
+        let catch_up = Arc::new(NewFolderCatchUp::default());
+        let (tx, mut rx) = mpsc::channel::<RawFsEvent>(64);
+        let tx = Arc::new(tx);
+        let runtime = tokio::runtime::Handle::current();
+        let mut folders = Vec::new();
+        for i in 0..=CATCH_UP_WORKERS {
+            let folder = td.path().join(format!("folder-{i}"));
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("SKILL.md"), b"x").unwrap();
+            folders.push(folder);
+        }
+        let (last, doomed) = folders.split_last().unwrap();
+        PANIC_FOLDERS.lock().unwrap().extend(doomed.iter().cloned());
+        for folder in doomed {
+            catch_up.begin(folder);
+            catch_up.enqueue(folder.clone(), &runtime, &tx);
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !PANIC_FOLDERS.lock().unwrap().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "injected panics never ran"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        catch_up.begin(last);
+        catch_up.enqueue(last.clone(), &runtime, &tx);
+        receive_path(&mut rx, &last.join("SKILL.md")).await;
     }
 
     #[cfg(target_os = "linux")]
