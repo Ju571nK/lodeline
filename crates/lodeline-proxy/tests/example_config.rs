@@ -2,6 +2,7 @@
 //! The packaged example (`config/proxy.example.yaml`) must stay a valid
 //! bootstrap: rewrite its placeholder paths to a temp dir with files of the
 //! right modes and expect `check-config` to exit 0 (AC-14 packaging support).
+// home-isolation: exempt (lodeline-proxy takes every path from its --config file)
 
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;

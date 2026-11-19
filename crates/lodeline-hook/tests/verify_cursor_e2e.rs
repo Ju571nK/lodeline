@@ -12,6 +12,7 @@ fn lodeline(
     Command::new(env!("CARGO_BIN_EXE_lodeline-hook"))
         .args(args)
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("XDG_STATE_HOME", state)
         .output()
         .unwrap()

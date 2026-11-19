@@ -3,7 +3,10 @@
 use std::process::{Command, Output};
 
 fn enroll(args: &[&std::ffi::OsStr]) -> Output {
+    let home = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_lodeline-sender"))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .arg("enroll")
         .args(args)
         .output()

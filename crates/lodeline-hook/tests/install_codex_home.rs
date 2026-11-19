@@ -8,6 +8,7 @@ use std::process::Command;
 fn hook(home: &Path, codex_home: Option<&Path>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lodeline-hook"));
     cmd.env("HOME", home)
+        .env("USERPROFILE", home)
         .env("XDG_STATE_HOME", home.join("state"))
         .env_remove("CODEX_HOME");
     if let Some(dir) = codex_home {

@@ -1,5 +1,6 @@
 //! `lodeline-server enroll-token`: which host_ids and which accounts it accepts.
 #![cfg(unix)]
+// home-isolation: exempt (lodeline-server takes every path from its flags and config)
 
 use std::path::Path;
 use std::process::{Command, Output};

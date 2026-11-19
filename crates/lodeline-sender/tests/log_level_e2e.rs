@@ -75,6 +75,8 @@ fn log_through_prune(server_base_url: &str, rust_log: Option<&str>) -> String {
     cmd.arg("--config")
         .arg(&config_path)
         .arg("start")
+        .env("HOME", dir.path())
+        .env("USERPROFILE", dir.path())
         .env_remove("RUST_LOG")
         .env_remove("LODELINE_HOST_ID")
         .stdout(Stdio::null())

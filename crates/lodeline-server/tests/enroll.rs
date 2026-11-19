@@ -6,6 +6,7 @@
 //! Negatives: expired→403, reused→403, CN!=host_id→403, bad CSR→400, off→404.
 //!
 //! These tests require `openssl` on PATH (CI ubuntu/macos/rocky all have it).
+// home-isolation: exempt (lodeline-server takes every path from its flags and config)
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

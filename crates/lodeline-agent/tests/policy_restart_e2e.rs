@@ -552,6 +552,8 @@ fn lodeline_reload_keeps_the_deny_rule_when_the_policy_file_is_gone() {
     std::fs::remove_file(host.path("policy.yaml")).unwrap();
     let reload = Command::new(env!("CARGO_BIN_EXE_lodeline"))
         .arg("reload")
+        .env("HOME", host.path("."))
+        .env("USERPROFILE", host.path("."))
         .env("XDG_RUNTIME_DIR", host.path("run"))
         .output()
         .unwrap();
@@ -592,6 +594,7 @@ impl Host {
         let mut agent = Command::new(env!("CARGO_BIN_EXE_lodeline"));
         agent
             .env("HOME", self.path("."))
+            .env("USERPROFILE", self.path("."))
             .env("XDG_CONFIG_HOME", self.path("config"))
             .arg("--state-db")
             .arg(self.path("state.db"))

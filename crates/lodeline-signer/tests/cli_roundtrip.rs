@@ -1,5 +1,6 @@
 //! Drives the `lodeline-sign` binary directly: keygen → sign → verify roundtrip
 //! ends with verify exiting 0 and inspect printing the right metadata.
+// home-isolation: exempt (lodeline-sign reads only the paths on its command line)
 
 use std::process::Command;
 use tempfile::tempdir;

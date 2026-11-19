@@ -1,5 +1,6 @@
 //! #161: `lodeline-hook --version` / `-V` print the package version and exit 0
 //! (clap `version` attr), instead of being treated as an unknown invocation.
+// home-isolation: exempt (only prints the version and exits)
 use std::process::Command;
 
 fn run(flag: &str) -> (i32, String) {

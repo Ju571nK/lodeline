@@ -36,9 +36,12 @@ fn spawn_stub(socket: std::path::PathBuf, deny: bool) {
 
 fn run_hook_enforce(socket: &std::path::Path, stdin_json: &str) -> (String, i32) {
     let exe = env!("CARGO_BIN_EXE_lodeline-hook");
+    let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(exe)
         .args(["claude-code", "--enforce", "--on-failure", "open"])
         .env("LODELINE_HOOK_DECIDE_SOCKET", socket)
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

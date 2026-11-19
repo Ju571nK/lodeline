@@ -1,4 +1,5 @@
 //! `lodeline-server` logs to stderr, at `info` unless `RUST_LOG` sets another level (#560).
+// home-isolation: exempt (lodeline-server takes every path from its flags and config)
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

@@ -9,7 +9,10 @@ const X: &str = "5a7c3e91-1f2b-4c3d-8e4f-0a1b2c3d4e5f";
 const Y: &str = "9d8c7b6a-5f4e-4d3c-9b2a-1f0e9d8c7b6a";
 
 fn lodeline(state_db: &Path, args: &[&str]) -> Output {
+    let home = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_lodeline"))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .arg("--state-db")
         .arg(state_db)
         .args(args)
@@ -66,6 +69,8 @@ fn a_relative_state_db_is_refused() {
     let dir = tempfile::tempdir().unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_lodeline"))
+        .env("HOME", dir.path())
+        .env("USERPROFILE", dir.path())
         .current_dir(dir.path())
         .args(["--state-db", "state.db", "init-host-id", X])
         .output()
@@ -95,6 +100,8 @@ fn concurrent_claims_on_a_fresh_state_db_elect_one_host_id() {
         .iter()
         .map(|id| {
             Command::new(env!("CARGO_BIN_EXE_lodeline"))
+                .env("HOME", dir.path())
+                .env("USERPROFILE", dir.path())
                 .arg("--state-db")
                 .arg(&db)
                 .args(["init-host-id", id])
