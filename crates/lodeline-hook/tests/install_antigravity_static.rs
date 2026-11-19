@@ -12,18 +12,33 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Writes an executable script at `path` without leaving a write fd in this process.
+/// A child forked by a parallel test between our open and close would hold that fd
+/// until it execs, and running the script meanwhile fails with ETXTBSY on Linux.
+/// `cp` writes the executable in its own process, so no fork here can inherit it.
+fn write_executable(path: &Path, content: &str) {
+    let src = path.with_extension("src");
+    std::fs::write(&src, content).unwrap();
+    let copied = std::process::Command::new("cp")
+        .arg(&src)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    std::fs::remove_file(&src).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 // Fake `agy` that records each invocation by touching a marker file.
 fn write_fake_agy(home: &Path) -> PathBuf {
     let bin = home.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
     let agy = bin.join("agy");
     let marker = home.join("agy-invoked.marker");
-    fs::write(
+    write_executable(
         &agy,
-        format!("#!/bin/sh\necho called >> {}\nexit 0\n", marker.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&agy, fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\necho called >> {}\nexit 0\n", marker.display()),
+    );
     marker
 }
 

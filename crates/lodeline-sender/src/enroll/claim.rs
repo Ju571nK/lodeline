@@ -59,19 +59,34 @@ pub fn init_host_id(agent: &Path, state_db: Option<&Path>, host_id: &str) -> Cla
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+
+    /// Writes an executable script at `path` without leaving a write fd in this process.
+    /// A child forked by a parallel test between our open and close would hold that fd
+    /// until it execs, and running the script meanwhile fails with ETXTBSY on Linux.
+    /// `cp` writes the executable in its own process, so no fork here can inherit it.
+    fn write_executable(path: &Path, content: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let src = path.with_extension("src");
+        std::fs::write(&src, content).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&src)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        std::fs::remove_file(&src).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     fn fake(dir: &Path, code: i32) -> PathBuf {
         let p = dir.join("lodeline");
-        std::fs::write(
+        write_executable(
             &p,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$@\" > '{}/args'\nexit {code}\n",
                 dir.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p
     }
 
