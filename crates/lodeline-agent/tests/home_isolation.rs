@@ -7,6 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
+mod support;
+use support::scan::workspace_files;
+
 const SPAWN_MARKERS: &[&str] = &[
     "CARGO_BIN_EXE_",
     "assert_cmd",
@@ -14,30 +17,6 @@ const SPAWN_MARKERS: &[&str] = &[
     "Command::new(\"lodeline",
 ];
 const EXEMPT_PREFIX: &str = "// home-isolation: exempt (";
-
-fn test_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            test_sources(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
-
-fn workspace_test_files() -> Vec<PathBuf> {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let mut files = Vec::new();
-    for krate in std::fs::read_dir(&crates).unwrap() {
-        let tests = krate.unwrap().path().join("tests");
-        if tests.is_dir() {
-            test_sources(&tests, &mut files);
-        }
-    }
-    files.sort();
-    files
-}
 
 fn has_exemption(source: &str) -> bool {
     source.lines().any(|line| {
@@ -63,7 +42,7 @@ fn leaking(files: &[(PathBuf, String)]) -> Vec<&Path> {
 #[test]
 fn binary_spawning_tests_isolate_the_home() {
     let this = Path::new(file!()).file_name().unwrap().to_owned();
-    let files: Vec<_> = workspace_test_files()
+    let files: Vec<_> = workspace_files("tests")
         .into_iter()
         .filter(|p| p.file_name() != Some(&this))
         .map(|p| {
