@@ -54,6 +54,7 @@ fn run(home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_lodeline-hook"))
         .args(args)
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env_remove("XDG_STATE_HOME")
         .output()
         .unwrap()

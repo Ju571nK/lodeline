@@ -13,8 +13,11 @@ fn garbage_stdin_exits_zero_with_no_output() {
     // Feed clearly-invalid UTF-8 bytes to lodeline-hook claude-code.
     // The binary must: (a) exit with status 0, (b) write nothing to stdout,
     // (c) write nothing to stderr.
+    let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodeline-hook"))
         .arg("claude-code")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -53,8 +56,11 @@ fn garbage_stdin_exits_zero_with_no_output() {
 fn not_json_string_exits_zero_with_no_output() {
     // Also test with a plain ASCII non-JSON string to confirm the json parse
     // failure path is also silent.
+    let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_lodeline-hook"))
         .arg("claude-code")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

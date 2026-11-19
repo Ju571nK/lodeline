@@ -7,7 +7,10 @@ use std::process::{Command, Output};
 const HOST_ID: &str = "3f2c6a1e-8b4d-4c2a-9e7f-1a2b3c4d5e6f";
 
 fn csr(host_id: &str, key: &Path, csr: &Path) -> Output {
+    let home = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_lodeline-sender"))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .args(["csr", "--host-id", host_id, "--key-out"])
         .arg(key)
         .arg("--csr-out")

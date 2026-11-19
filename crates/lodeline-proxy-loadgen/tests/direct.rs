@@ -1,4 +1,5 @@
 //! The driver against the load server over real loopback HTTP, no proxy.
+// home-isolation: exempt (the load driver talks to a loopback server and reads no home)
 
 use std::sync::Arc;
 use std::time::Duration;

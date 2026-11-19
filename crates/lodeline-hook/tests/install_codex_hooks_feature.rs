@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 fn hook(home: &Path, args: &[&str]) -> Output {
     let out = Command::new(env!("CARGO_BIN_EXE_lodeline-hook"))
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("XDG_STATE_HOME", home.join("state"))
         .env("CODEX_HOME", home.join("codex"))
         .args(args)

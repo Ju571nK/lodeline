@@ -1,6 +1,7 @@
 //! #161: `lodeline-mcp --version` / `-V` print the package version and exit 0
 //! (handled by `handle_version()` before the server starts), instead of
 //! silently launching the MCP server on a bare flag.
+// home-isolation: exempt (only prints the version and exits)
 use std::process::Command;
 
 fn run(flag: &str) -> (i32, String) {

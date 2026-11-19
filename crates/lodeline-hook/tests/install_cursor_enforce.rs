@@ -21,6 +21,7 @@ fn cursor_enforce_install_writes_both_events_and_writes_baseline() {
             "--write",
         ])
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("XDG_STATE_HOME", &state)
         .output()
         .unwrap();

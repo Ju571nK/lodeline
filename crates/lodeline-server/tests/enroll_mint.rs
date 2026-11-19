@@ -1,6 +1,7 @@
 //! #553: `POST /v1/enroll-tokens`. Real mutual TLS (an openssl test PKI, the
 //! `PeerCertAcceptor` and router `main` uses), the real enrollment listener for the
 //! redeem, and the real binary for the start refusal and `verifier-new`.
+// home-isolation: exempt (lodeline-server takes every path from its flags and config)
 
 use lodeline_core::audit::GENESIS_PREV_HASH;
 use lodeline_fleet_api::mint::{MintResponse, MINT_PATH};

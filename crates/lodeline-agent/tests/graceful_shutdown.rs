@@ -68,6 +68,7 @@ fn shutdown_case(signal: i32, deliver: bool, late: bool, poll: bool, stall: bool
         .arg("--keystore")
         .arg(dir.path().join("keystore.json"))
         .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))

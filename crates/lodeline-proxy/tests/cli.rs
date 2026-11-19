@@ -1,6 +1,7 @@
 #![cfg(unix)]
 //! Binary-level tests: AC-14 (no start without --config), AC-12 (signals,
 //! second instance), D-02 item 4 (token CLI).
+// home-isolation: exempt (lodeline-proxy takes every path from its --config file)
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

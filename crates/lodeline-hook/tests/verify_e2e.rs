@@ -34,8 +34,11 @@ fn setup(state: &std::path::Path, settings: &std::path::Path, matcher: &str, set
 
 fn run_verify(state: &std::path::Path, stub_socket: Option<&std::path::Path>) -> i32 {
     let exe = env!("CARGO_BIN_EXE_lodeline-hook");
+    let home = tempfile::tempdir().unwrap();
     let mut c = Command::new(exe);
     c.arg("verify")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .env("XDG_STATE_HOME", state)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
