@@ -596,14 +596,15 @@ pub fn spawn_watcher(
             // created after the new folder's watch but before notify walks it is
             // listed again by its own creation event, and a file in it may then
             // get a kernel event too (same content).
-            for file in new_folders(&event)
-                .iter()
-                .flat_map(|d| files_in_new_folder(d))
-            {
-                let tx = tx_for_cb.clone();
-                handle_for_cb.spawn(async move {
-                    catch_up_file(file, &tx).await;
-                });
+            for folder in new_folders(&event) {
+                for file in files_in_new_folder(&folder) {
+                    let tx = tx_for_cb.clone();
+                    handle_for_cb.spawn(async move {
+                        catch_up_file(file, &tx).await;
+                    });
+                }
+                #[cfg(test)]
+                tests::after_new_folder_listing(&folder);
             }
         }
         let mapped = map_notify_event(&event);
@@ -1157,6 +1158,17 @@ mod tests {
         assert!(files_in_new_folder(&wide).is_empty());
     }
 
+    static LATE_FILE: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
+
+    pub(super) fn after_new_folder_listing(folder: &Path) {
+        let late = LATE_FILE.lock().unwrap().clone();
+        if let Some((watched, file)) = late {
+            if watched == folder {
+                fs::write(file, b"x").unwrap();
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     async fn kinds_for(rx: &mut mpsc::Receiver<RawFsEvent>, file: &Path) -> Vec<FileChangeKind> {
         let mut kinds = Vec::new();
@@ -1216,6 +1228,28 @@ mod tests {
             1,
             "one move must give one event, got {kinds:?}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_that_lands_between_the_listing_and_the_watch_gives_one_event() {
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let folder = root.join("demo");
+        let late = folder.join("SKILL.md");
+        *LATE_FILE.lock().unwrap() = Some((folder.clone(), late.clone()));
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            64,
+            None,
+        )
+        .unwrap();
+        fs::create_dir(&folder).unwrap();
+        let kinds = kinds_for(&mut rx, &late).await;
+        *LATE_FILE.lock().unwrap() = None;
+        assert_eq!(kinds, [FileChangeKind::Modified], "got {kinds:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
