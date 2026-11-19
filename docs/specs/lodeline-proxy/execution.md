@@ -12,6 +12,13 @@
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
 
+## 2026-11-19 서버 재시작과 되돌려진 revision의 e2e (`test/proxy-e2e-server-restart`, #269)
+
+#269의 통합 시나리오 중 두 개를 `lodeline-proxy-e2e/tests/server_proxy_e2e.rs`에 시험으로 추가했다. 제품 코드, reason, 필드, wire는 바꾸지 않았다.
+
+- `proxy_serves_the_last_config_while_the_server_is_down_and_recovers`: 서버를 내리면 proxy는 마지막 config로 계속 전달하고(`config_state` valid, `forwarding` true, `last_update_error` `fetch_failed`), 같은 포트로 서버가 돌아온 뒤 넣은 revision 2를 다시 받아 적용한다. config TTL은 60초 이상이므로 만료 자체는 기다리지 않는다. 만료는 `config_sync`의 단위 시험이 맡는다.
+- `a_rolled_back_revision_is_refused_after_a_proxy_restart`: 서버를 revision 1 때의 백업으로 되돌리고 proxy를 같은 state_dir로 다시 시작하면, proxy는 `applied.json`의 revision 2를 읽어 revision 1을 `stale_revision`으로 거절한다. 아무것도 전달하지 않고, `applied.json`(revision과 hash)과 `sequence.json`의 bound는 그대로다. 서버 부팅은 audit보다 뒤처진 store를 거절하므로(`state_init` 없이), 시험은 서버 상태 파일 전체를 백업 시점으로 되돌린다.
+
 ## 2026-11-09 proxy 상세에서 열린 gap을 닫힌 gap보다 먼저 (`fix/proxy-open-gaps-first`)
 
 문제: `GET /v1/proxies/{id}`의 `audit_gaps`는 최신순 최대 50개였다. `Ledger::gaps_page`는 `open`과 관계없이 `ORDER BY rowid_seq DESC LIMIT 50`으로

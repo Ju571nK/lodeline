@@ -22,6 +22,7 @@ use lodeline_proxy::bootstrap::Bootstrap;
 use lodeline_proxy::lifecycle::{read_status, run_tuned, RunTuning};
 use lodeline_proxy::route::TableHandle;
 use lodeline_proxy_api::status::ConfigState;
+use lodeline_proxy_api::status::LastUpdateError;
 use lodeline_proxy_api::verifier::verifier_for;
 use lodeline_server::proxy::identity::proxy_san;
 use lodeline_server::proxy::ProxyContext;
@@ -42,8 +43,8 @@ const WAIT: Duration = Duration::from_secs(40);
 
 struct Server {
     port: u16,
-    ctx: Arc<ProxyContext>,
-    handle: axum_server::Handle,
+    inner: Option<common::Server>,
+    pki_tweak: Tweak,
     mgmt: reqwest::Client,
 }
 
@@ -56,10 +57,39 @@ impl Server {
         let mgmt = mtls_client_pooled(&pki.p("hostca.crt"), &mgmt_cert.0, &mgmt_cert.1);
         Server {
             port: srv.port,
-            ctx: srv.ctx,
-            handle: srv.handle,
+            inner: Some(srv),
+            pki_tweak: tweak,
             mgmt,
         }
+    }
+
+    fn ctx(&self) -> Arc<ProxyContext> {
+        self.inner.as_ref().expect("server is up").ctx.clone()
+    }
+
+    /// Stop the server and wait until its port refuses connections and the
+    /// state it held is released.
+    async fn down(&mut self) {
+        let port = self.inner.take().expect("server is up").stop().await;
+        eventually("the stopped server refuses connections", || async move {
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+        })
+        .await;
+    }
+
+    /// Start the server again on the same port and the same state files.
+    async fn up(&mut self, pki: &Pki) {
+        for _ in 0..20 {
+            if let Some(s) = common::Server::try_start(pki, self.port, false, &self.pki_tweak).await
+            {
+                self.inner = Some(s);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("server could not rebind port {}", self.port);
     }
 
     fn url(&self, path: &str) -> String {
@@ -312,7 +342,7 @@ where
 #[tokio::test]
 async fn server_and_proxy_walk_the_whole_lifecycle() {
     let Some(pki) = pki("e2e") else { return };
-    let srv = Server::start(&pki).await;
+    let mut srv = Server::start(&pki).await;
     let up = upstream().await;
 
     // 1. Register, fingerprint, config.
@@ -384,7 +414,7 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
     assert_eq!(big.status().as_u16(), 413, "request over the route limit");
 
     // 4. The status report reaches the server: applied revision + config hash.
-    let ctx = srv.ctx.clone();
+    let ctx = srv.ctx();
     let h1 = hash1.clone();
     eventually("server sees applied revision 1 and its hash", || async {
         ctx.store
@@ -423,7 +453,7 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
         px.call(TOK_B).await == 200
     })
     .await;
-    let (ctx, h2) = (srv.ctx.clone(), hash2.clone());
+    let (ctx, h2) = (srv.ctx(), hash2.clone());
     eventually("server sees applied revision 2 and its hash", || async {
         ctx.store
             .entry(PROXY_ID)
@@ -476,10 +506,10 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
         "a disabled answer is not an update error"
     );
     tokio::time::sleep(Duration::from_millis(600)).await;
-    let frozen = srv.ctx.store.last_seen(PROXY_ID);
+    let frozen = srv.ctx().store.last_seen(PROXY_ID);
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert_eq!(
-        srv.ctx.store.last_seen(PROXY_ID),
+        srv.ctx().store.last_seen(PROXY_ID),
         frozen,
         "the proxy sends no report while disabled"
     );
@@ -510,7 +540,7 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
     })
     .await;
     assert!(up.hits.load(Ordering::SeqCst) > hits_disabled);
-    let (ctx, before_seen) = (srv.ctx.clone(), frozen.clone());
+    let (ctx, before_seen) = (srv.ctx(), frozen.clone());
     eventually("reports accepted again", || async {
         ctx.store.last_seen(PROXY_ID) != before_seen
     })
@@ -544,5 +574,225 @@ async fn server_and_proxy_walk_the_whole_lifecycle() {
     }
 
     px.shutdown().await;
-    srv.handle.graceful_shutdown(Some(Duration::from_secs(1)));
+    srv.down().await;
+}
+
+// ------------------------------------------------- restart and rollback
+
+fn cfg_path() -> String {
+    format!("/v1/proxies/{PROXY_ID}/config")
+}
+
+/// Registers the proxy, pins its certificate and puts revision 1 (`TOK_A`).
+/// Returns the proxy's client certificate and key.
+async fn enroll(srv: &Server, pki: &Pki, up_port: u16) -> (PathBuf, PathBuf) {
+    let cert = pki.leaf(
+        "proxyca",
+        "proxy",
+        PROXY_ID,
+        &client_ext(&proxy_san(PROXY_ID)),
+    );
+    let (st, _) = srv
+        .mgmt(
+            "POST",
+            "/v1/proxies",
+            T_ID,
+            Some(serde_json::json!({"proxy_id": PROXY_ID, "display_name": "e2e"})),
+        )
+        .await;
+    assert_eq!(st, 201, "register");
+    let (st, _) = srv
+        .mgmt(
+            "POST",
+            &format!("/v1/proxies/{PROXY_ID}/fingerprints"),
+            T_ID,
+            Some(serde_json::json!({"fingerprint": fingerprint(&cert.0)})),
+        )
+        .await;
+    assert_eq!(st, 200, "fingerprint");
+    put_config(srv, 0, up_port, &[("alice", TOK_A)]).await;
+    cert
+}
+
+/// PUTs a config at `expected` and returns its `config_hash`.
+async fn put_config(srv: &Server, expected: u64, up_port: u16, tokens: &[(&str, &str)]) -> String {
+    let (st, body) = srv
+        .mgmt(
+            "PUT",
+            &cfg_path(),
+            T_CFG,
+            Some(serde_json::json!({
+                "expected_revision": expected,
+                "config": spec(up_port, tokens, 65536),
+            })),
+        )
+        .await;
+    assert_eq!(st, 200, "config put: {body}");
+    assert_eq!(body["revision"], expected + 1);
+    body["config_hash"].as_str().unwrap().to_string()
+}
+
+/// The proxy's persisted `applied.json` as (revision, config_hash).
+fn applied_file(state_dir: &std::path::Path) -> Option<(i64, String)> {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state_dir.join("applied.json")).ok()?).ok()?;
+    Some((
+        v["revision"].as_i64()?,
+        v["config_hash"].as_str()?.to_string(),
+    ))
+}
+
+/// The proxy's persisted status-sequence bound.
+fn sequence_bound(state_dir: &std::path::Path) -> Option<i64> {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state_dir.join("sequence.json")).ok()?).ok()?;
+    v["bound"].as_i64()
+}
+
+/// The regular files directly in `dir` (the server's state files and the PKI),
+/// copied to `backup`.
+fn snapshot(dir: &std::path::Path, backup: &std::path::Path) {
+    for e in std::fs::read_dir(dir).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), backup.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+/// Puts the files of `snapshot` back and removes the files created since, so
+/// the server boots as it was when the backup was taken.
+fn restore(dir: &std::path::Path, backup: &std::path::Path) {
+    for e in std::fs::read_dir(dir).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_file() && !backup.join(e.file_name()).exists() {
+            std::fs::remove_file(e.path()).unwrap();
+        }
+    }
+    for e in std::fs::read_dir(backup).unwrap() {
+        let e = e.unwrap();
+        std::fs::copy(e.path(), dir.join(e.file_name())).unwrap();
+    }
+}
+
+/// While the server is down the proxy keeps forwarding on its last good config.
+/// When the server is back the proxy fetches again: a revision put after the
+/// restart is applied. The config TTL is at least 60 s, so the expiry itself
+/// is not waited for here.
+#[tokio::test]
+async fn proxy_serves_the_last_config_while_the_server_is_down_and_recovers() {
+    let Some(pki) = pki("e2e") else { return };
+    let mut srv = Server::start(&pki).await;
+    let up = upstream().await;
+    let proxy_cert = enroll(&srv, &pki, up.port).await;
+    let px = start_proxy(&pki, srv.port, up.port, &proxy_cert);
+    eventually("revision 1 applied and forwarding", || async {
+        px.call(TOK_A).await == 200
+    })
+    .await;
+    assert_eq!(px.call(TOK_B).await, 401, "token B is not configured yet");
+
+    srv.down().await;
+    let sd = px.state_dir.clone();
+    eventually("the proxy sees the failed fetches", || async {
+        read_status(&sd).is_some_and(|s| s.last_update_error == Some(LastUpdateError::FetchFailed))
+    })
+    .await;
+    let local = read_status(&px.state_dir).unwrap();
+    assert_eq!(local.config_state, ConfigState::Valid);
+    assert!(local.forwarding, "the last good config is still served");
+    let before = up.hits.load(Ordering::SeqCst);
+    assert_eq!(px.call(TOK_A).await, 200, "served while the server is down");
+    assert!(up.hits.load(Ordering::SeqCst) > before);
+    assert_eq!(px.call(TOK_B).await, 401, "no new config while it is down");
+
+    srv.up(&pki).await;
+    let hash2 = put_config(&srv, 1, up.port, &[("alice", TOK_A), ("bob", TOK_B)]).await;
+    eventually("token B accepted after the server is back", || async {
+        px.call(TOK_B).await == 200
+    })
+    .await;
+    assert_eq!(px.call(TOK_A).await, 200);
+    let sd = px.state_dir.clone();
+    eventually("the fetch error clears", || async {
+        read_status(&sd).is_some_and(|s| {
+            s.config_state == ConfigState::Valid && s.forwarding && s.last_update_error.is_none()
+        })
+    })
+    .await;
+    assert_eq!(applied_file(&px.state_dir), Some((2, hash2)));
+
+    px.shutdown().await;
+    srv.down().await;
+}
+
+/// The server comes back from a backup that holds revision 1 while the proxy
+/// applied revision 2 and restarts. The proxy reads revision 2 from its
+/// persisted applied state, refuses the older one with `stale_revision`, serves
+/// nothing, and keeps the persisted state it had.
+#[tokio::test]
+async fn a_rolled_back_revision_is_refused_after_a_proxy_restart() {
+    let Some(pki) = pki("e2e") else { return };
+    let mut srv = Server::start(&pki).await;
+    let up = upstream().await;
+    let proxy_cert = enroll(&srv, &pki, up.port).await;
+
+    srv.down().await;
+    let backup = tempfile::tempdir().unwrap();
+    snapshot(pki.dir.path(), backup.path());
+    srv.up(&pki).await;
+
+    let px = start_proxy(&pki, srv.port, up.port, &proxy_cert);
+    eventually("revision 1 applied", || async {
+        px.call(TOK_A).await == 200
+    })
+    .await;
+    let hash2 = put_config(&srv, 1, up.port, &[("alice", TOK_A), ("bob", TOK_B)]).await;
+    eventually("revision 2 applied", || async {
+        px.call(TOK_B).await == 200
+    })
+    .await;
+    let sd = px.state_dir.clone();
+    assert_eq!(applied_file(&sd), Some((2, hash2.clone())));
+    eventually("a status sequence is persisted", || async {
+        sequence_bound(&sd).is_some()
+    })
+    .await;
+    px.shutdown().await;
+    let bound = sequence_bound(&sd).unwrap();
+
+    srv.down().await;
+    restore(pki.dir.path(), backup.path());
+    srv.up(&pki).await;
+
+    let hits = up.hits.load(Ordering::SeqCst);
+    let px = start_proxy(&pki, srv.port, up.port, &proxy_cert);
+    let sd = px.state_dir.clone();
+    eventually("the older revision is refused", || async {
+        read_status(&sd)
+            .is_some_and(|s| s.last_update_error == Some(LastUpdateError::StaleRevision))
+    })
+    .await;
+    let local = read_status(&px.state_dir).unwrap();
+    assert_ne!(local.config_state, ConfigState::Valid);
+    assert!(!local.forwarding);
+    assert_eq!(
+        px.call(TOK_A).await,
+        401,
+        "nothing is served from revision 1"
+    );
+    assert_eq!(px.call(TOK_B).await, 401);
+    assert_eq!(up.hits.load(Ordering::SeqCst), hits);
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        read_status(&px.state_dir).unwrap().last_update_error,
+        Some(LastUpdateError::StaleRevision),
+        "the refusal holds across later fetches"
+    );
+    assert_eq!(applied_file(&px.state_dir), Some((2, hash2)));
+    assert!(sequence_bound(&px.state_dir).unwrap() >= bound);
+
+    px.shutdown().await;
+    srv.down().await;
 }
