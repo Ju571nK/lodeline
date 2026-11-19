@@ -7,13 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
-## [0.18.2] - 2026-11-19
+## [0.18.2] - 2026-11-20
 
-**Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind
-and no fleet API field. No package script, unit file, tmpfiles entry or SELinux module changed. The
-only change to a shipped program is in the agent's file watcher, and its new second listing
-runs only on Linux. Upgrade the
-server, the console and the agents in any order.
+**Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind and
+no fleet API field. No package script, unit file, tmpfiles entry or SELinux module changed. The only
+change in behavior is in the agent's file watcher on Linux, which lists a new folder a second time.
+Upgrade the server, the console and the agents in any order.
 
 ### Fixed
 
