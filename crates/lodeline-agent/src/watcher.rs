@@ -414,7 +414,6 @@ impl WatcherHandle {
         let idle: Vec<_> = self
             .active
             .keys()
-            .filter(|root| root.is_dir())
             .filter(|root| {
                 self.activity.since(root).is_some_and(|last| {
                     SystemTime::now()
@@ -422,6 +421,7 @@ impl WatcherHandle {
                         .is_ok_and(|elapsed| elapsed >= quiet)
                 })
             })
+            .filter(|root| root.is_dir())
             .cloned()
             .collect();
         for root in idle {
