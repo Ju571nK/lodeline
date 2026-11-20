@@ -196,7 +196,7 @@ fn assess_user(
         if let Some(perms) = managed.get("permissions") {
             emit_broad_allow_reasons(perms, &mut found);
         }
-        push_managed(found, &mut out, |_| false);
+        push_managed(found, &mut out, |r| hook_differs(r, &merged, managed));
     }
     // #191 signal 1 — the start mode's auto-approval posture.
     if emit_start_mode_reason(start, &mut out) {
