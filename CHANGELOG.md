@@ -9,6 +9,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline doctor` and the MCP tool `my_risk` now name each source whose config the agent could
+  not read or parse, as `lodeline show risk` does. `doctor` prints one line per source under
+  `latest risk`. `my_risk` adds a `failed_sources` list next to `latest_risk` only when a source
+  failed. Before, both showed only good readings, so an AI agent could see a clean or stale score
+  for a tool whose config failed. An older MCP client ignores the new key, and either reader with
+  an older agent shows no extra line.
 - `lodeline show risk` now names each source whose config the agent could not read or parse. It adds
   one line per source after the table, and the JSON output gains `failed_sources`. Before, such a
   source showed a stale score or nothing, although the agent already reports the failure to the

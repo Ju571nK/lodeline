@@ -560,8 +560,7 @@ fn write_latest_risk(
             r.reasons_count
         )?;
     }
-    let _ = failed;
-    Ok(())
+    crate::show::write_failed_sources(w, failed)
 }
 
 #[cfg(feature = "operator-cli")]

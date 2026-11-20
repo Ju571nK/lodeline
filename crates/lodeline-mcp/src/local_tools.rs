@@ -50,7 +50,7 @@ impl LodelineLocal {
     )]
     async fn my_risk(&self) -> Result<CallToolResult, McpError> {
         let r = self.upstream.doctor_report().await?;
-        let failed: Vec<lodeline_core::control_proto::FailedSource> = vec![];
+        let failed = self.upstream.failed_sources().await.unwrap_or_default();
         if failed.is_empty() {
             return ok(serde_json::json!({ "latest_risk": r.latest_risk }));
         }
