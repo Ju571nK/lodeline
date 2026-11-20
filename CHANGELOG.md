@@ -7,6 +7,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-20
+
+**Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind and
+no fleet API field. No package script, unit file, tmpfiles entry or SELinux module changed. The only
+change in behavior is in the agent's file watcher on Linux, which lists a new folder a second time.
+Upgrade the server, the console and the agents in any order.
+
 ### Fixed
 
 - A Codex project whose folder the user config marks `trust_level = "untrusted"` no longer scores its `.codex/` layers, because Codex does not load them. Its `AGENTS.md` is still scanned, and a folder with no trust entry is scored as before.
@@ -15,6 +22,15 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `cp -r` of a skill folder, where a new `SKILL.md` could give no event until its next change or
   the next rescan. The agent now lists the folder a second time once the watch is in place and
   sends only the files not yet sent.
+  At most 8 such second listings run at once, so a large `cp -r` no longer holds hundreds of
+  threads of the agent's blocking pool. A second listing that panics is dropped and no longer uses
+  up one of those 8 slots. (#700, #711 and #712)
+
+### Documentation
+
+- `docs/codex-coverage.md` said a `.codex/hooks.json` at the repo root with no `.codex/config.toml`
+  and no `AGENTS.md` gives no `lodeline scan` row. It does give one, as it has since #648, and the
+  page now says so. (#709)
 
 ## [0.18.1] - 2026-11-19
 

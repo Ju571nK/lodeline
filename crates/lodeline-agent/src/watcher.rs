@@ -5,7 +5,7 @@ use notify::{
     event::{CreateKind, EventKind as NEvent, ModifyKind, RenameMode},
     Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Duration;
@@ -618,18 +618,7 @@ pub fn spawn_watcher(
                 }
                 #[cfg(test)]
                 tests::after_new_folder_listing(&folder);
-                let catch_up = catch_up.clone();
-                let handle = handle_for_cb.clone();
-                let tx = tx_for_cb.clone();
-                handle_for_cb.spawn_blocking(move || {
-                    catch_up.wait_for_watch();
-                    for file in catch_up.finish(&folder) {
-                        let tx = tx.clone();
-                        handle.spawn(async move {
-                            catch_up_file(file, &tx).await;
-                        });
-                    }
-                });
+                catch_up.enqueue(folder, &handle_for_cb, &tx_for_cb);
             }
         }
         let mapped = map_notify_event(&event);
@@ -685,7 +674,19 @@ pub fn spawn_watcher(
 struct NewFolderCatchUp {
     pending: Mutex<HashMap<PathBuf, HashSet<PathBuf>>>,
     backend: OnceLock<Weak<Mutex<BackendWatcher>>>,
+    queue: Mutex<CatchUpQueue>,
 }
+
+/// Folders waiting for their second listing, and how many workers drain them.
+#[derive(Default)]
+struct CatchUpQueue {
+    folders: VecDeque<PathBuf>,
+    workers: usize,
+}
+
+/// Most blocking tasks that finish new-folder catch-up at once. Each one waits on the
+/// watcher lock, so more would only hold threads of the runtime's shared blocking pool.
+const CATCH_UP_WORKERS: usize = 8;
 
 impl NewFolderCatchUp {
     fn pending(&self) -> MutexGuard<'_, HashMap<PathBuf, HashSet<PathBuf>>> {
@@ -721,6 +722,60 @@ impl NewFolderCatchUp {
         let _ = backend
             .as_watcher_mut()
             .configure(Config::default().with_follow_symlinks(false));
+    }
+
+    /// Queue `folder` for its second listing. Starts a worker unless
+    /// `CATCH_UP_WORKERS` already run; a worker drains the queue in order
+    /// and ends when it is empty. A folder whose catch-up panics is dropped and
+    /// the worker goes on, so a panic never uses up a worker slot.
+    fn enqueue(
+        self: &Arc<Self>,
+        folder: PathBuf,
+        runtime: &tokio::runtime::Handle,
+        tx: &Arc<mpsc::Sender<RawFsEvent>>,
+    ) {
+        {
+            let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            queue.folders.push_back(folder);
+            if queue.workers >= CATCH_UP_WORKERS {
+                return;
+            }
+            queue.workers += 1;
+        }
+        let this = self.clone();
+        let handle = runtime.clone();
+        let tx = tx.clone();
+        runtime.spawn_blocking(move || {
+            #[cfg(test)]
+            let _in_flight = tests::catch_up_task();
+            loop {
+                let folder = {
+                    let mut queue = this.queue.lock().unwrap_or_else(PoisonError::into_inner);
+                    match queue.folders.pop_front() {
+                        Some(folder) => folder,
+                        None => {
+                            queue.workers -= 1;
+                            return;
+                        }
+                    }
+                };
+                let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    tests::before_catch_up(&folder);
+                    this.wait_for_watch();
+                    for file in this.finish(&folder) {
+                        let tx = tx.clone();
+                        handle.spawn(async move {
+                            catch_up_file(file, &tx).await;
+                        });
+                    }
+                }));
+                if finished.is_err() {
+                    this.pending().remove(&folder);
+                    tracing::warn!(folder = %folder.display(), "new-folder catch-up panicked");
+                }
+            }
+        });
     }
 
     /// The files now in `folder` that nothing has sent. Ends the folder's window.
@@ -1242,6 +1297,34 @@ mod tests {
 
     static LATE_FILE: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
 
+    static PANIC_FOLDERS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn before_catch_up(folder: &Path) {
+        let mut doomed = PANIC_FOLDERS.lock().unwrap();
+        if let Some(at) = doomed.iter().position(|f| f == folder) {
+            doomed.remove(at);
+            drop(doomed);
+            panic!("injected catch-up panic");
+        }
+    }
+
+    static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static PEAK_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    pub(super) struct InFlight;
+
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    pub(super) fn catch_up_task() -> InFlight {
+        let now = IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        PEAK_IN_FLIGHT.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        InFlight
+    }
+
     pub(super) fn after_new_folder_listing(folder: &Path) {
         let late = LATE_FILE.lock().unwrap().clone();
         if let Some((watched, file)) = late {
@@ -1332,6 +1415,180 @@ mod tests {
         let kinds = kinds_for(&mut rx, &late).await;
         *LATE_FILE.lock().unwrap() = None;
         assert_eq!(kinds, [FileChangeKind::Modified], "got {kinds:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn folders_whose_catch_up_panics_do_not_stop_later_catch_up() {
+        let td = TempDir::new().unwrap();
+        let catch_up = Arc::new(NewFolderCatchUp::default());
+        let (tx, mut rx) = mpsc::channel::<RawFsEvent>(64);
+        let tx = Arc::new(tx);
+        let runtime = tokio::runtime::Handle::current();
+        let mut folders = Vec::new();
+        for i in 0..=CATCH_UP_WORKERS {
+            let folder = td.path().join(format!("folder-{i}"));
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("SKILL.md"), b"x").unwrap();
+            folders.push(folder);
+        }
+        let (last, doomed) = folders.split_last().unwrap();
+        PANIC_FOLDERS.lock().unwrap().extend(doomed.iter().cloned());
+        for folder in doomed {
+            catch_up.begin(folder);
+            catch_up.enqueue(folder.clone(), &runtime, &tx);
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !PANIC_FOLDERS.lock().unwrap().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "injected panics never ran"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        catch_up.begin(last);
+        catch_up.enqueue(last.clone(), &runtime, &tx);
+        receive_path(&mut rx, &last.join("SKILL.md")).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    const BULK_FOLDERS: usize = 2000;
+
+    #[cfg(target_os = "linux")]
+    static BULK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Counts the events each `SKILL.md` under `root` gets, until every one of
+    /// `BULK_FOLDERS` has one and the stream has been quiet for 500 ms.
+    #[cfg(target_os = "linux")]
+    async fn count_bulk_events(rx: &mut mpsc::Receiver<RawFsEvent>) -> HashMap<PathBuf, usize> {
+        let mut counts: HashMap<PathBuf, usize> = HashMap::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let quiet = counts.len() >= BULK_FOLDERS;
+            let wait = if quiet {
+                Duration::from_millis(500)
+            } else {
+                deadline.saturating_duration_since(tokio::time::Instant::now())
+            };
+            match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Some(event)) if event.path.ends_with("SKILL.md") => {
+                    *counts.entry(event.path).or_default() += 1;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return counts,
+            }
+        }
+    }
+
+    /// Waits for catch-up tasks left by an earlier test, so the peak counts only this one.
+    #[cfg(target_os = "linux")]
+    async fn reset_peak() {
+        use std::sync::atomic::Ordering;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while IN_FLIGHT.load(Ordering::SeqCst) != 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        PEAK_IN_FLIGHT.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_catch_up_capped(cap: usize) {
+        use std::sync::atomic::Ordering;
+        let peak = PEAK_IN_FLIGHT.load(Ordering::SeqCst);
+        assert!(
+            peak <= cap,
+            "catch-up tasks in flight at once: {peak}, cap {cap}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn report_bulk(name: &str, started: std::time::Instant, counts: &HashMap<PathBuf, usize>) {
+        use std::sync::atomic::Ordering;
+        let mut by_count: BTreeMap<usize, usize> = BTreeMap::new();
+        for n in counts.values() {
+            *by_count.entry(*n).or_default() += 1;
+        }
+        eprintln!(
+            "bulk-catch-up {name}: folders={BULK_FOLDERS} seen={} events_per_file={by_count:?} peak_in_flight={} elapsed_ms={}",
+            counts.len(),
+            PEAK_IN_FLIGHT.load(Ordering::SeqCst),
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_thousand_folders_moved_in_give_one_event_per_file() {
+        let _serial = BULK.lock().await;
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("root");
+        let staged = td.path().join("staged");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&staged).unwrap();
+        for i in 0..BULK_FOLDERS {
+            let dir = staged.join(format!("skill-{i}"));
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), b"x").unwrap();
+        }
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            BULK_FOLDERS * 4,
+            None,
+        )
+        .unwrap();
+        reset_peak().await;
+        let started = std::time::Instant::now();
+        for i in 0..BULK_FOLDERS {
+            fs::rename(
+                staged.join(format!("skill-{i}")),
+                root.join(format!("skill-{i}")),
+            )
+            .unwrap();
+        }
+        let counts = count_bulk_events(&mut rx).await;
+        report_bulk("moved_in", started, &counts);
+        let missing = (0..BULK_FOLDERS)
+            .filter(|i| !counts.contains_key(&root.join(format!("skill-{i}/SKILL.md"))))
+            .count();
+        assert_eq!(missing, 0, "files with no event");
+        let repeated: Vec<_> = counts.iter().filter(|(_, n)| **n != 1).take(3).collect();
+        assert!(
+            repeated.is_empty(),
+            "files with other than one event, first few: {repeated:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert_catch_up_capped(8);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_thousand_folders_copied_in_all_give_an_event() {
+        let _serial = BULK.lock().await;
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let (mut rx, _watcher) = spawn_watcher(
+            vec![(root.clone(), true)],
+            tokio::runtime::Handle::current(),
+            BULK_FOLDERS * 8,
+            None,
+        )
+        .unwrap();
+        reset_peak().await;
+        let started = std::time::Instant::now();
+        for i in 0..BULK_FOLDERS {
+            let dir = root.join(format!("skill-{i}"));
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), b"x").unwrap();
+        }
+        let counts = count_bulk_events(&mut rx).await;
+        report_bulk("copied_in", started, &counts);
+        let missing = (0..BULK_FOLDERS)
+            .filter(|i| !counts.contains_key(&root.join(format!("skill-{i}/SKILL.md"))))
+            .count();
+        assert_eq!(missing, 0, "files with no event");
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert_catch_up_capped(8);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
