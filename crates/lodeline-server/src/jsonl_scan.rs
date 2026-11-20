@@ -534,4 +534,55 @@ mod tests {
         }
         assert_eq!(seen, expected);
     }
+
+    fn evjson_ms(host_id: &str, t: time::OffsetDateTime) -> serde_json::Value {
+        let mut v = evjson(host_id, "2026-05-17T12:00:00Z", "host_id_conflict");
+        let ms = (t.unix_timestamp() as u128) * 1000;
+        let id = uuid::Uuid::from_u128((ms << 80) | (0x7abc_u128 << 64) | (0x8def_u128 << 48));
+        v["event_id"] = json!(id.to_string());
+        v
+    }
+
+    #[test]
+    fn scan_pages_have_no_gap_when_a_late_batch_lands_in_a_newer_day_file() {
+        use time::macros::datetime;
+        let dir = tempdir().unwrap();
+        let a = evjson_ms(HID, datetime!(2026-05-17 10:00 UTC));
+        let b = evjson_ms(HID_B, datetime!(2026-05-16 23:00 UTC));
+        let c = evjson_ms(HID_B, datetime!(2026-05-17 11:00 UTC));
+        let d = evjson_ms(HID, datetime!(2026-05-17 12:00 UTC));
+        let (t1, t0, t2, t3) = (&a, &b, &c, &d);
+        let host_a = dir.path().join(HID);
+        let host_b = dir.path().join(HID_B);
+        std::fs::create_dir_all(&host_a).unwrap();
+        std::fs::create_dir_all(&host_b).unwrap();
+        for e in [t1, t3] {
+            write_line(&host_a.join("received-2026-05-17.jsonl"), e);
+        }
+        for e in [t0, t2] {
+            write_line(&host_b.join("received-2026-05-18.jsonl"), e);
+        }
+        let expected = ids(&[t3.clone(), t2.clone(), t1.clone(), t0.clone()]);
+        for limit in [1, 2] {
+            let mut seen = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = scan(
+                    dir.path(),
+                    &ScanFilters {
+                        limit,
+                        cursor,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                seen.extend(ids(&page.events));
+                match page.next_cursor {
+                    Some(c) => cursor = Some(c),
+                    None => break,
+                }
+            }
+            assert_eq!(seen, expected, "limit {limit}");
+        }
+    }
 }
