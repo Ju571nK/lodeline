@@ -1688,8 +1688,9 @@ The `tool`, `bucket` and `scope.kind` of an AI Guard reading, and the `agent` of
 evidence, may carry a value this release does not know. A server from the next release after
 v0.18 accepts such an event, keeps it, and returns each of these as its plain string, so a
 consumer must render any string it does not recognize. A server before that release rejects the
-event as malformed. An agent never writes an unknown name. No field is added and no known value
-changes.
+event as malformed. An agent from this release writes only known names, and a later agent must
+not write a new name until the fleet's servers are on the next release after v0.18 or later. No
+field is added and no known value changes.
 
 - **Bucket rank.** An unknown bucket ranks as the bucket its reading's `score` falls in: `low`
   below 1, `medium` below 4, `high` below 7, `critical` from 7. Every sort and filter by bucket

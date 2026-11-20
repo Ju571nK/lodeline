@@ -4,7 +4,8 @@ Status: implemented. Rollout steps 2 (Option
 B1), 3 (Option A3 ingest on the server), 4 (console), 5 (Option A3 emission in
 the agent) and 6 (docs) are implemented, and step 1 is implemented for
 `AiGuardReason`, `AiTool`, `AiGuardBucket` and `AiGuardScope`. The optional
-`config_found` field of `ai_guard_risk_assessed` (v0.18) answers the "tool is absent" case. Tracks two items from issue #333.
+`config_found` field of `ai_guard_risk_assessed` (v0.18) answers the "tool is
+absent" case. Tracks two items from issue #333.
 
 This document covers two gaps in how AI Guard posture reaches the fleet:
 
