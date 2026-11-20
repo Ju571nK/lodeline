@@ -671,29 +671,69 @@ fn show_risk(control_socket: &Path, tool: Option<String>, pretty: bool) -> anyho
 }
 
 #[cfg(feature = "operator-cli")]
+fn scope_label(scope: &lodeline_core::event::AiGuardScope) -> String {
+    match scope {
+        lodeline_core::event::AiGuardScope::UserGlobal => "user-global".to_string(),
+        lodeline_core::event::AiGuardScope::Project { path } => {
+            format!("project:{}", path.display())
+        }
+        lodeline_core::event::AiGuardScope::Application { app } => {
+            format!("application:{app}")
+        }
+    }
+}
+
+#[cfg(feature = "operator-cli")]
+fn with_user(scope: String, user: &Option<String>) -> String {
+    match user {
+        Some(u) => format!("{scope}@{u}"),
+        None => scope,
+    }
+}
+
+/// One plain line per failing source. Never prints config content, only the
+/// path the agent names in its own event.
+#[cfg(feature = "operator-cli")]
+fn write_failed_sources(
+    w: &mut impl Write,
+    failed: &[lodeline_core::control_proto::FailedSource],
+) -> io::Result<()> {
+    for f in failed {
+        let what = match f.error_kind.as_str() {
+            "unreadable" => "could not read",
+            "parse" => "could not parse",
+            _ => "could not assess",
+        };
+        let score = match &f.last_assessed_ts {
+            Some(ts) => format!("the score from {ts} may be out of date"),
+            None => "no score yet".to_string(),
+        };
+        writeln!(
+            w,
+            "! {}\t{}\t{what} {} since {}; {score}",
+            tool_cli_label(f.tool),
+            with_user(scope_label(&f.scope), &f.user),
+            f.path.display(),
+            f.failing_since,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "operator-cli")]
 fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
-    if p.assessments.is_empty() {
+    if p.assessments.is_empty() && p.failed_sources.is_empty() {
         writeln!(w, "(no assessments yet)")?;
         return Ok(());
     }
-    writeln!(
-        w,
-        "TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED\tTOP_REASONS"
-    )?;
-    let with_user = |scope: String, user: &Option<String>| match user {
-        Some(u) => format!("{scope}@{u}"),
-        None => scope,
-    };
+    if !p.assessments.is_empty() {
+        writeln!(
+            w,
+            "TOOL\tSCOPE\tSCORE\tBUCKET\tREASONS\tLAST_ASSESSED\tTOP_REASONS"
+        )?;
+    }
     for s in &p.assessments {
-        let scope_str = match &s.scope {
-            lodeline_core::event::AiGuardScope::UserGlobal => "user-global".to_string(),
-            lodeline_core::event::AiGuardScope::Project { path } => {
-                format!("project:{}", path.display())
-            }
-            lodeline_core::event::AiGuardScope::Application { app } => {
-                format!("application:{app}")
-            }
-        };
+        let scope_str = scope_label(&s.scope);
         let tool_str = tool_cli_label(s.tool);
         // Use the serde wire string (snake_case) rather than Debug. Robust
         // against future multi-word AiGuardBucket variants (e.g., "very_high")
@@ -725,7 +765,7 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
             top_reasons
         )?;
     }
-    Ok(())
+    write_failed_sources(w, &p.failed_sources)
 }
 
 #[cfg(all(test, unix))]

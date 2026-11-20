@@ -110,15 +110,18 @@ pub struct ControlContext {
 }
 
 #[cfg(feature = "operator-cli")]
+fn rfc3339(ts: time::OffsetDateTime) -> String {
+    ts.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "operator-cli")]
 pub(crate) fn risk_summary(
     (tool, scope, _pid, user): &crate::ai_guard::task::StateKey,
     source: &crate::ai_guard::task::SourceState,
 ) -> Option<RiskSummary> {
     let cached = source.reading.as_ref()?;
-    let last = cached
-        .last_assessed_ts
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
+    let last = rfc3339(cached.last_assessed_ts);
     Some(RiskSummary {
         controls: cached.controls.clone(),
         tool: *tool,
@@ -135,10 +138,19 @@ pub(crate) fn risk_summary(
 
 #[cfg(feature = "operator-cli")]
 pub(crate) fn failed_source(
-    _key: &crate::ai_guard::task::StateKey,
-    _source: &crate::ai_guard::task::SourceState,
+    (tool, scope, _pid, user): &crate::ai_guard::task::StateKey,
+    source: &crate::ai_guard::task::SourceState,
 ) -> Option<FailedSource> {
-    None
+    let failure = source.failure.as_ref()?;
+    Some(FailedSource {
+        tool: *tool,
+        scope: scope.clone(),
+        user: user.clone(),
+        error_kind: failure.error_kind.to_string(),
+        path: failure.path.clone(),
+        failing_since: rfc3339(failure.since),
+        last_assessed_ts: source.reading.as_ref().map(|r| rfc3339(r.last_assessed_ts)),
+    })
 }
 
 #[cfg(feature = "operator-cli")]

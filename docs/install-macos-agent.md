@@ -215,6 +215,9 @@ tool with `false` as "no config found" next to its bucket, and its JSON output c
 `false` means no watched config file was found, and `lodeline show events` prints it too.
 With `--pretty`, the `TOP_REASONS` column names the first two distinct reason kinds behind the count, then `(+N more)`,
 and the JSON output lists every kind in `reason_kinds`.
+When the agent cannot read or parse a tool's config, `lodeline show risk` adds one line for that source after
+the table, starting with `!`. It says whether the config could not be read or parsed, and whether the score
+above is from an earlier reading and may be out of date. The JSON output lists these sources in `failed_sources`.
 Without a running daemon, `lodeline scan` produces the same per-tool scores in one
 shot (and exits 0) — handy for a quick check before the daemon is set up.
 

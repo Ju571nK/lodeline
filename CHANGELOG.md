@@ -9,6 +9,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline show risk` now names each source whose config the agent could not read or parse. It adds
+  one line per source after the table, and the JSON output gains `failed_sources`. Before, such a
+  source showed a stale score or nothing, although the agent already reports the failure to the
+  fleet. This is a fix, not a change, because the command hid a failure the agent knew about. An
+  older CLI ignores the new field, and a new CLI with an older agent prints no extra line.
 - `/v1/events` now returns events newest first across hosts. Before, two hosts with a file for the
   same day came back one host after the other, in the order the operating system listed them. Each
   page and the cursor now follow `event_id` across all hosts of a day.
