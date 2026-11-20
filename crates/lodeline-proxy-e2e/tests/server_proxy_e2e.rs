@@ -6,7 +6,7 @@
 //! `build_router_with_proxy` behind `axum_server` + `PeerCertAcceptor`, the
 //! proxy through `lifecycle::run_tuned` (test-only pacing knob). The stub
 //! upstream is a tiny plain-HTTP loopback listener. Real-time polling with
-//! generous timeouts; no paused clock.
+//! generous timeouts. Only the TTL tests move the clock, with `skip_clock`.
 //!
 //! Flow (issue #267): register + config + fingerprint -> proxy starts and
 //! applies -> 200 / 401 -> status report visible on the server -> new revision
@@ -14,7 +14,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,26 +41,86 @@ const WAIT: Duration = Duration::from_secs(40);
 
 // ----------------------------------------------------------------- server
 
+/// Makes the server accept a proxy's config fetch and never answer it. A held
+/// request is counted in `inflight` until its connection is dropped; `entered`
+/// counts every request held so far.
+#[derive(Default)]
+struct ConfigHold {
+    on: AtomicBool,
+    inflight: AtomicUsize,
+    entered: AtomicUsize,
+}
+
+struct HeldRequest<'a>(&'a ConfigHold);
+
+impl Drop for HeldRequest<'_> {
+    fn drop(&mut self) {
+        self.0.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+async fn hold_config_fetch(
+    axum::extract::State(hold): axum::extract::State<Arc<ConfigHold>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if hold.on.load(Ordering::SeqCst)
+        && req.method() == axum::http::Method::GET
+        && req.uri().path() == "/v1/proxy-config"
+    {
+        hold.entered.fetch_add(1, Ordering::SeqCst);
+        hold.inflight.fetch_add(1, Ordering::SeqCst);
+        let _held = HeldRequest(&hold);
+        std::future::pending::<()>().await;
+    }
+    next.run(req).await
+}
+
 struct Server {
     port: u16,
     inner: Option<common::Server>,
     pki_tweak: Tweak,
     mgmt: reqwest::Client,
+    hold: Arc<ConfigHold>,
 }
 
 impl Server {
     async fn start(pki: &Pki) -> Server {
+        Self::start_with(pki, Arc::new(|_| {})).await
+    }
+
+    async fn start_with(pki: &Pki, tweak: Tweak) -> Server {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mgmt_cert = mgmt_identity(pki, T_ID, T_CFG);
-        let tweak: Tweak = Arc::new(|_| {});
-        let srv = common::Server::start(pki, 0, true, &tweak).await;
+        let hold = Arc::new(ConfigHold::default());
+        let srv = Self::try_start(pki, 0, true, &tweak, &hold)
+            .await
+            .expect("server must bind");
         let mgmt = mtls_client_pooled(&pki.p("hostca.crt"), &mgmt_cert.0, &mgmt_cert.1);
         Server {
             port: srv.port,
             inner: Some(srv),
             pki_tweak: tweak,
             mgmt,
+            hold,
         }
+    }
+
+    async fn try_start(
+        pki: &Pki,
+        port: u16,
+        first: bool,
+        tweak: &Tweak,
+        hold: &Arc<ConfigHold>,
+    ) -> Option<common::Server> {
+        let hold = hold.clone();
+        common::Server::try_start_with(pki, port, first, tweak, |app| {
+            app.layer(axum::middleware::from_fn_with_state(
+                hold,
+                hold_config_fetch,
+            ))
+        })
+        .await
     }
 
     fn ctx(&self) -> Arc<ProxyContext> {
@@ -82,7 +142,8 @@ impl Server {
     /// Start the server again on the same port and the same state files.
     async fn up(&mut self, pki: &Pki) {
         for _ in 0..20 {
-            if let Some(s) = common::Server::try_start(pki, self.port, false, &self.pki_tweak).await
+            if let Some(s) =
+                Self::try_start(pki, self.port, false, &self.pki_tweak, &self.hold).await
             {
                 self.inner = Some(s);
                 return;
@@ -218,6 +279,7 @@ fn spec(up_port: u16, tokens: &[(&str, &str)], limit_bytes: i64) -> serde_json::
 }
 
 struct RunningProxy {
+    table: TableHandle,
     listen: u16,
     state_dir: PathBuf,
     stop: tokio::sync::oneshot::Sender<()>,
@@ -302,10 +364,12 @@ fn start_proxy(
     );
     let b = Bootstrap::from_yaml(&yaml, d).expect("bootstrap loads");
     let (stop, rx) = tokio::sync::oneshot::channel::<()>();
+    let table = TableHandle::new();
+    let run_table = table.clone();
     let task = tokio::spawn(async move {
         run_tuned(
             &b,
-            TableHandle::new(),
+            run_table,
             async move {
                 let _ = rx.await;
             },
@@ -314,11 +378,15 @@ fn start_proxy(
         .await
     });
     RunningProxy {
+        table,
         listen,
         state_dir,
         stop,
         task,
-        client: reqwest::Client::new(),
+        client: reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap(),
     }
 }
 
@@ -792,6 +860,131 @@ async fn a_rolled_back_revision_is_refused_after_a_proxy_restart() {
     );
     assert_eq!(applied_file(&px.state_dir), Some((2, hash2)));
     assert!(sequence_bound(&px.state_dir).unwrap() >= bound);
+
+    px.shutdown().await;
+    srv.down().await;
+}
+
+const TTL_SECONDS: u32 = 60;
+
+fn short_ttl() -> Tweak {
+    Arc::new(|p| p.config_ttl_seconds = Some(TTL_SECONDS))
+}
+
+/// Moves tokio's clock forward by `by` without waiting. The clock runs in real
+/// time again when this returns, so the real sockets between the two sides keep
+/// their timers.
+async fn skip_clock(by: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(by).await;
+    tokio::time::resume();
+}
+
+/// The server goes away after the proxy applied a config. The proxy serves that
+/// config until its TTL deadline and answers 401 after it, without reaching the
+/// upstream. The clock is moved forward because the TTL is at least 60 s.
+#[tokio::test]
+async fn proxy_fails_closed_at_the_config_ttl_when_the_server_stays_down() {
+    let Some(pki) = pki("e2e") else { return };
+    let mut srv = Server::start_with(&pki, short_ttl()).await;
+    let up = upstream().await;
+    let proxy_cert = enroll(&srv, &pki, up.port).await;
+    let px = start_proxy(&pki, srv.port, up.port, &proxy_cert);
+    eventually("revision 1 applied and forwarding", || async {
+        px.call(TOK_A).await == 200
+    })
+    .await;
+
+    srv.down().await;
+    let sd = px.state_dir.clone();
+    eventually("the proxy sees the failed fetches", || async {
+        read_status(&sd).is_some_and(|s| s.last_update_error == Some(LastUpdateError::FetchFailed))
+    })
+    .await;
+
+    skip_clock(Duration::from_secs(u64::from(TTL_SECONDS) - 15)).await;
+    assert!(px.table.current().is_some(), "before the deadline");
+    assert_eq!(read_status(&sd).unwrap().config_state, ConfigState::Valid);
+    assert_eq!(px.call(TOK_A).await, 200, "served before the deadline");
+
+    skip_clock(Duration::from_secs(20)).await;
+    let sd = px.state_dir.clone();
+    eventually("the proxy publishes the expiry", || async {
+        read_status(&sd).is_some_and(|s| s.config_state == ConfigState::Expired)
+    })
+    .await;
+    let local = read_status(&px.state_dir).unwrap();
+    assert!(!local.forwarding);
+    assert!(px.table.current().is_none());
+    let hits = up.hits.load(Ordering::SeqCst);
+    assert_eq!(px.call(TOK_A).await, 401, "refused after the deadline");
+    assert_eq!(up.hits.load(Ordering::SeqCst), hits, "nothing is forwarded");
+
+    px.shutdown().await;
+}
+
+/// The server accepts the proxy's config fetch and never answers it. The fetch
+/// is still in flight when the deadline passes, and the proxy fails closed at
+/// the deadline anyway instead of waiting for the fetch.
+#[tokio::test]
+async fn proxy_fails_closed_at_the_config_ttl_while_a_config_fetch_is_in_flight() {
+    let Some(pki) = pki("e2e") else { return };
+    let mut srv = Server::start_with(&pki, short_ttl()).await;
+    let up = upstream().await;
+    let proxy_cert = enroll(&srv, &pki, up.port).await;
+    let px = start_proxy(&pki, srv.port, up.port, &proxy_cert);
+    eventually("revision 1 applied and forwarding", || async {
+        px.call(TOK_A).await == 200
+    })
+    .await;
+
+    srv.down().await;
+    let sd = px.state_dir.clone();
+    eventually("the proxy sees the failed fetches", || async {
+        read_status(&sd).is_some_and(|s| s.last_update_error == Some(LastUpdateError::FetchFailed))
+    })
+    .await;
+    skip_clock(Duration::from_secs(u64::from(TTL_SECONDS) - 8)).await;
+
+    // The fetch timeout is 10 s, so a fetch that starts now outlives a
+    // deadline that is under 10 s away.
+    srv.hold.on.store(true, Ordering::SeqCst);
+    srv.up(&pki).await;
+    let hold = srv.hold.clone();
+    eventually("a config fetch is held by the server", || async {
+        hold.inflight.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let held = hold.entered.load(Ordering::SeqCst);
+    assert!(px.table.current().is_some(), "before the deadline");
+    assert_eq!(px.call(TOK_A).await, 200, "served while the fetch is held");
+
+    tokio::time::pause();
+    let mut stepped = Duration::ZERO;
+    while px.table.current().is_some() {
+        assert!(stepped < Duration::from_secs(9), "the deadline never came");
+        tokio::time::advance(Duration::from_millis(100)).await;
+        stepped += Duration::from_millis(100);
+    }
+    tokio::time::resume();
+
+    assert_eq!(hold.inflight.load(Ordering::SeqCst), 1);
+    assert_eq!(hold.entered.load(Ordering::SeqCst), held);
+    let sd = px.state_dir.clone();
+    eventually("the proxy publishes the expiry", || async {
+        read_status(&sd).is_some_and(|s| s.config_state == ConfigState::Expired)
+    })
+    .await;
+    assert_eq!(
+        hold.entered.load(Ordering::SeqCst),
+        held,
+        "the expiry came before the held fetch ended"
+    );
+    assert_eq!(hold.inflight.load(Ordering::SeqCst), 1);
+    assert!(!read_status(&px.state_dir).unwrap().forwarding);
+    let hits = up.hits.load(Ordering::SeqCst);
+    assert_eq!(px.call(TOK_A).await, 401, "refused after the deadline");
+    assert_eq!(up.hits.load(Ordering::SeqCst), hits, "nothing is forwarded");
 
     px.shutdown().await;
     srv.down().await;
