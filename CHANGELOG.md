@@ -7,6 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- A Codex project whose folder the user config marks `trust_level = "untrusted"` no longer scores
+  its `.codex/` layers, because Codex does not load them. Its `AGENTS.md` is still scanned, and a
+  folder with no trust entry is scored as before. (#710)
+
 ## [0.18.2] - 2026-11-20
 
 **Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind and
