@@ -8,7 +8,7 @@ use notify::{
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
@@ -43,6 +43,70 @@ pub struct WatcherHandle {
     aliases_tx: watch::Sender<crate::normalizer::AliasTable>,
     /// Link problems already logged, so a tick does not repeat them.
     warned: BTreeSet<(PathBuf, &'static str)>,
+    activity: Arc<RootActivity>,
+    /// Quiet time after which an active directory root is re-armed. `None` never re-arms.
+    rearm_after: Option<Duration>,
+}
+
+/// ReadDirectoryChangesW can end a directory watch without telling the agent (#627), and a
+/// root with traffic proves its watch is armed, so only a root quiet this long is re-armed.
+/// Fifteen minutes keeps the cost to one handle and one listing per idle root per period.
+const WINDOWS_REARM_AFTER: Duration = Duration::from_secs(15 * 60);
+
+/// When each active root last had an event, or was armed if it has had none. The notify
+/// callback writes it, so a root is told apart by the path prefix of an event.
+#[derive(Default)]
+struct RootActivity {
+    last_live: Mutex<BTreeMap<PathBuf, SystemTime>>,
+}
+
+impl RootActivity {
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<PathBuf, SystemTime>> {
+        self.last_live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn arm(&self, root: &Path) {
+        self.lock().insert(root.to_path_buf(), SystemTime::now());
+    }
+
+    fn disarm(&self, root: &Path) {
+        self.lock().remove(root);
+    }
+
+    fn since(&self, root: &Path) -> Option<SystemTime> {
+        self.lock().get(root).copied()
+    }
+
+    fn note(&self, paths: &[PathBuf]) {
+        let now = SystemTime::now();
+        for (root, last) in self.lock().iter_mut() {
+            if paths.iter().any(|path| path.starts_with(root)) {
+                *last = now;
+            }
+        }
+    }
+}
+
+/// The files a re-arm listing sends: those created or modified after `after`, the last
+/// moment the old watch was known to be live, up to `until`, when the new watch was in
+/// place and its own events take over. A file untouched since its last event has an
+/// older time, so it is not sent again.
+#[derive(Clone, Copy)]
+struct ChangeWindow {
+    after: SystemTime,
+    until: SystemTime,
+}
+
+impl ChangeWindow {
+    fn holds(&self, meta: &std::fs::Metadata) -> bool {
+        let latest = [meta.modified().ok(), meta.created().ok()]
+            .into_iter()
+            .flatten()
+            .max();
+        latest.is_some_and(|time| self.after < time && time <= self.until)
+    }
 }
 
 pub(crate) const ROOT_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -141,6 +205,7 @@ impl WatcherHandle {
         }
         // A deleted/replaced directory may retain a stale backend subscription.
         if let Some((_, _, registered)) = self.active.remove(root) {
+            self.activity.disarm(root);
             let _ = self.backend().as_watcher_mut().unwatch(&registered);
         }
         if let Some(task) = self.catchups.remove(root) {
@@ -156,12 +221,14 @@ impl WatcherHandle {
         self.backend().as_watcher_mut().watch(&registered, mode)?;
         self.active
             .insert(root.to_path_buf(), (recursive, identity, registered));
+        self.activity.arm(root);
         if catch_up {
             // Register first, then replay current files to cover the subscription gap.
             let task = self.runtime.spawn(catch_up_files(
                 root.to_path_buf(),
                 recursive,
                 self.tx.clone(),
+                None,
             ));
             self.catchups.insert(root.to_path_buf(), task);
             tracing::info!(root = %root.display(), recursive, "watch root recovered; scanning current files");
@@ -331,6 +398,81 @@ impl WatcherHandle {
     pub(crate) fn reconcile(&mut self) {
         self.catchups.retain(|_, task| !task.is_finished());
         let _ = self.rebuild_roots(true);
+        self.rearm_idle_roots();
+    }
+
+    /// Start the watch of each quiet directory root again and list what changed while
+    /// the old watch may have been down (#627). A root whose directory is gone is left
+    /// to `rebuild_roots`.
+    fn rearm_idle_roots(&mut self) {
+        let Some(quiet) = self.rearm_after.filter(|_| false) else {
+            return;
+        };
+        if matches!(*self.backend(), BackendWatcher::Poll(_)) {
+            return;
+        }
+        let idle: Vec<_> = self
+            .active
+            .keys()
+            .filter(|root| root.is_dir())
+            .filter(|root| {
+                self.activity.since(root).is_some_and(|last| {
+                    SystemTime::now()
+                        .duration_since(last)
+                        .is_ok_and(|elapsed| elapsed >= quiet)
+                })
+            })
+            .cloned()
+            .collect();
+        for root in idle {
+            self.rearm(&root);
+        }
+    }
+
+    fn rearm(&mut self, root: &Path) {
+        let Some(after) = self.activity.since(root) else {
+            return;
+        };
+        let Some((recursive, registered)) = self
+            .active
+            .get(root)
+            .map(|(recursive, _, registered)| (*recursive, registered.clone()))
+        else {
+            return;
+        };
+        if let Some(task) = self.catchups.remove(root) {
+            task.abort();
+        }
+        let mode = if recursive {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        let rewatched = {
+            let mut backend = self.backend();
+            let watcher = backend.as_watcher_mut();
+            let _ = watcher.unwatch(&registered);
+            watcher.watch(&registered, mode)
+        };
+        tracing::warn!(root = %root.display(), recursive, "watch root re-armed after a quiet period");
+        if let Err(error) = rewatched {
+            tracing::debug!(root = %root.display(), %error, "re-armed watch root unavailable; will retry");
+            self.active.remove(root);
+            self.activity.disarm(root);
+            return;
+        }
+        self.activity.arm(root);
+        let window = ChangeWindow {
+            after,
+            until: SystemTime::now(),
+        };
+        let task = self.runtime.spawn(catch_up_files(
+            root.to_path_buf(),
+            recursive,
+            self.tx.clone(),
+            Some(window),
+        ));
+        self.catchups.insert(root.to_path_buf(), task);
     }
 
     /// Stop watching a root.
@@ -342,6 +484,7 @@ impl WatcherHandle {
     }
 
     fn remove_active(&mut self, root: &Path) -> notify::Result<()> {
+        self.activity.disarm(root);
         if let Some(task) = self.catchups.remove(root) {
             task.abort();
         }
@@ -496,7 +639,12 @@ impl Drop for WatcherHandle {
     }
 }
 
-async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<RawFsEvent>>) {
+async fn catch_up_files(
+    root: PathBuf,
+    recursive: bool,
+    tx: Arc<mpsc::Sender<RawFsEvent>>,
+    window: Option<ChangeWindow>,
+) {
     let Ok(meta) = tokio::fs::symlink_metadata(&root).await else {
         return;
     };
@@ -506,7 +654,9 @@ async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<Raw
         meta
     };
     if meta.is_file() {
-        let _ = catch_up_file(root, &tx).await;
+        if window.is_none_or(|window| window.holds(&meta)) {
+            let _ = catch_up_file(root, &tx).await;
+        }
         return;
     }
     if !meta.is_dir() {
@@ -528,6 +678,12 @@ async fn catch_up_files(root: PathBuf, recursive: bool, tx: Arc<mpsc::Sender<Raw
                     continue;
                 };
                 if kind.is_file() {
+                    if let Some(window) = window {
+                        match entry.metadata().await {
+                            Ok(meta) if window.holds(&meta) => {}
+                            _ => continue,
+                        }
+                    }
                     if !catch_up_file(entry.path(), &tx).await {
                         return;
                     }
@@ -581,6 +737,8 @@ pub fn spawn_watcher(
     let tx = Arc::new(tx);
     let tx_for_cb = tx.clone();
     let handle_for_cb = runtime_handle.clone();
+    let activity = Arc::new(RootActivity::default());
+    let activity_for_cb = activity.clone();
     // The polling backend finds files in new folders by itself.
     let catch_up_new_folders = cfg!(target_os = "linux") && poll_interval.is_none();
     let catch_up = Arc::new(NewFolderCatchUp::default());
@@ -595,6 +753,7 @@ pub fn spawn_watcher(
             }
         };
         tracing::trace!(kind = ?event.kind, paths = ?event.paths, "raw notify event");
+        activity_for_cb.note(&event.paths);
         if catch_up_new_folders {
             // inotify places the watch on a new folder only after this callback
             // returns, so a file already in it gives no event. List it now, then
@@ -660,6 +819,8 @@ pub fn spawn_watcher(
         files: Vec::new(),
         aliases_tx: watch::channel(Default::default()).0,
         warned: BTreeSet::new(),
+        activity,
+        rearm_after: cfg!(windows).then_some(WINDOWS_REARM_AFTER),
     };
     for (root, recursive) in roots {
         *handle.desired.entry(root).or_default() |= recursive;
@@ -1175,7 +1336,7 @@ mod tests {
         }
         for (recursive, expected) in [(false, 1), (true, 2)] {
             let (tx, mut rx) = mpsc::channel(8);
-            catch_up_files(root.clone(), recursive, Arc::new(tx)).await;
+            catch_up_files(root.clone(), recursive, Arc::new(tx), None).await;
             let mut count = 0;
             while let Some(event) = rx.recv().await {
                 assert_ne!(event.path.file_name().unwrap(), "secret.json");
@@ -1189,7 +1350,7 @@ mod tests {
             let linked_root = td.path().join("linked-root");
             std::os::unix::fs::symlink(&root, &linked_root).unwrap();
             let (tx, mut rx) = mpsc::channel(8);
-            catch_up_files(linked_root.clone(), true, Arc::new(tx)).await;
+            catch_up_files(linked_root.clone(), true, Arc::new(tx), None).await;
             let mut seen = Vec::new();
             while let Some(event) = rx.recv().await {
                 seen.push(event.path);
@@ -2024,5 +2185,125 @@ mod tests {
         watcher.follow_files(vec![agents.join("*.md")], true);
         assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
         receive_path(&mut rx, &link).await;
+    }
+    fn drop_backend_watch(watcher: &WatcherHandle, root: &Path) {
+        let registered = watcher.active[root].2.clone();
+        watcher
+            .backend()
+            .as_watcher_mut()
+            .unwatch(&registered)
+            .unwrap();
+    }
+
+    async fn drain_for(rx: &mut mpsc::Receiver<RawFsEvent>, wait: Duration) -> Vec<PathBuf> {
+        let mut seen = Vec::new();
+        let _ = tokio::time::timeout(wait, async {
+            while let Some(event) = rx.recv().await {
+                seen.push(event.path);
+            }
+        })
+        .await;
+        seen
+    }
+
+    fn count_of(seen: &[PathBuf], name: &str) -> usize {
+        seen.iter().filter(|path| path.ends_with(name)).count()
+    }
+
+    async fn armed_root_with_old_file(
+    ) -> (TempDir, PathBuf, mpsc::Receiver<RawFsEvent>, WatcherHandle) {
+        let td = TempDir::new().unwrap();
+        let root = td.path().to_path_buf();
+        fs::write(root.join("old.json"), b"before the watch").unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (rx, mut watcher) = spawn_watcher(
+            vec![(root.clone(), false)],
+            tokio::runtime::Handle::current(),
+            64,
+            None,
+        )
+        .unwrap();
+        watcher.rearm_after = Some(Duration::from_secs(3600));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (td, root, rx, watcher)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rearm_sends_the_file_written_while_the_watch_was_down_once() {
+        let (_td, root, mut rx, mut watcher) = armed_root_with_old_file().await;
+        let before: Vec<_> = watcher.active.keys().cloned().collect();
+        drop_backend_watch(&watcher, &root);
+        fs::write(root.join("gap.json"), b"written while down").unwrap();
+        let silent = drain_for(&mut rx, Duration::from_millis(800)).await;
+        assert!(silent.is_empty(), "a dropped watch gave {silent:?}");
+
+        watcher.rearm_after = Some(Duration::ZERO);
+        let logs = test_logs::logs_of(|| watcher.reconcile());
+        assert_eq!(logs.matches("watch root re-armed").count(), 1, "{logs}");
+        watcher.catchups.remove(&root).unwrap().await.unwrap();
+        let listed = drain_for(&mut rx, Duration::from_millis(800)).await;
+        assert_eq!(count_of(&listed, "gap.json"), 1, "{listed:?}");
+        assert_eq!(count_of(&listed, "old.json"), 0, "{listed:?}");
+
+        watcher.rearm_after = Some(Duration::from_secs(3600));
+        fs::write(root.join("after.json"), b"written after the re-arm").unwrap();
+        let live = drain_for(&mut rx, Duration::from_secs(2)).await;
+        assert!(count_of(&live, "after.json") >= 1, "{live:?}");
+        assert_eq!(count_of(&live, "gap.json"), 0, "{live:?}");
+        assert_eq!(watcher.active.keys().cloned().collect::<Vec<_>>(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_root_with_recent_events_is_not_rearmed() {
+        let (_td, root, mut rx, mut watcher) = armed_root_with_old_file().await;
+        fs::write(root.join("live.json"), b"an event").unwrap();
+        assert!(!drain_for(&mut rx, Duration::from_secs(2)).await.is_empty());
+        watcher.rearm_after = Some(Duration::from_secs(1));
+        let logs = test_logs::logs_of(|| watcher.reconcile());
+        assert!(!logs.contains("re-armed"), "{logs}");
+        assert!(watcher.catchups.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_vanished_root_is_left_to_the_existing_path() {
+        let (td, root, _rx, mut watcher) = armed_root_with_old_file().await;
+        let moved = td.path().with_extension("gone");
+        fs::rename(&root, &moved).unwrap();
+        watcher.rearm_after = Some(Duration::ZERO);
+        let logs = test_logs::logs_of(|| watcher.reconcile());
+        assert!(!logs.contains("re-armed"), "{logs}");
+        assert!(watcher.active.is_empty());
+        fs::rename(&moved, &root).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn process_handles() -> u32 {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+        let mut count = 0;
+        // SAFETY: the pseudo handle of the current process is always valid and `count` is a live u32.
+        assert_ne!(
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) },
+            0
+        );
+        count
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_rearms_do_not_leak_handles() {
+        let (_td, root, _rx, mut watcher) = armed_root_with_old_file().await;
+        watcher.rearm_after = Some(Duration::ZERO);
+        for _ in 0..5 {
+            watcher.reconcile();
+        }
+        let before = process_handles();
+        for _ in 0..200 {
+            watcher.reconcile();
+        }
+        watcher.catchups.remove(&root);
+        assert!(
+            process_handles() <= before + 10,
+            "handles grew from {before}"
+        );
     }
 }
