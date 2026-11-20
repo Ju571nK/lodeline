@@ -4424,6 +4424,7 @@ mod tests {
     }
 
     fn command_hook(matcher: &str, command: &str) -> String {
+        let command = command.replace('\\', "\\\\");
         format!(
             r#"{{"hooks": {{"PreToolUse": [{{"matcher": "{matcher}", "hooks": [{{"command": "{command}"}}]}}]}}}}"#
         )
