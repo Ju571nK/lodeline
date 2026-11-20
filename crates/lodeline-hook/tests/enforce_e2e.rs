@@ -1,6 +1,9 @@
 //! E2E (#100): the hook binary's claude-code --enforce path against a stub
 //! decide server. Verifies deny JSON, allow silence, and fail-open.
 #![cfg(unix)]
+
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
@@ -53,7 +56,7 @@ fn run_hook_enforce(socket: &std::path::Path, stdin_json: &str) -> (String, i32)
         .unwrap()
         .write_all(stdin_json.as_bytes())
         .unwrap();
-    let out = child.wait_with_output().unwrap();
+    let out = common::wait_bounded(child, common::WAIT_BOUND, "lodeline-hook --enforce");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         out.status.code().unwrap_or(-1),

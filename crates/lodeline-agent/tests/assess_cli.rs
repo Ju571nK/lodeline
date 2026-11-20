@@ -19,6 +19,9 @@
 
 #![cfg(feature = "operator-cli")]
 
+#[allow(unused_imports)]
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -68,7 +71,7 @@ fn run_assess(extra_args: &[&str], stdin_data: Option<&[u8]>) -> std::process::O
             .write_all(data)
             .expect("write stdin");
     }
-    child.wait_with_output().expect("failed to wait")
+    common::wait_bounded(child, common::WAIT_BOUND, "lodeline assess")
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! `lodeline init-host-id` on the real binary, against a scratch `--state-db`.
 
 mod common;
-use common::{fs_event_timeout, TestAgentBuilder};
+use common::{fs_event_timeout, wait_bounded, TestAgentBuilder, WAIT_BOUND};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -113,7 +113,7 @@ fn concurrent_claims_on_a_fresh_state_db_elect_one_host_id() {
         .collect();
     let outputs: Vec<Output> = children
         .into_iter()
-        .map(|c| c.wait_with_output().unwrap())
+        .map(|c| wait_bounded(c, WAIT_BOUND, "lodeline init-host-id"))
         .collect();
 
     let stored = text(&lodeline(&db, &["show", "host-id"]).stdout)
