@@ -694,7 +694,7 @@ fn with_user(scope: String, user: &Option<String>) -> String {
 /// One plain line per failing source. Never prints config content, only the
 /// path the agent names in its own event.
 #[cfg(feature = "operator-cli")]
-fn write_failed_sources(
+pub(crate) fn write_failed_sources(
     w: &mut impl Write,
     failed: &[lodeline_core::control_proto::FailedSource],
 ) -> io::Result<()> {
