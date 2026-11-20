@@ -1,6 +1,9 @@
 //! E2E (#100): `lodeline-hook verify` against temp baseline + settings, plus a
 //! stub hook.sock to confirm the drift emit.
 #![cfg(unix)]
+
+mod common;
+
 use std::io::Read;
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
@@ -45,7 +48,11 @@ fn run_verify(state: &std::path::Path, stub_socket: Option<&std::path::Path>) ->
     if let Some(s) = stub_socket {
         c.env("LODELINE_HOOK_SOCKET", s);
     }
-    c.status().unwrap().code().unwrap_or(-1)
+    let child = c.spawn().unwrap();
+    common::wait_bounded(child, common::WAIT_BOUND, "lodeline-hook verify")
+        .status
+        .code()
+        .unwrap_or(-1)
 }
 
 const CLEAN: &str = r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/lodeline-hook claude-code --capture redacted"}]}]}}"#;
@@ -100,25 +107,17 @@ fn drift_emits_report_on_socket() {
     let sockdir = tempfile::tempdir().unwrap();
     let socket = sockdir.path().join("hook.sock");
     let l = UnixListener::bind(&socket).unwrap();
-    let handle = std::thread::spawn(move || {
-        // l is blocking by default; accept() returns as soon as the hook connects.
-        match l.accept() {
-            Ok((mut s, _)) => {
-                let mut buf = String::new();
-                let _ = s.read_to_string(&mut buf);
-                buf
-            }
-            Err(_) => String::new(),
-        }
-    });
-
     let state = tempfile::tempdir().unwrap();
     let sdir = tempfile::tempdir().unwrap();
     let settings = sdir.path().join("settings.json");
     setup(state.path(), &settings, "*", NARROWED); // drift
     let code = run_verify(state.path(), Some(&socket));
     assert_eq!(code, 2);
-    let got = handle.join().unwrap();
+    let mut report = common::accept_bounded(&l, common::WAIT_BOUND, "the hook's drift report");
+    let mut got = String::new();
+    report
+        .read_to_string(&mut got)
+        .expect("read the drift report from the hook");
     assert!(
         got.contains("\"msg_type\":\"drift_report\""),
         "expected a drift_report emit, got: {got:?}"

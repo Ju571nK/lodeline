@@ -1,5 +1,8 @@
 //! e2e: `apply_policy` → atomic write → state advance → event → expiry-aware.
 
+#[allow(unused_imports)]
+mod common;
+
 use ed25519_dalek::{Signer, SigningKey};
 use lodeline_agent::policy_apply::{apply, ApplyContext, ApplyOutcome};
 use lodeline_agent::policy_expiry_task::{evaluate_for_test, ExpiryTaskCtx};
@@ -90,7 +93,12 @@ async fn apply_policy_writes_yaml_advances_version_emits_reloaded_and_no_expiry_
     assert_eq!(cache.lock().host_meta_get().unwrap().policy.version(), 1);
 
     // PolicyReloaded event.
-    let ev = event_rx.recv().await.unwrap();
+    let ev = common::recv_bounded(
+        &mut event_rx,
+        common::WAIT_BOUND,
+        "the PolicyReloaded event",
+    )
+    .await;
     assert!(matches!(
         ev.event.evidence,
         Evidence::PolicyReloaded { policy_version: 1 }

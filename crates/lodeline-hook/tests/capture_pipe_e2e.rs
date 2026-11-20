@@ -1,6 +1,8 @@
 //! Windows: capture mode delivers the hook event to the agent's hook pipe.
 #![cfg(windows)]
 
+mod common;
+
 use lodeline_core::event::{AiTool, Evidence};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -27,7 +29,7 @@ fn run_hook(pipe: &str, home: &std::path::Path) -> std::process::Output {
         .unwrap()
         .write_all(PAYLOAD.as_bytes())
         .unwrap();
-    child.wait_with_output().expect("wait for lodeline-hook")
+    common::wait_bounded(child, common::WAIT_BOUND, "lodeline-hook capture")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

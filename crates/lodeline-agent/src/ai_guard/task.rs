@@ -507,6 +507,17 @@ async fn send(ctx: &TaskCtx, ts: OffsetDateTime, evidence: Evidence) {
 mod tests {
     use super::*;
 
+    /// `recv` with a deadline, so a missing event fails the test by name.
+    async fn next_event(
+        events: &mut mpsc::Receiver<CommittableEvent>,
+        what: &str,
+    ) -> CommittableEvent {
+        tokio::time::timeout(Duration::from_secs(60), events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{what}: nothing within 60s"))
+            .unwrap_or_else(|| panic!("{what}: channel closed"))
+    }
+
     fn own_home(ctx: &TaskCtx) -> AssessHome {
         AssessHome {
             user: None,
@@ -679,7 +690,7 @@ mod tests {
         );
         let state = ctx.state.clone();
         let h = tokio::spawn(run(ctx));
-        let ev = events.recv().await.expect("boot event").event;
+        let ev = next_event(&mut events, "boot event").await.event;
         let j = serde_json::to_value(&ev).unwrap();
         assert_eq!(
             j["evidence"],
@@ -733,7 +744,7 @@ mod tests {
             flaky_ctx(vec![unparsable("/home/test/.codex/config.toml")]);
         let home = own_home(&ctx);
         eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
-        let _ = events.recv().await.expect("failure report");
+        let _ = next_event(&mut events, "failure report").await;
 
         let payload = crate::control::risk_payload(&ctx.state.read(), None);
         assert!(payload.assessments.is_empty());
@@ -1241,7 +1252,7 @@ mod tests {
         // Allow the boot scan to fire.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
-        let ev = events.recv().await.expect("boot event");
+        let ev = next_event(&mut events, "boot event").await;
         match ev.event.evidence {
             Evidence::AiGuardRiskAssessed {
                 score,
@@ -1282,7 +1293,7 @@ mod tests {
         let h = tokio::spawn(run(ctx));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
-        let _boot = events.recv().await.expect("boot event");
+        let _boot = next_event(&mut events, "boot event").await;
         tx.send(watched).unwrap();
         tokio::time::advance(Duration::from_millis(50)).await;
         // Should NOT receive a second event.
@@ -1310,7 +1321,7 @@ mod tests {
         let h = tokio::spawn(run(ctx));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
-        let _boot = events.recv().await.expect("boot");
+        let _boot = next_event(&mut events, "boot").await;
         tx.send(watched).unwrap();
         tokio::time::advance(Duration::from_millis(50)).await;
         // SandboxDisabled is also a dangerous toggle, so an OFF→ON drift event
@@ -1343,7 +1354,7 @@ mod tests {
         let h = tokio::spawn(run(ctx));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
-        let _boot = events.recv().await.expect("boot");
+        let _boot = next_event(&mut events, "boot").await;
         tokio::time::advance(Duration::from_millis(150)).await;
         let ev = events.recv().await.expect("heartbeat event");
         match ev.event.evidence {
@@ -1376,7 +1387,7 @@ mod tests {
         let h = tokio::spawn(run(ctx));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
-        let _boot = events.recv().await.expect("boot event");
+        let _boot = next_event(&mut events, "boot event").await;
         tokio::time::advance(Duration::from_millis(150)).await;
         // SandboxDisabled (the changed reason) is also a dangerous toggle, so a
         // drift event precedes the risk event this cycle. Skip to the risk one.
@@ -1420,7 +1431,7 @@ mod tests {
             watched: vec![],
         };
         eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), true).await;
-        let ev = events.recv().await.expect("tool_label event");
+        let ev = next_event(&mut events, "tool_label event").await;
         let j = serde_json::to_value(&ev.event).unwrap();
         assert_eq!(j["evidence"]["tool"], "other");
         assert_eq!(j["evidence"]["tool_label"], "acme-ai");
@@ -2073,7 +2084,7 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
         // Boot: AiGuardRiskAssessed only, no drift.
-        let boot = events.recv().await.expect("boot");
+        let boot = next_event(&mut events, "boot").await;
         assert!(matches!(
             boot.event.evidence,
             Evidence::AiGuardRiskAssessed { .. }

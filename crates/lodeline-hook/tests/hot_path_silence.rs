@@ -5,6 +5,8 @@
 //! call is never blocked) and the silence invariant (the panic hook suppresses
 //! output, and normal parse failures are also silent).
 
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -31,9 +33,7 @@ fn garbage_stdin_exits_zero_with_no_output() {
         // Drop closes stdin so the process sees EOF.
     }
 
-    let output = child
-        .wait_with_output()
-        .expect("failed to wait for lodeline-hook");
+    let output = common::wait_bounded(child, common::WAIT_BOUND, "lodeline-hook");
 
     assert!(
         output.status.success(),
@@ -71,9 +71,7 @@ fn not_json_string_exits_zero_with_no_output() {
         let _ = stdin.write_all(b"not json");
     }
 
-    let output = child
-        .wait_with_output()
-        .expect("failed to wait for lodeline-hook");
+    let output = common::wait_bounded(child, common::WAIT_BOUND, "lodeline-hook");
 
     assert!(
         output.status.success(),
