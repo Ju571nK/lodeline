@@ -7,6 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- A Codex project whose folder the user config marks `trust_level = "untrusted"` no longer scores
+  its `.codex/` layers, because Codex does not load them. Its `AGENTS.md` is still scanned, and a
+  folder with no trust entry is scored as before. (#710)
+
 ## [0.18.2] - 2026-11-20
 
 **Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind and
@@ -16,7 +22,6 @@ Upgrade the server, the console and the agents in any order.
 
 ### Fixed
 
-- A Codex project whose folder the user config marks `trust_level = "untrusted"` no longer scores its `.codex/` layers, because Codex does not load them. Its `AGENTS.md` is still scanned, and a folder with no trust entry is scored as before.
 - On Linux the agent no longer misses a file that lands in a new folder between the moment the
   agent lists the folder and the moment the kernel watch on it starts. This is the case of
   `cp -r` of a skill folder, where a new `SKILL.md` could give no event until its next change or
