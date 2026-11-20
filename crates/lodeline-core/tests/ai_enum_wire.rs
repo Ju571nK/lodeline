@@ -60,3 +60,26 @@ fn known_scopes_keep_their_bytes() {
         assert_eq!(serde_json::from_str::<AiGuardScope>(bytes).unwrap(), scope);
     }
 }
+
+#[test]
+fn unknown_tools_sort_after_every_known_tool_and_by_name() {
+    let mut tools: Vec<AiTool> = vec![
+        AiTool::Unknown("zeta".into()),
+        AiTool::Other,
+        AiTool::Unknown("alpha".into()),
+        AiTool::ClaudeCode,
+    ];
+    tools.sort();
+    assert_eq!(
+        tools,
+        [
+            AiTool::ClaudeCode,
+            AiTool::Other,
+            AiTool::Unknown("alpha".into()),
+            AiTool::Unknown("zeta".into()),
+        ]
+    );
+    let known: Vec<&AiTool> = TOOLS.iter().map(|(t, _)| t).collect();
+    let after = AiTool::Unknown(String::new());
+    assert!(known.iter().all(|t| **t < after));
+}

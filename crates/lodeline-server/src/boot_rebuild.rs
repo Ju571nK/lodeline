@@ -264,7 +264,7 @@ mod tests {
             write_line(&host_dir.join(name), line);
         }
         let map = rebuild_from_jsonl(dir.path()).unwrap();
-        map[HID].current_risk.keys().copied().collect()
+        map[HID].current_risk.keys().cloned().collect()
     }
 
     #[test]
@@ -301,8 +301,8 @@ mod tests {
             (AiTool::Cursor, Some(false)),
             (AiTool::Codex, None),
         ] {
-            assert_eq!(found(&live, tool), want, "live {tool:?}");
-            assert_eq!(found(&rebuilt[HID], tool), want, "rebuild {tool:?}");
+            assert_eq!(found(&live, tool.clone()), want, "live {tool:?}");
+            assert_eq!(found(&rebuilt[HID], tool.clone()), want, "rebuild {tool:?}");
         }
     }
 

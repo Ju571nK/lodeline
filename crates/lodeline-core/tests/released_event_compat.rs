@@ -6,7 +6,7 @@ mod released;
 
 use lodeline_core::event::{
     AiGuardBucket, AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind,
-    Subject, UnknownReason,
+    Subject, UnknownReason, UnknownScope,
 };
 use time::macros::datetime;
 
@@ -285,6 +285,35 @@ fn unknown_tool_bucket_and_scope_kind_are_kept_and_written_back() {
             wire["evidence"]
         );
     }
+}
+
+#[test]
+fn unknown_names_land_in_the_unknown_variants() {
+    let wire = risk_event(
+        "newtool",
+        serde_json::json!({"kind": "workspace", "name": "w"}),
+        "severe",
+    );
+    let ev: Event = serde_json::from_value(wire).unwrap();
+    let Evidence::AiGuardRiskAssessed {
+        tool,
+        scope,
+        bucket,
+        ..
+    } = ev.evidence
+    else {
+        panic!("{:?}", ev.evidence)
+    };
+    assert_eq!(tool, AiTool::Unknown("newtool".into()));
+    assert_eq!(bucket, AiGuardBucket::Unknown("severe".into()));
+    let AiGuardScope::Unknown(UnknownScope { kind, rest }) = scope else {
+        panic!("{scope:?}")
+    };
+    assert_eq!(kind, "workspace");
+    assert_eq!(
+        serde_json::Value::Object(rest),
+        serde_json::json!({"name": "w"})
+    );
 }
 
 #[test]

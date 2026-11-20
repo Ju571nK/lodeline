@@ -209,10 +209,10 @@ impl HostSummary {
 
     /// When the parser behind `tool`'s `current_risk` reading started failing,
     /// or `None` when that reading is current.
-    pub fn unassessed_since(&self, tool: AiTool) -> Option<OffsetDateTime> {
-        let e = self.current_risk.get(&tool)?;
+    pub fn unassessed_since(&self, tool: &AiTool) -> Option<OffsetDateTime> {
+        let e = self.current_risk.get(tool)?;
         let key = (
-            tool,
+            tool.clone(),
             e.scope.clone(),
             e.user.clone(),
             e.rule_pack_id.clone(),

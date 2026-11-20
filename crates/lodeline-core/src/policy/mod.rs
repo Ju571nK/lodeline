@@ -89,6 +89,7 @@ pub enum RulePackScope {
 pub struct RulePack {
     pub id: String,
     pub pack_version: u32,
+    #[serde(deserialize_with = "crate::event::deserialize_known_tool")]
     pub tool: crate::event::AiTool,
     pub scope: RulePackScope,
     pub watched_paths: Vec<String>,
@@ -291,7 +292,7 @@ impl Default for ProbeCap {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookSilenceCfg {
     /// Per-agent opt-in allowlist. Empty = the whole feature is off.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::event::deserialize_known_tools")]
     pub enabled_agents: Vec<crate::event::AiTool>,
     /// Silence window W (seconds): an opted-in agent with session activity but
     /// zero hook events for longer than this is flagged (default 43200 = 12h).

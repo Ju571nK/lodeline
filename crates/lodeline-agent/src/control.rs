@@ -124,10 +124,10 @@ pub(crate) fn risk_summary(
     let last = rfc3339(cached.last_assessed_ts);
     Some(RiskSummary {
         controls: cached.controls.clone(),
-        tool: *tool,
+        tool: tool.clone(),
         scope: scope.clone(),
         score: cached.score,
-        bucket: cached.bucket,
+        bucket: cached.bucket.clone(),
         reasons_count: cached.reasons_count,
         last_assessed_ts: last,
         user: user.clone(),
@@ -143,7 +143,7 @@ pub(crate) fn failed_source(
 ) -> Option<FailedSource> {
     let failure = source.failure.as_ref()?;
     Some(FailedSource {
-        tool: *tool,
+        tool: tool.clone(),
         scope: scope.clone(),
         user: user.clone(),
         error_kind: failure.error_kind.to_string(),
@@ -154,8 +154,8 @@ pub(crate) fn failed_source(
 }
 
 #[cfg(feature = "operator-cli")]
-fn tool_key(tool: lodeline_core::event::AiTool) -> String {
-    serde_json::to_string(&tool).unwrap_or_default()
+fn tool_key(tool: &lodeline_core::event::AiTool) -> String {
+    serde_json::to_string(tool).unwrap_or_default()
 }
 
 #[cfg(feature = "operator-cli")]
@@ -165,7 +165,7 @@ pub(crate) fn risk_payload(
 ) -> RiskPayload {
     let mut assessments: Vec<RiskSummary> = state
         .iter()
-        .filter(|((t, _scope, _pid, _user), _)| tool.is_none_or(|filter| *t == filter))
+        .filter(|((t, _scope, _pid, _user), _)| tool.as_ref().is_none_or(|filter| t == filter))
         .filter_map(|(key, source)| risk_summary(key, source))
         .collect();
     assessments.sort_by(|a, b| {
@@ -175,11 +175,11 @@ pub(crate) fn risk_payload(
     });
     let mut failed_sources: Vec<FailedSource> = state
         .iter()
-        .filter(|((t, _scope, _pid, _user), _)| tool.is_none_or(|filter| *t == filter))
+        .filter(|((t, _scope, _pid, _user), _)| tool.as_ref().is_none_or(|filter| t == filter))
         .filter_map(|(key, source)| failed_source(key, source))
         .collect();
     failed_sources.sort_by(|a, b| {
-        (tool_key(a.tool), &a.user, &a.path).cmp(&(tool_key(b.tool), &b.user, &b.path))
+        (tool_key(&a.tool), &a.user, &a.path).cmp(&(tool_key(&b.tool), &b.user, &b.path))
     });
     RiskPayload {
         assessments,

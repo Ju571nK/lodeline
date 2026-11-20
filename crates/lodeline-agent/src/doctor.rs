@@ -523,17 +523,7 @@ fn write_latest_risk(
     }
     writeln!(w, "[INFO] latest risk:")?;
     for r in risk {
-        let tool_str = match r.tool {
-            lodeline_core::event::AiTool::ClaudeCode => "claude_code",
-            lodeline_core::event::AiTool::Codex => "codex",
-            lodeline_core::event::AiTool::ClaudeDesktop => "claude_desktop",
-            lodeline_core::event::AiTool::ContinueDev => "continue_dev",
-            lodeline_core::event::AiTool::Gemini => "gemini",
-            lodeline_core::event::AiTool::Cursor => "cursor",
-            lodeline_core::event::AiTool::Antigravity => "antigravity",
-            lodeline_core::event::AiTool::Grok => "grok",
-            lodeline_core::event::AiTool::Other => "other",
-        };
+        let tool_str = r.tool.as_str();
         let scope_str = match &r.scope {
             lodeline_core::event::AiGuardScope::UserGlobal => "user_global".to_string(),
             lodeline_core::event::AiGuardScope::Project { path } => {
@@ -542,6 +532,7 @@ fn write_latest_risk(
             lodeline_core::event::AiGuardScope::Application { app } => {
                 format!("application:{app}")
             }
+            lodeline_core::event::AiGuardScope::Unknown(unknown) => unknown.kind.clone(),
         };
         let bucket_str = serde_json::to_string(&r.bucket)
             .unwrap_or_default()
@@ -608,17 +599,7 @@ fn format_parsers_summary(parsers: &[crate::control::ParserInfo]) -> String {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for p in parsers {
-        let key = match p.tool {
-            lodeline_core::event::AiTool::ClaudeCode => "claude_code",
-            lodeline_core::event::AiTool::Codex => "codex",
-            lodeline_core::event::AiTool::ClaudeDesktop => "claude_desktop",
-            lodeline_core::event::AiTool::ContinueDev => "continue_dev",
-            lodeline_core::event::AiTool::Gemini => "gemini",
-            lodeline_core::event::AiTool::Cursor => "cursor",
-            lodeline_core::event::AiTool::Antigravity => "antigravity",
-            lodeline_core::event::AiTool::Grok => "grok",
-            lodeline_core::event::AiTool::Other => "other",
-        };
+        let key = p.tool.as_str();
         *counts.entry(key.to_string()).or_insert(0) += 1;
     }
     let mut parts: Vec<String> = Vec::new();

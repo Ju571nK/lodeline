@@ -181,13 +181,13 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| tool_cli_label(a.tool).cmp(tool_cli_label(b.tool)))
+            .then_with(|| tool_cli_label(&a.tool).cmp(tool_cli_label(&b.tool)))
     });
     // Several parsers can share a tool, so one scope with nothing to report does not
     // mean the tool is absent.
     not_configured
         .retain(|t| !rows.iter().any(|r| r.tool == *t) && !errors.iter().any(|e| e.0 == *t));
-    not_configured.sort_by_key(|t| tool_cli_label(*t));
+    not_configured.sort_by(|a, b| tool_cli_label(a).cmp(tool_cli_label(b)));
     not_configured.dedup();
 
     Report {
@@ -279,15 +279,17 @@ fn scope_str(scope: &AiGuardScope) -> String {
         AiGuardScope::UserGlobal => "user-global".to_string(),
         AiGuardScope::Project { path } => format!("project:{}", path.display()),
         AiGuardScope::Application { app } => format!("application:{app}"),
+        AiGuardScope::Unknown(unknown) => unknown.kind.clone(),
     }
 }
 
-fn bucket_wire(b: AiGuardBucket) -> &'static str {
+fn bucket_wire(b: &AiGuardBucket) -> &str {
     match b {
         AiGuardBucket::Low => "low",
         AiGuardBucket::Medium => "medium",
         AiGuardBucket::High => "high",
         AiGuardBucket::Critical => "critical",
+        AiGuardBucket::Unknown(name) => name,
     }
 }
 
@@ -313,7 +315,7 @@ fn headline(report: &Report) -> (AiGuardBucket, f32, usize, usize) {
         .iter()
         .fold((AiGuardBucket::Low, 0.0_f32), |acc, r| {
             if r.score > acc.1 {
-                (r.bucket, r.score)
+                (r.bucket.clone(), r.score)
             } else {
                 acc
             }
@@ -366,7 +368,7 @@ fn render_human(report: &Report) -> String {
     let _ = writeln!(
         out,
         "Lodeline scan — {} ({:.1})",
-        bucket_wire(hb).to_uppercase(),
+        bucket_wire(&hb).to_uppercase(),
         round1(hs)
     );
     let _ = writeln!(out, "{tools} tools assessed · {findings} findings\n");
@@ -376,7 +378,7 @@ fn render_human(report: &Report) -> String {
         let tcol = report
             .rows
             .iter()
-            .map(|r| display_width(tool_cli_label(r.tool)))
+            .map(|r| display_width(tool_cli_label(&r.tool)))
             .chain(std::iter::once("TOOL".len()))
             .max()
             .unwrap_or(4);
@@ -399,10 +401,10 @@ fn render_human(report: &Report) -> String {
             let _ = writeln!(
                 out,
                 "{}  {}  {:>5.1}  {:<8}  {}",
-                pad_right(tool_cli_label(r.tool), tcol),
+                pad_right(tool_cli_label(&r.tool), tcol),
                 pad_right(&scope_str(&r.scope), scol),
                 round1(r.score),
-                bucket_wire(r.bucket),
+                bucket_wire(&r.bucket),
                 reasons_summary(&r.reasons),
             );
         }
@@ -424,7 +426,7 @@ fn render_human(report: &Report) -> String {
             let _ = writeln!(
                 out,
                 "  {} ({}) {} = {} [{}]",
-                tool_cli_label(row.tool),
+                tool_cli_label(&row.tool),
                 scope_str(&row.scope),
                 control.setting,
                 control.value,
@@ -436,7 +438,7 @@ fn render_human(report: &Report) -> String {
         let names = report
             .not_configured
             .iter()
-            .map(|t| tool_cli_label(*t))
+            .map(tool_cli_label)
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(
@@ -449,7 +451,7 @@ fn render_human(report: &Report) -> String {
         let _ = writeln!(
             out,
             "⚠ could not read {} ({}): {msg}",
-            tool_cli_label(*tool),
+            tool_cli_label(tool),
             scope_str(scope)
         );
     }
@@ -491,17 +493,17 @@ fn report_json(report: &Report) -> serde_json::Value {
     let (hb, hs, tools, findings) = headline(report);
     json!({
         "headline": {
-            "bucket": bucket_wire(hb),
+            "bucket": bucket_wire(&hb),
             "score": round1(hs),
             "tools_assessed": tools,
             "findings": findings,
         },
         "results": report.rows.iter().map(|r| {
             let mut value = json!({
-            "tool": tool_cli_label(r.tool),
+            "tool": tool_cli_label(&r.tool),
             "scope": scope_str(&r.scope),
             "score": round1(r.score),
-            "bucket": bucket_wire(r.bucket),
+            "bucket": bucket_wire(&r.bucket),
             // Each reason is the serialized AiGuardReason with an advisory
             // `hint` derived from the reason variant (#188-followup A).
             "reasons": r.reasons.iter().map(|reason| {
@@ -524,9 +526,9 @@ fn report_json(report: &Report) -> serde_json::Value {
             value
         }).collect::<Vec<_>>(),
         "not_configured": report.not_configured.iter()
-            .map(|t| tool_cli_label(*t)).collect::<Vec<_>>(),
+            .map(tool_cli_label).collect::<Vec<_>>(),
         "errors": report.errors.iter().map(|(t, s, m)| json!({
-            "tool": tool_cli_label(*t),
+            "tool": tool_cli_label(t),
             "scope": scope_str(s),
             "error": m,
         })).collect::<Vec<_>>(),
@@ -724,7 +726,7 @@ mod fail_on_tests {
                     tool: AiTool::Codex,
                     scope: AiGuardScope::UserGlobal,
                     score: 0.0,
-                    bucket: *b,
+                    bucket: b.clone(),
                     reasons: vec![],
                 })
                 .collect(),
@@ -761,11 +763,11 @@ mod fail_on_tests {
     fn exits_3_exactly_when_a_row_reaches_the_threshold() {
         use AiGuardBucket::*;
         let all = [Low, Medium, High, Critical];
-        for row in all {
-            for threshold in all {
+        for row in all.clone() {
+            for threshold in all.clone() {
                 let want = if row >= threshold { FAIL_ON_EXIT } else { 0 };
                 assert_eq!(
-                    fail_on_exit(&report(&[row]), Some(threshold)),
+                    fail_on_exit(&report(std::slice::from_ref(&row)), Some(threshold.clone())),
                     want,
                     "row {row:?} threshold {threshold:?}"
                 );

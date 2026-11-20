@@ -7,6 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- Readers built from this release keep an unknown AI tool, bucket or scope name in an AI Guard
+  event instead of rejecting the event. A server still rejects such an event until a later change,
+  and an agent never writes one. Policy fields that name a tool still refuse an unknown tool.
+
 ### Fixed
 
 - A hook in the managed settings files and a hook in the user's settings with the same event and

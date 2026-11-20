@@ -366,7 +366,7 @@ async fn eval_and_maybe_emit(
                 controls: controls.clone(),
                 controls_blake3: controls_hash,
                 score,
-                bucket,
+                bucket: bucket.clone(),
                 reasons_blake3: reasons_hash,
                 reasons_count: reasons.len(),
                 last_assessed_ts: now,
@@ -384,7 +384,7 @@ async fn eval_and_maybe_emit(
             ctx,
             now,
             Evidence::AiGuardToggleDrift {
-                tool: key.0,
+                tool: key.0.clone(),
                 scope: key.1.clone(),
                 toggle,
                 rule_pack_id: key.2.clone(),
@@ -402,7 +402,7 @@ async fn eval_and_maybe_emit(
         now,
         Evidence::AiGuardRiskAssessed {
             controls,
-            tool: key.0,
+            tool: key.0.clone(),
             scope: key.1.clone(),
             score,
             bucket,
@@ -460,7 +460,7 @@ async fn report_failure(
         ctx,
         now,
         Evidence::AiGuardAssessFailed {
-            tool: key.0,
+            tool: key.0.clone(),
             scope: key.1.clone(),
             user: key.3.clone(),
             rule_pack_id: key.2.clone(),
@@ -530,7 +530,7 @@ mod tests {
 
     impl AiGuardParser for ScriptedParser {
         fn tool(&self) -> AiTool {
-            self.tool
+            self.tool.clone()
         }
         fn scope(&self) -> AiGuardScope {
             self.scope.clone()

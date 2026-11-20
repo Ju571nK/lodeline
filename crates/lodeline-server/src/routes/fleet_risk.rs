@@ -21,21 +21,22 @@ fn min_bucket(s: &Option<String>) -> AiGuardBucket {
     }
 }
 
-fn bucket_rank(b: AiGuardBucket) -> u8 {
+fn bucket_rank(b: &AiGuardBucket) -> u8 {
     use AiGuardBucket::*;
     match b {
         Low => 1,
         Medium => 2,
         High => 3,
         Critical => 4,
+        Unknown(_) => 0,
     }
 }
 
 /// Whether `entry` beats `held` for a host's top tool: a higher bucket, then a higher score.
 /// Readings that tie on both keep the tool visited first, which is `AiTool` order.
 fn outranks(entry: &RiskEntry, held: &RiskEntry) -> bool {
-    bucket_rank(entry.bucket)
-        .cmp(&bucket_rank(held.bucket))
+    bucket_rank(&entry.bucket)
+        .cmp(&bucket_rank(&held.bucket))
         .then_with(|| entry.score.total_cmp(&held.score))
         .is_gt()
 }
@@ -45,7 +46,7 @@ pub async fn get_fleet_risk(
     Query(q): Query<RiskQuery>,
 ) -> impl IntoResponse {
     let limit = clamp_limit(q.limit);
-    let min = bucket_rank(min_bucket(&q.min_bucket));
+    let min = bucket_rank(&min_bucket(&q.min_bucket));
     let tool_filter: Option<Vec<String>> = q
         .tool
         .as_ref()
@@ -72,7 +73,7 @@ pub async fn get_fleet_risk(
             if !selected(tool) {
                 continue;
             }
-            if bucket_rank(entry.bucket) < min {
+            if bucket_rank(&entry.bucket) < min {
                 continue;
             }
             let pick = top
@@ -80,7 +81,7 @@ pub async fn get_fleet_risk(
                 .map(|(_, e)| outranks(entry, e))
                 .unwrap_or(true);
             if pick {
-                top = Some((*tool, entry.clone()));
+                top = Some((tool.clone(), entry.clone()));
             }
         }
         if let Some((tool, entry)) = top {
@@ -88,8 +89,8 @@ pub async fn get_fleet_risk(
         }
     }
     rows.sort_by(|a, b| {
-        bucket_rank(b.2.bucket)
-            .cmp(&bucket_rank(a.2.bucket))
+        bucket_rank(&b.2.bucket)
+            .cmp(&bucket_rank(&a.2.bucket))
             .then_with(|| b.2.score.total_cmp(&a.2.score))
             .then_with(|| a.0.host_id.cmp(&b.0.host_id))
     });
@@ -115,7 +116,7 @@ pub async fn get_fleet_risk(
             assessed_ts: super::rfc3339(entry.assessed_ts),
             open_alert_count_24h: h.counts_24h.sum_alerts(),
             source: Some(super::risk_source(entry)),
-            unassessed_since: h.unassessed_since(*tool).map(super::rfc3339),
+            unassessed_since: h.unassessed_since(tool).map(super::rfc3339),
         })
         .collect();
     let next_cursor = if end < rows.len() {

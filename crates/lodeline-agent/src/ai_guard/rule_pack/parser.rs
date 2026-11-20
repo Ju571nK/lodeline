@@ -82,7 +82,7 @@ impl RulePackParser {
 
 impl AiGuardParser for RulePackParser {
     fn tool(&self) -> AiTool {
-        self.pack.tool
+        self.pack.tool.clone()
     }
 
     fn scope(&self) -> AiGuardScope {

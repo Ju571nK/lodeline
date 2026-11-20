@@ -102,8 +102,13 @@ pub enum PolicySignatureInvalidReason {
 /// Phase 3b.1 — which AI coding agent is being assessed.
 /// Stable wire strings — operators filter by these in the SIEM, so renames are
 /// breaking changes.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
+///
+/// The wire value is a bare string. A name this build does not know decodes to
+/// `Unknown(name)` and is written back as the same string. Agents never emit
+/// `Unknown`, and policy fields that take a tool refuse it. `Unknown` is the
+/// last variant, so it sorts after every known tool and by name among
+/// unknowns.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AiTool {
     ClaudeCode,
     Codex,
@@ -122,13 +127,93 @@ pub enum AiTool {
     Grok,
     /// Phase 3b.7.5 — an operator-defined tool with no built-in parser. Wire
     /// string: "other". The human name rides `tool_label` (rule pack + event),
-    /// never inside the enum, so AiTool stays Copy + a bare-string wire value.
+    /// never inside this variant.
     Other,
+    /// A tool name from a newer agent. Holds the wire string as received.
+    Unknown(String),
+}
+
+/// Maps each unit variant to its wire string once, and derives both directions
+/// from that table. The `match` in `as_str` has no wildcard for known variants,
+/// so a new variant fails to compile until it gets a string.
+macro_rules! wire_names {
+    ($ty:ident { $($variant:ident => $wire:literal,)* }) => {
+        impl $ty {
+            /// The wire strings of the known variants.
+            pub const KNOWN_NAMES: &'static [&'static str] = &[$($wire),*];
+
+            /// The wire string, for display and filtering.
+            pub fn as_str(&self) -> &str {
+                match self {
+                    $(Self::$variant => $wire,)*
+                    Self::Unknown(name) => name,
+                }
+            }
+
+            /// Known names decode to their variant, any other string to `Unknown`.
+            pub fn from_name(name: &str) -> Self {
+                match name {
+                    $($wire => Self::$variant,)*
+                    other => Self::Unknown(other.to_owned()),
+                }
+            }
+        }
+
+        impl Serialize for $ty {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                Ok(Self::from_name(&String::deserialize(d)?))
+            }
+        }
+    };
+}
+
+wire_names!(AiTool {
+    ClaudeCode => "claude_code",
+    Codex => "codex",
+    ClaudeDesktop => "claude_desktop",
+    ContinueDev => "continue_dev",
+    Gemini => "gemini",
+    Cursor => "cursor",
+    Antigravity => "antigravity",
+    Grok => "grok",
+    Other => "other",
+});
+
+/// Decodes a tool the way a closed enum did: an unknown name is an error. For
+/// policy fields, where a tool name picks a built-in parser or an opt-in.
+pub fn deserialize_known_tool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AiTool, D::Error> {
+    match AiTool::deserialize(d)? {
+        AiTool::Unknown(name) => Err(serde::de::Error::unknown_variant(
+            &name,
+            AiTool::KNOWN_NAMES,
+        )),
+        known => Ok(known),
+    }
+}
+
+/// `deserialize_known_tool` for a list of tools.
+pub fn deserialize_known_tools<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<AiTool>, D::Error> {
+    #[derive(Deserialize)]
+    struct Known(#[serde(deserialize_with = "deserialize_known_tool")] AiTool);
+    let tools = Vec::<Known>::deserialize(d)?;
+    Ok(tools.into_iter().map(|Known(t)| t).collect())
 }
 
 /// Phase 3b.1 — where the assessment applies on the host.
+///
+/// The derived serde code is reachable only as the inherent
+/// `AiGuardScope::{serialize, deserialize}` (`remote = "Self"`). Call the trait
+/// impls below, which require a string `kind`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(remote = "Self", tag = "kind", rename_all = "snake_case")]
 pub enum AiGuardScope {
     /// `~/.claude/`, `~/.codex/` — user's global config.
     UserGlobal,
@@ -138,6 +223,42 @@ pub enum AiGuardScope {
     /// `app` is a stable snake_case identifier matching the parser
     /// (e.g., "claude_desktop", "continue").
     Application { app: String },
+    /// A scope object this build cannot decode: a kind from a newer agent, or a
+    /// known kind whose fields changed. The object is kept as the same JSON
+    /// value, so key order may differ. Agents never emit it. Untagged variants
+    /// must come last.
+    #[serde(untagged)]
+    Unknown(UnknownScope),
+}
+
+impl Serialize for AiGuardScope {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        AiGuardScope::serialize(self, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for AiGuardScope {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // The untagged fallback makes serde buffer the object, and a buffered
+        // tag accepts an integer as a variant index, so `{"kind":1}` would
+        // decode as a known scope. Only a string `kind` reaches the derived code.
+        let v = serde_json::Value::deserialize(d)?;
+        if !v.get("kind").is_some_and(serde_json::Value::is_string) {
+            return Err(D::Error::custom("an AI Guard scope needs a string `kind`"));
+        }
+        #[allow(clippy::disallowed_methods)] // the one caller that ran the check
+        AiGuardScope::deserialize(v).map_err(D::Error::custom)
+    }
+}
+
+/// The body of `AiGuardScope::Unknown`. `kind` must be a string, so a reader
+/// can always show it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnknownScope {
+    pub kind: String,
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Phase 3b.1 — auto-derived from `score`. low <1 / medium <4 / high <7 / critical 7+.
@@ -147,14 +268,26 @@ pub enum AiGuardScope {
 /// Variants are declared in ascending severity order so `#[derive(PartialOrd, Ord)]`
 /// produces the correct ordering: Low < Medium < High < Critical. Required by the
 /// assess engine's enforce-bucket threshold comparison (#149).
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
+///
+/// A name this build does not know decodes to `Unknown(name)` and is written
+/// back as the same string. Agents never emit it. `Unknown` is declared last, so
+/// the derived order puts it above `Critical`: a reader must not use that order
+/// to rank an unknown bucket.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AiGuardBucket {
     Low,
     Medium,
     High,
     Critical,
+    Unknown(String),
 }
+
+wire_names!(AiGuardBucket {
+    Low => "low",
+    Medium => "medium",
+    High => "high",
+    Critical => "critical",
+});
 
 /// Phase 3b.1 — one finding inside an `AiGuardRiskAssessed` event.
 /// Stable wire strings — operators filter by these in the SIEM, so renames are
