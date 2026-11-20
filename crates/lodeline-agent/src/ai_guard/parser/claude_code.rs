@@ -504,11 +504,7 @@ pub(crate) fn emit_hook_reasons_allowing(
                 // evidence names the tool, never the `if` argument, which can
                 // hold a token or URL.
                 if event_name == "PermissionRequest" {
-                    let target = hook_condition(h)
-                        .or(matcher.filter(|m| !m.is_empty()))
-                        .unwrap_or("*");
-                    let pattern =
-                        truncate_for_snippet(&format!("PermissionRequest hook: {target}"));
+                    let pattern = approval_pattern(h, matcher);
                     if !approvals.contains(&pattern) {
                         approvals.push(pattern);
                     }
@@ -718,6 +714,15 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         }
     }
     p[pi..].iter().all(|&c| c == b'*')
+}
+
+/// The evidence of a `PermissionRequest` hook's standing approval. It names the
+/// tool, never the `if` argument, which can hold a token or URL.
+fn approval_pattern(hook: &Value, matcher: Option<&str>) -> String {
+    let target = hook_condition(hook)
+        .or(matcher.filter(|m| !m.is_empty()))
+        .unwrap_or("*");
+    truncate_for_snippet(&format!("PermissionRequest hook: {target}"))
 }
 
 /// #199 — an `http` hook forwards the whole tool-call payload to a URL. On
@@ -1351,20 +1356,59 @@ fn matcher_handlers(settings: &Value, event: &str, matcher: &str) -> Option<Vec<
     found.then_some(handlers)
 }
 
-/// A managed `BroadMatcher` is a different hook from the user's when both
-/// files have the event and matcher but not the same handlers: both run.
+/// Each handler on the reason's event that gives `reason`, with its matcher,
+/// as sorted text. A forwarding or approval reason names the event and the
+/// destination or tool but not the handler.
+fn reason_handlers(settings: &Value, reason: &AiGuardReason) -> Vec<String> {
+    let event = match reason {
+        AiGuardReason::HookForwardsToolCalls { hook_event, .. } => hook_event,
+        _ => "PermissionRequest",
+    };
+    let mut found = Vec::new();
+    let groups = settings.get("hooks").and_then(|h| h.get(event));
+    for group in groups.and_then(Value::as_array).into_iter().flatten() {
+        let matcher = group.get("matcher").and_then(Value::as_str);
+        for handler in group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let mut gives = Vec::new();
+            match handler.get("type").and_then(Value::as_str) {
+                Some("http") => emit_http_hook_reason(handler, event, None, &mut gives),
+                Some("mcp_tool") => emit_mcp_tool_hook_reason(handler, event, &mut gives),
+                _ => {}
+            }
+            if let AiGuardReason::StandingCommandApproval { pattern } = reason {
+                if approval_pattern(handler, matcher) == *pattern {
+                    gives.push(reason.clone());
+                }
+            }
+            if gives.contains(reason) {
+                found.push(format!("{}\n{handler}", matcher.unwrap_or_default()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A managed reason is a different hook from the user's when both files have
+/// handlers that give it but not the same ones: both run.
 fn hook_differs(reason: &AiGuardReason, user: &Value, managed: &Value) -> bool {
-    let AiGuardReason::BroadMatcher {
+    if let AiGuardReason::BroadMatcher {
         hook_event,
         matcher,
     } = reason
-    else {
-        return false;
-    };
-    match matcher_handlers(user, hook_event, matcher) {
-        Some(theirs) => matcher_handlers(managed, hook_event, matcher) != Some(theirs),
-        None => false,
+    {
+        return match matcher_handlers(user, hook_event, matcher) {
+            Some(theirs) => matcher_handlers(managed, hook_event, matcher) != Some(theirs),
+            None => false,
+        };
     }
+    let theirs = reason_handlers(user, reason);
+    !theirs.is_empty() && reason_handlers(managed, reason) != theirs
 }
 
 /// A settings file a `defaultMode` is read from. Claude Code ignores `auto`
@@ -4186,7 +4230,22 @@ mod tests {
             }],
             "{same:?}"
         );
-        assert!(rubric::score(&reasons) > rubric::score(&same));
+        assert_eq!(rubric::score(&same), 7.5);
+        assert_eq!(rubric::score(&reasons), 10.0);
+    }
+
+    /// Two `mcp_tool` hooks that call different tools on one server both run.
+    #[test]
+    fn user_and_managed_mcp_tool_hooks_with_different_tools_score_twice() {
+        let hook = |tool: &str| {
+            format!(
+                r#"{{"hooks": {{"PreToolUse": [{{"matcher": "Bash", "hooks": [{{"type": "mcp_tool", "server": "audit", "tool": "{tool}"}}]}}]}}}}"#
+            )
+        };
+        let reasons = assess_with_managed(Some(&hook("a")), &hook("b"));
+        assert_eq!(forwards(&reasons).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&hook("a")), &hook("a"));
+        assert_eq!(forwards(&same).len(), 1, "{same:?}");
     }
 
     /// The same URL under two matchers is two hooks: each fires for its own
@@ -4215,7 +4274,7 @@ mod tests {
             }],
             "{same:?}"
         );
-        assert!(rubric::score(&reasons) > rubric::score(&same));
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 2.5);
     }
 
     /// Assess `user` settings (none when `None`) under the managed file

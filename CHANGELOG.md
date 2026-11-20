@@ -14,6 +14,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   one broad-matcher reason. The score rises by 1.875 for a `PreToolUse` matcher and by 0.625 for
   another event. It changes only on a host where both files define the same event and matcher with
   different commands. The same command in both files still scores once.
+- An `http` or `mcp_tool` hook in the managed settings files and a different one in the user's
+  settings, on the same event and destination, now score as two hooks, as do two `PermissionRequest`
+  hooks for one tool with different commands. Both run, and the score counted them once. The score
+  rises by 3.75 for a forwarding hook and by 2.5 for a standing approval, up to the score cap of
+  10. It changes only on a host where both files define such hooks. The same hook in both files
+  still scores once.
 - `lodeline doctor` and the MCP tool `my_risk` now name each source whose config the agent could
   not read or parse, as `lodeline show risk` does. `doctor` prints one line per source under
   `latest risk`. `my_risk` adds a `failed_sources` list next to `latest_risk` only when a source
