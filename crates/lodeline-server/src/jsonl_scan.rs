@@ -427,4 +427,76 @@ mod tests {
         .unwrap();
         assert!(r.events.is_empty(), "non-UUID host dir must be skipped");
     }
+    const HID_B: &str = "0190b8a0-2222-7abc-8def-000000000002";
+    const HID_C: &str = "0190b8a0-3333-7abc-8def-000000000003";
+
+    fn evjson_at(host_id: &str, seq: u128) -> serde_json::Value {
+        let mut v = evjson(host_id, "2026-05-17T12:00:00Z", "host_id_conflict");
+        let id = uuid::Uuid::from_u128(
+            ((0x0190_b8a0_0000u128 + seq) << 80) | (0x7abc_u128 << 64) | (0x8def_u128 << 48),
+        );
+        v["event_id"] = json!(id.to_string());
+        v
+    }
+
+    fn ids(events: &[serde_json::Value]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| e["event_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn scan_orders_same_day_files_of_several_hosts_newest_first_across_pages() {
+        let dir = tempdir().unwrap();
+        let hosts = [HID, HID_B, HID_C];
+        let mut expected = Vec::new();
+        for seq in (1..=9u128).rev() {
+            expected.push(
+                evjson_at(HID, seq)["event_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        for (i, host) in hosts.iter().enumerate() {
+            let host_dir = dir.path().join(host);
+            std::fs::create_dir_all(&host_dir).unwrap();
+            let f = host_dir.join("received-2026-05-17.jsonl");
+            for seq in 1..=9u128 {
+                if seq as usize % 3 == i {
+                    write_line(&f, &evjson_at(host, seq));
+                }
+            }
+        }
+        let all = scan(
+            dir.path(),
+            &ScanFilters {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ids(&all.events), expected);
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = scan(
+                dir.path(),
+                &ScanFilters {
+                    limit: 2,
+                    cursor,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            seen.extend(ids(&page.events));
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
 }
