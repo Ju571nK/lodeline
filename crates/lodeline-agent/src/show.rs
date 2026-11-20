@@ -1063,6 +1063,7 @@ mod tests {
                 config_found: None,
                 reason_kinds: vec!["no_sandbox".into(), "broad_matcher_other".into()],
             }],
+            ..Default::default()
         };
         let mut buf = Vec::new();
         write_risk_pretty(&mut buf, &payload).unwrap();
@@ -1100,6 +1101,7 @@ mod tests {
                 config_found,
                 reason_kinds: kinds.into_iter().map(String::from).collect(),
             }],
+            ..Default::default()
         };
         let mut buf = Vec::new();
         write_risk_pretty(&mut buf, &payload).unwrap();
@@ -1148,11 +1150,67 @@ mod tests {
     }
 
     #[cfg(feature = "operator-cli")]
+    fn failed(kind: &str, last: Option<&str>) -> lodeline_core::control_proto::FailedSource {
+        lodeline_core::control_proto::FailedSource {
+            tool: lodeline_core::event::AiTool::Codex,
+            scope: lodeline_core::event::AiGuardScope::UserGlobal,
+            user: Some("alice".into()),
+            error_kind: kind.into(),
+            path: "/Users/alice/.codex/config.toml".into(),
+            failing_since: "2026-11-20T01:00:00Z".into(),
+            last_assessed_ts: last.map(str::to_string),
+        }
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn write_risk_pretty_says_when_a_source_could_not_be_read_or_parsed() {
+        let payload = RiskPayload {
+            failed_sources: vec![
+                failed("unreadable", Some("2026-11-19T06:00:00Z")),
+                failed("parse", None),
+            ],
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        write_risk_pretty(&mut buf, &payload).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("(no assessments yet)"),
+            "a failing source is not 'no assessments': {out}"
+        );
+        let lines: Vec<&str> = out.lines().filter(|l| l.contains("codex")).collect();
+        assert_eq!(lines.len(), 2, "one line per failing source: {out}");
+        assert!(
+            lines[0].contains("could not read")
+                && lines[0].contains("/Users/alice/.codex/config.toml")
+                && lines[0].contains("2026-11-19T06:00:00Z")
+                && lines[0].contains("out of date"),
+            "got: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("could not parse") && lines[1].contains("no score"),
+            "got: {}",
+            lines[1]
+        );
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn write_risk_pretty_adds_no_failure_line_when_nothing_failed() {
+        let out = risk_row(None);
+        assert!(!out.contains("could not"), "got: {out}");
+        assert_eq!(out.lines().count(), 1, "one row, no extra line: {out}");
+    }
+
+    #[cfg(feature = "operator-cli")]
     #[test]
     fn write_risk_pretty_empty_prints_sentinel() {
         use crate::control::RiskPayload;
         let payload = RiskPayload {
             assessments: vec![],
+            ..Default::default()
         };
         let mut buf = Vec::new();
         write_risk_pretty(&mut buf, &payload).unwrap();
@@ -1183,6 +1241,7 @@ mod tests {
                 config_found: None,
                 reason_kinds: vec![],
             }],
+            ..Default::default()
         };
         let mut buf = Vec::new();
         write_risk_pretty(&mut buf, &payload).unwrap();

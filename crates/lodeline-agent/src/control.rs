@@ -17,9 +17,9 @@ use crate::policy_apply::{apply, apply_rule_packs, ApplyContext, ApplyOutcome};
 // this crate. Re-exported here so existing `crate::control::{...}` paths keep
 // working.
 pub use lodeline_core::control_proto::{
-    ApplyPolicyResult, AssessVerdict, DoctorAiGuardReport, ExtScriptSummary, ParserInfo,
-    PerRepoSummary, PolicyStatusPayload, Request, Response, RiskPayload, RiskSummary, RubricEntry,
-    RulePackInfo, TargetSummary, TargetsPayload,
+    ApplyPolicyResult, AssessVerdict, DoctorAiGuardReport, ExtScriptSummary, FailedSource,
+    ParserInfo, PerRepoSummary, PolicyStatusPayload, Request, Response, RiskPayload, RiskSummary,
+    RubricEntry, RulePackInfo, TargetSummary, TargetsPayload,
 };
 
 /// Default control-socket path. As root, the system path `/var/run/lodeline`
@@ -131,6 +131,48 @@ pub(crate) fn risk_summary(
         config_found: cached.config_found,
         reason_kinds: cached.reason_kinds.clone(),
     })
+}
+
+#[cfg(feature = "operator-cli")]
+pub(crate) fn failed_source(
+    _key: &crate::ai_guard::task::StateKey,
+    _source: &crate::ai_guard::task::SourceState,
+) -> Option<FailedSource> {
+    None
+}
+
+#[cfg(feature = "operator-cli")]
+fn tool_key(tool: lodeline_core::event::AiTool) -> String {
+    serde_json::to_string(&tool).unwrap_or_default()
+}
+
+#[cfg(feature = "operator-cli")]
+pub(crate) fn risk_payload(
+    state: &crate::ai_guard::task::StateMap,
+    tool: Option<lodeline_core::event::AiTool>,
+) -> RiskPayload {
+    let mut assessments: Vec<RiskSummary> = state
+        .iter()
+        .filter(|((t, _scope, _pid, _user), _)| tool.is_none_or(|filter| *t == filter))
+        .filter_map(|(key, source)| risk_summary(key, source))
+        .collect();
+    assessments.sort_by(|a, b| {
+        serde_json::to_string(&a.tool)
+            .unwrap_or_default()
+            .cmp(&serde_json::to_string(&b.tool).unwrap_or_default())
+    });
+    let mut failed_sources: Vec<FailedSource> = state
+        .iter()
+        .filter(|((t, _scope, _pid, _user), _)| tool.is_none_or(|filter| *t == filter))
+        .filter_map(|(key, source)| failed_source(key, source))
+        .collect();
+    failed_sources.sort_by(|a, b| {
+        (tool_key(a.tool), &a.user, &a.path).cmp(&(tool_key(b.tool), &b.user, &b.path))
+    });
+    RiskPayload {
+        assessments,
+        failed_sources,
+    }
 }
 
 /// Shared dispatch logic. Returns the `Response` for a given `Request`.
@@ -309,27 +351,14 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
         }
         #[cfg(feature = "operator-cli")]
         Request::Risk { tool } => {
-            let snapshot = ctx.ai_guard_state.read();
-            let mut assessments: Vec<RiskSummary> = snapshot
-                .iter()
-                .filter(|((t, _scope, _pid, _user), _)| match tool {
-                    Some(filter) => *t == filter,
-                    None => true,
-                })
-                .filter_map(|(key, source)| risk_summary(key, source))
-                .collect();
-            assessments.sort_by(|a, b| {
-                serde_json::to_string(&a.tool)
-                    .unwrap_or_default()
-                    .cmp(&serde_json::to_string(&b.tool).unwrap_or_default())
-            });
+            let payload = risk_payload(&ctx.ai_guard_state.read(), tool);
             Response {
                 ok: true,
                 stats: None,
                 apply_policy: None,
                 policy_status: None,
                 targets: None,
-                risk: Some(RiskPayload { assessments }),
+                risk: Some(payload),
                 doctor_ai_guard: None,
                 assess_verdict: None,
                 error: None,

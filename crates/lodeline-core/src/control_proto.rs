@@ -159,9 +159,32 @@ pub struct TargetsPayload {
     pub targets: Vec<TargetSummary>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct RiskPayload {
     pub assessments: Vec<RiskSummary>,
+    /// Sources whose last assessment failed (unreadable or unparsable config),
+    /// with or without an earlier good reading. Omitted when none fail, as
+    /// older daemons send it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_sources: Vec<FailedSource>,
+}
+
+/// One source whose assessment failed. Carries no config content and no error
+/// text.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FailedSource {
+    pub tool: AiTool,
+    pub scope: AiGuardScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// `unreadable` or `parse`, as in `ai_guard_assess_failed`.
+    pub error_kind: String,
+    pub path: PathBuf,
+    /// RFC 3339. When the failure began.
+    pub failing_since: String,
+    /// RFC 3339. The last good reading of this source, if the agent has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assessed_ts: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -439,6 +462,7 @@ mod tests {
                     config_found: None,
                     reason_kinds: vec![],
                 }],
+                ..Default::default()
             }),
             doctor_ai_guard: None,
             assess_verdict: None,
@@ -473,6 +497,29 @@ mod tests {
         format!(
             r#"{{"ok":true,"risk":{{"assessments":[{{"tool":"gemini","scope":{{"kind":"user_global"}},"score":0.0,"bucket":"low","reasons_count":0,"last_assessed_ts":"2026-11-17T00:00:00Z"{extra}}}]}}}}"#
         )
+    }
+
+    #[test]
+    fn risk_payload_failed_sources_are_omitted_when_empty_and_default_when_absent() {
+        let none = serde_json::to_string(&RiskPayload::default()).unwrap();
+        assert!(!none.contains("failed_sources"), "got: {none}");
+        let old: RiskPayload = serde_json::from_str(r#"{"assessments":[]}"#).unwrap();
+        assert!(old.failed_sources.is_empty());
+        let one = RiskPayload {
+            failed_sources: vec![FailedSource {
+                tool: AiTool::Codex,
+                scope: AiGuardScope::UserGlobal,
+                user: None,
+                error_kind: "parse".into(),
+                path: "/h/.codex/config.toml".into(),
+                failing_since: "2026-11-20T01:00:00Z".into(),
+                last_assessed_ts: None,
+            }],
+            ..Default::default()
+        };
+        let back: RiskPayload =
+            serde_json::from_str(&serde_json::to_string(&one).unwrap()).unwrap();
+        assert_eq!(back.failed_sources, one.failed_sources);
     }
 
     #[test]
