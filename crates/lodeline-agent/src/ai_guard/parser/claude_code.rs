@@ -4423,10 +4423,12 @@ mod tests {
         assert_eq!(rubric::score(&reasons) - rubric::score(&same), 2.5);
     }
 
+    /// A hook file with the lowest baseline score: a deny rule and no auto
+    /// mode, so the score cap does not hide what a second hook adds.
     fn command_hook(matcher: &str, command: &str) -> String {
         let command = command.replace('\\', "\\\\");
         format!(
-            r#"{{"hooks": {{"PreToolUse": [{{"matcher": "{matcher}", "hooks": [{{"command": "{command}"}}]}}]}}}}"#
+            r#"{{"permissions": {{"deny": ["Read(x)"], "disableAutoMode": "disable"}}, "hooks": {{"PreToolUse": [{{"matcher": "{matcher}", "hooks": [{{"command": "{command}"}}]}}]}}}}"#
         )
     }
 
@@ -4460,7 +4462,8 @@ mod tests {
         assert_eq!(reasons_of(&reasons, is_inline).len(), 2, "{reasons:?}");
         let same = assess_with_managed(Some(&long("a")), &long("a"));
         assert_eq!(reasons_of(&same, is_inline).len(), 1, "{same:?}");
-        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 1.5);
+        assert_eq!(rubric::score(&same), 6.0);
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 4.0);
 
         let chained = |script: &str| command_hook("Bash", &format!("/opt/{script}.sh && rm -rf ~"));
         let reasons = assess_with_managed(Some(&chained("a")), &chained("b"));
@@ -4474,6 +4477,8 @@ mod tests {
         let managed = command_hook("Edit", "rm -rf ~");
         let reasons = assess_with_managed(Some(&user), &managed);
         assert_eq!(reasons_of(&reasons, is_inline).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&user), &user);
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 4.0);
     }
 
     /// Two commands that run one script with different arguments run it twice.
@@ -4487,6 +4492,7 @@ mod tests {
         assert_eq!(reasons_of(&reasons, is_script).len(), 2, "{reasons:?}");
         let same = assess_with_managed(Some(&hook("a")), &hook("a"));
         assert_eq!(reasons_of(&same, is_script).len(), 1, "{same:?}");
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 4.0);
     }
 
     /// Same for a script that is not read.
