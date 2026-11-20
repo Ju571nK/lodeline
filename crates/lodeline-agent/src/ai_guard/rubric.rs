@@ -312,15 +312,7 @@ pub fn score(reasons: &[AiGuardReason]) -> f32 {
 
 /// Map a score to its bucket per spec thresholds.
 pub fn bucket(score: f32) -> AiGuardBucket {
-    if score < 1.0 {
-        AiGuardBucket::Low
-    } else if score < 4.0 {
-        AiGuardBucket::Medium
-    } else if score < 7.0 {
-        AiGuardBucket::High
-    } else {
-        AiGuardBucket::Critical
-    }
+    AiGuardBucket::from_score(score)
 }
 
 /// Hardcoded destructive patterns. False positive cost is low (we don't block).

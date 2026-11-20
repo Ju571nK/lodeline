@@ -12,31 +12,12 @@ fn clamp_limit(req: Option<u32>) -> usize {
     req.unwrap_or(100).clamp(1, 1000) as usize
 }
 
-fn min_bucket(s: &Option<String>) -> AiGuardBucket {
-    match s.as_deref() {
-        Some("medium") => AiGuardBucket::Medium,
-        Some("high") => AiGuardBucket::High,
-        Some("critical") => AiGuardBucket::Critical,
-        _ => AiGuardBucket::Low,
-    }
-}
-
-fn bucket_rank(b: &AiGuardBucket) -> u8 {
-    use AiGuardBucket::*;
-    match b {
-        Low => 1,
-        Medium => 2,
-        High => 3,
-        Critical => 4,
-        Unknown(_) => 0,
-    }
-}
-
 /// Whether `entry` beats `held` for a host's top tool: a higher bucket, then a higher score.
 /// Readings that tie on both keep the tool visited first, which is `AiTool` order.
 fn outranks(entry: &RiskEntry, held: &RiskEntry) -> bool {
-    bucket_rank(&entry.bucket)
-        .cmp(&bucket_rank(&held.bucket))
+    entry
+        .rank()
+        .cmp(&held.rank())
         .then_with(|| entry.score.total_cmp(&held.score))
         .is_gt()
 }
@@ -46,7 +27,10 @@ pub async fn get_fleet_risk(
     Query(q): Query<RiskQuery>,
 ) -> impl IntoResponse {
     let limit = clamp_limit(q.limit);
-    let min = bucket_rank(&min_bucket(&q.min_bucket));
+    let min = q
+        .min_bucket
+        .as_deref()
+        .map_or(1, |name| AiGuardBucket::from_name(name).rank(0.0));
     let tool_filter: Option<Vec<String>> = q
         .tool
         .as_ref()
@@ -73,7 +57,7 @@ pub async fn get_fleet_risk(
             if !selected(tool) {
                 continue;
             }
-            if bucket_rank(&entry.bucket) < min {
+            if entry.rank() < min {
                 continue;
             }
             let pick = top
@@ -89,8 +73,8 @@ pub async fn get_fleet_risk(
         }
     }
     rows.sort_by(|a, b| {
-        bucket_rank(&b.2.bucket)
-            .cmp(&bucket_rank(&a.2.bucket))
+        b.2.rank()
+            .cmp(&a.2.rank())
             .then_with(|| b.2.score.total_cmp(&a.2.score))
             .then_with(|| a.0.host_id.cmp(&b.0.host_id))
     });

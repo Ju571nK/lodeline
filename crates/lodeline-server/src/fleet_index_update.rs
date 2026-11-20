@@ -10,18 +10,20 @@ use time::OffsetDateTime;
 /// AiGuardRiskAssessed in {high, critical} + the additional alert kinds.
 /// MUST stay in sync with the JSON in `routes/meta.rs::get_meta`.
 fn is_alert_evidence(ev: &Evidence) -> bool {
-    matches!(
-        ev,
-        Evidence::AiGuardRiskAssessed {
-            bucket: AiGuardBucket::High | AiGuardBucket::Critical,
-            ..
-        } | Evidence::AiGuardToggleDrift { .. }
-            | Evidence::PolicySignatureInvalid { .. }
-            | Evidence::TlsFailure { .. }
-            | Evidence::HostIdFingerprintDrift { .. }
-            | Evidence::AgentDying { .. }
-            | Evidence::SenderLagCritical { .. }
-    )
+    match ev {
+        Evidence::AiGuardRiskAssessed { bucket, score, .. } => {
+            bucket.rank(*score) >= AiGuardBucket::High.rank(0.0)
+        }
+        _ => matches!(
+            ev,
+            Evidence::AiGuardToggleDrift { .. }
+                | Evidence::PolicySignatureInvalid { .. }
+                | Evidence::TlsFailure { .. }
+                | Evidence::HostIdFingerprintDrift { .. }
+                | Evidence::AgentDying { .. }
+                | Evidence::SenderLagCritical { .. }
+        ),
+    }
 }
 
 /// Store the latest report of one AI Guard source, `next` of its previous
@@ -313,11 +315,15 @@ mod tests {
         use crate::routes::meta::alerts_definition_default;
 
         fn ai_guard(bucket: AiGuardBucket) -> Evidence {
+            ai_guard_scored(bucket, 5.0)
+        }
+
+        fn ai_guard_scored(bucket: AiGuardBucket, score: f32) -> Evidence {
             Evidence::AiGuardRiskAssessed {
                 controls: None,
                 tool: AiTool::ClaudeCode,
                 scope: AiGuardScope::UserGlobal,
-                score: 5.0,
+                score,
                 bucket,
                 reasons: vec![],
                 is_reattestation: false,
@@ -386,6 +392,10 @@ mod tests {
         }
         // Low/Medium AI Guard and a non-listed warn must NOT count as alerts.
         assert!(!is_alert_evidence(&ai_guard(AiGuardBucket::Low)));
+        for (score, alert) in [(0.5, false), (3.0, false), (6.0, true), (8.0, true)] {
+            let unknown = ai_guard_scored(AiGuardBucket::Unknown("severe".into()), score);
+            assert_eq!(is_alert_evidence(&unknown), alert, "unknown at {score}");
+        }
         assert!(!is_alert_evidence(&ai_guard(AiGuardBucket::Medium)));
         assert!(!is_alert_evidence(&Evidence::WatcherDegraded {
             from: "fsevents".into(),
