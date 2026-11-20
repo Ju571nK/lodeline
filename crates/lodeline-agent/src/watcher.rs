@@ -1069,6 +1069,24 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
+    /// Run a rename or removal of a folder the polling backend scans. Windows
+    /// refuses it with `PermissionDenied` while a scan holds the folder open;
+    /// that scan lasts milliseconds, so retry for a bounded time.
+    fn while_scanned(mut op: impl FnMut() -> std::io::Result<()>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match op() {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::PermissionDenied
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result => return result.unwrap(),
+            }
+        }
+    }
+
     async fn receive_path(rx: &mut mpsc::Receiver<RawFsEvent>, path: &Path) {
         let expected = dunce::canonicalize(path).unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1111,7 +1129,7 @@ mod tests {
         receive_path(&mut rx, &later).await;
 
         // Replacement at the same path, without observing an intermediate absence.
-        fs::rename(&root, td.path().join("old-tools")).unwrap();
+        while_scanned(|| fs::rename(&root, td.path().join("old-tools")));
         fs::create_dir_all(&root).unwrap();
         let replacement = root.join("replacement.json");
         fs::write(&replacement, b"new directory identity").unwrap();
@@ -1171,13 +1189,13 @@ mod tests {
         watcher.reconcile();
         assert!(watcher.catchups.is_empty(), "stable roots must not rescan");
 
-        fs::rename(&late, td.path().join("old-contents")).unwrap();
+        while_scanned(|| fs::rename(&late, td.path().join("old-contents")));
         fs::create_dir(&late).unwrap();
         let replaced = late.join("replacement.json");
         fs::write(&replaced, b"replacement").unwrap();
         watcher.reconcile();
         receive_path(&mut rx, &replaced).await;
-        fs::remove_dir_all(apps.join("New.app")).unwrap();
+        while_scanned(|| fs::remove_dir_all(apps.join("New.app")));
         watcher.reconcile();
         assert!(!watcher.active.contains_key(&late));
 
