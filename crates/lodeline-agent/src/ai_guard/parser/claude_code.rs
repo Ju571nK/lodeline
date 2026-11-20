@@ -4506,6 +4506,63 @@ mod tests {
         assert_eq!(rubric::score(&reasons) - rubric::score(&same), 1.875);
     }
 
+    /// On an event other than `PreToolUse`, a broad matcher adds less to the
+    /// score, and so does its second hook.
+    #[test]
+    fn a_second_broad_hook_on_another_event_raises_the_score_by_a_smaller_step() {
+        let hook = |command: &str| {
+            format!(
+                r#"{{"permissions": {{"deny": ["Read(x)"], "disableAutoMode": "disable"}}, "hooks": {{"PostToolUse": [{{"matcher": "*", "hooks": [{{"command": "{command}"}}]}}]}}}}"#
+            )
+        };
+        let reasons = assess_with_managed(Some(&hook("echo a")), &hook("echo b"));
+        assert_eq!(broad_matchers(&reasons).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&hook("echo a")), &hook("echo a"));
+        assert_eq!(broad_matchers(&same).len(), 1, "{same:?}");
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 0.625);
+    }
+
+    /// Two different `http` hooks on a host that scores low: the second one
+    /// adds its full step, with no score cap in the way.
+    #[test]
+    fn a_second_forwarding_hook_raises_the_score_by_its_full_step() {
+        let hook = |url: &str| {
+            format!(
+                r#"{{"permissions": {{"deny": ["Read(x)"], "disableAutoMode": "disable"}}, "hooks": {{"PreToolUse": [{{"matcher": "Bash", "hooks": [{{"type": "http", "url": "{url}"}}]}}]}}}}"#
+            )
+        };
+        let reasons = assess_with_managed(
+            Some(&hook("https://hooks.example.com/a")),
+            &hook("https://hooks.example.com/b"),
+        );
+        assert_eq!(forwards(&reasons).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(
+            Some(&hook("https://hooks.example.com/a")),
+            &hook("https://hooks.example.com/a"),
+        );
+        assert_eq!(forwards(&same).len(), 1, "{same:?}");
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 3.75);
+    }
+
+    /// A program run by full path after another command is reported as not
+    /// scanned, and that reason adds to the score.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_program_chained_after_another_command_raises_the_score() {
+        let score_of = |command: &str| {
+            let dir = tempdir().unwrap();
+            write_settings(dir.path(), &command_hook("Bash", command));
+            let home = dunce::canonicalize(dir.path()).unwrap();
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            (reasons.clone(), rubric::score(&reasons))
+        };
+        let (without, base) = score_of("cd /tmp; true");
+        assert_eq!(reasons_of(&without, is_unscanned).len(), 0, "{without:?}");
+        let (with, scored) = score_of("cd /tmp; /opt/missing/x.sh");
+        assert_eq!(reasons_of(&with, is_unscanned).len(), 1, "{with:?}");
+        assert_eq!(scored - base, 1.5);
+    }
+
     /// Assess `user` settings (none when `None`) under the managed file
     /// `managed`.
     fn assess_with_managed(user: Option<&str>, managed: &str) -> Vec<AiGuardReason> {
