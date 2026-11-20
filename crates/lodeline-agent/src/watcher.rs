@@ -759,7 +759,7 @@ pub fn spawn_watcher(
             // returns, so a file already in it gives no event. List it now, then
             // list it again once the watch exists and send what the first
             // listing and the kernel events did not. A file gets one event,
-            // except that a file created just after the watch exists can get
+            // except that a file created or moved in just after the watch exists can get
             // its kernel event and a late listing, and a subfolder created
             // after the new folder's watch but before notify walks it is listed
             // again by its own creation event, so a file in it may get a kernel
@@ -1550,7 +1550,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_file_moved_in_just_after_its_new_folder_gives_one_event() {
+    async fn a_file_moved_in_just_after_its_new_folder_is_reported_without_repeats() {
         let td = TempDir::new().unwrap();
         let root = td.path().join("root");
         fs::create_dir(&root).unwrap();
@@ -1567,10 +1567,19 @@ mod tests {
         fs::create_dir(&folder).unwrap();
         fs::rename(&staged, folder.join("SKILL.md")).unwrap();
         let kinds = kinds_for(&mut rx, &folder.join("SKILL.md")).await;
+        // The move can land before or after the watch exists. If after, the kernel
+        // reports a rename and the second listing may also report the file, so
+        // one Modified and one Renamed are both fine. A lost file or a repeat is not.
+        let count = |kind| kinds.iter().filter(|k| **k == kind).count();
+        assert!(!kinds.is_empty(), "the moved file was not reported");
+        assert!(
+            count(FileChangeKind::Modified) <= 1 && count(FileChangeKind::Renamed) <= 1,
+            "a kind repeated, got {kinds:?}"
+        );
         assert_eq!(
+            count(FileChangeKind::Modified) + count(FileChangeKind::Renamed),
             kinds.len(),
-            1,
-            "one move must give one event, got {kinds:?}"
+            "unexpected kind, got {kinds:?}"
         );
     }
 
