@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { HookEvidence } from '@/api/fleet';
+import type { HookEvidence, Scope } from '@/api/fleet';
 import { hookTitle, humanKind, humanTool, scopeLabel, shortPath, sourceLabel } from './labels';
 
 describe('humanTool', () => {
@@ -154,6 +154,16 @@ describe('scopeLabel', () => {
   });
   it('labels application scope by app name', () => {
     expect(scopeLabel({ kind: 'application', app: 'Slack' })).toBe('app · Slack');
+  });
+  it.each([
+    [{ kind: 'user_global' }, 'user global'],
+    [{ kind: 'project', path: '/home/u/proj/src' }, 'project · …/proj/src'],
+    [{ kind: 'application', app: 'Slack' }, 'app · Slack'],
+  ] as const)('renders the known kind %j exactly as before', (scope, label) => {
+    expect(scopeLabel(scope)).toBe(label);
+  });
+  it('renders an unknown scope kind as its own text, not as user global', () => {
+    expect(scopeLabel({ kind: 'workspace' } as unknown as Scope)).toBe('workspace');
   });
 });
 
