@@ -32,8 +32,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   handlers differ, for example two commands that run one script with different arguments, or one
   command under two matchers. Both run, and the score counted them once. On a host that otherwise
   scores 6 the score rises by 4, to the score cap of 10, for a destructive command or script, and by
-  1.875 for an unread script, up to the score cap of 10. It changes only on a host where both files define such hooks. The same hook in both files still
-  scores once.
+  1.875 for an unread script, up to the score cap of 10. It changes only on a host where both files
+  define such hooks. The same hook in both files still scores once.
 - `lodeline doctor` and the MCP tool `my_risk` now name each source whose config the agent could
   not read or parse, as `lodeline show risk` does. `doctor` prints one line per source under
   `latest risk`. `my_risk` adds a `failed_sources` list next to `latest_risk` only when a source
