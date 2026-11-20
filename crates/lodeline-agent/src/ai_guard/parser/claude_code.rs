@@ -4429,10 +4429,10 @@ mod tests {
         )
     }
 
-    fn reasons_of<'a>(
-        reasons: &'a [AiGuardReason],
+    fn reasons_of(
+        reasons: &[AiGuardReason],
         kind: fn(&AiGuardReason) -> bool,
-    ) -> Vec<&'a AiGuardReason> {
+    ) -> Vec<&AiGuardReason> {
         reasons.iter().filter(|r| kind(r)).collect()
     }
 
