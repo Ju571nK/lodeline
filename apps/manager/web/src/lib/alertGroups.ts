@@ -1,6 +1,7 @@
 import type { EventWithTriage, ReasonLike } from '@/api/fleet';
 import { extractAiGuard } from '@/api/fleet';
 import { humanKind } from './labels';
+import { effectiveBucket } from './severity';
 
 export type SortMode = 'severity_desc' | 'age_desc' | 'age_asc';
 
@@ -100,7 +101,7 @@ function stableJSON(value: unknown): string {
 
 function bucketRank(ev: EventWithTriage): number {
   const ag = extractAiGuard(ev);
-  if (ag) return ag.bucket ? (BUCKET_RANK[ag.bucket] ?? 0) : 0;
+  if (ag) return ag.bucket ? (BUCKET_RANK[effectiveBucket(ag.bucket, ag.score)] ?? 0) : 0;
   return ev.severity === 'warn' ? 2 : 0;
 }
 

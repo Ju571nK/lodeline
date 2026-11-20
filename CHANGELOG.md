@@ -20,6 +20,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The console sorts and colors an AI Guard reading whose bucket name it does not know by the
+  bucket its score falls in, as the server does. Before, such a reading sorted below the low ones
+  in the alerts queue and showed in the info color.
 - The console shows an AI Guard scope kind it does not know as that kind's own text, where it
   showed "user global".
 - The AI Guard hook scanner now reads a script that a hook command runs after another command, as

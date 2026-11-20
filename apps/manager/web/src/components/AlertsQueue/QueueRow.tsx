@@ -8,7 +8,7 @@ import {
 import type { AlertGroup } from '@/lib/alertGroups';
 import { reasonTitle } from '@/lib/alertGroups';
 import { hookTitle, humanKind, humanTool, scopeLabel } from '@/lib/labels';
-import { bucketTextColor } from '@/lib/severity';
+import { bucketTextColor, effectiveBucket } from '@/lib/severity';
 import { relativeAge } from '@/lib/time';
 import { cn } from '@/lib/utils';
 
@@ -40,6 +40,7 @@ export function QueueRow({
   const event = group.latest;
   const ag = extractAiGuard(event);
   const bucket = ag?.bucket ?? severityToBucket(event.severity);
+  const rankedBucket = effectiveBucket(bucket, ag?.score);
 
   const title = computeTitle(event, ag);
   const host = displayHost(event.host_id);
@@ -59,12 +60,12 @@ export function QueueRow({
         selected ? 'bg-bg-elevated text-text-primary' : 'text-text-body hover:bg-bg-elevated/60',
         // Critical glow: subtle box-shadow per UI/UX §6.2. The data-fresh
         // attribute drives a 1s fade-in animation defined in index.css.
-        bucket === 'critical' && 'shadow-[inset_2px_0_0] shadow-sev-critical',
+        rankedBucket === 'critical' && 'shadow-[inset_2px_0_0] shadow-sev-critical',
         isFresh && 'animate-[alertFlash_1s_ease-out]',
       )}
       aria-pressed={selected}
     >
-      <SeverityDot bucket={bucket} />
+      <SeverityDot bucket={rankedBucket} />
       <span className="font-mono text-text-muted">{age}</span>
       <span className="truncate text-text-primary">
         {title}
@@ -84,7 +85,7 @@ export function QueueRow({
       <span className="truncate font-mono text-text-muted" title={event.host_id}>
         {host}
       </span>
-      <span className={cn('uppercase tracking-wide font-medium', bucketTextColor(bucket))}>
+      <span className={cn('uppercase tracking-wide font-medium', bucketTextColor(rankedBucket))}>
         {bucket}
       </span>
       <StatusPill status={triage?.status ?? 'open'} hasTriage={!!triage} />

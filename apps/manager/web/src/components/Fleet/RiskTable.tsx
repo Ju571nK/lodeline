@@ -3,6 +3,7 @@ import type { RiskRow } from '@/api/fleet';
 import { SkeletonRows } from '@/components/Fleet/SkeletonRows';
 import { UnassessedSince } from '@/components/UnassessedSince';
 import { humanTool, sourceLabel } from '@/lib/labels';
+import { effectiveBucket } from '@/lib/severity';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -104,7 +105,7 @@ export function NotAssessedNotice({ count, link }: { count?: number; link: boole
 }
 
 function RiskBar({ bucket, score }: { bucket: string; score: number }) {
-  const color = bucketBarColor(bucket);
+  const color = bucketBarColor(effectiveBucket(bucket, score));
   const pct = Math.max(0, Math.min(100, (score / 10) * 100));
   return (
     <div className="flex items-center gap-2">
