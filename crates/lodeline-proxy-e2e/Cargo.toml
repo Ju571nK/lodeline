@@ -18,7 +18,7 @@ lodeline-proxy-api = { path = "../lodeline-proxy-api" }
 lodeline-proxy-loadgen = { path = "../lodeline-proxy-loadgen" }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }

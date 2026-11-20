@@ -16,8 +16,16 @@
 
 #269의 통합 시나리오 중 두 개를 `lodeline-proxy-e2e/tests/server_proxy_e2e.rs`에 시험으로 추가했다. 제품 코드, reason, 필드, wire는 바꾸지 않았다.
 
-- `proxy_serves_the_last_config_while_the_server_is_down_and_recovers`: 서버를 내리면 proxy는 마지막 config로 계속 전달하고(`config_state` valid, `forwarding` true, `last_update_error` `fetch_failed`), 같은 포트로 서버가 돌아온 뒤 넣은 revision 2를 다시 받아 적용한다. config TTL은 60초 이상이므로 만료 자체는 기다리지 않는다. 만료는 `config_sync`의 단위 시험이 맡는다.
+- `proxy_serves_the_last_config_while_the_server_is_down_and_recovers`: 서버를 내리면 proxy는 마지막 config로 계속 전달하고(`config_state` valid, `forwarding` true, `last_update_error` `fetch_failed`), 같은 포트로 서버가 돌아온 뒤 넣은 revision 2를 다시 받아 적용한다. config TTL은 60초 이상이므로 이 시험은 만료 자체를 보지 않는다. 만료는 아래 2026-11-20 항목의 두 시험이 맡는다.
 - `a_rolled_back_revision_is_refused_after_a_proxy_restart`: 서버를 revision 1 때의 백업으로 되돌리고 proxy를 같은 state_dir로 다시 시작하면, proxy는 `applied.json`의 revision 2를 읽어 revision 1을 `stale_revision`으로 거절한다. 아무것도 전달하지 않고, `applied.json`(revision과 hash)과 `sequence.json`의 bound는 그대로다. 서버 부팅은 audit보다 뒤처진 store를 거절하므로(`state_init` 없이), 시험은 서버 상태 파일 전체를 백업 시점으로 되돌린다.
+
+## 2026-11-20 config TTL 만료 fail closed의 e2e (`test/proxy-e2e-ttl-expiry`, #269)
+
+#269의 "TTL 만료" 항목을 `server_proxy_e2e.rs`의 시험 두 개로 덮었다. 제품 코드는 바꾸지 않았다. TTL 하한이 60초라서 tokio 시계를 `pause`/`advance`/`resume`으로 앞당긴다. 앞당긴 뒤에는 시계를 바로 되돌려, 서버와 proxy 사이의 실제 socket이 자기 timer를 유지한다. 이를 위해 e2e crate의 dev-dependency tokio에 `test-util` feature를 켰다.
+
+- `proxy_fails_closed_at_the_config_ttl_when_the_server_stays_down`: 서버를 내린 채 시계를 TTL 15초 전까지 앞당기면 요청은 200이고 `config_state`는 valid다. 20초 더 앞당기면 `config_state`가 expired, `forwarding`이 false가 되고 요청은 401이며 upstream hit는 늘지 않는다.
+- `proxy_fails_closed_at_the_config_ttl_while_a_config_fetch_is_in_flight`: 서버가 `/v1/proxy-config` 요청을 받고 답하지 않는 동안(fetch 제한 시간은 10초) 마감이 지나도록 시계를 100ms씩 앞당긴다. 마감이 지난 뒤에도 같은 요청이 계속 대기 중인 채로 proxy가 expired를 게시하고 401을 낸다.
+- 지킬 점: 두 번째 시험은 fetch 제한 시간 안에 마감이 오도록 시계를 TTL 8초 전까지 앞당긴 뒤 hold를 건다. 남은 시간이 10초를 넘으면 fetch가 마감 전에 끝나므로 시험이 실패한다.
 
 ## 2026-11-09 proxy 상세에서 열린 gap을 닫힌 gap보다 먼저 (`fix/proxy-open-gaps-first`)
 
