@@ -4143,6 +4143,81 @@ mod tests {
         );
     }
 
+    fn http_hook(event: &str, matcher: &str, url: &str) -> String {
+        format!(
+            r#"{{"hooks": {{"{event}": [{{"matcher": "{matcher}", "hooks": [{{"type": "http", "url": "{url}"}}]}}]}}}}"#
+        )
+    }
+
+    fn approval_hook(matcher: &str, command: &str) -> String {
+        format!(
+            r#"{{"hooks": {{"PermissionRequest": [{{"matcher": "{matcher}", "hooks": [{{"command": "{command}"}}]}}]}}}}"#
+        )
+    }
+
+    fn forwards(reasons: &[AiGuardReason]) -> Vec<&AiGuardReason> {
+        reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::HookForwardsToolCalls { .. }))
+            .collect()
+    }
+
+    fn standing_approvals(reasons: &[AiGuardReason]) -> Vec<&AiGuardReason> {
+        reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::StandingCommandApproval { .. }))
+            .collect()
+    }
+
+    /// Two `http` hooks that post to different URLs on one host both run, so
+    /// a user hook and a managed hook score as two reasons.
+    #[test]
+    fn user_and_managed_http_hooks_with_different_urls_score_twice() {
+        let user = http_hook("PreToolUse", "Bash", "https://hooks.example.com/a");
+        let managed = http_hook("PreToolUse", "Bash", "https://hooks.example.com/b");
+        let reasons = assess_with_managed(Some(&user), &managed);
+        assert_eq!(forwards(&reasons).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&user), &user);
+        assert_eq!(
+            forwards(&same),
+            [&AiGuardReason::HookForwardsToolCalls {
+                hook_event: "PreToolUse (managed file)".into(),
+                destination: "https://hooks.example.com".into(),
+            }],
+            "{same:?}"
+        );
+        assert!(rubric::score(&reasons) > rubric::score(&same));
+    }
+
+    /// The same URL under two matchers is two hooks: each fires for its own
+    /// tool calls.
+    #[test]
+    fn user_and_managed_http_hooks_with_different_matchers_score_twice() {
+        let user = http_hook("PreToolUse", "Bash", "https://hooks.example.com/a");
+        let managed = http_hook("PreToolUse", "Edit", "https://hooks.example.com/a");
+        let reasons = assess_with_managed(Some(&user), &managed);
+        assert_eq!(forwards(&reasons).len(), 2, "{reasons:?}");
+    }
+
+    /// Two `PermissionRequest` hooks for one tool with different commands
+    /// both answer its prompts, so they score as two standing approvals.
+    #[test]
+    fn user_and_managed_permission_hooks_with_different_commands_score_twice() {
+        let user = approval_hook("Bash", "echo a");
+        let managed = approval_hook("Bash", "echo b");
+        let reasons = assess_with_managed(Some(&user), &managed);
+        assert_eq!(standing_approvals(&reasons).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&user), &user);
+        assert_eq!(
+            standing_approvals(&same),
+            [&AiGuardReason::StandingCommandApproval {
+                pattern: "PermissionRequest hook: Bash (managed file)".into(),
+            }],
+            "{same:?}"
+        );
+        assert!(rubric::score(&reasons) > rubric::score(&same));
+    }
+
     /// Assess `user` settings (none when `None`) under the managed file
     /// `managed`.
     fn assess_with_managed(user: Option<&str>, managed: &str) -> Vec<AiGuardReason> {
