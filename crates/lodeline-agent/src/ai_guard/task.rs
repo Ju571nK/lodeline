@@ -726,6 +726,66 @@ mod tests {
         assert_eq!(summary.last_assessed_ts, expected);
     }
 
+    #[cfg(feature = "operator-cli")]
+    #[tokio::test]
+    async fn show_risk_lists_a_source_that_failed_at_boot_without_a_score() {
+        let (ctx, parser, mut events) =
+            flaky_ctx(vec![unparsable("/home/test/.codex/config.toml")]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        let _ = events.recv().await.expect("failure report");
+
+        let payload = crate::control::risk_payload(&ctx.state.read(), None);
+        assert!(payload.assessments.is_empty());
+        assert_eq!(payload.failed_sources.len(), 1);
+        let failed = &payload.failed_sources[0];
+        assert_eq!(failed.error_kind, "parse");
+        assert_eq!(
+            failed.path,
+            std::path::PathBuf::from("/home/test/.codex/config.toml")
+        );
+        assert_eq!(failed.last_assessed_ts, None);
+        assert!(!serde_json::to_string(&payload)
+            .unwrap()
+            .contains("must stay local"));
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[tokio::test]
+    async fn show_risk_keeps_the_old_score_and_marks_the_failure_until_recovery() {
+        let (ctx, parser, mut events) = flaky_ctx(vec![
+            Ok(vec![AiGuardReason::SandboxDisabled]),
+            unreadable("/home/test/.codex/config.toml"),
+            Ok(vec![AiGuardReason::SandboxDisabled]),
+        ]);
+        let home = own_home(&ctx);
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, true).await;
+        let good_ts = recv_next_risk_assessed(&mut events).await.event.ts;
+        let clean = crate::control::risk_payload(&ctx.state.read(), None);
+        assert_eq!(clean.assessments.len(), 1);
+        assert!(clean.failed_sources.is_empty());
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let failing = crate::control::risk_payload(&ctx.state.read(), None);
+        assert_eq!(failing.assessments.len(), 1);
+        assert_eq!(failing.failed_sources.len(), 1);
+        assert_eq!(failing.failed_sources[0].error_kind, "unreadable");
+        let expected = good_ts
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        assert_eq!(
+            failing.failed_sources[0].last_assessed_ts.as_deref(),
+            Some(expected.as_str())
+        );
+        let other_tool = crate::control::risk_payload(&ctx.state.read(), Some(AiTool::Gemini));
+        assert!(other_tool.assessments.is_empty() && other_tool.failed_sources.is_empty());
+
+        eval_and_maybe_emit(parser.as_ref(), &ctx, &home, false).await;
+        let recovered = crate::control::risk_payload(&ctx.state.read(), None);
+        assert_eq!(recovered.assessments.len(), 1);
+        assert!(recovered.failed_sources.is_empty());
+    }
+
     #[tokio::test]
     async fn a_failure_after_a_reading_names_it_and_never_resends_it() {
         let (ctx, parser, mut events) = flaky_ctx(vec![

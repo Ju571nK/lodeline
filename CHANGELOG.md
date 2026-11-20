@@ -9,6 +9,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline show risk` now names each source whose config the agent could not read or parse. It adds
+  one line per source after the table, and the JSON output gains `failed_sources`. Before, such a
+  source showed a stale score or nothing, although the agent already reports the failure to the
+  fleet. An older CLI ignores the new field, and a new CLI with an older agent prints no extra
+  line.
 - A failing AI Guard source no longer shows `last_assessed_ts: null` in `ai_guard_unassessed` after
   an agent restart when the server still holds that source's last good reading. The server now
   uses that reading's time when the agent reports none, live and after a server restart. A value
