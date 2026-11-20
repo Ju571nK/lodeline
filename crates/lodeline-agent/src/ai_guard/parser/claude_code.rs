@@ -2724,6 +2724,73 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn a_script_chained_after_another_command_is_scanned() {
+        let mut unscanned = Vec::new();
+        for command in [
+            "cd /tmp; ~/x.sh",
+            "true && ~/x.sh",
+            "false || ~/x.sh",
+            "cd /tmp && bash $HOME/x.sh",
+            "~/a.sh && ~/x.sh",
+            "bash ~/a.sh; bash ${HOME}/x.sh",
+            "cd /tmp; true; true; ~/x.sh",
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(
+                dir.path(),
+                command,
+                &[("a.sh", "true\n"), ("x.sh", "rm -rf /\n")],
+            );
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            if scanned_script(&reasons) != Some(home.join("x.sh").as_path()) {
+                unscanned.push(command);
+            }
+        }
+        assert!(unscanned.is_empty(), "not scanned: {unscanned:?}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_chained_word_the_shell_does_not_run_is_not_scanned() {
+        let beyond = "true; ".repeat(8) + "~/x.sh";
+        for command in [
+            "cd /tmp; $OTHER_VAR/x.sh",
+            "$OTHER_VAR/x.sh",
+            r#"echo "a; ~/x.sh""#,
+            "echo 'a && ~/x.sh'",
+            "cd /tmp; ~alice/x.sh",
+            beyond.as_str(),
+        ] {
+            let dir = tempdir().unwrap();
+            let home = home_with_hook(
+                dir.path(),
+                command,
+                &[("x.sh", "rm -rf /\n"), ("alice/x.sh", "rm -rf /\n")],
+            );
+            let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+            assert_eq!(scanned_script(&reasons), None, "{command}: {reasons:?}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_user_tilde_script_is_reported_unscanned() {
+        let dir = tempdir().unwrap();
+        let home = home_with_hook(dir.path(), "~alice/x.sh", &[("x.sh", "rm -rf /\n")]);
+        let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+        assert_eq!(scanned_script(&reasons), None, "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| matches!(
+                r,
+                AiGuardReason::ExternalScriptUnscanned { script_path, .. }
+                    if script_path == Path::new("~alice/x.sh")
+            )),
+            "{reasons:?}"
+        );
+    }
+
     #[test]
     fn a_single_quoted_or_other_var_is_not_the_home() {
         // A wrong reading of `$HOMEX/` or `$HOME_DIR/` lands on one of these.
