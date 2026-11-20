@@ -11,7 +11,8 @@ function alert(over: {
   scope?: Scope;
   user?: string;
   reasons?: ReasonLike[];
-  bucket?: 'high' | 'critical';
+  bucket?: 'high' | 'critical' | string;
+  score?: number;
   status?: 'open' | 'acknowledged' | 'investigating' | 'resolved' | null;
 }): EventWithTriage {
   seq += 1;
@@ -30,8 +31,8 @@ function alert(over: {
       tool: over.tool ?? 'claude_code',
       scope: over.scope ?? { kind: 'user_global' },
       ...(over.user ? { user: over.user } : {}),
-      score: 5,
-      bucket: over.bucket ?? 'high',
+      score: over.score ?? 5,
+      bucket: (over.bucket ?? 'high') as 'high',
       reasons: over.reasons ?? [{ kind: 'no_sandbox', executor: 'bash' }],
       is_reattestation: false,
     },
@@ -140,6 +141,49 @@ describe('sortAlertGroups', () => {
     expect(ids('severity_desc')).toEqual([crit.event_id, high.event_id, old.event_id]);
     expect(ids('age_desc')).toEqual([high.event_id, old.event_id, crit.event_id]);
     expect(ids('age_asc')).toEqual([crit.event_id, old.event_id, high.event_id]);
+  });
+});
+
+describe('sortAlertGroups with an unknown bucket', () => {
+  const order = (events: EventWithTriage[]) =>
+    sortAlertGroups(groupAlerts(events), 'severity_desc').map((g) => g.latest.event_id);
+
+  it('ranks an unknown bucket by its score as low, medium, high, critical', () => {
+    const at = (score: number, tool: string) =>
+      alert({ bucket: 'severe', score, tool, ts: '2026-11-18T10:00:00Z' });
+    const [low, medium, high, critical] = [at(0.5, 'a'), at(3, 'b'), at(6, 'c'), at(8, 'd')];
+    expect(order([low, critical, medium, high])).toEqual([
+      critical.event_id,
+      high.event_id,
+      medium.event_id,
+      low.event_id,
+    ]);
+  });
+
+  it('puts an unknown bucket between known ones by its score', () => {
+    const known = alert({ bucket: 'high', score: 5, tool: 'a' });
+    const unknownCritical = alert({ bucket: 'severe', score: 7, tool: 'b' });
+    const unknownLow = alert({ bucket: 'severe', score: 0.2, tool: 'c' });
+    const knownMedium = alert({ bucket: 'medium', score: 2, tool: 'd' });
+    expect(order([unknownLow, knownMedium, known, unknownCritical])).toEqual([
+      unknownCritical.event_id,
+      known.event_id,
+      knownMedium.event_id,
+      unknownLow.event_id,
+    ]);
+  });
+
+  it('keeps each known bucket at its own rank whatever its score', () => {
+    const rows = [
+      ['critical', 0],
+      ['high', 0],
+      ['medium', 9],
+      ['low', 9],
+    ] as const;
+    const events = rows.map(([bucket, score], i) =>
+      alert({ bucket, score, tool: `t${i}`, ts: '2026-11-18T10:00:00Z' }),
+    );
+    expect(order([...events].reverse())).toEqual(events.map((e) => e.event_id));
   });
 });
 
