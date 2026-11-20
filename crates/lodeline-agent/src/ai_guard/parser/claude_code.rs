@@ -196,7 +196,7 @@ fn assess_user(
         if let Some(perms) = managed.get("permissions") {
             emit_broad_allow_reasons(perms, &mut found);
         }
-        push_managed(found, &mut out, |r| hook_differs(r, &merged, managed));
+        push_managed(found, &mut out, |r| hook_differs(r, &merged, managed, home));
     }
     // #191 signal 1 — the start mode's auto-approval posture.
     if emit_start_mode_reason(start, &mut out) {
@@ -1403,10 +1403,14 @@ fn matcher_handlers(settings: &Value, event: &str, matcher: &str) -> Option<Vec<
 
 /// Each handler on the reason's event that gives `reason`, with its matcher,
 /// as sorted text. A forwarding or approval reason names the event and the
-/// destination or tool but not the handler.
-fn reason_handlers(settings: &Value, reason: &AiGuardReason) -> Vec<String> {
+/// destination or tool, and a command reason the snippet or script path, but
+/// none of them the handler.
+fn reason_handlers(settings: &Value, reason: &AiGuardReason, home: Option<&Path>) -> Vec<String> {
     let event = match reason {
-        AiGuardReason::HookForwardsToolCalls { hook_event, .. } => hook_event,
+        AiGuardReason::HookForwardsToolCalls { hook_event, .. }
+        | AiGuardReason::DestructiveInInlineCommand { hook_event, .. }
+        | AiGuardReason::DestructiveInHookScript { hook_event, .. }
+        | AiGuardReason::ExternalScriptUnscanned { hook_event, .. } => hook_event,
         _ => "PermissionRequest",
     };
     let mut found = Vec::new();
@@ -1423,6 +1427,12 @@ fn reason_handlers(settings: &Value, reason: &AiGuardReason) -> Vec<String> {
             match handler.get("type").and_then(Value::as_str) {
                 Some("http") => emit_http_hook_reason(handler, event, None, &mut gives),
                 Some("mcp_tool") => emit_mcp_tool_hook_reason(handler, event, &mut gives),
+                Some("command") | None => {
+                    if let Some(cmd) = handler.get("command").and_then(Value::as_str) {
+                        let home = home.filter(|_| handler.get("args").is_none());
+                        classify_command(cmd, event, home, None, None, &mut gives);
+                    }
+                }
                 _ => {}
             }
             if let AiGuardReason::StandingCommandApproval { pattern } = reason {
@@ -1441,7 +1451,12 @@ fn reason_handlers(settings: &Value, reason: &AiGuardReason) -> Vec<String> {
 
 /// A managed reason is a different hook from the user's when both files have
 /// handlers that give it but not the same ones: both run.
-fn hook_differs(reason: &AiGuardReason, user: &Value, managed: &Value) -> bool {
+fn hook_differs(
+    reason: &AiGuardReason,
+    user: &Value,
+    managed: &Value,
+    home: Option<&Path>,
+) -> bool {
     if let AiGuardReason::BroadMatcher {
         hook_event,
         matcher,
@@ -1452,8 +1467,8 @@ fn hook_differs(reason: &AiGuardReason, user: &Value, managed: &Value) -> bool {
             None => false,
         };
     }
-    let theirs = reason_handlers(user, reason);
-    !theirs.is_empty() && reason_handlers(managed, reason) != theirs
+    let theirs = reason_handlers(user, reason, home);
+    !theirs.is_empty() && reason_handlers(managed, reason, home) != theirs
 }
 
 /// A settings file a `defaultMode` is read from. Claude Code ignores `auto`
@@ -4406,6 +4421,89 @@ mod tests {
             "{same:?}"
         );
         assert_eq!(rubric::score(&reasons) - rubric::score(&same), 2.5);
+    }
+
+    /// A hook file with the lowest baseline score: a deny rule and no auto
+    /// mode, so the score cap does not hide what a second hook adds.
+    fn command_hook(matcher: &str, command: &str) -> String {
+        let command = command.replace('\\', "\\\\");
+        format!(
+            r#"{{"permissions": {{"deny": ["Read(x)"], "disableAutoMode": "disable"}}, "hooks": {{"PreToolUse": [{{"matcher": "{matcher}", "hooks": [{{"command": "{command}"}}]}}]}}}}"#
+        )
+    }
+
+    fn reasons_of(
+        reasons: &[AiGuardReason],
+        kind: fn(&AiGuardReason) -> bool,
+    ) -> Vec<&AiGuardReason> {
+        reasons.iter().filter(|r| kind(r)).collect()
+    }
+
+    fn is_inline(r: &AiGuardReason) -> bool {
+        matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })
+    }
+
+    fn is_script(r: &AiGuardReason) -> bool {
+        matches!(r, AiGuardReason::DestructiveInHookScript { .. })
+    }
+
+    fn is_unscanned(r: &AiGuardReason) -> bool {
+        matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })
+    }
+
+    /// Two inline commands that give one snippet are two hooks, and both run:
+    /// the snippet keeps the first 80 characters, and the text after a
+    /// script is all the reason keeps of a command that starts with one.
+    #[test]
+    fn user_and_managed_inline_hooks_with_one_snippet_score_twice() {
+        let long =
+            |tail: &str| command_hook("Bash", &format!("rm -rf ~ #{}{tail}", "x".repeat(80)));
+        let reasons = assess_with_managed(Some(&long("a")), &long("b"));
+        assert_eq!(reasons_of(&reasons, is_inline).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&long("a")), &long("a"));
+        assert_eq!(reasons_of(&same, is_inline).len(), 1, "{same:?}");
+        assert_eq!(rubric::score(&same), 6.0);
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 4.0);
+
+        let chained = |script: &str| command_hook("Bash", &format!("/opt/{script}.sh && rm -rf ~"));
+        let reasons = assess_with_managed(Some(&chained("a")), &chained("b"));
+        assert_eq!(reasons_of(&reasons, is_inline).len(), 2, "{reasons:?}");
+    }
+
+    /// The same inline command under two matchers fires for two tools.
+    #[test]
+    fn user_and_managed_inline_hooks_with_different_matchers_score_twice() {
+        let user = command_hook("Bash", "rm -rf ~");
+        let managed = command_hook("Edit", "rm -rf ~");
+        let reasons = assess_with_managed(Some(&user), &managed);
+        assert_eq!(reasons_of(&reasons, is_inline).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&user), &user);
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 4.0);
+    }
+
+    /// Two commands that run one script with different arguments run it twice.
+    #[test]
+    fn user_and_managed_hooks_running_one_script_score_twice() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("guard.sh");
+        std::fs::write(&script, "#!/bin/sh\nrm -rf ~\n").unwrap();
+        let hook = |arg: &str| command_hook("Bash", &format!("{} {arg}", script.display()));
+        let reasons = assess_with_managed(Some(&hook("a")), &hook("b"));
+        assert_eq!(reasons_of(&reasons, is_script).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&hook("a")), &hook("a"));
+        assert_eq!(reasons_of(&same, is_script).len(), 1, "{same:?}");
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 4.0);
+    }
+
+    /// Same for a script that is not read.
+    #[test]
+    fn user_and_managed_hooks_running_one_unread_script_score_twice() {
+        let hook = |arg: &str| command_hook("Bash", &format!("/opt/missing/guard.sh {arg}"));
+        let reasons = assess_with_managed(Some(&hook("a")), &hook("b"));
+        assert_eq!(reasons_of(&reasons, is_unscanned).len(), 2, "{reasons:?}");
+        let same = assess_with_managed(Some(&hook("a")), &hook("a"));
+        assert_eq!(reasons_of(&same, is_unscanned).len(), 1, "{same:?}");
+        assert_eq!(rubric::score(&reasons) - rubric::score(&same), 1.875);
     }
 
     /// Assess `user` settings (none when `None`) under the managed file
