@@ -46,11 +46,15 @@ impl LodelineLocal {
 
     #[tool(
         description = "This machine's AI-tool risk headline: per (tool, scope) risk band + score, \
-                          plus reasons_count, the distinct reason_kinds and last-assessed time. Use for 'what's my AI risk?'."
+                          plus reasons_count, the distinct reason_kinds and last-assessed time. A `failed_sources` list appears only when a tool's config could not be read or parsed, and then that tool's score may be stale. Use for 'what's my AI risk?'."
     )]
     async fn my_risk(&self) -> Result<CallToolResult, McpError> {
         let r = self.upstream.doctor_report().await?;
-        ok(serde_json::json!({ "latest_risk": r.latest_risk }))
+        let failed: Vec<lodeline_core::control_proto::FailedSource> = vec![];
+        if failed.is_empty() {
+            return ok(serde_json::json!({ "latest_risk": r.latest_risk }));
+        }
+        ok(serde_json::json!({ "latest_risk": r.latest_risk, "failed_sources": failed }))
     }
 
     #[tool(
@@ -223,6 +227,95 @@ mod tests {
         assert_eq!(res.is_error, Some(false));
         assert!(text(&res).contains("latest_risk"));
         srv.await.unwrap();
+    }
+
+    /// Answers the doctor report and the risk request, in either order, each
+    /// on its own connection.
+    fn canned_risk_agent(
+        socket: std::path::PathBuf,
+        failed: Vec<lodeline_core::control_proto::FailedSource>,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (rd, mut wr) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(rd).read_line(&mut line).await.unwrap();
+                let mut resp = Response {
+                    ok: true,
+                    stats: None,
+                    apply_policy: None,
+                    policy_status: None,
+                    targets: None,
+                    risk: None,
+                    error: None,
+                    doctor_ai_guard: None,
+                    assess_verdict: None,
+                };
+                if line.contains("doctor_ai_guard_report") {
+                    resp.doctor_ai_guard = Some(DoctorAiGuardReport {
+                        parsers: vec![],
+                        rule_packs: vec![],
+                        ext_scripts: Default::default(),
+                        per_repo: PerRepoSummary {
+                            continue_dev: 0,
+                            claude_code: 0,
+                            codex: 0,
+                        },
+                        latest_risk: vec![],
+                        effective_rubric: vec![],
+                        unknown_override_keys: vec![],
+                    });
+                } else {
+                    resp.risk = Some(lodeline_core::control_proto::RiskPayload {
+                        assessments: vec![],
+                        failed_sources: failed.clone(),
+                    });
+                }
+                let mut bytes = serde_json::to_vec(&resp).unwrap();
+                bytes.push(b'\n');
+                wr.write_all(&bytes).await.unwrap();
+            }
+        })
+    }
+
+    async fn my_risk_json(
+        failed: Vec<lodeline_core::control_proto::FailedSource>,
+    ) -> serde_json::Value {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("control.sock");
+        let srv = canned_risk_agent(socket.clone(), failed);
+        let local = LodelineLocal::new(Arc::new(LocalUpstream::new(socket)));
+        let res = local.my_risk().await.unwrap();
+        srv.abort();
+        serde_json::from_str(&text(&res)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn my_risk_names_a_source_whose_config_failed() {
+        let v = my_risk_json(vec![lodeline_core::control_proto::FailedSource {
+            tool: lodeline_core::event::AiTool::Codex,
+            scope: lodeline_core::event::AiGuardScope::UserGlobal,
+            user: Some("alice".into()),
+            error_kind: "parse".into(),
+            path: "/home/alice/.codex/config.toml".into(),
+            failing_since: "2026-11-20T01:00:00Z".into(),
+            last_assessed_ts: None,
+        }])
+        .await;
+        assert_eq!(v["failed_sources"][0]["error_kind"], "parse", "got: {v}");
+        assert_eq!(
+            v["failed_sources"][0]["path"], "/home/alice/.codex/config.toml",
+            "got: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn my_risk_adds_no_key_when_nothing_failed() {
+        let v = my_risk_json(vec![]).await;
+        assert!(v.get("failed_sources").is_none(), "got: {v}");
+        assert!(v.get("latest_risk").is_some(), "got: {v}");
     }
 
     #[tokio::test]

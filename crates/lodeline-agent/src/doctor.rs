@@ -351,7 +351,15 @@ pub fn run(
         ) {
             Ok(resp) => match resp.doctor_ai_guard {
                 Some(rep) => {
-                    print_ai_guard_live(&rep);
+                    let failed = crate::control_client::query(
+                        control_socket,
+                        &crate::control::Request::Risk { tool: None },
+                    )
+                    .ok()
+                    .and_then(|r| r.risk)
+                    .map(|r| r.failed_sources)
+                    .unwrap_or_default();
+                    print_ai_guard_live(&rep, &failed);
                     if !rep.unknown_override_keys.is_empty() {
                         for k in &rep.unknown_override_keys {
                             println!("[WARN] rubric override ignored — unknown reason kind: '{k}'");
@@ -505,7 +513,62 @@ fn launch_failure(e: &std::io::Error) -> String {
 }
 
 #[cfg(feature = "operator-cli")]
-fn print_ai_guard_live(rep: &crate::control::DoctorAiGuardReport) {
+fn write_latest_risk(
+    w: &mut impl std::io::Write,
+    risk: &[lodeline_core::control_proto::RiskSummary],
+    failed: &[lodeline_core::control_proto::FailedSource],
+) -> std::io::Result<()> {
+    if risk.is_empty() && failed.is_empty() {
+        return writeln!(w, "[INFO] latest risk: (no assessments yet)");
+    }
+    writeln!(w, "[INFO] latest risk:")?;
+    for r in risk {
+        let tool_str = match r.tool {
+            lodeline_core::event::AiTool::ClaudeCode => "claude_code",
+            lodeline_core::event::AiTool::Codex => "codex",
+            lodeline_core::event::AiTool::ClaudeDesktop => "claude_desktop",
+            lodeline_core::event::AiTool::ContinueDev => "continue_dev",
+            lodeline_core::event::AiTool::Gemini => "gemini",
+            lodeline_core::event::AiTool::Cursor => "cursor",
+            lodeline_core::event::AiTool::Antigravity => "antigravity",
+            lodeline_core::event::AiTool::Grok => "grok",
+            lodeline_core::event::AiTool::Other => "other",
+        };
+        let scope_str = match &r.scope {
+            lodeline_core::event::AiGuardScope::UserGlobal => "user_global".to_string(),
+            lodeline_core::event::AiGuardScope::Project { path } => {
+                format!("project:{}", path.display())
+            }
+            lodeline_core::event::AiGuardScope::Application { app } => {
+                format!("application:{app}")
+            }
+        };
+        let bucket_str = serde_json::to_string(&r.bucket)
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+        writeln!(
+            w,
+            "         {} / {}    score {:.1}  bucket={}   reasons={}",
+            tool_str,
+            match &r.user {
+                Some(u) => format!("{scope_str}@{u}"),
+                None => scope_str,
+            },
+            r.score,
+            bucket_str,
+            r.reasons_count
+        )?;
+    }
+    let _ = failed;
+    Ok(())
+}
+
+#[cfg(feature = "operator-cli")]
+fn print_ai_guard_live(
+    rep: &crate::control::DoctorAiGuardReport,
+    failed: &[lodeline_core::control_proto::FailedSource],
+) {
     println!(
         "[OK]   active parsers: {} ({})",
         rep.parsers.len(),
@@ -529,48 +592,7 @@ fn print_ai_guard_live(rep: &crate::control::DoctorAiGuardReport) {
         "[OK]   ext-script watch: {} unique paths across {} parsers",
         rep.ext_scripts.unique_paths, rep.ext_scripts.parser_entries
     );
-    if rep.latest_risk.is_empty() {
-        println!("[INFO] latest risk: (no assessments yet)");
-    } else {
-        println!("[INFO] latest risk:");
-        for r in &rep.latest_risk {
-            let tool_str = match r.tool {
-                lodeline_core::event::AiTool::ClaudeCode => "claude_code",
-                lodeline_core::event::AiTool::Codex => "codex",
-                lodeline_core::event::AiTool::ClaudeDesktop => "claude_desktop",
-                lodeline_core::event::AiTool::ContinueDev => "continue_dev",
-                lodeline_core::event::AiTool::Gemini => "gemini",
-                lodeline_core::event::AiTool::Cursor => "cursor",
-                lodeline_core::event::AiTool::Antigravity => "antigravity",
-                lodeline_core::event::AiTool::Grok => "grok",
-                lodeline_core::event::AiTool::Other => "other",
-            };
-            let scope_str = match &r.scope {
-                lodeline_core::event::AiGuardScope::UserGlobal => "user_global".to_string(),
-                lodeline_core::event::AiGuardScope::Project { path } => {
-                    format!("project:{}", path.display())
-                }
-                lodeline_core::event::AiGuardScope::Application { app } => {
-                    format!("application:{app}")
-                }
-            };
-            let bucket_str = serde_json::to_string(&r.bucket)
-                .unwrap_or_default()
-                .trim_matches('"')
-                .to_string();
-            println!(
-                "         {} / {}    score {:.1}  bucket={}   reasons={}",
-                tool_str,
-                match &r.user {
-                    Some(u) => format!("{scope_str}@{u}"),
-                    None => scope_str,
-                },
-                r.score,
-                bucket_str,
-                r.reasons_count
-            );
-        }
-    }
+    let _ = write_latest_risk(&mut std::io::stdout(), &rep.latest_risk, failed);
 
     println!();
     println!("────────────  Effective Rubric  ────────────");
@@ -1647,5 +1669,45 @@ mod verify_self_tests {
         std::fs::write(&exe, b"x").unwrap();
         let keys = [("bk", entry.as_str())];
         assert_ne!(verify_self_impl(&exe, None, &keys, TGT), 0);
+    }
+}
+
+#[cfg(all(test, feature = "operator-cli"))]
+mod latest_risk_tests {
+    use super::*;
+    use lodeline_core::control_proto::FailedSource;
+    use lodeline_core::event::{AiGuardScope, AiTool};
+
+    fn failed(kind: &str) -> FailedSource {
+        FailedSource {
+            tool: AiTool::Codex,
+            scope: AiGuardScope::UserGlobal,
+            user: Some("alice".into()),
+            error_kind: kind.into(),
+            path: "/home/alice/.codex/config.toml".into(),
+            failing_since: "2026-11-20T01:00:00Z".into(),
+            last_assessed_ts: None,
+        }
+    }
+
+    fn render(failed: &[FailedSource]) -> String {
+        let mut buf = Vec::new();
+        write_latest_risk(&mut buf, &[], failed).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn a_failing_source_is_named_not_reported_as_no_assessments() {
+        let out = render(&[failed("parse")]);
+        assert!(!out.contains("(no assessments yet)"), "got: {out}");
+        assert!(
+            out.contains("could not parse /home/alice/.codex/config.toml"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn no_failing_source_adds_no_extra_line() {
+        assert_eq!(render(&[]), "[INFO] latest risk: (no assessments yet)\n");
     }
 }

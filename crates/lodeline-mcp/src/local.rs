@@ -12,7 +12,9 @@ use crate::config::LocalConfig;
 use lodeline_core::assess::AssessInput;
 #[cfg(unix)]
 use lodeline_core::control_proto::peer_trusted;
-use lodeline_core::control_proto::{AssessVerdict, DoctorAiGuardReport, Request, Response};
+use lodeline_core::control_proto::{
+    AssessVerdict, DoctorAiGuardReport, FailedSource, Request, Response,
+};
 use rmcp::ErrorData as McpError;
 use std::path::PathBuf;
 
@@ -75,6 +77,16 @@ impl LocalUpstream {
             return Err(LocalError::Agent(err));
         }
         resp.doctor_ai_guard.ok_or(LocalError::Empty)
+    }
+
+    /// The agent's risk payload, for the sources whose config it could not
+    /// read or parse (`failed_sources`). An older agent sends none.
+    pub async fn failed_sources(&self) -> Result<Vec<FailedSource>, LocalError> {
+        let resp = self.query(&Request::Risk { tool: None }).await?;
+        if let Some(err) = resp.error {
+            return Err(LocalError::Agent(err));
+        }
+        Ok(resp.risk.map(|r| r.failed_sources).unwrap_or_default())
     }
 
     /// Ask the running `lodeline-agent` to evaluate a proposed command or MCP
