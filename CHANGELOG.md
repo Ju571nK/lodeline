@@ -14,6 +14,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   error and the agent did not notice. A message at `warn` level names each folder it re-armed. The
   agent then sends one event for each file created or changed while the watch was down, and none
   for a file that is unchanged. (#627)
+- `/v1/events` now returns events newest first across hosts. Before, two hosts with a file for the
+  same day came back one host after the other, in the order the operating system listed them. Each
+  page and the cursor now follow `event_id` across all hosts of a day.
+- A Codex project whose folder the user config marks `trust_level = "untrusted"` no longer scores
+  its `.codex/` layers, because Codex does not load them. Its `AGENTS.md` is still scanned, and a
+  folder with no trust entry is scored as before. (#710)
 
 ## [0.18.2] - 2026-11-20
 
