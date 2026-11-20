@@ -14,6 +14,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   at the first four commands split at `;`, `&&` and `||` outside quotes, on macOS and Linux. Before,
   such a script was never read, so a destructive line in it raised no reason. A `~user/x.sh` path
   is still reported as not scanned.
+- A hook in the managed settings files and a hook in the user's settings with the same event and
+  matcher but different commands now score as two hooks, not one. Both run, and the score missed
+  one broad-matcher reason. The score rises by 1.875 for a `PreToolUse` matcher and by 0.625 for
+  another event. It changes only on a host where both files define the same event and matcher with
+  different commands. The same command in both files still scores once.
 - `lodeline doctor` and the MCP tool `my_risk` now name each source whose config the agent could
   not read or parse, as `lodeline show risk` does. `doctor` prints one line per source under
   `latest risk`. `my_risk` adds a `failed_sources` list next to `latest_risk` only when a source
