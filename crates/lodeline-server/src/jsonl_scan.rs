@@ -166,7 +166,7 @@ pub fn scan(events_out_dir: &Path, f: &ScanFilters) -> std::io::Result<ScanResul
                 }
             }
         }
-        pending.sort_by(|a, b| b.0.cmp(&a.0));
+        pending.sort_by_key(|p| std::cmp::Reverse(p.0));
         pending.truncate(f.limit);
         let floor = day_start_ms(&day[0].1);
         let ready = pending.partition_point(|(id, _)| uuid_v7_unix_ms(*id) >= floor);
