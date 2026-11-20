@@ -342,3 +342,17 @@ fn non_string_tool_and_bucket_are_rejected() {
         assert!(serde_json::from_str::<AiGuardBucket>(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn a_known_scope_kind_with_the_wrong_fields_is_rejected() {
+    for bad in [
+        r#"{"kind":"project"}"#,
+        r#"{"kind":"project","path":5}"#,
+        r#"{"kind":"application"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AiGuardScope>(bad).is_err(),
+            "{bad} decoded"
+        );
+    }
+}

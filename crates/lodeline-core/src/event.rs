@@ -223,9 +223,9 @@ pub enum AiGuardScope {
     /// `app` is a stable snake_case identifier matching the parser
     /// (e.g., "claude_desktop", "continue").
     Application { app: String },
-    /// A scope object this build cannot decode: a kind from a newer agent, or a
-    /// known kind whose fields changed. The object is kept as the same JSON
-    /// value, so key order may differ. Agents never emit it. Untagged variants
+    /// A scope object whose kind this build does not know, from a newer agent.
+    /// The object is kept as the same JSON value, so key order may differ. A
+    /// known kind with the wrong fields is an error, not this variant. Agents never emit it. Untagged variants
     /// must come last.
     #[serde(untagged)]
     Unknown(UnknownScope),
@@ -247,8 +247,19 @@ impl<'de> Deserialize<'de> for AiGuardScope {
         if !v.get("kind").is_some_and(serde_json::Value::is_string) {
             return Err(D::Error::custom("an AI Guard scope needs a string `kind`"));
         }
+        let kind = v["kind"].as_str().unwrap_or_default().to_owned();
         #[allow(clippy::disallowed_methods)] // the one caller that ran the check
-        AiGuardScope::deserialize(v).map_err(D::Error::custom)
+        let scope = AiGuardScope::deserialize(v).map_err(D::Error::custom)?;
+        // A known kind with the wrong fields falls into the untagged arm; that
+        // arm is only for kinds this build does not know.
+        if matches!(scope, AiGuardScope::Unknown(_))
+            && matches!(kind.as_str(), "user_global" | "project" | "application")
+        {
+            return Err(D::Error::custom(format!(
+                "an AI Guard scope of kind `{kind}` has the wrong fields"
+            )));
+        }
+        Ok(scope)
     }
 }
 
