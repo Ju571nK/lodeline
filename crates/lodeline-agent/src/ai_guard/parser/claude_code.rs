@@ -196,7 +196,7 @@ fn assess_user(
         if let Some(perms) = managed.get("permissions") {
             emit_broad_allow_reasons(perms, &mut found);
         }
-        push_managed(found, &mut out);
+        push_managed(found, &mut out, |_| false);
     }
     // #191 signal 1 — the start mode's auto-approval posture.
     if emit_start_mode_reason(start, &mut out) {
@@ -233,7 +233,7 @@ fn assess_user(
             super::mcp_scan::emit_one_server(name, def, &mut found);
         }
     }
-    push_managed(found, &mut out);
+    push_managed(found, &mut out, |_| false);
     // #145 (codex C8) — a user-global `enableAllProjectMcpServers: true`
     // blanket-approves project MCP servers across EVERY repo. No single
     // repo context here, so emit on the key alone.
@@ -1296,8 +1296,13 @@ fn label_managed(reason: &mut AiGuardReason) {
 /// Add reasons found in the managed files. `NoSandbox` describes the host as
 /// a whole, so it is added at most once, as for component hooks. A hook or
 /// allow rule the user also has runs once, so the user's reason is replaced
-/// by the labelled one rather than scored twice.
-fn push_managed(found: Vec<AiGuardReason>, out: &mut Vec<AiGuardReason>) {
+/// by the labelled one rather than scored twice, unless `distinct` says the
+/// two are different things that only share a reason.
+fn push_managed(
+    found: Vec<AiGuardReason>,
+    out: &mut Vec<AiGuardReason>,
+    distinct: impl Fn(&AiGuardReason) -> bool,
+) {
     for mut reason in found {
         if matches!(reason, AiGuardReason::NoSandbox { .. }) {
             if out
@@ -1309,12 +1314,56 @@ fn push_managed(found: Vec<AiGuardReason>, out: &mut Vec<AiGuardReason>) {
             out.push(reason);
             continue;
         }
-        let user_copy = out.iter().position(|r| *r == reason);
+        let user_copy = out
+            .iter()
+            .position(|r| *r == reason)
+            .filter(|_| !distinct(&reason));
         label_managed(&mut reason);
         match user_copy {
             Some(i) => out[i] = reason,
             None => out.push(reason),
         }
+    }
+}
+
+/// The handlers of every group on `event` and `matcher`, as sorted JSON text,
+/// or `None` when no group has them. A `BroadMatcher` reason names the event
+/// and matcher but not the handlers.
+fn matcher_handlers(settings: &Value, event: &str, matcher: &str) -> Option<Vec<String>> {
+    let groups = settings.get("hooks")?.get(event)?.as_array()?;
+    let mut found = false;
+    let mut handlers = Vec::new();
+    for group in groups
+        .iter()
+        .filter(|g| g.get("matcher").and_then(Value::as_str) == Some(matcher))
+    {
+        found = true;
+        for handler in group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            handlers.push(handler.to_string());
+        }
+    }
+    handlers.sort();
+    found.then_some(handlers)
+}
+
+/// A managed `BroadMatcher` is a different hook from the user's when both
+/// files have the event and matcher but not the same handlers: both run.
+fn hook_differs(reason: &AiGuardReason, user: &Value, managed: &Value) -> bool {
+    let AiGuardReason::BroadMatcher {
+        hook_event,
+        matcher,
+    } = reason
+    else {
+        return false;
+    };
+    match matcher_handlers(user, hook_event, matcher) {
+        Some(theirs) => matcher_handlers(managed, hook_event, matcher) != Some(theirs),
+        None => false,
     }
 }
 
@@ -4040,6 +4089,58 @@ mod tests {
             .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))
             .count();
         assert_eq!(sandboxes, 1, "{reasons:?}");
+    }
+
+    fn broad_hook(command: &str) -> String {
+        format!(
+            r#"{{"hooks": {{"PreToolUse": [{{"matcher": "*", "hooks": [{{"command": "{command}"}}]}}]}}}}"#
+        )
+    }
+
+    fn broad_matchers(reasons: &[AiGuardReason]) -> Vec<&AiGuardReason> {
+        reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::BroadMatcher { .. }))
+            .collect()
+    }
+
+    /// Two hooks with different commands both run, so a user hook and a
+    /// managed hook on the same event and matcher score as two reasons.
+    #[test]
+    fn user_and_managed_hooks_with_different_commands_score_twice() {
+        let reasons = assess_with_managed(Some(&broad_hook("echo a")), &broad_hook("echo b"));
+        let found = broad_matchers(&reasons);
+        assert_eq!(found.len(), 2, "{reasons:?}");
+        assert!(found.contains(&&AiGuardReason::BroadMatcher {
+            hook_event: "PreToolUse".into(),
+            matcher: "*".into(),
+        }));
+        assert!(found.contains(&&AiGuardReason::BroadMatcher {
+            hook_event: "PreToolUse (managed file)".into(),
+            matcher: "*".into(),
+        }));
+        let sandboxes = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))
+            .count();
+        assert_eq!(sandboxes, 1, "{reasons:?}");
+        let one = assess_with_managed(Some(&broad_hook("echo a")), &broad_hook("echo a"));
+        assert_eq!(rubric::score(&reasons) - rubric::score(&one), 1.875);
+    }
+
+    /// One hook the user and the managed file both define runs once, so only
+    /// the labelled reason stays.
+    #[test]
+    fn user_and_managed_hooks_with_the_same_command_score_once() {
+        let reasons = assess_with_managed(Some(&broad_hook("echo a")), &broad_hook("echo a"));
+        assert_eq!(
+            broad_matchers(&reasons),
+            [&AiGuardReason::BroadMatcher {
+                hook_event: "PreToolUse (managed file)".into(),
+                matcher: "*".into(),
+            }],
+            "{reasons:?}"
+        );
     }
 
     /// Assess `user` settings (none when `None`) under the managed file
