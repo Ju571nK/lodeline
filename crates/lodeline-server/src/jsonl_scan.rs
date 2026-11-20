@@ -270,22 +270,11 @@ fn filter_match(e: &Event, f: &ScanFilters) -> bool {
         }
     }
     if let Some(min_bucket) = &f.min_ai_guard_bucket {
-        if let lodeline_core::event::Evidence::AiGuardRiskAssessed { bucket, .. } = &e.evidence {
-            use lodeline_core::event::AiGuardBucket::*;
-            let rank = |b: &lodeline_core::event::AiGuardBucket| match b {
-                Low => 1,
-                Medium => 2,
-                High => 3,
-                Critical => 4,
-                Unknown(_) => 0,
-            };
-            let min_rank = match min_bucket.as_str() {
-                "medium" => 2,
-                "high" => 3,
-                "critical" => 4,
-                _ => 1,
-            };
-            if rank(bucket) < min_rank {
+        if let lodeline_core::event::Evidence::AiGuardRiskAssessed { bucket, score, .. } =
+            &e.evidence
+        {
+            let min_rank = lodeline_core::event::AiGuardBucket::from_name(min_bucket).rank(0.0);
+            if bucket.rank(*score) < min_rank {
                 return false;
             }
         }

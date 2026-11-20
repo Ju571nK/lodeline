@@ -33,6 +33,13 @@ pub struct RiskEntry {
     pub config_found: Option<bool>,
 }
 
+impl RiskEntry {
+    /// The reading's severity rank (see `AiGuardBucket::rank`).
+    pub fn rank(&self) -> u8 {
+        self.bucket.rank(self.score)
+    }
+}
+
 /// A source whose parser failed (#333): the latest `AiGuardAssessFailed`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssessFailure {

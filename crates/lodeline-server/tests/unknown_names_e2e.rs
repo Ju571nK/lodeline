@@ -248,15 +248,15 @@ async fn an_unknown_bucket_ranks_by_its_score_in_every_server_reader() {
             .unwrap();
         assert_eq!(row["current_risk"]["max_bucket"], "severe", "{row}");
     }
-    let list = get(&app, "/v1/fleet/hosts").await;
+    let risk = get(&app, "/v1/fleet/risk").await;
     let alerts: Vec<u64> = hosts
         .iter()
         .map(|host| {
-            list["hosts"]
+            risk["rows"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|h| &h["host_id"] == host)
+                .find(|r| &r["host_id"] == host)
                 .unwrap()["open_alert_count_24h"]
                 .as_u64()
                 .unwrap()

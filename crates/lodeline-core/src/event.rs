@@ -300,6 +300,35 @@ wire_names!(AiGuardBucket {
     Critical => "critical",
 });
 
+impl AiGuardBucket {
+    /// The bucket a score falls in: low below 1, medium below 4, high below 7,
+    /// critical from 7.
+    pub fn from_score(score: f32) -> Self {
+        if score < 1.0 {
+            Self::Low
+        } else if score < 4.0 {
+            Self::Medium
+        } else if score < 7.0 {
+            Self::High
+        } else {
+            Self::Critical
+        }
+    }
+
+    /// Severity rank, 1 for low to 4 for critical. An unknown bucket ranks as
+    /// the bucket its `score` falls in, so pass the score of the reading the
+    /// bucket came from, or 0 when there is none.
+    pub fn rank(&self, score: f32) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Critical => 4,
+            Self::Unknown(_) => Self::from_score(score).rank(score),
+        }
+    }
+}
+
 /// Phase 3b.1 — one finding inside an `AiGuardRiskAssessed` event.
 /// Stable wire strings — operators filter by these in the SIEM, so renames are
 /// breaking changes.
@@ -1117,6 +1146,40 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use time::macros::datetime;
+
+    #[test]
+    fn a_score_falls_in_the_bucket_of_its_threshold() {
+        for (score, bucket) in [
+            (0.0, AiGuardBucket::Low),
+            (0.99, AiGuardBucket::Low),
+            (1.0, AiGuardBucket::Medium),
+            (3.99, AiGuardBucket::Medium),
+            (4.0, AiGuardBucket::High),
+            (6.99, AiGuardBucket::High),
+            (7.0, AiGuardBucket::Critical),
+            (10.0, AiGuardBucket::Critical),
+        ] {
+            assert_eq!(AiGuardBucket::from_score(score), bucket, "score {score}");
+        }
+    }
+
+    #[test]
+    fn a_known_bucket_ranks_by_its_name_and_an_unknown_one_by_its_score() {
+        for (bucket, rank) in [
+            (AiGuardBucket::Low, 1),
+            (AiGuardBucket::Medium, 2),
+            (AiGuardBucket::High, 3),
+            (AiGuardBucket::Critical, 4),
+        ] {
+            for score in [0.0, 3.0, 9.0] {
+                assert_eq!(bucket.rank(score), rank, "{bucket:?} at {score}");
+            }
+        }
+        let severe = AiGuardBucket::Unknown("severe".into());
+        for (score, rank) in [(0.5, 1), (3.0, 2), (6.0, 3), (8.0, 4)] {
+            assert_eq!(severe.rank(score), rank, "unknown at {score}");
+        }
+    }
 
     #[test]
     fn severity_round_trips_as_lower_snake() {

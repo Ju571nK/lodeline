@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use lodeline_core::event::{AiTool, HostMetaSnapshot, NetworkInterface};
+use lodeline_core::event::{AiGuardBucket, AiTool, HostMetaSnapshot, NetworkInterface};
 use lodeline_fleet_api as api;
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
@@ -46,51 +46,23 @@ fn list_filter_match(
         }
     }
     if let Some(bf) = bucket_filter {
-        let max = max_bucket_str(h);
-        match max {
-            Some(b) => {
-                if !bf.iter().any(|x| x == b) {
-                    return false;
-                }
+        let matches = match top_entry(h) {
+            Some(top) => {
+                let ranked_as = match &top.bucket {
+                    AiGuardBucket::Unknown(_) => Some(AiGuardBucket::from_score(top.score)),
+                    _ => None,
+                };
+                bf.iter().any(|x| {
+                    x == top.bucket.as_str() || ranked_as.as_ref().is_some_and(|b| x == b.as_str())
+                })
             }
-            None => {
-                if !bf.iter().any(|x| x == "low") {
-                    return false;
-                }
-            } // no risk ≈ low
+            None => bf.iter().any(|x| x == "low"), // no risk is low
+        };
+        if !matches {
+            return false;
         }
     }
     true
-}
-
-fn max_bucket_str(h: &HostSummary) -> Option<&'static str> {
-    use lodeline_core::event::AiGuardBucket::*;
-    let mut max: Option<&lodeline_core::event::AiGuardBucket> = None;
-    for entry in h.current_risk.values() {
-        let new_rank = bucket_rank(&entry.bucket);
-        let cur_rank = max.map(bucket_rank).unwrap_or(0);
-        if new_rank >= cur_rank {
-            max = Some(&entry.bucket);
-        }
-    }
-    max.map(|b| match b {
-        Low => "low",
-        Medium => "medium",
-        High => "high",
-        Critical => "critical",
-        Unknown(_) => "unknown",
-    })
-}
-
-fn bucket_rank(b: &lodeline_core::event::AiGuardBucket) -> u8 {
-    use lodeline_core::event::AiGuardBucket::*;
-    match b {
-        Low => 1,
-        Medium => 2,
-        High => 3,
-        Critical => 4,
-        Unknown(_) => 0,
-    }
 }
 
 fn comma_split(s: &Option<String>) -> Option<Vec<String>> {
@@ -119,7 +91,7 @@ pub async fn get_fleet_hosts(
         "risk" => {
             all.sort_by_key(|h| {
                 (
-                    std::cmp::Reverse(bucket_rank(top_bucket(h))),
+                    std::cmp::Reverse(top_entry(h).map_or(1, RiskEntry::rank)),
                     h.host_id.clone(),
                 )
             });
@@ -161,12 +133,15 @@ pub async fn get_fleet_hosts(
     .into_response()
 }
 
-fn top_bucket(h: &HostSummary) -> &lodeline_core::event::AiGuardBucket {
-    h.current_risk
-        .values()
-        .map(|e| &e.bucket)
-        .max_by_key(|b| bucket_rank(b))
-        .unwrap_or(&lodeline_core::event::AiGuardBucket::Low)
+/// The reading that sets the host's severity: the highest rank, and among
+/// equal ranks the last tool in `AiTool` order.
+fn top_entry(h: &HostSummary) -> Option<&RiskEntry> {
+    h.current_risk.values().max_by_key(|e| e.rank())
+}
+
+fn top_bucket(h: &HostSummary) -> &AiGuardBucket {
+    const LOW: &AiGuardBucket = &AiGuardBucket::Low;
+    top_entry(h).map_or(LOW, |e| &e.bucket)
 }
 
 fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {

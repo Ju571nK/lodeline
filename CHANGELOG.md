@@ -10,8 +10,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 ### Changed
 
 - Readers built from this release keep an unknown AI tool, bucket or scope name in an AI Guard
-  event instead of rejecting the event. A server still rejects such an event until a later change,
-  and an agent never writes one. Policy fields that name a tool still refuse an unknown tool.
+  event instead of rejecting the event. A server from this release accepts and stores such an
+  event, where an earlier server rejected it as malformed. Its fleet views list an unknown tool
+  under its own name, after the known tools in a tie. An unknown bucket ranks as the bucket its
+  score falls in: low below 1, medium below 4, high below 7, critical from 7. The host list sort
+  and `bucket` filter, the risk `min_bucket` filter, the events `min_ai_guard_bucket` filter and
+  the high and critical alert count all use that rank. An agent never writes an unknown name, and
+  policy fields that name a tool still refuse an unknown tool.
 
 ### Fixed
 
