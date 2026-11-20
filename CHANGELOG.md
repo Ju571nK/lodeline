@@ -14,6 +14,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   source showed a stale score or nothing, although the agent already reports the failure to the
   fleet. An older CLI ignores the new field, and a new CLI with an older agent prints no extra
   line.
+- On Windows the agent starts the watch of a folder again when the folder has had no event for
+  15 minutes and still exists, because the operating system can end a folder watch after a read
+  error and the agent did not notice. A message at `warn` level names each folder it re-armed. The
+  agent then sends one event for each file created or changed while the watch was down, and none
+  for a file that is unchanged. (#627)
 - `/v1/events` now returns events newest first across hosts. Before, two hosts with a file for the
   same day came back one host after the other, in the order the operating system listed them. Each
   page and the cursor now follow `event_id` across all hosts of a day.

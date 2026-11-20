@@ -52,6 +52,9 @@ icu_normalizer = { workspace = true }
 same-file = "1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }
