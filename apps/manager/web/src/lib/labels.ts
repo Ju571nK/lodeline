@@ -95,12 +95,16 @@ export function sourceLabel(
 }
 
 /** Humanizes an AI Guard scope (§14.5) for display: "project · …/path",
- *  "app · name", or "user global". Shared by the alerts SlideOver and the
+ *  "app · name", or "user global". A kind this build does not know (§14.17)
+ *  shows as its own text. Shared by the alerts SlideOver and the
  *  host-detail AI Guard block so the rendering can't diverge. Tolerates a
  *  null/absent scope and a project scope missing its `path` (omitempty wire). */
 export function scopeLabel(scope: Scope | null | undefined): string {
   if (!scope) return '—';
   if (scope.kind === 'project') return `project · ${shortPath(scope.path)}`;
   if (scope.kind === 'application') return `app · ${scope.app}`;
-  return 'user global';
+  if (scope.kind === 'user_global') return 'user global';
+  // The wire type is not checked at runtime; a newer server may send a kind this build lacks.
+  const kind = (scope as { kind?: unknown }).kind;
+  return typeof kind === 'string' && kind ? kind : 'unknown scope';
 }
