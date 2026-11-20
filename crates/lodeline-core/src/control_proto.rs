@@ -595,7 +595,7 @@ mod tests {
         let older: OlderResponse =
             serde_json::from_str(&risk_reply_json(r#","config_found":false"#)).unwrap();
         let a = &older.risk.unwrap().assessments[0];
-        assert_eq!((a.tool, a.reasons_count), (AiTool::Gemini, 0));
+        assert_eq!((&a.tool, a.reasons_count), (&AiTool::Gemini, 0));
     }
 
     #[test]

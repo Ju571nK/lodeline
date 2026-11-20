@@ -41,11 +41,11 @@ pub async fn evaluate(ctx: &SilenceTaskCtx) {
             .collect()
     };
     for key in keys {
-        let (agent, uid) = key;
+        let (agent, uid) = key.clone();
         let Some(record) = ctx.map.lock().get(&key).cloned() else {
             continue;
         };
-        let probe = (ctx.probe_fn)(agent, uid);
+        let probe = (ctx.probe_fn)(agent.clone(), uid);
         // window applied here (single place): session active = recent enough mtime.
         let session_active = probe.active
             && probe.last_activity_at.is_some_and(|la| {
@@ -128,7 +128,7 @@ pub async fn run(rc: RunCfg) {
         event_tx: rc.event_tx,
         now_fn: Box::new(OffsetDateTime::now_utc),
         probe_fn: Box::new(move |agent, _uid| {
-            let dirs = crate::hook_silence::session_dirs(agent, &home);
+            let dirs = crate::hook_silence::session_dirs(agent.clone(), &home);
             crate::hook_silence::probe_dirs(crate::hook_silence::probe_kind_for(agent), &dirs, &cap)
         }),
     };

@@ -218,7 +218,7 @@ async fn handle_decide_conn<S>(
     // observation never becomes false silence.
     crate::hook_silence::record_hook_event(
         &activity_map,
-        req.invocation.agent,
+        req.invocation.agent.clone(),
         peer_uid,
         time::OffsetDateTime::now_utc(),
     );
@@ -332,7 +332,7 @@ fn decision_event(
         source: SourceKind::AgentHook,
         subject: Subject::Self_,
         evidence: Evidence::HookDecision(HookDecisionEvidence {
-            agent: inv.agent,
+            agent: inv.agent.clone(),
             peer_uid,
             agent_session_id: inv.agent_session_id.clone(),
             tool_use_id: inv.tool_use_id.clone(),

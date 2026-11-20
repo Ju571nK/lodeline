@@ -323,7 +323,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             Antigravity => &antigravity_repos,
             ClaudeDesktop => &[],
             Grok => &grok_repos,
-            Other => &[],
+            Other | Unknown(_) => &[],
         }
     };
     // Clone the authored packs out so the loop can push synthetic targets into
@@ -333,7 +333,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         if !crate::ai_guard::rule_pack::pack_is_loadable(pack) {
             continue;
         }
-        let repos = repos_for_tool(pack.tool);
+        let repos = repos_for_tool(pack.tool.clone());
         for parser in crate::ai_guard::rule_pack::expand::expand_pack_parsers(pack, repos) {
             if let lodeline_core::event::AiGuardScope::Project { path } =
                 crate::ai_guard::parser::AiGuardParser::scope(&parser)
@@ -2293,7 +2293,7 @@ pub(crate) fn push_ext_script_synthetic_target(
 /// Phase 3b.3 — map `AiTool` to the display string used in synthetic
 /// WatchTarget ids for ext-scripts. Matches the existing per-repo naming
 /// convention (`continue`, `claude_code`, `codex`).
-pub(crate) fn tool_display_for_extscript(tool: lodeline_core::event::AiTool) -> &'static str {
+pub(crate) fn tool_display_for_extscript(tool: &lodeline_core::event::AiTool) -> &str {
     use lodeline_core::event::AiTool;
     match tool {
         AiTool::ClaudeCode => "claude_code",
@@ -2305,6 +2305,7 @@ pub(crate) fn tool_display_for_extscript(tool: lodeline_core::event::AiTool) -> 
         AiTool::Antigravity => "antigravity",
         AiTool::Grok => "grok",
         AiTool::Other => "other",
+        AiTool::Unknown(name) => name,
     }
 }
 
@@ -2383,7 +2384,8 @@ pub(crate) fn register_ext_scripts(
                     continue;
                 };
                 if already_synthesized.insert(canon.clone()) {
-                    let display = tool_display_for_extscript(parser.tool());
+                    let tool = parser.tool();
+                    let display = tool_display_for_extscript(&tool);
                     push_ext_script_synthetic_target(effective, display, &canon);
                 }
                 per_parser

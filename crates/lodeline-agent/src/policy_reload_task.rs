@@ -67,7 +67,7 @@ where
         let mut s = state.write();
         for repo_root in &removed {
             s.remove(&(
-                tool,
+                tool.clone(),
                 lodeline_core::event::AiGuardScope::Project {
                     path: repo_root.clone(),
                 },
@@ -125,7 +125,7 @@ fn reconcile_rule_packs(
             continue;
         }
         new_pack_ids.insert(pack.id.clone());
-        let repos = repos_for_tool(pack.tool);
+        let repos = repos_for_tool(pack.tool.clone());
         for parser in crate::ai_guard::rule_pack::expand::expand_pack_parsers(pack, &repos) {
             new_keys.insert((parser.tool(), parser.scope(), pack.id.clone()));
             guard.push(Arc::new(parser));
@@ -477,7 +477,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
             Antigravity => new_antigravity.iter().cloned().collect(),
             ClaudeDesktop => Vec::new(),
             Grok => new_grok.iter().cloned().collect(),
-            Other => Vec::new(),
+            Other | Unknown(_) => Vec::new(),
         }
     };
 
@@ -659,7 +659,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         .cloned()
         .collect();
     for pack in &project_packs {
-        for repo in repos_for_tool(pack.tool) {
+        for repo in repos_for_tool(pack.tool.clone()) {
             crate::runtime::push_rule_pack_synthetic_targets(&mut effective, pack, &repo);
         }
     }

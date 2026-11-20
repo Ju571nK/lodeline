@@ -2,7 +2,7 @@
 //! can be exercised by unit tests without spinning up a FleetIndex.
 
 use crate::fleet_index::{AssessFailure, HostSummary, RiskEntry, RiskSourceKey, SourceState};
-use lodeline_core::event::{AiGuardBucket, Event, Evidence, Severity};
+use lodeline_core::event::{AiGuardBucket, AiTool, Event, Evidence, Severity};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
@@ -49,7 +49,7 @@ fn put_source(
     // A clean reading for one user or project must not hide another's; on a
     // tie the newest reading is shown. Rebuilt for every tool, so a tool whose
     // readings were all pruned drops out. A source with no reading adds none.
-    let mut top: BTreeMap<_, (OffsetDateTime, &RiskEntry)> = BTreeMap::new();
+    let mut top: BTreeMap<&AiTool, (OffsetDateTime, &RiskEntry)> = BTreeMap::new();
     for ((t, ..), (seen, state)) in &host.risk_sources {
         let Some(r) = state.reading() else { continue };
         let keep = top.get(t).is_some_and(|best| {
@@ -60,7 +60,7 @@ fn put_source(
                 .is_ge()
         });
         if !keep {
-            top.insert(*t, (*seen, r));
+            top.insert(t, (*seen, r));
         }
     }
     host.current_risk = top
@@ -68,7 +68,7 @@ fn put_source(
         .map(|(t, r)| {
             let mut entry = r.1.clone();
             entry.config_found = config_found_rollup(&host.risk_sources, t);
-            (t, entry)
+            (t.clone(), entry)
         })
         .collect();
 }
@@ -79,11 +79,11 @@ fn put_source(
 /// `true`. One source that does not say leaves the tool unknown.
 fn config_found_rollup(
     sources: &std::collections::HashMap<RiskSourceKey, (OffsetDateTime, SourceState)>,
-    tool: lodeline_core::event::AiTool,
+    tool: &AiTool,
 ) -> Option<bool> {
     let mut all_false = true;
     for ((t, ..), (_, state)) in sources {
-        if *t != tool {
+        if t != tool {
             continue;
         }
         match state {
@@ -159,7 +159,7 @@ pub fn apply_event_received_between(
             let entry = RiskEntry {
                 controls: controls.clone(),
                 score: *score,
-                bucket: *bucket,
+                bucket: bucket.clone(),
                 assessed_ts: event.ts,
                 is_reattestation: *is_reattestation,
                 scope: scope.clone(),
@@ -169,7 +169,12 @@ pub fn apply_event_received_between(
                 tool_label: tool_label.clone(),
                 config_found: *config_found,
             };
-            let key = (*tool, scope.clone(), user.clone(), rule_pack_id.clone());
+            let key = (
+                tool.clone(),
+                scope.clone(),
+                user.clone(),
+                rule_pack_id.clone(),
+            );
             put_source(host, event, earliest, latest, key, |_| {
                 SourceState::Assessed(entry)
             });
@@ -186,7 +191,12 @@ pub fn apply_event_received_between(
             last_assessed_ts,
             is_reattestation: _,
         } => {
-            let key = (*tool, scope.clone(), user.clone(), rule_pack_id.clone());
+            let key = (
+                tool.clone(),
+                scope.clone(),
+                user.clone(),
+                rule_pack_id.clone(),
+            );
             put_source(host, event, earliest, latest, key, |prev| {
                 let held = prev.as_ref().and_then(SourceState::reading);
                 let failure = AssessFailure {

@@ -89,6 +89,7 @@ pub enum RulePackScope {
 pub struct RulePack {
     pub id: String,
     pub pack_version: u32,
+    #[serde(deserialize_with = "crate::event::deserialize_known_tool")]
     pub tool: crate::event::AiTool,
     pub scope: RulePackScope,
     pub watched_paths: Vec<String>,
@@ -291,7 +292,7 @@ impl Default for ProbeCap {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookSilenceCfg {
     /// Per-agent opt-in allowlist. Empty = the whole feature is off.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::event::deserialize_known_tools")]
     pub enabled_agents: Vec<crate::event::AiTool>,
     /// Silence window W (seconds): an opted-in agent with session activity but
     /// zero hook events for longer than this is flagged (default 43200 = 12h).
@@ -1864,6 +1865,28 @@ host_id_strategy: hostname
         assert_eq!(doc.hook_silence.probe_cap.max_entries, 256);
         assert_eq!(doc.hook_silence.probe_cap.max_depth, 3);
         assert_eq!(doc.hook_silence.probe_cap.budget_ms, 50);
+    }
+
+    #[test]
+    fn a_rule_pack_with_an_unknown_tool_fails_to_parse() {
+        let yaml = |tool: &str| {
+            format!(
+                "id: p\npack_version: 1\ntool: {tool}\nscope:\n  kind: user_global\nwatched_paths: []\nrules: []\n"
+            )
+        };
+        assert!(serde_yaml::from_str::<RulePack>(&yaml("gemini")).is_ok());
+        let err = serde_yaml::from_str::<RulePack>(&yaml("newtool")).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
+    }
+
+    #[test]
+    fn enabled_agents_with_an_unknown_tool_fails_to_parse() {
+        assert!(
+            parse("version: 1\ntargets: []\nhook_silence:\n  enabled_agents: [codex]\n").is_ok()
+        );
+        let err = parse("version: 1\ntargets: []\nhook_silence:\n  enabled_agents: [newtool]\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
     }
 
     #[test]

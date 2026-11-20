@@ -65,12 +65,12 @@ fn list_filter_match(
 
 fn max_bucket_str(h: &HostSummary) -> Option<&'static str> {
     use lodeline_core::event::AiGuardBucket::*;
-    let mut max: Option<lodeline_core::event::AiGuardBucket> = None;
+    let mut max: Option<&lodeline_core::event::AiGuardBucket> = None;
     for entry in h.current_risk.values() {
-        let new_rank = bucket_rank(entry.bucket);
+        let new_rank = bucket_rank(&entry.bucket);
         let cur_rank = max.map(bucket_rank).unwrap_or(0);
         if new_rank >= cur_rank {
-            max = Some(entry.bucket);
+            max = Some(&entry.bucket);
         }
     }
     max.map(|b| match b {
@@ -78,16 +78,18 @@ fn max_bucket_str(h: &HostSummary) -> Option<&'static str> {
         Medium => "medium",
         High => "high",
         Critical => "critical",
+        Unknown(_) => "unknown",
     })
 }
 
-fn bucket_rank(b: lodeline_core::event::AiGuardBucket) -> u8 {
+fn bucket_rank(b: &lodeline_core::event::AiGuardBucket) -> u8 {
     use lodeline_core::event::AiGuardBucket::*;
     match b {
         Low => 1,
         Medium => 2,
         High => 3,
         Critical => 4,
+        Unknown(_) => 0,
     }
 }
 
@@ -159,13 +161,12 @@ pub async fn get_fleet_hosts(
     .into_response()
 }
 
-fn top_bucket(h: &HostSummary) -> lodeline_core::event::AiGuardBucket {
-    use lodeline_core::event::AiGuardBucket::*;
+fn top_bucket(h: &HostSummary) -> &lodeline_core::event::AiGuardBucket {
     h.current_risk
         .values()
-        .map(|e| e.bucket)
-        .max_by_key(|b| bucket_rank(*b))
-        .unwrap_or(Low)
+        .map(|e| &e.bucket)
+        .max_by_key(|b| bucket_rank(b))
+        .unwrap_or(&lodeline_core::event::AiGuardBucket::Low)
 }
 
 fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {
@@ -182,7 +183,7 @@ fn render_risk_block(h: &HostSummary) -> Option<api::CurrentRisk> {
                 config_found: entry.config_found,
                 score: f64::from(entry.score),
                 source: Some(risk_source(entry)),
-                unassessed_since: h.unassessed_since(*tool).map(rfc3339),
+                unassessed_since: h.unassessed_since(tool).map(rfc3339),
             };
             (wire_str(tool), risk)
         })
@@ -205,7 +206,7 @@ fn render_unassessed(h: &HostSummary) -> Option<BTreeMap<String, api::ToolUnasse
     let mut by_tool: BTreeMap<AiTool, Vec<(&RiskSourceKey, &AssessFailure)>> = BTreeMap::new();
     for (key, (_, state)) in &h.risk_sources {
         if let Some(f) = state.failure() {
-            by_tool.entry(key.0).or_default().push((key, f));
+            by_tool.entry(key.0.clone()).or_default().push((key, f));
         }
     }
     if by_tool.is_empty() {
@@ -403,7 +404,7 @@ pub async fn get_fleet_host_by_id(
                 .current_risk
                 .iter()
                 .map(|(tool, entry)| {
-                    let a = render_assessment(entry, h.unassessed_since(*tool));
+                    let a = render_assessment(entry, h.unassessed_since(tool));
                     (wire_str(tool), a)
                 })
                 .collect(),

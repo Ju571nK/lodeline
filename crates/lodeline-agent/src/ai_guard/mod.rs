@@ -110,7 +110,7 @@ pub(crate) fn user_global_parsers_with_baseline(
 /// pretty table) and `lodeline scan`, so the accepted set can never drift from the
 /// enum. The exhaustive match means a new `AiTool` variant fails to compile here
 /// until a label is added. Ungated (scan is in the default build).
-pub(crate) fn tool_cli_label(t: lodeline_core::event::AiTool) -> &'static str {
+pub(crate) fn tool_cli_label(t: &lodeline_core::event::AiTool) -> &str {
     use lodeline_core::event::AiTool::*;
     match t {
         ClaudeCode => "claude-code",
@@ -122,5 +122,6 @@ pub(crate) fn tool_cli_label(t: lodeline_core::event::AiTool) -> &'static str {
         Antigravity => "antigravity",
         Grok => "grok",
         Other => "other",
+        Unknown(name) => name,
     }
 }

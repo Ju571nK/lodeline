@@ -274,7 +274,7 @@ async fn handle_hook_conn<S>(
             // observation never becomes false silence.
             crate::hook_silence::record_hook_event(
                 &activity_map,
-                env.payload.agent,
+                env.payload.agent.clone(),
                 peer_uid,
                 time::OffsetDateTime::now_utc(),
             );

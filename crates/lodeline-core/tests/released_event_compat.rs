@@ -5,8 +5,8 @@
 mod released;
 
 use lodeline_core::event::{
-    AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject,
-    UnknownReason,
+    AiGuardBucket, AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind,
+    Subject, UnknownReason, UnknownScope,
 };
 use time::macros::datetime;
 
@@ -240,6 +240,118 @@ fn a_reason_without_a_string_kind_is_rejected() {
     ] {
         assert!(
             serde_json::from_str::<AiGuardReason>(bad).is_err(),
+            "{bad} decoded"
+        );
+    }
+}
+
+fn risk_event(tool: &str, scope: serde_json::Value, bucket: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1, "event_id": uuid::Uuid::now_v7(), "ts": "2026-11-20T10:00:00Z",
+        "host_id": "h", "agent_version": "0.19.0", "severity": "warn",
+        "source": {"kind": "agent"}, "subject": {"kind": "self"},
+        "evidence": {"kind": "ai_guard_risk_assessed", "tool": tool,
+            "scope": scope, "score": 3.0, "bucket": bucket,
+            "reasons": [], "is_reattestation": false}
+    })
+}
+
+#[test]
+fn unknown_tool_bucket_and_scope_kind_are_kept_and_written_back() {
+    let scope = serde_json::json!({"kind": "workspace", "name": "w", "depth": 2});
+    for (name, wire) in [
+        (
+            "tool",
+            risk_event("newtool", serde_json::json!({"kind": "user_global"}), "low"),
+        ),
+        (
+            "bucket",
+            risk_event(
+                "codex",
+                serde_json::json!({"kind": "user_global"}),
+                "severe",
+            ),
+        ),
+        ("scope", risk_event("codex", scope, "low")),
+    ] {
+        assert!(
+            serde_json::from_value::<released::Event>(wire.clone()).is_err(),
+            "v0.12.6 rejects an unknown {name}"
+        );
+        let ev: Event = serde_json::from_value(wire.clone())
+            .unwrap_or_else(|e| panic!("an unknown {name} is kept: {e}"));
+        assert_eq!(
+            serde_json::to_value(&ev).unwrap()["evidence"],
+            wire["evidence"]
+        );
+    }
+}
+
+#[test]
+fn unknown_names_land_in_the_unknown_variants() {
+    let wire = risk_event(
+        "newtool",
+        serde_json::json!({"kind": "workspace", "name": "w"}),
+        "severe",
+    );
+    let ev: Event = serde_json::from_value(wire).unwrap();
+    let Evidence::AiGuardRiskAssessed {
+        tool,
+        scope,
+        bucket,
+        ..
+    } = ev.evidence
+    else {
+        panic!("{:?}", ev.evidence)
+    };
+    assert_eq!(tool, AiTool::Unknown("newtool".into()));
+    assert_eq!(bucket, AiGuardBucket::Unknown("severe".into()));
+    let AiGuardScope::Unknown(UnknownScope { kind, rest }) = scope else {
+        panic!("{scope:?}")
+    };
+    assert_eq!(kind, "workspace");
+    assert_eq!(
+        serde_json::Value::Object(rest),
+        serde_json::json!({"name": "w"})
+    );
+}
+
+#[test]
+fn a_scope_without_a_string_kind_is_rejected() {
+    for bad in [
+        "{}",
+        r#"{"kind":null}"#,
+        r#"{"kind":0}"#,
+        r#"{"kind":1,"x":1}"#,
+        r#"{"kind":true}"#,
+        r#"{"kind":{"x":1}}"#,
+        r#""user_global""#,
+        "7",
+    ] {
+        assert!(
+            serde_json::from_str::<AiGuardScope>(bad).is_err(),
+            "{bad} decoded"
+        );
+    }
+}
+
+#[test]
+fn non_string_tool_and_bucket_are_rejected() {
+    for bad in ["7", "null", r#"{"a":1}"#, "[\"codex\"]"] {
+        assert!(serde_json::from_str::<AiTool>(bad).is_err(), "{bad}");
+        assert!(serde_json::from_str::<AiGuardBucket>(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_known_scope_kind_with_the_wrong_fields_is_rejected() {
+    for bad in [
+        r#"{"kind":"project"}"#,
+        r#"{"kind":"project","path":5}"#,
+        r#"{"kind":"application"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AiGuardScope>(bad).is_err(),
             "{bad} decoded"
         );
     }

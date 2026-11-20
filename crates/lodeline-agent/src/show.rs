@@ -621,7 +621,7 @@ fn parse_tool(s: &str) -> Option<lodeline_core::event::AiTool> {
     if s == "claude_code" {
         return Some(lodeline_core::event::AiTool::ClaudeCode);
     }
-    ALL_TOOLS.iter().copied().find(|t| tool_cli_label(*t) == s)
+    ALL_TOOLS.iter().find(|t| tool_cli_label(t) == s).cloned()
 }
 
 #[cfg(feature = "operator-cli")]
@@ -633,7 +633,7 @@ fn show_risk(control_socket: &Path, tool: Option<String>, pretty: bool) -> anyho
             None => {
                 let accepted = ALL_TOOLS
                     .iter()
-                    .map(|t| tool_cli_label(*t))
+                    .map(tool_cli_label)
                     .collect::<Vec<_>>()
                     .join(", ");
                 eprintln!("lodeline show risk: unknown --tool '{s}' (expected: {accepted})");
@@ -680,6 +680,7 @@ fn scope_label(scope: &lodeline_core::event::AiGuardScope) -> String {
         lodeline_core::event::AiGuardScope::Application { app } => {
             format!("application:{app}")
         }
+        lodeline_core::event::AiGuardScope::Unknown(unknown) => unknown.kind.clone(),
     }
 }
 
@@ -711,7 +712,7 @@ pub(crate) fn write_failed_sources(
         writeln!(
             w,
             "! {}\t{}\t{what} {} since {}; {score}",
-            tool_cli_label(f.tool),
+            tool_cli_label(&f.tool),
             with_user(scope_label(&f.scope), &f.user),
             f.path.display(),
             f.failing_since,
@@ -734,7 +735,7 @@ fn write_risk_pretty(w: &mut impl Write, p: &RiskPayload) -> io::Result<()> {
     }
     for s in &p.assessments {
         let scope_str = scope_label(&s.scope);
-        let tool_str = tool_cli_label(s.tool);
+        let tool_str = tool_cli_label(&s.tool);
         // Use the serde wire string (snake_case) rather than Debug. Robust
         // against future multi-word AiGuardBucket variants (e.g., "very_high")
         // where Debug would emit "Veryhigh" but the SIEM filter expects
@@ -1296,11 +1297,11 @@ mod tests {
     #[test]
     fn parse_tool_accepts_every_variant_via_its_label() {
         // Each AiTool must parse from its canonical CLI label and round-trip.
-        for &t in ALL_TOOLS {
+        for t in ALL_TOOLS {
             let label = tool_cli_label(t);
             assert_eq!(
                 parse_tool(label),
-                Some(t),
+                Some(t.clone()),
                 "label {label:?} should parse back to its variant"
             );
         }
@@ -1339,7 +1340,7 @@ mod tests {
         // other formerly-omitted tools) must appear in the enumerated set.
         let accepted = ALL_TOOLS
             .iter()
-            .map(|t| tool_cli_label(*t))
+            .map(tool_cli_label)
             .collect::<Vec<_>>()
             .join(", ");
         assert_eq!(
