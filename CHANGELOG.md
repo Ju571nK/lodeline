@@ -15,6 +15,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The AI Guard hook scanner now reads a script that a hook command runs after another command, as
+  in `cd /tmp; ~/x.sh` or `a && ~/x.sh`, with the same home rules as a script run first. It looks
+  at the first four commands split at `;`, `&&` and `||` outside quotes, on macOS and Linux. Before,
+  such a script was never read, so a destructive line in it raised no reason. A `~user/x.sh` path
+  is still reported as not scanned. A program run by full path after another command is now
+  reported as not scanned, as one run first already is, and the score rises by 1.5 for each such
+  hook.
 - A hook in the managed settings files and a hook in the user's settings with the same event and
   matcher but different commands now score as two hooks, not one. Both run, and the score missed
   one broad-matcher reason. The score rises by 1.875 for a `PreToolUse` matcher and by 0.625 for
