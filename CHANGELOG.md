@@ -7,6 +7,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows the agent starts the watch of a folder again when the folder has had no event for
+  15 minutes and still exists, because the operating system can end a folder watch after a read
+  error and the agent did not notice. A message at `warn` level names each folder it re-armed. The
+  agent then sends one event for each file created or changed while the watch was down, and none
+  for a file that is unchanged. (#627)
+
 ## [0.18.2] - 2026-11-20
 
 **Upgrade.** This release changes no event field, no event kind, no policy field, no reason kind and

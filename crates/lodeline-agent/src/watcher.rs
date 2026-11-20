@@ -405,7 +405,7 @@ impl WatcherHandle {
     /// the old watch may have been down (#627). A root whose directory is gone is left
     /// to `rebuild_roots`.
     fn rearm_idle_roots(&mut self) {
-        let Some(quiet) = self.rearm_after.filter(|_| false) else {
+        let Some(quiet) = self.rearm_after else {
             return;
         };
         if matches!(*self.backend(), BackendWatcher::Poll(_)) {
@@ -2258,7 +2258,7 @@ mod tests {
         let (_td, root, mut rx, mut watcher) = armed_root_with_old_file().await;
         fs::write(root.join("live.json"), b"an event").unwrap();
         assert!(!drain_for(&mut rx, Duration::from_secs(2)).await.is_empty());
-        watcher.rearm_after = Some(Duration::from_secs(1));
+        watcher.rearm_after = Some(Duration::from_secs(30));
         let logs = test_logs::logs_of(|| watcher.reconcile());
         assert!(!logs.contains("re-armed"), "{logs}");
         assert!(watcher.catchups.is_empty());
@@ -2305,5 +2305,51 @@ mod tests {
             process_handles() <= before + 10,
             "handles grew from {before}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rearm_is_on_only_on_windows_and_skips_files_and_polling() {
+        let (td, _root, _rx, mut watcher) = armed_root_with_old_file().await;
+        let (_unused, fresh) = spawn_watcher(
+            vec![(td.path().to_path_buf(), false)],
+            tokio::runtime::Handle::current(),
+            4,
+            None,
+        )
+        .unwrap();
+        assert_eq!(fresh.rearm_after.is_some(), cfg!(windows));
+        let file = td.path().join("old.json");
+        watcher.watch(&file, false).unwrap();
+        watcher.rearm_after = Some(Duration::ZERO);
+        watcher.activity.arm(&file);
+        let only_the_file: Vec<_> = watcher.active.keys().filter(|r| r.is_file()).collect();
+        assert_eq!(only_the_file.len(), 1);
+        let logs = test_logs::logs_of(|| watcher.rearm_idle_roots());
+        assert!(!logs.contains(&file.display().to_string()), "{logs}");
+
+        let (_rx, mut polling) = spawn_watcher(
+            vec![(td.path().to_path_buf(), false)],
+            tokio::runtime::Handle::current(),
+            4,
+            Some(Duration::from_secs(60)),
+        )
+        .unwrap();
+        polling.rearm_after = Some(Duration::ZERO);
+        let logs = test_logs::logs_of(|| polling.reconcile());
+        assert!(!logs.contains("re-armed"), "{logs}");
+    }
+
+    #[test]
+    fn the_change_window_holds_only_files_changed_inside_it() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("f.json");
+        fs::write(&path, b"x").unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        let now = SystemTime::now();
+        let hour = Duration::from_secs(3600);
+        let window = |after, until| ChangeWindow { after, until };
+        assert!(window(now - hour, now + hour).holds(&meta));
+        assert!(!window(now + hour, now + hour * 2).holds(&meta));
+        assert!(!window(now - hour * 2, now - hour).holds(&meta));
     }
 }
