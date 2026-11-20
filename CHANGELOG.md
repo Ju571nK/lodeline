@@ -9,6 +9,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `/v1/events` now returns events newest first across hosts. Before, two hosts with a file for the
+  same day came back one host after the other, in the order the operating system listed them. Each
+  page and the cursor now follow `event_id` across all hosts of a day.
 - A Codex project whose folder the user config marks `trust_level = "untrusted"` no longer scores
   its `.codex/` layers, because Codex does not load them. Its `AGENTS.md` is still scanned, and a
   folder with no trust entry is scored as before. (#710)
