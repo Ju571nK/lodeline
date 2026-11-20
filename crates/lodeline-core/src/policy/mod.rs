@@ -1867,6 +1867,28 @@ host_id_strategy: hostname
     }
 
     #[test]
+    fn a_rule_pack_with_an_unknown_tool_fails_to_parse() {
+        let yaml = |tool: &str| {
+            format!(
+                "id: p\npack_version: 1\ntool: {tool}\nscope:\n  kind: user_global\nwatched_paths: []\nrules: []\n"
+            )
+        };
+        assert!(serde_yaml::from_str::<RulePack>(&yaml("gemini")).is_ok());
+        let err = serde_yaml::from_str::<RulePack>(&yaml("newtool")).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
+    }
+
+    #[test]
+    fn enabled_agents_with_an_unknown_tool_fails_to_parse() {
+        assert!(
+            parse("version: 1\ntargets: []\nhook_silence:\n  enabled_agents: [codex]\n").is_ok()
+        );
+        let err = parse("version: 1\ntargets: []\nhook_silence:\n  enabled_agents: [newtool]\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
+    }
+
+    #[test]
     fn merge_forwards_hook_silence_from_user() {
         let user: PolicyDocument = parse(
             "version: 1\ntargets: []\nhook_silence:\n  enabled_agents: [codex]\n  window_secs: 60\n",
