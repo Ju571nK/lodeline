@@ -637,6 +637,60 @@ async fn a_future_dated_event_counts_by_receive_time_live_and_after_rebuild() {
 }
 
 #[tokio::test]
+async fn a_failure_with_no_last_assessed_ts_takes_the_servers_reading_live_and_after_rebuild() {
+    use time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_token(dir.path(), "tok");
+    let app = build_router(state.clone());
+    let now = time::OffsetDateTime::now_utc();
+    let h = |hours: i64| now - Duration::hours(hours);
+    let host = uuid::Uuid::now_v7().to_string();
+    post_evidence(
+        &app,
+        &host,
+        &[
+            (h(30), ai_reading("claude_code", "alice", 7.5, "critical")),
+            (h(30), ai_reading("gemini", "bob", 2.0, "low")),
+            // The agent restarted, so it reports no last reading for alice.
+            (
+                h(5),
+                ai_failure("claude_code", "alice", "parse", h(5), None),
+            ),
+            // Bob's agent still knows an older value, which wins.
+            (
+                h(5),
+                ai_failure("gemini", "bob", "parse", h(5), Some(h(40))),
+            ),
+            // The server never held a reading for carol.
+            (h(5), ai_failure("codex", "carol", "parse", h(5), None)),
+        ],
+    )
+    .await;
+
+    let check = |views: &[serde_json::Value; 3]| {
+        for body in &views[..2] {
+            let by_tool = &body["ai_guard_unassessed"];
+            assert_eq!(
+                by_tool["claude_code"]["last_assessed_ts"],
+                rfc(h(30)),
+                "{body}"
+            );
+            assert_eq!(by_tool["gemini"]["last_assessed_ts"], rfc(h(40)), "{body}");
+            assert!(by_tool["codex"]["last_assessed_ts"].is_null(), "{body}");
+        }
+    };
+    let live = host_views(&app, &host).await;
+    check(&live);
+
+    state
+        .fleet_index
+        .replace(lodeline_server::boot_rebuild::rebuild_from_jsonl(dir.path()).unwrap());
+    let rebuilt = host_views(&app, &host).await;
+    check(&rebuilt);
+    assert_eq!(rebuilt, live, "a rebuild must match live ingest");
+}
+
+#[tokio::test]
 async fn assess_failure_with_no_reading_leaves_current_risk_null() {
     let dir = tempfile::tempdir().unwrap();
     let app = build_router(state_with_token(dir.path(), "tok"));

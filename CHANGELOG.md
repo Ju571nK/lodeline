@@ -14,6 +14,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   source showed a stale score or nothing, although the agent already reports the failure to the
   fleet. An older CLI ignores the new field, and a new CLI with an older agent prints no extra
   line.
+- A failing AI Guard source no longer shows `last_assessed_ts: null` in `ai_guard_unassessed` after
+  an agent restart when the server still holds that source's last good reading. The server now
+  uses that reading's time when the agent reports none, live and after a server restart. A value
+  the agent sends still wins, and the field stays `null` for a source the server never read.
 - On Windows the agent starts the watch of a folder again when the folder has had no event for
   15 minutes and still exists, because the operating system can end a folder watch after a read
   error and the agent did not notice. A message at `warn` level names each folder it re-armed. The

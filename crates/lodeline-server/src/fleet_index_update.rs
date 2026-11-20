@@ -186,18 +186,23 @@ pub fn apply_event_received_between(
             last_assessed_ts,
             is_reattestation: _,
         } => {
-            let failure = AssessFailure {
-                failing_since: *failing_since,
-                last_assessed_ts: *last_assessed_ts,
-                error_kind: error_kind.clone(),
-                path: path.clone(),
-            };
             let key = (*tool, scope.clone(), user.clone(), rule_pack_id.clone());
-            put_source(host, event, earliest, latest, key, |prev| match prev {
-                Some(SourceState::Assessed(r) | SourceState::Stale(r, _)) => {
-                    SourceState::Stale(r, failure)
+            put_source(host, event, earliest, latest, key, |prev| {
+                let held = prev.as_ref().and_then(SourceState::reading);
+                let failure = AssessFailure {
+                    failing_since: *failing_since,
+                    // An agent that restarted knows no last reading, but the
+                    // server still holds the source's one.
+                    last_assessed_ts: last_assessed_ts.or(held.map(|r| r.assessed_ts)),
+                    error_kind: error_kind.clone(),
+                    path: path.clone(),
+                };
+                match prev {
+                    Some(SourceState::Assessed(r) | SourceState::Stale(r, _)) => {
+                        SourceState::Stale(r, failure)
+                    }
+                    Some(SourceState::Unassessed(_)) | None => SourceState::Unassessed(failure),
                 }
-                Some(SourceState::Unassessed(_)) | None => SourceState::Unassessed(failure),
             });
         }
         Evidence::Heartbeat {

@@ -336,9 +336,11 @@ Notes:
   It is `null` when no source is failing, and absent from servers before this
   field. Per tool:
   - `since`: the earliest `failing_since` of the tool's failing sources.
-  - `last_assessed_ts`: the oldest last good assessment of those sources, as
-    the agent reports it. `null` when any of them has none, as after an
-    agent restart.
+  - `last_assessed_ts`: the oldest last good assessment of those sources.
+    For each source it is the value the agent reports, or, when the agent
+    reports none, as after an agent restart, the time of the server's own
+    reading of the same source (same tool, scope, user and `rule_pack_id`).
+    `null` when any source has neither.
   - `sources`: one entry per failing source, ordered by `user`,
     `rule_pack_id` and `scope`. `scope`, `user` and `rule_pack_id` have the
     same meaning as in `source`. `error_kind` is a string. The agent sends
