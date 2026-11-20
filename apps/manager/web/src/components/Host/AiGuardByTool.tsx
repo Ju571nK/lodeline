@@ -3,7 +3,7 @@ import { ObservedControls } from '@/components/ObservedControls';
 import { ReasonList } from '@/components/ReasonList';
 import { UnassessedSince } from '@/components/UnassessedSince';
 import { humanKind, humanTool, scopeLabel, sourceLabel } from '@/lib/labels';
-import { bucketTextColor } from '@/lib/severity';
+import { bucketTextColor, effectiveBucket } from '@/lib/severity';
 import { shortTime } from '@/lib/time';
 import { cn } from '@/lib/utils';
 
@@ -30,7 +30,8 @@ export function AiGuardByTool({ byTool, unassessed = {} }: Props) {
     );
   }
   // A stale low score stays out of the collapsed strip, so it never reads as quiet.
-  const isQuiet = (t: ToolAiGuard) => t.bucket === 'low' && !t.unassessed_since;
+  const isQuiet = (t: ToolAiGuard) =>
+    effectiveBucket(t.bucket, t.score) === 'low' && !t.unassessed_since;
   const risky = tools.filter(([, t]) => !isQuiet(t)).sort((a, b) => b[1].score - a[1].score);
   const noConfig = tools.filter(([, t]) => isQuiet(t) && t.config_found === false);
   const quiet = tools.filter(([, t]) => isQuiet(t) && t.config_found !== false);
@@ -138,13 +139,18 @@ function ToolCard({ tool, t }: { tool: string; t: ToolAiGuard }) {
   const source = sourceLabel(t.source);
   return (
     <div
-      className={cn('rounded-md border border-border bg-bg-surface p-3', bucketBorder(t.bucket))}
+      className={cn(
+        'rounded-md border border-border bg-bg-surface p-3',
+        bucketBorder(effectiveBucket(t.bucket, t.score)),
+      )}
     >
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="font-medium text-text-primary">
           {humanTool(tool, t.source?.tool_label)}
         </span>
-        <span className={cn('uppercase tracking-wide font-medium', bucketTextColor(t.bucket))}>
+        <span
+          className={cn('uppercase tracking-wide font-medium', bucketTextColor(t.bucket, t.score))}
+        >
           {t.bucket} {t.score.toFixed(2)}
         </span>
         <span className="text-text-subtle">{scopeLabel(t.scope)}</span>

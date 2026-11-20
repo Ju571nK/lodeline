@@ -42,9 +42,16 @@ describe('an unknown bucket with a score', () => {
 
 describe('scoreBucket', () => {
   it('cuts at 1, 4 and 7', () => {
-    expect(
-      [0, 0.99, 1, 3.99, 4, 6.99, 7, 10].map((s) => scoreBucket(s)),
-    ).toEqual(['low', 'low', 'medium', 'medium', 'high', 'high', 'critical', 'critical']);
+    expect([0, 0.99, 1, 3.99, 4, 6.99, 7, 10].map((s) => scoreBucket(s))).toEqual([
+      'low',
+      'low',
+      'medium',
+      'medium',
+      'high',
+      'high',
+      'critical',
+      'critical',
+    ]);
   });
 
   it('leaves a known bucket name alone in effectiveBucket', () => {
