@@ -1,10 +1,10 @@
 //! Reverse-chronological JSONL scan for /v1/events. Walks
-//! events_out_dir/<host_id>/received-*.jsonl files in date desc order. The files of one date,
-//! one per host, are merged newest event_id first. Applies filters, stops at limit.
+//! events_out_dir/<host_id>/received-*.jsonl files in date desc order, and returns events newest
+//! event_id first even when a late batch filed old ids under a newer date. Applies filters, stops
+//! at limit.
 
 use lodeline_core::event::Event;
 use serde_json::Value;
-use std::collections::BinaryHeap;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -144,41 +144,54 @@ pub fn scan(events_out_dir: &Path, f: &ScanFilters) -> std::io::Result<ScanResul
             }
         }
     }
-    // Newest day first. Files of one day (one per host) are merged by event_id, the key the cursor
-    // compares, so only one day's files are in memory at a time.
+    // Newest receive day first. An event is filed by the day the server received it, so a late
+    // batch puts old event_ids in a newer day's file. Matching events wait in `pending` until every
+    // file that could still hold a larger event_id has been read: once the file of day R is read,
+    // every event with an id from day R on is final, because an unread file is for an older receive
+    // day. `pending` is cut to `limit`, so a page holds at most that many events besides one day's
+    // files, and it stops reading files as soon as `limit` events are out.
     files.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut pending: Vec<(Uuid, Vec<u8>)> = Vec::new();
 
     'outer: for day in files.chunk_by(|a, b| a.1 == b.1) {
-        let buffers: Vec<Vec<u8>> = day
-            .iter()
-            .filter_map(|(_, _, path)| std::fs::read(path).ok())
-            .collect();
-        let mut streams: Vec<DayStream> = buffers.iter().map(|b| DayStream::new(b)).collect();
-        let mut heads: BinaryHeap<(Uuid, usize)> = BinaryHeap::new();
-        for (i, s) in streams.iter().enumerate() {
-            if let Some((e, _)) = &s.head {
-                heads.push((e.event_id, i));
+        for (_, _, path) in day {
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            for line in bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+                if let Ok(event) = serde_json::from_slice::<Event>(line) {
+                    if filter_match(&event, f) {
+                        pending.push((event.event_id, line.to_vec()));
+                    }
+                }
             }
         }
-        while let Some((_, i)) = heads.pop() {
-            let (event, line) = streams[i].head.take().expect("heap entry has a head");
-            streams[i].advance();
-            if let Some((e, _)) = &streams[i].head {
-                heads.push((e.event_id, i));
-            }
-            if !filter_match(&event, f) {
-                continue;
-            }
+        pending.sort_by(|a, b| b.0.cmp(&a.0));
+        pending.truncate(f.limit);
+        let floor = day_start_ms(&day[0].1);
+        let ready = pending.partition_point(|(id, _)| uuid_v7_unix_ms(*id) >= floor);
+        for (id, line) in pending.drain(..ready) {
             // raw JSON shape: re-parse so we don't re-serialize via lodeline-core's Event Serialize
             // (preserves any forward-compatible unknown fields).
-            let raw: Value = match serde_json::from_slice(line) {
-                Ok(v) => v,
-                Err(_) => continue,
+            let Ok(raw) = serde_json::from_slice::<Value>(&line) else {
+                continue;
             };
             out.push(raw);
             if out.len() >= f.limit {
-                next_cursor = Some(event.event_id);
+                next_cursor = Some(id);
                 break 'outer;
+            }
+        }
+    }
+    if out.len() < f.limit {
+        for (id, line) in pending {
+            let Ok(raw) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            out.push(raw);
+            if out.len() >= f.limit {
+                next_cursor = Some(id);
+                break;
             }
         }
     }
@@ -189,34 +202,21 @@ pub fn scan(events_out_dir: &Path, f: &ScanFilters) -> std::io::Result<ScanResul
     })
 }
 
-/// One file's events, newest line first, with the next parsable event held in `head`.
-struct DayStream<'a> {
-    lines: std::vec::IntoIter<&'a [u8]>,
-    head: Option<(Event, &'a [u8])>,
-}
-
-impl<'a> DayStream<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        let mut lines: Vec<&[u8]> = bytes
-            .split(|&b| b == b'\n')
-            .filter(|l| !l.is_empty())
-            .collect();
-        lines.reverse();
-        let mut s = DayStream {
-            lines: lines.into_iter(),
-            head: None,
-        };
-        s.advance();
-        s
-    }
-
-    fn advance(&mut self) {
-        self.head = self.lines.find_map(|line| {
-            serde_json::from_slice::<Event>(line)
-                .ok()
-                .map(|e| (e, line))
-        });
-    }
+/// UNIX ms at 00:00 UTC of the day in a `received-YYYY-MM-DD.jsonl` name; 0 if the name has no
+/// date, which makes every pending event ready.
+fn day_start_ms(file_name: &str) -> u64 {
+    let parse = || {
+        let date = file_name
+            .strip_prefix("received-")?
+            .strip_suffix(".jsonl")?;
+        let mut parts = date.splitn(3, '-');
+        let year = parts.next()?.parse().ok()?;
+        let month = time::Month::try_from(parts.next()?.parse::<u8>().ok()?).ok()?;
+        let day = parts.next()?.parse().ok()?;
+        let d = time::Date::from_calendar_date(year, month, day).ok()?;
+        u64::try_from(d.midnight().assume_utc().unix_timestamp() * 1000).ok()
+    };
+    parse().unwrap_or(0)
 }
 
 fn filter_match(e: &Event, f: &ScanFilters) -> bool {

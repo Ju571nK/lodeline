@@ -18,6 +18,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   error and the agent did not notice. A message at `warn` level names each folder it re-armed. The
   agent then sends one event for each file created or changed while the watch was down, and none
   for a file that is unchanged. (#627)
+- `/v1/events` no longer skips newer events on the next page after a late batch. A host that was
+  offline sends old events that the server files under the day it received them, and a page that
+  ended inside that batch moved the cursor back past newer events of the day before. Each page
+  now holds an event back until no unread file can hold a newer one, so pages follow `event_id`
+  with no gap and no repeat. A page still stops reading files once it has `limit` events.
 - `/v1/events` now returns events newest first across hosts. Before, two hosts with a file for the
   same day came back one host after the other, in the order the operating system listed them. Each
   page and the cursor now follow `event_id` across all hosts of a day.
