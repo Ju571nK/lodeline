@@ -815,17 +815,18 @@ pub(crate) fn classify_command(
     // misclassified as inline because the original check only looked for `/`.
     // A script run by path is scanned through the recursive walker, which
     // also follows `source`d files.
+    let own = crate::ai_guard::own_entries::is_own_hook_command(cmd);
+    let mut scan = |part: &str, script: &str| {
+        let file = script_file(part, script, home, run_dir, project);
+        out.extend(
+            scan_script_file(file, run_dir.is_some(), event_name)
+                .into_iter()
+                .filter(|r| !own || !matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })),
+        );
+    };
     let inline = match hook_script_path(cmd, project) {
         Some(script) => {
-            let own = crate::ai_guard::own_entries::is_own_hook_command(cmd);
-            let file = script_file(cmd, script, home, run_dir, project);
-            out.extend(
-                scan_script_file(file, run_dir.is_some(), event_name)
-                    .into_iter()
-                    .filter(|r| {
-                        !own || !matches!(r, AiGuardReason::ExternalScriptUnscanned { .. })
-                    }),
-            );
+            scan(cmd, script);
             // The script's own arguments are data (a guard often receives the
             // patterns it blocks), but a command chained after it runs too:
             // `./ok.sh && rm -rf ~`.
@@ -833,6 +834,13 @@ pub(crate) fn classify_command(
         }
         None => cmd,
     };
+    if !cfg!(windows) {
+        for part in chain_parts(cmd).into_iter().skip(1) {
+            if let Some(script) = hook_script_path(part, project) {
+                scan(part, script);
+            }
+        }
+    }
     if let Some(pat) = rubric::first_destructive_pattern(inline) {
         out.push(AiGuardReason::DestructiveInInlineCommand {
             pattern: pat.to_string(),
@@ -1187,6 +1195,43 @@ fn chained_after<'a>(cmd: &'a str, script: &str) -> &'a str {
         return cmd;
     }
     &rest[args_end..]
+}
+
+/// The commands a hook runs in turn: `cmd` split at `;`, `&&` and `||` outside
+/// quotes, at most `MAX_CHAIN_PARTS` of them.
+fn chain_parts(cmd: &str) -> Vec<&str> {
+    const MAX_CHAIN_PARTS: usize = 4;
+    let bytes = cmd.as_bytes();
+    let mut parts = Vec::new();
+    let (mut start, mut i, mut quote) = (0, 0, None::<u8>);
+    while i < bytes.len() {
+        let byte = bytes[i];
+        let mut separator = 0;
+        match quote {
+            Some(q) if byte == q => quote = None,
+            Some(b'"') if byte == b'\\' => i += 1,
+            Some(_) => {}
+            None => match byte {
+                b'\\' => i += 1,
+                b'\'' | b'"' => quote = Some(byte),
+                b';' => separator = 1,
+                b'&' | b'|' if bytes.get(i + 1) == Some(&byte) => separator = 2,
+                _ => {}
+            },
+        }
+        if separator == 0 {
+            i += 1;
+            continue;
+        }
+        parts.push(&cmd[start..i]);
+        if parts.len() == MAX_CHAIN_PARTS {
+            return parts;
+        }
+        i += separator;
+        start = i;
+    }
+    parts.push(&cmd[start..]);
+    parts
 }
 
 fn looks_pathish(token: &str) -> bool {
@@ -2736,6 +2781,7 @@ mod tests {
             "~/a.sh && ~/x.sh",
             "bash ~/a.sh; bash ${HOME}/x.sh",
             "cd /tmp; true; true; ~/x.sh",
+            "cd /tmpé; ~/x.sh",
         ] {
             let dir = tempdir().unwrap();
             let home = home_with_hook(
@@ -2751,6 +2797,24 @@ mod tests {
         assert!(unscanned.is_empty(), "not scanned: {unscanned:?}");
     }
 
+    /// Hooks run through `cmd.exe` or PowerShell on Windows, which read `;`,
+    /// `&&` and `||` differently, so a chain there is still one inline command.
+    #[cfg(windows)]
+    #[test]
+    fn a_chained_script_is_not_scanned_on_windows() {
+        let dir = tempdir().unwrap();
+        let home = home_with_hook(dir.path(), "cd /tmp; ~/x.sh", &[("x.sh", "rm -rf /\n")]);
+        let reasons = ClaudeCodeParser::default().assess(&home).unwrap();
+        assert!(
+            !reasons.iter().any(|r| matches!(
+                r,
+                AiGuardReason::DestructiveInHookScript { .. }
+                    | AiGuardReason::ExternalScriptUnscanned { .. }
+            )),
+            "{reasons:?}"
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn a_chained_word_the_shell_does_not_run_is_not_scanned() {
@@ -2758,8 +2822,8 @@ mod tests {
         for command in [
             "cd /tmp; $OTHER_VAR/x.sh",
             "$OTHER_VAR/x.sh",
-            r#"echo "a; ~/x.sh""#,
-            "echo 'a && ~/x.sh'",
+            r#"echo "a; ~/x.sh b""#,
+            "echo 'a && ~/x.sh b'",
             "cd /tmp; ~alice/x.sh",
             beyond.as_str(),
         ] {

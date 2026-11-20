@@ -9,6 +9,11 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The AI Guard hook scanner now reads a script that a hook command runs after another command, as
+  in `cd /tmp; ~/x.sh` or `a && ~/x.sh`, with the same home rules as a script run first. It looks
+  at the first four commands split at `;`, `&&` and `||` outside quotes, on macOS and Linux. Before,
+  such a script was never read, so a destructive line in it raised no reason. A `~user/x.sh` path
+  is still reported as not scanned.
 - `lodeline doctor` and the MCP tool `my_risk` now name each source whose config the agent could
   not read or parse, as `lodeline show risk` does. `doctor` prints one line per source under
   `latest risk`. `my_risk` adds a `failed_sources` list next to `latest_risk` only when a source
