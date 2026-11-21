@@ -102,6 +102,8 @@ sudo systemctl enable --now lodeline
 lodeline run
 ```
 
+A different `HOME` moves only the home whose AI agent config is assessed. The built-in `~` watch paths still cover every user's home on the host. See [Run as root or as your user](install-macos-agent.md#run-as-root-full-coverage-or-as-your-user-own-posture).
+
 The daemon must be running for `lodeline-mcp` and `lodeline-hook` to function. Both are clients of the daemon and have no independent capability without it. On macOS and Linux they connect over Unix sockets. On Windows, `lodeline-hook` connects over named pipes.
 
 The daemon records a write to a watched file only when the bytes change. A write with the same bytes, and a mode or owner change that leaves the bytes alone, adds no event. `~/.claude.json` changes often where Claude Code runs, so it still produces events at that pace.
