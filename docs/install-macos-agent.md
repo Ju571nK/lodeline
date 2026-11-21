@@ -150,6 +150,14 @@ writable paths when running as your user.
 - **Your own posture only** (no sudo): run as **your user**, passing
   `--state-db`/`--events-dir` to writable paths.
 
+Policy paths that start with `~` (all built-in targets) expand to every user's
+home on the host, not to `$HOME`, whether you run as root or as your user.
+Setting `HOME` changes only the home whose AI agent config is assessed. To
+watch a different home, for example in a test or demo, write your own policy
+with `$HOME/...` target paths, add an `overrides` entry with `disabled: true`
+for each built-in target id (an empty `targets` list does not turn them off),
+then pass the file with `--policy`.
+
 ---
 
 ## 4. Run
