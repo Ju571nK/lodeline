@@ -165,8 +165,14 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: install cargo-nextest
+        run: cargo install --locked --version 0.9.152 cargo-nextest
+      # A test that runs past 5 slow periods of 60 s is killed and fails by name.
       - name: test (workspace)
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --profile ci-rocky
+      # nextest skips doc-tests.
+      - name: test (doc-tests)
+        run: cargo test --workspace --doc
       # This container runs as root, the one place CI can show that enroll gives a file
       # to the owner of its directory and refuses a link planted there.
       - name: test (root-only ownership)

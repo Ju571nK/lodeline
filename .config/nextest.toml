@@ -1,0 +1,3 @@
+[profile.ci-rocky]
+slow-timeout = { period = "60s", terminate-after = 5 }
+fail-fast = false
