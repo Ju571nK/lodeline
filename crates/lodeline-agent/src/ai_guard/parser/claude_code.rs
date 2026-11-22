@@ -3984,6 +3984,38 @@ mod tests {
         );
     }
 
+    fn auto_approval_only(reasons: Vec<AiGuardReason>) -> Vec<AiGuardReason> {
+        reasons
+            .into_iter()
+            .filter(|r| matches!(r, AiGuardReason::AutoApprovalEnabled { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn default_mode_unguarded_alone_scores_high() {
+        let reasons = default_mode_reasons(r#""bypassPermissions""#);
+        let whole = crate::ai_guard::rubric::score(&reasons);
+        assert_eq!(whole, 5.0, "with the empty deny list, got {reasons:?}");
+        let alone = crate::ai_guard::rubric::score(&auto_approval_only(reasons));
+        assert_eq!(alone, 4.0);
+        assert_eq!(
+            crate::ai_guard::rubric::bucket(alone),
+            lodeline_core::event::AiGuardBucket::High
+        );
+    }
+
+    #[test]
+    fn default_mode_accept_edits_keeps_its_weight() {
+        let reasons = default_mode_reasons(r#""acceptEdits""#);
+        assert_eq!(crate::ai_guard::rubric::score(&reasons), 3.0);
+        let alone = crate::ai_guard::rubric::score(&auto_approval_only(reasons));
+        assert_eq!(alone, 2.0);
+        assert_eq!(
+            crate::ai_guard::rubric::bucket(alone),
+            lodeline_core::event::AiGuardBucket::Medium
+        );
+    }
+
     #[test]
     fn default_mode_auto_and_accept_edits_emit_auto_approval() {
         for m in ["auto", "acceptEdits"] {
