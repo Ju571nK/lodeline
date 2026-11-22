@@ -304,4 +304,31 @@ mod tests {
             .iter()
             .any(|r| matches!(r, AiGuardReason::BroadMatcher { .. })));
     }
+
+    #[test]
+    fn another_event_or_an_exec_form_entry_is_still_scored() {
+        let mut other_event = settings(&[INSTALLED]);
+        other_event["hooks"] = json!({ "PostToolUse": other_event["hooks"]["PreToolUse"] });
+        assert!(score(&reasons_of(&other_event, None)) >= 2.0);
+        let mut exec_form = settings(&[INSTALLED]);
+        exec_form["hooks"]["PreToolUse"][0]["hooks"][0]["args"] = json!(["--extra"]);
+        assert!(score(&reasons_of(&exec_form, None)) >= 3.5);
+    }
+
+    #[test]
+    fn the_codex_hook_install_writes_was_never_scored_for_it() {
+        let cfg: toml::Value = toml::from_str(
+            "[[hooks.PreToolUse]]\nmatcher = \"*\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/usr/local/bin/lodeline-hook codex --capture redacted\"\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        crate::ai_guard::parser::codex::emit_hook_reasons(&cfg, |_, _, _| true, None, &mut out);
+        assert_eq!(score(&out), 0.0, "{out:?}");
+    }
+
+    #[test]
+    fn a_group_with_no_handlers_is_still_scored() {
+        let s = json!({ "hooks": { "PreToolUse": [{ "matcher": "*", "hooks": [] }] } });
+        assert!(score(&reasons_of(&s, None)) >= 2.0);
+    }
 }
