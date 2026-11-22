@@ -9,6 +9,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Changed
 
+- A Claude Code tool whose only finding is `permissions.defaultMode: "bypassPermissions"` now
+  reads HIGH 4.0 instead of MEDIUM 2.0, so the score of such a host rises by 2.0. A settings
+  file with no deny rules also carries the empty deny list finding, so it goes from 3.0 to 5.0.
+  The finding weighs under its own rubric key, `auto_approval_enabled_unguarded`, which a policy
+  weight override can tune and the toggle drift alert reports under that name. `acceptEdits`,
+  `auto` and the other tools keep their weights.
 - Readers built from this release keep an unknown AI tool, bucket or scope name in an AI Guard
   event instead of rejecting the event. A server from this release accepts and stores such an
   event, where an earlier server rejected it as malformed. Its fleet views list an unknown tool
