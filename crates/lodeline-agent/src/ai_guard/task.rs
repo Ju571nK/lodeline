@@ -2029,6 +2029,32 @@ mod tests {
         );
     }
 
+    /// A switch to Codex `never` or Antigravity `always-proceed` drifts under
+    /// the unguarded key, as `bypassPermissions` does.
+    #[tokio::test]
+    async fn drift_switch_to_codex_never_or_always_proceed_names_the_unguarded_key() {
+        for mode in ["never", "always-proceed"] {
+            let (ctx, mut events) = drift_ctx();
+            eval_and_maybe_emit(
+                &one_shot_parser(vec![AiGuardReason::PermissionsDenyEmpty]),
+                &ctx,
+                &own_home(&ctx),
+                true,
+            )
+            .await;
+            let _ = drain_drift_toggles(&mut events);
+            let on = one_shot_parser(vec![AiGuardReason::AutoApprovalEnabled {
+                mode: mode.into(),
+            }]);
+            eval_and_maybe_emit(&on, &ctx, &own_home(&ctx), false).await;
+            assert_eq!(
+                drain_drift_toggles(&mut events),
+                vec!["auto_approval_enabled_unguarded".to_string()],
+                "mode {mode}"
+            );
+        }
+    }
+
     /// Multiple toggles appearing at once → one drift event per appeared toggle.
     #[tokio::test]
     async fn drift_multiple_toggles_one_event_each() {

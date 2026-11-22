@@ -48,10 +48,14 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         {
             "auto_approval_enabled_classifier"
         }
-        // Claude Code `bypassPermissions` skips every prompt with no
-        // classifier in the path, so it weighs above the other modes.
+        // Claude Code `bypassPermissions`, Codex `approval_policy = "never"` and
+        // Antigravity `toolPermission = "always-proceed"` skip the prompts with
+        // no classifier in the path, so they weigh above the other modes.
         AiGuardReason::AutoApprovalEnabled { mode }
-            if without_managed_label(mode) == "bypassPermissions" =>
+            if matches!(
+                without_managed_label(mode),
+                "bypassPermissions" | "never" | "always-proceed"
+            ) =>
         {
             "auto_approval_enabled_unguarded"
         }
@@ -715,11 +719,33 @@ mod tests {
     }
 
     #[test]
+    fn codex_never_and_antigravity_always_proceed_weigh_4_0() {
+        for mode in ["never", "always-proceed"] {
+            let r = vec![AiGuardReason::AutoApprovalEnabled { mode: mode.into() }];
+            assert_eq!(score(&r), 4.0, "mode {mode}");
+            assert_eq!(bucket(score(&r)), AiGuardBucket::High, "mode {mode}");
+            assert!(
+                dangerous_toggles(&r).contains("auto_approval_enabled_unguarded"),
+                "mode {mode}"
+            );
+            let mut overrides = std::collections::HashMap::new();
+            overrides.insert("auto_approval_enabled_unguarded".to_string(), 6.0);
+            assert_eq!(
+                Rubric::defaults().with_overrides(&overrides).score(&r),
+                6.0,
+                "mode {mode}"
+            );
+        }
+    }
+
+    #[test]
     fn other_auto_approval_modes_keep_their_weights() {
         for (mode, expected) in [
             ("acceptEdits", 2.0),
-            ("never", 2.0),
             ("auto_edit", 2.0),
+            ("proceed-in-sandbox", 2.0),
+            ("allow_all", 2.0),
+            ("permissions.allow:Bash(*)", 2.0),
             ("auto", 1.5),
             ("auto_review", 1.5),
         ] {

@@ -7,6 +7,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Changed
+
+- A Codex tool whose only finding is `approval_policy = "never"` and an Antigravity tool whose
+  only finding is `toolPermission = "always-proceed"` now read HIGH 4.0 instead of MEDIUM 2.0, so
+  the score of such a host rises by 2.0. Both modes skip the permission prompts with no
+  classifier in the path, as Claude Code `bypassPermissions` does (#744), and weigh under the same
+  rubric key, `auto_approval_enabled_unguarded`. A policy weight override for that key applies to
+  all three. A Codex config that also sets `sandbox_mode = "danger-full-access"` goes from 5.0 to
+  7.0. The toggle drift alert for a switch to either mode now reports
+  `auto_approval_enabled_unguarded`, where it reported `auto_approval_enabled`. Gemini
+  `auto_edit`, Antigravity `proceed-in-sandbox` and `allowAll`, Claude Code `acceptEdits` and
+  `auto`, and Codex `auto_review` keep their weights.
+
 ## [0.19.0] - 2026-11-22
 
 **Upgrade.** This is a minor release because two Claude Code scoring changes move scores after the

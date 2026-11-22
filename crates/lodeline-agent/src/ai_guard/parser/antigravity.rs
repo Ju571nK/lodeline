@@ -318,6 +318,32 @@ mod tests {
         ));
     }
     #[test]
+    fn always_proceed_alone_scores_high_and_the_sandbox_mode_does_not() {
+        for (body, expected) in [
+            (r#"{"toolPermission":"always-proceed"}"#, 4.0),
+            (r#"{"toolPermission":"proceed-in-sandbox"}"#, 2.0),
+            (r#"{"permissions":{"allowAll":true}}"#, 2.0),
+        ] {
+            let d = tempdir().unwrap();
+            write_settings(d.path(), body);
+            let reasons = assess(d.path());
+            assert_eq!(reasons.len(), 1, "{body}: {reasons:?}");
+            assert_eq!(crate::ai_guard::rubric::score(&reasons), expected, "{body}");
+        }
+        let d = tempdir().unwrap();
+        let repo = d.path().join("repoX");
+        std::fs::create_dir_all(repo.join(".antigravity")).unwrap();
+        std::fs::write(
+            repo.join(".antigravity").join("settings.json"),
+            r#"{"toolPermission":"always-proceed"}"#,
+        )
+        .unwrap();
+        let project = AntigravityProjectParser { repo_root: repo }
+            .assess(Path::new("/unused"))
+            .unwrap();
+        assert_eq!(crate::ai_guard::rubric::score(&project), 4.0);
+    }
+    #[test]
     fn proceed_in_sandbox_emits_auto_approval() {
         // agy 1.2.0: auto-execute in the sandbox — still no per-action review.
         let d = tempdir().unwrap();

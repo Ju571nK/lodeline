@@ -3028,6 +3028,69 @@ command = "echo inline"
         );
     }
 
+    fn scored(reasons: &[AiGuardReason]) -> f32 {
+        crate::ai_guard::rubric::score(reasons)
+    }
+
+    /// Every source of the `never` mode: the user config, the system layer and
+    /// a project layer, each as a scalar.
+    #[test]
+    fn approval_policy_never_alone_scores_high_from_every_source() {
+        let never = vec![AiGuardReason::AutoApprovalEnabled {
+            mode: "never".to_string(),
+        }];
+
+        let dir = tempdir().unwrap();
+        write_config(dir.path(), r#"approval_policy = "never""#);
+        let user = CodexParser::default().assess(dir.path()).unwrap();
+        assert_eq!(user, never);
+        assert_eq!(scored(&user), 4.0);
+
+        let (_root, system, home) = system_and_home();
+        std::fs::write(system.join("config.toml"), "approval_policy = \"never\"\n").unwrap();
+        let system_only = assess_user_layers(&system, &home.join(".codex"), &home).unwrap();
+        assert_eq!(system_only, never);
+        assert_eq!(scored(&system_only), 4.0);
+
+        let (dir, p) = project_with("approval_policy = \"never\"\n");
+        let project = p.assess(dir.path()).unwrap();
+        assert_eq!(project, never);
+        assert_eq!(scored(&project), 4.0);
+    }
+
+    /// A user config with full disk access and `never` already scored for the
+    /// sandbox; the approval finding is the part that rose.
+    #[test]
+    fn never_with_full_access_scores_sandbox_plus_unguarded() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "sandbox_mode = \"danger-full-access\"\napproval_policy = \"never\"\n",
+        );
+        let reasons = CodexParser::default().assess(dir.path()).unwrap();
+        let sandbox: Vec<_> = reasons
+            .iter()
+            .filter(|r| !matches!(r, AiGuardReason::AutoApprovalEnabled { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(reasons.len(), sandbox.len() + 1, "{reasons:?}");
+        assert_eq!(scored(&sandbox), 3.0, "{sandbox:?}");
+        assert_eq!(scored(&reasons), 7.0, "{reasons:?}");
+    }
+
+    /// Only a scalar `never` counts; the other policies and the reviewer keep
+    /// their scores.
+    #[test]
+    fn non_never_policies_keep_their_scores() {
+        let dir = tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "approval_policy = \"on-request\"\napprovals_reviewer = \"auto_review\"\n",
+        );
+        let reasons = CodexParser::default().assess(dir.path()).unwrap();
+        assert_eq!(scored(&reasons), 1.5, "{reasons:?}");
+    }
+
     /// These still put a prompt in front of the user, so none is a blanket
     /// auto-approval.
     #[test]
