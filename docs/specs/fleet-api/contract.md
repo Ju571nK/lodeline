@@ -1682,14 +1682,14 @@ A server from v0.13.0 on keeps an unknown reason kind as an unknown reason, so
 an older console still receives it. `ReasonList` renders any kind and any
 field, so it shows the new reason without a change.
 
-### 14.17 Unknown tool, bucket and scope names (since the next release after v0.18)
+### 14.17 Unknown tool, bucket and scope names (since v0.19.0)
 
 The `tool`, `bucket` and `scope.kind` of an AI Guard reading, and the `agent` of a hook
-evidence, may carry a value this release does not know. A server from the next release after
-v0.18 accepts such an event, keeps it, and returns each of these as its plain string, so a
+evidence, may carry a value this release does not know. A server from v0.19.0
+accepts such an event, keeps it, and returns each of these as its plain string, so a
 consumer must render any string it does not recognize. A server before that release rejects the
 event as malformed. An agent from this release writes only known names, and a later agent must
-not write a new name until the fleet's servers are on the next release after v0.18 or later. No
+not write a new name until the fleet's servers are on v0.19.0 or later. No
 field is added and no known value changes.
 
 - **Bucket rank.** An unknown bucket ranks as the bucket its reading's `score` falls in: `low`

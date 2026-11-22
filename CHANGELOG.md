@@ -7,6 +7,24 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-22
+
+**Upgrade.** This is a minor release because two Claude Code scoring changes move scores after the
+upgrade. A host whose Claude Code settings set `permissions.defaultMode: "bypassPermissions"` reads
+higher (#744), because that mode skips the permission prompts with no classifier in the path. A host
+whose only hook is the entry `lodeline-hook install --agent claude-code` writes reads lower (#745),
+because that entry is Lodeline's own hook. Scores also rise on a host where the managed settings
+files and the user's settings both define hooks (#728, #730 and #731) and for a hook that runs a
+program by full path after another command (#729), and fall for a Codex project marked untrusted
+(#710).
+
+This release changes no event field, no event kind, no policy field, no reason kind and no fleet API
+field. The `toggle` of an `ai_guard_toggle_drift` event for a switch to `bypassPermissions` is now
+`auto_approval_enabled_unguarded`, where it was `auto_approval_enabled`, and a policy weight
+override may name that key. An agent from this release writes the same tool, bucket and scope names
+as before. No package script, unit file, tmpfiles entry or SELinux module changed. Upgrade the
+server, the console and the agents in any order.
+
 ### Changed
 
 - A Claude Code tool whose only finding is `permissions.defaultMode: "bypassPermissions"` now
@@ -14,7 +32,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   file with no deny rules also carries the empty deny list finding, so it goes from 3.0 to 5.0.
   The finding weighs under its own rubric key, `auto_approval_enabled_unguarded`, which a policy
   weight override can tune and the toggle drift alert reports under that name. `acceptEdits`,
-  `auto` and the other tools keep their weights.
+  `auto` and the other tools keep their weights. (#744)
 - Readers built from this release keep an unknown AI tool, bucket or scope name in an AI Guard
   event instead of rejecting the event. A server from this release accepts and stores such an
   event, where an earlier server rejected it as malformed. Its fleet views list an unknown tool
@@ -22,7 +40,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   score falls in: low below 1, medium below 4, high below 7, critical from 7. The host list sort
   and `bucket` filter, the risk `min_bucket` filter, the events `min_ai_guard_bucket` filter and
   the high and critical alert count all use that rank. An agent never writes an unknown name, and
-  policy fields that name a tool still refuse an unknown tool.
+  policy fields that name a tool still refuse an unknown tool. (#732 and #735)
 
 ### Fixed
 
@@ -34,64 +52,65 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   writes (`claude-code`, optional `--enforce --on-failure open|closed`, `--capture <mode>`). A
   hook with other arguments, a wrapper, a relative path or a temp-folder path scores as before,
   and a second hook in the same settings keeps its own score. Codex hooks were not scored this way.
+  (#745)
 - The console sorts and colors an AI Guard reading whose bucket name it does not know by the
   bucket its score falls in, as the server does. Before, such a reading sorted below the low ones
-  in the alerts queue and showed in the info color.
+  in the alerts queue and showed in the info color. (#737)
 - The console shows an AI Guard scope kind it does not know as that kind's own text, where it
-  showed "user global".
+  showed "user global". (#736)
 - The AI Guard hook scanner now reads a script that a hook command runs after another command, as
   in `cd /tmp; ~/x.sh` or `a && ~/x.sh`, with the same home rules as a script run first. It looks
   at the first four commands split at `;`, `&&` and `||` outside quotes, on macOS and Linux. Before,
   such a script was never read, so a destructive line in it raised no reason. A `~user/x.sh` path
   is still reported as not scanned. A program run by full path after another command is now
   reported as not scanned, as one run first already is, and the score rises by 1.5 for each such
-  hook.
+  hook. (#729)
 - A hook in the managed settings files and a hook in the user's settings with the same event and
   matcher but different commands now score as two hooks, not one. Both run, and the score missed
   one broad-matcher reason. The score rises by 1.875 for a `PreToolUse` matcher and by 0.625 for
   another event. It changes only on a host where both files define the same event and matcher with
-  different commands. The same command in both files still scores once.
+  different commands. The same command in both files still scores once. (#728)
 - An `http` or `mcp_tool` hook in the managed settings files and a different one in the user's
   settings, on the same event and destination, now score as two hooks, as do two `PermissionRequest`
   hooks for one tool with different commands. Both run, and the score counted them once. The score
   rises by 3.75 for a forwarding hook and by 2.5 for a standing approval, up to the score cap of
   10. It changes only on a host where both files define such hooks. The same hook in both files
-  still scores once.
+  still scores once. (#730)
 - A hook in the managed settings files and a hook in the user's settings that give the same
   destructive-command, destructive-script or unread-script reason now score as two hooks when their
   handlers differ, for example two commands that run one script with different arguments, or one
   command under two matchers. Both run, and the score counted them once. On a host that otherwise
   scores 6 the score rises by 4, to the score cap of 10, for a destructive command or script, and by
   1.875 for an unread script, up to the score cap of 10. It changes only on a host where both files
-  define such hooks. The same hook in both files still scores once.
+  define such hooks. The same hook in both files still scores once. (#731)
 - `lodeline doctor` and the MCP tool `my_risk` now name each source whose config the agent could
   not read or parse, as `lodeline show risk` does. `doctor` prints one line per source under
   `latest risk`. `my_risk` adds a `failed_sources` list next to `latest_risk` only when a source
   failed. Before, both showed only good readings, so an AI agent could see a clean or stale score
   for a tool whose config failed. An older MCP client ignores the new key, and either reader with
-  an older agent shows no extra line.
+  an older agent shows no extra line. (#725)
 - `lodeline show risk` now names each source whose config the agent could not read or parse. It adds
   one line per source after the table, and the JSON output gains `failed_sources`. Before, such a
   source showed a stale score or nothing, although the agent already reports the failure to the
   fleet. An older CLI ignores the new field, and a new CLI with an older agent prints no extra
-  line.
+  line. (#721)
 - A failing AI Guard source no longer shows `last_assessed_ts: null` in `ai_guard_unassessed` after
   an agent restart when the server still holds that source's last good reading. The server now
   uses that reading's time when the agent reports none, live and after a server restart. A value
-  the agent sends still wins, and the field stays `null` for a source the server never read.
+  the agent sends still wins, and the field stays `null` for a source the server never read. (#722)
 - On Windows the agent starts the watch of a folder again when the folder has had no event for
   15 minutes and still exists, because the operating system can end a folder watch after a read
   error and the agent did not notice. A message at `warn` level names each folder it re-armed. The
   agent then sends one event for each file created or changed while the watch was down, and none
-  for a file that is unchanged. (#627)
+  for a file that is unchanged. (#627 and #719)
 - `/v1/events` no longer skips newer events on the next page after a late batch. A host that was
   offline sends old events that the server files under the day it received them, and a page that
   ended inside that batch moved the cursor back past newer events of the day before. Each page
   now holds an event back until no unread file can hold a newer one, so pages follow `event_id`
-  with no gap and no repeat. A page still stops reading files once it has `limit` events.
+  with no gap and no repeat. A page still stops reading files once it has `limit` events. (#724)
 - `/v1/events` now returns events newest first across hosts. Before, two hosts with a file for the
   same day came back one host after the other, in the order the operating system listed them. Each
-  page and the cursor now follow `event_id` across all hosts of a day.
+  page and the cursor now follow `event_id` across all hosts of a day. (#720)
 - A Codex project whose folder the user config marks `trust_level = "untrusted"` no longer scores
   its `.codex/` layers, because Codex does not load them. Its `AGENTS.md` is still scanned, and a
   folder with no trust entry is scored as before. (#710)
