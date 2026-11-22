@@ -35,6 +35,8 @@ Files passed with `--profile`, such as `p.config.toml`, are not read. The flag i
 
 ## Approval policy
 
+`approval_policy = "never"` as a plain value in the system, user or project config gives an auto-approval finding that weighs 4.0, a HIGH reading alone, as `bypassPermissions` does for Claude Code. `approvals_reviewer = "auto_review"` keeps 1.5. A config that also sets `sandbox_mode = "danger-full-access"` reads 7.0 where it read 5.0.
+
 The granular `approval_policy` table is read on purpose. It only turns prompts into rejections, so it is not a finding by itself. The requirements allowlist still names `untrusted`.
 
 ## Hook scripts
