@@ -48,6 +48,13 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
         {
             "auto_approval_enabled_classifier"
         }
+        // Claude Code `bypassPermissions` skips every prompt with no
+        // classifier in the path, so it weighs above the other modes.
+        AiGuardReason::AutoApprovalEnabled { mode }
+            if without_managed_label(mode) == "bypassPermissions" =>
+        {
+            "auto_approval_enabled_unguarded"
+        }
         AiGuardReason::AutoApprovalEnabled { .. } => "auto_approval_enabled",
         AiGuardReason::McpServerSuspiciousLauncher {
             shape: LauncherShape::Shell,
@@ -103,6 +110,7 @@ pub const DANGEROUS_TOGGLE_KINDS: &[&str] = &[
     // #199 — switching into classifier auto-approval is the same OFF→ON
     // escalation, just a milder one; it still stops the human prompts.
     "auto_approval_enabled_classifier",
+    "auto_approval_enabled_unguarded",
     "sandbox_disabled",
     "permissions_allow_broad",
     "project_mcp_auto_enabled",
@@ -204,6 +212,7 @@ impl Rubric {
         // #199 — classifier auto-approval still removes the prompt, but a
         // check remains in the path, so it sits below the unguarded modes.
         w.insert("auto_approval_enabled_classifier", 1.5);
+        w.insert("auto_approval_enabled_unguarded", 4.0);
         // #199 — dropping the shipped safety rules re-arms exactly the
         // commands the defaults were written to stop.
         w.insert("auto_mode_defaults_dropped", 2.5);
@@ -648,7 +657,7 @@ mod tests {
         );
         assert_eq!(r.weights.get("mcp_tools_auto_approved"), Some(&1.0));
         assert_eq!(r.weights.get("mcp_server_static_credential"), Some(&1.0));
-        assert_eq!(r.weights.len(), 40);
+        assert_eq!(r.weights.len(), 41);
     }
 
     #[test]
@@ -686,6 +695,51 @@ mod tests {
             mode: "auto_edit".into(),
         }];
         assert_eq!(score(&r), 2.0);
+    }
+
+    fn unguarded_only() -> Vec<AiGuardReason> {
+        vec![AiGuardReason::AutoApprovalEnabled {
+            mode: "bypassPermissions".into(),
+        }]
+    }
+
+    #[test]
+    fn unguarded_mode_alone_scores_high_4_0() {
+        let r = unguarded_only();
+        assert_eq!(score(&r), 4.0);
+        assert_eq!(bucket(score(&r)), AiGuardBucket::High);
+        let managed = vec![AiGuardReason::AutoApprovalEnabled {
+            mode: "bypassPermissions (managed file)".into(),
+        }];
+        assert_eq!(score(&managed), 4.0);
+    }
+
+    #[test]
+    fn other_auto_approval_modes_keep_their_weights() {
+        for (mode, expected) in [
+            ("acceptEdits", 2.0),
+            ("never", 2.0),
+            ("auto_edit", 2.0),
+            ("auto", 1.5),
+            ("auto_review", 1.5),
+        ] {
+            let r = vec![AiGuardReason::AutoApprovalEnabled { mode: mode.into() }];
+            assert_eq!(score(&r), expected, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn unguarded_mode_is_a_dangerous_toggle_and_overridable() {
+        assert!(dangerous_toggles(&unguarded_only()).contains("auto_approval_enabled_unguarded"));
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("auto_approval_enabled_unguarded".to_string(), 6.0);
+        let r = Rubric::defaults().with_overrides(&overrides);
+        assert!(r.unknown_override_keys.is_empty());
+        assert_eq!(r.score(&unguarded_only()), 6.0);
+        let accept = vec![AiGuardReason::AutoApprovalEnabled {
+            mode: "acceptEdits".into(),
+        }];
+        assert_eq!(r.score(&accept), 2.0);
     }
 
     #[test]
