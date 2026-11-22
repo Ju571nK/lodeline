@@ -27,6 +27,13 @@
 - `proxy_fails_closed_at_the_config_ttl_while_a_config_fetch_is_in_flight`: 서버가 `/v1/proxy-config` 요청을 받고 답하지 않는 동안(fetch 제한 시간은 10초) 마감이 지나도록 시계를 100ms씩 앞당긴다. 마감이 지난 뒤에도 같은 요청이 계속 대기 중인 채로 proxy가 expired를 게시하고 401을 낸다.
 - 지킬 점: 두 번째 시험은 fetch 제한 시간 안에 마감이 오도록 시계를 TTL 8초 전까지 앞당긴 뒤 hold를 건다. 남은 시간이 10초를 넘으면 fetch가 마감 전에 끝나므로 시험이 실패한다.
 
+## 2026-11-22 proxy client 인증서 교체와 retire의 e2e (`test/proxy-e2e-cert-rotation`, #269)
+
+#269의 `fp_next`·retire 항목을 `lodeline-proxy-e2e/tests/server_proxy_rotation_e2e.rs`의 시험 하나로 덮었다. 제품 코드, reason, 필드, wire는 바꾸지 않았다. 서버와 proxy는 실제 mTLS로 연결한다.
+
+- `rotating_the_client_certificate_promotes_fp_next_and_retire_ends_it`: 옛 인증서로 등록하고 revision 1을 적용한 뒤 새 fingerprint를 `fp_next`로 등록한다. 새 인증서를 쓰기 전에는 `fp_current`가 옛 값 그대로이고 옛 인증서의 proxy가 계속 보고한다. proxy를 새 인증서로 다시 시작하면 첫 요청에서 `fp_next`가 `fp_current`로 승격하고 `fp_next`는 비며, audit에 `proxy.fingerprint_promote`가 한 건 남는다. 그 뒤 옛 인증서는 404 `proxy_unknown`, 새 인증서는 200이다. retire하면 새 인증서는 403 `retired`, 옛 인증서는 계속 404이고, proxy는 `config_state` disabled로 전달을 멈추며 `last_seen`이 멈춘다. retire된 proxy에 fingerprint를 다시 등록하면 409다.
+- 변이로 확인한 가드: 승격 호출을 끄면 승격 대기에서, 승격 때 옛 fingerprint를 `fp_next`에 남기면 `fp_next` 비어 있음 검사에서, retired 거절을 통과시키면 403 검사에서 실패한다.
+
 ## 2026-11-09 proxy 상세에서 열린 gap을 닫힌 gap보다 먼저 (`fix/proxy-open-gaps-first`)
 
 문제: `GET /v1/proxies/{id}`의 `audit_gaps`는 최신순 최대 50개였다. `Ledger::gaps_page`는 `open`과 관계없이 `ORDER BY rowid_seq DESC LIMIT 50`으로
