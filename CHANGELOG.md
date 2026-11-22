@@ -26,6 +26,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- A Claude Code host whose hooks are just the entry `lodeline-hook install --agent claude-code`
+  writes no longer scores for it. Before, that entry raised the score by 3.5: `no_sandbox` 2.0 and
+  `broad_matcher_pre_tool_use` 1.5. Lodeline skips a `PreToolUse` command that is an absolute path
+  to `lodeline-hook` outside a temp folder and outside the project, made of letters, digits and
+  `/ \ : . _ -` (and spaces inside double quotes), with the arguments install
+  writes (`claude-code`, optional `--enforce --on-failure open|closed`, `--capture <mode>`). A
+  hook with other arguments, a wrapper, a relative path or a temp-folder path scores as before,
+  and a second hook in the same settings keeps its own score. Codex hooks were not scored this way.
 - The console sorts and colors an AI Guard reading whose bucket name it does not know by the
   bucket its score falls in, as the server does. Before, such a reading sorted below the low ones
   in the alerts queue and showed in the info color.

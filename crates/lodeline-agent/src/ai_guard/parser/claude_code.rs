@@ -469,16 +469,33 @@ pub(crate) fn emit_hook_reasons_allowing(
         // present but no host-shell exposure"; not a NoSandbox finding.
         return Ok(());
     }
-    // At least one hook event configured → host shell w/o sandbox.
-    out.push(AiGuardReason::NoSandbox {
-        executor: "host_shell".into(),
-    });
+    // At least one hook event configured → host shell w/o sandbox. The entry
+    // `lodeline-hook install` writes is the tool that measures the host, so a
+    // host whose every entry is that one is not scored for it.
+    let entries = || {
+        hooks.iter().flat_map(|(event, entries)| {
+            entries
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |entry| is_installed_entry(event, entry, run_dir))
+        })
+    };
+    let only_ours = entries().any(|own| own) && entries().all(|own| own);
+    if !only_ours {
+        out.push(AiGuardReason::NoSandbox {
+            executor: "host_shell".into(),
+        });
+    }
     let mut approvals: Vec<String> = Vec::new();
     for (event_name, entries) in hooks {
         let Some(arr) = entries.as_array() else {
             continue;
         };
         for entry in arr {
+            if is_installed_entry(event_name, entry, run_dir) {
+                continue;
+            }
             let inner = entry.get("hooks").and_then(Value::as_array);
             let matcher = entry.get("matcher").and_then(Value::as_str);
             // matcher. #199 — a handler runs only for calls its `if` rule
@@ -552,6 +569,29 @@ pub(crate) fn emit_hook_reasons_allowing(
         );
     }
     Ok(())
+}
+
+/// A `PreToolUse` group made only of the command hook `lodeline-hook install`
+/// writes for Claude Code, in the shape install writes it.
+fn is_installed_entry(event: &str, entry: &Value, run_dir: Option<&Path>) -> bool {
+    event == "PreToolUse"
+        && entry
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|hs| {
+                !hs.is_empty()
+                    && hs.iter().all(|h| {
+                        h.get("type")
+                            .and_then(Value::as_str)
+                            .is_none_or(|t| t == "command")
+                            && h.get("args").is_none()
+                            && h.get("command").and_then(Value::as_str).is_some_and(|c| {
+                                crate::ai_guard::own_entries::is_installed_claude_hook_command(
+                                    c, run_dir,
+                                )
+                            })
+                    })
+            })
 }
 
 /// The tool a handler's `if` permission rule narrows it to. Only `Tool(arg)`

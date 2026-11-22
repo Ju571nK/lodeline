@@ -46,7 +46,7 @@ Command files are read as skill files are. The skills page says a command file i
 
 | Key | Read from | Effect |
 |---|---|---|
-| `hooks` | user, project, managed | Any hook event with at least one entry gives `no_sandbox` (executor `host_shell`) once per row. The handler types are in the next table. |
+| `hooks` | user, project, managed | Any hook event with at least one entry gives `no_sandbox` (executor `host_shell`) once per row. The handler types are in the next table. A `PreToolUse` group that holds the command `lodeline-hook install --agent claude-code` writes, an absolute path to `lodeline-hook` outside a temp folder and the project, made of letters, digits and `/ \ : . _ -` (spaces only inside double quotes), with the install arguments, gives neither `no_sandbox` nor `broad_matcher`. |
 | `hooks[].matcher` | user, project, managed | An empty, `*` or `.*` matcher gives `broad_matcher`, unless every handler in the group has an `if` rule that narrows it. |
 | `hooks[].hooks[].if` | user, project, managed | A handler whose `if` rule names one tool with a non-wildcard argument narrows its group. |
 | `disableAllHooks` | user, project, managed | `true` drops the hook reasons and the `statusLine`, `subagentStatusLine` and `fileSuggestion` reasons of the files below it. Only a managed `true` drops managed hooks. |
