@@ -150,13 +150,26 @@ writable paths when running as your user.
 - **Your own posture only** (no sudo): run as **your user**, passing
   `--state-db`/`--events-dir` to writable paths.
 
-Policy paths that start with `~` (all built-in targets) expand to every user's
+Policy paths that start with `~` (most built-in targets, see the table below) expand to every user's
 home on the host, not to `$HOME`, whether you run as root or as your user.
 Setting `HOME` changes only the home whose AI agent config is assessed. To
 watch a different home, for example in a test or demo, write your own policy
 with `$HOME/...` target paths, add an `overrides` entry with `disabled: true`
 for each built-in target id (an empty `targets` list does not turn them off),
 then pass the file with `--policy`.
+
+### Built-in targets
+
+All of these are on by default. The `overrides` entry above names one by its id.
+
+| Id | Tier | Watches |
+|---|---|---|
+| `claude-desktop-config-macos` | critical | `~/Library/Application Support/Claude/claude_desktop_config.json`, `~/.claude.json` |
+| `cursor-mcp-macos` | critical | `~/Library/Application Support/Cursor/User/globalStorage/*.json` |
+| `shadow-ai-binaries-macos` | standard | `/Applications/*.app/Contents/Info.plist` (a new app install) |
+| `ai-guard-claude-code-user-global` | critical | `~/.claude/` settings, hooks, skills, agents, commands, `CLAUDE.md`, `loop.md`, scheduled tasks, and the managed settings under `/Library/Application Support/ClaudeCode/` |
+| `ai-guard-codex-user-global` | critical | `~/.codex/config.toml`, `/etc/codex/requirements.toml` |
+| `ai-guard-continue-config-macos` | critical | `~/.continue/config.json` |
 
 ---
 
