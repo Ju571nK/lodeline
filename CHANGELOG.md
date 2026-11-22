@@ -11,10 +11,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 **Upgrade.** This is a minor release because two Claude Code scoring changes move scores after the
 upgrade. A host whose Claude Code settings set `permissions.defaultMode: "bypassPermissions"` reads
-higher (#744). A host whose only hook is the entry `lodeline-hook install --agent claude-code`
-writes reads lower (#745). Scores also rise on a host where the managed settings files and the
-user's settings both define hooks (#728, #730 and #731) and for a hook that runs a program by full
-path after another command (#729), and fall for a Codex project marked untrusted (#710).
+higher (#744), because that mode skips the permission prompts with no classifier in the path. A host
+whose only hook is the entry `lodeline-hook install --agent claude-code` writes reads lower (#745),
+because that entry is Lodeline's own hook. Scores also rise on a host where the managed settings
+files and the user's settings both define hooks (#728, #730 and #731) and for a hook that runs a
+program by full path after another command (#729), and fall for a Codex project marked untrusted
+(#710).
 
 This release changes no event field, no event kind, no policy field, no reason kind and no fleet API
 field. The `toggle` of an `ai_guard_toggle_drift` event for a switch to `bypassPermissions` is now
