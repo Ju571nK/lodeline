@@ -7,6 +7,19 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-22
+
+**Upgrade.** This is a minor release because one scoring change moves scores after the upgrade. A
+host whose Codex config sets `approval_policy = "never"`, or whose Antigravity settings set
+`toolPermission = "always-proceed"`, reads higher, because those modes skip the permission prompts
+with no classifier in the path (#748). No host reads lower from this change.
+
+This release changes no event field, no event kind, no policy field, no reason kind and no fleet API
+field. The `toggle` of an `ai_guard_toggle_drift` event for a switch to either mode is now
+`auto_approval_enabled_unguarded`, where it was `auto_approval_enabled`, and a policy weight
+override for that key now applies to both. No package script, unit file, tmpfiles entry or SELinux
+module changed. Upgrade the server, the console and the agents in any order.
+
 ### Changed
 
 - A Codex tool whose only finding is `approval_policy = "never"` and an Antigravity tool whose
@@ -18,7 +31,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   7.0. The toggle drift alert for a switch to either mode now reports
   `auto_approval_enabled_unguarded`, where it reported `auto_approval_enabled`. Gemini
   `auto_edit`, Antigravity `proceed-in-sandbox` and `allowAll`, Claude Code `acceptEdits` and
-  `auto`, and Codex `auto_review` keep their weights.
+  `auto`, and Codex `auto_review` keep their weights. (#748)
 
 ## [0.19.0] - 2026-11-22
 
