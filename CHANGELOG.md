@@ -11,7 +11,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - A Codex tool whose only finding is `approval_policy = "never"` and an Antigravity tool whose
   only finding is `toolPermission = "always-proceed"` now read HIGH 4.0 instead of MEDIUM 2.0, so
-  the score of such a host rises by 2.0. Both modes skip every permission prompt with no
+  the score of such a host rises by 2.0. Both modes skip the permission prompts with no
   classifier in the path, as Claude Code `bypassPermissions` does (#744), and weigh under the same
   rubric key, `auto_approval_enabled_unguarded`. A policy weight override for that key applies to
   all three. A Codex config that also sets `sandbox_mode = "danger-full-access"` goes from 5.0 to

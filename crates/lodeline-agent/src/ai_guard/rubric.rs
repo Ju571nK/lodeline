@@ -49,7 +49,7 @@ fn kind_key(reason: &AiGuardReason) -> &'static str {
             "auto_approval_enabled_classifier"
         }
         // Claude Code `bypassPermissions`, Codex `approval_policy = "never"` and
-        // Antigravity `toolPermission = "always-proceed"` skip every prompt with
+        // Antigravity `toolPermission = "always-proceed"` skip the prompts with
         // no classifier in the path, so they weigh above the other modes.
         AiGuardReason::AutoApprovalEnabled { mode }
             if matches!(
