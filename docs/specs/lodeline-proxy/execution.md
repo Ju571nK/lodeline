@@ -12,6 +12,14 @@
 - **실기 측정 범위(2026-11-06 run I 기준).** AWS(t4g.small 2대, AL2023 aarch64, D1)에서 측정됨: 상태 유지 §9–§13, `--stateless`·`--initialize-sse`·둘 다 변형(§9–§10), RPM 패키지 + systemd 유닛(SELinux Enforcing, AVC 0건). 아직 미측정: vendor client(R), D2 공개 HTTPS, x86_64, [validation.md](validation.md)의 성능 목표(목표 환경에서). 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았고, Rocky 9도 시험하지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. run I는 이 상태에서 Enforcing AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
 
+## 2026-11-22 https upstream과 사설 목적지 거절의 e2e (`test/proxy-e2e-private-dest`)
+
+`lodeline-proxy-e2e/tests/server_proxy_dest_e2e.rs`에 시험 세 개를 추가했다. 제품 코드, reason, 필드, wire는 바꾸지 않았다. 서버가 내려 주는 config는 `allow_private_destination`을 정하지 못하므로(`config_sync::route_specs`는 항상 false), 이 시험은 실제 서버와 실제 proxy 사이에서 그 거절을 확인한다.
+
+- `https_upstream_on_loopback_is_refused_before_any_connection`, `https_upstream_name_resolving_to_loopback_is_refused`: 루프백 주소나 `localhost`를 가리키는 https route는 502 `destination_refused`이고, 그 주소의 listener는 연결을 하나도 받지 않는다.
+- `server_refuses_a_config_with_a_private_or_metadata_upstream_literal`: 서버는 사설(10/8, 192.168/16), 링크로컬(클라우드 metadata 주소 포함), ULA(fd00::/8) 리터럴 https upstream이 든 config를 422로 거절하고, 공개 리터럴은 받는다.
+- 시험하지 못한 것: 로컬 https upstream으로의 성공 경로. 서버 config로는 루프백 https가 허용되지 않고, 이름이 사설 주소로 풀리는 경우는 DNS가 필요하다. 후자는 `relay_dest.rs`가 주입한 resolver로 덮는다.
+
 ## 2026-11-19 서버 재시작과 되돌려진 revision의 e2e (`test/proxy-e2e-server-restart`, #269)
 
 #269의 통합 시나리오 중 두 개를 `lodeline-proxy-e2e/tests/server_proxy_e2e.rs`에 시험으로 추가했다. 제품 코드, reason, 필드, wire는 바꾸지 않았다.
