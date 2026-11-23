@@ -639,6 +639,9 @@ impl Drop for WatcherHandle {
     }
 }
 
+/// Per-folder warnings one recovery scan logs before it only counts the rest.
+const UNREADABLE_FOLDER_WARNS: usize = 3;
+
 async fn catch_up_files(
     root: PathBuf,
     recursive: bool,
@@ -663,6 +666,8 @@ async fn catch_up_files(
         return;
     }
     let mut stack = Vec::new();
+    let mut unreadable = 0usize;
+    let mut first_error: Option<std::io::Error> = None;
     match tokio::fs::read_dir(&root).await {
         Ok(entries) => stack.push(entries),
         Err(e) => {
@@ -692,7 +697,11 @@ async fn catch_up_files(
                     match tokio::fs::read_dir(entry.path()).await {
                         Ok(children) => stack.push(children),
                         Err(e) => {
-                            tracing::warn!(path = %entry.path().display(), error = %e, "watch recovery scan could not read directory")
+                            unreadable += 1;
+                            if unreadable <= UNREADABLE_FOLDER_WARNS {
+                                tracing::warn!(path = %entry.path().display(), error = %e, "watch recovery scan could not read directory");
+                            }
+                            first_error.get_or_insert(e);
                         }
                     }
                 }
@@ -705,6 +714,9 @@ async fn catch_up_files(
                 stack.pop();
             }
         }
+    }
+    if let Some(error) = first_error {
+        tracing::warn!(root = %root.display(), failed = unreadable, first_error = %error, "watch recovery scan skipped unreadable folders");
     }
 }
 
@@ -1336,6 +1348,73 @@ mod tests {
         watcher.reconcile();
         assert!(watcher.catchups.is_empty());
         assert!(watcher.active[&root].0);
+    }
+
+    #[cfg(unix)]
+    fn catch_up_logs(root: &Path) -> String {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let raw = test_logs::logs_of(|| {
+            runtime.block_on(async {
+                let (tx, mut rx) = mpsc::channel(64);
+                catch_up_files(root.to_path_buf(), true, Arc::new(tx), None).await;
+                while rx.try_recv().is_ok() {}
+            })
+        });
+        let mut plain = String::new();
+        let mut in_escape = false;
+        for c in raw.chars() {
+            match (in_escape, c) {
+                (false, '\x1b') => in_escape = true,
+                (true, 'm') => in_escape = false,
+                (false, c) => plain.push(c),
+                (true, _) => {}
+            }
+        }
+        plain
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catchup_caps_unreadable_folder_warns_and_adds_one_summary() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("watched");
+        let locked: Vec<_> = (0..10).map(|i| root.join(format!("d{i}"))).collect();
+        for dir in &locked {
+            fs::create_dir_all(dir).unwrap();
+        }
+        for dir in &locked[1..] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let logs = catch_up_logs(&root);
+        for dir in &locked[1..] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            logs.matches("could not read directory").count(),
+            3,
+            "{logs}"
+        );
+        assert_eq!(
+            logs.matches("skipped unreadable folders").count(),
+            1,
+            "{logs}"
+        );
+        assert!(logs.contains("failed=9"), "{logs}");
+        assert!(logs.contains("Permission denied"), "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catchup_without_unreadable_folders_logs_no_warn() {
+        let td = TempDir::new().unwrap();
+        let root = td.path().join("watched");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        let logs = catch_up_logs(&root);
+        assert!(!logs.contains("could not read directory"), "{logs}");
+        assert!(!logs.contains("skipped unreadable folders"), "{logs}");
     }
 
     #[tokio::test]
