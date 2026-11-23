@@ -7,6 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- A watch recovery scan that cannot read many folders, for example under a low open-file limit,
+  now logs the first 3 failures and one summary line with the failed-folder count and the first
+  error, where it logged one warning per folder.
+
 ## [0.20.0] - 2026-11-22
 
 **Upgrade.** This is a minor release because one scoring change moves scores after the upgrade. A
