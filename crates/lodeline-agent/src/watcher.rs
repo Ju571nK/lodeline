@@ -1388,6 +1388,10 @@ mod tests {
         for dir in &locked[1..] {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
         }
+        if fs::read_dir(&locked[1]).is_ok() {
+            // root ignores directory modes, so nothing here can fail to read.
+            return;
+        }
         let logs = catch_up_logs(&root);
         for dir in &locked[1..] {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
