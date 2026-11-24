@@ -106,3 +106,71 @@ async fn a_pinned_home_is_where_a_tilde_target_is_watched() {
 
     agent.join.abort();
 }
+
+fn offline(home: &Path, args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_lodeline"))
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .arg("--state-db")
+        .arg(home.join("state.db"))
+        .arg("--control-socket")
+        .arg(home.join("c.sock"))
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn show_paths_with_a_pin_lists_only_that_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = dir.path().join("pinned-home");
+    std::fs::create_dir(&pin).unwrap();
+    let pin_str = pin.to_str().unwrap();
+    let text = offline(dir.path(), &["show", "paths", "--pin-user-home", pin_str]);
+    let listed: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("  /"))
+        .map(str::trim)
+        .collect();
+    assert!(
+        listed
+            .iter()
+            .any(|p| *p == format!("{pin_str}/.claude/settings.json")),
+        "{text}"
+    );
+    let outside: Vec<_> = listed
+        .iter()
+        .filter(|p| p.contains("/.") && !p.starts_with(pin_str))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "paths outside the pinned home: {outside:?}"
+    );
+}
+
+#[test]
+fn doctor_with_a_pin_checks_that_home_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = dir.path().join("pinned-home");
+    std::fs::create_dir(&pin).unwrap();
+    let pin_str = pin.to_str().unwrap();
+    let text = offline(dir.path(), &["doctor", "--pin-user-home", pin_str]);
+    assert!(text.contains("enumerated users: 1\n"), "{text}");
+    let absent: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("not present (no file at "))
+        .collect();
+    assert!(
+        absent.iter().any(|l| l.contains(pin_str)),
+        "no absent path under the pin: {text}"
+    );
+    let outside: Vec<_> = absent
+        .iter()
+        .filter(|l| l.contains("/.") && !l.contains(pin_str))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "paths outside the pinned home: {outside:?}"
+    );
+}

@@ -551,6 +551,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         rubric: rubric_handle.clone(),
         #[cfg(feature = "operator-cli")]
         deny: shared_evaluator_pre.clone(),
+        #[cfg(feature = "operator-cli")]
+        home_dir: home_dir.clone(),
     });
 
     // Watcher (notify → raw events → tx_norm via normalizer wrapper).
@@ -1288,7 +1290,7 @@ fn other_homes_of(
 }
 
 /// The process environment, except that a pinned home answers for `$HOME` and `%USERPROFILE%`.
-struct PinnedEnv<'a>(Option<&'a std::path::Path>);
+pub(crate) struct PinnedEnv<'a>(pub(crate) Option<&'a std::path::Path>);
 
 impl VarLookup for PinnedEnv<'_> {
     fn lookup(&self, name: &str) -> Option<String> {
@@ -1304,6 +1306,21 @@ impl VarLookup for PinnedEnv<'_> {
     }
 }
 
+/// The users a `~` template expands for: the one pinned home, else the host's user list.
+pub(crate) fn expansion_users(
+    plat: &impl UserEnumerator,
+    pinned_home: Option<&std::path::Path>,
+) -> Vec<UserContext> {
+    match pinned_home {
+        Some(home) => vec![UserContext {
+            name: "pinned".into(),
+            home: home.to_path_buf(),
+            uid_or_sid: String::new(),
+        }],
+        None => UserEnumerator::list(plat),
+    }
+}
+
 /// Expand a policy's per-user path templates into concrete watch paths and the
 /// set of (canonical) watch roots to register. Shared by `run` (startup) and
 /// `policy_reload_task` (live reload). With `pinned_home` set, `~`, `%USERPROFILE%` and
@@ -1314,14 +1331,7 @@ pub(crate) fn expand_targets(
     plat: &impl UserEnumerator,
     pinned_home: Option<&std::path::Path>,
 ) -> (HashMap<String, Vec<PathBuf>>, Vec<(PathBuf, bool)>) {
-    let users = match pinned_home {
-        Some(home) => vec![UserContext {
-            name: "pinned".into(),
-            home: home.to_path_buf(),
-            uid_or_sid: String::new(),
-        }],
-        None => UserEnumerator::list(plat),
-    };
+    let users = expansion_users(plat, pinned_home);
     let env = PinnedEnv(pinned_home);
     let mut expanded_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut watch_roots: Vec<(PathBuf, bool)> = Vec::new();
@@ -3017,6 +3027,20 @@ mod tests {
         assert_eq!(
             expanded_for(&eff, "profile", &NoUserList, Some(&pin)),
             vec![pin.join(".codex/config.toml"), pin.join(".cursor/mcp.json")]
+        );
+    }
+
+    #[test]
+    fn the_expansion_users_are_the_pinned_home_alone_or_the_hosts_list() {
+        let pin = std::path::Path::new("/pin");
+        let pinned = super::expansion_users(&NoUserList, Some(pin));
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].home, pin);
+        let listed_users = super::expansion_users(&ListedUsers(vec![listed("alice")]), None);
+        assert_eq!(listed_users.len(), 1);
+        assert_eq!(
+            listed_users[0].home,
+            std::path::PathBuf::from("/listed/alice")
         );
     }
 

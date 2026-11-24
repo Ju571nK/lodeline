@@ -107,6 +107,24 @@ pub struct ControlContext {
     /// Snapshot-cloned (inner `Arc`) per request, never held across await.
     #[cfg(feature = "operator-cli")]
     pub deny: crate::hook_deny::SharedEvaluator,
+    /// The home the AI Guard parsers assess, as `run` resolved it (`--pin-user-home` first).
+    #[cfg(feature = "operator-cli")]
+    pub home_dir: std::path::PathBuf,
+}
+
+#[cfg(feature = "operator-cli")]
+fn parser_infos(
+    parsers: &[std::sync::Arc<dyn crate::ai_guard::parser::AiGuardParser>],
+    home_dir: &std::path::Path,
+) -> Vec<ParserInfo> {
+    parsers
+        .iter()
+        .map(|p| ParserInfo {
+            tool: p.tool(),
+            scope: p.scope(),
+            watched_path_count: p.watched_paths(home_dir).len(),
+        })
+        .collect()
 }
 
 #[cfg(feature = "operator-cli")]
@@ -381,19 +399,7 @@ async fn handle(ctx: &ControlContext, req: Request) -> Response {
             // Parsers snapshot (clone the Arc list — small).
             let parsers_snapshot: Vec<std::sync::Arc<dyn crate::ai_guard::parser::AiGuardParser>> =
                 ctx.parsers.read().clone();
-            // Resolve home_dir consistently with runtime + reload.
-            let home_dir = std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("/"));
-            let parsers: Vec<ParserInfo> = parsers_snapshot
-                .iter()
-                .map(|p| ParserInfo {
-                    tool: p.tool(),
-                    scope: p.scope(),
-                    watched_path_count: p.watched_paths(&home_dir).len(),
-                })
-                .collect();
+            let parsers = parser_infos(&parsers_snapshot, &ctx.home_dir);
 
             // Per-repo summary — derive from parsers' scopes.
             let mut per_repo = PerRepoSummary::default();
@@ -732,5 +738,36 @@ mod tests {
         assert_eq!(found_in_reply(Some(false)), Some(false));
         assert_eq!(found_in_reply(Some(true)), Some(true));
         assert_eq!(found_in_reply(None), None);
+    }
+
+    #[cfg(feature = "operator-cli")]
+    #[test]
+    fn the_doctor_report_counts_each_parsers_paths_under_the_home_it_is_given() {
+        use crate::ai_guard::parser::AiGuardParser;
+        use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
+        struct PerHome;
+        impl AiGuardParser for PerHome {
+            fn tool(&self) -> AiTool {
+                AiTool::ClaudeCode
+            }
+            fn scope(&self) -> AiGuardScope {
+                AiGuardScope::UserGlobal
+            }
+            fn watched_paths(&self, home: &std::path::Path) -> Vec<std::path::PathBuf> {
+                home.components().map(|c| home.join(c)).collect()
+            }
+            fn assess(
+                &self,
+                _home: &std::path::Path,
+            ) -> Result<Vec<AiGuardReason>, crate::ai_guard::parser::AssessError> {
+                Ok(Vec::new())
+            }
+        }
+        let parsers: Vec<std::sync::Arc<dyn AiGuardParser>> = vec![std::sync::Arc::new(PerHome)];
+        let count = |home: &str| {
+            super::parser_infos(&parsers, std::path::Path::new(home))[0].watched_path_count
+        };
+        assert_eq!(count("/pin"), 2);
+        assert_eq!(count("/pin/deeper/home"), 4);
     }
 }
