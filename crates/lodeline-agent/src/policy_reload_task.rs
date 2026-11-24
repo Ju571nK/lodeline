@@ -240,6 +240,8 @@ pub struct ReloadCtx {
     /// The agent's own home, the user scope whose `.claude` folders no project
     /// target watches a second time.
     pub home_dir: PathBuf,
+    /// `--pin-user-home`: the one home every `~` target expands to.
+    pub pinned_home: Option<PathBuf>,
     /// The other users' homes a root agent assesses, as the AI Guard task
     /// holds them. A project parser built here leaves their `.claude` folders
     /// to those users' rows, and a change of this set triggers a reload.
@@ -696,6 +698,7 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         crate::runtime::discover_and_register_ext_scripts(
             &parsers_snapshot,
             &ctx.home_dir,
+            ctx.pinned_home.is_some(),
             &ctx.ext_scripts,
             &mut effective,
         );
@@ -720,7 +723,8 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         }
     }
 
-    let (expanded_paths, new_roots) = crate::runtime::expand_targets(&effective, plat);
+    let (expanded_paths, new_roots) =
+        crate::runtime::expand_targets(&effective, plat, ctx.pinned_home.as_deref());
 
     // Re-seed the critical-tier warmup cache (idempotent — overwrites).
     let _ = crate::runtime::perform_warmup(&effective, &expanded_paths, &ctx.cache);
@@ -807,7 +811,7 @@ mod tests {
         std::fs::write(&policy_yaml_path, initial_yaml).unwrap();
 
         let eff = effective_from(initial_yaml);
-        let (expanded, roots) = expand_targets(&eff, &plat);
+        let (expanded, roots) = expand_targets(&eff, &plat, None);
         let initial_targets = Arc::new(normalizer::compile_targets(&eff, &expanded));
         let (targets_tx, targets_rx) = watch::channel(initial_targets);
 
@@ -856,6 +860,7 @@ mod tests {
                 unfinished: Vec::new(),
                 applied_policy: None,
                 home_dir: dir.join("home"),
+                pinned_home: None,
                 users_rx: watch::channel(Vec::new()).1,
             },
             plat,
@@ -879,7 +884,7 @@ mod tests {
         std::fs::write(&policy_yaml_path, initial_yaml).unwrap();
 
         let eff = effective_from(initial_yaml);
-        let (expanded, roots) = expand_targets(&eff, &plat);
+        let (expanded, roots) = expand_targets(&eff, &plat, None);
         let initial_targets = Arc::new(normalizer::compile_targets(&eff, &expanded));
         let (targets_tx, targets_rx) = watch::channel(initial_targets);
 
@@ -926,6 +931,7 @@ mod tests {
                 unfinished: Vec::new(),
                 applied_policy: None,
                 home_dir: dir.join("home"),
+                pinned_home: None,
                 users_rx: watch::channel(Vec::new()).1,
             },
             plat,
@@ -973,7 +979,7 @@ mod tests {
 
         // Watch-root bookkeeping reflects policy B's roots.
         let eff_b = effective_from(&policy_yaml("target-b", &path_b, "critical"));
-        let (_exp_b, roots_b) = expand_targets(&eff_b, &plat);
+        let (_exp_b, roots_b) = expand_targets(&eff_b, &plat, None);
         assert_eq!(ctx.watched_roots, roots_b);
 
         // Warmup re-seeded the cache for B's critical file. The cache key is the

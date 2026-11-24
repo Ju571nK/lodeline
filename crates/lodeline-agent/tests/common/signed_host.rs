@@ -123,6 +123,7 @@ impl Host {
             poll_watcher: true,
             keystore_path: Some(self.path("keystore.json")),
             home_dir: Some(self.path("home")),
+            pinned_home: None,
         }));
         let deadline = Instant::now() + BOOT_DEADLINE;
         while Instant::now() < deadline {

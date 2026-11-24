@@ -7,6 +7,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- `lodeline run --pin-user-home <dir>` watches and assesses one home. The `~`, `%USERPROFILE%` and
+  `$HOME` policy targets expand to that folder, the AI agent configs read are that folder's, and the
+  other users' homes are left out, also as root. The folder must be an absolute path that exists,
+  or the command stops with an error before the agent starts. Without the option nothing changes.
+
 ### Fixed
 
 - A watch recovery scan that cannot read many folders, for example under a low open-file limit,

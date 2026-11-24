@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(default_control_socket);
     match cli.command {
-        cli::Command::Run => {
+        cli::Command::Run { pin_user_home } => {
             let cfg = runtime::RuntimeConfig {
                 policy_paths: runtime::policy_paths(cli.policy.clone()),
                 state_db_path: cli.state_db.clone().unwrap_or_else(default_state_db_path),
@@ -29,6 +29,7 @@ fn main() -> anyhow::Result<()> {
                 poll_watcher: cli.poll,
                 keystore_path: cli.keystore.clone(),
                 home_dir: None,
+                pinned_home: pin_user_home,
             };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
