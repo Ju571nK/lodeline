@@ -107,7 +107,6 @@ async fn a_pinned_home_is_where_a_tilde_target_is_watched() {
     agent.join.abort();
 }
 
-#[cfg(unix)]
 fn offline(home: &Path, args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_lodeline"))
         .env("HOME", home)
@@ -122,58 +121,84 @@ fn offline(home: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-#[cfg(unix)]
+/// A per-user path: a dot folder or `AppData` below the home. System folders such as
+/// `%ProgramFiles%` do not count.
+fn is_per_user(p: &Path) -> bool {
+    p.components().any(|c| {
+        let c = c.as_os_str().to_string_lossy();
+        c.starts_with('.') && c.len() > 1 && c != ".." || c == "AppData"
+    })
+}
+
+fn outside_the_pin<'a>(paths: impl Iterator<Item = &'a str>, pin: &Path) -> Vec<&'a str> {
+    paths
+        .filter(|p| is_per_user(Path::new(p)) && !Path::new(p).starts_with(pin))
+        .collect()
+}
+
 #[test]
 fn show_paths_with_a_pin_lists_only_that_home() {
     let dir = tempfile::tempdir().unwrap();
     let pin = dir.path().join("pinned-home");
     std::fs::create_dir(&pin).unwrap();
-    let pin_str = pin.to_str().unwrap();
-    let text = offline(dir.path(), &["show", "paths", "--pin-user-home", pin_str]);
+    let text = offline(
+        dir.path(),
+        &["show", "paths", "--pin-user-home", pin.to_str().unwrap()],
+    );
     let listed: Vec<&str> = text
         .lines()
-        .filter(|l| l.starts_with("  /"))
+        .filter(|l| l.starts_with("  ") && !l.starts_with("  !"))
         .map(str::trim)
         .collect();
     assert!(
         listed
             .iter()
-            .any(|p| *p == format!("{pin_str}/.claude/settings.json")),
+            .any(|p| Path::new(p) == pin.join(".claude").join("settings.json")),
         "{text}"
     );
-    let outside: Vec<_> = listed
-        .iter()
-        .filter(|p| p.contains("/.") && !p.starts_with(pin_str))
-        .collect();
+    let outside = outside_the_pin(listed.iter().copied(), &pin);
     assert!(
         outside.is_empty(),
         "paths outside the pinned home: {outside:?}"
     );
+    #[cfg(windows)]
+    assert!(
+        listed
+            .iter()
+            .any(|p| Path::new(p).starts_with(pin.join("AppData").join("Roaming"))),
+        "no %APPDATA% target under the pin: {text}"
+    );
 }
 
-#[cfg(unix)]
 #[test]
 fn doctor_with_a_pin_checks_that_home_only() {
     let dir = tempfile::tempdir().unwrap();
     let pin = dir.path().join("pinned-home");
     std::fs::create_dir(&pin).unwrap();
-    let pin_str = pin.to_str().unwrap();
-    let text = offline(dir.path(), &["doctor", "--pin-user-home", pin_str]);
+    let text = offline(
+        dir.path(),
+        &["doctor", "--pin-user-home", pin.to_str().unwrap()],
+    );
     assert!(text.contains("enumerated users: 1\n"), "{text}");
     let absent: Vec<&str> = text
         .lines()
-        .filter(|l| l.contains("not present (no file at "))
+        .filter_map(|l| l.split_once("not present (no file at "))
+        .map(|(_, rest)| rest.trim_end_matches(')'))
         .collect();
     assert!(
-        absent.iter().any(|l| l.contains(pin_str)),
+        absent.iter().any(|p| Path::new(p).starts_with(&pin)),
         "no absent path under the pin: {text}"
     );
-    let outside: Vec<_> = absent
-        .iter()
-        .filter(|l| l.contains("/.") && !l.contains(pin_str))
-        .collect();
+    let outside = outside_the_pin(absent.iter().copied(), &pin);
     assert!(
         outside.is_empty(),
         "paths outside the pinned home: {outside:?}"
+    );
+    #[cfg(windows)]
+    assert!(
+        absent
+            .iter()
+            .any(|p| Path::new(p).starts_with(pin.join("AppData").join("Local"))),
+        "no %LOCALAPPDATA% target under the pin: {text}"
     );
 }
