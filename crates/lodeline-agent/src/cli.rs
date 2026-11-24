@@ -84,6 +84,10 @@ pub enum Command {
         /// Path to the signed build manifest JSON (required with --verify-self).
         #[arg(long)]
         manifest: Option<PathBuf>,
+        /// Check one user home only, as `lodeline run --pin-user-home` watches it. The folder
+        /// must exist.
+        #[arg(long, value_name = "DIR", value_parser = existing_absolute_dir)]
+        pin_user_home: Option<PathBuf>,
     },
     /// Inspect static or live state.
     Show {
@@ -188,7 +192,12 @@ pub enum ShowWhat {
     /// Print the merged effective policy.
     Config,
     /// Print fully expanded watch paths.
-    Paths,
+    Paths {
+        /// Expand `~`, `%USERPROFILE%` and `$HOME` to this one home, as
+        /// `lodeline run --pin-user-home` does. The folder must exist.
+        #[arg(long, value_name = "DIR", value_parser = existing_absolute_dir)]
+        pin_user_home: Option<PathBuf>,
+    },
     /// Query the running daemon for stats via control IPC.
     Stats,
     /// Print this host's stable host_id — the UUID persisted in state.db on the
@@ -317,5 +326,30 @@ mod cli_tests {
                 .expect_err("a bad home must be refused");
             assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{bad}");
         }
+    }
+
+    #[test]
+    fn doctor_and_show_paths_take_the_same_pin_as_run() {
+        let dir = std::env::temp_dir();
+        let pin = dir.to_str().unwrap();
+        let super::Command::Doctor { pin_user_home, .. } =
+            Cli::parse_from(["lodeline", "doctor", "--pin-user-home", pin]).command
+        else {
+            panic!("expected the doctor command");
+        };
+        assert_eq!(pin_user_home, Some(dir.clone()));
+        let super::Command::Show {
+            what: super::ShowWhat::Paths { pin_user_home },
+        } = Cli::parse_from(["lodeline", "show", "paths", "--pin-user-home", pin]).command
+        else {
+            panic!("expected show paths");
+        };
+        assert_eq!(pin_user_home, Some(dir));
+        let err = Cli::try_parse_from(["lodeline", "doctor", "--pin-user-home", "relative/home"])
+            .expect_err("a relative home must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        let err = Cli::try_parse_from(["lodeline", "show", "paths", "--pin-user-home", "relative"])
+            .expect_err("a relative home must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }

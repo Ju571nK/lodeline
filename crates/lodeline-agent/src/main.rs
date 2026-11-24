@@ -43,11 +43,12 @@ fn main() -> anyhow::Result<()> {
         cli::Command::Doctor {
             verify_self,
             manifest,
+            pin_user_home,
         } => {
             let code = if verify_self {
                 doctor::verify_self(manifest)
             } else {
-                doctor::run(cli.policy, cli.state_db, &control_socket)
+                doctor::run(cli.policy, cli.state_db, &control_socket, pin_user_home)
             };
             std::process::exit(code);
         }

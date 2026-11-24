@@ -13,9 +13,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   `$HOME` policy targets expand to that folder, the AI agent configs read are that folder's, and the
   other users' homes are left out, also as root. The folder must be an absolute path that exists,
   or the command stops with an error before the agent starts. Without the option nothing changes.
+- `lodeline show paths` and `lodeline doctor` take `--pin-user-home <dir>`, which expands the `~`,
+  `%USERPROFILE%` and `$HOME` targets to that one folder as `lodeline run` does.
 
 ### Fixed
 
+- The AI Guard section of `lodeline doctor` counts each parser's watched paths under the home the
+  running agent assesses, where it used the `$HOME` of the agent process and ignored
+  `--pin-user-home`.
 - A watch recovery scan that cannot read many folders, for example under a low open-file limit,
   now logs the first 3 failures and one summary line with the failed-folder count and the first
   error, where it logged one warning per folder.

@@ -9,7 +9,7 @@ use crate::control::RiskPayload;
 use crate::control::TargetsPayload;
 use crate::platform::ActivePlatform;
 use crate::runtime::SignedFile;
-use lodeline_core::policy::expand::{expand_per_user, EnvLookup};
+use lodeline_core::policy::expand::expand_per_user;
 use lodeline_core::policy::{current_platform, defaults, merge};
 use lodeline_core::stats::StatsSnapshot;
 use std::io::{self, Write};
@@ -66,12 +66,12 @@ pub fn run(
         ShowWhat::Config => {
             println!("{}", serde_yaml::to_string(&effective.targets)?);
         }
-        ShowWhat::Paths => {
+        ShowWhat::Paths { pin_user_home } => {
             println!("{}", in_force_line("policy", &paths.policy));
             println!("{}", in_force_line("rule packs", &paths.rule_packs));
             let plat = ActivePlatform::new();
-            let users = lodeline_core::policy::expand::UserEnumerator::list(&plat);
-            let env = EnvLookup;
+            let users = crate::runtime::expansion_users(&plat, pin_user_home.as_deref());
+            let env = crate::runtime::PinnedEnv(pin_user_home.as_deref());
             for t in &effective.targets {
                 println!("# {} ({:?})", t.id, t.tier);
                 for path_template in &t.paths {

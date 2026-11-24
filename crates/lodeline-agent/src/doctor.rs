@@ -1,7 +1,7 @@
 //! `lodeline doctor` — startup diagnostics, prints a formatted report.
 
 use crate::platform::{ActivePlatform, FdaState, Platform};
-use lodeline_core::policy::expand::{expand_per_user, EnvLookup};
+use lodeline_core::policy::expand::expand_per_user;
 use lodeline_core::policy::{current_platform, defaults, merge};
 use std::path::Path;
 use std::path::PathBuf;
@@ -139,6 +139,7 @@ pub fn run(
     policy_override: Option<PathBuf>,
     state_db_override: Option<PathBuf>,
     control_socket: &Path,
+    pin_user_home: Option<PathBuf>,
 ) -> i32 {
     #[cfg(not(any(target_os = "linux", feature = "operator-cli")))]
     let _ = control_socket;
@@ -202,10 +203,10 @@ pub fn run(
         count_standard,
     );
 
-    let users = lodeline_core::policy::expand::UserEnumerator::list(&plat);
+    let users = crate::runtime::expansion_users(&plat, pin_user_home.as_deref());
     println!("[OK]   enumerated users: {}", users.len());
 
-    let env = EnvLookup;
+    let env = crate::runtime::PinnedEnv(pin_user_home.as_deref());
     let mut total_paths = 0usize;
     let mut absent_paths = 0usize;
     for t in &effective.targets {
