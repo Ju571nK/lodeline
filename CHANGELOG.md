@@ -18,6 +18,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- On Windows, `--pin-user-home` now also moves the `%APPDATA%` and `%LOCALAPPDATA%` targets, to
+  `AppData\Roaming` and `AppData\Local` under the pinned folder. They expanded from the process
+  environment, so a pinned `lodeline run`, `show paths` and `doctor` still watched the real user's
+  AppData.
 - The AI Guard section of `lodeline doctor` counts each parser's watched paths under the home the
   running agent assesses, where it used the `$HOME` of the agent process and ignored
   `--pin-user-home`.

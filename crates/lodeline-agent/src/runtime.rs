@@ -1289,16 +1289,28 @@ fn other_homes_of(
     homes
 }
 
-/// The process environment, except that a pinned home answers for `$HOME` and `%USERPROFILE%`.
+/// The process environment, except that a pinned home answers for `$HOME`, `%USERPROFILE%`,
+/// `%APPDATA%` and `%LOCALAPPDATA%`.
 pub(crate) struct PinnedEnv<'a>(pub(crate) Option<&'a std::path::Path>);
+
+/// The value a pinned home gives a per-user variable, or `None` for any other name.
+fn pinned_var(home: &std::path::Path, name: &str) -> Option<PathBuf> {
+    if name == "HOME" || name == "USERPROFILE" {
+        Some(home.to_path_buf())
+    } else if name.eq_ignore_ascii_case("APPDATA") {
+        Some(home.join("AppData").join("Roaming"))
+    } else if name.eq_ignore_ascii_case("LOCALAPPDATA") {
+        Some(home.join("AppData").join("Local"))
+    } else {
+        None
+    }
+}
 
 impl VarLookup for PinnedEnv<'_> {
     fn lookup(&self, name: &str) -> Option<String> {
-        match self.0 {
-            Some(home) if name == "HOME" || name == "USERPROFILE" => {
-                home.to_str().map(str::to_string)
-            }
-            _ => EnvLookup.lookup(name),
+        match self.0.and_then(|home| pinned_var(home, name)) {
+            Some(value) => value.to_str().map(str::to_string),
+            None => EnvLookup.lookup(name),
         }
     }
     fn home(&self) -> Option<PathBuf> {
@@ -3027,6 +3039,30 @@ mod tests {
         assert_eq!(
             expanded_for(&eff, "profile", &NoUserList, Some(&pin)),
             vec![pin.join(".codex/config.toml"), pin.join(".cursor/mcp.json")]
+        );
+    }
+
+    #[test]
+    fn a_pinned_home_answers_for_the_per_user_variables_and_no_others() {
+        use lodeline_core::policy::expand::{expand, VarLookup};
+        use std::path::Path;
+        let pin = Path::new("pin-home");
+        let env = super::PinnedEnv(Some(pin));
+        assert_eq!(
+            expand("%APPDATA%/Cursor", &env).unwrap(),
+            pin.join("AppData").join("Roaming").join("Cursor")
+        );
+        assert_eq!(
+            expand("%LocalAppData%/Programs", &env).unwrap(),
+            pin.join("AppData").join("Local").join("Programs")
+        );
+        assert_eq!(expand("%USERPROFILE%/x", &env).unwrap(), pin.join("x"));
+        assert_eq!(super::pinned_var(pin, "ProgramData"), None);
+        assert_eq!(super::pinned_var(pin, "PROGRAMFILES"), None);
+        let unpinned = super::PinnedEnv(None);
+        assert_eq!(
+            unpinned.lookup("APPDATA"),
+            lodeline_core::policy::expand::EnvLookup.lookup("APPDATA")
         );
     }
 

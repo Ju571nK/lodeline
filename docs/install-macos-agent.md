@@ -156,7 +156,7 @@ Setting `HOME` changes only the home whose AI agent config is assessed.
 
 To watch and assess one home, start the agent with `lodeline run --pin-user-home <dir>`. The
 folder must be an absolute path that exists. The `~`, `%USERPROFILE%` and `$HOME` targets then expand to
-that folder, the AI agent configs read are that folder's, and the other users' homes are left out,
+that folder (on Windows `%APPDATA%` and `%LOCALAPPDATA%` too, to its `AppData\Roaming` and `AppData\Local`), the AI agent configs read are that folder's, and the other users' homes are left out,
 also when you run as root. Without the option nothing changes. The agent measures the folder you
 name and does not block anything. `lodeline show paths --pin-user-home <dir>` and
 `lodeline doctor --pin-user-home <dir>` take the same option and check that one folder, and the
