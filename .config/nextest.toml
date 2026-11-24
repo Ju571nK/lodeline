@@ -1,3 +1,6 @@
 [profile.ci-rocky]
 slow-timeout = { period = "60s", terminate-after = 5 }
 fail-fast = false
+
+[profile.ci-rocky.junit]
+path = "junit.xml"

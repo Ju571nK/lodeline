@@ -168,8 +168,24 @@ jobs:
       - name: install cargo-nextest
         run: cargo install --locked --version 0.9.152 cargo-nextest
       # A test that runs past 5 slow periods of 60 s is killed and fails by name.
+      # The step has its own limit below the job's, so the log upload still runs
+      # when a hang eats the time.
       - name: test (workspace)
-        run: cargo nextest run --workspace --profile ci-rocky
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --profile ci-rocky 2>&1 | tee nextest-rocky.log
+      - name: upload rocky test log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rocky9-nextest
+          path: |
+            nextest-rocky.log
+            target/nextest/ci-rocky/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
       # nextest skips doc-tests.
       - name: test (doc-tests)
         run: cargo test --workspace --doc
