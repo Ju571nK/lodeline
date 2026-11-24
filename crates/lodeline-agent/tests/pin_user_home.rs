@@ -107,6 +107,7 @@ async fn a_pinned_home_is_where_a_tilde_target_is_watched() {
     agent.join.abort();
 }
 
+#[cfg(unix)]
 fn offline(home: &Path, args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_lodeline"))
         .env("HOME", home)
@@ -121,6 +122,7 @@ fn offline(home: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+#[cfg(unix)]
 #[test]
 fn show_paths_with_a_pin_lists_only_that_home() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,6 +151,7 @@ fn show_paths_with_a_pin_lists_only_that_home() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn doctor_with_a_pin_checks_that_home_only() {
     let dir = tempfile::tempdir().unwrap();
