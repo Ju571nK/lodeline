@@ -17,7 +17,9 @@ use lodeline_core::event::{
     Event, Evidence, Severity, SourceKind, Subject, AGENT_VERSION, SCHEMA_VERSION,
 };
 use lodeline_core::policy::deployment::ArtifactKind;
-use lodeline_core::policy::expand::{expand_per_user, EnvLookup, UserEnumerator};
+use lodeline_core::policy::expand::{
+    expand_per_user, EnvLookup, UserContext, UserEnumerator, VarLookup,
+};
 use lodeline_core::policy::pubkeys::Keystore;
 use lodeline_core::policy::{create_dir_durably, merge_on_this_host, settle_pending, Tier};
 use lodeline_core::sink::jsonl::JsonlSink;
@@ -45,6 +47,23 @@ pub struct RuntimeConfig {
     pub keystore_path: Option<PathBuf>,
     /// Home the AI Guard parsers assess (tests). `None` → `$HOME`, as `main` passes.
     pub home_dir: Option<PathBuf>,
+    /// `--pin-user-home`: the one home that `~`, `%USERPROFILE%` and `$HOME` targets expand to
+    /// and that the AI Guard assesses. Wins over `home_dir`. Other users' homes are left out.
+    pub pinned_home: Option<PathBuf>,
+}
+
+/// The home the AI Guard parsers assess: the pinned home, else the configured one, else
+/// `$HOME` or `%USERPROFILE%` (`env_home`), else `/`.
+pub(crate) fn assessment_home(
+    pinned: Option<&std::path::Path>,
+    configured: Option<&std::path::Path>,
+    env_home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    pinned
+        .or(configured)
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| env_home.map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
@@ -210,13 +229,13 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     for repo_root in &continue_repos {
         push_continue_synthetic_target(&mut effective, repo_root);
     }
-    let home_dir = cfg.home_dir.clone().unwrap_or_else(|| {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("/"))
-    });
-    let user_homes = other_user_homes(&plat);
+    let pinned_home = cfg.pinned_home.clone();
+    let home_dir = assessment_home(
+        pinned_home.as_deref(),
+        cfg.home_dir.as_deref(),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+    );
+    let user_homes = other_user_homes(&plat, pinned_home.is_some());
     let (users_tx, users_rx) = watch::channel(user_homes.clone());
     let other_homes: Vec<PathBuf> = user_homes.iter().map(|h| h.dir.clone()).collect();
     let claude_code_parsers: Vec<Arc<crate::ai_guard::ClaudeCodeProjectParser>> = claude_code_repos
@@ -361,6 +380,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         discover_and_register_ext_scripts(
             &parsers_snapshot,
             &home_dir,
+            pinned_home.is_some(),
             &ext_scripts_registry,
             &mut effective,
         );
@@ -375,7 +395,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     ));
 
     // 2. Expand paths per user → watch paths + watch roots.
-    let (expanded_paths, watch_roots) = expand_targets(&effective, &plat);
+    let (expanded_paths, watch_roots) = expand_targets(&effective, &plat, pinned_home.as_deref());
 
     // 3. Perform critical-tier warmup (state.db already opened above).
     perform_warmup(&effective, &expanded_paths, &cache)?;
@@ -644,6 +664,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                 applied_policy: None,
                 rule_packs_read,
                 home_dir: home_dir.clone(),
+                pinned_home: pinned_home.clone(),
                 users_rx: users_rx.clone(),
             },
         )),
@@ -703,6 +724,7 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
             tokio::spawn({
                 let policy_version_tx = policy_version_tx.clone();
                 let shutdown = cancel.clone();
+                let pinned = pinned_home.is_some();
                 async move {
                     let mut tick = tokio::time::interval(USER_REFRESH_INTERVAL);
                     tick.tick().await;
@@ -711,11 +733,10 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
                             _ = shutdown.cancelled() => break,
                             _ = tick.tick() => {}
                         }
-                        let Ok(homes) =
-                            tokio::task::spawn_blocking(
-                                || other_user_homes(&ActivePlatform::new()),
-                            )
-                            .await
+                        let Ok(homes) = tokio::task::spawn_blocking(move || {
+                            other_user_homes(&ActivePlatform::new(), pinned)
+                        })
+                        .await
                         else {
                             continue;
                         };
@@ -1239,12 +1260,23 @@ const USER_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 
 /// #329 — the other users' homes a root agent assesses, sorted so that two
 /// listings of the same users compare equal. Empty for a normal user, who can
-/// read only its own home.
-pub(crate) fn other_user_homes(plat: &ActivePlatform) -> Vec<crate::ai_guard::task::AssessHome> {
-    if !crate::control::is_root() {
+/// read only its own home, and when a home is pinned.
+pub(crate) fn other_user_homes(
+    plat: &ActivePlatform,
+    home_pinned: bool,
+) -> Vec<crate::ai_guard::task::AssessHome> {
+    other_homes_of(plat, crate::control::is_root(), home_pinned)
+}
+
+fn other_homes_of(
+    users: &impl UserEnumerator,
+    is_root: bool,
+    home_pinned: bool,
+) -> Vec<crate::ai_guard::task::AssessHome> {
+    if home_pinned || !is_root {
         return Vec::new();
     }
-    let mut homes: Vec<_> = UserEnumerator::list(plat)
+    let mut homes: Vec<_> = UserEnumerator::list(users)
         .into_iter()
         .map(|u| crate::ai_guard::task::AssessHome {
             user: Some(u.name),
@@ -1255,16 +1287,42 @@ pub(crate) fn other_user_homes(plat: &ActivePlatform) -> Vec<crate::ai_guard::ta
     homes
 }
 
+/// The process environment, except that a pinned home answers for `$HOME` and `%USERPROFILE%`.
+struct PinnedEnv<'a>(Option<&'a std::path::Path>);
+
+impl VarLookup for PinnedEnv<'_> {
+    fn lookup(&self, name: &str) -> Option<String> {
+        match self.0 {
+            Some(home) if name == "HOME" || name == "USERPROFILE" => {
+                home.to_str().map(str::to_string)
+            }
+            _ => EnvLookup.lookup(name),
+        }
+    }
+    fn home(&self) -> Option<PathBuf> {
+        self.0.map(PathBuf::from).or_else(|| EnvLookup.home())
+    }
+}
+
 /// Expand a policy's per-user path templates into concrete watch paths and the
 /// set of (canonical) watch roots to register. Shared by `run` (startup) and
-/// `policy_reload_task` (live reload).
+/// `policy_reload_task` (live reload). With `pinned_home` set, `~`, `%USERPROFILE%` and
+/// `$HOME` expand to that home alone and the host's user list is not read.
 #[allow(clippy::type_complexity)]
 pub(crate) fn expand_targets(
     eff: &lodeline_core::policy::EffectivePolicy,
-    plat: &ActivePlatform,
+    plat: &impl UserEnumerator,
+    pinned_home: Option<&std::path::Path>,
 ) -> (HashMap<String, Vec<PathBuf>>, Vec<(PathBuf, bool)>) {
-    let users = UserEnumerator::list(plat);
-    let env = EnvLookup;
+    let users = match pinned_home {
+        Some(home) => vec![UserContext {
+            name: "pinned".into(),
+            home: home.to_path_buf(),
+            uid_or_sid: String::new(),
+        }],
+        None => UserEnumerator::list(plat),
+    };
+    let env = PinnedEnv(pinned_home);
     let mut expanded_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut watch_roots: Vec<(PathBuf, bool)> = Vec::new();
     for t in &eff.targets {
@@ -2328,12 +2386,13 @@ fn expand_user_path_for_ext_script(p: &std::path::Path, home: &std::path::Path) 
 pub(crate) fn discover_and_register_ext_scripts(
     parsers: &[std::sync::Arc<dyn crate::ai_guard::parser::AiGuardParser>],
     home_dir: &std::path::Path,
+    home_pinned: bool,
     registry: &crate::ai_guard::ExtScriptRegistry,
     effective: &mut lodeline_core::policy::EffectivePolicy,
 ) {
     let homes: Vec<PathBuf> = std::iter::once(home_dir.to_path_buf())
         .chain(
-            other_user_homes(&ActivePlatform::new())
+            other_user_homes(&ActivePlatform::new(), home_pinned)
                 .into_iter()
                 .map(|h| h.dir),
         )
@@ -2890,6 +2949,115 @@ mod tests {
         );
     }
 
+    struct ListedUsers(Vec<lodeline_core::policy::expand::UserContext>);
+
+    impl lodeline_core::policy::expand::UserEnumerator for ListedUsers {
+        fn list(&self) -> Vec<lodeline_core::policy::expand::UserContext> {
+            self.0.clone()
+        }
+    }
+
+    struct NoUserList;
+
+    impl lodeline_core::policy::expand::UserEnumerator for NoUserList {
+        fn list(&self) -> Vec<lodeline_core::policy::expand::UserContext> {
+            panic!("a pinned home must not read the host's user list");
+        }
+    }
+
+    fn listed(name: &str) -> lodeline_core::policy::expand::UserContext {
+        lodeline_core::policy::expand::UserContext {
+            name: name.into(),
+            home: std::path::PathBuf::from("/listed").join(name),
+            uid_or_sid: "501".into(),
+        }
+    }
+
+    fn home_targets() -> lodeline_core::policy::EffectivePolicy {
+        let yaml = "version: 1\ntargets:\n  - id: tilde\n    description: t\n    tier: standard\n    platform: any\n    paths: ['~/.claude/settings.json']\n    recursive: false\n  - id: profile\n    description: p\n    tier: standard\n    platform: any\n    paths: ['%USERPROFILE%/.codex/config.toml', '$HOME/.cursor/mcp.json']\n    recursive: false\n";
+        lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            Some(lodeline_core::policy::parse(yaml).unwrap()),
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap()
+    }
+
+    fn expanded_for(
+        eff: &lodeline_core::policy::EffectivePolicy,
+        id: &str,
+        users: &impl lodeline_core::policy::expand::UserEnumerator,
+        pinned: Option<&std::path::Path>,
+    ) -> Vec<std::path::PathBuf> {
+        let (expanded, _) = super::expand_targets(eff, users, pinned);
+        expanded[id].clone()
+    }
+
+    #[test]
+    fn a_pinned_home_is_the_only_home_that_tilde_and_profile_targets_expand_to() {
+        let td = tempfile::tempdir().unwrap();
+        let pin = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let eff = home_targets();
+        let users = ListedUsers(vec![listed("alice"), listed("bob")]);
+
+        let unpinned = expanded_for(&eff, "tilde", &users, None);
+        assert_eq!(
+            unpinned,
+            vec![
+                std::path::PathBuf::from("/listed/alice/.claude/settings.json"),
+                std::path::PathBuf::from("/listed/bob/.claude/settings.json"),
+            ]
+        );
+
+        assert_eq!(
+            expanded_for(&eff, "tilde", &NoUserList, Some(&pin)),
+            vec![pin.join(".claude/settings.json")]
+        );
+        assert_eq!(
+            expanded_for(&eff, "profile", &NoUserList, Some(&pin)),
+            vec![pin.join(".codex/config.toml"), pin.join(".cursor/mcp.json")]
+        );
+    }
+
+    #[test]
+    fn assessment_home_prefers_the_pin_then_the_configured_home_then_the_environment() {
+        use std::ffi::OsString;
+        use std::path::{Path, PathBuf};
+        let env = || Some(OsString::from("/env/home"));
+        assert_eq!(
+            super::assessment_home(Some(Path::new("/pin")), Some(Path::new("/cfg")), env()),
+            PathBuf::from("/pin")
+        );
+        assert_eq!(
+            super::assessment_home(None, Some(Path::new("/cfg")), env()),
+            PathBuf::from("/cfg")
+        );
+        assert_eq!(
+            super::assessment_home(None, None, env()),
+            PathBuf::from("/env/home")
+        );
+        assert_eq!(super::assessment_home(None, None, None), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn a_pinned_home_adds_no_other_user_assessment_homes_even_as_root() {
+        let users = ListedUsers(vec![listed("bob"), listed("alice")]);
+        let homes: Vec<_> = super::other_homes_of(&users, true, false)
+            .into_iter()
+            .map(|h| h.dir)
+            .collect();
+        assert_eq!(
+            homes,
+            vec![
+                std::path::PathBuf::from("/listed/alice"),
+                std::path::PathBuf::from("/listed/bob")
+            ]
+        );
+        assert!(super::other_homes_of(&NoUserList, true, true).is_empty());
+        assert!(super::other_homes_of(&NoUserList, false, false).is_empty());
+    }
+
     #[test]
     fn expand_targets_retains_missing_roots_and_merges_recursive_coverage() {
         let td = tempfile::tempdir().unwrap();
@@ -2905,7 +3073,7 @@ mod tests {
             lodeline_core::policy::current_platform(),
         )
         .unwrap();
-        let (_, roots) = super::expand_targets(&eff, &crate::platform::ActivePlatform::new());
+        let (_, roots) = super::expand_targets(&eff, &crate::platform::ActivePlatform::new(), None);
         let expected = crate::normalizer::canonicalize_glob_prefix(&root);
         let matching: Vec<_> = roots.iter().filter(|(path, _)| path == &expected).collect();
         assert_eq!(matching, vec![&(expected, true)]);
@@ -2928,7 +3096,7 @@ mod tests {
             lodeline_core::policy::current_platform(),
         )
         .unwrap();
-        let (_, roots) = super::expand_targets(&eff, &crate::platform::ActivePlatform::new());
+        let (_, roots) = super::expand_targets(&eff, &crate::platform::ActivePlatform::new(), None);
         for want in [
             (dir.join("skills"), true),
             (dir.join("skills/*"), false),
@@ -2957,7 +3125,8 @@ mod tests {
             lodeline_core::policy::current_platform(),
         )
         .unwrap();
-        let (expanded, _) = super::expand_targets(&eff, &crate::platform::ActivePlatform::new());
+        let (expanded, _) =
+            super::expand_targets(&eff, &crate::platform::ActivePlatform::new(), None);
         let files = super::watched_files(&eff, &expanded);
         let listed = crate::normalizer::canonicalize_glob_prefix(&file);
         assert_eq!(files.iter().filter(|f| **f == listed).count(), 1);

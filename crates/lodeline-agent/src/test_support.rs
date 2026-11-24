@@ -24,6 +24,7 @@ pub struct TestAgentBuilder {
     host_id: Option<String>,
     home: Option<PathBuf>,
     default_targets: bool,
+    pin_home: bool,
 }
 
 impl Default for TestAgentBuilder {
@@ -41,6 +42,7 @@ impl TestAgentBuilder {
             host_id: None,
             home: None,
             default_targets: false,
+            pin_home: false,
         }
     }
 
@@ -48,6 +50,12 @@ impl TestAgentBuilder {
     /// inside the agent's tempdir, never the process `HOME`.
     pub fn home(mut self, home: &std::path::Path) -> Self {
         self.home = Some(home.to_path_buf());
+        self
+    }
+
+    /// Start with `--pin-user-home` set to the agent's home.
+    pub fn pin_home(mut self) -> Self {
+        self.pin_home = true;
         self
     }
 
@@ -118,6 +126,7 @@ impl TestAgentBuilder {
             hook_pipe_name: format!("{control_pipe_name}-hook"),
             poll_watcher: self.poll_watcher,
             keystore_path,
+            pinned_home: self.pin_home.then(|| home.clone()),
             home_dir: Some(home),
         };
         let mut join = tokio::spawn(async move {
@@ -157,7 +166,7 @@ impl TestAgentBuilder {
 /// `disabled: true`. A policy with no target of its own gets one watching
 /// `placeholder`, since a policy cannot end up with none. YAML that does not
 /// parse is returned as is, so a test of a refused policy still sees its error.
-fn with_defaults_disabled(yaml: &str, placeholder: &std::path::Path) -> String {
+pub fn with_defaults_disabled(yaml: &str, placeholder: &std::path::Path) -> String {
     use serde_yaml::{Mapping, Value};
     let mut doc: Mapping = if yaml.trim().is_empty() {
         let mut m = Mapping::new();

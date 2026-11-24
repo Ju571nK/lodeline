@@ -152,8 +152,15 @@ writable paths when running as your user.
 
 Policy paths that start with `~` (most built-in targets, see the table below) expand to every user's
 home on the host, not to `$HOME`, whether you run as root or as your user.
-Setting `HOME` changes only the home whose AI agent config is assessed. To
-watch a different home, for example in a test or demo, write your own policy
+Setting `HOME` changes only the home whose AI agent config is assessed.
+
+To watch and assess one home, start the agent with `lodeline run --pin-user-home <dir>`. The
+folder must be an absolute path that exists. The `~`, `%USERPROFILE%` and `$HOME` targets then expand to
+that folder, the AI agent configs read are that folder's, and the other users' homes are left out,
+also when you run as root. Without the option nothing changes. The agent measures the folder you
+name and does not block anything.
+
+To watch a different set of paths, for example in a test or demo, write your own policy
 with `$HOME/...` target paths, add an `overrides` entry with `disabled: true`
 for each built-in target id (an empty `targets` list does not turn them off),
 then pass the file with `--policy`.

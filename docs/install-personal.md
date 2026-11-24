@@ -102,7 +102,7 @@ sudo systemctl enable --now lodeline
 lodeline run
 ```
 
-A different `HOME` moves only the home whose AI agent config is assessed. The built-in `~` watch paths still cover every user's home on the host. See [Run as root or as your user](install-macos-agent.md#run-as-root-full-coverage-or-as-your-user-own-posture).
+A different `HOME` moves only the home whose AI agent config is assessed. The built-in `~` watch paths still cover every user's home on the host. To watch and assess one home, start the agent with `lodeline run --pin-user-home <dir>`. See [Run as root or as your user](install-macos-agent.md#run-as-root-full-coverage-or-as-your-user-own-posture).
 
 The daemon must be running for `lodeline-mcp` and `lodeline-hook` to function. Both are clients of the daemon and have no independent capability without it. On macOS and Linux they connect over Unix sockets. On Windows, `lodeline-hook` connects over named pipes.
 

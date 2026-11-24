@@ -69,7 +69,13 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run as a daemon.
-    Run,
+    Run {
+        /// Watch and assess one user home only. `~`, `%USERPROFILE%` and `$HOME` policy
+        /// targets expand to this folder, the AI agent configs read are this folder's, and
+        /// other users' homes are left out, also as root. The folder must exist.
+        #[arg(long, value_name = "DIR", value_parser = existing_absolute_dir)]
+        pin_user_home: Option<PathBuf>,
+    },
     /// Diagnose configuration and permissions; do not start the daemon.
     Doctor {
         /// Verify this binary's blake3 against a signed build manifest, then exit.
@@ -162,6 +168,19 @@ fn canonical_v4(host_id: &str) -> Result<String, &'static str> {
     } else {
         Err("expected a lowercase, hyphenated version 4 UUID")
     }
+}
+
+/// A relative path would follow the working directory and a missing one would watch nothing,
+/// so `--pin-user-home` takes neither.
+fn existing_absolute_dir(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!("{value} is not an absolute path"));
+    }
+    if !path.is_dir() {
+        return Err(format!("{value} is not an existing folder"));
+    }
+    Ok(path)
 }
 
 #[derive(Subcommand, Debug)]
@@ -272,5 +291,31 @@ mod cli_tests {
         let cli = Cli::parse_from(["lodeline", "run"]);
         assert!(cli.control_socket.is_none());
         assert!(cli.keystore.is_none());
+    }
+
+    #[test]
+    fn pin_user_home_defaults_to_none_and_takes_an_existing_absolute_folder() {
+        let super::Command::Run { pin_user_home } = Cli::parse_from(["lodeline", "run"]).command
+        else {
+            panic!("expected the run command");
+        };
+        assert!(pin_user_home.is_none());
+
+        let dir = std::env::temp_dir();
+        let cli = Cli::parse_from(["lodeline", "run", "--pin-user-home", dir.to_str().unwrap()]);
+        let super::Command::Run { pin_user_home } = cli.command else {
+            panic!("expected the run command");
+        };
+        assert_eq!(pin_user_home, Some(dir));
+    }
+
+    #[test]
+    fn pin_user_home_refuses_a_relative_or_missing_folder() {
+        let missing = std::env::temp_dir().join("lodeline-no-such-home-folder");
+        for bad in [".", "relative/home", missing.to_str().unwrap()] {
+            let err = Cli::try_parse_from(["lodeline", "run", "--pin-user-home", bad])
+                .expect_err("a bad home must be refused");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{bad}");
+        }
     }
 }
