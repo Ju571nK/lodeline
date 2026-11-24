@@ -27,9 +27,9 @@ order.
   or the command stops with an error before the agent starts. Without the option nothing
   changes. (#754, #757)
 - `lodeline show paths` and `lodeline doctor` take `--pin-user-home <dir>`, which expands the `~`,
-  `%USERPROFILE%` and `$HOME` targets to that one folder as `lodeline run` does. With the option,
-  the AI Guard section of `lodeline doctor` counts each parser's watched paths under that home.
-  (#756)
+  `%USERPROFILE%` and `$HOME` targets to that one folder as `lodeline run` does. When the agent runs
+  with the option, the AI Guard section of `lodeline doctor` counts each parser's watched paths
+  under the pinned home. (#756)
 
 ### Fixed
 
