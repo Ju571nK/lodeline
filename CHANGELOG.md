@@ -7,7 +7,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
-## [0.21.0] - 2026-11-24
+## [0.21.0] - 2026-11-25
 
 **Upgrade.** This is a minor release because `lodeline run`, `lodeline show paths` and `lodeline
 doctor` gain the `--pin-user-home <dir>` option (#754, #756, #757). Without the option nothing
@@ -20,22 +20,19 @@ order.
 ### Added
 
 - `lodeline run --pin-user-home <dir>` watches and assesses one home. The `~`, `%USERPROFILE%` and
-  `$HOME` policy targets expand to that folder, the AI agent configs read are that folder's, and the
-  other users' homes are left out, also as root. The folder must be an absolute path that exists,
+  `$HOME` policy targets expand to that folder, and on Windows so do `%APPDATA%` and
+  `%LOCALAPPDATA%`, to `AppData\Roaming` and `AppData\Local` under it. The AI agent configs read
+  are that folder's, and the other users' homes are left out, also as root. Targets with an absolute
+  system path outside any home are still watched. The folder must be an absolute path that exists,
   or the command stops with an error before the agent starts. Without the option nothing
-  changes. (#754)
+  changes. (#754, #757)
 - `lodeline show paths` and `lodeline doctor` take `--pin-user-home <dir>`, which expands the `~`,
-  `%USERPROFILE%` and `$HOME` targets to that one folder as `lodeline run` does. (#756)
+  `%USERPROFILE%` and `$HOME` targets to that one folder as `lodeline run` does. With the option,
+  the AI Guard section of `lodeline doctor` counts each parser's watched paths under that home.
+  (#756)
 
 ### Fixed
 
-- On Windows, `--pin-user-home` now also moves the `%APPDATA%` and `%LOCALAPPDATA%` targets, to
-  `AppData\Roaming` and `AppData\Local` under the pinned folder. They expanded from the process
-  environment, so a pinned `lodeline run`, `show paths` and `doctor` still watched the real user's
-  AppData. (#757)
-- The AI Guard section of `lodeline doctor` counts each parser's watched paths under the home the
-  running agent assesses, where it used the `$HOME` of the agent process and ignored
-  `--pin-user-home`. (#756)
 - A watch recovery scan that cannot read many folders, for example under a low open-file limit,
   now logs the first 3 failures and one summary line with the failed-folder count and the first
   error, where it logged one warning per folder. (#751)
