@@ -1714,12 +1714,12 @@ An entry of `reasons` in `ai_guard_risk_assessed` may carry one more key next to
 The key is absent when the agent cannot name one file, and is not written as `null`. `file` is
 required inside the object. A reader must show a `layer` string it does not know as it is. No
 reason kind is added and no known key changes. A reading that carries the key scores as the same
-reading without it. This release writes no `config_source`; a later release fills it per
-tool.
+reading without it. The Codex parser writes it where one file holds the setting (see the Codex
+coverage page); the other tools do not write it yet.
 
-An agent or server that decodes a reason as a typed value ignores the key. A server that keeps
-an unknown reason kind (§14.17 style, #333) stores the key with the rest of that object. The
-console server relays `reasons` as raw JSON, so the key reaches the SPA unchanged.
+A build released before this key existed ignores it when it decodes a reason as a typed value. A
+server that keeps an unknown reason kind (§14.17 style, #333) stores the key with the rest of that
+object. The console server relays `reasons` as raw JSON, so the key reaches the SPA unchanged.
 
 The agent's change detector includes the key in its hash only for a finding that carries it. A
 finding without the key hashes as before, so an agent that starts to write the key sends one
