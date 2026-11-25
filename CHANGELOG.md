@@ -7,23 +7,45 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-25
+
+**Upgrade.** This is a minor release because an entry of `reasons` in `ai_guard_risk_assessed` may
+carry the optional `config_source` key, which the agent now writes on Codex findings (#766, #768).
+For the same files no score changes, except where a fix scores a file once that was scored twice at
+a home folder (#763 Claude Code, #767 and #769 Cursor, Grok, Gemini CLI and Continue) or reads the
+folder Claude Code really uses (#765). Servers, consoles and SIEM parsers released before the key
+ignore it if they tolerate unknown keys. The restart after an upgrade sends its usual boot event
+and no extra one. This release changes no policy field, no reason kind and no fleet API route. No
+package script, unit file, tmpfiles entry or SELinux module changed. Upgrade the server, the
+console and the agents in any order.
+
 ### Added
 
 - An entry of `reasons` in `ai_guard_risk_assessed` may carry an optional `config_source` key, an
   object with the `layer` and the absolute `file` of the configuration the finding came from. Older
-  agents and servers ignore it (contract section 14.18).
+  agents and servers ignore it (contract section 14.18). (#766)
 - The agent now fills `config_source` on Codex findings, in the service and in `lodeline scan
   --json`. A hook finding names its `config.toml` or `hooks.json`, a merged setting or MCP server
   the highest layer that sets it, a rules finding the first rules file, and an `AGENTS.md` finding
   that file. A finding from a named permission profile names none. Scores do not change. A Codex
   setting that moves to another layer now sends a new event, because the change detector includes
   the key. An upgrade adds no event of its own, because the first assessment after a restart is sent
-  anyway.
+  anyway. (#768)
+- Added `docs/cursor-coverage.md`. It lists the Cursor hook files Lodeline reads (user, enterprise
+  and project), states that a `prompt` hook adds no finding and that a command is scored under any
+  event name, and says team hooks and Cursor cloud agents are not covered and why. Refs #203.
+  (#767)
 
 ### Fixed
 
-- The Cursor project row no longer reads `.cursor/mcp.json`, and the Grok, Gemini CLI and Continue project rows no longer read `.grok`, `.gemini/settings.json` and `.continue/config.json`, when the project root is a home folder, because the user row of each tool reads the same file, so a home-folder project no longer scores one file twice. A project below the home folder still reads its own files. Refs #203.
-- A Cursor project row no longer reads `.cursor/hooks.json` when the project root is a home folder, because the user row reads that file, so a home-folder project no longer scores one hook file twice. Refs #203.
+- The Cursor project row no longer reads `.cursor/mcp.json`, and the Grok, Gemini CLI and Continue
+  project rows no longer read `.grok`, `.gemini/settings.json` and `.continue/config.json`, when the
+  project root is a home folder, because the user row of each tool reads the same file, so a
+  home-folder project no longer scores one file twice. A project below the home folder still reads
+  its own files. Refs #203. (#769)
+- A Cursor project row no longer reads `.cursor/hooks.json` when the project root is a home folder,
+  because the user row reads that file, so a home-folder project no longer scores one hook file
+  twice. Refs #203. (#767)
 - A `CLAUDE_CONFIG_DIR` set in the `env` block of a user's `~/.claude/settings.json` now moves that
   user's Claude Code row to that folder, in `lodeline scan` and in the agent service, as Claude Code
   itself does. The scan read the default folder and scored the wrong files. The variable in the
@@ -31,16 +53,13 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   Claude Code resolves those against the session's folder, which a scan cannot know. A redirect
   inside the redirected folder is not followed. On Linux and macOS a redirect to a folder owned
   by another account is ignored, so a service running as root cannot be pointed at another user's
-  folder; on Windows the redirect is followed as it is. The agent service does not watch the redirected
-  folder, so an edit there shows at its next full pass.
-
+  folder; on Windows the redirect is followed as it is. The agent service does not watch the
+  redirected folder, so an edit there shows at its next full pass. (#765)
 - A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`
-  and the hooks of their skills, subagents and commands a second time in the project row. Claude
-  Code builds no project settings path at the home folder, so the user row reads them.
-
-### Added
-
-- Added `docs/cursor-coverage.md`. It lists the Cursor hook files Lodeline reads (user, enterprise and project), states that a `prompt` hook adds no finding and that a command is scored under any event name, and says team hooks and Cursor cloud agents are not covered and why. Refs #203.
+  and the hooks of their skills, subagents and commands a second time in the project row.
+  Lodeline's Claude Code user row already reads them, so they now count once. (#763)
+- The console's observed controls note now reads "This list adds nothing to the risk score." where
+  it read "Risk score is unchanged.", which read as if a score had not moved. (#764)
 
 ## [0.21.0] - 2026-11-25
 
