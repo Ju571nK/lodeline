@@ -56,8 +56,8 @@ console and the agents in any order.
   folder; on Windows the redirect is followed as it is. The agent service does not watch the
   redirected folder, so an edit there shows at its next full pass. (#765)
 - A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`
-  and the hooks of their skills, subagents and commands a second time in the project row. Claude
-  Code already reads them in the user row, so they now count once. (#763)
+  and the hooks of their skills, subagents and commands a second time in the project row.
+  Lodeline's Claude Code user row already reads them, so they now count once. (#763)
 - The console's observed controls note now reads "This list adds nothing to the risk score." where
   it read "Risk score is unchanged.", which read as if a score had not moved. (#764)
 
