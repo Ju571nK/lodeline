@@ -339,6 +339,15 @@ fn hostile_project_settings_names_never_reach_scan_json() {
 /// `lodeline scan --json` as the invoking user, with `HOME` and optionally
 /// `CODEX_HOME` set on the child only, so no test races another on the env.
 fn scan_bin(home: &Path, cwd: &Path, codex_home: Option<&Path>) -> serde_json::Value {
+    scan_bin_with_claude_dir(home, cwd, codex_home, None)
+}
+
+fn scan_bin_with_claude_dir(
+    home: &Path,
+    cwd: &Path,
+    codex_home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
+) -> serde_json::Value {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_lodeline"));
     cmd.args(["scan", "--json"])
         .current_dir(cwd)
@@ -348,6 +357,9 @@ fn scan_bin(home: &Path, cwd: &Path, codex_home: Option<&Path>) -> serde_json::V
         .env_remove("CODEX_HOME");
     if let Some(dir) = codex_home {
         cmd.env("CODEX_HOME", dir);
+    }
+    if let Some(dir) = claude_config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
     let out = cmd.output().unwrap();
     assert!(
@@ -712,4 +724,101 @@ fn a_tool_over_the_threshold_beats_a_corrupt_config() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(!v["errors"].as_array().unwrap().is_empty(), "{v}");
     assert_eq!(scan_exit(home.path(), &["--fail-on", "medium"]).0, Some(3));
+}
+
+fn claude_user_kinds(v: &serde_json::Value) -> Vec<String> {
+    v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["tool"] == "claude-code" && r["scope"] == "user-global")
+        .flat_map(|r| kinds(&r["reasons"]))
+        .collect()
+}
+
+const ALLOW_BROAD: &str = r#"{"permissions":{"allow":["Bash:*"]}}"#;
+
+fn redirecting_settings(dir: &Path) -> String {
+    serde_json::json!({
+        "env": {"CLAUDE_CONFIG_DIR": dir},
+        "permissions": {"allow": ["Read"]},
+    })
+    .to_string()
+}
+
+#[test]
+fn scan_follows_a_claude_config_dir_set_in_the_default_settings_env() {
+    let (home, alt, cwd) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+    write(
+        &home.path().join(".claude").join("settings.json"),
+        &redirecting_settings(alt.path()),
+    );
+    write(&alt.path().join("settings.json"), ALLOW_BROAD);
+
+    let v = scan_bin(home.path(), cwd.path(), None);
+
+    assert!(
+        claude_user_kinds(&v).contains(&"permissions_allow_broad".to_string()),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_prefers_the_process_claude_config_dir_over_the_settings_env() {
+    let (home, alt, process, cwd) = (
+        tempdir().unwrap(),
+        tempdir().unwrap(),
+        tempdir().unwrap(),
+        tempdir().unwrap(),
+    );
+    write(
+        &home.path().join(".claude").join("settings.json"),
+        &redirecting_settings(alt.path()),
+    );
+    write(&alt.path().join("settings.json"), ALLOW_BROAD);
+    write(
+        &process.path().join("settings.json"),
+        r#"{"permissions":{"allow":["Read"]}}"#,
+    );
+
+    let v = scan_bin_with_claude_dir(home.path(), cwd.path(), None, Some(process.path()));
+
+    assert!(
+        !claude_user_kinds(&v).contains(&"permissions_allow_broad".to_string()),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_ignores_a_relative_claude_config_dir_in_the_settings_env() {
+    let (home, cwd) = (tempdir().unwrap(), tempdir().unwrap());
+    write(
+        &home.path().join(".claude").join("settings.json"),
+        r#"{"env":{"CLAUDE_CONFIG_DIR":"alt"},"permissions":{"allow":["Bash:*"]}}"#,
+    );
+    write(&home.path().join("alt").join("settings.json"), r#"{}"#);
+
+    let v = scan_bin(home.path(), cwd.path(), None);
+
+    assert!(
+        claude_user_kinds(&v).contains(&"permissions_allow_broad".to_string()),
+        "{v}"
+    );
+}
+
+#[test]
+fn scan_of_a_given_home_follows_that_homes_settings_env() {
+    let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+    write(
+        &home.path().join(".claude").join("settings.json"),
+        &redirecting_settings(alt.path()),
+    );
+    write(&alt.path().join("settings.json"), ALLOW_BROAD);
+
+    let v = report_json_for(home.path(), None);
+
+    assert!(
+        claude_user_kinds(&v).contains(&"permissions_allow_broad".to_string()),
+        "{v}"
+    );
 }

@@ -11,8 +11,10 @@ use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// `config_dir` is `CLAUDE_CONFIG_DIR`, which moves `~/.claude` to that
-/// folder and `~/.claude.json` into it. `None` reads the default layout.
+/// `config_dir` is `CLAUDE_CONFIG_DIR` from the process environment, which moves
+/// `~/.claude` to that folder and `~/.claude.json` into it. `None` reads the
+/// default layout, unless that home's own `~/.claude/settings.json` sets
+/// `env.CLAUDE_CONFIG_DIR` (see [`settings_env_config_dir`]).
 #[derive(Default)]
 pub struct ClaudeCodeParser {
     config_dir: Option<PathBuf>,
@@ -25,11 +27,71 @@ impl ClaudeCodeParser {
 
     /// The config folder and the `.claude.json` path for `home_dir`.
     fn locate(&self, home_dir: &Path) -> (PathBuf, PathBuf) {
-        match &self.config_dir {
-            Some(dir) => (dir.clone(), dir.join(".claude.json")),
+        match self
+            .config_dir
+            .clone()
+            .or_else(|| settings_env_config_dir(home_dir))
+        {
+            Some(dir) => {
+                let claude_json = dir.join(".claude.json");
+                (dir, claude_json)
+            }
             None => (home_dir.join(".claude"), home_dir.join(".claude.json")),
         }
     }
+}
+
+/// The config folder that `env.CLAUDE_CONFIG_DIR` in `home_dir`'s default
+/// `~/.claude/settings.json` names. Claude Code (2.1.332) then takes that
+/// folder as its whole config dir, so the default `settings.json` hooks stop
+/// applying. Only that file is read, so a redirect inside the folder is not
+/// followed.
+///
+/// Claude Code resolves a relative value against the session's working folder
+/// and takes `~` literally as a folder name, neither of which a scan can know,
+/// so only an absolute path counts. An absolute path to a folder that does not
+/// exist counts too: Claude Code creates and uses it, so the scan reads it as
+/// empty. An unreadable or malformed default file reads as no redirect.
+fn settings_env_config_dir(home_dir: &Path) -> Option<PathBuf> {
+    let settings =
+        super::read_json_optional(&home_dir.join(".claude").join("settings.json")).ok()??;
+    let dir = Path::new(settings.pointer("/env/CLAUDE_CONFIG_DIR")?.as_str()?);
+    if !dir.is_absolute() {
+        return None;
+    }
+    if !redirect_owner_matches(home_dir, dir) {
+        tracing::debug!(
+            home = %home_dir.display(), target = %dir.display(),
+            "claude: ignoring a settings env CLAUDE_CONFIG_DIR owned by another account"
+        );
+        return None;
+    }
+    Some(dir.to_path_buf())
+}
+
+/// The agent service can run as root and assess every home, so one user's file
+/// must not point the row at another account's folder. On unix the folder, or
+/// its nearest existing parent when it does not exist, must belong to the
+/// home folder's owner. Windows has no uid to compare, so a redirect is followed
+/// as it is there.
+#[cfg(unix)]
+fn redirect_owner_matches(home_dir: &Path, target: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(home_dir).is_ok_and(|home| owned_by(target, home.uid()))
+}
+
+#[cfg(unix)]
+fn owned_by(target: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    target
+        .ancestors()
+        .find_map(|p| std::fs::metadata(p).ok())
+        .is_some_and(|m| m.uid() == uid)
+}
+
+#[cfg(not(unix))]
+fn redirect_owner_matches(_home_dir: &Path, _target: &Path) -> bool {
+    true
 }
 
 impl AiGuardParser for ClaudeCodeParser {
@@ -62,6 +124,11 @@ impl AiGuardParser for ClaudeCodeParser {
         paths.extend(super::policy_controls::claude_paths(
             &super::policy_controls::claude_policy_dir(),
         ));
+        // The redirect itself lives in the default file, so it stays watched.
+        let default_settings = home_dir.join(".claude").join("settings.json");
+        if self.config_dir.is_none() && !paths.contains(&default_settings) {
+            paths.push(default_settings);
+        }
         paths
     }
 
@@ -2274,6 +2341,173 @@ mod tests {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, contents).unwrap();
+    }
+
+    const PROMPT_FREE: &str = r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
+    const ALLOW_BROAD: &str = r#"{"permissions":{"allow":["Bash:*"]}}"#;
+
+    fn redirect_to(home: &Path, value: &str) {
+        let settings = serde_json::json!({
+            "env": {"CLAUDE_CONFIG_DIR": value},
+            "permissions": {"defaultMode": "bypassPermissions"},
+        });
+        write_settings(home, &settings.to_string());
+    }
+
+    fn has_allow_broad(reasons: &[AiGuardReason]) -> bool {
+        reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. }))
+    }
+
+    fn has_prompt_free_mode(reasons: &[AiGuardReason]) -> bool {
+        reasons.iter().any(
+            |r| matches!(r, AiGuardReason::AutoApprovalEnabled { mode } if mode == "bypassPermissions"),
+        )
+    }
+
+    #[test]
+    fn settings_env_config_dir_replaces_the_default_folder() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        write_file(alt.path(), "settings.json", ALLOW_BROAD);
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(has_allow_broad(&reasons), "{reasons:?}");
+        assert!(!has_prompt_free_mode(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn process_config_dir_wins_over_settings_env() {
+        let (home, alt, process) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        write_file(alt.path(), "settings.json", PROMPT_FREE);
+        write_file(process.path(), "settings.json", ALLOW_BROAD);
+        let parser = ClaudeCodeParser::with_config_dir(Some(process.path().to_path_buf()));
+
+        let reasons = parser.assess(home.path()).unwrap();
+
+        assert!(has_allow_broad(&reasons), "{reasons:?}");
+        assert!(!has_prompt_free_mode(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_relative_or_tilde_settings_env_is_ignored() {
+        for value in ["alt", "./alt", "~/alt", "", "~"] {
+            let home = tempdir().unwrap();
+            redirect_to(home.path(), value);
+            write_file(home.path(), "alt/settings.json", ALLOW_BROAD);
+            write_file(home.path(), "~/alt/settings.json", ALLOW_BROAD);
+
+            let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+            assert!(has_prompt_free_mode(&reasons), "{value:?}: {reasons:?}");
+            assert!(!has_allow_broad(&reasons), "{value:?}: {reasons:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settings_env_folder_owned_by_another_account_is_ignored() {
+        use std::os::unix::fs::MetadataExt;
+        let alt = tempdir().unwrap();
+        let uid = std::fs::metadata(alt.path()).unwrap().uid();
+
+        assert!(owned_by(alt.path(), uid));
+        assert!(owned_by(&alt.path().join("not/created"), uid));
+        assert!(!owned_by(alt.path(), uid.wrapping_add(1)));
+        assert!(!owned_by(
+            &alt.path().join("not/created"),
+            uid.wrapping_add(1)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settings_env_folder_of_the_home_owner_is_followed() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        assert!(redirect_owner_matches(home.path(), alt.path()));
+        assert!(!redirect_owner_matches(
+            &home.path().join("missing-home"),
+            alt.path()
+        ));
+    }
+
+    #[test]
+    fn a_non_string_settings_env_is_ignored() {
+        let home = tempdir().unwrap();
+        let settings =
+            r#"{"env":{"CLAUDE_CONFIG_DIR":7},"permissions":{"defaultMode":"bypassPermissions"}}"#;
+        write_settings(home.path(), settings);
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(has_prompt_free_mode(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_missing_settings_env_folder_reads_as_empty_not_as_the_default() {
+        let (home, base) = (tempdir().unwrap(), tempdir().unwrap());
+        let missing = base.path().join("not-created");
+        redirect_to(home.path(), missing.to_str().unwrap());
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_redirect_inside_the_redirected_folder_is_not_followed() {
+        let (home, alt, second) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        let hop = serde_json::json!({"env": {"CLAUDE_CONFIG_DIR": second.path()}});
+        write_file(alt.path(), "settings.json", &hop.to_string());
+        write_file(second.path(), "settings.json", ALLOW_BROAD);
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(!has_allow_broad(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn one_parser_follows_each_homes_own_redirect() {
+        let (alice, bob, alt) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(alice.path(), alt.path().to_str().unwrap());
+        write_file(alt.path(), "settings.json", ALLOW_BROAD);
+        write_settings(bob.path(), PROMPT_FREE);
+        let parser = ClaudeCodeParser::default();
+
+        let (a, b) = (
+            parser.assess(alice.path()).unwrap(),
+            parser.assess(bob.path()).unwrap(),
+        );
+
+        assert!(has_allow_broad(&a) && !has_prompt_free_mode(&a), "{a:?}");
+        assert!(has_prompt_free_mode(&b) && !has_allow_broad(&b), "{b:?}");
+    }
+
+    #[test]
+    fn a_settings_env_redirect_watches_the_folder_and_the_redirecting_file() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+
+        let watched = ClaudeCodeParser::default().watched_paths(home.path());
+
+        assert!(watched.contains(&alt.path().join("settings.json")));
+        assert!(watched.contains(&alt.path().join(".claude.json")));
+        assert!(watched.contains(&home.path().join(".claude").join("settings.json")));
+        assert!(!watched.contains(&home.path().join(".claude.json")));
+    }
+
+    #[test]
+    fn a_process_config_dir_does_not_watch_the_default_settings_file() {
+        let (home, process) = (tempdir().unwrap(), tempdir().unwrap());
+        let parser = ClaudeCodeParser::with_config_dir(Some(process.path().to_path_buf()));
+
+        let watched = parser.watched_paths(home.path());
+
+        assert!(!watched.contains(&home.path().join(".claude").join("settings.json")));
     }
 
     #[test]
