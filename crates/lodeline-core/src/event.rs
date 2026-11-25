@@ -634,6 +634,105 @@ pub struct UnknownReason {
     pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The configuration layer a finding came from. Stable wire strings. A layer
+/// name this build does not know decodes to `Unknown(name)` and is written
+/// back as the same string, so a newer agent can add layers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigLayer {
+    System,
+    User,
+    Project,
+    Unknown(String),
+}
+
+wire_names!(ConfigLayer {
+    System => "system",
+    User => "user",
+    Project => "project",
+});
+
+/// The configuration file a finding came from, and the layer it sits in.
+/// `file` is the absolute path as the agent read it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSource {
+    pub layer: ConfigLayer,
+    pub file: String,
+}
+
+/// One entry of `AiGuardRiskAssessed.reasons`: the reason, plus the optional
+/// `config_source` key written next to the reason's own keys. Derefs to the
+/// reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiGuardFinding {
+    pub reason: AiGuardReason,
+    pub config_source: Option<ConfigSource>,
+}
+
+const CONFIG_SOURCE_KEY: &str = "config_source";
+
+impl From<AiGuardReason> for AiGuardFinding {
+    fn from(reason: AiGuardReason) -> Self {
+        Self {
+            reason,
+            config_source: None,
+        }
+    }
+}
+
+impl std::ops::Deref for AiGuardFinding {
+    type Target = AiGuardReason;
+    fn deref(&self) -> &AiGuardReason {
+        &self.reason
+    }
+}
+
+impl PartialEq<AiGuardReason> for AiGuardFinding {
+    fn eq(&self, other: &AiGuardReason) -> bool {
+        self.config_source.is_none() && self.reason == *other
+    }
+}
+
+impl Serialize for AiGuardFinding {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Sourced<'a> {
+            #[serde(flatten)]
+            reason: &'a AiGuardReason,
+            config_source: &'a ConfigSource,
+        }
+        match &self.config_source {
+            None => self.reason.serialize(s),
+            Some(config_source) => Sourced {
+                reason: &self.reason,
+                config_source,
+            }
+            .serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AiGuardFinding {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(d)?;
+        let config_source = v
+            .get(CONFIG_SOURCE_KEY)
+            .and_then(|raw| ConfigSource::deserialize(raw).ok());
+        let reason = serde_json::from_value::<AiGuardReason>(v).map_err(D::Error::custom)?;
+        // An unknown kind keeps the whole object, key included, so the key is
+        // not read a second time. A key that is not a `{layer, file}` object
+        // is dropped from a known kind.
+        let config_source = match reason {
+            AiGuardReason::Unknown(_) => None,
+            _ => config_source,
+        };
+        Ok(Self {
+            reason,
+            config_source,
+        })
+    }
+}
+
 /// #146 — category of instruction-file directive. Stable wire strings
 /// (SIEM filter keys; renames are breaking).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -951,7 +1050,7 @@ pub enum Evidence {
         /// Auto-derived from `score` (low <1 / medium <4 / high <7 / critical 7+).
         bucket: AiGuardBucket,
         /// Per-finding breakdown. Empty array = clean assessment.
-        reasons: Vec<AiGuardReason>,
+        reasons: Vec<AiGuardFinding>,
         /// `true` iff this is the periodic re-attestation heartbeat (no
         /// reason or control change since last emission). `false` = something changed.
         is_reattestation: bool,
@@ -1144,6 +1243,78 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finding(json: &str) -> AiGuardFinding {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_finding_round_trips_with_and_without_config_source() {
+        let bare = r#"{"kind":"sandbox_disabled"}"#;
+        let f = finding(bare);
+        assert_eq!(f, AiGuardFinding::from(AiGuardReason::SandboxDisabled));
+        assert_eq!(serde_json::to_string(&f).unwrap(), bare);
+        assert!(!bare.contains("config_source"));
+
+        let sourced = r#"{"kind":"no_sandbox","executor":"host_shell","config_source":{"layer":"project","file":"/r/.codex/config.toml"}}"#;
+        let f = finding(sourced);
+        assert_eq!(
+            f.config_source,
+            Some(ConfigSource {
+                layer: ConfigLayer::Project,
+                file: "/r/.codex/config.toml".into()
+            })
+        );
+        assert!(matches!(&*f, AiGuardReason::NoSandbox { .. }));
+        assert_eq!(serde_json::to_string(&f).unwrap(), sourced);
+    }
+
+    #[test]
+    fn an_unknown_layer_is_kept_and_written_back() {
+        let wire =
+            r#"{"kind":"sandbox_disabled","config_source":{"layer":"managed","file":"/etc/x"}}"#;
+        let f = finding(wire);
+        assert_eq!(
+            f.config_source.as_ref().unwrap().layer,
+            ConfigLayer::Unknown("managed".into())
+        );
+        assert_eq!(serde_json::to_string(&f).unwrap(), wire);
+    }
+
+    #[test]
+    fn an_unknown_kind_keeps_config_source_in_its_object() {
+        let wire = r#"{"kind":"future","a":1,"config_source":{"layer":"user","file":"/f"}}"#;
+        let f = finding(wire);
+        let AiGuardReason::Unknown(u) = &f.reason else {
+            panic!("{f:?}")
+        };
+        assert!(u.rest.contains_key("config_source"));
+        assert_eq!(f.config_source, None);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&f).unwrap()).unwrap(),
+            serde_json::from_str::<serde_json::Value>(wire).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_config_source_without_a_file_is_not_read_as_one() {
+        let f = finding(r#"{"kind":"sandbox_disabled","config_source":{"layer":"user"}}"#);
+        assert_eq!(f.reason, AiGuardReason::SandboxDisabled);
+        assert_eq!(f.config_source, None);
+    }
+
+    #[test]
+    fn a_finding_still_needs_a_string_kind() {
+        for bad in [
+            r#"{"config_source":{"layer":"user","file":"/f"}}"#,
+            r#"{"kind":7}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<AiGuardFinding>(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
     use std::collections::BTreeMap;
     use time::macros::datetime;
 
@@ -1439,7 +1610,10 @@ mod tests {
                     hook_event: "PreToolUse".into(),
                     matcher: ".*".into(),
                 },
-            ],
+            ]
+            .into_iter()
+            .map(AiGuardFinding::from)
+            .collect(),
             is_reattestation: false,
             rule_pack_id: None,
             tool_label: None,

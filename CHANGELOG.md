@@ -7,6 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- An entry of `reasons` in `ai_guard_risk_assessed` may carry an optional `config_source` key, an
+  object with the `layer` and the absolute `file` of the configuration the finding came from. Older
+  agents and servers ignore it, and no agent writes it yet (contract section 14.18).
+
 ### Fixed
 
 - A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`

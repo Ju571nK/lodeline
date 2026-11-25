@@ -20,8 +20,8 @@ use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rubric;
 use crate::state_task::CommittableEvent;
 use lodeline_core::event::{
-    AiGuardBucket, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject,
-    AGENT_VERSION, SCHEMA_VERSION,
+    AiGuardBucket, AiGuardFinding, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind,
+    Subject, AGENT_VERSION, SCHEMA_VERSION,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -301,7 +301,8 @@ async fn eval_and_maybe_emit(
     let score = rubric_snapshot.score(&reasons);
     let bucket = rubric::bucket(score);
     let config_found = parser.config_found(&home.dir);
-    let reasons_hash = rubric::canonical_hash(&reasons);
+    let findings: Vec<AiGuardFinding> = reasons.iter().cloned().map(Into::into).collect();
+    let reasons_hash = rubric::canonical_hash(&findings);
     let SourceState {
         reading: prev,
         failure,
@@ -406,7 +407,7 @@ async fn eval_and_maybe_emit(
             scope: key.1.clone(),
             score,
             bucket,
-            reasons,
+            reasons: findings,
             is_reattestation,
             rule_pack_id: key.2.clone(),
             tool_label: parser.tool_label().map(|s| s.to_string()),
@@ -992,9 +993,9 @@ mod tests {
             if let Evidence::AiGuardRiskAssessed { user, reasons, .. } = ev.event.evidence {
                 seen.push((
                     user,
-                    reasons
-                        .iter()
-                        .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })),
+                    reasons.iter().any(|r| {
+                        matches!(r.reason, AiGuardReason::DestructiveInInlineCommand { .. })
+                    }),
                 ));
             }
         }
@@ -1667,7 +1668,7 @@ mod tests {
         assert!(matches!(
             ev.event.evidence,
             Evidence::AiGuardRiskAssessed { ref reasons, .. }
-                if reasons.iter().any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+                if reasons.iter().any(|r| matches!(r.reason, AiGuardReason::DestructiveInInlineCommand { .. }))
         ));
         h.abort();
     }
@@ -1838,7 +1839,7 @@ mod tests {
         assert_eq!(user.as_deref(), Some("alice"));
         assert!(reasons
             .iter()
-            .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })));
+            .any(|r| matches!(r.reason, AiGuardReason::DestructiveInHookScript { .. })));
         h.abort();
     }
 

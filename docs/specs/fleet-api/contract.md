@@ -1697,3 +1697,30 @@ field is added and no known value changes.
   uses that rank, and the reading keeps its own bucket string.
 - **Tool order.** The fixed tool order in §5.5 holds for known tools. An unknown tool comes after
   every known tool, in order by name.
+
+### 14.18 Optional `config_source` on a reason (#716)
+
+An entry of `reasons` in `ai_guard_risk_assessed` may carry one more key next to its own keys,
+`config_source`. It names the configuration file the finding came from:
+
+```json
+{"kind":"sandbox_disabled","config_source":{"layer":"user","file":"/Users/alice/.codex/config.toml"}}
+```
+
+| Field | Shape / meaning |
+|---|---|
+| `config_source`? | Object with `layer` and `file`. `file` is the absolute path of the file the agent read. `layer` is `system`, `user` or `project`. |
+
+The key is absent when the agent cannot name one file, and is not written as `null`. `file` is
+required inside the object. A reader must show a `layer` string it does not know as it is. No
+reason kind is added and no known key changes. A reading that carries the key scores as the same
+reading without it. This release writes no `config_source`; a later release fills it per
+tool.
+
+An agent or server that decodes a reason as a typed value ignores the key. A server that keeps
+an unknown reason kind (§14.17 style, #333) stores the key with the rest of that object. The
+console server relays `reasons` as raw JSON, so the key reaches the SPA unchanged.
+
+The agent's change detector includes the key in its hash only for a finding that carries it. A
+finding without the key hashes as before, so an agent that starts to write the key sends one
+event with `is_reattestation` false for each reading that gains it.
