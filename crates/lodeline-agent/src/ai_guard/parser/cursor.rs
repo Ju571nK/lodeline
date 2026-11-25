@@ -215,17 +215,32 @@ impl AiGuardParser for CursorProjectParser {
             path: self.repo_root.clone(),
         }
     }
-    fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
-        vec![
+    fn watched_paths(&self, home: &Path) -> Vec<PathBuf> {
+        let rules = [
+            self.repo_root.join(".cursorrules"),
+            self.repo_root.join(".cursor").join("rules"), // dir → starts_with matches child files
+        ];
+        // At a home folder the user row watches the other three.
+        if is_home(&self.repo_root, home) {
+            return rules.to_vec();
+        }
+        let mut paths = vec![
             self.repo_root.join(".cursor").join("mcp.json"),
             self.repo_root.join(".cursor").join("hooks.json"),
             self.repo_root.join(".cursor").join("hooks"),
-            self.repo_root.join(".cursorrules"),
-            self.repo_root.join(".cursor").join("rules"), // dir → starts_with matches child files
-        ]
+        ];
+        paths.extend(rules);
+        paths
     }
     fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        let mut out = assess_path(self.repo_root.join(".cursor").join("mcp.json"))?;
+        // A root that is the home folder has the user row read `mcp.json` and
+        // `hooks.json`; only the rules files below are the project row's own.
+        let at_home = is_home(&self.repo_root, home);
+        let mut out = if at_home {
+            Vec::new()
+        } else {
+            assess_path(self.repo_root.join(".cursor").join("mcp.json"))?
+        };
         // #145 Option B — amplify only when folder-trust autorun would launch
         // local/risky code on this host (not for benign remote-only configs).
         if super::mcp_scan::has_local_or_risky_mcp(&out) {
@@ -234,8 +249,7 @@ impl AiGuardParser for CursorProjectParser {
             });
         }
         // #203 — a committed hooks.json runs in every trusted checkout.
-        // A root that is the home folder has the user row read that file.
-        if !is_home(&self.repo_root, home) {
+        if !at_home {
             emit_hook_reasons(
                 &self.repo_root.join(".cursor").join("hooks.json"),
                 Some(home),
@@ -988,5 +1002,58 @@ mod tests {
         assert!(parser
             .collect_external_script_paths(Path::new("/unused"))
             .is_empty());
+    }
+
+    const LOCAL_MCP: &str = r#"{"mcpServers": {"x": {"command": "node"}}}"#;
+
+    fn mcp_local_count(out: &[AiGuardReason]) -> usize {
+        out.iter()
+            .filter(|r| matches!(r, AiGuardReason::McpServerLocalCommand { .. }))
+            .count()
+    }
+
+    fn write_mcp(cursor: &Path) {
+        std::fs::create_dir_all(cursor).unwrap();
+        std::fs::write(cursor.join("mcp.json"), LOCAL_MCP).unwrap();
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_leaves_mcp_json_to_the_user_row() {
+        let home = tempdir().unwrap();
+        write_mcp(&home.path().join(".cursor"));
+        let project = CursorProjectParser {
+            repo_root: home.path().to_path_buf(),
+        }
+        .assess(home.path())
+        .unwrap();
+        assert!(project.is_empty(), "got {project:?}");
+        let user = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+        assert_eq!(mcp_local_count(&user), 1, "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_watches_only_its_rules_files() {
+        let home = tempdir().unwrap();
+        let parser = CursorProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert_eq!(
+            parser.watched_paths(home.path()),
+            [
+                home.path().join(".cursorrules"),
+                home.path().join(".cursor").join("rules")
+            ]
+        );
+    }
+
+    #[test]
+    fn project_below_the_home_folder_still_reads_its_own_mcp_json() {
+        let home = tempdir().unwrap();
+        let repo = home.path().join("work").join("app");
+        write_mcp(&repo.join(".cursor"));
+        let project = CursorProjectParser { repo_root: repo }
+            .assess(home.path())
+            .unwrap();
+        assert_eq!(mcp_local_count(&project), 1, "got {project:?}");
     }
 }

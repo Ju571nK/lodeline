@@ -11,7 +11,7 @@ Checked on 2026-11-25 against Cursor's hooks page at https://cursor.com/docs/age
 | `~/.cursor/hooks.json` | User | Yes |
 | Enterprise `hooks.json`: `/Library/Application Support/Cursor/hooks.json` on macOS, `/etc/cursor/hooks.json` on Linux, `C:\ProgramData\Cursor\hooks.json` on Windows | User | Yes |
 | `<project>/.cursor/hooks.json` | Project | Yes. Skipped when the project root is a home folder, because the user row reads that file. |
-| `~/.cursor/mcp.json`, `<project>/.cursor/mcp.json` | User, Project | Yes |
+| `~/.cursor/mcp.json`, `<project>/.cursor/mcp.json` | User, Project | Yes. The project file is skipped when the project root is a home folder, because the user row reads that file. |
 | Team hooks set in the Cursor web dashboard | None | No |
 | Plugin hooks | None | No |
 
@@ -27,7 +27,7 @@ A `hooks.json` that does not parse is skipped with a warning and does not hide t
 
 ## Watch targets
 
-The user row watches `~/.cursor/hooks.json`, `~/.cursor/hooks` and the enterprise file. A project row watches `<project>/.cursor/hooks.json` and `<project>/.cursor/hooks`. The daemon finds projects through the `cursor_workspaces` policy field. A change to a watched file scores that row again.
+The user row watches `~/.cursor/hooks.json`, `~/.cursor/hooks` and the enterprise file. A project row watches `<project>/.cursor/hooks.json` and `<project>/.cursor/hooks`. The daemon finds projects through the `cursor_workspaces` policy field. A change to a watched file scores that row again. A project row whose root is a home folder watches only `.cursorrules` and `.cursor/rules`; the user row watches the other files.
 
 ## What is not covered
 

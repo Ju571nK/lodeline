@@ -137,10 +137,17 @@ impl AiGuardParser for GeminiProjectParser {
             path: self.repo_root.clone(),
         }
     }
-    fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
+    fn watched_paths(&self, home: &Path) -> Vec<PathBuf> {
+        if super::claude_code::is_home(&self.repo_root, home) {
+            return Vec::new();
+        }
         vec![self.repo_root.join(".gemini").join("settings.json")]
     }
-    fn assess(&self, _home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+        // A root that is the home folder has the user row read that file.
+        if super::claude_code::is_home(&self.repo_root, home) {
+            return Ok(Vec::new());
+        }
         let mut out = assess_path(self.repo_root.join(".gemini").join("settings.json"))?;
         if super::mcp_scan::has_local_or_risky_mcp(&out) {
             out.push(AiGuardReason::ProjectMcpAutoEnabled {
@@ -320,7 +327,7 @@ mod tests {
         let out = GeminiProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new("/unused"))
         .unwrap();
         assert!(
             out.iter()
@@ -342,12 +349,58 @@ mod tests {
         let out = GeminiProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new("/unused"))
         .unwrap();
         assert!(
             !out.iter()
                 .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
             "got {out:?}"
         );
+    }
+
+    fn write_sandbox_off(dir: &Path) {
+        let g = dir.join(".gemini");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("settings.json"), r#"{"tools":{"sandbox":false}}"#).unwrap();
+    }
+
+    fn sandbox_off_count(out: &[AiGuardReason]) -> usize {
+        out.iter()
+            .filter(|r| matches!(r, AiGuardReason::SandboxDisabled))
+            .count()
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_leaves_settings_to_the_user_row() {
+        let home = tempdir().unwrap();
+        write_sandbox_off(home.path());
+        let project = GeminiProjectParser {
+            repo_root: home.path().to_path_buf(),
+        }
+        .assess(home.path())
+        .unwrap();
+        assert!(project.is_empty(), "got {project:?}");
+        let user = GeminiParser.assess(home.path()).unwrap();
+        assert_eq!(sandbox_off_count(&user), 1, "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_watches_nothing() {
+        let home = tempdir().unwrap();
+        let parser = GeminiProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert!(parser.watched_paths(home.path()).is_empty());
+    }
+
+    #[test]
+    fn project_below_the_home_folder_still_reads_its_own_settings() {
+        let home = tempdir().unwrap();
+        let repo = home.path().join("work").join("app");
+        write_sandbox_off(&repo);
+        let project = GeminiProjectParser { repo_root: repo }
+            .assess(home.path())
+            .unwrap();
+        assert_eq!(sandbox_off_count(&project), 1, "got {project:?}");
     }
 }

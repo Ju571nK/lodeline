@@ -109,11 +109,18 @@ impl AiGuardParser for ContinueDevProjectParser {
         }
     }
 
-    fn watched_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
+    fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
+        if super::claude_code::is_home(&self.repo_root, home_dir) {
+            return Vec::new();
+        }
         vec![self.repo_root.join(".continue").join("config.json")]
     }
 
-    fn assess(&self, _home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+        // A root that is the home folder has the user row read that file.
+        if super::claude_code::is_home(&self.repo_root, home_dir) {
+            return Ok(Vec::new());
+        }
         let path = self.repo_root.join(".continue").join("config.json");
         let Some(val) = super::read_json_optional(&path)? else {
             return Ok(Vec::new());
@@ -509,5 +516,47 @@ mod tests {
                 .any(|r| matches!(r, AiGuardReason::ProjectMcpAutoEnabled { .. })),
             "destructive custom command (not MCP) must not trigger the amplifier; got {out:?}"
         );
+    }
+
+    const LOCAL_MCP: &str = r#"{"mcpServers": {"x": {"command": "node"}}}"#;
+
+    fn mcp_local_count(out: &[AiGuardReason]) -> usize {
+        out.iter()
+            .filter(|r| matches!(r, AiGuardReason::McpServerLocalCommand { .. }))
+            .count()
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_leaves_config_to_the_user_row() {
+        let home = tempdir().unwrap();
+        write_config(home.path(), LOCAL_MCP);
+        let project = ContinueDevProjectParser {
+            repo_root: home.path().to_path_buf(),
+        }
+        .assess(home.path())
+        .unwrap();
+        assert!(project.is_empty(), "got {project:?}");
+        let user = ContinueDevParser.assess(home.path()).unwrap();
+        assert_eq!(mcp_local_count(&user), 1, "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_watches_nothing() {
+        let home = tempdir().unwrap();
+        let parser = ContinueDevProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert!(parser.watched_paths(home.path()).is_empty());
+    }
+
+    #[test]
+    fn project_below_the_home_folder_still_reads_its_own_config() {
+        let home = tempdir().unwrap();
+        let repo = home.path().join("work").join("app");
+        write_config(&repo, LOCAL_MCP);
+        let project = ContinueDevProjectParser { repo_root: repo }
+            .assess(home.path())
+            .unwrap();
+        assert_eq!(mcp_local_count(&project), 1, "got {project:?}");
     }
 }
