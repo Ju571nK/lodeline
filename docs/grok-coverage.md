@@ -11,8 +11,8 @@ Checked on 2026-11-15 against the official Grok Build documentation at https://d
 | `~/.grok/hooks/*.json` | User | Yes. Every file, merged per event in file-name order. |
 | `[hooks]` in `~/.grok/config.toml` | User | Yes. |
 | `[mcp_servers.<name>]` in `~/.grok/config.toml` | User | Yes. A server with `enabled = false` is skipped. |
-| `<repo>/.grok/hooks/*.json` | Project | Yes. |
-| `[mcp_servers.<name>]` in `<repo>/.grok/config.toml` | Project | Yes. |
+| `<repo>/.grok/hooks/*.json` | Project | Yes. Skipped when the project root is a home folder, because the user row reads that folder. |
+| `[mcp_servers.<name>]` in `<repo>/.grok/config.toml` | Project | Yes. Skipped when the project root is a home folder, for the same reason. |
 | `[hooks]` in `<repo>/.grok/config.toml` | Project | No. Grok 1.0.70 did not load it, so reading it would report a hook that does not run. |
 | `[[hooks.<Event>]]` and `[mcp_servers.<name>]` in `~/.grok/managed_config.toml`, `/etc/grok/managed_config.toml` | User | Yes. A server with `enabled = false` is skipped. |
 | `[[hooks.<Event>]]` and `[mcp_servers.<name>]` in `~/.grok/requirements.toml`, `/etc/grok/requirements.toml` | User | Yes. A server with `enabled = false` is skipped. |

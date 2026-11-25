@@ -225,7 +225,14 @@ impl AiGuardParser for CursorProjectParser {
         ]
     }
     fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
-        let mut out = assess_path(self.repo_root.join(".cursor").join("mcp.json"))?;
+        // A root that is the home folder has the user row read `mcp.json` and
+        // `hooks.json`; only the rules files below are the project row's own.
+        let at_home = is_home(&self.repo_root, home);
+        let mut out = if at_home {
+            Vec::new()
+        } else {
+            assess_path(self.repo_root.join(".cursor").join("mcp.json"))?
+        };
         // #145 Option B — amplify only when folder-trust autorun would launch
         // local/risky code on this host (not for benign remote-only configs).
         if super::mcp_scan::has_local_or_risky_mcp(&out) {
@@ -234,8 +241,7 @@ impl AiGuardParser for CursorProjectParser {
             });
         }
         // #203 — a committed hooks.json runs in every trusted checkout.
-        // A root that is the home folder has the user row read that file.
-        if !is_home(&self.repo_root, home) {
+        if !at_home {
             emit_hook_reasons(
                 &self.repo_root.join(".cursor").join("hooks.json"),
                 Some(home),

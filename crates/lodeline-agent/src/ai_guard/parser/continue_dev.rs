@@ -113,7 +113,11 @@ impl AiGuardParser for ContinueDevProjectParser {
         vec![self.repo_root.join(".continue").join("config.json")]
     }
 
-    fn assess(&self, _home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+        // A root that is the home folder has the user row read that file.
+        if super::claude_code::is_home(&self.repo_root, home_dir) {
+            return Ok(Vec::new());
+        }
         let path = self.repo_root.join(".continue").join("config.json");
         let Some(val) = super::read_json_optional(&path)? else {
             return Ok(Vec::new());

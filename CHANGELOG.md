@@ -15,6 +15,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- The Cursor project row no longer reads `.cursor/mcp.json`, and the Grok, Gemini CLI and Continue project rows no longer read `.grok`, `.gemini/settings.json` and `.continue/config.json`, when the project root is a home folder, because the user row of each tool reads the same file, so a home-folder project no longer scores one file twice. A project below the home folder still reads its own files. Refs #203.
 - A Cursor project row no longer reads `.cursor/hooks.json` when the project root is a home folder, because the user row reads that file, so a home-folder project no longer scores one hook file twice. Refs #203.
 - A `CLAUDE_CONFIG_DIR` set in the `env` block of a user's `~/.claude/settings.json` now moves that
   user's Claude Code row to that folder, in `lodeline scan` and in the agent service, as Claude Code

@@ -188,7 +188,11 @@ impl AiGuardParser for GrokProjectParser {
     fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
         watched(&self.repo_root.join(".grok"))
     }
-    fn assess(&self, _home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+        // A root that is the home folder has the user row read `~/.grok`.
+        if super::claude_code::is_home(&self.repo_root, home) {
+            return Ok(Vec::new());
+        }
         assess_dir(&self.repo_root.join(".grok"), false)
     }
 }

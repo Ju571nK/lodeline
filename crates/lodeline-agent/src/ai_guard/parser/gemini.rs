@@ -140,7 +140,11 @@ impl AiGuardParser for GeminiProjectParser {
     fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
         vec![self.repo_root.join(".gemini").join("settings.json")]
     }
-    fn assess(&self, _home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+    fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+        // A root that is the home folder has the user row read that file.
+        if super::claude_code::is_home(&self.repo_root, home) {
+            return Ok(Vec::new());
+        }
         let mut out = assess_path(self.repo_root.join(".gemini").join("settings.json"))?;
         if super::mcp_scan::has_local_or_risky_mcp(&out) {
             out.push(AiGuardReason::ProjectMcpAutoEnabled {
