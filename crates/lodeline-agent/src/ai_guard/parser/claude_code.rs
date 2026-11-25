@@ -2276,6 +2276,146 @@ mod tests {
         std::fs::write(p, contents).unwrap();
     }
 
+    const BYPASS: &str = r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
+    const ALLOW_BROAD: &str = r#"{"permissions":{"allow":["Bash:*"]}}"#;
+
+    fn redirect_to(home: &Path, value: &str) {
+        let settings = serde_json::json!({
+            "env": {"CLAUDE_CONFIG_DIR": value},
+            "permissions": {"defaultMode": "bypassPermissions"},
+        });
+        write_settings(home, &settings.to_string());
+    }
+
+    fn has_allow_broad(reasons: &[AiGuardReason]) -> bool {
+        reasons
+            .iter()
+            .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. }))
+    }
+
+    fn has_bypass_mode(reasons: &[AiGuardReason]) -> bool {
+        reasons.iter().any(
+            |r| matches!(r, AiGuardReason::AutoApprovalEnabled { mode } if mode == "bypassPermissions"),
+        )
+    }
+
+    #[test]
+    fn settings_env_config_dir_replaces_the_default_folder() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        write_file(alt.path(), "settings.json", ALLOW_BROAD);
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(has_allow_broad(&reasons), "{reasons:?}");
+        assert!(!has_bypass_mode(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn process_config_dir_wins_over_settings_env() {
+        let (home, alt, process) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        write_file(alt.path(), "settings.json", BYPASS);
+        write_file(process.path(), "settings.json", ALLOW_BROAD);
+        let parser = ClaudeCodeParser::with_config_dir(Some(process.path().to_path_buf()));
+
+        let reasons = parser.assess(home.path()).unwrap();
+
+        assert!(has_allow_broad(&reasons), "{reasons:?}");
+        assert!(!has_bypass_mode(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_relative_or_tilde_settings_env_is_ignored() {
+        for value in ["alt", "./alt", "~/alt", "", "~"] {
+            let home = tempdir().unwrap();
+            redirect_to(home.path(), value);
+            write_file(home.path(), "alt/settings.json", ALLOW_BROAD);
+            write_file(home.path(), "~/alt/settings.json", ALLOW_BROAD);
+
+            let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+            assert!(has_bypass_mode(&reasons), "{value:?}: {reasons:?}");
+            assert!(!has_allow_broad(&reasons), "{value:?}: {reasons:?}");
+        }
+    }
+
+    #[test]
+    fn a_non_string_settings_env_is_ignored() {
+        let home = tempdir().unwrap();
+        let settings =
+            r#"{"env":{"CLAUDE_CONFIG_DIR":7},"permissions":{"defaultMode":"bypassPermissions"}}"#;
+        write_settings(home.path(), settings);
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(has_bypass_mode(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_missing_settings_env_folder_reads_as_empty_not_as_the_default() {
+        let (home, base) = (tempdir().unwrap(), tempdir().unwrap());
+        let missing = base.path().join("not-created");
+        redirect_to(home.path(), missing.to_str().unwrap());
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_redirect_inside_the_redirected_folder_is_not_followed() {
+        let (home, alt, second) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        let hop = serde_json::json!({"env": {"CLAUDE_CONFIG_DIR": second.path()}});
+        write_file(alt.path(), "settings.json", &hop.to_string());
+        write_file(second.path(), "settings.json", ALLOW_BROAD);
+
+        let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
+
+        assert!(!has_allow_broad(&reasons), "{reasons:?}");
+    }
+
+    #[test]
+    fn one_parser_follows_each_homes_own_redirect() {
+        let (alice, bob, alt) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(alice.path(), alt.path().to_str().unwrap());
+        write_file(alt.path(), "settings.json", ALLOW_BROAD);
+        write_settings(bob.path(), BYPASS);
+        let parser = ClaudeCodeParser::default();
+
+        let (a, b) = (
+            parser.assess(alice.path()).unwrap(),
+            parser.assess(bob.path()).unwrap(),
+        );
+
+        assert!(has_allow_broad(&a) && !has_bypass_mode(&a), "{a:?}");
+        assert!(has_bypass_mode(&b) && !has_allow_broad(&b), "{b:?}");
+    }
+
+    #[test]
+    fn a_settings_env_redirect_watches_the_folder_and_the_redirecting_file() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+
+        let watched = ClaudeCodeParser::default().watched_paths(home.path());
+
+        assert!(watched.contains(&alt.path().join("settings.json")));
+        assert!(watched.contains(&alt.path().join(".claude.json")));
+        assert!(watched.contains(&home.path().join(".claude").join("settings.json")));
+        assert!(!watched.contains(&home.path().join(".claude.json")));
+    }
+
+    #[test]
+    fn a_process_config_dir_does_not_watch_the_default_settings_file() {
+        let (home, process) = (tempdir().unwrap(), tempdir().unwrap());
+        let parser = ClaudeCodeParser::with_config_dir(Some(process.path().to_path_buf()));
+
+        let watched = parser.watched_paths(home.path());
+
+        assert!(!watched.contains(&home.path().join(".claude").join("settings.json")));
+    }
+
     #[test]
     fn project_mcp_json_payload_scored() {
         let repo = tempdir().unwrap();
