@@ -20,8 +20,8 @@ use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use crate::ai_guard::rubric;
 use crate::state_task::CommittableEvent;
 use lodeline_core::event::{
-    AiGuardBucket, AiGuardFinding, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind,
-    Subject, AGENT_VERSION, SCHEMA_VERSION,
+    AiGuardBucket, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind, Subject,
+    AGENT_VERSION, SCHEMA_VERSION,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -293,6 +293,7 @@ async fn eval_and_maybe_emit(
     };
     assessment.normalize();
     let controls_hash = assessment.controls_hash();
+    let findings = assessment.findings();
     let reasons = assessment.reasons;
     let controls = assessment.controls;
     // Phase 3b.5 — snapshot-clone the Rubric BEFORE any subsequent await.
@@ -301,7 +302,6 @@ async fn eval_and_maybe_emit(
     let score = rubric_snapshot.score(&reasons);
     let bucket = rubric::bucket(score);
     let config_found = parser.config_found(&home.dir);
-    let findings: Vec<AiGuardFinding> = reasons.iter().cloned().map(Into::into).collect();
     let reasons_hash = rubric::canonical_hash(&findings);
     let SourceState {
         reading: prev,

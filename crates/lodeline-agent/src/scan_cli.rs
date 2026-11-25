@@ -11,7 +11,9 @@
 use crate::ai_guard::parser::AiGuardParser;
 use crate::ai_guard::rubric::{reason_kind, reason_kinds};
 use crate::ai_guard::{rubric, tool_cli_label, user_global_parsers};
-use lodeline_core::event::{AiGuardBucket, AiGuardReason, AiGuardScope, AiTool};
+use lodeline_core::event::{
+    AiGuardBucket, AiGuardFinding, AiGuardReason, AiGuardScope, AiTool, ConfigSource,
+};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,6 +47,8 @@ struct Row {
     score: f32,
     bucket: AiGuardBucket,
     reasons: Vec<AiGuardReason>,
+    /// `sources[i]` is the config file `reasons[i]` came from, when one is named.
+    sources: Vec<Option<ConfigSource>>,
 }
 
 struct Report {
@@ -154,6 +158,7 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
         match p.assess_posture(home) {
             Ok(mut assessment) => {
                 assessment.normalize();
+                let sources = assessment.sources;
                 let reasons = assessment.reasons;
                 let controls = assessment.controls;
                 if reasons.is_empty() && controls.as_ref().is_none_or(Vec::is_empty) && !configured
@@ -169,6 +174,7 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
                         score,
                         bucket: rubric::bucket(score),
                         reasons,
+                        sources,
                     });
                 }
             }
@@ -504,10 +510,15 @@ fn report_json(report: &Report) -> serde_json::Value {
             "scope": scope_str(&r.scope),
             "score": round1(r.score),
             "bucket": bucket_wire(&r.bucket),
-            // Each reason is the serialized AiGuardReason with an advisory
-            // `hint` derived from the reason variant (#188-followup A).
-            "reasons": r.reasons.iter().map(|reason| {
-                let mut v = serde_json::to_value(reason).unwrap_or(serde_json::Value::Null);
+            // Each reason is the serialized AiGuardReason, plus `config_source`
+            // when the parser names the file, with an advisory `hint` derived
+            // from the reason variant (#188-followup A).
+            "reasons": r.reasons.iter().enumerate().map(|(i, reason)| {
+                let finding = AiGuardFinding {
+                    reason: reason.clone(),
+                    config_source: r.sources.get(i).cloned().flatten(),
+                };
+                let mut v = serde_json::to_value(finding).unwrap_or(serde_json::Value::Null);
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert(
                         "hint".to_string(),
@@ -735,6 +746,7 @@ mod table_width_tests {
             score,
             bucket: AiGuardBucket::Low,
             reasons: vec![],
+            sources: vec![],
         };
         let report = Report {
             rows: vec![
@@ -782,6 +794,7 @@ mod fail_on_tests {
                     score: 0.0,
                     bucket: b.clone(),
                     reasons: vec![],
+                    sources: vec![],
                 })
                 .collect(),
             not_configured: vec![AiTool::Cursor],
