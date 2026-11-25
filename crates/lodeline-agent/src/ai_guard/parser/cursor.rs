@@ -989,4 +989,42 @@ mod tests {
             .collect_external_script_paths(Path::new("/unused"))
             .is_empty());
     }
+
+    const LOCAL_MCP: &str = r#"{"mcpServers": {"x": {"command": "node"}}}"#;
+
+    fn mcp_local_count(out: &[AiGuardReason]) -> usize {
+        out.iter()
+            .filter(|r| matches!(r, AiGuardReason::McpServerLocalCommand { .. }))
+            .count()
+    }
+
+    fn write_mcp(cursor: &Path) {
+        std::fs::create_dir_all(cursor).unwrap();
+        std::fs::write(cursor.join("mcp.json"), LOCAL_MCP).unwrap();
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_leaves_mcp_json_to_the_user_row() {
+        let home = tempdir().unwrap();
+        write_mcp(&home.path().join(".cursor"));
+        let project = CursorProjectParser {
+            repo_root: home.path().to_path_buf(),
+        }
+        .assess(home.path())
+        .unwrap();
+        assert!(project.is_empty(), "got {project:?}");
+        let user = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+        assert_eq!(mcp_local_count(&user), 1, "got {user:?}");
+    }
+
+    #[test]
+    fn project_below_the_home_folder_still_reads_its_own_mcp_json() {
+        let home = tempdir().unwrap();
+        let repo = home.path().join("work").join("app");
+        write_mcp(&repo.join(".cursor"));
+        let project = CursorProjectParser { repo_root: repo }
+            .assess(home.path())
+            .unwrap();
+        assert_eq!(mcp_local_count(&project), 1, "got {project:?}");
+    }
 }

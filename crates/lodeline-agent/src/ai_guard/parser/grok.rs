@@ -504,4 +504,43 @@ enabled = false
             }
         }
     }
+
+    const LOCAL_MCP: &str = "[mcp_servers.local]\ncommand = \"node\"\n";
+
+    fn mcp_local_count(out: &[AiGuardReason]) -> usize {
+        out.iter()
+            .filter(|r| matches!(r, AiGuardReason::McpServerLocalCommand { .. }))
+            .count()
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_leaves_grok_files_to_the_user_row() {
+        let home = tempdir().unwrap();
+        let grok = home.path().join(".grok");
+        write(&grok.join("config.toml"), LOCAL_MCP);
+        write(&grok.join("hooks").join("a.json"), HOOK_FILE);
+        let project = GrokProjectParser {
+            repo_root: home.path().to_path_buf(),
+        }
+        .assess(home.path())
+        .unwrap();
+        assert!(project.is_empty(), "got {project:?}");
+        let user = GrokParser.assess(home.path()).unwrap();
+        assert_eq!(mcp_local_count(&user), 1, "got {user:?}");
+        assert_eq!(destructive(&user), ["rm -rf /tmp/a"], "got {user:?}");
+    }
+
+    #[test]
+    fn project_below_the_home_folder_still_reads_its_own_grok_files() {
+        let home = tempdir().unwrap();
+        let repo = home.path().join("work").join("app");
+        let grok = repo.join(".grok");
+        write(&grok.join("config.toml"), LOCAL_MCP);
+        write(&grok.join("hooks").join("a.json"), HOOK_FILE);
+        let project = GrokProjectParser { repo_root: repo }
+            .assess(home.path())
+            .unwrap();
+        assert_eq!(mcp_local_count(&project), 1, "got {project:?}");
+        assert_eq!(destructive(&project), ["rm -rf /tmp/a"], "got {project:?}");
+    }
 }
