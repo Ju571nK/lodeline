@@ -1,6 +1,6 @@
 //! In-memory FleetIndex schemas (Task 3 = types only; Task 5 adds FleetIndex wrapper).
 
-use lodeline_core::event::{AiGuardBucket, AiGuardReason, AiGuardScope, AiTool, HostMetaSnapshot};
+use lodeline_core::event::{AiGuardBucket, AiGuardFinding, AiGuardScope, AiTool, HostMetaSnapshot};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
@@ -21,7 +21,7 @@ pub struct RiskEntry {
     pub assessed_ts: OffsetDateTime,
     pub is_reattestation: bool,
     pub scope: AiGuardScope,
-    pub reasons: Vec<AiGuardReason>,
+    pub reasons: Vec<AiGuardFinding>,
     /// The event's fields of the same name, which name the reading's source
     /// together with `scope`.
     pub user: Option<String>,

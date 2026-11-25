@@ -5,7 +5,9 @@
 //! doctor static-fallback path) keep working unchanged.
 
 use crate::ai_guard::parser::claude_code::without_managed_label;
-use lodeline_core::event::{AiGuardBucket, AiGuardReason, InstructionDirectiveKind, LauncherShape};
+use lodeline_core::event::{
+    AiGuardBucket, AiGuardFinding, AiGuardReason, InstructionDirectiveKind, LauncherShape,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -410,12 +412,13 @@ pub fn top_kinds(kinds: &[String]) -> String {
 /// 2. Sort the tuples lexicographically by `(kind_str, payload_json)`.
 /// 3. Serialize the sorted Vec to a JSON string.
 /// 4. Hash the string with blake3 → 32-byte digest.
-pub fn canonical_hash(reasons: &[AiGuardReason]) -> [u8; 32] {
-    let mut tuples: Vec<(String, String)> = reasons
+pub fn canonical_hash(findings: &[AiGuardFinding]) -> [u8; 32] {
+    let mut tuples: Vec<(String, String)> = findings
         .iter()
-        .map(|r| {
-            let kind = kind_key(r).to_string();
-            let payload = serde_json::to_string(r).expect("AiGuardReason is Serialize");
+        .map(|f| {
+            let kind = kind_key(&f.reason).to_string();
+            // A finding without `config_source` serializes as its bare reason.
+            let payload = serde_json::to_string(f).expect("AiGuardFinding is Serialize");
             (kind, payload)
         })
         .collect();
@@ -591,6 +594,10 @@ mod tests {
         assert!(is_destructive(":(){ :|:& };:"));
     }
 
+    fn findings(reasons: Vec<AiGuardReason>) -> Vec<AiGuardFinding> {
+        reasons.into_iter().map(Into::into).collect()
+    }
+
     #[test]
     fn canonical_hash_is_order_independent() {
         let a = vec![
@@ -605,14 +612,53 @@ mod tests {
                 executor: "host_shell".into(),
             },
         ];
-        assert_eq!(canonical_hash(&a), canonical_hash(&b));
+        assert_eq!(canonical_hash(&findings(a)), canonical_hash(&findings(b)));
+    }
+
+    fn sourced(reason: AiGuardReason) -> AiGuardFinding {
+        AiGuardFinding {
+            reason,
+            config_source: Some(lodeline_core::event::ConfigSource {
+                layer: lodeline_core::event::ConfigLayer::User,
+                file: "/h/.codex/config.toml".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn canonical_hash_of_a_bare_finding_is_the_hash_of_the_bare_reason() {
+        let set = findings(vec![
+            AiGuardReason::SandboxDisabled,
+            AiGuardReason::NoSandbox {
+                executor: "host_shell".into(),
+            },
+        ]);
+        let canonical = r#"[["no_sandbox","{\"kind\":\"no_sandbox\",\"executor\":\"host_shell\"}"],["sandbox_disabled","{\"kind\":\"sandbox_disabled\"}"]]"#;
+        let expected = *blake3::hash(canonical.as_bytes()).as_bytes();
+        assert_eq!(canonical_hash(&set), expected);
+        let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "b10ffc9b6fffcd2e2e96f4e1405a2c94bf3da139486a903ac913ae5c87355468"
+        );
+    }
+
+    #[test]
+    fn canonical_hash_covers_config_source_only_when_set() {
+        let bare = findings(vec![AiGuardReason::SandboxDisabled]);
+        let with = vec![sourced(AiGuardReason::SandboxDisabled)];
+        assert_ne!(canonical_hash(&bare), canonical_hash(&with));
+        let mut moved = with.clone();
+        moved[0].config_source.as_mut().unwrap().layer = lodeline_core::event::ConfigLayer::Project;
+        assert_ne!(canonical_hash(&with), canonical_hash(&moved));
+        assert_eq!(canonical_hash(&with), canonical_hash(&with.clone()));
     }
 
     #[test]
     fn canonical_hash_changes_when_reasons_differ() {
         let a = vec![AiGuardReason::PermissionsDenyEmpty];
         let b = vec![AiGuardReason::SandboxDisabled];
-        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+        assert_ne!(canonical_hash(&findings(a)), canonical_hash(&findings(b)));
     }
 
     #[test]

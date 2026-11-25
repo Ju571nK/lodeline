@@ -5,9 +5,10 @@
 mod released;
 
 use lodeline_core::event::{
-    AiGuardBucket, AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity, SourceKind,
-    Subject, UnknownReason, UnknownScope,
+    AiGuardBucket, AiGuardFinding, AiGuardReason, AiGuardScope, AiTool, Event, Evidence, Severity,
+    SourceKind, Subject, UnknownReason, UnknownScope,
 };
+use lodeline_core::event::{ConfigLayer, ConfigSource};
 use time::macros::datetime;
 
 #[test]
@@ -204,7 +205,7 @@ fn unknown_reason_kind_keeps_the_event_and_the_object() {
         panic!("{:?}", ev.evidence)
     };
     assert_eq!(reasons[0], AiGuardReason::SandboxDisabled);
-    let AiGuardReason::Unknown(UnknownReason { kind, rest }) = &reasons[1] else {
+    let AiGuardReason::Unknown(UnknownReason { kind, rest }) = &reasons[1].reason else {
         panic!("{:?}", reasons[1])
     };
     assert_eq!(kind, "future_reason");
@@ -355,4 +356,79 @@ fn a_known_scope_kind_with_the_wrong_fields_is_rejected() {
             "{bad} decoded"
         );
     }
+}
+
+#[test]
+fn known_findings_without_config_source_keep_their_released_bytes() {
+    for wire in KNOWN_REASONS.iter().chain(NEWER_REASONS) {
+        let finding: AiGuardFinding = serde_json::from_str(wire).expect(wire);
+        assert_eq!(finding.config_source, None, "{wire}");
+        assert_eq!(serde_json::to_string(&finding).unwrap(), *wire);
+    }
+}
+
+fn sourced_event(reasons: serde_json::Value) -> serde_json::Value {
+    let mut wire = risk_event(
+        "codex",
+        serde_json::json!({"kind": "user_global"}),
+        "medium",
+    );
+    wire["evidence"]["reasons"] = reasons;
+    wire
+}
+
+#[test]
+fn released_server_ignores_config_source_on_a_known_reason() {
+    let source = serde_json::json!({"layer": "user", "file": "/Users/alice/.codex/config.toml"});
+    let wire = sourced_event(serde_json::json!([
+        {"kind": "sandbox_disabled", "config_source": source},
+        {"kind": "no_sandbox", "executor": "host_shell"},
+    ]));
+    let old: released::Event =
+        serde_json::from_value(wire.clone()).expect("v0.12.6 rejects config_source");
+    let released::Evidence::AiGuardRiskAssessed { reasons, .. } = old.evidence else {
+        panic!("{:?}", old.evidence)
+    };
+    assert_eq!(
+        serde_json::to_string(&reasons[0]).unwrap(),
+        r#"{"kind":"sandbox_disabled"}"#
+    );
+    let ev: Event = serde_json::from_value(wire.clone()).unwrap();
+    let Evidence::AiGuardRiskAssessed { reasons, .. } = &ev.evidence else {
+        panic!("{:?}", ev.evidence)
+    };
+    assert_eq!(reasons[0].reason, AiGuardReason::SandboxDisabled);
+    assert_eq!(
+        reasons[0].config_source,
+        Some(ConfigSource {
+            layer: ConfigLayer::User,
+            file: "/Users/alice/.codex/config.toml".into()
+        })
+    );
+    assert_eq!(reasons[1].config_source, None);
+    assert_eq!(
+        serde_json::to_string(&ev).unwrap(),
+        serde_json::to_string(&serde_json::from_value::<Event>(wire).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn an_unknown_reason_kind_keeps_config_source_in_rest() {
+    let wire = sourced_event(serde_json::json!([
+        {"kind": "future_reason", "n": 2,
+         "config_source": {"layer": "project", "file": "/r/.codex/config.toml"}},
+    ]));
+    let ev: Event = serde_json::from_value(wire.clone()).unwrap();
+    let Evidence::AiGuardRiskAssessed { reasons, .. } = &ev.evidence else {
+        panic!("{:?}", ev.evidence)
+    };
+    let AiGuardReason::Unknown(UnknownReason { rest, .. }) = &reasons[0].reason else {
+        panic!("{:?}", reasons[0])
+    };
+    assert!(rest.contains_key("config_source"));
+    assert_eq!(reasons[0].config_source, None);
+    assert_eq!(
+        serde_json::to_value(&ev).unwrap()["evidence"]["reasons"],
+        wire["evidence"]["reasons"]
+    );
 }
