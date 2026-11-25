@@ -56,7 +56,42 @@ fn settings_env_config_dir(home_dir: &Path) -> Option<PathBuf> {
     let settings =
         super::read_json_optional(&home_dir.join(".claude").join("settings.json")).ok()??;
     let dir = Path::new(settings.pointer("/env/CLAUDE_CONFIG_DIR")?.as_str()?);
-    dir.is_absolute().then(|| dir.to_path_buf())
+    if !dir.is_absolute() {
+        return None;
+    }
+    if !redirect_owner_matches(home_dir, dir) {
+        tracing::debug!(
+            home = %home_dir.display(), target = %dir.display(),
+            "claude: ignoring a settings env CLAUDE_CONFIG_DIR owned by another account"
+        );
+        return None;
+    }
+    Some(dir.to_path_buf())
+}
+
+/// The agent service can run as root and assess every home, so one user's file
+/// must not point the row at another account's folder. On unix the folder, or
+/// its nearest existing parent when it does not exist, must belong to the
+/// home folder's owner. Windows has no uid to compare, so a redirect is followed
+/// as it is there.
+#[cfg(unix)]
+fn redirect_owner_matches(home_dir: &Path, target: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(home_dir).is_ok_and(|home| owned_by(target, home.uid()))
+}
+
+#[cfg(unix)]
+fn owned_by(target: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    target
+        .ancestors()
+        .find_map(|p| std::fs::metadata(p).ok())
+        .is_some_and(|m| m.uid() == uid)
+}
+
+#[cfg(not(unix))]
+fn redirect_owner_matches(_home_dir: &Path, _target: &Path) -> bool {
+    true
 }
 
 impl AiGuardParser for ClaudeCodeParser {
@@ -2370,6 +2405,33 @@ mod tests {
             assert!(has_prompt_free_mode(&reasons), "{value:?}: {reasons:?}");
             assert!(!has_allow_broad(&reasons), "{value:?}: {reasons:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settings_env_folder_owned_by_another_account_is_ignored() {
+        use std::os::unix::fs::MetadataExt;
+        let alt = tempdir().unwrap();
+        let uid = std::fs::metadata(alt.path()).unwrap().uid();
+
+        assert!(owned_by(alt.path(), uid));
+        assert!(owned_by(&alt.path().join("not/created"), uid));
+        assert!(!owned_by(alt.path(), uid.wrapping_add(1)));
+        assert!(!owned_by(
+            &alt.path().join("not/created"),
+            uid.wrapping_add(1)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settings_env_folder_of_the_home_owner_is_followed() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        assert!(redirect_owner_matches(home.path(), alt.path()));
+        assert!(!redirect_owner_matches(
+            &home.path().join("missing-home"),
+            alt.path()
+        ));
     }
 
     #[test]

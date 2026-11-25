@@ -14,7 +14,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   itself does. The scan read the default folder and scored the wrong files. The variable in the
   process environment still wins. A relative path or one that starts with `~` is ignored, because
   Claude Code resolves those against the session's folder, which a scan cannot know. A redirect
-  inside the redirected folder is not followed. The agent service does not watch the redirected
+  inside the redirected folder is not followed. On Linux and macOS a redirect to a folder owned
+  by another account is ignored, so a service running as root cannot be pointed at another user's
+  folder; on Windows the redirect is followed as it is. The agent service does not watch the redirected
   folder, so an edit there shows at its next full pass.
 
 - A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`
