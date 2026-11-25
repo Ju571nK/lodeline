@@ -412,7 +412,7 @@ mod tests {
         .unwrap();
         let parser = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
         let got: Vec<_> = parser
-            .assess(repo.path())
+            .assess(std::path::Path::new("/nonexistent-lodeline-home"))
             .unwrap()
             .into_iter()
             .filter(|r| matches!(r, AiGuardReason::ProjectSettingsPluginEnabled { .. }))
