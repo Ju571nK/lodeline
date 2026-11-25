@@ -57,7 +57,7 @@ console and the agents in any order.
   redirected folder, so an edit there shows at its next full pass. (#765)
 - A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`
   and the hooks of their skills, subagents and commands a second time in the project row. Claude
-  Code builds no project settings path at the home folder, so the user row reads them. (#763)
+  Code already reads them in the user row, so they now count once. (#763)
 - The console's observed controls note now reads "This list adds nothing to the risk score." where
   it read "Risk score is unchanged.", which read as if a score had not moved. (#764)
 
