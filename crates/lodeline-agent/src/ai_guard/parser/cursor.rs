@@ -8,7 +8,7 @@
 //! 2026.10.22 `executeAllAndMerge`), so each file is scored on its own. Team
 //! hooks are fetched from the dashboard and held in memory, and are not read.
 
-use crate::ai_guard::parser::claude_code::{classify_command, external_path_from_command};
+use crate::ai_guard::parser::claude_code::{classify_command, external_path_from_command, is_home};
 use crate::ai_guard::parser::mcp_scan::emit_mcp_reasons;
 use crate::ai_guard::parser::{AiGuardParser, AssessError};
 use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
@@ -234,12 +234,15 @@ impl AiGuardParser for CursorProjectParser {
             });
         }
         // #203 — a committed hooks.json runs in every trusted checkout.
-        emit_hook_reasons(
-            &self.repo_root.join(".cursor").join("hooks.json"),
-            Some(home),
-            &self.repo_root,
-            &mut out,
-        );
+        // A root that is the home folder has the user row read that file.
+        if !is_home(&self.repo_root, home) {
+            emit_hook_reasons(
+                &self.repo_root.join(".cursor").join("hooks.json"),
+                Some(home),
+                &self.repo_root,
+                &mut out,
+            );
+        }
         // #146 — instruction files.
         super::instruction_scan::scan_file_path(&self.repo_root.join(".cursorrules"), &mut out);
         super::instruction_scan::scan_rules_dir(
@@ -248,7 +251,10 @@ impl AiGuardParser for CursorProjectParser {
         );
         Ok(out)
     }
-    fn collect_external_script_paths(&self, _home: &Path) -> Vec<PathBuf> {
+    fn collect_external_script_paths(&self, home: &Path) -> Vec<PathBuf> {
+        if is_home(&self.repo_root, home) {
+            return Vec::new();
+        }
         project_script_paths(&self.repo_root)
     }
 }
@@ -353,7 +359,7 @@ mod tests {
         let out = CursorProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new("/unused"))
         .unwrap();
         assert!(
             out.iter().any(|r| matches!(
@@ -377,7 +383,7 @@ mod tests {
         let out = CursorProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new("/unused"))
         .unwrap();
         assert!(
             !out.iter()
@@ -477,7 +483,7 @@ mod tests {
         let out = CursorProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new("/unused"))
         .unwrap();
         assert_eq!(destructive_events(&out).len(), 2, "got {out:?}");
         assert!(
@@ -503,7 +509,7 @@ mod tests {
             let parser = CursorProjectParser {
                 repo_root: repo.path().to_path_buf(),
             };
-            let out = parser.assess(repo.path()).unwrap();
+            let out = parser.assess(Path::new("/unused")).unwrap();
             assert!(
                 !out.iter()
                     .any(|r| matches!(r, AiGuardReason::DestructiveInHookScript { .. })),
@@ -514,7 +520,7 @@ mod tests {
                 .filter(|r| matches!(r, AiGuardReason::ExternalScriptUnscanned { .. }))
                 .count();
             assert_eq!(held, usize::from(unscanned), "{command}: {out:?}");
-            let watched = parser.collect_external_script_paths(repo.path());
+            let watched = parser.collect_external_script_paths(Path::new("/unused"));
             assert!(
                 watched.iter().all(|p| p != &repo.path().join("x.sh")),
                 "{command}: {watched:?}"
@@ -595,7 +601,7 @@ mod tests {
         CursorProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new("/unused"))
         .unwrap();
     }
 
@@ -620,7 +626,7 @@ mod tests {
         let out = CursorProjectParser {
             repo_root: repo.path().to_path_buf(),
         }
-        .assess(repo.path())
+        .assess(Path::new("/unused"))
         .unwrap();
         assert!(
             out.iter().any(|r| matches!(
@@ -643,8 +649,8 @@ mod tests {
         let p = CursorProjectParser {
             repo_root: repo.path().to_path_buf(),
         };
-        let out1 = p.assess(repo.path()).unwrap();
-        let out2 = p.assess(repo.path()).unwrap();
+        let out1 = p.assess(Path::new("/unused")).unwrap();
+        let out2 = p.assess(Path::new("/unused")).unwrap();
         assert_eq!(out1, out2, "repeated scans must be identical");
         assert!(out1.iter().any(|r| matches!(
             r,
@@ -667,7 +673,7 @@ mod tests {
         CursorProjectParser {
             repo_root: repo.to_path_buf(),
         }
-        .assess(repo)
+        .assess(Path::new("/unused"))
         .unwrap()
     }
 
@@ -907,5 +913,80 @@ mod tests {
         .unwrap();
         assert_eq!(script_findings(&user).len(), 1, "got {user:?}");
         assert_eq!(script_findings(&project).len(), 1, "got {project:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_leaves_hooks_to_the_user_row() {
+        let home = tempdir().unwrap();
+        write_hooks(&home.path().join(".cursor"), DESTRUCTIVE_HOOKS);
+        let parser = CursorProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        let project = parser.assess(home.path()).unwrap();
+        assert!(destructive_events(&project).is_empty(), "got {project:?}");
+        let user = assess_user(home.path(), &home.path().join("none.json")).unwrap();
+        assert_eq!(destructive_events(&user).len(), 2, "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_adds_no_script_paths() {
+        let home = tempdir().unwrap();
+        write_hooks(
+            &home.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"stop": [{"command": "/opt/ext/run.sh"}]}}"#,
+        );
+        let parser = CursorProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert!(parser.collect_external_script_paths(home.path()).is_empty());
+    }
+
+    #[test]
+    fn current_event_names_are_scored() {
+        let repo = tempdir().unwrap();
+        write_hooks(
+            &repo.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {
+                "beforeSubmitPrompt": [{"command": "rm -rf /tmp/lodeline-a"}],
+                "subagentStart": [{"command": "rm -rf /tmp/lodeline-b"}],
+                "workspaceOpen": [{"command": "rm -rf /tmp/lodeline-c"}],
+                "somethingNew": [{"command": "rm -rf /tmp/lodeline-d"}]
+            }}"#,
+        );
+        let out = CursorProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        }
+        .assess(Path::new("/unused"))
+        .unwrap();
+        assert_eq!(
+            destructive_events(&out),
+            [
+                "beforeSubmitPrompt",
+                "somethingNew",
+                "subagentStart",
+                "workspaceOpen"
+            ],
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_hook_in_the_project_file_raises_no_finding_and_keeps_command_hooks() {
+        let repo = tempdir().unwrap();
+        write_hooks(
+            &repo.path().join(".cursor"),
+            r#"{"version": 1, "hooks": {"stop": [
+                {"type": "prompt", "prompt": "is this safe?", "model": "m"},
+                {"type": "command", "command": "rm -rf /tmp/lodeline-e"}
+            ]}}"#,
+        );
+        let parser = CursorProjectParser {
+            repo_root: repo.path().to_path_buf(),
+        };
+        let out = parser.assess(Path::new("/unused")).unwrap();
+        assert_eq!(destructive_events(&out), ["stop"], "got {out:?}");
+        assert!(parser
+            .collect_external_script_paths(Path::new("/unused"))
+            .is_empty());
     }
 }
