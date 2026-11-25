@@ -283,7 +283,8 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     let mut parsers_vec: Vec<Arc<dyn crate::ai_guard::parser::AiGuardParser>> =
         // The daemon's env is not a user's shell, and one parser is assessed
         // against every user home, so `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
-        // are not honored here.
+        // are not honored here. The Claude parser still follows an
+        // `env.CLAUDE_CONFIG_DIR` in each home's own settings file.
         crate::ai_guard::user_global_parsers_with_baseline(
             Some(cfg.state_db_path.with_extension("mcp-baselines")),
             None,

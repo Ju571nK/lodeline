@@ -11,8 +11,10 @@ use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// `config_dir` is `CLAUDE_CONFIG_DIR`, which moves `~/.claude` to that
-/// folder and `~/.claude.json` into it. `None` reads the default layout.
+/// `config_dir` is `CLAUDE_CONFIG_DIR` from the process environment, which moves
+/// `~/.claude` to that folder and `~/.claude.json` into it. `None` reads the
+/// default layout, unless that home's own `~/.claude/settings.json` sets
+/// `env.CLAUDE_CONFIG_DIR` (see [`settings_env_config_dir`]).
 #[derive(Default)]
 pub struct ClaudeCodeParser {
     config_dir: Option<PathBuf>,
@@ -25,11 +27,36 @@ impl ClaudeCodeParser {
 
     /// The config folder and the `.claude.json` path for `home_dir`.
     fn locate(&self, home_dir: &Path) -> (PathBuf, PathBuf) {
-        match &self.config_dir {
-            Some(dir) => (dir.clone(), dir.join(".claude.json")),
+        match self
+            .config_dir
+            .clone()
+            .or_else(|| settings_env_config_dir(home_dir))
+        {
+            Some(dir) => {
+                let claude_json = dir.join(".claude.json");
+                (dir, claude_json)
+            }
             None => (home_dir.join(".claude"), home_dir.join(".claude.json")),
         }
     }
+}
+
+/// The config folder that `env.CLAUDE_CONFIG_DIR` in `home_dir`'s default
+/// `~/.claude/settings.json` names. Claude Code (2.1.332) then takes that
+/// folder as its whole config dir, so the default `settings.json` hooks stop
+/// applying. Only that file is read, so a redirect inside the folder is not
+/// followed.
+///
+/// Claude Code resolves a relative value against the session's working folder
+/// and takes `~` literally as a folder name, neither of which a scan can know,
+/// so only an absolute path counts. An absolute path to a folder that does not
+/// exist counts too: Claude Code creates and uses it, so the scan reads it as
+/// empty. An unreadable or malformed default file reads as no redirect.
+fn settings_env_config_dir(home_dir: &Path) -> Option<PathBuf> {
+    let settings =
+        super::read_json_optional(&home_dir.join(".claude").join("settings.json")).ok()??;
+    let dir = Path::new(settings.pointer("/env/CLAUDE_CONFIG_DIR")?.as_str()?);
+    dir.is_absolute().then(|| dir.to_path_buf())
 }
 
 impl AiGuardParser for ClaudeCodeParser {
@@ -62,6 +89,11 @@ impl AiGuardParser for ClaudeCodeParser {
         paths.extend(super::policy_controls::claude_paths(
             &super::policy_controls::claude_policy_dir(),
         ));
+        // The redirect itself lives in the default file, so it stays watched.
+        let default_settings = home_dir.join(".claude").join("settings.json");
+        if self.config_dir.is_none() && !paths.contains(&default_settings) {
+            paths.push(default_settings);
+        }
         paths
     }
 
@@ -2276,7 +2308,7 @@ mod tests {
         std::fs::write(p, contents).unwrap();
     }
 
-    const BYPASS: &str = r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
+    const PROMPT_FREE: &str = r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
     const ALLOW_BROAD: &str = r#"{"permissions":{"allow":["Bash:*"]}}"#;
 
     fn redirect_to(home: &Path, value: &str) {
@@ -2293,7 +2325,7 @@ mod tests {
             .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. }))
     }
 
-    fn has_bypass_mode(reasons: &[AiGuardReason]) -> bool {
+    fn has_prompt_free_mode(reasons: &[AiGuardReason]) -> bool {
         reasons.iter().any(
             |r| matches!(r, AiGuardReason::AutoApprovalEnabled { mode } if mode == "bypassPermissions"),
         )
@@ -2308,21 +2340,21 @@ mod tests {
         let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
 
         assert!(has_allow_broad(&reasons), "{reasons:?}");
-        assert!(!has_bypass_mode(&reasons), "{reasons:?}");
+        assert!(!has_prompt_free_mode(&reasons), "{reasons:?}");
     }
 
     #[test]
     fn process_config_dir_wins_over_settings_env() {
         let (home, alt, process) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
         redirect_to(home.path(), alt.path().to_str().unwrap());
-        write_file(alt.path(), "settings.json", BYPASS);
+        write_file(alt.path(), "settings.json", PROMPT_FREE);
         write_file(process.path(), "settings.json", ALLOW_BROAD);
         let parser = ClaudeCodeParser::with_config_dir(Some(process.path().to_path_buf()));
 
         let reasons = parser.assess(home.path()).unwrap();
 
         assert!(has_allow_broad(&reasons), "{reasons:?}");
-        assert!(!has_bypass_mode(&reasons), "{reasons:?}");
+        assert!(!has_prompt_free_mode(&reasons), "{reasons:?}");
     }
 
     #[test]
@@ -2335,7 +2367,7 @@ mod tests {
 
             let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
 
-            assert!(has_bypass_mode(&reasons), "{value:?}: {reasons:?}");
+            assert!(has_prompt_free_mode(&reasons), "{value:?}: {reasons:?}");
             assert!(!has_allow_broad(&reasons), "{value:?}: {reasons:?}");
         }
     }
@@ -2349,7 +2381,7 @@ mod tests {
 
         let reasons = ClaudeCodeParser::default().assess(home.path()).unwrap();
 
-        assert!(has_bypass_mode(&reasons), "{reasons:?}");
+        assert!(has_prompt_free_mode(&reasons), "{reasons:?}");
     }
 
     #[test]
@@ -2381,7 +2413,7 @@ mod tests {
         let (alice, bob, alt) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
         redirect_to(alice.path(), alt.path().to_str().unwrap());
         write_file(alt.path(), "settings.json", ALLOW_BROAD);
-        write_settings(bob.path(), BYPASS);
+        write_settings(bob.path(), PROMPT_FREE);
         let parser = ClaudeCodeParser::default();
 
         let (a, b) = (
@@ -2389,8 +2421,8 @@ mod tests {
             parser.assess(bob.path()).unwrap(),
         );
 
-        assert!(has_allow_broad(&a) && !has_bypass_mode(&a), "{a:?}");
-        assert!(has_bypass_mode(&b) && !has_allow_broad(&b), "{b:?}");
+        assert!(has_allow_broad(&a) && !has_prompt_free_mode(&a), "{a:?}");
+        assert!(has_prompt_free_mode(&b) && !has_allow_broad(&b), "{b:?}");
     }
 
     #[test]

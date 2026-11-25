@@ -805,3 +805,20 @@ fn scan_ignores_a_relative_claude_config_dir_in_the_settings_env() {
         "{v}"
     );
 }
+
+#[test]
+fn scan_of_a_given_home_follows_that_homes_settings_env() {
+    let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+    write(
+        &home.path().join(".claude").join("settings.json"),
+        &redirecting_settings(alt.path()),
+    );
+    write(&alt.path().join("settings.json"), ALLOW_BROAD);
+
+    let v = report_json_for(home.path(), None);
+
+    assert!(
+        claude_user_kinds(&v).contains(&"permissions_allow_broad".to_string()),
+        "{v}"
+    );
+}
