@@ -510,9 +510,10 @@ fn report_json(report: &Report) -> serde_json::Value {
             "scope": scope_str(&r.scope),
             "score": round1(r.score),
             "bucket": bucket_wire(&r.bucket),
-            // Each reason is the serialized AiGuardReason, plus `config_source`
-            // when the parser names the file, with an advisory `hint` derived
-            // from the reason variant (#188-followup A).
+            // Each reason is the serialized AiGuardReason with an advisory
+            // `hint` derived from the reason variant (#188-followup A).
+            // A reason whose parser names its config file also gets
+            // `config_source`.
             "reasons": r.reasons.iter().enumerate().map(|(i, reason)| {
                 let finding = AiGuardFinding {
                     reason: reason.clone(),
