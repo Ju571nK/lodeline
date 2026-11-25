@@ -6154,7 +6154,7 @@ base_url = "https://llm.corp.example/v1"
             .unwrap();
         let want = source(
             ConfigLayer::Project,
-            &dir.path().join("repo/.codex/config.toml"),
+            &dir.path().join("repo").join(".codex").join("config.toml"),
         );
         assert_eq!(
             source_of(&findings, |r| *r == AiGuardReason::SandboxDisabled),
@@ -6216,18 +6216,18 @@ base_url = "https://llm.corp.example/v1"
         let approval = |name: &'static str| move |r: &AiGuardReason| matches!(r, AiGuardReason::StandingCommandApproval { pattern } if pattern == name);
         assert_eq!(
             source_of(&findings, approval("git")),
-            source(ConfigLayer::System, &system.join("rules/a.rules"))
+            source(ConfigLayer::System, &system.join("rules").join("a.rules"))
         );
         assert_eq!(
             source_of(&findings, approval("make")),
-            source(ConfigLayer::User, &codex.join("rules/b.rules"))
+            source(ConfigLayer::User, &codex.join("rules").join("b.rules"))
         );
         assert_eq!(
             source_of(&findings, |r| matches!(
                 r,
                 AiGuardReason::PermissionsAllowBroad { .. }
             )),
-            source(ConfigLayer::User, &codex.join("rules/b.rules"))
+            source(ConfigLayer::User, &codex.join("rules").join("b.rules"))
         );
     }
 
@@ -6257,7 +6257,10 @@ base_url = "https://llm.corp.example/v1"
             .unwrap();
         assert_eq!(
             source_of(&findings, fetch),
-            source(ConfigLayer::Project, &dir.path().join("repo/AGENTS.md"))
+            source(
+                ConfigLayer::Project,
+                &dir.path().join("repo").join("AGENTS.md")
+            )
         );
     }
 
