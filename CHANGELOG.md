@@ -21,6 +21,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- A Cursor project row no longer reads `.cursor/hooks.json` when the project root is a home folder, because the user row reads that file, so a home-folder project no longer scores one hook file twice. Refs #203.
 - A `CLAUDE_CONFIG_DIR` set in the `env` block of a user's `~/.claude/settings.json` now moves that
   user's Claude Code row to that folder, in `lodeline scan` and in the agent service, as Claude Code
   itself does. The scan read the default folder and scored the wrong files. The variable in the
@@ -34,6 +35,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`
   and the hooks of their skills, subagents and commands a second time in the project row. Claude
   Code builds no project settings path at the home folder, so the user row reads them.
+
+### Added
+
+- Added `docs/cursor-coverage.md`. It lists the Cursor hook files Lodeline reads (user, enterprise and project), states that a `prompt` hook adds no finding and that a command is scored under any event name, and says team hooks and Cursor cloud agents are not covered and why. Refs #203.
 
 ## [0.21.0] - 2026-11-25
 
