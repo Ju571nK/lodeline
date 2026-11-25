@@ -96,11 +96,7 @@ goldens, most recorded from the Go console it replaced. See
 To drive the console in a browser and capture evidence, use the verify skill in
 [`.claude/skills/verify/`](.claude/skills/verify/SKILL.md).
 
-`src/server.rs` holds the route table, which must match `ROUTES` in
-`web/tests/parity/cases.ts` (a unit test checks it). The console does not have to match Go.
-The goldens are a regression check: when a change intentionally differs from a Go golden,
-record that golden from the Rust build, leave every other golden as it is, and list the
-difference in the PR. The parity README says how.
+`ROUTES` in `src/server.rs` must match `ROUTES` in `web/tests/parity/cases.ts` (a unit test checks it). The console does not have to match Go. When a change intentionally differs from a Go golden, record that golden from the Rust build, leave every other golden as it is, and list the difference in the PR (the parity README says how).
 
 `src/auth.rs` signs and checks the session token, `src/auth/oidc.rs` is the OIDC login, and
 `src/api/auth.rs` and `src/api/ratelimit.rs` are the auth routes and the login limiter. The
@@ -126,6 +122,4 @@ process, through the console's own router. The mock fleet is `testdata/mock-flee
 Go build's: keep the schema text, the pragmas and the fixed-width timestamp layout as they are.
 Its tests open the Go-written `testdata/triage.sqlite` through a copy.
 
-`docs/specs/` holds the design specs written for the Go console. They record the design
-decisions, and the file paths they name are the Go layout. Comments that say "as in Go" give
-the reason for a behavior that keeps the Go console's answer.
+`docs/specs/` holds two design specs written for the Go console; the paths they name are the Go layout. A comment that says "as in Go" gives the reason for a behavior that keeps the Go console's answer.
