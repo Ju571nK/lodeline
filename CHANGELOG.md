@@ -7,6 +7,12 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`
+  and the hooks of their skills, subagents and commands a second time in the project row. Claude
+  Code builds no project settings path at the home folder, so the user row reads them.
+
 ## [0.21.0] - 2026-11-25
 
 **Upgrade.** This is a minor release because `lodeline run`, `lodeline show paths` and `lodeline

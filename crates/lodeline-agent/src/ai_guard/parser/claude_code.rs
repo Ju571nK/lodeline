@@ -1990,7 +1990,11 @@ impl AiGuardParser for ClaudeCodeProjectParser {
     /// without them keeps the unsupported-inspection shape of its events.
     fn assess_posture(&self, home_dir: &Path) -> Result<super::AiGuardAssessment, AssessError> {
         let cd = self.repo_root.join(".claude");
-        let mut files = vec![cd.join("settings.json"), cd.join("settings.local.json")];
+        let at_home = is_any_home(&self.repo_root, &self.skip_homes(home_dir));
+        let mut files = vec![cd.join("settings.local.json")];
+        if !at_home {
+            files.push(cd.join("settings.json"));
+        }
         files.extend(shared_local_settings(
             &self.repo_root,
             &self.skip_homes(home_dir),
@@ -2087,14 +2091,23 @@ fn assess_project_skipping(
     policy_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let cd = repo_root.join(".claude");
-    let base = super::read_json_optional(&cd.join("settings.json"))?;
+    let skip_homes: Vec<PathBuf> = std::iter::once(home.to_path_buf())
+        .chain(other_homes.iter().cloned())
+        .collect();
+    // Claude Code builds no project settings path when the project folder is
+    // the home folder (2.1.332), so `settings.json` and the components there
+    // are the user scope, which the user row reads. `settings.local.json` is
+    // not read by the user row and stays scored here.
+    let at_home = is_any_home(repo_root, &skip_homes);
+    let base = if at_home {
+        None
+    } else {
+        super::read_json_optional(&cd.join("settings.json"))?
+    };
     let local = super::read_json_optional(&cd.join("settings.local.json"))?;
     // #199: the repository root's copy wins a key both files set, and the
     // permission lists of both apply. That file belongs to another checkout,
     // so a broken copy is ignored rather than failing this project's score.
-    let skip_homes: Vec<PathBuf> = std::iter::once(home.to_path_buf())
-        .chain(other_homes.iter().cloned())
-        .collect();
     let shared = shared_local_settings(repo_root, &skip_homes).and_then(|path| {
         super::read_json_optional(&path).unwrap_or_else(|e| {
             tracing::warn!(
@@ -2111,8 +2124,12 @@ fn assess_project_skipping(
     // #539: at a home folder this is `~/.claude/loop.md`, which that user's row reads.
     // shortcut: a scan with `CLAUDE_CONFIG_DIR` set reads the user prompt there, so
     // then no row reads this file; pass the config dir here if that matters.
-    let has_loop = !is_any_home(repo_root, &skip_homes) && cd.join("loop.md").is_file();
-    let mut components = super::claude_components::component_hooks(&cd);
+    let has_loop = !at_home && cd.join("loop.md").is_file();
+    let mut components = if at_home {
+        Vec::new()
+    } else {
+        super::claude_components::component_hooks(&cd)
+    };
     components.extend(super::claude_components::nested_skill_hooks(repo_root));
     components.extend(super::claude_components::inherited_skill_hooks(
         repo_root,
@@ -2289,7 +2306,7 @@ mod tests {
             r#"{ "permissions": { "allow": ["Bash:*"] } }"#,
         );
         let parser = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
-        let out = parser.assess(repo.path()).unwrap();
+        let out = parser.assess(Path::new(NO_HOME)).unwrap();
         assert!(
             out.iter()
                 .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. })),
@@ -2700,6 +2717,88 @@ mod tests {
         assert!(reasons
             .iter()
             .any(|r| matches!(r, AiGuardReason::PermissionsAllowBroad { .. })));
+    }
+
+    const HOME_RISK_HOOK: &str = r#"{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+        {"type": "command", "command": "rm -rf /home-x/*"}]}]},
+        "permissions": {"allow": ["Bash(*)"]}}"#;
+
+    const DEPLOYER_AGENT: &str =
+        "---\nname: deployer\nhooks:\n  Stop:\n    - hooks:\n        - command: rm -rf ~/y\n---\n";
+
+    fn destructive_count(reasons: &[AiGuardReason]) -> usize {
+        reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+            .count()
+    }
+
+    /// Claude Code builds no project settings path when the project folder is
+    /// the home folder, so `~/.claude/settings.json` is the user scope only.
+    #[test]
+    fn project_row_at_home_does_not_rescore_user_settings_json() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), HOME_RISK_HOOK);
+        let user = user_reasons(home.path());
+        assert_eq!(destructive_count(&user), 1, "{user:?}");
+        let project =
+            assess_project(home.path(), home.path(), &home.path().join("no-policy")).unwrap();
+        assert!(project.is_empty(), "{project:?}");
+    }
+
+    #[test]
+    fn project_row_at_home_does_not_rescore_user_component_hooks() {
+        let home = tempdir().unwrap();
+        write_file(home.path(), ".claude/agents/deployer.md", DEPLOYER_AGENT);
+        let user = user_reasons(home.path());
+        assert_eq!(destructive_count(&user), 1, "{user:?}");
+        let project =
+            assess_project(home.path(), home.path(), &home.path().join("no-policy")).unwrap();
+        assert!(project.is_empty(), "{project:?}");
+    }
+
+    #[test]
+    fn project_row_below_home_still_reads_its_own_claude_files() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), HOME_RISK_HOOK);
+        let repo = home.path().join("proj");
+        write_file(&repo, ".claude/settings.json", HOME_RISK_HOOK);
+        write_file(&repo, ".claude/agents/deployer.md", DEPLOYER_AGENT);
+        let project = assess_project(&repo, home.path(), &home.path().join("no-policy")).unwrap();
+        assert_eq!(destructive_count(&project), 2, "{project:?}");
+    }
+
+    #[test]
+    fn project_row_at_another_users_home_skips_its_user_files() {
+        let users = tempdir().unwrap();
+        let alice = users.path().join("alice");
+        write_settings(&alice, HOME_RISK_HOOK);
+        write_file(&alice, ".claude/agents/deployer.md", DEPLOYER_AGENT);
+        let own = users.path().join("root");
+        let policy = tempdir().unwrap();
+        let reasons =
+            assess_project_skipping(&alice, &own, std::slice::from_ref(&alice), policy.path())
+                .unwrap();
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn project_posture_at_home_skips_the_user_controls() {
+        const BLOCK_READS: &str =
+            r#"{"permissions": {"blockReadsOutsideWorkingDirectories": true}}"#;
+        let home = tempdir().unwrap();
+        write_settings(home.path(), BLOCK_READS);
+        let at_home = ClaudeCodeProjectParser::without_walk(home.path().to_path_buf());
+        let posture = at_home.assess_posture(home.path()).unwrap();
+        assert!(posture.controls.is_none(), "{:?}", posture.controls);
+        let repo = home.path().join("proj");
+        write_file(&repo, ".claude/settings.json", BLOCK_READS);
+        let below = ClaudeCodeProjectParser::without_walk(repo);
+        assert!(below
+            .assess_posture(home.path())
+            .unwrap()
+            .controls
+            .is_some());
     }
 
     /// The user's `settings.local.json` is not a user-scope file, so its
@@ -3308,7 +3407,7 @@ mod tests {
             "---\nname: deployer\nhooks:\n  PreToolUse:\n    - matcher: \"*\"\n      hooks:\n        - type: command\n          command: echo hi\n---\n",
         );
         let p = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
-        let out = p.assess(repo.path()).unwrap();
+        let out = p.assess(Path::new(NO_HOME)).unwrap();
         let sandbox = out
             .iter()
             .filter(|r| matches!(r, AiGuardReason::NoSandbox { .. }))
@@ -3489,7 +3588,7 @@ mod tests {
             r#"{ "mcpServers": { "x": { "command": "node", "args": ["/tmp/.x/p.js"] } } }"#,
         );
         let parser = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
-        let out = parser.assess(repo.path()).unwrap();
+        let out = parser.assess(Path::new(NO_HOME)).unwrap();
         assert!(out.iter().any(|r| matches!(
             r, AiGuardReason::ProjectMcpAutoEnabled { mechanism } if mechanism == "enableAllProjectMcpServers"
         )), "got {out:?}");
@@ -3526,7 +3625,7 @@ mod tests {
             r#"{ "mcpServers": { "x": { "command": "node" } } }"#,
         );
         let parser = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
-        let out = parser.assess(repo.path()).unwrap();
+        let out = parser.assess(Path::new(NO_HOME)).unwrap();
         assert!(out.iter().any(|r| matches!(
             r, AiGuardReason::ProjectMcpAutoEnabled { mechanism } if mechanism == "enabledMcpjsonServers"
         )), "got {out:?}");
@@ -5631,20 +5730,20 @@ mod tests {
     #[test]
     fn project_scope_reports_outside_working_directory_blocks() {
         let home = tempdir().unwrap();
-        let repo = tempdir().unwrap();
-        let project = ClaudeCodeProjectParser::without_walk(repo.path().to_path_buf());
-        write_file(repo.path(), ".claude/settings.json", r#"{"model": "x"}"#);
+        let repo = home.path().join("proj");
+        let project = ClaudeCodeProjectParser::without_walk(repo.clone());
+        write_file(&repo, ".claude/settings.json", r#"{"model": "x"}"#);
         assert!(project
             .assess_posture(home.path())
             .unwrap()
             .controls
             .is_none());
-        write_file(repo.path(), ".claude/settings.json", OUTSIDE_BOTH);
-        let found = outside_controls(&project, repo.path());
+        write_file(&repo, ".claude/settings.json", OUTSIDE_BOTH);
+        let found = outside_controls(&project, home.path());
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found
             .iter()
-            .all(|c| c.source_path == repo.path().join(".claude/settings.json")));
+            .all(|c| c.source_path == repo.join(".claude/settings.json")));
     }
 
     // ---- #539: allowedHttpHookUrls ---------------------------------------
