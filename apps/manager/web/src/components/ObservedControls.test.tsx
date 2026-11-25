@@ -44,6 +44,8 @@ describe('observed security settings', () => {
     }
     expect(screen.getByText(/project/)).toBeInTheDocument();
     expect(screen.getByText(/not proof of runtime enforcement/)).toBeInTheDocument();
+    expect(screen.getByText(/This list adds nothing to the risk score\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Risk score is unchanged/)).not.toBeInTheDocument();
   });
   it('retains controls for low-risk tools without changing the score', () => {
     render(
