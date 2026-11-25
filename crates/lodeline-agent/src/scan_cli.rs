@@ -11,7 +11,9 @@
 use crate::ai_guard::parser::AiGuardParser;
 use crate::ai_guard::rubric::{reason_kind, reason_kinds};
 use crate::ai_guard::{rubric, tool_cli_label, user_global_parsers};
-use lodeline_core::event::{AiGuardBucket, AiGuardReason, AiGuardScope, AiTool};
+use lodeline_core::event::{
+    AiGuardBucket, AiGuardFinding, AiGuardReason, AiGuardScope, AiTool, ConfigSource,
+};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,6 +47,8 @@ struct Row {
     score: f32,
     bucket: AiGuardBucket,
     reasons: Vec<AiGuardReason>,
+    /// `sources[i]` is the config file `reasons[i]` came from, when one is named.
+    sources: Vec<Option<ConfigSource>>,
 }
 
 struct Report {
@@ -154,6 +158,7 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
         match p.assess_posture(home) {
             Ok(mut assessment) => {
                 assessment.normalize();
+                let sources = assessment.sources;
                 let reasons = assessment.reasons;
                 let controls = assessment.controls;
                 if reasons.is_empty() && controls.as_ref().is_none_or(Vec::is_empty) && !configured
@@ -169,6 +174,7 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
                         score,
                         bucket: rubric::bucket(score),
                         reasons,
+                        sources,
                     });
                 }
             }
@@ -506,8 +512,14 @@ fn report_json(report: &Report) -> serde_json::Value {
             "bucket": bucket_wire(&r.bucket),
             // Each reason is the serialized AiGuardReason with an advisory
             // `hint` derived from the reason variant (#188-followup A).
-            "reasons": r.reasons.iter().map(|reason| {
-                let mut v = serde_json::to_value(reason).unwrap_or(serde_json::Value::Null);
+            // A reason whose parser names its config file also gets
+            // `config_source`.
+            "reasons": r.reasons.iter().enumerate().map(|(i, reason)| {
+                let finding = AiGuardFinding {
+                    reason: reason.clone(),
+                    config_source: r.sources.get(i).cloned().flatten(),
+                };
+                let mut v = serde_json::to_value(finding).unwrap_or(serde_json::Value::Null);
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert(
                         "hint".to_string(),
@@ -574,8 +586,62 @@ mod controls_tests {
             Ok(AiGuardAssessment {
                 reasons: vec![],
                 controls: self.0.clone(),
+                ..Default::default()
             })
         }
+    }
+
+    struct Sourced;
+    impl AiGuardParser for Sourced {
+        fn tool(&self) -> AiTool {
+            AiTool::Codex
+        }
+        fn scope(&self) -> AiGuardScope {
+            AiGuardScope::UserGlobal
+        }
+        fn watched_paths(&self, _: &Path) -> Vec<PathBuf> {
+            vec![]
+        }
+        fn assess(&self, _: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+            panic!("must use posture")
+        }
+        fn assess_posture(&self, _: &Path) -> Result<AiGuardAssessment, AssessError> {
+            Ok(AiGuardAssessment {
+                reasons: vec![
+                    AiGuardReason::SandboxDisabled,
+                    AiGuardReason::NoSandbox {
+                        executor: "x".into(),
+                    },
+                ],
+                sources: vec![Some(lodeline_core::event::ConfigSource {
+                    layer: lodeline_core::event::ConfigLayer::User,
+                    file: "/h/.codex/config.toml".into(),
+                })],
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn json_reasons_carry_config_source_and_the_score_is_unchanged() {
+        let report = build_report_with_parsers(Path::new("/unused"), &[Arc::new(Sourced)]);
+        let json = report_json(&report);
+        let reasons = &json["results"][0]["reasons"];
+        assert_eq!(
+            reasons[0]["config_source"],
+            serde_json::json!({"layer": "user", "file": "/h/.codex/config.toml"})
+        );
+        assert!(reasons[1].get("config_source").is_none());
+        let bare = [
+            AiGuardReason::SandboxDisabled,
+            AiGuardReason::NoSandbox {
+                executor: "x".into(),
+            },
+        ];
+        assert_eq!(
+            json["results"][0]["score"],
+            serde_json::json!(round1(rubric::score(&bare)))
+        );
     }
 
     #[test]
@@ -681,6 +747,7 @@ mod table_width_tests {
             score,
             bucket: AiGuardBucket::Low,
             reasons: vec![],
+            sources: vec![],
         };
         let report = Report {
             rows: vec![
@@ -728,6 +795,7 @@ mod fail_on_tests {
                     score: 0.0,
                     bucket: b.clone(),
                     reasons: vec![],
+                    sources: vec![],
                 })
                 .collect(),
             not_configured: vec![AiTool::Cursor],

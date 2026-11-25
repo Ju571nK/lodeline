@@ -146,6 +146,7 @@ impl AiGuardParser for ClaudeCodeParser {
         Ok(super::AiGuardAssessment {
             reasons: self.assess(home_dir)?,
             controls: Some(controls),
+            ..Default::default()
         })
     }
 
@@ -2070,6 +2071,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
         Ok(super::AiGuardAssessment {
             reasons: self.assess(home_dir)?,
             controls: (!controls.is_empty()).then_some(controls),
+            ..Default::default()
         })
     }
 

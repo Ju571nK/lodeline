@@ -11,7 +11,14 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - An entry of `reasons` in `ai_guard_risk_assessed` may carry an optional `config_source` key, an
   object with the `layer` and the absolute `file` of the configuration the finding came from. Older
-  agents and servers ignore it, and no agent writes it yet (contract section 14.18).
+  agents and servers ignore it (contract section 14.18).
+- The agent now fills `config_source` on Codex findings, in the service and in `lodeline scan
+  --json`. A hook finding names its `config.toml` or `hooks.json`, a merged setting or MCP server
+  the highest layer that sets it, a rules finding the first rules file, and an `AGENTS.md` finding
+  that file. A finding from a named permission profile names none. Scores do not change. A Codex
+  setting that moves to another layer now sends a new event, because the change detector includes
+  the key. An upgrade adds no event of its own, because the first assessment after a restart is sent
+  anyway.
 
 ### Fixed
 
