@@ -574,8 +574,62 @@ mod controls_tests {
             Ok(AiGuardAssessment {
                 reasons: vec![],
                 controls: self.0.clone(),
+                ..Default::default()
             })
         }
+    }
+
+    struct Sourced;
+    impl AiGuardParser for Sourced {
+        fn tool(&self) -> AiTool {
+            AiTool::Codex
+        }
+        fn scope(&self) -> AiGuardScope {
+            AiGuardScope::UserGlobal
+        }
+        fn watched_paths(&self, _: &Path) -> Vec<PathBuf> {
+            vec![]
+        }
+        fn assess(&self, _: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
+            panic!("must use posture")
+        }
+        fn assess_posture(&self, _: &Path) -> Result<AiGuardAssessment, AssessError> {
+            Ok(AiGuardAssessment {
+                reasons: vec![
+                    AiGuardReason::SandboxDisabled,
+                    AiGuardReason::NoSandbox {
+                        executor: "x".into(),
+                    },
+                ],
+                sources: vec![Some(lodeline_core::event::ConfigSource {
+                    layer: lodeline_core::event::ConfigLayer::User,
+                    file: "/h/.codex/config.toml".into(),
+                })],
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn json_reasons_carry_config_source_and_the_score_is_unchanged() {
+        let report = build_report_with_parsers(Path::new("/unused"), &[Arc::new(Sourced)]);
+        let json = report_json(&report);
+        let reasons = &json["results"][0]["reasons"];
+        assert_eq!(
+            reasons[0]["config_source"],
+            serde_json::json!({"layer": "user", "file": "/h/.codex/config.toml"})
+        );
+        assert!(reasons[1].get("config_source").is_none());
+        let bare = [
+            AiGuardReason::SandboxDisabled,
+            AiGuardReason::NoSandbox {
+                executor: "x".into(),
+            },
+        ];
+        assert_eq!(
+            json["results"][0]["score"],
+            serde_json::json!(round1(rubric::score(&bare)))
+        );
     }
 
     #[test]

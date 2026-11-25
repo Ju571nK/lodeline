@@ -1138,6 +1138,7 @@ mod tests {
             Ok(crate::ai_guard::parser::AiGuardAssessment {
                 reasons: vec![AiGuardReason::SandboxDisabled],
                 controls: self.0.lock().unwrap().clone(),
+                ..Default::default()
             })
         }
     }
@@ -2299,5 +2300,94 @@ mod tests {
         let j = serde_json::to_value(&ev).unwrap();
         assert_eq!(j["evidence"]["kind"], "ai_guard_assess_failed");
         assert!(j["evidence"].get("config_found").is_none());
+    }
+
+    struct SourcedParser(StdMutex<Option<lodeline_core::event::ConfigSource>>);
+
+    impl AiGuardParser for SourcedParser {
+        fn tool(&self) -> AiTool {
+            AiTool::Codex
+        }
+        fn scope(&self) -> AiGuardScope {
+            AiGuardScope::UserGlobal
+        }
+        fn watched_paths(&self, _: &std::path::Path) -> Vec<PathBuf> {
+            vec![]
+        }
+        fn assess(&self, _: &std::path::Path) -> Result<Vec<AiGuardReason>, AssessError> {
+            panic!("posture path must be used")
+        }
+        fn assess_posture(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<crate::ai_guard::parser::AiGuardAssessment, AssessError> {
+            Ok(crate::ai_guard::parser::AiGuardAssessment {
+                reasons: vec![AiGuardReason::SandboxDisabled],
+                sources: vec![self.0.lock().unwrap().clone()],
+                ..Default::default()
+            })
+        }
+    }
+
+    fn config_source(
+        layer: lodeline_core::event::ConfigLayer,
+        file: &str,
+    ) -> Option<lodeline_core::event::ConfigSource> {
+        Some(lodeline_core::event::ConfigSource {
+            layer,
+            file: file.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn the_event_carries_config_source_and_a_moved_source_is_a_change() {
+        use lodeline_core::event::ConfigLayer;
+        let (_tx, fc_rx) = broadcast::channel(8);
+        let parser = SourcedParser(StdMutex::new(config_source(
+            ConfigLayer::User,
+            "/h/.codex/config.toml",
+        )));
+        let (ctx, mut events) = ctx_with(
+            SourcedParser(StdMutex::new(None)),
+            fc_rx,
+            Duration::from_secs(60),
+        );
+        let steps = [
+            (
+                config_source(ConfigLayer::User, "/h/.codex/config.toml"),
+                true,
+            ),
+            (
+                config_source(ConfigLayer::User, "/h/.codex/config.toml"),
+                false,
+            ),
+            (
+                config_source(ConfigLayer::System, "/etc/codex/config.toml"),
+                true,
+            ),
+            (None, true),
+        ];
+        for (source, emits) in steps {
+            *parser.0.lock().unwrap() = source.clone();
+            eval_and_maybe_emit(&parser, &ctx, &own_home(&ctx), false).await;
+            if !emits {
+                assert!(events.try_recv().is_err());
+                continue;
+            }
+            match events.try_recv().unwrap().event.evidence {
+                Evidence::AiGuardRiskAssessed {
+                    score,
+                    reasons,
+                    is_reattestation,
+                    ..
+                } => {
+                    assert_eq!(score, rubric::score(&[AiGuardReason::SandboxDisabled]));
+                    assert_eq!(reasons.len(), 1);
+                    assert_eq!(reasons[0].config_source, source);
+                    assert!(!is_reattestation);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
     }
 }
