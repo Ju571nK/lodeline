@@ -13,7 +13,8 @@ export function ObservedControls({ controls, assessedAt, scope }: Props) {
     <section aria-label="Observed security settings" className="mt-3 min-w-0 text-xs">
       <h3 className="font-medium text-text-primary">Observed security settings</h3>
       <p className="mt-1 text-text-muted">
-        Configuration observations, not proof of runtime enforcement. Risk score is unchanged.
+        Configuration observations, not proof of runtime enforcement. This list adds nothing to the
+        risk score.
       </p>
       <p className="mt-1 break-all text-text-muted">
         Assessment: <time dateTime={assessedAt}>{assessedAt}</time> · {scopeLabel(scope)}
