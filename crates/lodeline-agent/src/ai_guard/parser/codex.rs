@@ -41,7 +41,9 @@
 //!      if `url` is present the server is inherently remote.
 
 use crate::ai_guard::parser::{claude_code, AiGuardParser, AssessError};
-use lodeline_core::event::{AiGuardReason, AiGuardScope, AiTool};
+use lodeline_core::event::{
+    AiGuardFinding, AiGuardReason, AiGuardScope, AiTool, ConfigLayer, ConfigSource,
+};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use toml::Value;
@@ -108,10 +110,21 @@ impl AiGuardParser for CodexParser {
         )
     }
 
+    fn assess_sourced(&self, home_dir: &Path) -> Result<Vec<AiGuardFinding>, AssessError> {
+        assess_user_findings(
+            &super::policy_controls::codex_system_dir(),
+            &user_codex_dir(home_dir, self.codex_home.as_deref()),
+            home_dir,
+        )
+    }
+
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         let system_dir = super::policy_controls::codex_system_dir();
-        let system = CodexLayer::read_lenient(&system_dir);
-        let user = CodexLayer::read_lenient(&user_codex_dir(home_dir, self.codex_home.as_deref()));
+        let system = CodexLayer::read_lenient(&system_dir, ConfigLayer::System);
+        let user = CodexLayer::read_lenient(
+            &user_codex_dir(home_dir, self.codex_home.as_deref()),
+            ConfigLayer::User,
+        );
         if !hooks_feature_enabled(&system_dir, [&system.config, &user.config]) {
             return Vec::new();
         }
@@ -129,14 +142,65 @@ const HOOKS_JSON: &str = "hooks.json";
 /// scalar settings are merged across layers.
 struct CodexLayer {
     dir: PathBuf,
+    kind: ConfigLayer,
     config: Option<Value>,
     json_hooks: Option<Value>,
+}
+
+/// The file a finding came from, as an absolute path.
+fn config_source(layer: &ConfigLayer, file: &Path) -> ConfigSource {
+    let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+    ConfigSource {
+        layer: layer.clone(),
+        file: file.to_string_lossy().into_owned(),
+    }
+}
+
+/// `reasons` as findings, each naming the file `source` picks for it.
+fn stamp(
+    reasons: Vec<AiGuardReason>,
+    mut source: impl FnMut(&AiGuardReason) -> Option<ConfigSource>,
+) -> impl Iterator<Item = AiGuardFinding> {
+    reasons.into_iter().map(move |reason| AiGuardFinding {
+        config_source: source(&reason),
+        reason,
+    })
+}
+
+fn stamp_all(
+    reasons: Vec<AiGuardReason>,
+    source: Option<ConfigSource>,
+) -> impl Iterator<Item = AiGuardFinding> {
+    stamp(reasons, move |_| source.clone())
+}
+
+fn lookup<'a>(config: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(config, |value, key| value.get(*key))
+}
+
+/// The file of the highest layer whose own `config.toml` satisfies `defines`.
+/// A merge takes a key from that layer, so it is the file that set the
+/// effective value. `layers` is low to high.
+fn defining_source(
+    layers: &[CodexLayer],
+    defines: impl Fn(&Value) -> bool,
+) -> Option<ConfigSource> {
+    layers
+        .iter()
+        .rev()
+        .find(|layer| layer.config.as_ref().is_some_and(&defines))
+        .map(CodexLayer::config_source)
+}
+
+/// `defining_source` for one key path.
+fn key_source(layers: &[CodexLayer], path: &[&str]) -> Option<ConfigSource> {
+    defining_source(layers, |config| lookup(config, path).is_some())
 }
 
 impl CodexLayer {
     /// A corrupt `config.toml` is an error: Codex will not start against it.
     /// A corrupt `hooks.json` is skipped with a warning, as Codex does.
-    fn read(dir: &Path) -> Result<Self, AssessError> {
+    fn read(dir: &Path, kind: ConfigLayer) -> Result<Self, AssessError> {
         let path = dir.join("config.toml");
         let config = match std::fs::read_to_string(&path) {
             Ok(text) => Some(toml::from_str(&text).map_err(|e| {
@@ -147,17 +211,27 @@ impl CodexLayer {
         };
         Ok(Self {
             dir: dir.to_path_buf(),
+            kind,
             config,
             json_hooks: read_hooks_json(&dir.join(HOOKS_JSON)),
         })
     }
 
-    fn read_lenient(dir: &Path) -> Self {
-        Self::read(dir).unwrap_or_else(|_| Self {
+    fn read_lenient(dir: &Path, kind: ConfigLayer) -> Self {
+        Self::read(dir, kind.clone()).unwrap_or_else(|_| Self {
             dir: dir.to_path_buf(),
+            kind,
             config: None,
             json_hooks: read_hooks_json(&dir.join(HOOKS_JSON)),
         })
+    }
+
+    fn source(&self, file: &Path) -> ConfigSource {
+        config_source(&self.kind, file)
+    }
+
+    fn config_source(&self) -> ConfigSource {
+        self.source(&self.dir.join("config.toml"))
     }
 
     fn hook_sources(&self) -> impl Iterator<Item = &Value> {
@@ -168,7 +242,7 @@ impl CodexLayer {
         &self,
         trust: &HookTrust,
         home: Option<&Path>,
-        out: &mut Vec<AiGuardReason>,
+        out: &mut Vec<AiGuardFinding>,
     ) {
         let sources = [
             (self.dir.join("config.toml"), self.config.as_ref()),
@@ -177,12 +251,14 @@ impl CodexLayer {
         for (path, source) in sources {
             let Some(source) = source else { continue };
             let key_sources = hook_key_sources(&path);
+            let mut reasons = Vec::new();
             emit_hook_reasons(
                 source,
                 |event, group, handler| trust.runs(&key_sources, event, group, handler),
                 home,
-                out,
+                &mut reasons,
             );
+            out.extend(stamp_all(reasons, Some(self.source(&path))));
         }
     }
 
@@ -324,14 +400,34 @@ fn merge_layer(base: &mut Value, overlay: &Value) {
     }
 }
 
-/// #200 — the system layer (`/etc/codex`, `%ProgramData%\OpenAI\Codex`) sits
-/// below the user's Codex folder and applies to every user on the host.
 fn assess_user_layers(
     system_dir: &Path,
     codex_dir: &Path,
     home_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
-    let layers = [CodexLayer::read(system_dir)?, CodexLayer::read(codex_dir)?];
+    Ok(assess_user_findings(system_dir, codex_dir, home_dir)?
+        .into_iter()
+        .map(|finding| finding.reason)
+        .collect())
+}
+
+/// #200 — the system layer (`/etc/codex`, `%ProgramData%\OpenAI\Codex`) sits
+/// below the user's Codex folder and applies to every user on the host.
+///
+/// Each finding names the file that holds its setting when one file does. A
+/// merged value names the highest layer that sets its key, and a merged MCP
+/// server the highest layer that defines the server. A finding that comes
+/// from a permission profile resolved in the merged `[permissions]` table
+/// names no file.
+fn assess_user_findings(
+    system_dir: &Path,
+    codex_dir: &Path,
+    home_dir: &Path,
+) -> Result<Vec<AiGuardFinding>, AssessError> {
+    let layers = [
+        CodexLayer::read(system_dir, ConfigLayer::System)?,
+        CodexLayer::read(codex_dir, ConfigLayer::User)?,
+    ];
     let mut effective: Option<Value> = None;
     for config in layers.iter().filter_map(|layer| layer.config.as_ref()) {
         match effective.as_mut() {
@@ -358,9 +454,45 @@ fn assess_user_layers(
     emit_workspace_write_reasons(&layers, &layers, trust_decided, home_dir, &mut out);
     if let Some(val) = &effective {
         // #200 — whether a human is asked before a tool runs.
-        emit_approval_policy_reasons(val, None, &mut out);
-        emit_user_command_key_reasons(val, &mut out);
-        emit_shell_environment_reasons(val, &mut out);
+        let mut reasons = Vec::new();
+        emit_approval_policy_reasons(val, None, &mut reasons);
+        out.extend(stamp(reasons, |reason| match reason {
+            AiGuardReason::AutoApprovalEnabled { mode } if mode == "never" => {
+                key_source(&layers, &["approval_policy"])
+            }
+            _ => key_source(&layers, &["approvals_reviewer"]),
+        }));
+        let mut reasons = Vec::new();
+        emit_user_command_key_reasons(val, &mut reasons);
+        out.extend(stamp(reasons, |reason| {
+            let key: Vec<&str> = match reason {
+                AiGuardReason::ProjectSettingsHelperCommand { .. } => vec!["notify"],
+                AiGuardReason::ProjectSettingsEnvOverride { variable, .. }
+                    if variable == "openai_base_url" =>
+                {
+                    vec!["openai_base_url"]
+                }
+                AiGuardReason::ProjectSettingsEnvOverride { .. } => {
+                    let provider = val.get("model_provider").and_then(Value::as_str)?;
+                    vec!["model_providers", provider, "base_url"]
+                }
+                _ => return None,
+            };
+            key_source(&layers, &key)
+        }));
+        let mut reasons = Vec::new();
+        emit_shell_environment_reasons(val, &mut reasons);
+        out.extend(stamp(reasons, |reason| {
+            let AiGuardReason::ProjectSettingsEnvOverride { variable, .. } = reason else {
+                return None;
+            };
+            let name = variable.strip_prefix("shell_environment_policy.set.")?;
+            defining_source(&layers, |config| {
+                lookup(config, &["shell_environment_policy", "set"])
+                    .and_then(Value::as_table)
+                    .is_some_and(|set| set.keys().any(|k| k.eq_ignore_ascii_case(name)))
+            })
+        }));
     }
     let [system, user] = &layers;
     if hooks_feature_enabled(system_dir, [&system.config, &user.config]) {
@@ -373,7 +505,15 @@ fn assess_user_layers(
         );
     }
     if let Some(val) = &effective {
-        emit_mcp_reasons(val, &mut out);
+        for (id, reasons) in app_approval_reasons(val) {
+            out.extend(stamp_all(reasons, key_source(&layers, &["apps", &id])));
+        }
+        for (name, reasons) in mcp_server_reasons(val) {
+            out.extend(stamp_all(
+                reasons,
+                key_source(&layers, &["mcp_servers", &name]),
+            ));
+        }
     }
     // #200 — standing command approvals, which live outside config.toml.
     // System rules are managed and always load.
@@ -390,23 +530,16 @@ fn assess_user_layers(
         });
         let text = String::from_utf8_lossy(&bytes);
         if read.is_ok() && !text.trim().is_empty() {
-            super::instruction_scan::scan_instruction_file(&path, &text, &mut out);
+            let mut reasons = Vec::new();
+            super::instruction_scan::scan_instruction_file(&path, &text, &mut reasons);
+            out.extend(stamp_all(
+                reasons,
+                Some(config_source(&ConfigLayer::User, &path)),
+            ));
             break;
         }
     }
     Ok(out)
-}
-
-#[allow(dead_code)]
-fn assess_user_findings(
-    system_dir: &Path,
-    codex_dir: &Path,
-    home_dir: &Path,
-) -> Result<Vec<lodeline_core::event::AiGuardFinding>, AssessError> {
-    Ok(assess_user_layers(system_dir, codex_dir, home_dir)?
-        .into_iter()
-        .map(Into::into)
-        .collect())
 }
 
 const GLOBAL_AGENTS_MD: [&str; 2] = ["AGENTS.override.md", "AGENTS.md"];
@@ -423,21 +556,32 @@ const GLOBAL_AGENTS_MD: [&str; 2] = ["AGENTS.override.md", "AGENTS.md"];
 /// sets either key, and inside that layer `default_permissions` wins
 /// (`resolve_permission_config_syntax`, rust-v0.166.0). `layers` is low to high.
 /// `permissions` is the merged `[permissions]` table that names resolve in.
+///
+/// The finding names the layer that picks the setting. A named profile
+/// resolves in the merged `[permissions]` table, so no one file holds it and
+/// the finding names none; the built-in `:danger-full-access` is the pick
+/// itself.
 fn emit_sandbox_reasons(
     layers: &[CodexLayer],
     permissions: Option<&Value>,
     home: &Path,
-    out: &mut Vec<AiGuardReason>,
+    out: &mut Vec<AiGuardFinding>,
 ) {
-    let disabled = match sandbox_setting(layers) {
-        Some(SandboxSetting::Profile(profile)) => {
-            profile_writes_everywhere(profile, permissions, home)
-        }
-        Some(SandboxSetting::Mode(mode)) => mode == "danger-full-access",
-        None => false,
+    let Some((layer, setting)) = sandbox_setting(layers) else {
+        return;
+    };
+    let (disabled, resolved_in_merge) = match setting {
+        SandboxSetting::Profile(profile) => (
+            profile_writes_everywhere(profile, permissions, home),
+            profile != ":danger-full-access",
+        ),
+        SandboxSetting::Mode(mode) => (mode == "danger-full-access", false),
     };
     if disabled {
-        out.push(AiGuardReason::SandboxDisabled);
+        out.push(AiGuardFinding {
+            reason: AiGuardReason::SandboxDisabled,
+            config_source: (!resolved_in_merge).then(|| layer.config_source()),
+        });
     }
 }
 
@@ -448,13 +592,14 @@ enum SandboxSetting<'a> {
 
 /// The key that picks the sandbox: the highest layer setting either key
 /// decides, and inside it `default_permissions` wins over `sandbox_mode`.
-fn sandbox_setting(layers: &[CodexLayer]) -> Option<SandboxSetting<'_>> {
+fn sandbox_setting(layers: &[CodexLayer]) -> Option<(&CodexLayer, SandboxSetting<'_>)> {
     layers.iter().rev().find_map(|layer| {
         let config = layer.config.as_ref()?;
         let key = |k| config.get(k).and_then(Value::as_str);
         key("default_permissions")
             .map(SandboxSetting::Profile)
             .or_else(|| key("sandbox_mode").map(SandboxSetting::Mode))
+            .map(|setting| (layer, setting))
     })
 }
 
@@ -475,11 +620,11 @@ fn emit_workspace_write_reasons(
     settings_layers: &[CodexLayer],
     trust_decided: bool,
     home: &Path,
-    out: &mut Vec<AiGuardReason>,
+    out: &mut Vec<AiGuardFinding>,
 ) {
     let in_force = match sandbox_setting(mode_layers) {
-        Some(SandboxSetting::Mode(mode)) => mode == "workspace-write",
-        Some(SandboxSetting::Profile(_)) => false,
+        Some((_, SandboxSetting::Mode(mode))) => mode == "workspace-write",
+        Some((_, SandboxSetting::Profile(_))) => false,
         None => trust_decided,
     };
     if !in_force {
@@ -496,9 +641,12 @@ fn emit_workspace_write_reasons(
             Some((layer, value))
         })
     };
-    if setting("network_access").and_then(|(_, v)| v.as_bool()) == Some(true) {
-        out.push(AiGuardReason::NoSandbox {
-            executor: "workspace_write_network".to_string(),
+    if let Some((layer, Some(true))) = setting("network_access").map(|(l, v)| (l, v.as_bool())) {
+        out.push(AiGuardFinding {
+            reason: AiGuardReason::NoSandbox {
+                executor: "workspace_write_network".to_string(),
+            },
+            config_source: Some(layer.config_source()),
         });
     }
     let Some((layer, roots)) = setting("writable_roots") else {
@@ -511,7 +659,10 @@ fn emit_workspace_write_reasons(
         .filter_map(Value::as_str)
         .any(|root| holds_home(root, Some(&layer.dir), home))
     {
-        out.push(AiGuardReason::SandboxDisabled);
+        out.push(AiGuardFinding {
+            reason: AiGuardReason::SandboxDisabled,
+            config_source: Some(layer.config_source()),
+        });
     }
 }
 
@@ -801,15 +952,39 @@ pub(super) const MAX_STANDING_APPROVAL_REASONS: usize = 32;
 /// A host that a `network_rule` allows is a standing approval too: Codex adds
 /// it to the network proxy's allowlist (`network_proxy_spec.rs`,
 /// rust-v0.166.0). It is reported as the bare host under the same cap.
-fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
-    let texts: Vec<String> = layers
+///
+/// A finding names the first rules file, in layer order, that yields it.
+fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardFinding>) {
+    let files: Vec<(ConfigSource, String)> = layers
         .iter()
-        .flat_map(|layer| rules_texts(&layer.dir.join("rules")))
+        .flat_map(|layer| {
+            rules_texts(&layer.dir.join("rules"))
+                .into_iter()
+                .map(|(file, text)| (layer.source(&file), text))
+        })
         .collect();
+    let texts: Vec<String> = files.iter().map(|(_, text)| text.clone()).collect();
     let allowed: Vec<Vec<String>> = texts
         .iter()
         .flat_map(|text| allow_patterns_in_rules_text(text))
         .collect();
+    let mut first_pattern = std::collections::HashMap::new();
+    let mut first_broad = std::collections::HashMap::new();
+    for (source, text) in &files {
+        for words in allow_patterns_in_rules_text(text) {
+            first_pattern
+                .entry(program_basename(&words[0]))
+                .or_insert_with(|| source.clone());
+            if let Some(rule) = broad_prefix(&words) {
+                first_broad.entry(rule).or_insert_with(|| source.clone());
+            }
+        }
+        for host in allowed_network_hosts(std::slice::from_ref(text)) {
+            first_pattern
+                .entry(program_basename(&host))
+                .or_insert_with(|| source.clone());
+        }
+    }
     let prefixes = allowed.iter().map(|words| program_basename(&words[0]));
     let hosts = allowed_network_hosts(&texts)
         .into_iter()
@@ -819,7 +994,10 @@ fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
     patterns.dedup();
     let total = patterns.len();
     for pattern in patterns.into_iter().take(MAX_STANDING_APPROVAL_REASONS) {
-        out.push(AiGuardReason::StandingCommandApproval { pattern });
+        out.push(AiGuardFinding {
+            config_source: first_pattern.get(&pattern).cloned(),
+            reason: AiGuardReason::StandingCommandApproval { pattern },
+        });
     }
     if total > MAX_STANDING_APPROVAL_REASONS {
         tracing::warn!(
@@ -832,7 +1010,10 @@ fn emit_rules_reasons(layers: &[&CodexLayer], out: &mut Vec<AiGuardReason>) {
     broad.sort();
     broad.dedup();
     for rule in broad.into_iter().take(MAX_STANDING_APPROVAL_REASONS) {
-        out.push(AiGuardReason::PermissionsAllowBroad { rule });
+        out.push(AiGuardFinding {
+            config_source: first_broad.get(&rule).cloned(),
+            reason: AiGuardReason::PermissionsAllowBroad { rule },
+        });
     }
 }
 
@@ -988,8 +1169,9 @@ fn program_basename(word: &str) -> String {
     }
 }
 
-/// The `.rules` files in one `rules/` dir, at most `MAX_RULES_FILES`.
-fn rules_texts(rules_dir: &Path) -> Vec<String> {
+/// The `.rules` files in one `rules/` dir, at most `MAX_RULES_FILES`, with
+/// their paths.
+fn rules_texts(rules_dir: &Path) -> Vec<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir(rules_dir) else {
         return Vec::new();
     };
@@ -1013,7 +1195,7 @@ fn rules_texts(rules_dir: &Path) -> Vec<String> {
             Err(_) => continue,
         }
         if let Ok(text) = std::fs::read_to_string(&file) {
-            texts.push(text);
+            texts.push((file, text));
         }
     }
     texts
@@ -1547,10 +1729,20 @@ pub(crate) fn collect_external_script_paths_from_config(
 /// `url` (StreamableHttp). A `url` starting with `http://` or `https://`
 /// means the server is remote.
 pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
-    emit_app_approval_reasons(val, out);
+    out.extend(
+        app_approval_reasons(val)
+            .into_iter()
+            .chain(mcp_server_reasons(val))
+            .flat_map(|(_, reasons)| reasons),
+    );
+}
+
+/// The reasons of each enabled `[mcp_servers.<name>]` table, by name.
+fn mcp_server_reasons(val: &Value) -> Vec<(String, Vec<AiGuardReason>)> {
     let Some(servers) = val.get("mcp_servers").and_then(Value::as_table) else {
-        return;
+        return Vec::new();
     };
+    let mut found = Vec::new();
     for (name, def) in servers {
         // #200 — Codex does not start a server with `enabled = false`.
         if def.get("enabled").and_then(Value::as_bool) == Some(false) {
@@ -1561,10 +1753,13 @@ pub(crate) fn emit_mcp_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
         let Ok(json_def) = serde_json::to_value(def) else {
             continue;
         };
-        super::mcp_scan::emit_one_server(name, &json_def, out);
-        emit_static_credential_reasons(name, def, out);
-        emit_mcp_approval_reasons(name.to_string(), def, None, false, out);
+        let mut reasons = Vec::new();
+        super::mcp_scan::emit_one_server(name, &json_def, &mut reasons);
+        emit_static_credential_reasons(name, def, &mut reasons);
+        emit_mcp_approval_reasons(name.to_string(), def, None, false, &mut reasons);
+        found.push((name.clone(), reasons));
     }
+    found
 }
 
 /// #200: `http_headers` maps header names to static values that Codex sends
@@ -1646,10 +1841,12 @@ fn is_credential_header(name: &str) -> bool {
 /// A listed app's `enabled` defaults to true whatever `_default.enabled` says
 /// (`app_is_enabled`). Per-link defaults and requirements overrides are not
 /// read.
-fn emit_app_approval_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
+/// The reasons of the `[apps]` entries that have any, by app id.
+fn app_approval_reasons(val: &Value) -> Vec<(String, Vec<AiGuardReason>)> {
     let Some(apps) = val.get("apps").and_then(Value::as_table) else {
-        return;
+        return Vec::new();
     };
+    let mut found = Vec::new();
     let enabled = |app: &Value| app.get("enabled").and_then(Value::as_bool) != Some(false);
     let fallback = apps
         .get("_default")
@@ -1657,9 +1854,12 @@ fn emit_app_approval_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
     if apps.get("_default").is_some_and(enabled)
         && fallback.and_then(Value::as_str) == Some("approve")
     {
-        out.push(AiGuardReason::TrustedMcpServer {
-            server_name: "apps._default".to_string(),
-        });
+        found.push((
+            "_default".to_string(),
+            vec![AiGuardReason::TrustedMcpServer {
+                server_name: "apps._default".to_string(),
+            }],
+        ));
     }
     for (id, app) in apps.iter().filter(|(id, _)| *id != "_default") {
         if !enabled(app) {
@@ -1668,8 +1868,11 @@ fn emit_app_approval_reasons(val: &Value, out: &mut Vec<AiGuardReason>) {
         let name = format!("apps.{}", super::claude_project_settings::safe_name(id));
         let tools_off_by_default =
             app.get("default_tools_enabled").and_then(Value::as_bool) == Some(false);
-        emit_mcp_approval_reasons(name, app, fallback, tools_off_by_default, out);
+        let mut reasons = Vec::new();
+        emit_mcp_approval_reasons(name, app, fallback, tools_off_by_default, &mut reasons);
+        found.push((id.clone(), reasons));
     }
+    found
 }
 
 /// #200 — a tool's `approval_mode`, else the server's
@@ -1787,6 +1990,14 @@ impl AiGuardParser for CodexProjectParser {
         )
     }
 
+    fn assess_sourced(&self, home_dir: &Path) -> Result<Vec<AiGuardFinding>, AssessError> {
+        self.assess_findings(
+            &super::policy_controls::codex_system_dir(),
+            &home_dir.join(".codex"),
+            home_dir,
+        )
+    }
+
     fn collect_external_script_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         self.script_paths_in(&home_dir.join(".codex"))
     }
@@ -1821,6 +2032,14 @@ impl AiGuardParser for CodexHomeProjectParser {
 
     fn assess(&self, home_dir: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
         self.project.assess_layers(
+            &super::policy_controls::codex_system_dir(),
+            &self.user_dir(home_dir),
+            home_dir,
+        )
+    }
+
+    fn assess_sourced(&self, home_dir: &Path) -> Result<Vec<AiGuardFinding>, AssessError> {
+        self.project.assess_findings(
             &super::policy_controls::codex_system_dir(),
             &self.user_dir(home_dir),
             home_dir,
@@ -1882,13 +2101,13 @@ impl CodexProjectParser {
             return Vec::new();
         }
         let system_dir = super::policy_controls::codex_system_dir();
-        if self.is_marked_untrusted(&CodexLayer::read_lenient(codex_dir)) {
+        if self.is_marked_untrusted(&CodexLayer::read_lenient(codex_dir, ConfigLayer::User)) {
             return Vec::new();
         }
-        let layer = CodexLayer::read_lenient(&self.repo_root.join(".codex"));
+        let layer = CodexLayer::read_lenient(&self.repo_root.join(".codex"), ConfigLayer::Project);
         let configs = [
-            &CodexLayer::read_lenient(&system_dir).config,
-            &CodexLayer::read_lenient(codex_dir).config,
+            &CodexLayer::read_lenient(&system_dir, ConfigLayer::System).config,
+            &CodexLayer::read_lenient(codex_dir, ConfigLayer::User).config,
             &layer.config,
         ];
         if !hooks_feature_enabled(&system_dir, configs) {
@@ -1896,7 +2115,7 @@ impl CodexProjectParser {
         }
         let mut paths = layer.external_script_paths();
         for dir in self.subfolder_layer_dirs(codex_dir) {
-            let sub = CodexLayer::read_lenient(dir);
+            let sub = CodexLayer::read_lenient(dir, ConfigLayer::Project);
             if hooks_feature_enabled(&system_dir, [configs[0], configs[1], &sub.config]) {
                 paths.extend(sub.external_script_paths());
             }
@@ -1945,19 +2164,42 @@ impl CodexProjectParser {
         codex_dir: &Path,
         home_dir: &Path,
     ) -> Result<Vec<AiGuardReason>, AssessError> {
+        Ok(self
+            .assess_findings(system_dir, codex_dir, home_dir)?
+            .into_iter()
+            .map(|finding| finding.reason)
+            .collect())
+    }
+
+    /// The repo's `AGENTS.md` is a project instruction file.
+    fn scan_agents_md(&self, out: &mut Vec<AiGuardFinding>) {
+        let path = self.repo_root.join("AGENTS.md");
+        let mut reasons = Vec::new();
+        super::instruction_scan::scan_file_path(&path, &mut reasons);
+        out.extend(stamp_all(
+            reasons,
+            Some(config_source(&ConfigLayer::Project, &path)),
+        ));
+    }
+
+    fn assess_findings(
+        &self,
+        system_dir: &Path,
+        codex_dir: &Path,
+        home_dir: &Path,
+    ) -> Result<Vec<AiGuardFinding>, AssessError> {
+        let mut out = Vec::new();
         if self.is_codex_home(codex_dir) {
-            let mut out = Vec::new();
-            super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
+            self.scan_agents_md(&mut out);
             return Ok(out);
         }
         let mut all = [
-            CodexLayer::read_lenient(system_dir),
-            CodexLayer::read_lenient(codex_dir),
-            CodexLayer::read(&self.repo_root.join(".codex"))?,
+            CodexLayer::read_lenient(system_dir, ConfigLayer::System),
+            CodexLayer::read_lenient(codex_dir, ConfigLayer::User),
+            CodexLayer::read(&self.repo_root.join(".codex"), ConfigLayer::Project)?,
         ];
-        let mut out = Vec::new();
         if self.is_marked_untrusted(&all[1]) {
-            super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
+            self.scan_agents_md(&mut out);
             return Ok(out);
         }
         self.assess_project_layer(system_dir, &all, home_dir, &mut out);
@@ -1966,26 +2208,12 @@ impl CodexProjectParser {
         // subfolder layer is assessed on its own over the same system and user
         // layers. A corrupt subfolder file is skipped, as for hooks.json.
         for dir in self.subfolder_layer_dirs(codex_dir) {
-            all[2] = CodexLayer::read_lenient(dir);
+            all[2] = CodexLayer::read_lenient(dir, ConfigLayer::Project);
             self.assess_project_layer(system_dir, &all, home_dir, &mut out);
         }
         // #146. AGENTS.md is Codex's first-class instruction file.
-        super::instruction_scan::scan_file_path(&self.repo_root.join("AGENTS.md"), &mut out);
+        self.scan_agents_md(&mut out);
         Ok(out)
-    }
-
-    #[allow(dead_code)]
-    fn assess_findings(
-        &self,
-        system_dir: &Path,
-        codex_dir: &Path,
-        home_dir: &Path,
-    ) -> Result<Vec<lodeline_core::event::AiGuardFinding>, AssessError> {
-        Ok(self
-            .assess_layers(system_dir, codex_dir, home_dir)?
-            .into_iter()
-            .map(Into::into)
-            .collect())
     }
 
     fn assess_project_layer(
@@ -1993,7 +2221,7 @@ impl CodexProjectParser {
         system_dir: &Path,
         all: &[CodexLayer; 3],
         home_dir: &Path,
-        out: &mut Vec<AiGuardReason>,
+        out: &mut Vec<AiGuardFinding>,
     ) {
         let [system, user, layer] = all;
         let layers = std::slice::from_ref(layer);
@@ -2017,8 +2245,10 @@ impl CodexProjectParser {
                 .into_iter()
                 .flatten()
                 .find_map(|c| c.get("approval_policy"));
-            emit_approval_policy_reasons(val, inherited_policy, out);
-            emit_shell_environment_reasons(val, out);
+            let mut reasons = Vec::new();
+            emit_approval_policy_reasons(val, inherited_policy, &mut reasons);
+            emit_shell_environment_reasons(val, &mut reasons);
+            out.extend(stamp_all(reasons, Some(layer.config_source())));
         }
         if hooks_feature_enabled(system_dir, [&system.config, &user.config, &layer.config]) {
             layer.emit_hook_reasons(
@@ -2037,13 +2267,14 @@ impl CodexProjectParser {
             // approval check). Same TrustFall class as Cursor/Gemini, so
             // amplify — but only off the MCP-derived reasons (slice from
             // mcp_start), never hook/sandbox findings in the same `out`.
-            let mcp_start = out.len();
-            emit_mcp_reasons(val, out);
-            if super::mcp_scan::has_local_or_risky_mcp(&out[mcp_start..]) {
-                out.push(AiGuardReason::ProjectMcpAutoEnabled {
+            let mut reasons = Vec::new();
+            emit_mcp_reasons(val, &mut reasons);
+            if super::mcp_scan::has_local_or_risky_mcp(&reasons) {
+                reasons.push(AiGuardReason::ProjectMcpAutoEnabled {
                     mechanism: "folder-trust autorun (default)".to_string(),
                 });
             }
+            out.extend(stamp_all(reasons, Some(layer.config_source())));
         }
         emit_rules_reasons(&[layer], out);
     }
