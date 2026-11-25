@@ -17,7 +17,9 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
   the highest layer that sets it, a rules finding the first rules file, and an `AGENTS.md` finding
   that file. A finding from a named permission profile names none. Scores do not change. A Codex
   setting that moves to another layer now sends a new event, because the change detector includes
-  the key.
+  the key. An upgrade adds no event of its own, because the first assessment after a restart is sent
+  anyway.
+- Added `docs/cursor-coverage.md`. It lists the Cursor hook files Lodeline reads (user, enterprise and project), states that a `prompt` hook adds no finding and that a command is scored under any event name, and says team hooks and Cursor cloud agents are not covered and why. Refs #203.
 
 ### Fixed
 
@@ -35,10 +37,6 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - A scan that starts in a user's home folder no longer scores that user's `.claude/settings.json`
   and the hooks of their skills, subagents and commands a second time in the project row. Claude
   Code builds no project settings path at the home folder, so the user row reads them.
-
-### Added
-
-- Added `docs/cursor-coverage.md`. It lists the Cursor hook files Lodeline reads (user, enterprise and project), states that a `prompt` hook adds no finding and that a command is scored under any event name, and says team hooks and Cursor cloud agents are not covered and why. Refs #203.
 
 ## [0.21.0] - 2026-11-25
 

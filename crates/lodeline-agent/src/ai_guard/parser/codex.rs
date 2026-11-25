@@ -411,7 +411,7 @@ fn assess_user_layers(
         .collect())
 }
 
-/// #200 — the system layer (`/etc/codex`, `%ProgramData%\OpenAI\Codex`) sits
+/// #200: the system layer (`/etc/codex`, `%ProgramData%\OpenAI\Codex`) sits
 /// below the user's Codex folder and applies to every user on the host.
 ///
 /// Each finding names the file that holds its setting when one file does. A

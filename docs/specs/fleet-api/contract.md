@@ -1723,4 +1723,5 @@ object. The console server relays `reasons` as raw JSON, so the key reaches the 
 
 The agent's change detector includes the key in its hash only for a finding that carries it. A
 finding without the key hashes as before, so an agent that starts to write the key sends one
-event with `is_reattestation` false for each reading that gains it.
+event with `is_reattestation` false for each reading that gains it. For an upgrade that is the
+boot event every restart sends anyway, because the agent keeps its baseline in memory.
