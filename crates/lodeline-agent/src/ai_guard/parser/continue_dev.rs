@@ -109,7 +109,10 @@ impl AiGuardParser for ContinueDevProjectParser {
         }
     }
 
-    fn watched_paths(&self, _home_dir: &Path) -> Vec<PathBuf> {
+    fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
+        if super::claude_code::is_home(&self.repo_root, home_dir) {
+            return Vec::new();
+        }
         vec![self.repo_root.join(".continue").join("config.json")]
     }
 
@@ -535,6 +538,15 @@ mod tests {
         assert!(project.is_empty(), "got {project:?}");
         let user = ContinueDevParser.assess(home.path()).unwrap();
         assert_eq!(mcp_local_count(&user), 1, "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_watches_nothing() {
+        let home = tempdir().unwrap();
+        let parser = ContinueDevProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert!(parser.watched_paths(home.path()).is_empty());
     }
 
     #[test]

@@ -185,7 +185,10 @@ impl AiGuardParser for GrokProjectParser {
             path: self.repo_root.clone(),
         }
     }
-    fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
+    fn watched_paths(&self, home: &Path) -> Vec<PathBuf> {
+        if super::claude_code::is_home(&self.repo_root, home) {
+            return Vec::new();
+        }
         watched(&self.repo_root.join(".grok"))
     }
     fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
@@ -532,6 +535,15 @@ enabled = false
         let user = GrokParser.assess(home.path()).unwrap();
         assert_eq!(mcp_local_count(&user), 1, "got {user:?}");
         assert_eq!(destructive(&user), ["rm -rf /tmp/a"], "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_watches_nothing() {
+        let home = tempdir().unwrap();
+        let parser = GrokProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert!(parser.watched_paths(home.path()).is_empty());
     }
 
     #[test]

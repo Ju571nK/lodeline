@@ -215,14 +215,22 @@ impl AiGuardParser for CursorProjectParser {
             path: self.repo_root.clone(),
         }
     }
-    fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
-        vec![
+    fn watched_paths(&self, home: &Path) -> Vec<PathBuf> {
+        let rules = [
+            self.repo_root.join(".cursorrules"),
+            self.repo_root.join(".cursor").join("rules"), // dir → starts_with matches child files
+        ];
+        // At a home folder the user row watches the other three.
+        if is_home(&self.repo_root, home) {
+            return rules.to_vec();
+        }
+        let mut paths = vec![
             self.repo_root.join(".cursor").join("mcp.json"),
             self.repo_root.join(".cursor").join("hooks.json"),
             self.repo_root.join(".cursor").join("hooks"),
-            self.repo_root.join(".cursorrules"),
-            self.repo_root.join(".cursor").join("rules"), // dir → starts_with matches child files
-        ]
+        ];
+        paths.extend(rules);
+        paths
     }
     fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
         // A root that is the home folder has the user row read `mcp.json` and
@@ -1021,6 +1029,21 @@ mod tests {
         assert!(project.is_empty(), "got {project:?}");
         let user = assess_user(home.path(), &home.path().join("none.json")).unwrap();
         assert_eq!(mcp_local_count(&user), 1, "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_watches_only_its_rules_files() {
+        let home = tempdir().unwrap();
+        let parser = CursorProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert_eq!(
+            parser.watched_paths(home.path()),
+            [
+                home.path().join(".cursorrules"),
+                home.path().join(".cursor").join("rules")
+            ]
+        );
     }
 
     #[test]

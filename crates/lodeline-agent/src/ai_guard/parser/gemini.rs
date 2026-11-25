@@ -137,7 +137,10 @@ impl AiGuardParser for GeminiProjectParser {
             path: self.repo_root.clone(),
         }
     }
-    fn watched_paths(&self, _home: &Path) -> Vec<PathBuf> {
+    fn watched_paths(&self, home: &Path) -> Vec<PathBuf> {
+        if super::claude_code::is_home(&self.repo_root, home) {
+            return Vec::new();
+        }
         vec![self.repo_root.join(".gemini").join("settings.json")]
     }
     fn assess(&self, home: &Path) -> Result<Vec<AiGuardReason>, AssessError> {
@@ -379,6 +382,15 @@ mod tests {
         assert!(project.is_empty(), "got {project:?}");
         let user = GeminiParser.assess(home.path()).unwrap();
         assert_eq!(sandbox_off_count(&user), 1, "got {user:?}");
+    }
+
+    #[test]
+    fn project_row_at_the_home_folder_watches_nothing() {
+        let home = tempdir().unwrap();
+        let parser = GeminiProjectParser {
+            repo_root: home.path().to_path_buf(),
+        };
+        assert!(parser.watched_paths(home.path()).is_empty());
     }
 
     #[test]
