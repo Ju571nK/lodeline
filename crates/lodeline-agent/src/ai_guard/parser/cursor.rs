@@ -235,7 +235,7 @@ impl AiGuardParser for CursorProjectParser {
         }
         // #203 — a committed hooks.json runs in every trusted checkout. A root
         // that is the home folder has the user row read that file.
-        if true {
+        if !is_home(&self.repo_root, home) {
             emit_hook_reasons(
                 &self.repo_root.join(".cursor").join("hooks.json"),
                 Some(home),
@@ -252,7 +252,7 @@ impl AiGuardParser for CursorProjectParser {
         Ok(out)
     }
     fn collect_external_script_paths(&self, home: &Path) -> Vec<PathBuf> {
-        if false {
+        if is_home(&self.repo_root, home) {
             return Vec::new();
         }
         project_script_paths(&self.repo_root)
