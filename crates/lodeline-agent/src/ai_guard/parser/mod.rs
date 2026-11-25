@@ -18,7 +18,9 @@ pub(crate) mod instruction_scan;
 pub mod mcp_scan;
 pub(crate) mod policy_controls;
 
-use lodeline_core::event::{AiGuardControl, AiGuardReason, AiGuardScope, AiTool};
+use lodeline_core::event::{
+    AiGuardControl, AiGuardFinding, AiGuardReason, AiGuardScope, AiTool, ConfigSource,
+};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -26,10 +28,39 @@ use std::path::{Path, PathBuf};
 #[derive(Default, Debug)]
 pub struct AiGuardAssessment {
     pub reasons: Vec<AiGuardReason>,
+    /// `sources[i]` names the config file `reasons[i]` came from. Empty, or
+    /// shorter than `reasons`, means the rest name none.
+    pub sources: Vec<Option<ConfigSource>>,
     pub controls: Option<Vec<AiGuardControl>>,
 }
 
 impl AiGuardAssessment {
+    pub fn from_findings(
+        findings: Vec<AiGuardFinding>,
+        controls: Option<Vec<AiGuardControl>>,
+    ) -> Self {
+        let (reasons, sources) = findings
+            .into_iter()
+            .map(|f| (f.reason, f.config_source))
+            .unzip();
+        Self {
+            reasons,
+            sources,
+            controls,
+        }
+    }
+
+    pub fn findings(&self) -> Vec<AiGuardFinding> {
+        self.reasons
+            .iter()
+            .enumerate()
+            .map(|(i, reason)| AiGuardFinding {
+                reason: reason.clone(),
+                config_source: self.sources.get(i).cloned().flatten(),
+            })
+            .collect()
+    }
+
     /// Normalize once before display, hashing, or emission; retain source identity.
     pub fn normalize(&mut self) {
         if let Some(controls) = &mut self.controls {
@@ -75,10 +106,20 @@ pub trait AiGuardParser: Send + Sync {
 
     /// Migrated parsers return findings and observations from the same inputs.
     fn assess_posture(&self, home_dir: &Path) -> Result<AiGuardAssessment, AssessError> {
-        Ok(AiGuardAssessment {
-            reasons: self.assess(home_dir)?,
-            controls: None,
-        })
+        Ok(AiGuardAssessment::from_findings(
+            self.assess_sourced(home_dir)?,
+            None,
+        ))
+    }
+
+    /// Like `assess`, with the config file each reason came from where the
+    /// parser can name one. The default names none.
+    fn assess_sourced(&self, home_dir: &Path) -> Result<Vec<AiGuardFinding>, AssessError> {
+        Ok(self
+            .assess(home_dir)?
+            .into_iter()
+            .map(AiGuardFinding::from)
+            .collect())
     }
 
     /// Phase 3b.7 — downcast hook for hot-reload reconciliation. Default

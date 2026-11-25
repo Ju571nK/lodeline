@@ -25,7 +25,18 @@ Reading the subfolders can raise a repo score. A hook, MCP server or rule there 
 
 Codex loads project `.codex/` layers only when the project is trusted, and skips them for a project marked untrusted. When the user config holds `[projects."<repo>"]` with `trust_level = "untrusted"` for the repo root, Lodeline reads no `.codex/` layer of that repo, the root or below it, and the repo's `AGENTS.md` is still scanned. A repo with no `projects` entry is still read: Codex asks for trust on launch, and one keypress activates the layers. The Codex configuration pages say this in general terms and do not list MCP servers among what an untrusted project skips, so Lodeline treats them like the other layers. This was not run on 0.167.0. Lodeline matches the repo root only, so an untrusted parent folder does not skip a repo below it.
 
-No finding names the layer it came from. The event scope separates user and project findings, but the system and user layers share the user event.
+The event scope separates user and project findings, but the system and user layers share the user event. A finding can name the file it came from in a `config_source` key, with the layer (`system`, `user` or `project`) and the absolute path of the file (contract section 14.18). The agent sets it where one file holds the setting:
+
+- A hook finding names the `config.toml` or `hooks.json` that holds the hook, and the layer of that folder.
+- A finding built from a merged setting names the highest layer whose own `config.toml` sets the key, which is the layer Codex takes the value from. This covers `approval_policy`, `approvals_reviewer`, `sandbox_mode`, `default_permissions` (only for the built-in `:danger-full-access`), the `sandbox_workspace_write` keys, `notify`, `openai_base_url`, a provider `base_url` and `shell_environment_policy.set`. The `auto_review` finding names the layer of `approvals_reviewer`.
+- An MCP server or app finding names the highest layer that defines the server or app by name. The fields of one server can come from two layers, and the finding still names the highest one.
+- A standing command approval or a broad prefix names the first `.rules` file that yields it. The user event reads the system layer, then the user layer, and a project row reads its own layer. The files of a folder go in name order.
+- A finding about `AGENTS.md` names that file: the user layer for `AGENTS.override.md` or `AGENTS.md` in the Codex folder, the project layer for the repo's `AGENTS.md`.
+- A project finding names the `.codex/config.toml` of its layer, and a finding from a subfolder layer names that subfolder's file. The `sandbox_workspace_write` keys of a project row are read from the project layer, so they name it.
+
+A `sandbox_disabled` finding that comes from a named permission profile has no `config_source`. The profile resolves in the merged `[permissions]` table, which no one file holds. The built-in `:danger-full-access` profile does carry one, and names the layer that picks it. Other tools write no `config_source` yet.
+
+The change detector includes the key, so a setting that moves to another layer sends a new event. The agent keeps its last reading in memory, so the first assessment after an upgrade is a boot assessment and sends no extra event.
 
 ## Profiles
 
