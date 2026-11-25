@@ -233,8 +233,8 @@ impl AiGuardParser for CursorProjectParser {
                 mechanism: "folder-trust autorun (default)".to_string(),
             });
         }
-        // #203 — a committed hooks.json runs in every trusted checkout. A root
-        // that is the home folder has the user row read that file.
+        // #203 — a committed hooks.json runs in every trusted checkout.
+        // A root that is the home folder has the user row read that file.
         if !is_home(&self.repo_root, home) {
             emit_hook_reasons(
                 &self.repo_root.join(".cursor").join("hooks.json"),
