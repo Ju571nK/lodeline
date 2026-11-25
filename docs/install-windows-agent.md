@@ -124,6 +124,26 @@ lodeline show risk              # AI Guard risk score per assessed AI tool
 lodeline show stats             # live heartbeat from the running agent
 ```
 
+### Watch one user folder
+
+Without an option, a target that starts with `%USERPROFILE%` (or `~`) expands once for each
+folder the agent lists under `C:\Users`. The list leaves out files, folders whose name starts with
+`.`, and the folders `Default`, `Default User`, `Public` and `All Users`. A target that starts with
+`%APPDATA%` or `%LOCALAPPDATA%` expands once, from the environment of the account that runs the
+agent.
+
+To watch one folder, start the agent with `lodeline run --pin-user-home <dir>`. The folder must be
+an absolute path that exists, or the command exits with status 2 before the agent starts.
+`%USERPROFILE%` targets then expand to that folder, `%APPDATA%` to its `AppData\Roaming` and
+`%LOCALAPPDATA%` to its `AppData\Local`, and the folders under `C:\Users` are not listed. System
+paths such as `%PROGRAMFILES%` and `%ProgramData%` expand as before, so they are still watched.
+`lodeline show paths --pin-user-home <dir>` and `lodeline doctor --pin-user-home <dir>` take the
+same option. The agent measures the folder you name and does not block anything.
+
+```powershell
+lodeline run --pin-user-home C:\Users\alice
+```
+
 Set the diagnostic log level with `LODELINE_LOG` (e.g. `$env:LODELINE_LOG = "debug"`).
 
 > **Persistent service (Windows Service / Scheduled Task):** TBD — documented
