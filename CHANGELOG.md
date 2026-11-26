@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Fixed
+
+- A Windows agent running as a service now assesses every user profile on the host, like a root agent on Linux and macOS (#540).
+
 ## [0.22.0] - 2026-11-25
 
 **Upgrade.** This is a minor release because an entry of `reasons` in `ai_guard_risk_assessed` may

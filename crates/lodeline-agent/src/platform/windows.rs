@@ -151,41 +151,67 @@ impl HostIdResolver for WindowsPlatform {
 
 impl UserEnumerator for WindowsPlatform {
     fn list(&self) -> Vec<UserContext> {
-        let mut out = Vec::new();
-        let users_dir = Path::new(r"C:\Users");
-        let Ok(entries) = std::fs::read_dir(users_dir) else {
-            return out;
-        };
-        for ent in entries.flatten() {
-            // Only real user profile directories are users; skip files such as
-            // `desktop.ini` and any other non-directory entries.
-            match ent.file_type() {
-                Ok(ft) if ft.is_dir() => {}
-                _ => continue,
+        match read_profile_list() {
+            Some(entries) => {
+                let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+                super::profile_list::users_from_profiles(&entries, &drive, |p| p.is_dir())
             }
-            let name = ent.file_name().to_string_lossy().to_string();
-            // Skip well-known non-human profiles.
-            if matches!(
-                name.as_str(),
-                "Default" | "Default User" | "Public" | "All Users"
-            ) {
-                continue;
-            }
-            // Skip directories starting with `.` or known service accounts.
-            if name.starts_with('.') {
-                continue;
-            }
-            let home = users_dir.join(&name);
-            // Use the directory name as a stable per-user identifier; Phase 1 does
-            // not call NetUserEnum to convert to SID (avoids extra deps).
-            out.push(UserContext {
-                name: name.clone(),
-                home,
-                uid_or_sid: format!("name:{name}"),
-            });
+            None => list_users_dir(),
         }
-        out
     }
+}
+
+/// The `ProfileList` subkeys, or `None` when the registry read fails.
+fn read_profile_list() -> Option<Vec<super::profile_list::ProfileEntry>> {
+    let out = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList",
+            "/s",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let entries = super::profile_list::parse_reg_query(&String::from_utf8_lossy(&out.stdout));
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// Fallback: the folder names under `C:\Users`.
+fn list_users_dir() -> Vec<UserContext> {
+    let mut out = Vec::new();
+    let users_dir = Path::new(r"C:\Users");
+    let Ok(entries) = std::fs::read_dir(users_dir) else {
+        return out;
+    };
+    for ent in entries.flatten() {
+        match ent.file_type() {
+            Ok(ft) if ft.is_dir() => {}
+            _ => continue,
+        }
+        let name = ent.file_name().to_string_lossy().to_string();
+        if matches!(
+            name.as_str(),
+            "Default" | "Default User" | "Public" | "All Users"
+        ) {
+            continue;
+        }
+        if name.starts_with('.') {
+            continue;
+        }
+        let home = users_dir.join(&name);
+        out.push(UserContext {
+            name: name.clone(),
+            home,
+            uid_or_sid: format!("name:{name}"),
+        });
+    }
+    out
 }
 
 use super::hw_fingerprint::{pick_stable_mac, HardwareFingerprint, IfaceKind};

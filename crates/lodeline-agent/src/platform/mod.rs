@@ -41,6 +41,8 @@ pub enum FdaState {
 }
 
 pub mod hw_fingerprint;
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) mod profile_list;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
