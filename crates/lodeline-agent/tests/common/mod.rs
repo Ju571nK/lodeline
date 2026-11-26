@@ -101,3 +101,64 @@ pub async fn recv_bounded<T>(
         .unwrap_or_else(|_| panic!("{what}: nothing within {bound:?}"))
         .unwrap_or_else(|| panic!("{what}: channel closed"))
 }
+
+/// Where a bounded test is, for the failure message when it is cut off.
+#[derive(Default)]
+pub struct Steps {
+    step: std::sync::Mutex<&'static str>,
+    context: std::sync::Mutex<Option<Box<dyn Fn() -> String + Send>>>,
+}
+
+impl Steps {
+    /// Name the step the test is about to run.
+    pub fn at(&self, step: &'static str) {
+        *self.step.lock().unwrap() = step;
+    }
+
+    /// Text added to the failure message, for example the events seen so far.
+    pub fn context(&self, f: impl Fn() -> String + Send + 'static) {
+        *self.context.lock().unwrap() = Some(Box::new(f));
+    }
+
+    fn describe(&self) -> String {
+        let step = *self.step.lock().unwrap();
+        let context = self.context.lock().unwrap();
+        let extra = context.as_ref().map(|f| f()).unwrap_or_default();
+        format!("stuck at step {step:?}. {extra}")
+    }
+}
+
+/// Run an async test body on its own thread and runtime, and fail by name when
+/// the body, or the runtime shutdown after it, takes longer than `bound`. The
+/// bound is enforced from outside, so a blocking call or a runtime drop that
+/// waits on a native watcher thread cannot hold the test past it. On timeout the
+/// worker thread is left behind and the test process ends when the tests finish.
+pub fn run_bounded<F, Fut>(name: &str, bound: std::time::Duration, body: F)
+where
+    F: FnOnce(std::sync::Arc<Steps>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let steps = std::sync::Arc::new(Steps::default());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_steps = steps.clone();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(body(worker_steps));
+            drop(rt);
+        }));
+        let _ = tx.send(outcome);
+    });
+    match rx.recv_timeout(bound) {
+        Ok(Ok(())) => {}
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(_) => panic!(
+            "{name}: not finished within {bound:?}, {}",
+            steps.describe()
+        ),
+    }
+}
