@@ -8,9 +8,25 @@ use std::process::ExitCode;
 /// by the config).
 const EXIT_INVALID_CONFIG: u8 = 2;
 
+fn is_snippet_usage_error(e: &clap::Error) -> bool {
+    e.use_stderr() && std::env::args().nth(1).as_deref() == Some("snippet")
+}
+
 fn main() -> ExitCode {
     // clap exits with 2 on usage errors; `run` without --config is one of them.
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if is_snippet_usage_error(&e) => {
+            // Clap echoes the offending argument, which can be a bearer pasted
+            // through an unquoted shell expansion; print a fixed message instead.
+            eprintln!(
+                "snippet: invalid arguments (not echoed, they may hold a token); \
+                 run `lodeline-proxy snippet --help`"
+            );
+            return ExitCode::from(EXIT_INVALID_CONFIG);
+        }
+        Err(e) => e.exit(),
+    };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(

@@ -43,6 +43,13 @@ pub fn render(
     if Id::new(route).is_err() {
         return Err("--route does not match the id pattern".into());
     }
+    if name.starts_with('-') {
+        return Err(
+            "--name must not start with a hyphen (it would read as an option in the \
+                    claude mcp add-json command)"
+                .into(),
+        );
+    }
     if !valid_name(name) {
         return Err(
             "--name may use only letters, digits, underscore and hyphen \

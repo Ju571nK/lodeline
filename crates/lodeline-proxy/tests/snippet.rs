@@ -229,3 +229,57 @@ fn snippet_creates_no_file() {
     }
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn snippet_usage_errors_never_echo_a_token_shaped_argument() {
+    assert_valid_call_works();
+    let token = format!("a{}", "1b2c3d4e".repeat(8).get(..63).unwrap());
+    // The words of a `token new` result split by an unquoted shell expansion.
+    let split = Command::new(BIN)
+        .args(["snippet", "--client", "codex", "--name", "docs"])
+        .args([
+            "--url",
+            URL,
+            "--route",
+            "r1",
+            "--token-env",
+            "token:",
+            &token,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(split.status.code(), Some(2));
+    assert!(out(&split).is_empty());
+    assert!(!has_hex_run(&err(&split), 64), "stderr: {}", err(&split));
+    assert!(err(&split).contains("snippet --help"));
+    // A token in the place of a flag value that clap validates itself.
+    let bad_client = Command::new(BIN)
+        .args(["snippet", "--client", &token, "--name", "docs"])
+        .output()
+        .unwrap();
+    assert_eq!(bad_client.status.code(), Some(2));
+    assert!(!has_hex_run(&err(&bad_client), 64));
+    // Help is still help.
+    let help = Command::new(BIN)
+        .args(["snippet", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(out(&help).contains("--token-env"));
+}
+
+#[test]
+fn snippet_refuses_a_name_that_starts_with_a_hyphen() {
+    assert_valid_call_works();
+    for name in ["--help", "-x"] {
+        let o = Command::new(BIN)
+            .args(["snippet", "--client", "claude-code"])
+            .arg(format!("--name={name}"))
+            .args(["--url", URL, "--route", "r1", "--token-env", "T"])
+            .output()
+            .unwrap();
+        assert_refused(&o, "--name must not start with a hyphen");
+    }
+    let ok = snippet("claude-code", "a-b", URL, "r1", "T");
+    assert!(ok.status.success());
+}
