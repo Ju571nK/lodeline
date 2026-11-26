@@ -178,7 +178,7 @@ All of these are on by default. The `overrides` entry above names one by its id.
 | `cursor-mcp-macos` | critical | `~/Library/Application Support/Cursor/User/globalStorage/*.json` |
 | `shadow-ai-binaries-macos` | standard | `/Applications/*.app/Contents/Info.plist` (a new app install) |
 | `ai-guard-claude-code-user-global` | critical | `~/.claude/` settings, hooks, skills, agents, commands, `CLAUDE.md`, `loop.md`, scheduled tasks, and the managed settings under `/Library/Application Support/ClaudeCode/` |
-| `ai-guard-codex-user-global` | critical | `~/.codex/config.toml`, `/etc/codex/requirements.toml` |
+| `ai-guard-codex-user-global` | critical | `~/.codex/config.toml`, the files below `~/.codex/plugins/cache` (installed Codex plugins), `/etc/codex/requirements.toml` |
 | `ai-guard-continue-config-macos` | critical | `~/.continue/config.json` |
 
 ---

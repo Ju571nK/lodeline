@@ -630,6 +630,26 @@ fn a_hooks_file_that_is_not_a_regular_file_is_skipped_without_blocking() {
     assert!(fx.destructive().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_named_hooks_file_that_is_not_a_regular_file_is_skipped_without_blocking() {
+    let fx = fixture();
+    let dir = fx.install("1.0.0", DESTRUCTIVE);
+    fx.write(
+        &dir.join(".codex-plugin").join("plugin.json"),
+        r#"{"name":"demo","hooks":["./fifo.json","./folder.json"]}"#,
+    );
+    let fifo = std::ffi::CString::new(dir.join("fifo.json").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    std::fs::create_dir_all(dir.join("folder.json")).unwrap();
+    fx.config(&format!(
+        "{ENABLED}{}{}",
+        trusted("fifo.json:pre_tool_use:0:0"),
+        trusted("folder.json:pre_tool_use:0:0")
+    ));
+    assert!(fx.destructive().is_empty());
+}
+
 #[test]
 fn a_hooks_or_manifest_file_over_the_byte_cap_is_skipped() {
     let fx = fixture();

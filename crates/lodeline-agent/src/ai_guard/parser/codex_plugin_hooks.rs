@@ -10,8 +10,6 @@
 //! inside the Codex folder after links are resolved, takes regular files
 //! only, and has a byte cap.
 
-#![allow(dead_code, unreachable_code, unused_variables)]
-
 use lodeline_core::event::{AiGuardFinding, ConfigLayer};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -208,7 +206,6 @@ fn sorted(value: &serde_json::Value) -> serde_json::Value {
 /// (`hook_hash`, `normalize_command_hook` and `append_matcher_groups` in
 /// `discovery.rs`).
 fn declaration_hash(events: &Events, event: &str, group: usize, handler: usize) -> Option<String> {
-    return None;
     use serde_json::{json, Value as J};
     let group = events.group(event, group)?;
     let matcher = group.matcher.as_deref().filter(|_| takes_matcher(event));
@@ -698,7 +695,6 @@ pub(super) fn watched_paths(
     config: Option<&Value>,
     states: Option<&toml::Table>,
 ) -> Vec<PathBuf> {
-    return Vec::new();
     let mut out: Vec<_> = candidates(codex_dir, config, states)
         .into_iter()
         .map(|c| c.base)
@@ -760,7 +756,6 @@ struct Caps {
 }
 
 fn content_hash_with(root: &Path, caps: Caps) -> std::io::Result<String> {
-    return Err(std::io::Error::other("stub"));
     let too_big = |what: &str| std::io::Error::other(format!("plugin folder over the {what} cap"));
     if !std::fs::symlink_metadata(root)?.is_dir() {
         return Err(std::io::Error::other("plugin root is not a directory"));
@@ -858,7 +853,6 @@ pub(super) fn plugin_findings(
     states: Option<&toml::Table>,
     home: Option<&Path>,
 ) -> Vec<AiGuardFinding> {
-    return Vec::new();
     let mut out = Vec::new();
     let Some(codex_home) = Home::new(codex_dir) else {
         return out;
