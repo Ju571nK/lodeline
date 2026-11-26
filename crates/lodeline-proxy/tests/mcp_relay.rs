@@ -1404,6 +1404,74 @@ async fn noop_sink_keeps_bytes_and_cancel_ordering() {
     assert_eq!(up.count(), 1, "the cancelled call was never dispatched");
 }
 
+/// AC-15: resources, prompts, and task-augmented tool calls are relayed and audited.
+#[tokio::test]
+async fn support_matrix_methods_are_relayed_and_audited() {
+    for (method, params, result, expected_method) in [
+        (
+            "resources/list",
+            "{}",
+            r#"{"resources":[]}"#,
+            Method::Unknown,
+        ),
+        (
+            "resources/read",
+            r#"{"uri":"test://notes/intro"}"#,
+            r#"{"contents":[{"uri":"test://notes/intro","text":"Hello"}]}"#,
+            Method::Unknown,
+        ),
+        (
+            "resources/templates/list",
+            "{}",
+            r#"{"resourceTemplates":[]}"#,
+            Method::Unknown,
+        ),
+        ("prompts/list", "{}", r#"{"prompts":[]}"#, Method::Unknown),
+        (
+            "prompts/get",
+            r#"{"name":"greeting"}"#,
+            r#"{"messages":[{"role":"user","content":{"type":"text","text":"Hello"}}]}"#,
+            Method::Unknown,
+        ),
+        (
+            "tools/call",
+            r#"{"name":"echo","arguments":{},"task":{ "ttl" : 1000 }}"#,
+            r#"{"content":[{"type":"text","text":"ok"}],"isError":false}"#,
+            Method::ToolsCall,
+        ),
+    ] {
+        let request = format!(
+            r#"{{ "jsonrpc": "2.0", "id": 1, "method": "{method}", "params": {params} }} "#
+        );
+        let response = format!(r#"{{ "jsonrpc": "2.0", "id": 1, "result": {result} }} "#);
+        let upstream_response = response.clone();
+        let up =
+            Up::start(move |_| full(200, "application/json", upstream_response.as_bytes())).await;
+        let rec = Rec::new();
+        let (_secret, table) = audited_table(&up, None);
+        let px = start_table(table, limits(), Some(rec.clone())).await;
+
+        let reply = px.post(&request).await;
+        assert_eq!(up.count(), 1, "{method}: upstream requests");
+        assert_eq!(
+            up.last().body,
+            request.as_bytes(),
+            "{method}: request bytes"
+        );
+        assert_eq!(reply.status, 200, "{method}: response status");
+        assert_eq!(
+            reply.body(),
+            response.as_bytes(),
+            "{method}: response bytes"
+        );
+
+        let completed = rec.the_completion().await;
+        assert!(completed.call.audit.is_some(), "{method}: audit context");
+        assert_eq!(completed.method, expected_method, "{method}: audit method");
+        assert_eq!(completed.outcome, Outcome::Success, "{method}: outcome");
+    }
+}
+
 // ------------------------------------------------------ caller claims (AC-04)
 
 /// A table whose route carries a revision and a scope, so every call is
