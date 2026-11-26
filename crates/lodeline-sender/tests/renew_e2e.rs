@@ -49,6 +49,7 @@ struct Pki {
 
 impl Pki {
     fn new() -> Pki {
+        Log::install_subscriber();
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("ca.key");
         let out = Command::new(openssl())
@@ -579,8 +580,8 @@ impl std::io::Write for Log {
 }
 
 impl Log {
-    /// Each test has its own Tokio runtime. Its tasks and blocking workers share this log.
-    fn capture(&self) -> Capture {
+    // Install before exercising the sender so call sites cannot register during startup.
+    fn install_subscriber() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             tracing::subscriber::set_global_default(
@@ -599,6 +600,11 @@ impl Log {
             )
             .unwrap();
         });
+    }
+
+    /// Each test has its own Tokio runtime. Its tasks and blocking workers share this log.
+    fn capture(&self) -> Capture {
+        Self::install_subscriber();
         let id = Handle::current().id();
         let mut captures = CAPTURES.lock().unwrap();
         let Entry::Vacant(entry) = captures.entry(id) else {
@@ -1002,6 +1008,7 @@ async fn a_crash_between_the_renames_is_repaired_before_the_sender_builds_its_cl
 
 #[tokio::test]
 async fn a_request_in_flight_finishes_on_the_old_client_and_the_next_one_uses_the_new_client() {
+    Log::install_subscriber();
     // The server tells the two clients apart by a header and holds the first request.
     #[derive(Clone, Default)]
     struct Seen(Arc<Mutex<Vec<String>>>);
