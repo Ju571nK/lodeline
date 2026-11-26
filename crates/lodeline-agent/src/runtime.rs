@@ -1443,14 +1443,24 @@ pub(crate) fn expand_targets_for(
     (expanded_paths, watch_roots)
 }
 
-/// The concrete file paths the policy watches, in policy order, for the watcher
-/// to check for links.
+/// The concrete file paths the policy watches, for the watcher to check for
+/// links. Targets of the critical tier come first, then the others, each group in
+/// policy order: the watcher ranks its followed links by this order, so a cap on
+/// the links drops standard tier links before critical ones.
 pub(crate) fn watched_files(
     eff: &lodeline_core::policy::EffectivePolicy,
     expanded_paths: &HashMap<String, Vec<PathBuf>>,
 ) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = Vec::new();
-    for path in eff.targets.iter().flat_map(|t| &expanded_paths[&t.id]) {
+    let critical = |t: &&lodeline_core::policy::WatchTarget| {
+        matches!(t.tier, lodeline_core::policy::Tier::Critical)
+    };
+    let ranked = eff
+        .targets
+        .iter()
+        .filter(critical)
+        .chain(eff.targets.iter().filter(|t| !critical(t)));
+    for path in ranked.flat_map(|t| &expanded_paths[&t.id]) {
         if !files.contains(path) {
             files.push(path.clone());
         }

@@ -446,7 +446,8 @@ impl WatcherHandle {
     /// that is a link, and the links among them whose target a watched root
     /// already covers: those need an alias but no root of their own.
     /// At most `MAX_FOLLOWED_LINKS` are kept. The order of the cap is the order
-    /// of the policy as far as the watcher sees it: a file link ranks by its
+    /// of the watched files, which the caller lists critical tier first and then in
+    /// policy order: a file link ranks by its
     /// entry in the watched files, a folder link by the first watched file under
     /// the wildcard that found it (the policy does not reach the watcher as an
     /// ordered list of folders), and a folder link no file lies under ranks last.
@@ -545,10 +546,11 @@ impl WatcherHandle {
                     covered.insert(link.clone());
                 }
                 let pattern = patterns.get(&origin).cloned().unwrap_or_default();
+                // An empty pattern is a prefix of every path: rank it last.
                 let rank = self
                     .files
                     .iter()
-                    .position(|file| file.starts_with(&pattern))
+                    .position(|file| !pattern.as_os_str().is_empty() && file.starts_with(&pattern))
                     .unwrap_or(self.files.len());
                 links.push((real, link));
                 ranks.push((rank, pattern));
@@ -2649,6 +2651,49 @@ mod tests {
             "names the first left out: {logs}"
         );
         assert!(logs.contains("agents/*"), "names its pattern: {logs}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn critical_tier_links_stay_when_a_standard_target_listed_first_fills_the_cap() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        make_links(&dir, "agents", false, 300);
+        make_links(&dir, "skills", true, 5);
+        let target = |id: &str, tier: &str, path: PathBuf| {
+            format!(
+                "  - id: {id}\n    description: {id}\n    tier: {tier}\n    platform: any\n    paths: ['{}']\n    recursive: false\n",
+                path.display()
+            )
+        };
+        // The standard target comes first in the policy, as on the macOS defaults.
+        let yaml = format!(
+            "version: 1\ntargets:\n{}{}",
+            target("apps", "standard", dir.join("agents/*")),
+            target("skills", "critical", dir.join("skills/*/SKILL.md")),
+        );
+        let eff = lodeline_core::policy::merge(
+            lodeline_core::policy::parse(&yaml).unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        let (expanded, _) =
+            crate::runtime::expand_targets(&eff, &crate::platform::ActivePlatform::new(), None);
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&dir.join("skills/*"), false).unwrap();
+            watcher.follow_files(crate::runtime::watched_files(&eff, &expanded), true);
+        });
+        let aliased: Vec<PathBuf> = aliases_of(&watcher).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(aliased.len(), 256, "{logs}");
+        for index in 0..5 {
+            let link = dir.join(format!("skills/s{index:03}"));
+            assert!(aliased.contains(&link), "{link:?} was left out: {logs}");
+        }
+        assert_eq!(logs.matches("link limit").count(), 1, "{logs}");
+        assert!(logs.contains("49 more"), "{logs}");
     }
 
     #[cfg(unix)]
