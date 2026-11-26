@@ -7,6 +7,7 @@
 //! `verifier-new` is local: it prints a fresh token once and the verifier
 //! file entry to add.
 
+use super::config_api::MAX_PUT_BODY;
 use super::identity::is_dns_label;
 use super::mgmt::{AUDIT_PATH, REGISTER_PATH, REQUESTED_BY_HEADER};
 use super::verifiers::{
@@ -14,8 +15,9 @@ use super::verifiers::{
 };
 use anyhow::{bail, ensure, Context, Result};
 use clap::{ArgGroup, Args, Subcommand};
-use lodeline_proxy_api::{verifier, MetadataRef};
+use lodeline_proxy_api::{parse_config_put, verifier, MetadataRef};
 use rand_core::{OsRng, RngCore};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,18 @@ pub enum ProxyCommand {
         #[arg(long)]
         metadata_ref: String,
     },
+    /// Set a proxy's config from a request body file (config scope).
+    ConfigPut {
+        #[command(flatten)]
+        conn: ConnArgs,
+        #[arg(long)]
+        proxy_id: String,
+        /// JSON file holding the request body: `expected_revision` and `config`.
+        /// Sent byte for byte; the server validates the request (revision, retention,
+        /// proxy id).
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Read the management audit trail (the token file holds the READ bearer).
     Audit {
         #[command(flatten)]
@@ -134,13 +148,15 @@ pub enum ProxyCommand {
     },
 }
 
-/// One HTTP request, built without any I/O so it can be unit-tested.
+/// One HTTP request, built without network I/O so it can be unit-tested.
+/// `raw_body` is sent as given with `Content-Type: application/json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub method: &'static str,
     pub path: String,
     pub query: Vec<(&'static str, String)>,
     pub body: Option<serde_json::Value>,
+    pub raw_body: Option<Vec<u8>>,
 }
 
 fn check_id(id: &str) -> Result<()> {
@@ -153,6 +169,20 @@ fn check_id(id: &str) -> Result<()> {
 
 fn is_hex64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The bytes of a config PUT body file, at most [`MAX_PUT_BODY`].
+fn read_put_body(path: &Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PUT_BODY as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    ensure!(
+        bytes.len() <= MAX_PUT_BODY,
+        "request body is larger than {MAX_PUT_BODY} bytes"
+    );
+    Ok(bytes)
 }
 
 /// blake3 hex of the first certificate in a PEM file.
@@ -175,6 +205,7 @@ impl ProxyCommand {
             | ProxyCommand::Enable { conn, .. }
             | ProxyCommand::Retire { conn, .. }
             | ProxyCommand::DeleteContent { conn, .. }
+            | ProxyCommand::ConfigPut { conn, .. }
             | ProxyCommand::Audit { conn, .. } => Some(conn),
             ProxyCommand::VerifierNew { .. } => None,
         }
@@ -187,6 +218,7 @@ impl ProxyCommand {
             path,
             query: Vec::new(),
             body,
+            raw_body: None,
         };
         Ok(Some(match self {
             ProxyCommand::Register {
@@ -247,6 +279,28 @@ impl ProxyCommand {
                     None,
                 )
             }
+            ProxyCommand::ConfigPut { proxy_id, file, .. } => {
+                check_id(proxy_id)?;
+                let bytes = read_put_body(file)?;
+                let parsed = parse_config_put(&bytes).map_err(|_| {
+                    anyhow::anyhow!(
+                        "{} is not a valid config PUT body (expected_revision and config)",
+                        file.display()
+                    )
+                })?;
+                let in_file = parsed.config.proxy_id.as_str();
+                ensure!(
+                    in_file == proxy_id,
+                    "config.proxy_id {in_file} does not match --proxy-id {proxy_id}"
+                );
+                Plan {
+                    method: "PUT",
+                    path: format!("/v1/proxies/{proxy_id}/config"),
+                    query: Vec::new(),
+                    body: None,
+                    raw_body: Some(bytes),
+                }
+            }
             ProxyCommand::Audit { cursor, limit, .. } => {
                 let mut query = Vec::new();
                 if let Some(c) = cursor {
@@ -260,6 +314,7 @@ impl ProxyCommand {
                     path: AUDIT_PATH.to_string(),
                     query,
                     body: None,
+                    raw_body: None,
                 }
             }
             ProxyCommand::VerifierNew { .. } => return Ok(None),
@@ -403,6 +458,7 @@ pub async fn run(cmd: ProxyCommand) -> Result<()> {
     let url = format!("{}{}", conn.server_url.trim_end_matches('/'), plan.path);
     let mut rb = match plan.method {
         "GET" => client.get(&url),
+        "PUT" => client.put(&url),
         _ => client.post(&url),
     }
     .bearer_auth(token)
@@ -412,6 +468,11 @@ pub async fn run(cmd: ProxyCommand) -> Result<()> {
     }
     if let Some(b) = &plan.body {
         rb = rb.json(b);
+    }
+    if let Some(b) = plan.raw_body {
+        rb = rb
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(b);
     }
     let resp = rb.send().await.context("request failed")?;
     let status = resp.status();

@@ -272,7 +272,7 @@ CONN=(--server-url https://<A_PRIVATE_IP>:8443 --cert mgmt.crt --key mgmt.key --
   --proxy-id <PROXY_ID> --cert-file ../pki/proxy.crt                                  # state: active, fp_current set
 ```
 
-There is no CLI subcommand for `PUT /v1/proxies/{id}/config`. Use `curl` with the `config`-scope token. Template
+Config is set with `lodeline-server proxy config-put` and the `config`-scope token. Template
 `config-put.json` (replace the verifier from §6. D2: `"upstream_url": "https://<MCP_PUBLIC_FQDN>/mcp"`):
 
 ```json
@@ -289,6 +289,15 @@ There is no CLI subcommand for `PUT /v1/proxies/{id}/config`. Use `curl` with th
                   "verifiers": [{"key_id": "smoke-k1", "verifier": "<CLIENT_VERIFIER_SHA256>"}],
                   "routes": ["r1"]}]}}
 ```
+
+```sh
+../bin/lodeline-server proxy config-put "${CONN[@]}" --token-file mgmt-config.token \
+  --proxy-id <PROXY_ID> --file config-put.json
+# 200 {"config_hash":"…","request_id":"…","revision":1}; a later PUT needs "expected_revision": <current>
+```
+
+The command sends the file as it is and refuses a file over 1 MiB, a body the server cannot parse, or a `config.proxy_id`
+that differs from `--proxy-id`. The second way is `curl` with the same token:
 
 ```sh
 curl -sS --fail-with-body --cacert host-ca.crt --cert mgmt.crt --key mgmt.key -H @mgmt-config.hdr \
