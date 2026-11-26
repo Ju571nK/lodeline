@@ -120,8 +120,10 @@ Record these outputs in the evidence template (§14). B needs only `lodeline-pro
 
 ## 4. Test PKI (on A, throwaway, 7 days)
 
-All CA keys stay on A. Two CAs with **different subject DNs** (the server refuses to boot otherwise). Every leaf carries
-SKI/AKI: Python 3.13+ rejects leaves without AKI under its default strict X.509 verification. The rehearsal hit this.
+All CA keys stay on A. Why there are two CAs with different subject DNs, and the per-certificate commands, are in
+[install-proxy.md section 4](../../install-proxy.md#4-certificates). This section builds all of them in one script.
+Every leaf carries SKI/AKI: Python 3.13+ rejects leaves without AKI under its default strict X.509 verification. The
+rehearsal hit this.
 
 ```sh
 mkdir -p ~/lodeline-smoke/pki && cd ~/lodeline-smoke/pki && umask 077
@@ -252,12 +254,13 @@ credentials:
 ```sh
 mkdir -m 700 -p ~/lodeline-smoke/b/state && cd ~/lodeline-smoke/b
 ../bin/lodeline-proxy check-config --config proxy.yaml            # exit 0 "config ok"
-../bin/lodeline-proxy token new --config proxy.yaml --principal smoke-client > token-new.out
-sed -n 's/^token: //p' token-new.out > client.token && chmod 600 client.token     # deliver to the PC, then delete here
-sed -n 's/^verifier_sha256: //p' token-new.out > client.verifier && rm token-new.out
 ```
 
-Only `client.verifier` goes into the server config. The token is shown once and is not stored by the proxy. Move
+Make the client token as in [install-proxy.md section 6.1](../../install-proxy.md#61-a-token-for-a-client), with these
+smoke values: run it without `sudo` (the run uses an unprivileged user), `--config proxy.yaml`, `--principal smoke-client`,
+and name the outputs `client.token` (mode 0600) and `client.verifier`.
+
+Only `client.verifier` goes into the server config. Move
 `client.token` to the PC (`~/lodeline-smoke/pc/client.token`, 0600) and remove it from B after the privacy scan (§10) has
 used a copy.
 
@@ -296,8 +299,9 @@ Config is set with `lodeline-server proxy config-put` and the `config`-scope tok
 # 200 {"config_hash":"…","request_id":"…","revision":1}; a later PUT needs "expected_revision": <current>
 ```
 
-The command sends the file as it is and refuses a file over 1 MiB, a body the server cannot parse, or a `config.proxy_id`
-that differs from `--proxy-id`. The second way is `curl` with the same token:
+`config-put` sends the file as it is and checks it as described in
+[install-proxy.md section 7](../../install-proxy.md#7-register-fingerprint-configure). The second way is `curl` with the
+same token:
 
 ```sh
 curl -sS --fail-with-body --cacert host-ca.crt --cert mgmt.crt --key mgmt.key -H @mgmt-config.hdr \
