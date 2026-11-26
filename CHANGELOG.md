@@ -15,6 +15,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - A repo whose only Claude Code file is a `.claude/commands` folder now gets a project row, in the agent and in `lodeline scan` (#539).
 - A Windows agent running as a service now assesses every user profile on the host, like a root agent on Linux and macOS (#540).
+- The Claude Code project row now follows `CLAUDE_CONFIG_DIR` like the user row: a home folder's `.claude/loop.md` is reported once, and the user `disableAllHooks` is read from the config folder (#539).
 
 ## [0.22.0] - 2026-11-25
 
