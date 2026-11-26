@@ -28,6 +28,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - The agent now follows at most 256 watched file and skill folder links, and logs one warning with the number of links it left out and the first one left out.
 - The agent now tells a link that loops back on itself from a link to a missing target in its warning, and also warns once for a skill folder link of either kind.
 - The proxy's config TTL now counts time spent suspended on Linux and macOS when the boot clock is available.
+- When the agent reaches its limit of 256 followed links, it now keeps the links under critical tier targets first and drops standard tier links, instead of ranking by the order of the policy alone.
 
 ## [0.22.0] - 2026-11-25
 
