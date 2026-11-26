@@ -619,6 +619,36 @@ impl Log {
     }
 }
 
+#[test]
+fn a_log_follows_its_scope_to_another_thread() {
+    fn emit(message: &str) {
+        tracing::error!("{message}");
+    }
+
+    let log = Log::default();
+    let other = Log::default();
+    let _guard = log.capture();
+    let scope = tracing::Span::current();
+    let other_thread_log = other.clone();
+    std::thread::spawn(move || {
+        let _guard = other_thread_log.capture();
+        emit("other scope");
+        scope.in_scope(|| emit("original scope"));
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(
+        [
+            log.lines_with("original scope"),
+            other.lines_with("original scope")
+        ],
+        [1, 0]
+    );
+    assert_eq!(log.lines_with("other scope"), 0);
+    assert_eq!(other.lines_with("other scope"), 1);
+}
+
 #[tokio::test]
 async fn a_refusal_is_not_retried_quickly_and_is_logged_once_per_period() {
     for (status, needle) in [
