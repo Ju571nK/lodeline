@@ -1088,3 +1088,9 @@ async fn a_proxy_ca_certificate_is_refused_on_every_read() {
     let err = client.artifact(name).await.err().unwrap();
     assert_eq!(err, FleetError::CertificateRefused, "artifact");
 }
+
+#[tokio::test]
+#[ignore = "serves the seeded server until killed, for the browser run in web/tests/e2e-real"]
+async fn serve_seeded_proxies_until_killed() {
+    panic!("the launcher is not written yet");
+}
