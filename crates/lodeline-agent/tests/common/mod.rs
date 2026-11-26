@@ -107,23 +107,42 @@ pub async fn recv_bounded<T>(
 pub struct Steps {
     step: std::sync::Mutex<&'static str>,
     context: std::sync::Mutex<Option<Box<dyn Fn() -> String + Send>>>,
+    last: std::sync::Mutex<String>,
 }
 
 impl Steps {
-    /// Name the step the test is about to run.
+    /// Name the step the test is about to run, and keep a snapshot of the
+    /// context, so the message still has it after the test's temp dir is gone.
     pub fn at(&self, step: &'static str) {
         *self.step.lock().unwrap() = step;
+        self.refresh();
     }
 
     /// Text added to the failure message, for example the events seen so far.
+    /// An empty text means the source is gone; the last non-empty one is kept.
     pub fn context(&self, f: impl Fn() -> String + Send + 'static) {
         *self.context.lock().unwrap() = Some(Box::new(f));
+        self.refresh();
+    }
+
+    fn fresh(&self) -> String {
+        let context = self.context.lock().unwrap();
+        context.as_ref().map(|f| f()).unwrap_or_default()
+    }
+
+    fn refresh(&self) {
+        let text = self.fresh();
+        if !text.is_empty() {
+            *self.last.lock().unwrap() = text;
+        }
     }
 
     fn describe(&self) -> String {
         let step = *self.step.lock().unwrap();
-        let context = self.context.lock().unwrap();
-        let extra = context.as_ref().map(|f| f()).unwrap_or_default();
+        let mut extra = self.fresh();
+        if extra.is_empty() {
+            extra = self.last.lock().unwrap().clone();
+        }
         format!("stuck at step {step:?}. {extra}")
     }
 }
@@ -148,17 +167,95 @@ where
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(body(worker_steps));
+            rt.block_on(body(worker_steps.clone()));
+            worker_steps.at("runtime drop");
             drop(rt);
         }));
         let _ = tx.send(outcome);
     });
     match rx.recv_timeout(bound) {
         Ok(Ok(())) => {}
-        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Ok(Err(panic)) => {
+            eprintln!("{name}: failed, {}", steps.describe());
+            std::panic::resume_unwind(panic)
+        }
         Err(_) => panic!(
             "{name}: not finished within {bound:?}, {}",
             steps.describe()
         ),
     }
+}
+
+/// Outer bound for one bounded test: well under the 40 minute job limit, and
+/// over the sum of the step bounds of the longest test (the reload tests, about
+/// 370 seconds if every step ran to its own bound).
+pub const TEST_BOUND: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The `file_change` count and the kinds of the last few events in `events_dir`,
+/// for the message of a test that was cut off.
+pub fn events_seen(events_dir: &std::path::Path) -> String {
+    let mut kinds = Vec::new();
+    let mut changes = 0;
+    if let Ok(entries) = std::fs::read_dir(events_dir) {
+        let mut files: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for file in files {
+            for line in std::fs::read_to_string(file).unwrap_or_default().lines() {
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let kind = event["evidence"]["kind"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string();
+                if kind == "file_change" {
+                    changes += 1;
+                }
+                kinds.push(kind);
+            }
+        }
+    }
+    let tail = kinds.len().saturating_sub(5);
+    format!(
+        "{changes} file_change events, {} events in all, last kinds {:?}",
+        kinds.len(),
+        &kinds[tail..]
+    )
+}
+
+/// Start the agent with the await bounded: `start` waits on the control IPC and
+/// the settle delay, so a wedged start fails by name instead of at the job limit.
+pub async fn start_bounded(steps: &Steps, builder: TestAgentBuilder) -> TestAgent {
+    steps.at("start the agent");
+    let agent = tokio::time::timeout(WAIT_BOUND, builder.start())
+        .await
+        .unwrap_or_else(|_| panic!("the agent did not start within {WAIT_BOUND:?}"));
+    let events_dir = agent.events_dir.clone();
+    steps.context(move || {
+        if events_dir.is_dir() {
+            events_seen(&events_dir)
+        } else {
+            String::new()
+        }
+    });
+    agent
+}
+
+/// Abort the agent task and wait, bounded, for it to end. The caller drops the
+/// agent afterwards, which is the last step before the runtime drop.
+/// The events summary is snapshotted here, before the temp dir goes.
+pub async fn stop_bounded(steps: &Steps, agent: &mut TestAgent) {
+    steps.at("stop the agent");
+    agent.join.abort();
+    let ended = tokio::time::timeout(WAIT_BOUND, &mut agent.join).await;
+    let seen = events_seen(&agent.events_dir);
+    steps.context({
+        let seen = seen.clone();
+        move || seen.clone()
+    });
+    assert!(
+        ended.is_ok(),
+        "the agent task did not end within {WAIT_BOUND:?}. {seen}"
+    );
+    steps.at("drop the agent");
 }

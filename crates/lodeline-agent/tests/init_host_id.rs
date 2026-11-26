@@ -1,7 +1,10 @@
 //! `lodeline init-host-id` on the real binary, against a scratch `--state-db`.
 
 mod common;
-use common::{fs_event_timeout, wait_bounded, TestAgentBuilder, WAIT_BOUND};
+use common::{
+    fs_event_timeout, run_bounded, start_bounded, stop_bounded, wait_bounded, TestAgentBuilder,
+    TEST_BOUND, WAIT_BOUND,
+};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -134,19 +137,28 @@ fn concurrent_claims_on_a_fresh_state_db_elect_one_host_id() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_agent_adopts_a_preassigned_host_id_on_its_first_run() {
-    let agent = TestAgentBuilder::new()
-        .policy("version: 1\ntargets: []\n")
-        .host_id(X)
-        .start()
-        .await;
+#[test]
+fn the_agent_adopts_a_preassigned_host_id_on_its_first_run() {
+    run_bounded(
+        "the_agent_adopts_a_preassigned_host_id_on_its_first_run",
+        TEST_BOUND,
+        |steps| async move {
+            let mut agent = start_bounded(
+                &steps,
+                TestAgentBuilder::new()
+                    .policy("version: 1\ntargets: []\n")
+                    .host_id(X),
+            )
+            .await;
 
-    let ev = agent
-        .wait_for_event(|v| v["host_id"].is_string(), fs_event_timeout())
-        .await
-        .expect("the agent emits an event after boot");
+            steps.at("wait for an event with a host_id");
+            let ev = agent
+                .wait_for_event(|v| v["host_id"].is_string(), fs_event_timeout())
+                .await
+                .expect("the agent emits an event after boot");
 
-    assert_eq!(ev["host_id"], X);
-    agent.join.abort();
+            assert_eq!(ev["host_id"], X);
+            stop_bounded(&steps, &mut agent).await;
+        },
+    );
 }
