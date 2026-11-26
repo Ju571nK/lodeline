@@ -49,6 +49,8 @@ pub struct WatcherHandle {
     scope: LinkScope,
 }
 
+const OTHER_ACCOUNT: &str = "link target belongs to another account";
+
 type OwnerOf = Arc<dyn Fn(&Path, bool) -> Option<u32> + Send + Sync>;
 
 /// Whether the agent serves one account or a whole host, which decides whose links it follows.
@@ -85,12 +87,30 @@ impl LinkScope {
         self
     }
 
-    fn allows(&self, _link: &Path, _real: &Path) -> bool {
-        true
+    /// Whether a link may point at `real`. On unix the target must belong to the account
+    /// that owns the link; elsewhere there is no owner lookup, so it must sit under the
+    /// home the link is in. A single-user agent follows every link.
+    fn allows(&self, link: &Path, real: &Path) -> bool {
+        if !self.shared_host {
+            return true;
+        }
+        if cfg!(unix) {
+            let owner = (self.owner_of)(link, false);
+            owner.is_some() && owner == (self.owner_of)(real, true)
+        } else {
+            self.under_link_home(link, real)
+        }
     }
 
-    fn under_link_home(&self, _link: &Path, _real: &Path) -> bool {
-        true
+    fn under_link_home(&self, link: &Path, real: &Path) -> bool {
+        self.homes
+            .iter()
+            .filter(|home| link.starts_with(home))
+            .max_by_key(|home| home.components().count())
+            .is_some_and(|home| {
+                real.starts_with(home)
+                    || dunce::canonicalize(home).is_ok_and(|home| real.starts_with(home))
+            })
     }
 }
 
@@ -403,6 +423,10 @@ impl WatcherHandle {
             if !real.is_file() {
                 continue;
             }
+            if !self.scope.allows(&link, &real) {
+                self.warn_once(&link, "owner", OTHER_ACCOUNT);
+                continue;
+            }
             let real = crate::normalizer::match_form(real);
             if links.iter().any(|(other, _)| *other == real) {
                 self.warn_once(
@@ -420,6 +444,10 @@ impl WatcherHandle {
             let Ok(real) = dunce::canonicalize(&link) else {
                 continue;
             };
+            if !self.scope.allows(&link, &real) {
+                self.warn_once(&link, "owner", OTHER_ACCOUNT);
+                continue;
+            }
             let real = crate::normalizer::match_form(real);
             if real.parent().is_none()
                 || link.starts_with(&real)

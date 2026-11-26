@@ -568,11 +568,23 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         roots = watch_roots.len(),
         "runtime: spawning filesystem watcher"
     );
-    let (raw_rx, mut watcher_handle) = watcher::spawn_watcher(
+    let link_scope = if crate::control::assesses_other_users() || user_homes.len() > 1 {
+        watcher::LinkScope::shared_host(
+            pinned_home
+                .iter()
+                .cloned()
+                .chain(other_homes.iter().cloned())
+                .collect(),
+        )
+    } else {
+        watcher::LinkScope::single_user()
+    };
+    let (raw_rx, mut watcher_handle) = watcher::spawn_watcher_scoped(
         watch_roots.clone(),
         runtime_handle.clone(),
         1024,
         poll_interval,
+        link_scope,
     )?;
     watcher_handle.follow_files(watched_files(&effective, &expanded_paths), false);
     let aliases_rx = watcher_handle.aliases_rx();
