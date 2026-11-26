@@ -3529,4 +3529,45 @@ mod tests {
             [root.join("alpha/SKILL.md"), root.join("plain/SKILL.md")]
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn pattern_warmup_lists_a_leaf_link_below_a_two_part_literal_rest() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(outside.join("c.app/Contents")).unwrap();
+        std::fs::write(outside.join("info.plist"), "x").unwrap();
+        let apps = dir.join("apps");
+        for name in ["a.app", "b.app"] {
+            std::fs::create_dir_all(apps.join(name).join("Contents")).unwrap();
+        }
+        std::fs::write(apps.join("a.app/Contents/Info.plist"), "x").unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("info.plist"),
+            apps.join("b.app/Contents/Info.plist"),
+        )
+        .unwrap();
+        // A folder link brings its own Info.plist link below the followed folder.
+        std::os::unix::fs::symlink(
+            outside.join("info.plist"),
+            outside.join("c.app/Contents/Info.plist"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.join("c.app"), apps.join("c.app")).unwrap();
+        let mut found = super::files_matching_pattern(
+            &apps.join("*.app/Contents/Info.plist"),
+            false,
+            super::WARMUP_ENTRY_LIMIT,
+            super::WARMUP_FILE_LIMIT,
+        );
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                apps.join("a.app/Contents/Info.plist"),
+                apps.join("b.app/Contents/Info.plist")
+            ]
+        );
+    }
 }
