@@ -162,3 +162,65 @@ where
         ),
     }
 }
+
+/// Outer bound for one bounded test: well under the 40 minute job limit, over
+/// the sum of the step bounds inside it.
+pub const TEST_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The `file_change` count and the kinds of the last few events in `events_dir`,
+/// for the message of a test that was cut off.
+pub fn events_seen(events_dir: &std::path::Path) -> String {
+    let mut kinds = Vec::new();
+    let mut changes = 0;
+    if let Ok(entries) = std::fs::read_dir(events_dir) {
+        let mut files: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for file in files {
+            for line in std::fs::read_to_string(file).unwrap_or_default().lines() {
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let kind = event["evidence"]["kind"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string();
+                if kind == "file_change" {
+                    changes += 1;
+                }
+                kinds.push(kind);
+            }
+        }
+    }
+    let tail = kinds.len().saturating_sub(5);
+    format!(
+        "{changes} file_change events, {} events in all, last kinds {:?}",
+        kinds.len(),
+        &kinds[tail..]
+    )
+}
+
+/// Start the agent with the await bounded: `start` waits on the control IPC and
+/// the settle delay, so a wedged start fails by name instead of at the job limit.
+pub async fn start_bounded(steps: &Steps, builder: TestAgentBuilder) -> TestAgent {
+    steps.at("start the agent");
+    let agent = tokio::time::timeout(WAIT_BOUND, builder.start())
+        .await
+        .unwrap_or_else(|_| panic!("the agent did not start within {WAIT_BOUND:?}"));
+    let events_dir = agent.events_dir.clone();
+    steps.context(move || events_seen(&events_dir));
+    agent
+}
+
+/// Abort the agent task and wait, bounded, for it to end. The caller drops the
+/// agent afterwards, which is the last step before the runtime drop.
+pub async fn stop_bounded(steps: &Steps, agent: &mut TestAgent) {
+    steps.at("stop the agent");
+    agent.join.abort();
+    let ended = tokio::time::timeout(WAIT_BOUND, &mut agent.join).await;
+    assert!(
+        ended.is_ok(),
+        "the agent task did not end within {WAIT_BOUND:?}. {}",
+        events_seen(&agent.events_dir)
+    );
+    steps.at("drop the agent and the runtime");
+}
