@@ -55,6 +55,49 @@ pub(crate) fn is_root() -> bool {
     false
 }
 
+/// True when this process assesses the other users' homes: root on Unix, the LocalSystem
+/// account (`S-1-5-18`, a service) on Windows.
+#[cfg(unix)]
+pub(crate) fn assesses_other_users() -> bool {
+    is_root()
+}
+#[cfg(windows)]
+pub(crate) fn assesses_other_users() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, IsWellKnownSid, TokenUser, WinLocalSystemSid, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: `token` is a valid out pointer; the handle is closed below.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let mut len = 0u32;
+    // SAFETY: a null buffer with length 0 asks for the needed size.
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    // u64 words keep the buffer aligned for TOKEN_USER.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+    // SAFETY: `buf` holds at least `len` bytes.
+    let ok =
+        unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) }
+            != 0;
+    let system = ok && {
+        // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points inside it.
+        let user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+        let is_system = unsafe { IsWellKnownSid(user.User.Sid, WinLocalSystemSid) };
+        is_system != 0
+    };
+    // SAFETY: `token` came from OpenProcessToken.
+    unsafe { CloseHandle(token) };
+    system
+}
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn assesses_other_users() -> bool {
+    false
+}
+
 /// Process real uid — namespaces the fallback socket dir in shared `/tmp`.
 /// Non-Unix: 0 (unused; Windows uses the named pipe).
 #[cfg(unix)]
@@ -769,5 +812,17 @@ mod tests {
         };
         assert_eq!(count("/pin"), 2);
         assert_eq!(count("/pin/deeper/home"), 4);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn an_interactive_user_does_not_assess_other_users() {
+        let account = std::env::var("USERNAME").unwrap_or_default();
+        if account.ends_with('$') || account.eq_ignore_ascii_case("SYSTEM") {
+            return;
+        }
+        assert!(!super::assesses_other_users());
     }
 }

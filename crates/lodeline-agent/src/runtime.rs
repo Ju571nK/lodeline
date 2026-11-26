@@ -1261,14 +1261,14 @@ fn is_root_skills_target(t: &lodeline_core::policy::WatchTarget) -> bool {
 /// How often a running agent re-lists the host's users (#333).
 const USER_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// #329 — the other users' homes a root agent assesses, sorted so that two
-/// listings of the same users compare equal. Empty for a normal user, who can
+/// #329, #540: the other users' homes a root agent (or a Windows LocalSystem service) assesses,
+/// sorted so that two listings of the same users compare equal. Empty for a normal user, who can
 /// read only its own home, and when a home is pinned.
 pub(crate) fn other_user_homes(
     plat: &ActivePlatform,
     home_pinned: bool,
 ) -> Vec<crate::ai_guard::task::AssessHome> {
-    other_homes_of(plat, crate::control::is_root(), home_pinned)
+    other_homes_of(plat, crate::control::assesses_other_users(), home_pinned)
 }
 
 fn other_homes_of(

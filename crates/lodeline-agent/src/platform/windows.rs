@@ -151,41 +151,144 @@ impl HostIdResolver for WindowsPlatform {
 
 impl UserEnumerator for WindowsPlatform {
     fn list(&self) -> Vec<UserContext> {
-        let mut out = Vec::new();
-        let users_dir = Path::new(r"C:\Users");
-        let Ok(entries) = std::fs::read_dir(users_dir) else {
-            return out;
-        };
-        for ent in entries.flatten() {
-            // Only real user profile directories are users; skip files such as
-            // `desktop.ini` and any other non-directory entries.
-            match ent.file_type() {
-                Ok(ft) if ft.is_dir() => {}
-                _ => continue,
+        match read_profile_list() {
+            Some(entries) => {
+                let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+                super::profile_list::users_from_profiles(&entries, &drive, |p| p.is_dir())
             }
-            let name = ent.file_name().to_string_lossy().to_string();
-            // Skip well-known non-human profiles.
-            if matches!(
-                name.as_str(),
-                "Default" | "Default User" | "Public" | "All Users"
-            ) {
-                continue;
-            }
-            // Skip directories starting with `.` or known service accounts.
-            if name.starts_with('.') {
-                continue;
-            }
-            let home = users_dir.join(&name);
-            // Use the directory name as a stable per-user identifier; Phase 1 does
-            // not call NetUserEnum to convert to SID (avoids extra deps).
-            out.push(UserContext {
-                name: name.clone(),
-                home,
-                uid_or_sid: format!("name:{name}"),
-            });
+            None => list_users_dir(),
         }
-        out
     }
+}
+
+/// The `ProfileList` subkeys, or `None` when the registry read fails or finds nothing.
+/// Reads wide strings, so folder names outside the OEM code page survive.
+fn read_profile_list() -> Option<Vec<super::profile_list::ProfileEntry>> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE,
+        KEY_READ, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let subkey = wide(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+    let value = wide("ProfileImagePath");
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `subkey` is NUL terminated and `key` is a valid out pointer; the key is closed below.
+    let rc = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.as_ptr(), 0, KEY_READ, &mut key) };
+    if rc != ERROR_SUCCESS {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut name = [0u16; 256];
+        let mut name_len = name.len() as u32;
+        // SAFETY: `name` holds `name_len` u16 and `key` is open; the optional pointers are null.
+        let rc = unsafe {
+            RegEnumKeyExW(
+                key,
+                index,
+                name.as_mut_ptr(),
+                &mut name_len,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        index += 1;
+        if rc != ERROR_SUCCESS {
+            // ERROR_NO_MORE_ITEMS ends the walk; any other error ends it too.
+            break;
+        }
+        let sub = &name[..name_len as usize];
+        let mut sub_z = sub.to_vec();
+        sub_z.push(0);
+        let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+        let mut bytes = 0u32;
+        // SAFETY: a null data pointer asks for the size in bytes; the names are NUL terminated.
+        let rc = unsafe {
+            RegGetValueW(
+                key,
+                sub_z.as_ptr(),
+                value.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut bytes,
+            )
+        };
+        if rc != ERROR_SUCCESS || bytes == 0 {
+            continue;
+        }
+        let mut buf = vec![0u16; (bytes as usize).div_ceil(2) + 1];
+        let mut got = bytes;
+        // SAFETY: `buf` holds at least `bytes` bytes.
+        let rc = unsafe {
+            RegGetValueW(
+                key,
+                sub_z.as_ptr(),
+                value.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut got,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            continue;
+        }
+        let units = &buf[..(got as usize / 2).min(buf.len())];
+        let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+        entries.push(super::profile_list::ProfileEntry {
+            sid: String::from_utf16_lossy(sub),
+            image_path: String::from_utf16_lossy(&units[..end]),
+        });
+    }
+    // SAFETY: `key` came from a successful RegOpenKeyExW and is closed once.
+    unsafe { RegCloseKey(key) };
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// Fallback: the folder names under `C:\Users`.
+fn list_users_dir() -> Vec<UserContext> {
+    let mut out = Vec::new();
+    let users_dir = Path::new(r"C:\Users");
+    let Ok(entries) = std::fs::read_dir(users_dir) else {
+        return out;
+    };
+    for ent in entries.flatten() {
+        match ent.file_type() {
+            Ok(ft) if ft.is_dir() => {}
+            _ => continue,
+        }
+        let name = ent.file_name().to_string_lossy().to_string();
+        if matches!(
+            name.as_str(),
+            "Default" | "Default User" | "Public" | "All Users"
+        ) {
+            continue;
+        }
+        if name.starts_with('.') {
+            continue;
+        }
+        let home = users_dir.join(&name);
+        out.push(UserContext {
+            name: name.clone(),
+            home,
+            uid_or_sid: format!("name:{name}"),
+        });
+    }
+    out
 }
 
 use super::hw_fingerprint::{pick_stable_mac, HardwareFingerprint, IfaceKind};
@@ -273,6 +376,25 @@ mod tests {
     fn fda_state_is_granted() {
         let p = WindowsPlatform::new();
         assert_eq!(p.fda_state(), FdaState::Granted);
+    }
+
+    #[test]
+    fn the_registry_read_returns_the_runners_own_profile() {
+        let entries = read_profile_list().expect("ProfileList has entries");
+        assert!(!entries.is_empty());
+        let me = std::env::var("USERPROFILE")
+            .expect("USERPROFILE")
+            .to_lowercase();
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        let homes =
+            super::super::profile_list::users_from_profiles(&entries, &drive, |p| p.is_dir());
+        assert!(
+            homes
+                .iter()
+                .any(|u| u.home.to_string_lossy().to_lowercase() == me),
+            "USERPROFILE {me} not among {} homes",
+            homes.len()
+        );
     }
 
     #[test]
