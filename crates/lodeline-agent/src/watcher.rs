@@ -87,6 +87,7 @@ impl LinkScope {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn is_shared_host(&self) -> bool {
         self.shared_host
     }
@@ -107,15 +108,37 @@ impl LinkScope {
     }
 
     fn under_link_home(&self, link: &Path, real: &Path) -> bool {
-        self.homes
+        let link_forms = path_forms(link, true);
+        let homes: Vec<Vec<PathBuf>> = self
+            .homes
             .iter()
-            .filter(|home| link.starts_with(home))
-            .max_by_key(|home| home.components().count())
-            .is_some_and(|home| {
-                real.starts_with(home)
-                    || dunce::canonicalize(home).is_ok_and(|home| real.starts_with(home))
+            .map(|home| path_forms(home, false))
+            .collect();
+        homes
+            .iter()
+            .filter(|forms| {
+                forms
+                    .iter()
+                    .any(|home| link_forms.iter().any(|link| link.starts_with(home)))
             })
+            .max_by_key(|forms| forms.iter().map(|h| h.components().count()).max())
+            .is_some_and(|forms| forms.iter().any(|home| real.starts_with(home)))
     }
+}
+
+/// A path as spelled and with its folder resolved. A link keeps its own name, so only its
+/// parent is resolved; a home is resolved whole.
+fn path_forms(path: &Path, keep_leaf: bool) -> Vec<PathBuf> {
+    let mut forms = vec![path.to_path_buf()];
+    let resolved = if keep_leaf {
+        path.parent()
+            .zip(path.file_name())
+            .and_then(|(parent, name)| Some(dunce::canonicalize(parent).ok()?.join(name)))
+    } else {
+        dunce::canonicalize(path).ok()
+    };
+    forms.extend(resolved.filter(|form| form != path));
+    forms
 }
 
 #[cfg(unix)]
@@ -264,7 +287,9 @@ impl WatcherHandle {
     /// Set the watched file paths. Each one that is a link to a regular file is
     /// watched under its link path and aliased from its target.
     /// Replace whose links the watcher follows; takes effect at the next root rebuild.
-    pub fn set_link_scope(&mut self, _scope: LinkScope) {}
+    pub fn set_link_scope(&mut self, scope: LinkScope) {
+        self.scope = scope;
+    }
 
     pub fn follow_files(&mut self, files: Vec<PathBuf>, catch_up: bool) {
         self.files = files;
@@ -332,9 +357,9 @@ impl WatcherHandle {
         let mut matched = BTreeSet::new();
         let mut folder_links = BTreeSet::new();
         for (pattern, recursive) in &self.desired {
-            for (root, via_link) in resolve_pattern(pattern) {
-                if via_link {
-                    folder_links.insert(root);
+            for (root, origin) in resolve_pattern(pattern) {
+                if let Some(origin) = origin {
+                    folder_links.insert((root, origin));
                     continue;
                 }
                 if has_glob(pattern) {
@@ -400,7 +425,7 @@ impl WatcherHandle {
     fn follow_links(
         &mut self,
         roots: &BTreeMap<PathBuf, bool>,
-        folders: BTreeSet<PathBuf>,
+        folders: BTreeSet<(PathBuf, PathBuf)>,
     ) -> (Vec<(PathBuf, PathBuf)>, BTreeSet<PathBuf>) {
         let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut covered = BTreeSet::new();
@@ -447,12 +472,13 @@ impl WatcherHandle {
             }
             links.push((real, link));
         }
-        for link in folders {
+        for (link, origin) in folders {
             let Ok(real) = dunce::canonicalize(&link) else {
                 continue;
             };
-            if !self.scope.allows(&link, &real) {
-                self.warn_once(&link, "owner", OTHER_ACCOUNT);
+            let linked = dunce::canonicalize(&origin).unwrap_or_else(|_| real.clone());
+            if !self.scope.allows(&origin, &linked) {
+                self.warn_once(&origin, "owner", OTHER_ACCOUNT);
                 continue;
             }
             let real = crate::normalizer::match_form(real);
@@ -674,12 +700,12 @@ fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
 /// Literal missing roots retain #219's retry behavior; wildcard roots are
 /// discovered afresh so installation/removal/replacement needs no restart.
 /// A link to a folder counts as a folder at the first wildcard component only,
-/// and its root is flagged. A link under it, or a literal link, is not followed.
-fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, bool)> {
+/// and its root carries the link's own path. A link under it, or a literal link, is not followed.
+fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
     if !has_glob(pattern) {
-        return vec![(pattern.to_path_buf(), false)];
+        return vec![(pattern.to_path_buf(), None)];
     }
-    let mut candidates = vec![(PathBuf::new(), false)];
+    let mut candidates: Vec<(PathBuf, Option<PathBuf>)> = vec![(PathBuf::new(), None)];
     let mut in_pattern = false;
     for component in pattern.components() {
         let part = Path::new(component.as_os_str());
@@ -705,7 +731,8 @@ fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, bool)> {
                     if (kind.is_dir() || linked)
                         && glob.is_match(&crate::normalizer::match_form(entry.file_name().into()))
                     {
-                        matches.push((entry.path(), via_link || linked));
+                        let origin = via_link.clone().or_else(|| linked.then(|| entry.path()));
+                        matches.push((entry.path(), origin));
                     }
                 }
             }
