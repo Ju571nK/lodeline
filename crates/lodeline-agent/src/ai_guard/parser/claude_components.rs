@@ -24,9 +24,9 @@ const MAX_AGENT_DEPTH: usize = 8;
 /// The folder kinds under a `.claude` folder that carry component files.
 const COMPONENT_KINDS: [&str; 3] = ["skills", "agents", "commands"];
 /// Bounds on the walk for nested `.claude/skills`, `.claude/agents` and `.claude/commands` folders.
-const MAX_NESTED_DEPTH: usize = 8;
-const MAX_NESTED_WALK_DIRS: usize = 20_000;
-const NESTED_WALK_SKIPPED: &[&str] = &["node_modules", "target"];
+pub(crate) const MAX_NESTED_DEPTH: usize = 8;
+pub(crate) const MAX_NESTED_WALK_DIRS: usize = 20_000;
+pub(crate) const NESTED_WALK_SKIPPED: &[&str] = &["node_modules", "target"];
 /// Most inherited and nested folders one repository's watch targets cover.
 pub(crate) const MAX_WATCHED_COMPONENT_DIRS: usize = 64;
 /// Frontmatter sits at the top of the file, so only this much is read.
