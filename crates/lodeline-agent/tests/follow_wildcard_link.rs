@@ -153,3 +153,37 @@ async fn native_a_loop_link_is_not_followed_and_a_real_skill_still_records() {
 async fn polling_a_loop_link_is_not_followed_and_a_real_skill_still_records() {
     a_loop_link_is_not_followed_and_a_real_skill_still_records(true).await;
 }
+
+/// `skills/foo` links to `skills/vendor/foo`, a folder inside the same watched
+/// root. The built-in target matches one folder below `skills`, so the edit
+/// under `vendor/foo` fits no glob and must be recorded under the link path.
+async fn a_link_to_a_folder_inside_the_watched_root_records_under_the_link_path(poll: bool) {
+    let td = tempfile::tempdir().unwrap();
+    let home = dunce::canonicalize(td.path()).unwrap();
+    let skills = home.join(".claude/skills");
+    let real = skills.join("vendor/foo");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("SKILL.md"), b"initial").unwrap();
+    std::os::unix::fs::symlink(&real, skills.join("foo")).unwrap();
+    let agent = TestAgentBuilder::new()
+        .policy("version: 1\nhost_id_strategy: machine_id\ntargets: []\n")
+        .default_targets()
+        .home(&home)
+        .pin_home()
+        .poll_watcher(poll)
+        .start()
+        .await;
+    change_is_recorded_at(&agent, &skills.join("foo/SKILL.md"), real.join("SKILL.md")).await;
+    assert!(!agent.join.is_finished(), "the agent stopped");
+    agent.join.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_a_link_to_a_folder_inside_the_watched_root_records_under_the_link_path() {
+    a_link_to_a_folder_inside_the_watched_root_records_under_the_link_path(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn polling_a_link_to_a_folder_inside_the_watched_root_records_under_the_link_path() {
+    a_link_to_a_folder_inside_the_watched_root_records_under_the_link_path(true).await;
+}

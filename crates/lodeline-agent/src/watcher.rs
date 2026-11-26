@@ -2004,7 +2004,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_link_whose_target_is_in_a_watched_root_is_not_followed() {
+    async fn a_link_whose_target_is_in_a_watched_root_is_aliased_without_a_new_root() {
         let td = TempDir::new().unwrap();
         let dir = dunce::canonicalize(td.path()).unwrap();
         fs::create_dir_all(dir.join("dotfiles")).unwrap();
@@ -2013,12 +2013,27 @@ mod tests {
         let link = dir.join("settings.json");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (_rx, mut watcher) = idle_watcher(vec![(dir.join("dotfiles"), false)]);
-        let logs = test_logs::logs_of(|| {
-            watcher.follow_files(vec![link.clone()], true);
-            watcher.reconcile();
-        });
-        assert_eq!(logs.matches("in a watched root").count(), 1, "{logs}");
-        assert!(aliases_of(&watcher).is_empty());
+        watcher.follow_files(vec![link.clone()], true);
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
+        assert!(!watcher.active.contains_key(&link));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_link_whose_target_is_in_a_watched_root_is_aliased_without_a_new_root() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        let real = skills.join("vendor/foo");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("SKILL.md"), b"a").unwrap();
+        let link = skills.join("foo");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (_rx, mut watcher) =
+            idle_watcher(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(real, link.clone())]);
         assert!(!watcher.active.contains_key(&link));
     }
 
