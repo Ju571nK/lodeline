@@ -574,6 +574,22 @@ impl Drop for PhaseClock {
     }
 }
 
+/// Publish Stopped under the lifecycle lock. The lock wait and the write are
+/// two phases, so a slow shutdown names the half that was slow.
+fn finish_timed(
+    clock: &mut PhaseClock,
+    lc: &std::sync::Mutex<Lifecycle>,
+    invocation_accounted: bool,
+    gaps: Option<&crate::status_report::GapQueue>,
+) -> anyhow::Result<()> {
+    let mut guard = lock(lc);
+    clock.end("finish_lock_wait");
+    let finished = guard.finish_shutdown(invocation_accounted, gaps);
+    drop(guard);
+    clock.end("finish_write");
+    finished
+}
+
 /// Least time the audit drain gets after the relay drain used the grace: a
 /// drain that ends in milliseconds appends its completions instead of counting them.
 const AUDIT_DRAIN_FLOOR: Duration = Duration::from_millis(500);
@@ -1017,12 +1033,12 @@ async fn run_inner(
     clock.end("spool_close");
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
-    let mut guard = lock(&lc);
-    clock.end("finish_lock_wait");
-    let finished = guard.finish_shutdown(invocation_accounted, invocation_gaps.as_ref());
-    drop(guard);
-    clock.end("finish_write");
-    finished?;
+    finish_timed(
+        &mut clock,
+        &lc,
+        invocation_accounted,
+        invocation_gaps.as_ref(),
+    )?;
     Ok(())
 }
 
@@ -1768,6 +1784,42 @@ mod tests {
         }
     }
 
+    /// The finish step times the wait for the lifecycle lock apart from the
+    /// write that publishes Stopped.
+    #[test]
+    fn finish_step_times_its_lock_wait_apart_from_its_write() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        lc.set_run_state(RunState::Stopping).unwrap();
+        let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
+        let held = Duration::from_millis(150);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let lc = lc.clone();
+            std::thread::spawn(move || {
+                let _guard = lock(&lc);
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(held);
+            })
+        };
+        locked_rx.recv().unwrap();
+        let mut clock = PhaseClock::start(tokio::time::Instant::now());
+        finish_timed(&mut clock, &lc, true, None).unwrap();
+        holder.join().unwrap();
+        let names: Vec<&str> = clock.phases.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["finish_lock_wait", "finish_write"]);
+        assert!(
+            clock.phases[0].1 >= held / 2,
+            "the lock wait was not timed apart: {:?}",
+            clock.phases
+        );
+        assert_eq!(
+            read_status(&b.state_dir).unwrap().run_state,
+            RunState::Stopped
+        );
+    }
+
     /// The shutdown after the signal has one grace budget. A client stuck in its
     /// request head holds the relay drain and blocking work holds the gap queue:
     /// together they still end within one grace, not one grace each.
@@ -1811,16 +1863,6 @@ mod tests {
         let took = signaled.elapsed();
         let phases = log.text();
         ran.unwrap();
-        // The finish step logs its lock wait and its state write as two phases,
-        // so a slow shutdown names the half that was slow.
-        for phase in ["finish_lock_wait", "finish_write"] {
-            let entry = format!("(\"{phase}\", ");
-            let timed = phases.split(&entry).nth(1).is_some_and(|rest| {
-                rest.chars().next().is_some_and(|c| c.is_ascii_digit())
-                    && rest.split(')').next().is_some_and(|d| d.ends_with('s'))
-            });
-            assert!(timed, "no timed `{phase}` phase; log:\n{phases}");
-        }
         // Holds while `server::HEADER_READ_TIMEOUT` is longer than grace.
         assert!(
             took >= grace,
