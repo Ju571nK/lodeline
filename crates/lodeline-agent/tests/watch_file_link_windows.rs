@@ -98,10 +98,17 @@ async fn stop_agent(steps: &Steps, agent: TestAgent) {
     steps.at("stop the agent");
     agent.join.abort();
     let ended = tokio::time::timeout(WAIT_BOUND, agent.join).await;
+    let seen = events_seen(&agent.events_dir);
+    steps.context({
+        let seen = seen.clone();
+        move || seen.clone()
+    });
     assert!(
         ended.is_ok(),
-        "the agent task did not end within {WAIT_BOUND:?}"
+        "the agent task did not end within {WAIT_BOUND:?}. {seen}"
     );
+    drop(agent.td);
+    steps.at("drop the runtime");
 }
 
 async fn change_is_recorded_at(agent: &TestAgent, spelled: &Path, target: PathBuf) {
@@ -113,7 +120,12 @@ async fn change_is_recorded_at(agent: &TestAgent, spelled: &Path, target: PathBu
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     writer.abort();
-    assert!(seen, "no file_change for {}", spelled.display());
+    assert!(
+        seen,
+        "no file_change for {}. {}",
+        spelled.display(),
+        events_seen(&agent.events_dir)
+    );
 }
 
 /// A junction needs no privilege. No crate in the lockfile creates one, so this
