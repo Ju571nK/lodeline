@@ -487,6 +487,21 @@ settings. Pass the token through an environment variable. Never paste a token in
 file that goes into version control; a project-scoped file such as `.mcp.json` or
 `.cursor/mcp.json` is the one to be careful with.
 
+`lodeline-proxy snippet` prints one entry of this kind for a route, so you do not
+copy it by hand for each route. Give it `--client` (`claude-code`, `codex` or
+`cursor`), `--name`, `--url` (the proxy listener, for example
+`https://proxy.example.internal:8480`), `--route` and `--token-env` (the name of
+the variable that holds the token):
+
+```sh
+lodeline-proxy snippet --client codex --name docs \
+  --url https://proxy.example.internal:8480 --route r1 --token-env LODELINE_PROXY_TOKEN_DOCS
+```
+
+The entry goes to stdout and a line naming the client's file goes to stderr. The
+command reads no config file, writes no file, makes no request and takes no token;
+it refuses a `--token-env` that looks like a token value.
+
 These snippets are **documented by the vendor and not tested through the proxy**.
 Vendor pages were read on 2026-11-26, with Claude Code 2.1.332 and codex-cli 0.172.0
 installed here (their help output was read for flag names; nothing was run
