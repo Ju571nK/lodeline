@@ -47,8 +47,8 @@ assumes a running `lodeline-server` with mutual TLS, set up as in
   needs `tls_cert_file` and `tls_key_file`. On a loopback listener the `Host`
   header must be a loopback name with the same port, so a client reaches it as
   `http://127.0.0.1:8480` or `http://localhost:8480`.
-- **Control plane:** the proxy only makes outbound connections to the server's
-  `8443/tcp`. It listens for nothing else.
+- **Control plane:** toward the server the proxy makes outbound connections to
+  `8443/tcp`.
 - **Data plane path:** `/mcp/{route_id}`, where `route_id` is a route from the
   proxy's config. Any other path shape is a 404.
 
@@ -95,11 +95,11 @@ the service. The server host needs `lodeline-server` of the same build.
 
 ## 4. Certificates
 
-Three kinds of certificate are involved. All names below are examples.
+Three kinds of certificate are involved. The names below are examples.
 
 | What | Signed by | Used for |
 |---|---|---|
-| Server certificate | host CA | the server's TLS (already there if you followed install-server.md) |
+| Server certificate | host CA | the server's TLS (present if you followed install-server.md) |
 | Management certificate | host CA | the operator CLI that registers and configures proxies |
 | Proxy certificate | **proxy CA** | the proxy's client identity toward the server |
 
@@ -124,10 +124,10 @@ openssl req -x509 -new -newkey rsa:2048 -nodes -keyout proxy-ca.key -out proxy-c
 cat host-ca.crt proxy-ca.crt > client-ca-bundle.pem
 ```
 
-Every leaf needs subject and authority key identifiers; some TLS stacks reject a
+Give each leaf subject and authority key identifiers; some TLS stacks reject a
 leaf without them.
 
-**Management certificate** (signed by the host CA, which you already hold):
+**Management certificate** (signed by the host CA, which you hold):
 
 ```sh
 printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nextendedKeyUsage=clientAuth\n' > client.ext
@@ -139,7 +139,7 @@ openssl x509 -req -in mgmt.csr -CA host-ca.crt -CAkey host-ca.key \
 Do not reuse the read API certificate for this. Routes that read proxy data
 refuse a management certificate, and a management certificate cannot double as one.
 
-**Proxy certificate.** Make the key on the proxy host so it never leaves it, and sign
+**Proxy certificate.** Make the key on the proxy host so it stays there, and sign
 the request on the host that holds the proxy CA. The subject alternative name
 must have the form `<proxy_id>.proxy.sigil.invalid`. The `sigil` in that suffix is
 the old product name and stays on purpose; do not change it. The proxy id is a DNS
@@ -164,7 +164,7 @@ you do not compute it by hand.
 
 ## 5. Server configuration
 
-Add a `proxy:` section to `server.yaml`. The server must already run with mutual
+Add a `proxy:` section to `server.yaml`. The server must run with mutual
 TLS (`tls_cert_path`, `tls_key_path`, `client_ca_path`), and `client_ca_path` must
 point at the bundle from section 4.
 
@@ -283,7 +283,7 @@ pattern; a name with a space is refused.
 
 ## 7. Register, fingerprint, configure
 
-All three commands run from a host that has the management certificate. They talk
+The commands below run from a host that has the management certificate. They talk
 to the server over HTTPS and read the bearer from a file; no token is ever an
 argument.
 
@@ -336,8 +336,8 @@ A later change needs `"expected_revision"` set to the current revision.
 - `allowed_origins: []` refuses every browser `Origin`. Clients that are not
   browsers send none, so the empty list is the right value for the clients in this
   guide.
-- `actor_kind` is `non_human`. The proxy records the principal from its own config,
-  never from anything the client reports.
+- `actor_kind` is `non_human`. The proxy takes the principal from its own config, not from
+  anything the client reports.
 - A principal may use only the routes in its `routes` list. A request for any other
   route answers the same 401 as a wrong token.
 
@@ -456,7 +456,7 @@ settings. Pass the token through an environment variable. Never paste a token in
 file that goes into version control; a project-scoped file such as `.mcp.json` or
 `.cursor/mcp.json` is the one to be careful with.
 
-Every snippet is **documented by the vendor and not tested through the proxy**.
+These snippets are **documented by the vendor and not tested through the proxy**.
 Vendor pages were read on 2026-11-26, with Claude Code 2.1.332 and codex-cli 0.172.0
 installed here (their help output was read for flag names; nothing was run
 against a proxy).
@@ -526,7 +526,7 @@ observation, so it works only when the upstream answers 2025-11-25 (section 10).
 ### 11.3 Cursor
 
 Status: **documented only**. Cursor has no command to run here, so this snippet
-was never executed. Source: <https://cursor.com/docs/context/mcp>. Cursor takes
+was not run. Source: <https://cursor.com/docs/context/mcp>. Cursor takes
 `url` with `headers`, in `~/.cursor/mcp.json` or `.cursor/mcp.json`, and expands
 `${env:NAME}`.
 
@@ -586,7 +586,7 @@ By `health`:
 
 | Output | Meaning |
 |---|---|
-| `config_state: None` | no config applied yet; the server has none for this proxy id, or the fetch failed |
+| `config_state: None` | no config applied yet; the server holds no config for this proxy id, or the fetch failed |
 | `config_state: Valid`, `forwarding: true` | normal |
 | `config_state: Expired` | no fresh config within the TTL; check the network and the server |
 | `config_state: Disabled` | the proxy was disabled (section 14) |
@@ -607,9 +607,9 @@ recorded in the status as one of `fetch_failed`, `validation_failed`,
 | remove for good | `lodeline-server proxy retire ...` | `identity` |
 | remove one tool's stored content | `lodeline-server proxy delete-content ... --metadata-ref <ref>` | `identity` |
 
-All take the same connection flags as section 7. Within one poll interval after
+These commands take the same connection flags as section 7. Within one poll interval after
 `disable`, the proxy answers 401 and `health` shows `config_state: Disabled`.
-Every call appears in the management audit.
+Read the result with `lodeline-server proxy audit` (section 9).
 
 **Rotate a client token.** Make a second token for the principal
 (`token new`), add its verifier as a second entry in `verifiers` (at most 2 per
