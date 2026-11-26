@@ -25,8 +25,19 @@ use toml::Value;
 
 use super::codex::{config_source, emit_hook_reasons, hook_event_key_label, stamp_all};
 
-const MANIFESTS: [&str; 2] = [".codex-plugin/plugin.json", ".claude-plugin/plugin.json"];
-const DEFAULT_HOOKS: &str = "hooks/hooks.json";
+const MANIFEST_DIRS: [&str; 2] = [".codex-plugin", ".claude-plugin"];
+/// The `key_source` of the default hooks file.
+const DEFAULT_HOOKS_KEY: &str = "hooks/hooks.json";
+
+fn default_hooks(root: &Path) -> PathBuf {
+    root.join("hooks").join("hooks.json")
+}
+
+fn manifest_files(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    MANIFEST_DIRS
+        .iter()
+        .map(|dir| root.join(dir).join("plugin.json"))
+}
 const LOCAL_VERSION: &str = "local";
 
 /// One plugin hook declaration: a file in the plugin folder, or a block of
@@ -172,7 +183,7 @@ fn manifest_hooks(root: &Path, field: &serde_json::Value) -> Option<ManifestHook
 }
 
 fn plugin_hook_files(root: &Path) -> Vec<PluginHookFile> {
-    let manifest = MANIFESTS.iter().map(|m| root.join(m)).find(|p| p.is_file());
+    let manifest = manifest_files(root).find(|p| p.is_file());
     let mut field = None;
     if let Some(path) = &manifest {
         let parsed = std::fs::read_to_string(path)
@@ -215,8 +226,8 @@ fn plugin_hook_files(root: &Path) -> Vec<PluginHookFile> {
             }
         }
         None => out.extend(hook_file(
-            root.join(DEFAULT_HOOKS),
-            DEFAULT_HOOKS.to_string(),
+            default_hooks(root),
+            DEFAULT_HOOKS_KEY.to_string(),
         )),
     }
     out
@@ -343,8 +354,8 @@ pub(super) fn plugin_findings(
 pub(super) fn watched_paths(codex_dir: &Path, config: Option<&Value>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for plugin in enabled_plugins(codex_dir, config) {
-        out.push(plugin.root.join(DEFAULT_HOOKS));
-        out.extend(MANIFESTS.iter().map(|m| plugin.root.join(m)));
+        out.push(default_hooks(&plugin.root));
+        out.extend(manifest_files(&plugin.root));
         out.extend(plugin.files.into_iter().map(|f| f.file));
     }
     out.sort();
@@ -387,7 +398,12 @@ mod tests {
 
     impl Fixture {
         fn plugin_dir(&self, version: &str) -> PathBuf {
-            self.codex.join("plugins/cache/mk/demo").join(version)
+            self.codex
+                .join("plugins")
+                .join("cache")
+                .join("mk")
+                .join("demo")
+                .join(version)
         }
 
         fn write(&self, path: &Path, text: &str) {
@@ -428,7 +444,7 @@ mod tests {
     #[test]
     fn an_enabled_trusted_plugin_hook_is_scored_and_names_its_file() {
         let fx = fixture();
-        let file = fx.plugin_dir("1.0.0").join("hooks/hooks.json");
+        let file = fx.plugin_dir("1.0.0").join("hooks").join("hooks.json");
         fx.write(&file, DESTRUCTIVE);
         fx.config(&format!(
             "{ENABLED}{}",
@@ -441,7 +457,7 @@ mod tests {
     fn an_enabled_plugin_hook_without_a_trusted_hash_is_not_scored() {
         let fx = fixture();
         fx.write(
-            &fx.plugin_dir("1.0.0").join("hooks/hooks.json"),
+            &fx.plugin_dir("1.0.0").join("hooks").join("hooks.json"),
             DESTRUCTIVE,
         );
         fx.config(ENABLED);
@@ -452,7 +468,7 @@ mod tests {
     fn a_disabled_or_unlisted_plugin_contributes_nothing() {
         let fx = fixture();
         fx.write(
-            &fx.plugin_dir("1.0.0").join("hooks/hooks.json"),
+            &fx.plugin_dir("1.0.0").join("hooks").join("hooks.json"),
             DESTRUCTIVE,
         );
         let state = trusted("hooks/hooks.json:pre_tool_use:0:0");
@@ -465,7 +481,10 @@ mod tests {
     #[test]
     fn an_inline_manifest_hook_is_scored_and_names_the_manifest() {
         let fx = fixture();
-        let manifest = fx.plugin_dir("1.0.0").join(".codex-plugin/plugin.json");
+        let manifest = fx
+            .plugin_dir("1.0.0")
+            .join(".codex-plugin")
+            .join("plugin.json");
         fx.write(
             &manifest,
             &format!(r#"{{"name":"demo","hooks":{DESTRUCTIVE}}}"#),
@@ -481,9 +500,9 @@ mod tests {
     fn a_manifest_hooks_path_replaces_the_default_file() {
         let fx = fixture();
         let dir = fx.plugin_dir("1.0.0");
-        fx.write(&dir.join("hooks/hooks.json"), DESTRUCTIVE);
+        fx.write(&dir.join("hooks").join("hooks.json"), DESTRUCTIVE);
         fx.write(
-            &dir.join(".codex-plugin/plugin.json"),
+            &dir.join(".codex-plugin").join("plugin.json"),
             r#"{"name":"demo","hooks":"./extra.json"}"#,
         );
         fx.write(&dir.join("extra.json"), DESTRUCTIVE);
@@ -499,7 +518,7 @@ mod tests {
     fn a_malformed_plugin_hooks_file_is_skipped_without_an_error() {
         let fx = fixture();
         fx.write(
-            &fx.plugin_dir("1.0.0").join("hooks/hooks.json"),
+            &fx.plugin_dir("1.0.0").join("hooks").join("hooks.json"),
             "{ not json",
         );
         fx.config(&format!(
@@ -515,22 +534,113 @@ mod tests {
         let state = trusted("hooks/hooks.json:pre_tool_use:0:0");
         fx.config(&format!("{ENABLED}{state}"));
         fx.write(
-            &fx.plugin_dir("1.9.0").join("hooks/hooks.json"),
+            &fx.plugin_dir("1.9.0").join("hooks").join("hooks.json"),
             DESTRUCTIVE,
         );
-        let newest = fx.plugin_dir("1.10.0").join("hooks/hooks.json");
+        let newest = fx.plugin_dir("1.10.0").join("hooks").join("hooks.json");
         fx.write(&newest, DESTRUCTIVE);
         assert_eq!(fx.destructive(), vec![user_source(&newest)]);
-        let local = fx.plugin_dir("local").join("hooks/hooks.json");
+        fx.write(
+            &fx.plugin_dir("v9").join("hooks").join("hooks.json"),
+            DESTRUCTIVE,
+        );
+        let local = fx.plugin_dir("local").join("hooks").join("hooks.json");
         fx.write(&local, DESTRUCTIVE);
         assert_eq!(fx.destructive(), vec![user_source(&local)]);
+    }
+
+    #[test]
+    fn a_plugin_entry_without_enabled_counts_as_enabled() {
+        let fx = fixture();
+        let file = fx.plugin_dir("1.0.0").join("hooks").join("hooks.json");
+        fx.write(&file, DESTRUCTIVE);
+        fx.config(&format!(
+            "[plugins.\"demo@mk\"]\n{}",
+            trusted("hooks/hooks.json:pre_tool_use:0:0")
+        ));
+        assert_eq!(fx.destructive(), vec![user_source(&file)]);
+    }
+
+    #[test]
+    fn a_plugin_name_that_leaves_the_cache_folder_is_ignored() {
+        let fx = fixture();
+        fx.write(
+            &fx.codex
+                .join("outside")
+                .join("1.0.0")
+                .join("hooks")
+                .join("hooks.json"),
+            DESTRUCTIVE,
+        );
+        std::fs::create_dir_all(fx.codex.join("plugins").join("cache").join("mk")).unwrap();
+        fx.config(
+            "[plugins.\"../../../outside@mk\"]\nenabled = true\n\
+             [hooks.state.'../../../outside@mk:hooks/hooks.json:pre_tool_use:0:0']\ntrusted_hash = \"sha256:00\"\n",
+        );
+        assert!(fx.destructive().is_empty());
+    }
+
+    #[test]
+    fn a_manifest_hooks_path_that_leaves_the_plugin_folder_is_ignored() {
+        let fx = fixture();
+        let dir = fx.plugin_dir("1.0.0");
+        fx.write(&dir.join("..").join("outside.json"), DESTRUCTIVE);
+        fx.write(
+            &dir.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"demo","hooks":"./../outside.json"}"#,
+        );
+        fx.config(&format!(
+            "{ENABLED}{}",
+            trusted("../outside.json:pre_tool_use:0:0")
+        ));
+        assert!(fx.destructive().is_empty());
+    }
+
+    #[test]
+    fn a_malformed_manifest_means_the_plugin_adds_nothing() {
+        let fx = fixture();
+        let dir = fx.plugin_dir("1.0.0");
+        fx.write(&dir.join("hooks").join("hooks.json"), DESTRUCTIVE);
+        fx.write(&dir.join(".codex-plugin").join("plugin.json"), "{ not json");
+        fx.config(&format!(
+            "{ENABLED}{}",
+            trusted("hooks/hooks.json:pre_tool_use:0:0")
+        ));
+        assert!(fx.destructive().is_empty());
+    }
+
+    #[test]
+    fn a_state_without_a_trusted_hash_does_not_run_a_plugin_hook() {
+        let fx = fixture();
+        fx.write(
+            &fx.plugin_dir("1.0.0").join("hooks").join("hooks.json"),
+            DESTRUCTIVE,
+        );
+        fx.config(&format!(
+            "{ENABLED}[hooks.state.'demo@mk:hooks/hooks.json:pre_tool_use:0:0']\nenabled = true\n"
+        ));
+        assert!(fx.destructive().is_empty());
+    }
+
+    #[test]
+    fn a_state_that_sets_enabled_false_stops_a_plugin_hook() {
+        let fx = fixture();
+        fx.write(
+            &fx.plugin_dir("1.0.0").join("hooks").join("hooks.json"),
+            DESTRUCTIVE,
+        );
+        fx.config(&format!(
+            "{ENABLED}{}enabled = false\n",
+            trusted("hooks/hooks.json:pre_tool_use:0:0")
+        ));
+        assert!(fx.destructive().is_empty());
     }
 
     #[test]
     fn a_content_hash_mismatch_means_the_hook_does_not_run() {
         let fx = fixture();
         let dir = fx.plugin_dir("1.0.0");
-        fx.write(&dir.join("hooks/hooks.json"), DESTRUCTIVE);
+        fx.write(&dir.join("hooks").join("hooks.json"), DESTRUCTIVE);
         let hash = content_hash(&dir).unwrap();
         let state = |content: &str| {
             format!(
@@ -561,16 +671,19 @@ mod tests {
     fn the_user_parser_watches_the_files_of_an_enabled_plugin() {
         let fx = fixture();
         let dir = fx.plugin_dir("1.0.0");
-        fx.write(&dir.join("hooks/hooks.json"), DESTRUCTIVE);
-        fx.write(&dir.join(".codex-plugin/plugin.json"), r#"{"name":"demo"}"#);
+        fx.write(&dir.join("hooks").join("hooks.json"), DESTRUCTIVE);
+        fx.write(
+            &dir.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"demo"}"#,
+        );
         fx.config(ENABLED);
         let watched = CodexParser::with_codex_home(Some(fx.codex.clone())).watched_paths(&fx.home);
         assert!(
-            watched.contains(&dir.join("hooks/hooks.json")),
+            watched.contains(&dir.join("hooks").join("hooks.json")),
             "{watched:?}"
         );
         assert!(
-            watched.contains(&dir.join(".codex-plugin/plugin.json")),
+            watched.contains(&dir.join(".codex-plugin").join("plugin.json")),
             "{watched:?}"
         );
     }
