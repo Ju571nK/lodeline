@@ -75,16 +75,23 @@ There is no download. Build from source (Rust 1.88 or newer):
 
 ```sh
 git clone https://github.com/Ju571nK/lodeline.git && cd lodeline
-cargo build --release -p lodeline-proxy -p lodeline-server
-install -m 0755 target/release/lodeline-proxy /usr/local/bin/
-lodeline-proxy version
+cargo build --release --locked -p lodeline-proxy -p lodeline-server
+target/release/lodeline-proxy version
 ```
+
+`--locked` is needed: without it cargo may resolve a dependency that needs a newer
+Rust than 1.88. The binaries alone do not make a service. A host that uses them
+without a package must itself create the `lodeline-proxy` user and group,
+`/var/lib/lodeline-proxy` (owner `lodeline-proxy`, mode 0700) and a systemd unit
+(start from `packaging/systemd/lodeline-proxy.service`, which runs
+`/usr/bin/lodeline-proxy`). The rest of this guide assumes the package.
 
 Or build an OS package yourself (needs `cargo install cargo-deb cargo-generate-rpm`):
 
 ```sh
 packaging/build.sh proxy rpm      # or: packaging/build.sh proxy deb
-sudo dnf install ./target/generate-rpm/lodeline-proxy-*.rpm
+sudo dnf install ./target/generate-rpm/lodeline-proxy-*.rpm        # RHEL, Rocky
+sudo apt install ./target/debian/lodeline-proxy_*.deb              # Debian, Ubuntu
 ```
 
 The package installs the unit **disabled**, ships no live `/etc/lodeline/proxy.yaml`
@@ -136,8 +143,10 @@ openssl x509 -req -in mgmt.csr -CA host-ca.crt -CAkey host-ca.key \
   -set_serial 0x$(openssl rand -hex 8) -days 7 -extfile client.ext -out mgmt.crt
 ```
 
-Do not reuse the read API certificate for this. Routes that read proxy data
-refuse a management certificate, and a management certificate cannot double as one.
+Do not reuse the read API certificate for this. The routes that read proxy data
+(`/v1/proxies` and the invocation routes) refuse a management certificate, so reading
+them takes a different host certificate. The management audit route is the exception:
+`lodeline-server proxy audit` (section 9) takes the management certificate with the read bearer.
 
 **Proxy certificate.** Make the key on the proxy host so it stays there, and sign
 the request on the host that holds the proxy CA. The subject alternative name
@@ -191,16 +200,17 @@ proxy:
 
 ### 5.1 Management tokens
 
-Two scopes are used here: `identity` (register, fingerprint, enable, retire) and
+Two scopes are used here: `identity` (register, fingerprint, enable, retire, delete-content) and
 `config` (set config, disable). Each token is bound to the management certificate.
 `verifier-new` prints the token once on stdout and the file entry on stderr:
 
 ```sh
+umask 077
 lodeline-server proxy verifier-new --scope identity --caller-cert mgmt.crt \
   --key-id op-identity --not-after 2027-06-01T00:00:00Z > mgmt-identity.token 2> identity.entry
 lodeline-server proxy verifier-new --scope config --caller-cert mgmt.crt \
   --key-id op-config --not-after 2027-06-01T00:00:00Z > mgmt-config.token 2> config.entry
-chmod 600 mgmt-identity.token mgmt-config.token
+chmod 600 mgmt-identity.token mgmt-config.token    # already 0600 under the umask
 ```
 
 Each `.entry` file holds two lines of advice and then a JSON object. Build the
@@ -215,7 +225,9 @@ sudo install -o lodeline -g lodeline -m 0600 management-verifiers.json /etc/lode
 The server refuses a verifier file that is readable by others, owned by another
 account, or a symlink. At most 2 unexpired entries per scope are allowed, so a new
 token can overlap the old one during rotation. The file is read again at the next
-request after it changes.
+request after it changes. Write a new file and `mv` it over the old one: a file read
+half written fails closed, and every management route answers 404 until a valid
+file loads.
 
 Restart the server. Start with `registry_init: true`, then remove it.
 
@@ -224,9 +236,12 @@ Restart the server. Start with `registry_init: true`, then remove it.
 ## 6. Proxy bootstrap config
 
 The proxy has a small local config. Everything else (routes, principals, limits per
-route) comes from the server. Start from the example in
+route) comes from the server. The example in
 [`config/proxy.example.yaml`](../config/proxy.example.yaml), packaged as
-`/etc/lodeline/proxy.yaml.example`.
+`/etc/lodeline/proxy.yaml.example`, lists more keys. If you copy it, remove or
+comment out `tls_cert_file` and `tls_key_file` for a loopback listener: when they
+are set, the files must exist. The config below is the one this guide uses; write it
+to `proxy.yaml` in your working folder.
 
 ```yaml
 # /etc/lodeline/proxy.yaml
@@ -240,13 +255,19 @@ ca_file: "/etc/lodeline/proxy/ca.pem"
 credentials:
   example-upstream:
     secret_file: "/etc/lodeline/proxy/example-upstream.secret"
-    upstream_origins: ["https://mcp.example.com"]
+    upstream_origins: ["http://127.0.0.1:18080"]
 ```
 
 - `credentials` names each upstream secret by a reference. The secret is a file
   that only the `lodeline-proxy` user can read (mode 0600). No secret value is ever
   written in a config. Each reference lists the upstream origins it may be sent
-  to (`scheme://host[:port]`, no path). A reference with no origin is a start error.
+  to (`scheme://host[:port]`, no path; a default port is dropped). A reference with
+  no origin is a start error. **The origin of every route's `upstream_url` (section
+  7) must be listed here.** If it is not, the server accepts the config but the proxy
+  cannot apply it: the fetch ends in `apply_failed`, the proxy forwards nothing, and
+  every call is a 401. This example lists the loopback origin of the first route. For
+  a public upstream, list `"https://mcp.example.com"` instead. The bootstrap config
+  is read at start, so restart the proxy after you change it.
 - Unknown keys are errors. Relative paths resolve against the config file's
   directory.
 - A route carries one static upstream credential. The proxy replaces the client's
@@ -254,6 +275,7 @@ credentials:
   upstream.
 
 ```sh
+sudo install -o root -g lodeline-proxy -m 0640 proxy.yaml /etc/lodeline/proxy.yaml
 sudo install -d -o lodeline-proxy -g lodeline-proxy -m 0750 /etc/lodeline/proxy
 sudo install -o lodeline-proxy -g lodeline-proxy -m 0600 proxy.key /etc/lodeline/proxy/client.key
 sudo install -o lodeline-proxy -g lodeline-proxy -m 0644 proxy.crt /etc/lodeline/proxy/client.crt
@@ -269,8 +291,13 @@ sudo -u lodeline-proxy lodeline-proxy check-config --config /etc/lodeline/proxy.
 Each calling client gets its own principal and its own bearer token. `token new`
 prints the token once and its SHA-256 verifier. It stores nothing.
 
+The command reads the bootstrap config and the owner-only key and secret files, so it
+must run as the `lodeline-proxy` user. The shell that you run it from writes the
+output files, so set `umask 077` first.
+
 ```sh
-lodeline-proxy token new --config /etc/lodeline/proxy.yaml --principal alice > token-new.out
+umask 077
+sudo -u lodeline-proxy lodeline-proxy token new --config /etc/lodeline/proxy.yaml --principal alice > token-new.out
 sed -n 's/^token: //p' token-new.out > alice.token && chmod 600 alice.token
 sed -n 's/^verifier_sha256: //p' token-new.out > alice.verifier && rm token-new.out
 ```
@@ -319,9 +346,11 @@ verifier from section 6.1 in place of the placeholder:
 ```
 
 This first example uses the loopback case of section 2.1: an `http://` upstream on
-the proxy's own host. An `https://` upstream on a public name would use
-`https://mcp.example.com/mcp`, and the credential's `upstream_origins` must list its
-origin.
+the proxy's own host, and `upstream_origins` in section 6 lists `http://127.0.0.1:18080`
+for it. An `https://` upstream on a public name would use
+`https://mcp.example.com/mcp`, and then `upstream_origins` must list
+`https://mcp.example.com`. The two must agree, or the proxy ends in `apply_failed`
+(section 6).
 
 ```sh
 lodeline-server proxy config-put "${CONN[@]}" --token-file mgmt-config.token \
@@ -347,19 +376,22 @@ A later change needs `"expected_revision"` set to the current revision.
 
 ```sh
 sudo systemctl enable --now lodeline-proxy
-lodeline-proxy health --config /etc/lodeline/proxy.yaml
+sudo -u lodeline-proxy lodeline-proxy health --config /etc/lodeline/proxy.yaml
 ```
 
-`health` reads the local status file and opens no listener:
+`health` loads the bootstrap config, so like `token new` it runs as the
+`lodeline-proxy` user. It reads the local status file and opens no listener:
 
 ```text
 alive: true
 proxy_id: px-example-01
+epoch_id: ...
 run_state: ...
 config_state: Valid
 forwarding: true
 ingest_stopped: false
 spool: ...
+updated_at: ...
 ```
 
 Give the proxy a few seconds: right after a start it may print the previous
@@ -373,11 +405,13 @@ config and does not restart on it. The SELinux domain for the proxy does not exi
 yet, so on Rocky 9 the service runs unconfined. See
 [packaging/README.md](../packaging/README.md) for the clock wait on reboot.
 
-A test of the data plane, without a vendor client (the token comes from a file):
+A test of the data plane, without a vendor client. The header comes from a file, so
+the token is not on the `curl` command line (delete `alice.hdr` afterwards):
 
 ```sh
+(umask 077; printf 'Authorization: Bearer %s\n' "$(cat alice.token)" > alice.hdr)
 curl -sS -i http://127.0.0.1:8480/mcp/r1 \
-  -H "Authorization: Bearer $(cat alice.token)" \
+  -H @alice.hdr \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
 ```
@@ -389,7 +423,8 @@ A wrong or missing token answers `401` with a bare `WWW-Authenticate: Bearer`.
 ## 9. Reading the server side
 
 The server keeps the audit ledger and the proxy's status. Reading it needs the read
-bearer of install-server.md section 5 (and a host class client certificate), which
+bearer of install-server.md section 5 (`LODELINE_SERVER_READ_TOKEN`; save it to
+`read.token` with mode 0600) and a host class client certificate, which
 is a different credential from the management ones. The management audit (who registered,
 configured, disabled) is a CLI call:
 
@@ -525,10 +560,13 @@ observation, so it works only when the upstream answers 2025-11-25 (section 10).
 
 ### 11.3 Cursor
 
-Status: **documented only**. Cursor has no command to run here, so this snippet
-was not run. Source: <https://cursor.com/docs/context/mcp>. Cursor takes
-`url` with `headers`, in `~/.cursor/mcp.json` or `.cursor/mcp.json`, and expands
-`${env:NAME}`.
+Status: **documented only**; this snippet was not run, and no Cursor session was
+started against a proxy. Sources, read 2026-11-26:
+<https://cursor.com/docs/context/mcp> and <https://cursor.com/docs/cli/mcp>. Cursor
+takes `url` with `headers`, in `~/.cursor/mcp.json` or `.cursor/mcp.json`, and expands
+`${env:NAME}`. The Cursor CLI has MCP commands (`agent mcp list`, `list-tools`,
+`login`, `enable`, `disable`) but no command that adds a server, so you write the file
+by hand.
 
 ```json
 {
@@ -541,6 +579,35 @@ was not run. Source: <https://cursor.com/docs/context/mcp>. Cursor takes
 }
 ```
 
+Limits to expect with Cursor. Each is marked as the Cursor research record marks it:
+
+- **OAuth discovery on a 401** (reported by Cursor staff, 2026-03). On any 401 Cursor
+  may start OAuth discovery, even with a static `Authorization` header and a bare
+  `Bearer` challenge. The proxy then sees extra requests to `/.well-known/...` and
+  `POST /register`, and a wrong token can show as an OAuth error instead of a plain
+  401. What the proxy answers there was not measured.
+- **Empty 400 and SSE fallback** (reported by staff, 2026-09; for an empty body this
+  is inferred). Cursor 3.30 release notes (documented) say servers that only support
+  a newer stateless handshake now connect. If Cursor sends a modern request first, the
+  proxy answers an empty 400. Cursor has been seen to read a 400 on its first request
+  as "Streamable HTTP not supported" and fall back to an SSE GET. The proxy answers
+  every GET with 405, so the connection would fail. If Cursor retries with
+  `initialize` after the 400, the session works. Which one happens is unknown.
+- **Retries** (documented in the 3.30 release notes: connections cut off
+  mid-response are retried). What is retried is not stated. If Cursor sends a
+  `tools/call` again, that is a second call and a second audit record (inferred): the
+  proxy does not retry a call itself, and it does not merge a client's resend.
+- **GET after `initialize`** (reported): Cursor opens the optional GET stream. A 405
+  is the answer the MCP specification allows, and no Cursor source says Cursor
+  accepts it (inferred).
+- **Environment variables** (reported by a vendor doc and a third party guide): the
+  editor needs the variable in its own process environment. A macOS Dock launch may
+  not have it, and the header then goes out without the token. One user reported the
+  editor and the CLI resolve different spellings (`${env:NAME}` and `${VAR}`); the
+  docs do not say.
+- The CLI and the editor are documented to share the config files, not the client
+  code, so a CLI result does not prove the editor.
+
 ---
 
 ## 12. Limits
@@ -552,13 +619,13 @@ under load.
 | Limit | Default | When it is hit |
 |---|---|---|
 | request body / header | 1 MiB / 32 KiB | 413 `request_too_large` / 431 `headers_too_large` before the upstream is called |
-| one JSON response / one SSE event | 8 MiB / 1 MiB | the response is cut, and the call outcome is unknown |
-| one call, whole response | 64 MiB | the call is cut |
+| one JSON response / one SSE event | 8 MiB / 1 MiB | a length the upstream declares over the limit is refused before streaming with 502 `upstream_response_too_large`. With no declared length, or for an SSE event over the limit, the stream is cut and the call outcome is unknown. |
+| one call, whole response | 64 MiB | the same: a declared length over it is a 502, otherwise the stream is cut |
 | concurrent calls: all / per route / per principal | 64 / 16 / 8 | 429 `too_many_requests`, no queue |
-| sessions: all / per principal; idle | 256 / 32; 15 min | 429 `too_many_sessions` on `initialize` / the session ends |
-| connect / response idle / whole call | 5 s / 30 s / 120 s | 504 `upstream_timeout` |
+| sessions: all / per principal; idle | 256 / 32; 15 min with no call active | 429 `too_many_sessions` on `initialize` / the session ends |
+| connect / response idle / whole call | 5 s / 30 s / 120 s | 504 `upstream_timeout` while the proxy waits to connect or for the upstream's response headers. A stream that has started and then stalls, or runs past the whole call limit, is cut. Reading a slow client request body past the call limit is 408 `request_timeout`. |
 | shutdown grace | 30 s | calls still open then are recorded as unknown |
-| audit event / spool | 16 KiB / 1 GiB | a full spool refuses new calls (503) |
+| audit event / spool | 16 KiB / 1 GiB | a full spool refuses new calls (503 `audit_unavailable`) |
 
 The per-call and per-process bandwidth keys exist in the config, but the proxy does
 not shape traffic with them yet. The full list is in `config/proxy.example.yaml`.
@@ -574,13 +641,19 @@ By the status the client sees:
 | 401, `WWW-Authenticate: Bearer` | wrong, missing or foreign token; unknown route (the same answer on purpose); config not loaded or expired. Run `health`. |
 | 400, empty body | protocol rule: no or wrong `MCP-Protocol-Version` after `initialize`, a 2026-07-28 request, a bad session header (section 10) |
 | 403 `forbidden` | a browser `Origin` that is not in `allowed_origins`, or a `Host` header the loopback listener does not accept |
-| 404 | a path that is not `/mcp/{route_id}`; or a session the caller may not use |
+| 404 `not_found` | a path that is not `/mcp/{route_id}` |
+| 404, empty body | a session the caller may not use, or one that ended |
 | 405 | GET, or any method other than POST and DELETE |
 | 429 `too_many_requests` or `too_many_sessions` | a concurrency or session limit |
 | 502 `destination_refused` | the upstream resolves to an address the proxy refuses (section 2.1) |
-| 502 `upstream_unavailable`, `upstream_unresolved`, `upstream_rejected` | the upstream is down, its name does not resolve, or it answered 401 or 403 to the stored credential |
-| 503 `audit_unavailable` | the audit spool is full; see `health` and the server |
-| 504 `upstream_timeout` | a timeout from section 12 |
+| 502 `upstream_unavailable`, `upstream_unresolved` | the upstream is down, or its name does not resolve |
+| 502 `upstream_rejected` | the upstream answered 401 or 403 to the stored credential, and the request had no JSON-RPC `id` (a notification) or was a session DELETE |
+| HTTP 200 with JSON-RPC error `-32603` | the same upstream 401 or 403 on a request with an `id`: look here when the upstream secret is wrong |
+| 502 `upstream_response_too_large`, `upstream_redirect_refused` | a declared response over the limit (section 12); an upstream redirect, which the proxy never follows |
+| 503 `audit_unavailable` | the call could not be recorded: the audit spool is full, or writing it failed; see `health` and the server |
+| 503 `session_unavailable` | the proxy could not make a session id |
+| 504 `upstream_timeout` | no connection or response headers in time (section 12) |
+| 408 `request_timeout` | the client sent its request body too slowly |
 
 By `health`:
 
@@ -592,9 +665,12 @@ By `health`:
 | `config_state: Disabled` | the proxy was disabled (section 14) |
 | `ingest_stopped: true` | the server refuses the audit events; the spool grows |
 
-The proxy logs to the journal: `journalctl -u lodeline-proxy`. A failed fetch is
-recorded in the status as one of `fetch_failed`, `validation_failed`,
-`stale_revision`, `apply_failed` or `config_hash_mismatch`.
+The proxy logs to the journal: `journalctl -u lodeline-proxy`. `health` does not print
+the last update error. The status file `/var/lib/lodeline-proxy/status.json` and the
+server's proxy detail hold it as one of `fetch_failed`, `validation_failed`,
+`stale_revision`, `apply_failed` or `config_hash_mismatch`. `apply_failed` right after
+`config-put` usually means an upstream origin is missing from `upstream_origins`
+(section 6).
 
 ---
 
@@ -612,16 +688,21 @@ These commands take the same connection flags as section 7. Within one poll inte
 Read the result with `lodeline-server proxy audit` (section 9).
 
 **Rotate a client token.** Make a second token for the principal
-(`token new`), add its verifier as a second entry in `verifiers` (at most 2 per
-principal), put the new `expected_revision` in the file, run `config-put`, move the
-client to the new token, then `config-put` again without the old verifier.
+(`token new`; at most 2 verifiers per principal, and its `key_id` must differ from the
+old one), and add its verifier as a second entry in `verifiers`. Keep the whole `config` in the file (routes, `allowed_origins`,
+the other principals), set `expected_revision` to the current revision, and run
+`config-put`. Move the client to the new token, then `config-put` again without the
+old verifier. Run `token new` as in section 6.1.
 
 **Rotate a management token.** Make the new one with `verifier-new`, add its
-entry to the verifier file next to the old one, then remove the old entry.
+entry to the verifier file next to the old one, then remove the old entry. Replace
+the file with `mv`, as in section 5.1.
 
 **Rotate the proxy certificate.** Sign a new certificate, run
-`lodeline-server proxy fingerprint --cert-file` for it, then replace the files and
-restart the proxy.
+`lodeline-server proxy fingerprint "${CONN[@]}" --token-file mgmt-identity.token
+--proxy-id px-example-01 --cert-file proxy.crt` for the new file (`CONN` as in section 7).
+The server keeps the old fingerprint active until the proxy connects with the new
+certificate. Then replace the files and restart the proxy.
 
 **Teardown of a test.** Stop the unit, `retire` the proxy, delete the token files
 and the throwaway keys.
