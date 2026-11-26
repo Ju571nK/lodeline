@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lodeline-proxy");
+const TOKEN_SHAPED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Kills and reaps a spawned child on drop, so a failed assertion cannot leak it.
 struct Kill(std::process::Child);
@@ -70,6 +71,95 @@ fn run_without_config_is_a_usage_error() {
         "{stderr}"
     );
     assert!(stderr.contains("--config"), "{stderr}");
+
+    let out = Command::new(BIN)
+        .args(["token", "new", "--principal", TOKEN_SHAPED])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("required arguments were not provided"));
+    assert!(stderr.contains("--config"));
+    assert!(!stderr.contains(TOKEN_SHAPED));
+}
+
+#[test]
+fn usage_errors_do_not_echo_argument_values() {
+    let (_temp, config) = fixture();
+    let config = config.to_str().unwrap();
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &[
+                "token",
+                "new",
+                "--config",
+                config,
+                "--principal",
+                "alice",
+                TOKEN_SHAPED,
+            ],
+            "lodeline-proxy token new --help",
+        ),
+        (
+            &["run", "--config", config, TOKEN_SHAPED],
+            "lodeline-proxy run --help",
+        ),
+        (
+            &["check-config", "--config", config, TOKEN_SHAPED],
+            "lodeline-proxy check-config --help",
+        ),
+        (
+            &["health", "--config", config, TOKEN_SHAPED],
+            "lodeline-proxy health --help",
+        ),
+        (&["version", TOKEN_SHAPED], "lodeline-proxy version --help"),
+        (&["token", TOKEN_SHAPED], "lodeline-proxy token --help"),
+        (&[TOKEN_SHAPED], "lodeline-proxy --help"),
+        (
+            &["help", "token", TOKEN_SHAPED],
+            "lodeline-proxy token --help",
+        ),
+        (
+            &["snippet", "--client", TOKEN_SHAPED],
+            "lodeline-proxy snippet --help",
+        ),
+    ];
+    for (args, help) in cases {
+        let out = Command::new(BIN).args(*args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "expected help hint: {help}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr
+                .as_bytes()
+                .windows(64)
+                .any(|window| window.iter().all(u8::is_ascii_hexdigit)),
+            "stderr echoed a token-shaped argument for {help}"
+        );
+        assert!(stderr.contains("not echoed"), "expected help hint: {help}");
+        assert!(stderr.contains(help), "expected help hint: {help}");
+    }
+}
+
+#[test]
+fn help_and_version_keep_their_output_and_exit_status() {
+    let version = concat!("lodeline-proxy ", env!("CARGO_PKG_VERSION"), "\n");
+    let cases: &[(&[&str], &str)] = &[
+        (&["--help"], "Usage: lodeline-proxy <COMMAND>"),
+        (&["-h"], "Usage: lodeline-proxy <COMMAND>"),
+        (&["--version"], version),
+        (
+            &["help", "run"],
+            "Usage: lodeline-proxy run --config <CONFIG>",
+        ),
+        (&["snippet", "--help"], "--token-env <TOKEN_ENV>"),
+    ];
+    for (args, expected) in cases {
+        let out = Command::new(BIN).args(*args).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stderr.is_empty(), "{args:?}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains(expected), "{args:?}: {stdout}");
+    }
 }
 
 #[test]
