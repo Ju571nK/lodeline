@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- The agent and `lodeline scan` now report a Codex MCP server's `http_headers_helper`, a command Codex runs on the first request to a URL server, as a `project_settings_helper_command` finding that names the key and does not record the command. (#718)
+
 ### Fixed
 
 - A repo whose only Claude Code file is a `.claude/commands` folder now gets a project row, in the agent and in `lodeline scan` (#539).

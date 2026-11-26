@@ -1756,10 +1756,46 @@ fn mcp_server_reasons(val: &Value) -> Vec<(String, Vec<AiGuardReason>)> {
         let mut reasons = Vec::new();
         super::mcp_scan::emit_one_server(name, &json_def, &mut reasons);
         emit_static_credential_reasons(name, def, &mut reasons);
+        emit_headers_helper_reasons(name, def, &mut reasons);
         emit_mcp_approval_reasons(name.to_string(), def, None, false, &mut reasons);
         found.push((name.clone(), reasons));
     }
     found
+}
+
+/// #718: `http_headers_helper` is a command line that Codex runs with `sh -c`
+/// on the first HTTP request to a streamable-HTTP server, outside the sandbox
+/// (`rmcp-client/src/http_headers.rs`, rust-v0.172.0). Codex refuses to load a
+/// config where it is blank, sits on a stdio server, or sits on a server in
+/// another environment (`config/src/mcp_types.rs`), so only a URL server in
+/// the local environment is reported. A helper can embed a credential, so the
+/// finding names the key and the destructive-command check keeps no snippet.
+fn emit_headers_helper_reasons(server_name: &str, def: &Value, out: &mut Vec<AiGuardReason>) {
+    let Some(helper) = def
+        .get("http_headers_helper")
+        .and_then(Value::as_str)
+        .filter(|command| !command.trim().is_empty())
+    else {
+        return;
+    };
+    let in_local_environment = def
+        .get("environment_id")
+        .and_then(Value::as_str)
+        .is_none_or(|id| id == "local");
+    if def.get("command").is_some() || def.get("url").is_none() || !in_local_environment {
+        return;
+    }
+    let name = super::claude_project_settings::safe_name(server_name);
+    out.push(AiGuardReason::ProjectSettingsHelperCommand {
+        key: format!("mcp_servers.{name}.http_headers_helper"),
+    });
+    if let Some(pattern) = crate::ai_guard::rubric::first_destructive_pattern(helper) {
+        out.push(AiGuardReason::DestructiveInInlineCommand {
+            pattern: pattern.to_string(),
+            hook_event: "mcp_http_headers_helper".to_string(),
+            snippet: String::new(),
+        });
+    }
 }
 
 /// #200: `http_headers` maps header names to static values that Codex sends
@@ -6301,5 +6337,196 @@ base_url = "https://llm.corp.example/v1"
         assert_eq!(from_findings, reasons);
         assert!(findings.iter().all(|f| f.config_source.is_some()));
         assert_eq!(scored(&from_findings), scored(&reasons));
+    }
+
+    // ─── mcp_servers.<name>.http_headers_helper ────────────────────────────
+
+    const HELPER_SECRET: &str = "test-value-0";
+
+    fn helper_toml(server_keys: &str) -> String {
+        format!(
+            "[mcp_servers.acme]\n{server_keys}\n\
+             http_headers_helper = \"fetch-token --key {HELPER_SECRET}\"\n"
+        )
+    }
+
+    fn helper_keys(reasons: &[AiGuardReason]) -> Vec<String> {
+        reasons
+            .iter()
+            .filter_map(|r| match r {
+                AiGuardReason::ProjectSettingsHelperCommand { key } => Some(key.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn is_helper(r: &AiGuardReason) -> bool {
+        matches!(r, AiGuardReason::ProjectSettingsHelperCommand { .. })
+    }
+
+    #[test]
+    fn a_helper_on_a_url_server_is_reported_by_key_and_never_by_command() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &helper_toml("url = \"https://mcp.example.com/mcp\""),
+        );
+        let reasons = CodexParser::default().assess(home.path()).unwrap();
+        assert_eq!(
+            helper_keys(&reasons),
+            ["mcp_servers.acme.http_headers_helper"]
+        );
+        let wire = serde_json::to_string(&reasons).unwrap();
+        assert!(!wire.contains(HELPER_SECRET), "{wire}");
+        assert!(!wire.contains("fetch-token"), "{wire}");
+    }
+
+    #[test]
+    fn a_server_name_that_is_not_plain_is_redacted_in_the_key() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &format!(
+                "[mcp_servers.\"a b\"]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers_helper = \"fetch-token --key {HELPER_SECRET}\"\n"
+            ),
+        );
+        let reasons = CodexParser::default().assess(home.path()).unwrap();
+        assert_eq!(
+            helper_keys(&reasons),
+            [format!(
+                "mcp_servers.{}.http_headers_helper",
+                super::super::claude_project_settings::safe_name("a b")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_helper_that_codex_refuses_or_never_runs_is_not_reported() {
+        let url = "url = \"https://mcp.example.com/mcp\"\n";
+        let configs = [
+            // Codex: "http_headers_helper must not be empty".
+            format!("[mcp_servers.acme]\n{url}http_headers_helper = \"  \"\n"),
+            // Codex: "http_headers_helper is not supported for stdio".
+            helper_toml("command = \"npx\""),
+            // Codex: "url is not supported for stdio".
+            helper_toml(&format!("command = \"npx\"\n{url}")),
+            // Codex: "invalid transport".
+            helper_toml(""),
+            // Codex: "only supported for local MCP servers".
+            helper_toml(&format!("{url}environment_id = \"remote\"")),
+            // Codex does not start a disabled server.
+            helper_toml(&format!("{url}enabled = false")),
+            // No helper at all.
+            format!("[mcp_servers.acme]\n{url}"),
+        ];
+        for config in configs {
+            let home = tempdir().unwrap();
+            write_config(home.path(), &config);
+            let reasons = CodexParser::default().assess(home.path()).unwrap();
+            assert!(helper_keys(&reasons).is_empty(), "{config}\n{reasons:?}");
+        }
+    }
+
+    #[test]
+    fn a_helper_on_a_server_in_the_local_environment_is_reported() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &helper_toml("url = \"https://mcp.example.com/mcp\"\nenvironment_id = \"local\""),
+        );
+        let reasons = CodexParser::default().assess(home.path()).unwrap();
+        assert_eq!(helper_keys(&reasons).len(), 1, "{reasons:?}");
+    }
+
+    #[test]
+    fn a_project_config_helper_is_reported_with_the_project_file() {
+        let (dir, project) = project_with(&helper_toml("url = \"https://mcp.example.com/mcp\""));
+        let findings = project.assess_sourced(dir.path()).unwrap();
+        assert_eq!(
+            source_of(&findings, is_helper),
+            source(
+                ConfigLayer::Project,
+                &dir.path().join("repo").join(".codex").join("config.toml")
+            )
+        );
+        let reasons: Vec<_> = findings.into_iter().map(|f| f.reason).collect();
+        assert_eq!(
+            helper_keys(&reasons),
+            ["mcp_servers.acme.http_headers_helper"]
+        );
+        let wire = serde_json::to_string(&reasons).unwrap();
+        assert!(!wire.contains(HELPER_SECRET) && !wire.contains("fetch-token"));
+    }
+
+    #[test]
+    fn a_helper_names_the_layer_that_defines_the_server() {
+        let (_root, system, home) = system_and_home();
+        let codex = home.join(".codex");
+        let toml = helper_toml("url = \"https://mcp.example.com/mcp\"");
+        std::fs::write(system.join("config.toml"), &toml).unwrap();
+        assert_eq!(
+            source_of(&user_findings(&system, &home), is_helper),
+            source(ConfigLayer::System, &system.join("config.toml"))
+        );
+        std::fs::write(codex.join("config.toml"), &toml).unwrap();
+        assert_eq!(
+            source_of(&user_findings(&system, &home), is_helper),
+            source(ConfigLayer::User, &codex.join("config.toml"))
+        );
+    }
+
+    #[test]
+    fn a_helper_adds_two_points_to_the_score_of_its_server() {
+        let url = "url = \"https://mcp.example.com/mcp\"";
+        let score_of = |config: &str| {
+            let home = tempdir().unwrap();
+            write_config(home.path(), config);
+            scored(&CodexParser::default().assess(home.path()).unwrap())
+        };
+        let without = score_of(&format!("[mcp_servers.acme]\n{url}\n"));
+        let with = score_of(&helper_toml(url));
+        assert_eq!(without, 1.0);
+        assert_eq!(with, 3.0);
+    }
+
+    #[test]
+    fn a_destructive_helper_is_flagged_without_recording_any_of_it() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &format!(
+                "[mcp_servers.acme]\nurl = \"https://mcp.example.com/mcp\"\n\
+                 http_headers_helper = \"rm -rf ~ # {HELPER_SECRET}\"\n"
+            ),
+        );
+        let reasons = CodexParser::default().assess(home.path()).unwrap();
+        assert_eq!(helper_keys(&reasons).len(), 1, "{reasons:?}");
+        let destructive: Vec<_> = reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. }))
+            .collect();
+        assert_eq!(destructive.len(), 1, "{reasons:?}");
+        let wire = serde_json::to_string(&reasons).unwrap();
+        assert!(
+            !wire.contains(HELPER_SECRET) && !wire.contains("rm -rf"),
+            "{wire}"
+        );
+    }
+
+    #[test]
+    fn notify_is_still_reported_beside_a_helper() {
+        let home = tempdir().unwrap();
+        write_config(
+            home.path(),
+            &format!(
+                "notify = [\"say\", \"done\"]\n{}",
+                helper_toml("url = \"https://mcp.example.com/mcp\"")
+            ),
+        );
+        let reasons = CodexParser::default().assess(home.path()).unwrap();
+        let mut keys = helper_keys(&reasons);
+        keys.sort();
+        assert_eq!(keys, ["mcp_servers.acme.http_headers_helper", "notify"]);
     }
 }

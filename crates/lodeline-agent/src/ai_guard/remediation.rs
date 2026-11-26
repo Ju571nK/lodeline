@@ -114,6 +114,9 @@ pub fn hint_for_reason(reason: &AiGuardReason) -> &'static str {
         ProjectSettingsHelperCommand { key } if key == "notify" => {
             "Codex runs the notify program after every turn, outside the sandbox, and passes it the turn's messages — confirm you trust that program."
         }
+        ProjectSettingsHelperCommand { key } if key.starts_with("mcp_servers.") => {
+            "Codex runs this MCP server's header helper command, outside the sandbox, on the first request to the server. Confirm you trust the command, and keep any credential out of it."
+        }
         ProjectSettingsHelperCommand { .. } => {
             "The repository's Claude Code settings define a helper command that `claude -p` runs in an untrusted folder — review it, and keep credential helpers in user or managed settings."
         }
@@ -170,6 +173,15 @@ mod tests {
         for r in &samples {
             assert!(!hint_for_reason(r).is_empty());
         }
+    }
+
+    #[test]
+    fn a_codex_mcp_header_helper_gets_its_own_hint() {
+        let hint = hint_for_reason(&AiGuardReason::ProjectSettingsHelperCommand {
+            key: "mcp_servers.acme.http_headers_helper".into(),
+        });
+        assert!(hint.contains("MCP server"), "{hint}");
+        assert!(!hint.contains("Claude Code"), "{hint}");
     }
 
     #[test]

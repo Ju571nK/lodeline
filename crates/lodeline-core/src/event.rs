@@ -562,7 +562,9 @@ pub enum AiGuardReason {
     /// folder that was never trusted. `key` names the setting; the command is
     /// not recorded, because a helper can embed a credential. #200 — also
     /// Codex `notify` (`key = "notify"`), a program run after every turn,
-    /// from user or system config. POSTURE only.
+    /// from user or system config. #718: also Codex
+    /// `mcp_servers.<name>.http_headers_helper`, a command run on the first
+    /// request to a streamable-HTTP server, from any config layer. POSTURE only.
     ProjectSettingsHelperCommand {
         key: String,
     },
