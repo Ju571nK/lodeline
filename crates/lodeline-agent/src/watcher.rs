@@ -693,7 +693,7 @@ fn folder_leaf_links(dir: &Path, name: &std::ffi::OsStr) -> Vec<PathBuf> {
     resolve_pattern(dir)
         .into_iter()
         .take(crate::runtime::WARMUP_ENTRY_LIMIT)
-        .filter(|(_, via_link)| !via_link)
+        .filter(|(_, via_link)| via_link.is_none())
         .map(|(folder, _)| folder.join(name))
         .filter(|leaf| std::fs::symlink_metadata(leaf).is_ok_and(|m| m.is_symlink()))
         .filter(|leaf| dunce::canonicalize(leaf).is_ok_and(|real| real.is_file()))
