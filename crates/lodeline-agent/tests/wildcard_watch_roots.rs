@@ -143,7 +143,12 @@ async fn reload(steps: Arc<Steps>, poll: bool) {
         {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline);
+        steps.at("wait for the old target to return");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the old target did not return within {:?}",
+            fs_event_timeout()
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let removed = td

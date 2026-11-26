@@ -79,10 +79,7 @@ fn a_runtime_drop_hang_after_stop_still_reports_the_events_seen() {
     .unwrap_err();
 
     let text = panic_text(err);
-    assert!(
-        text.contains("stuck at step \"drop the runtime\""),
-        "{text}"
-    );
+    assert!(text.contains("stuck at step \"runtime drop\""), "{text}");
     assert!(text.contains("events in all"), "{text}");
     assert!(
         !text.contains("last kinds []"),

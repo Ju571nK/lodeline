@@ -21,8 +21,10 @@ fn it_graceful_shutdown_drains_queue() {
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
             stop_bounded(&steps, &mut agent).await;
+            steps.at("wait for drained events");
             tokio::time::sleep(Duration::from_millis(500)).await;
             let events = agent.read_all_events();
+            steps.at("drop the agent");
             assert!(!events.is_empty(), "expected at least one drained event");
         },
     );
