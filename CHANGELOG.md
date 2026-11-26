@@ -7,6 +7,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+### Added
+
+- The agent and `lodeline scan` now report a Codex MCP server's `http_headers_helper`, a command Codex runs on the first request to a URL server, as a `project_settings_helper_command` finding that names the key and does not record the command. (#718)
+
 ### Fixed
 
 - A Windows agent running as a service now assesses every user profile on the host, like a root agent on Linux and macOS (#540).
