@@ -46,6 +46,68 @@ pub struct WatcherHandle {
     activity: Arc<RootActivity>,
     /// Quiet time after which an active directory root is re-armed. `None` never re-arms.
     rearm_after: Option<Duration>,
+    scope: LinkScope,
+}
+
+type OwnerOf = Arc<dyn Fn(&Path, bool) -> Option<u32> + Send + Sync>;
+
+/// Whether the agent serves one account or a whole host, which decides whose links it follows.
+#[derive(Clone)]
+pub struct LinkScope {
+    shared_host: bool,
+    homes: Vec<PathBuf>,
+    owner_of: OwnerOf,
+}
+
+impl LinkScope {
+    pub fn single_user() -> Self {
+        Self {
+            shared_host: false,
+            homes: Vec::new(),
+            owner_of: Arc::new(file_owner),
+        }
+    }
+
+    pub fn shared_host(homes: Vec<PathBuf>) -> Self {
+        Self {
+            shared_host: true,
+            homes,
+            owner_of: Arc::new(file_owner),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_owner_of(
+        mut self,
+        owner_of: impl Fn(&Path, bool) -> Option<u32> + Send + Sync + 'static,
+    ) -> Self {
+        self.owner_of = Arc::new(owner_of);
+        self
+    }
+
+    fn allows(&self, _link: &Path, _real: &Path) -> bool {
+        true
+    }
+
+    fn under_link_home(&self, _link: &Path, _real: &Path) -> bool {
+        true
+    }
+}
+
+#[cfg(unix)]
+fn file_owner(path: &Path, follow: bool) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = if follow {
+        std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
+    };
+    meta.ok().map(|m| m.uid())
+}
+
+#[cfg(not(unix))]
+fn file_owner(_path: &Path, _follow: bool) -> Option<u32> {
+    None
 }
 
 /// ReadDirectoryChangesW can end a directory watch without telling the agent (#627), and a
@@ -746,6 +808,24 @@ pub fn spawn_watcher(
     capacity: usize,
     poll_interval: Option<Duration>,
 ) -> Result<(mpsc::Receiver<RawFsEvent>, WatcherHandle), WatcherError> {
+    spawn_watcher_scoped(
+        roots,
+        runtime_handle,
+        capacity,
+        poll_interval,
+        LinkScope::single_user(),
+    )
+}
+
+/// `spawn_watcher` for an agent that may serve more than one account: `scope` decides whose
+/// links it follows.
+pub fn spawn_watcher_scoped(
+    roots: Vec<(PathBuf, bool)>,
+    runtime_handle: tokio::runtime::Handle,
+    capacity: usize,
+    poll_interval: Option<Duration>,
+    scope: LinkScope,
+) -> Result<(mpsc::Receiver<RawFsEvent>, WatcherHandle), WatcherError> {
     let (tx, rx) = mpsc::channel::<RawFsEvent>(capacity);
     let tx = Arc::new(tx);
     let tx_for_cb = tx.clone();
@@ -834,6 +914,7 @@ pub fn spawn_watcher(
         warned: BTreeSet::new(),
         activity,
         rearm_after: cfg!(windows).then_some(WINDOWS_REARM_AFTER),
+        scope,
     };
     for (root, recursive) in roots {
         *handle.desired.entry(root).or_default() |= recursive;
@@ -1956,6 +2037,124 @@ mod tests {
     #[cfg(unix)]
     fn aliases_of(watcher: &WatcherHandle) -> Vec<(PathBuf, PathBuf)> {
         watcher.aliases_rx().borrow().to_vec()
+    }
+
+    #[cfg(unix)]
+    fn scoped_watcher(scope: LinkScope) -> WatcherHandle {
+        spawn_watcher_scoped(
+            vec![],
+            tokio::runtime::Handle::current(),
+            16,
+            Some(Duration::from_secs(60)),
+            scope,
+        )
+        .unwrap()
+        .1
+    }
+
+    /// A link owned by uid 1000 under `mine`, to a file under `theirs` owned by `target_uid`.
+    #[cfg(unix)]
+    fn owned_link(
+        dir: &Path,
+        target_uid: u32,
+        scope: impl FnOnce() -> LinkScope,
+    ) -> (WatcherHandle, PathBuf, PathBuf) {
+        fs::create_dir_all(dir.join("mine")).unwrap();
+        fs::create_dir_all(dir.join("theirs")).unwrap();
+        let real = dir.join("theirs/real.json");
+        fs::write(&real, b"x").unwrap();
+        let link = dir.join("mine/settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let theirs = dir.join("theirs");
+        let scope = scope().with_owner_of(move |path, _| {
+            Some(if path.starts_with(&theirs) {
+                target_uid
+            } else {
+                1000
+            })
+        });
+        (scoped_watcher(scope), link, real)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_host_agent_refuses_a_file_link_to_another_accounts_file() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, _real) =
+            owned_link(&dir, 0, || LinkScope::shared_host(vec![dir.join("mine")]));
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert!(aliases_of(&watcher).is_empty());
+        assert_eq!(
+            logs.matches("link target belongs to another account")
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_host_agent_follows_a_file_link_to_the_same_accounts_file() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, real) = owned_link(&dir, 1000, || {
+            LinkScope::shared_host(vec![dir.join("mine")])
+        });
+        watcher.follow_files(vec![link.clone()], true);
+        assert_eq!(aliases_of(&watcher), [(real, link)]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_single_user_agent_follows_a_file_link_to_another_accounts_file() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, real) = owned_link(&dir, 0, LinkScope::single_user);
+        watcher.follow_files(vec![link.clone()], true);
+        assert_eq!(aliases_of(&watcher), [(real, link)]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_host_agent_refuses_a_folder_link_to_another_accounts_folder() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("mine/skills")).unwrap();
+        fs::create_dir_all(dir.join("theirs/x")).unwrap();
+        std::os::unix::fs::symlink(dir.join("theirs/x"), dir.join("mine/skills/x")).unwrap();
+        let theirs = dir.join("theirs");
+        let scope = LinkScope::shared_host(vec![dir.join("mine")])
+            .with_owner_of(move |path, _| Some(if path.starts_with(&theirs) { 0 } else { 1000 }));
+        let mut watcher = scoped_watcher(scope);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&dir.join("mine/skills/*"), false).unwrap();
+        });
+        assert!(aliases_of(&watcher).is_empty());
+        assert_eq!(
+            logs.matches("link target belongs to another account")
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn a_link_target_must_sit_under_the_home_the_link_is_in() {
+        let (alice, bob) = (
+            Path::new("homes").join("alice"),
+            Path::new("homes").join("bob"),
+        );
+        let homes = LinkScope::shared_host(vec![alice.clone(), bob.clone()]);
+        let link = alice.join(".claude").join("settings.json");
+        assert!(homes.under_link_home(&link, &alice.join("dotfiles").join("a.json")));
+        assert!(!homes.under_link_home(&link, &bob.join("a.json")));
+        assert!(!homes.under_link_home(&link, &Path::new("opt").join("a.json")));
+        let stray = Path::new("srv").join("settings.json");
+        assert!(!homes.under_link_home(&stray, &stray));
     }
 
     #[cfg(unix)]
