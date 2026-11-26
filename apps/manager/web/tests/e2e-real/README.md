@@ -40,3 +40,8 @@ are numbered and the list spec, which reads connection state, runs first.
   proxy sends them.
 - A server without a `proxy:` section. The launcher starts one variant only.
 - The alerts, fleet and device pages. They run on the mock fleet and are not covered here.
+
+The run sets `MOCK_FLEET` to an empty value for the console, so a `MOCK_FLEET=1` in your shell
+cannot make it read the mock fleet. If Playwright is killed abnormally, the launcher and the
+console can stay up on 127.0.0.1. Find them with `lsof -nP -iTCP:18381 -iTCP:18382 -sTCP:LISTEN`
+and stop each by process id.

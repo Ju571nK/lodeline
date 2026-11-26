@@ -57,6 +57,8 @@ export default defineConfig({
       gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
       env: {
         LISTEN_ADDR: `127.0.0.1:${env.CONSOLE_PORT}`,
+        // An inherited MOCK_FLEET=1 would make the console serve the mock fleet.
+        MOCK_FLEET: '',
         LODELINE_SERVER_BASE_URL: env.SERVER_URL,
         LODELINE_SERVER_READ_TOKEN: env.READ_TOKEN,
         TRIAGE_DB_PATH: env.TRIAGE_DB_PATH,
