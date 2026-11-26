@@ -283,3 +283,21 @@ fn snippet_refuses_a_name_that_starts_with_a_hyphen() {
     let ok = snippet("claude-code", "a-b", URL, "r1", "T");
     assert!(ok.status.success());
 }
+
+#[test]
+fn a_non_utf8_argument_is_a_usage_error_not_a_panic() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    assert_valid_call_works();
+    let bad = OsStr::from_bytes(b"\xff\xfe");
+    let cases: Vec<Vec<&OsStr>> = vec![
+        vec![bad],
+        vec![OsStr::new("snippet"), bad, OsStr::new("--client")],
+        vec![OsStr::new("run"), bad],
+    ];
+    for args in cases {
+        let o = Command::new(BIN).args(&args).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "args {args:?}: {}", err(&o));
+        assert!(!err(&o).contains("panicked"), "stderr: {}", err(&o));
+    }
+}

@@ -9,7 +9,7 @@ use std::process::ExitCode;
 const EXIT_INVALID_CONFIG: u8 = 2;
 
 fn is_snippet_usage_error(e: &clap::Error) -> bool {
-    e.use_stderr() && std::env::args().nth(1).as_deref() == Some("snippet")
+    e.use_stderr() && std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("snippet"))
 }
 
 fn main() -> ExitCode {
