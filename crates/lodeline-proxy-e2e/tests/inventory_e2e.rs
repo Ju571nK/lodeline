@@ -40,6 +40,8 @@ const T_CFG: &str = "tok-config-inv";
 const READ_BEARER: &str = "read-bearer";
 const PROXY: &str = "px-inv";
 const CLIENT_TOKEN: &str = "client-tok";
+/// Message of the upstream JSON-RPC error that `NAMES[1]` calls get.
+const ERROR_CANARY: &str = "upstream-error-message-canary-8d3f";
 const WAIT: Duration = Duration::from_secs(30);
 
 // ------------------------------------------------------------ fake MCP upstream
@@ -84,6 +86,9 @@ fn answer(state: &Mutex<UpState>, body: &[u8]) -> Vec<u8> {
         json!({"protocolVersion":"2025-11-25", "capabilities":{"tools":{}}, "serverInfo":{"name":"fixture","version":"1"}})
     } else if v["method"] == "tools/call" {
         state.lock().unwrap().calls += 1;
+        if v["params"]["name"] == NAMES[1] {
+            return serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": ERROR_CANARY}})).unwrap();
+        }
         json!({"content":[{"type":"text","text":"private-result-canary"}]})
     } else if v["method"] == "tools/list" {
         let s = state.lock().unwrap();
@@ -1011,6 +1016,175 @@ async fn real_invocations_replay_deduplicate_and_refuse_before_dispatch() {
         assert!(!query.contains(canary));
     }
     px.stop().await;
+}
+
+/// AC-05 on the real binary: canaries in the arguments, the result and an
+/// upstream JSON-RPC error message must not appear in any byte of the state
+/// directory after a clean stop, nor in the process log at the default level
+/// (`RUST_LOG` unset, so `info`).
+#[tokio::test]
+async fn call_canaries_reach_neither_the_state_dir_bytes_nor_the_default_log() {
+    const ARG: &str = "raw-argument-canary-41c7";
+    const ARG_ERR: &str = "raw-error-argument-canary-9b20";
+    const RESULT: &str = "private-result-canary";
+    let Some(h) = H::new(
+        &[
+            (NAMES[0], "private-description-canary"),
+            (NAMES[1], "err tool"),
+        ],
+        10,
+    )
+    .await
+    else {
+        return;
+    };
+    let cfg_path = h.pki.p("proxy.yaml");
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen = free.local_addr().unwrap().port();
+    drop(free);
+    std::fs::write(&cfg_path, h.bootstrap_yaml(&format!("127.0.0.1:{listen}"))).unwrap();
+    let Some(bin) = proxy_binary() else {
+        return;
+    };
+    let log_path = h.pki.p("canary-proxy.log");
+    let child = Arc::new(Mutex::new(Child(
+        Command::new(bin)
+            .args(["run", "--config"])
+            .arg(&cfg_path)
+            .env_remove("RUST_LOG")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log_path).unwrap())
+            .spawn()
+            .expect("spawns the real proxy"),
+    )));
+    let px = Running {
+        listen,
+        session: tokio::sync::Mutex::new(None),
+        spool: None,
+        stop: None,
+        task: None,
+    };
+    let alive = |child: &Arc<Mutex<Child>>| {
+        if let Ok(Some(st)) = child.lock().unwrap().0.try_wait() {
+            panic!("the proxy exited early: {st}");
+        }
+    };
+    eventually("the real process forwards", || async {
+        alive(&child);
+        px.call(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+            .await
+            .0
+            == 200
+    })
+    .await;
+    assert_eq!(px.list_all().await, 2);
+    eventually("the baseline snapshot is on the server", || async {
+        alive(&child);
+        h.snapshots().await.len() == 1
+    })
+    .await;
+    let (st, ok) = px
+        .call(json!({"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":NAMES[0],"arguments":{"k":ARG}}}))
+        .await;
+    assert_eq!(st, 200);
+    assert!(
+        ok.to_string().contains(RESULT),
+        "the result reaches the client: {ok}"
+    );
+    let (st, err) = px
+        .call(json!({"jsonrpc":"2.0","id":81,"method":"tools/call","params":{"name":NAMES[1],"arguments":{"k":ARG_ERR}}}))
+        .await;
+    assert_eq!(st, 200);
+    assert!(
+        err.to_string().contains(ERROR_CANARY),
+        "the error reaches the client: {err}"
+    );
+    assert_eq!(h.up.state.lock().unwrap().calls, 2);
+    eventually("both calls are on the server", || async {
+        let rows = h
+            .items(&format!("/v1/proxy-invocations?proxy_id={PROXY}"))
+            .await;
+        rows.iter().any(|r| r["outcome"] == "success")
+            && rows.iter().any(|r| r["outcome"] != "success")
+    })
+    .await;
+    let kill = Command::new("kill")
+        .args(["-TERM", &child.lock().unwrap().0.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    let start = Instant::now();
+    let st = loop {
+        if let Some(st) = child.lock().unwrap().0.try_wait().unwrap() {
+            break st;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no clean stop");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(st.success(), "clean exit, got {st}");
+
+    // Call content must be nowhere in the state dir. The tool name and
+    // description come from the listing, and the local metadata registry keeps
+    // them on purpose (see `registry_store.rs`), so only that store may hold them.
+    let call_canaries = [
+        ARG,
+        ARG_ERR,
+        RESULT,
+        ERROR_CANARY,
+        CLIENT_TOKEN,
+        "UPSTREAM-SECRET-VALUE",
+    ];
+    let listing_canaries = ["private-description-canary", NAMES[0], NAMES[1]];
+    let canaries: Vec<&str> = call_canaries.into_iter().chain(listing_canaries).collect();
+    let mut files = Vec::new();
+    let mut dirs = vec![h.state_dir()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    let find = |hay: &[u8], needle: &str| hay.windows(needle.len()).any(|w| w == needle.as_bytes());
+    let mut all = Vec::new();
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap();
+        let registry = f
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("registry.sqlite3"));
+        for c in call_canaries {
+            assert!(
+                !find(&bytes, c),
+                "{c} found in the bytes of {}",
+                f.display()
+            );
+        }
+        for c in listing_canaries {
+            assert!(
+                registry || !find(&bytes, c),
+                "{c} found in the bytes of {}",
+                f.display()
+            );
+        }
+        all.extend_from_slice(&bytes);
+    }
+    // Controls: the scan reads real content. The spool holds the event type
+    // and the upstream id of the calls (neither is private).
+    for marker in ["invocation.started", "up1"] {
+        assert!(
+            find(&all, marker),
+            "control marker {marker} is not in {} state files",
+            files.len()
+        );
+    }
+    let log = std::fs::read(&log_path).unwrap();
+    for c in &canaries {
+        assert!(!find(&log, c), "{c} found in the proxy log");
+    }
+    assert!(!log.is_empty(), "control: the default log has lines");
 }
 
 /// README "Not-yet-synced refs": an event 424 makes the producer upload the
