@@ -574,10 +574,19 @@ impl TableHandle {
             boot: None,
         };
     }
-    fn stamp(&self, ttl: std::time::Duration) -> Option<BootStamp> {
-        let at = (self.boot_clock)()?;
-        let ttl_secs = i64::try_from(ttl.as_secs()).ok()?;
-        Some(BootStamp { at, ttl_secs })
+    /// The boot clock now. [`crate::config_sync::ConfigSync`] reads it beside the
+    /// monotonic receipt instant, before validation and persistence, and hands
+    /// it to [`TableHandle::set_with_deadline`] or [`TableHandle::extend_deadline`].
+    pub fn boot_now(&self) -> Option<BootInstant> {
+        (self.boot_clock)()
+    }
+    /// Whole seconds, rounded up, so a short TTL never collapses to zero.
+    fn stamp(receipt: Option<BootInstant>, ttl: std::time::Duration) -> Option<BootStamp> {
+        let ttl_secs = i64::try_from(ttl.as_secs() + u64::from(ttl.subsec_nanos() > 0)).ok()?;
+        Some(BootStamp {
+            at: receipt?,
+            ttl_secs,
+        })
     }
     /// Has the boot clock advanced by the TTL since receipt? A reading from
     /// another boot cannot be compared, so it counts as expired. Without a boot
@@ -599,14 +608,15 @@ impl TableHandle {
         self.boot_elapsed_in(&self.slot.read().unwrap_or_else(|e| e.into_inner()))
     }
     /// Install a table that stops being returned by [`TableHandle::current`] at
-    /// `deadline`, or once the boot clock has advanced by `ttl`.
+    /// `deadline`, or once the boot clock has advanced by `ttl` since `receipt`.
     pub fn set_with_deadline(
         &self,
         table: RouteTable,
         deadline: tokio::time::Instant,
         ttl: std::time::Duration,
+        receipt: Option<BootInstant>,
     ) {
-        let boot = self.stamp(ttl);
+        let boot = Self::stamp(receipt, ttl);
         *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Slot {
             table: Some(Arc::new(table)),
             deadline: Some(deadline),
@@ -615,8 +625,13 @@ impl TableHandle {
     }
     /// Move the deadline of the installed table (a TTL refresh). No-op when no
     /// table is installed.
-    pub fn extend_deadline(&self, deadline: tokio::time::Instant, ttl: std::time::Duration) {
-        let boot = self.stamp(ttl);
+    pub fn extend_deadline(
+        &self,
+        deadline: tokio::time::Instant,
+        ttl: std::time::Duration,
+        receipt: Option<BootInstant>,
+    ) {
+        let boot = Self::stamp(receipt, ttl);
         let mut g = self.slot.write().unwrap_or_else(|e| e.into_inner());
         if g.table.is_some() {
             g.deadline = Some(deadline);
@@ -862,9 +877,11 @@ mod tests {
     #[test]
     fn current_returns_none_after_the_deadline_without_any_task() {
         let t = RouteTable::build(&[], &BTreeMap::new(), &Limits::default()).unwrap();
-        let h = TableHandle::new();
-        let d = tokio::time::Instant::now() + std::time::Duration::from_millis(60);
-        h.set_with_deadline(t, d, std::time::Duration::from_secs(60));
+        let boot = frozen_boot();
+        let h = TableHandle::new().with_boot_clock(boot.clone());
+        let ttl = std::time::Duration::from_millis(60);
+        let d = tokio::time::Instant::now() + ttl;
+        h.set_with_deadline(t, d, ttl, h.boot_now());
         assert!(h.current().is_some());
         std::thread::sleep(std::time::Duration::from_millis(120));
         assert!(h.current().is_none(), "served past its deadline");
@@ -875,6 +892,7 @@ mod tests {
         h.extend_deadline(
             tokio::time::Instant::now() + std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(60),
+            h.boot_now(),
         );
         assert!(h.current().is_some());
         // no table: extend is a no-op
@@ -882,8 +900,44 @@ mod tests {
         e.extend_deadline(
             tokio::time::Instant::now() + std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(60),
+            e.boot_now(),
         );
         assert!(e.current().is_none());
+    }
+
+    fn frozen_boot() -> BootClock {
+        Arc::new(|| {
+            Some(BootInstant {
+                boot_id: "boot-a".into(),
+                secs: 1000,
+            })
+        })
+    }
+
+    /// A TTL under one second rounds up to one boot second: the table starts
+    /// valid and the boot half ends it once a second has passed.
+    #[test]
+    fn a_subsecond_ttl_starts_valid_on_the_boot_half() {
+        let secs = Arc::new(std::sync::atomic::AtomicI64::new(1000));
+        let s2 = secs.clone();
+        let clock: BootClock = Arc::new(move || {
+            Some(BootInstant {
+                boot_id: "boot-a".into(),
+                secs: s2.load(std::sync::atomic::Ordering::SeqCst),
+            })
+        });
+        let h = TableHandle::new().with_boot_clock(clock);
+        let t = RouteTable::build(&[], &BTreeMap::new(), &Limits::default()).unwrap();
+        let ttl = std::time::Duration::from_millis(60);
+        h.set_with_deadline(
+            t,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(3600),
+            ttl,
+            h.boot_now(),
+        );
+        assert!(h.current().is_some(), "a 60 ms TTL collapsed to zero");
+        secs.store(1001, std::sync::atomic::Ordering::SeqCst);
+        assert!(h.current().is_none());
     }
 
     /// A rebuild keeps the permits of unchanged routes and principals, so an
