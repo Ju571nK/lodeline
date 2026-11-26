@@ -44,6 +44,9 @@ flowchart LR
   `8443`, and to the enrollment port while they enroll. (Egress only, which
   suits locked-down endpoints.)
 
+To front an MCP server with `lodeline-proxy`, which registers with this server
+and adds a `proxy:` section, see [install-proxy.md](install-proxy.md).
+
 ---
 
 ## 2. Install
