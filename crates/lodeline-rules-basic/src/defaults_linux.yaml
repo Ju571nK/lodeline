@@ -88,9 +88,12 @@ targets:
     platform: linux
     paths:
       - "~/.codex/config.toml"
-      # Installed Codex plugins: a plugin hook is read from its manifest, a hooks file the
-      # manifest names, and the folder hash covers every file, so any file below the cache counts.
-      - "~/.codex/plugins/cache/*"
+      # Installed Codex plugins: the default hooks file and the manifest of each plugin
+      # folder. The hooks files a manifest names get their own target at start and on reload.
+      - "~/.codex/plugins/cache/*/*/*/hooks/hooks.json"
+      - "~/.codex/plugins/cache/*/*/*/.codex-plugin/plugin.json"
+      - "~/.codex/plugins/cache/*/*/*/.claude-plugin/plugin.json"
+      - "~/.codex/plugins/cache/*/*/*/.cursor-plugin/plugin.json"
       - "/etc/codex/requirements.toml"
       # The Codex apps cache folders (codex_apps_tools, codex_apps_server_info) are not
       # listed: Codex rewrites them at every start, also with the same bytes. The parser

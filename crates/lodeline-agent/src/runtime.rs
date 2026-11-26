@@ -3146,8 +3146,7 @@ mod tests {
             plugin.join("hooks/hooks.json"),
             plugin.join(".codex-plugin/plugin.json"),
             plugin.join(".claude-plugin/plugin.json"),
-            plugin.join("sub/named-hooks.json"),
-            plugin.join("lib/helper.py"),
+            plugin.join(".cursor-plugin/plugin.json"),
         ] {
             assert!(
                 patterns

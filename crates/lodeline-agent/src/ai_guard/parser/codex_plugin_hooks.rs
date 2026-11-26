@@ -707,8 +707,34 @@ pub(super) fn watched_paths(
 /// The existing files that decide what the candidates run: the default hooks
 /// file, the manifests, and the hooks files a manifest names.
 pub(super) fn watch_files(codex_dir: &Path, candidates: &[Candidate]) -> Vec<PathBuf> {
-    let _ = (codex_dir, candidates);
-    Vec::new()
+    let Some(home) = Home::new(codex_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for candidate in candidates {
+        let Some(version) = active_version(&candidate.base) else {
+            continue;
+        };
+        let root = candidate.base.join(version);
+        if !home.contains(&root) {
+            continue;
+        }
+        out.push(root.join("hooks").join("hooks.json"));
+        out.extend(
+            MANIFEST_DIRS
+                .iter()
+                .map(|d| root.join(d).join("plugin.json")),
+        );
+        if let Some(Declared::Paths(paths)) = load_manifest(&home, &root)
+            .and_then(|manifest| manifest.get("hooks").and_then(|f| declared_hooks(&root, f)))
+        {
+            out.extend(paths.into_iter().map(|(path, _)| path));
+        }
+    }
+    out.retain(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file()));
+    out.sort();
+    out.dedup();
+    out
 }
 
 pub(super) struct LoadedPlugin {
