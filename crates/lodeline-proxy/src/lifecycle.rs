@@ -562,7 +562,10 @@ impl PhaseClock {
     }
 
     fn end(&mut self, phase: &'static str) {
-        let now = tokio::time::Instant::now();
+        self.end_at(phase, tokio::time::Instant::now());
+    }
+
+    fn end_at(&mut self, phase: &'static str, now: tokio::time::Instant) {
         self.phases.push((phase, now.duration_since(self.last)));
         self.last = now;
     }
@@ -591,18 +594,22 @@ fn finish_timed(
     )
 }
 
+/// Read the clock only at the two edges, so the lock is held for exactly the
+/// work it covered before; the phases are recorded after it is released.
 fn finish_timed_at(
     clock: &mut PhaseClock,
     lc: &std::sync::Mutex<Lifecycle>,
     invocation_accounted: bool,
     gaps: Option<&crate::status_report::GapQueue>,
-    _now: &mut dyn FnMut() -> tokio::time::Instant,
+    now: &mut dyn FnMut() -> tokio::time::Instant,
 ) -> anyhow::Result<()> {
     let mut guard = lock(lc);
-    clock.end("finish_lock_wait");
+    let locked = now();
     let finished = guard.finish_shutdown(invocation_accounted, gaps);
     drop(guard);
-    clock.end("finish_write");
+    let written = now();
+    clock.end_at("finish_lock_wait", locked);
+    clock.end_at("finish_write", written);
     finished
 }
 
