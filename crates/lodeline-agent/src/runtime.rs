@@ -1145,7 +1145,9 @@ pub(crate) fn perform_warmup(
 /// (its first event has no `before_hash`). A link is followed only directly
 /// under the pattern's folder, where the first wildcard component sits: a link
 /// to a folder that is not `/` and does not hold the pattern's folder, or a link to
-/// a regular file. A link below that is not followed.
+/// a regular file. A link to a regular file is also followed one folder below, in
+/// a real folder, for a literal leaf such as `SKILL.md`. A link below that is not
+/// followed.
 fn files_matching_pattern(
     pattern: &Path,
     one_folder: bool,
@@ -1168,8 +1170,8 @@ fn files_matching_pattern(
     };
     let mut files = Vec::new();
     let mut visited = 0;
-    let mut queue = std::collections::VecDeque::from([root.clone()]);
-    while let Some(folder) = queue.pop_front() {
+    let mut queue = std::collections::VecDeque::from([(root.clone(), false)]);
+    while let Some((folder, via_link)) = queue.pop_front() {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
@@ -1184,15 +1186,19 @@ fn files_matching_pattern(
             };
             let path = crate::normalizer::match_form(entry.path());
             let (mut is_dir, mut is_file) = (kind.is_dir(), kind.is_file());
+            let mut linked_dir = false;
             if kind.is_symlink() && folder == root {
                 let target = std::fs::metadata(entry.path());
                 is_dir = target.as_ref().is_ok_and(|m| m.is_dir())
                     && crate::watcher::linked_folder(&entry.path()).is_some();
+                linked_dir = is_dir;
                 is_file = target.is_ok_and(|m| m.is_file());
+            } else if kind.is_symlink() && !via_link && folder.parent() == Some(root.as_path()) {
+                is_file = std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file());
             }
             if is_dir {
                 if glob.may_match_below(&path) {
-                    queue.push_back(entry.path());
+                    queue.push_back((entry.path(), linked_dir));
                 }
             } else if is_file && glob.is_match(&path) {
                 files.push(path);

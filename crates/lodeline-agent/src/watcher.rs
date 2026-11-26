@@ -528,13 +528,22 @@ fn is_covered(roots: &BTreeMap<PathBuf, bool>, link: &Path, real: &Path, folder:
     })
 }
 
-/// The links to regular files that a wildcard leaf such as `agents/*.md` matches.
-/// The folder must be a literal path, so this goes one level and no further.
+/// The links to regular files that a wildcard leaf such as `agents/*.md` matches,
+/// or that a literal leaf such as the `SKILL.md` of `skills/*/SKILL.md` names in
+/// each real folder the wildcard folder matches. A link below a folder link is
+/// not followed, so this goes one level and no further.
 fn leaf_links(pattern: &Path) -> Vec<PathBuf> {
     let (Some(dir), Some(name)) = (pattern.parent(), pattern.file_name()) else {
         return Vec::new();
     };
-    if has_glob(dir) || !has_glob(Path::new(name)) {
+    if has_glob(dir) {
+        return if has_glob(Path::new(name)) {
+            Vec::new()
+        } else {
+            folder_leaf_links(dir, name)
+        };
+    }
+    if !has_glob(Path::new(name)) {
         return Vec::new();
     }
     let Ok(glob) = lodeline_core::policy::glob::CompiledGlob::new(&pattern.to_string_lossy())
@@ -550,6 +559,18 @@ fn leaf_links(pattern: &Path) -> Vec<PathBuf> {
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_symlink()))
         .map(|entry| entry.path())
         .filter(|path| glob.is_match(&crate::normalizer::match_form(path.clone())))
+        .take(crate::runtime::WARMUP_FILE_LIMIT)
+        .collect()
+}
+
+fn folder_leaf_links(dir: &Path, name: &std::ffi::OsStr) -> Vec<PathBuf> {
+    resolve_pattern(dir)
+        .into_iter()
+        .take(crate::runtime::WARMUP_ENTRY_LIMIT)
+        .filter(|(_, via_link)| !via_link)
+        .map(|(folder, _)| folder.join(name))
+        .filter(|leaf| std::fs::symlink_metadata(leaf).is_ok_and(|m| m.is_symlink()))
+        .filter(|leaf| dunce::canonicalize(leaf).is_ok_and(|real| real.is_file()))
         .take(crate::runtime::WARMUP_FILE_LIMIT)
         .collect()
 }
