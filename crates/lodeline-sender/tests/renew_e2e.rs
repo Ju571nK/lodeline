@@ -24,11 +24,14 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair,
 };
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Once};
 use time::{Duration, OffsetDateTime};
+use tokio::runtime::{Handle, Id};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::writer::EitherWriter;
 
 const HOST: &str = "3f2c6a1e-8b4d-4c2a-9e7f-1a2b3c4d5e6f";
 const OTHER: &str = "5a1c6a1e-8b4d-4c2a-9e7f-1a2b3c4d5e70";
@@ -551,31 +554,13 @@ async fn an_unparseable_next_file_does_not_stop_renewal_and_no_bad_bytes_are_sen
     }
 }
 
-thread_local! {
-    static CURRENT: std::cell::RefCell<Option<Log>> = const { std::cell::RefCell::new(None) };
-}
+static CAPTURES: LazyLock<Mutex<HashMap<Id, Log>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-struct Route;
-
-impl std::io::Write for Route {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        CURRENT.with(|c| {
-            c.borrow_mut()
-                .as_mut()
-                .map(|l| l.write(b))
-                .unwrap_or(Ok(b.len()))
-        })
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-struct Capture;
+struct Capture(Id);
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        CURRENT.with(|c| *c.borrow_mut() = None);
+        CAPTURES.lock().unwrap().remove(&self.0);
     }
 }
 
@@ -594,21 +579,33 @@ impl std::io::Write for Log {
 }
 
 impl Log {
-    /// One global subscriber that writes to the calling thread's log: scoped subscribers
-    /// racing on a shared call site lose events.
+    /// Each test has its own Tokio runtime. Its tasks and blocking workers share this log.
     fn capture(&self) -> Capture {
-        static ONCE: std::sync::Once = std::sync::Once::new();
+        static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             tracing::subscriber::set_global_default(
                 tracing_subscriber::fmt()
-                    .with_writer(|| Route)
+                    .with_writer(|| {
+                        let log = Handle::try_current().ok().and_then(|runtime| {
+                            CAPTURES.lock().unwrap().get(&runtime.id()).cloned()
+                        });
+                        match log {
+                            Some(log) => EitherWriter::A(log),
+                            None => EitherWriter::B(std::io::sink()),
+                        }
+                    })
                     .with_ansi(false)
                     .finish(),
             )
             .unwrap();
         });
-        CURRENT.with(|c| *c.borrow_mut() = Some(self.clone()));
-        Capture
+        let id = Handle::current().id();
+        let mut captures = CAPTURES.lock().unwrap();
+        let Entry::Vacant(entry) = captures.entry(id) else {
+            panic!("the runtime already has an active log capture");
+        };
+        entry.insert(self.clone());
+        Capture(id)
     }
 
     fn lines_with(&self, needle: &str) -> usize {
@@ -619,8 +616,8 @@ impl Log {
     }
 }
 
-#[test]
-fn a_log_follows_its_scope_to_another_thread() {
+#[tokio::test]
+async fn a_log_follows_its_scope_to_another_thread() {
     fn emit(message: &str) {
         tracing::error!("{message}");
     }
@@ -628,15 +625,23 @@ fn a_log_follows_its_scope_to_another_thread() {
     let log = Log::default();
     let other = Log::default();
     let _guard = log.capture();
-    let scope = tracing::Span::current();
+    let runtime = Handle::current();
     let other_thread_log = other.clone();
     std::thread::spawn(move || {
+        let other_runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _other_runtime = other_runtime.enter();
         let _guard = other_thread_log.capture();
         emit("other scope");
-        scope.in_scope(|| emit("original scope"));
+        let _runtime = runtime.enter();
+        emit("original scope");
     })
     .join()
     .unwrap();
+    tokio::task::spawn_blocking(|| emit("blocking worker"))
+        .await
+        .unwrap();
 
     assert_eq!(
         [
@@ -647,6 +652,8 @@ fn a_log_follows_its_scope_to_another_thread() {
     );
     assert_eq!(log.lines_with("other scope"), 0);
     assert_eq!(other.lines_with("other scope"), 1);
+    assert_eq!(log.lines_with("blocking worker"), 1);
+    assert_eq!(other.lines_with("blocking worker"), 0);
 }
 
 #[tokio::test]
