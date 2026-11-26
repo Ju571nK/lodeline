@@ -187,3 +187,38 @@ async fn native_a_link_to_a_folder_inside_the_watched_root_records_under_the_lin
 async fn polling_a_link_to_a_folder_inside_the_watched_root_records_under_the_link_path() {
     a_link_to_a_folder_inside_the_watched_root_records_under_the_link_path(true).await;
 }
+
+/// `skills/foo/SKILL.md` is itself a link to a file outside the watched root.
+/// The built-in target matches one folder below `skills`, and its folder part
+/// has a glob, so the leaf link must be found below it.
+async fn a_linked_skill_md_records_under_the_link_path(poll: bool) {
+    let td = tempfile::tempdir().unwrap();
+    let home = dunce::canonicalize(td.path()).unwrap();
+    let skill = home.join(".claude/skills/foo");
+    let target = home.join("dotfiles/foo.md");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"initial").unwrap();
+    std::os::unix::fs::symlink(&target, skill.join("SKILL.md")).unwrap();
+    let agent = TestAgentBuilder::new()
+        .policy("version: 1\nhost_id_strategy: machine_id\ntargets: []\n")
+        .default_targets()
+        .home(&home)
+        .pin_home()
+        .poll_watcher(poll)
+        .start()
+        .await;
+    change_is_recorded_at(&agent, &skill.join("SKILL.md"), target).await;
+    assert!(!agent.join.is_finished(), "the agent stopped");
+    agent.join.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_a_linked_skill_md_records_under_the_link_path() {
+    a_linked_skill_md_records_under_the_link_path(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn polling_a_linked_skill_md_records_under_the_link_path() {
+    a_linked_skill_md_records_under_the_link_path(true).await;
+}

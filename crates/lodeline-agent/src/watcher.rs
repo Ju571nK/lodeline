@@ -528,13 +528,22 @@ fn is_covered(roots: &BTreeMap<PathBuf, bool>, link: &Path, real: &Path, folder:
     })
 }
 
-/// The links to regular files that a wildcard leaf such as `agents/*.md` matches.
-/// The folder must be a literal path, so this goes one level and no further.
+/// The links to regular files that a wildcard leaf such as `agents/*.md` matches,
+/// or that a literal leaf such as the `SKILL.md` of `skills/*/SKILL.md` names in
+/// each real folder the wildcard folder matches. A link below a folder link is
+/// not followed, so this goes one level and no further.
 fn leaf_links(pattern: &Path) -> Vec<PathBuf> {
     let (Some(dir), Some(name)) = (pattern.parent(), pattern.file_name()) else {
         return Vec::new();
     };
-    if has_glob(dir) || !has_glob(Path::new(name)) {
+    if has_glob(dir) {
+        return if has_glob(Path::new(name)) {
+            Vec::new()
+        } else {
+            folder_leaf_links(dir, name)
+        };
+    }
+    if !has_glob(Path::new(name)) {
         return Vec::new();
     }
     let Ok(glob) = lodeline_core::policy::glob::CompiledGlob::new(&pattern.to_string_lossy())
@@ -550,6 +559,18 @@ fn leaf_links(pattern: &Path) -> Vec<PathBuf> {
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_symlink()))
         .map(|entry| entry.path())
         .filter(|path| glob.is_match(&crate::normalizer::match_form(path.clone())))
+        .take(crate::runtime::WARMUP_FILE_LIMIT)
+        .collect()
+}
+
+fn folder_leaf_links(dir: &Path, name: &std::ffi::OsStr) -> Vec<PathBuf> {
+    resolve_pattern(dir)
+        .into_iter()
+        .take(crate::runtime::WARMUP_ENTRY_LIMIT)
+        .filter(|(_, via_link)| !via_link)
+        .map(|(folder, _)| folder.join(name))
+        .filter(|leaf| std::fs::symlink_metadata(leaf).is_ok_and(|m| m.is_symlink()))
+        .filter(|leaf| dunce::canonicalize(leaf).is_ok_and(|real| real.is_file()))
         .take(crate::runtime::WARMUP_FILE_LIMIT)
         .collect()
 }
@@ -2315,6 +2336,85 @@ mod tests {
         assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
         receive_path(&mut rx, &link).await;
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_literal_leaf_under_a_wildcard_folder_is_returned_only_when_it_is_a_link() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        for name in ["linked", "plain"] {
+            fs::create_dir_all(skills.join(name)).unwrap();
+        }
+        fs::create_dir_all(skills.join("deep/inner")).unwrap();
+        fs::create_dir_all(dir.join("outside")).unwrap();
+        let target = dir.join("outside/foo.md");
+        fs::write(&target, b"a").unwrap();
+        fs::write(skills.join("plain/SKILL.md"), b"b").unwrap();
+        std::os::unix::fs::symlink(&target, skills.join("linked/SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(&target, skills.join("deep/inner/SKILL.md")).unwrap();
+        assert_eq!(
+            leaf_links(&skills.join("*/SKILL.md")),
+            [skills.join("linked/SKILL.md")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leaf_link_below_a_followed_folder_link_is_not_returned() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        let real = dir.join("dotfiles/foo");
+        fs::create_dir_all(&skills).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(dir.join("elsewhere.md"), b"a").unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere.md"), real.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(&real, skills.join("foo")).unwrap();
+        assert!(leaf_links(&skills.join("*/SKILL.md")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_md_link_under_a_wildcard_folder_is_watched_by_its_link_path() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        fs::create_dir_all(skills.join("foo")).unwrap();
+        fs::create_dir_all(dir.join("outside")).unwrap();
+        let target = dir.join("outside/foo.md");
+        fs::write(&target, b"a").unwrap();
+        let link = skills.join("foo/SKILL.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (mut rx, mut watcher) = idle_watcher(vec![(skills.clone(), true)]);
+        watcher.follow_files(vec![skills.join("*/SKILL.md")], true);
+        assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
+        receive_path(&mut rx, &link).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dangling_or_covered_skill_md_link_gets_no_root() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        for name in ["dangling", "covered", "vendor"] {
+            fs::create_dir_all(skills.join(name)).unwrap();
+        }
+        let target = skills.join("vendor/covered.md");
+        fs::write(&target, b"a").unwrap();
+        std::os::unix::fs::symlink(dir.join("gone.md"), skills.join("dangling/SKILL.md")).unwrap();
+        let covered = skills.join("covered/SKILL.md");
+        std::os::unix::fs::symlink(&target, &covered).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![(skills.clone(), true)]);
+        watcher.follow_files(vec![skills.join("*/SKILL.md")], true);
+        assert_eq!(aliases_of(&watcher), [(target, covered.clone())]);
+        assert!(!watcher.active.contains_key(&covered));
+        assert!(!watcher
+            .active
+            .contains_key(&skills.join("dangling/SKILL.md")));
+    }
+
     fn drop_backend_watch(watcher: &WatcherHandle, root: &Path) {
         let registered = watcher.active[root].2.clone();
         watcher
