@@ -421,6 +421,20 @@ mod tests {
     }
 
     #[test]
+    fn discover_claude_repos_finds_commands_only_repo() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("only-commands");
+        std::fs::create_dir_all(repo.join(".claude/commands")).unwrap();
+        std::fs::write(repo.join(".claude/commands/x.md"), "x").unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        let found = discover_claude_repos(&roots);
+        assert!(
+            found.contains(&dunce::canonicalize(&repo).unwrap()),
+            "got {found:?}"
+        );
+    }
+
+    #[test]
     fn discover_claude_repos_finds_agents_md_only() {
         let root = tempdir().unwrap();
         let repo = root.path().join("only-agents");
