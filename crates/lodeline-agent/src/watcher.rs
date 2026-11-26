@@ -2391,6 +2391,84 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_loop_file_link_warns_of_a_loop_once_and_not_of_a_missing_target() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (link, other) = (dir.join("settings.json"), dir.join("other.json"));
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        std::os::unix::fs::symlink(&link, &other).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("loops back on itself").count(), 1, "{logs}");
+        assert_eq!(logs.matches("missing target").count(), 0, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dangling_file_link_warns_of_a_missing_target_and_not_of_a_loop() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(dir.join("missing.json"), &link).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("missing target").count(), 1, "{logs}");
+        assert_eq!(logs.matches("loops back on itself").count(), 0, "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dangling_and_a_loop_folder_link_under_a_wildcard_each_warn_once() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        fs::create_dir_all(&skills).unwrap();
+        std::os::unix::fs::symlink(dir.join("missing"), skills.join("gone")).unwrap();
+        std::os::unix::fs::symlink(skills.join("two"), skills.join("one")).unwrap();
+        std::os::unix::fs::symlink(skills.join("one"), skills.join("two")).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&skills.join("*"), false).unwrap();
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("missing target").count(), 1, "{logs}");
+        assert_eq!(logs.matches("loops back on itself").count(), 2, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn links_past_the_cap_get_no_alias_and_the_limit_is_logged_once() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        fs::create_dir_all(&skills).unwrap();
+        for index in 0..300 {
+            let real = dir.join(format!("outside/s{index:03}"));
+            fs::create_dir_all(&real).unwrap();
+            std::os::unix::fs::symlink(&real, skills.join(format!("s{index:03}"))).unwrap();
+        }
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&skills.join("*"), false).unwrap();
+            watcher.reconcile();
+        });
+        assert_eq!(aliases_of(&watcher).len(), 256);
+        assert_eq!(logs.matches("link limit").count(), 1, "{logs}");
+        assert!(logs.contains("256"), "{logs}");
+        assert!(logs.contains("44"), "{logs}");
+        assert!(!watcher.active.contains_key(&skills.join("s299")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_link_whose_target_is_in_a_watched_root_is_aliased_without_a_new_root() {
         let td = TempDir::new().unwrap();
         let dir = dunce::canonicalize(td.path()).unwrap();
