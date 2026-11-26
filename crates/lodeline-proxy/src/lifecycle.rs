@@ -113,6 +113,9 @@ pub struct Lifecycle {
     applied: Option<crate::state_dir::AppliedMark>,
     sequence_bound: Option<i64>,
     gap_queue: Option<crate::state_dir::GapQueueState>,
+    serving: Option<crate::status_report::ServingProbe>,
+    /// The config state the status file shows now.
+    published_config_state: ConfigState,
 }
 
 impl Lifecycle {
@@ -152,6 +155,8 @@ impl Lifecycle {
             applied,
             sequence_bound,
             gap_queue,
+            serving: None,
+            published_config_state: config_state,
         };
         lc.publish()?;
         Ok(lc)
@@ -333,12 +338,45 @@ impl Lifecycle {
         self.state.epoch_id()
     }
 
+    /// Publish against what the relay serves: a `valid` config state the relay
+    /// already refuses is written as `expired`.
+    pub fn set_serving_probe(&mut self, probe: crate::status_report::ServingProbe) {
+        self.serving = Some(probe);
+    }
+
+    /// The config state to publish: the sync state, except that a `valid` one
+    /// the relay already refuses reads as `expired`. The result is never written
+    /// back into the sync state, so a table installed later recovers by itself.
+    fn shown_config_state(&self) -> ConfigState {
+        if self.status.config_state == ConfigState::Valid
+            && self.serving.as_ref().is_some_and(|p| !p())
+        {
+            ConfigState::Expired
+        } else {
+            self.status.config_state
+        }
+    }
+
+    /// Republish when only the serving probe changed what the file should say
+    /// (a TTL ran out between sync wakes, or a fresh table was installed behind
+    /// an equal sync state).
+    pub fn refresh_published(&mut self) -> Result<(), StateError> {
+        if self.shown_config_state() == self.published_config_state {
+            return Ok(());
+        }
+        self.publish()
+    }
+
     fn publish(&mut self) -> Result<(), StateError> {
-        self.status.forwarding =
-            forwarding_allowed(self.status.run_state, self.status.config_state);
+        let shown = self.shown_config_state();
+        self.status.forwarding = forwarding_allowed(self.status.run_state, shown);
         self.status.updated_at = now_rfc3339();
-        let bytes = serde_json::to_vec_pretty(&self.status).expect("status serializes");
-        self.state.write_atomic(STATUS_FILE, &bytes)
+        let mut out = self.status.clone();
+        out.config_state = shown;
+        let bytes = serde_json::to_vec_pretty(&out).expect("status serializes");
+        self.state.write_atomic(STATUS_FILE, &bytes)?;
+        self.published_config_state = shown;
+        Ok(())
     }
 
     pub fn set_run_state(&mut self, s: RunState) -> Result<(), StateError> {
@@ -576,6 +614,11 @@ async fn run_inner(
     let mark = lc.applied_mark().cloned();
     let seq_floor = lc.sequence_bound();
     let saved_gaps = lc.take_gap_queue();
+    let serving: crate::status_report::ServingProbe = {
+        let table = table.clone();
+        std::sync::Arc::new(move || table.current().is_some())
+    };
+    lc.set_serving_probe(serving.clone());
     let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
     let acceptor = match &b.listener_tls {
         Some(t) => Some(crate::tls::load_acceptor(&t.cert_file, &t.key_file)?),
@@ -760,6 +803,7 @@ async fn run_inner(
             .with_central(central.clone())
             .with_spool(spool.clone())
             .with_route_health(health.clone())
+            .with_serving_probe(serving.clone())
             .with_wedge_hook(Box::new(move |w| {
                 if let Err(e) = lock(&lc7).set_sequence_wedged(w) {
                     tracing::error!(error = %e, "cannot publish the sequence state");
@@ -1038,6 +1082,9 @@ async fn follow_spool_view(
         if let Err(e) = lock(&lc).set_spool(v) {
             tracing::error!(error = %e, "cannot publish the spool state");
         }
+        if let Err(e) = lock(&lc).refresh_published() {
+            tracing::error!(error = %e, "cannot publish the config state");
+        }
         tokio::select! {
             _ = &mut shutdown => return,
             _ = tokio::time::sleep(SPOOL_VIEW_INTERVAL) => {}
@@ -1162,6 +1209,32 @@ mod tests {
         assert_eq!(spool.expire_now().unwrap().purged_quarantined, 0);
         spool.advance_clock_for_test(1);
         assert_eq!(spool.expire_now().unwrap().purged_quarantined, 1);
+    }
+
+    /// The local status never says `valid` or `forwarding` for a config the relay
+    /// already refuses (a suspend ran the TTL out before the sync task woke).
+    #[test]
+    fn a_publish_after_the_relay_refuses_says_expired() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        let serving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let s2 = serving.clone();
+        lc.set_serving_probe(std::sync::Arc::new(move || {
+            s2.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        lc.set_run_state(RunState::Running).unwrap();
+        lc.set_config(crate::config_sync::SyncStatus {
+            config_state: ConfigState::Valid,
+            last_update_error: None,
+        })
+        .unwrap();
+        assert!(read_status(&b.state_dir).unwrap().forwarding);
+        serving.store(false, std::sync::atomic::Ordering::SeqCst);
+        lc.set_ingest_stopped(false).unwrap();
+        let s = read_status(&b.state_dir).unwrap();
+        assert_eq!(s.config_state, ConfigState::Expired);
+        assert!(!s.forwarding);
     }
 
     /// AC-12: restart with an unreachable server never reports forwarding;

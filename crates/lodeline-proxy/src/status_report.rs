@@ -1071,7 +1071,12 @@ pub struct Reporter {
     ignored_streak: u32,
     wedged: bool,
     wedge_hook: Option<WedgeHook>,
+    serving: Option<ServingProbe>,
 }
+
+/// Whether the relay would serve a call now. A report never says `valid` for a
+/// config the relay already refuses.
+pub type ServingProbe = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Called with `true` when the status sequence looks wedged and `false` when a
 /// snapshot is applied again.
@@ -1100,7 +1105,16 @@ impl Reporter {
             ignored_streak: 0,
             wedged: false,
             wedge_hook: None,
+            serving: None,
         }
+    }
+
+    /// Check every report against what the relay serves: a `valid` view whose
+    /// table the relay already refuses (its TTL ran out while the sync task has
+    /// not woken yet) is reported as `expired`.
+    pub fn with_serving_probe(mut self, probe: ServingProbe) -> Reporter {
+        self.serving = Some(probe);
+        self
     }
 
     /// Share the `central` section source (also fed by the ingest client).
@@ -1174,6 +1188,17 @@ impl Reporter {
         if view.state == ConfigState::Disabled {
             return None;
         }
+        let lapsed;
+        let view =
+            if view.state == ConfigState::Valid && self.serving.as_ref().is_some_and(|p| !p()) {
+                lapsed = ConfigView {
+                    state: ConfigState::Expired,
+                    ..view.clone()
+                };
+                &lapsed
+            } else {
+                view
+            };
         let batch = match self.mode {
             Mode::Normal => self.gaps.pending_batch(),
             Mode::SnapshotProbe => Vec::new(),
@@ -1827,6 +1852,21 @@ mod tests {
         // Let spawned work run under the paused clock.
         for _ in 0..20 {
             tokio::task::yield_now().await;
+        }
+    }
+
+    /// A `valid` view whose table the relay already refuses is reported as
+    /// `expired`; a table the relay serves keeps `valid`.
+    #[tokio::test(start_paused = true)]
+    async fn a_report_never_says_valid_for_a_table_the_relay_refuses() {
+        for (serves, want) in [(false, "expired"), (true, "valid")] {
+            let fake = Fake::new(vec![]);
+            let mut reporter = Reporter::new("px-1", &uid(5), GapQueue::new(), params())
+                .with_serving_probe(Arc::new(move || serves));
+            reporter.send_once(&fake, &view(ConfigState::Valid)).await;
+            let sent = fake.sent.lock().unwrap();
+            let report: Value = serde_json::from_slice(&sent[0].1).unwrap();
+            assert_eq!(report["config"]["state"], want);
         }
     }
 

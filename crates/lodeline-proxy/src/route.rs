@@ -18,6 +18,7 @@ use tokio::sync::Semaphore;
 use lodeline_proxy_api::config::ActorKind as ConfigActorKind;
 use lodeline_proxy_api::event::{Actor, ActorKind, AuthenticationMethod, EvidenceSource};
 
+use crate::boot_clock::{system_boot_clock, BootClock, BootInstant};
 use crate::bootstrap::{normalize_origin, split_host_port, Credential};
 use crate::limits::{Limits, RemoteLimits};
 use crate::upstream_pool::UpstreamPool;
@@ -520,52 +521,141 @@ fn parse_upstream(url: &str) -> Result<(Upstream, String), String> {
 /// Holder for the applied table. The config slice swaps it atomically; `None`
 /// means no config has been applied, and every request is answered 401.
 ///
-/// The table carries its own expiry deadline (a monotonic instant), checked on
-/// every [`TableHandle::current`]. Expiry therefore does not depend on any
-/// background task: if the sync task dies, the last table still stops serving at
-/// its deadline (fail closed, control-plane.md §6.3).
-#[derive(Clone, Default)]
-pub struct TableHandle(Arc<RwLock<Slot>>);
+/// The table carries its own expiry deadline, checked on every
+/// [`TableHandle::current`]. Expiry therefore does not depend on any background
+/// task: if the sync task dies, the last table still stops serving at its
+/// deadline (fail closed, control-plane.md §6.3). The deadline has two halves,
+/// and the first to pass wins: a monotonic instant, and the TTL counted on the
+/// per-boot clock, which also runs while the host is suspended.
+#[derive(Clone)]
+pub struct TableHandle {
+    slot: Arc<RwLock<Slot>>,
+    boot_clock: BootClock,
+}
+
+impl Default for TableHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Default)]
 struct Slot {
     table: Option<Arc<RouteTable>>,
     /// `None`: no expiry (tests and callers that manage expiry themselves).
     deadline: Option<tokio::time::Instant>,
+    boot: Option<BootStamp>,
+}
+
+/// The boot clock reading at receipt and the TTL it counts against.
+struct BootStamp {
+    at: BootInstant,
+    ttl_secs: i64,
 }
 
 impl TableHandle {
     pub fn new() -> Self {
-        Self::default()
+        TableHandle {
+            slot: Arc::default(),
+            boot_clock: system_boot_clock(),
+        }
+    }
+    /// Use `clock` for the suspend-aware half of the deadline. Call it before the
+    /// handle is cloned.
+    pub fn with_boot_clock(mut self, clock: BootClock) -> Self {
+        self.boot_clock = clock;
+        self
     }
     /// Install (or remove) a table without an expiry deadline.
     pub fn set(&self, table: Option<RouteTable>) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Slot {
+        *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Slot {
             table: table.map(Arc::new),
             deadline: None,
+            boot: None,
         };
     }
+    /// The boot clock now. [`crate::config_sync::ConfigSync`] reads it beside the
+    /// monotonic receipt instant, before validation and persistence, and hands
+    /// it to [`TableHandle::set_with_deadline`] or [`TableHandle::extend_deadline`].
+    pub fn boot_now(&self) -> Option<BootInstant> {
+        (self.boot_clock)()
+    }
+    /// Whole seconds, rounded up, so a short TTL never collapses to zero.
+    fn stamp(receipt: Option<BootInstant>, ttl: std::time::Duration) -> Option<BootStamp> {
+        let ttl_secs = i64::try_from(
+            ttl.as_secs()
+                .checked_add(u64::from(ttl.subsec_nanos() > 0))?,
+        )
+        .ok()?;
+        Some(BootStamp {
+            at: receipt?,
+            ttl_secs,
+        })
+    }
+    /// Has the boot clock advanced by the TTL since receipt? A reading from
+    /// another boot cannot be compared, so it counts as expired. Without a boot
+    /// clock at receipt or now, only the monotonic deadline decides.
+    fn boot_elapsed_in(&self, slot: &Slot) -> bool {
+        let Some(stamp) = &slot.boot else {
+            return false;
+        };
+        match (self.boot_clock)() {
+            None => false,
+            Some(now) if now.boot_id != stamp.at.boot_id => true,
+            Some(now) => now.secs.saturating_sub(stamp.at.secs) >= stamp.ttl_secs,
+        }
+    }
+    /// Whether the installed table has passed the boot clock half of its
+    /// deadline. [`crate::config_sync::ConfigSync`] uses it so the published state
+    /// and forwarding agree.
+    pub(crate) fn boot_elapsed(&self) -> bool {
+        self.boot_elapsed_in(&self.slot.read().unwrap_or_else(|e| e.into_inner()))
+    }
+    /// Whether the installed table carries a boot clock reading to count against.
+    pub(crate) fn has_boot_stamp(&self) -> bool {
+        self.slot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .boot
+            .is_some()
+    }
     /// Install a table that stops being returned by [`TableHandle::current`] at
-    /// `deadline`.
-    pub fn set_with_deadline(&self, table: RouteTable, deadline: tokio::time::Instant) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Slot {
+    /// `deadline`, or once the boot clock has advanced by `ttl` since `receipt`.
+    pub fn set_with_deadline(
+        &self,
+        table: RouteTable,
+        deadline: tokio::time::Instant,
+        ttl: std::time::Duration,
+        receipt: Option<BootInstant>,
+    ) {
+        let boot = Self::stamp(receipt, ttl);
+        *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Slot {
             table: Some(Arc::new(table)),
             deadline: Some(deadline),
+            boot,
         };
     }
     /// Move the deadline of the installed table (a TTL refresh). No-op when no
     /// table is installed.
-    pub fn extend_deadline(&self, deadline: tokio::time::Instant) {
-        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
+    pub fn extend_deadline(
+        &self,
+        deadline: tokio::time::Instant,
+        ttl: std::time::Duration,
+        receipt: Option<BootInstant>,
+    ) {
+        let boot = Self::stamp(receipt, ttl);
+        let mut g = self.slot.write().unwrap_or_else(|e| e.into_inner());
         if g.table.is_some() {
             g.deadline = Some(deadline);
+            g.boot = boot;
         }
     }
     /// The table to serve with, or `None` when there is none or its deadline has
-    /// been reached.
+    /// been reached on either half.
     pub fn current(&self) -> Option<Arc<RouteTable>> {
-        let g = self.0.read().unwrap_or_else(|e| e.into_inner());
-        if g.deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+        let g = self.slot.read().unwrap_or_else(|e| e.into_inner());
+        if g.deadline.is_some_and(|d| tokio::time::Instant::now() >= d) || self.boot_elapsed_in(&g)
+        {
             return None;
         }
         g.table.clone()
@@ -573,7 +663,7 @@ impl TableHandle {
     /// The installed table regardless of its deadline. Only for carrying
     /// admission state over to the next table; never for serving.
     pub(crate) fn last(&self) -> Option<Arc<RouteTable>> {
-        self.0
+        self.slot
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .table
@@ -799,9 +889,11 @@ mod tests {
     #[test]
     fn current_returns_none_after_the_deadline_without_any_task() {
         let t = RouteTable::build(&[], &BTreeMap::new(), &Limits::default()).unwrap();
-        let h = TableHandle::new();
-        let d = tokio::time::Instant::now() + std::time::Duration::from_millis(60);
-        h.set_with_deadline(t, d);
+        let boot = frozen_boot();
+        let h = TableHandle::new().with_boot_clock(boot.clone());
+        let ttl = std::time::Duration::from_millis(60);
+        let d = tokio::time::Instant::now() + ttl;
+        h.set_with_deadline(t, d, ttl, h.boot_now());
         assert!(h.current().is_some());
         std::thread::sleep(std::time::Duration::from_millis(120));
         assert!(h.current().is_none(), "served past its deadline");
@@ -809,12 +901,55 @@ mod tests {
         assert!(h.last().is_some());
         // extending a held table does not resurrect an expired view unless the
         // deadline moves past now
-        h.extend_deadline(tokio::time::Instant::now() + std::time::Duration::from_secs(60));
+        h.extend_deadline(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            h.boot_now(),
+        );
         assert!(h.current().is_some());
         // no table: extend is a no-op
         let e = TableHandle::new();
-        e.extend_deadline(tokio::time::Instant::now() + std::time::Duration::from_secs(60));
+        e.extend_deadline(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            e.boot_now(),
+        );
         assert!(e.current().is_none());
+    }
+
+    fn frozen_boot() -> BootClock {
+        Arc::new(|| {
+            Some(BootInstant {
+                boot_id: "boot-a".into(),
+                secs: 1000,
+            })
+        })
+    }
+
+    /// A TTL under one second rounds up to one boot second: the table starts
+    /// valid and the boot half ends it once a second has passed.
+    #[test]
+    fn a_subsecond_ttl_starts_valid_on_the_boot_half() {
+        let secs = Arc::new(std::sync::atomic::AtomicI64::new(1000));
+        let s2 = secs.clone();
+        let clock: BootClock = Arc::new(move || {
+            Some(BootInstant {
+                boot_id: "boot-a".into(),
+                secs: s2.load(std::sync::atomic::Ordering::SeqCst),
+            })
+        });
+        let h = TableHandle::new().with_boot_clock(clock);
+        let t = RouteTable::build(&[], &BTreeMap::new(), &Limits::default()).unwrap();
+        let ttl = std::time::Duration::from_millis(60);
+        h.set_with_deadline(
+            t,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(3600),
+            ttl,
+            h.boot_now(),
+        );
+        assert!(h.current().is_some(), "a 60 ms TTL collapsed to zero");
+        secs.store(1001, std::sync::atomic::Ordering::SeqCst);
+        assert!(h.current().is_none());
     }
 
     /// A rebuild keeps the permits of unchanged routes and principals, so an
