@@ -95,6 +95,7 @@ impl AiGuardParser for CodexParser {
         paths.extend(codex_plugin_hooks::watched_paths(
             &codex_dir,
             user.config.as_ref(),
+            hook_states(user.config.as_ref()),
         ));
         paths
     }
@@ -371,6 +372,24 @@ pub(super) fn read_hooks_json(path: &Path) -> Option<Value> {
     }
 }
 
+/// The user config's `[hooks.state]` table.
+fn hook_states(config: Option<&Value>) -> Option<&toml::Table> {
+    config
+        .and_then(|c| c.get("hooks"))
+        .and_then(|h| h.get("state"))
+        .and_then(Value::as_table)
+}
+
+/// Whether the system `requirements.toml` sets `allow_managed_hooks_only`,
+/// which makes Codex skip every plugin hook (`discovery.rs`).
+fn managed_hooks_only(system_dir: &Path) -> bool {
+    std::fs::read_to_string(system_dir.join("requirements.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<Value>(&text).ok())
+        .and_then(|r| r.get("allow_managed_hooks_only").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// See [`lodeline_core::codex::hooks_disabled_by`]. `configs` is low layer to high.
 fn hooks_feature_enabled<'a>(
     system_dir: &Path,
@@ -509,14 +528,14 @@ pub(super) fn assess_user_findings(
             home,
             &mut out,
         );
-        let plugins = codex_plugin_hooks::enabled_plugins(codex_dir, effective.as_ref());
-        let states = user
-            .config
-            .as_ref()
-            .and_then(|c| c.get("hooks"))
-            .and_then(|h| h.get("state"))
-            .and_then(Value::as_table);
-        out.extend(codex_plugin_hooks::plugin_findings(&plugins, states, home));
+        if !managed_hooks_only(system_dir) {
+            let states = hook_states(user.config.as_ref());
+            let candidates = codex_plugin_hooks::candidates(codex_dir, effective.as_ref(), states);
+            let plugins = codex_plugin_hooks::load(codex_dir, &candidates);
+            out.extend(codex_plugin_hooks::plugin_findings(
+                codex_dir, &plugins, states, home,
+            ));
+        }
     }
     if let Some(val) = &effective {
         for (id, reasons) in app_approval_reasons(val) {
