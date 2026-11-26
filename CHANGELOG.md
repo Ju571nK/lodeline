@@ -22,6 +22,8 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - On Windows the native watcher now sees an edit of a watched file link's target in another folder, and records it under the link path.
 - A skill whose `SKILL.md` is itself a link now records an edit of the link's target under the link path.
 - An agent running as root or as a Windows service, or one that expands paths for several users, now follows a watched file or skill folder link only when its target belongs to the same account as the link (on Windows, when it lies under the home that holds the link), and logs one warning for a link it refuses.
+- The agent now follows at most 256 watched file and skill folder links, and logs one warning with the number of links it left out and the first one left out.
+- The agent now tells a link that loops back on itself from a link to a missing target in its warning, and also warns once for a skill folder link of either kind.
 
 ## [0.22.0] - 2026-11-25
 

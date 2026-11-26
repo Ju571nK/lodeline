@@ -43,11 +43,21 @@ pub struct WatcherHandle {
     aliases_tx: watch::Sender<crate::normalizer::AliasTable>,
     /// Link problems already logged, so a tick does not repeat them.
     warned: BTreeSet<(PathBuf, &'static str)>,
+    /// How many links the last rebuild left out past the cap, once it has said so.
+    cap_warned: usize,
     activity: Arc<RootActivity>,
     /// Quiet time after which an active directory root is re-armed. `None` never re-arms.
     rearm_after: Option<Duration>,
     scope: LinkScope,
 }
+
+/// Most links, files and folders together, one root rebuild follows. Each adds an
+/// alias to compare on every event, and a link no watched root covers a watch too;
+/// the rest are left out with one warning.
+const MAX_FOLLOWED_LINKS: usize = 256;
+
+/// Links a loop check follows before it calls a link a loop.
+const LOOP_HOP_LIMIT: usize = 40;
 
 const OTHER_ACCOUNT: &str = "link target belongs to another account";
 
@@ -359,9 +369,22 @@ impl WatcherHandle {
         let mut resolved = BTreeMap::new();
         let mut matched = BTreeSet::new();
         let mut folder_links = BTreeSet::new();
+        let mut broken_folder_links = BTreeSet::new();
+        // The pattern that first found each folder link, for the order of the cap.
+        let mut patterns = BTreeMap::new();
         for (pattern, recursive) in &self.desired {
-            for (root, origin) in resolve_pattern(pattern) {
+            let (found, broken) = resolve_pattern(pattern);
+            for link in broken {
+                patterns
+                    .entry(link.clone())
+                    .or_insert_with(|| pattern.clone());
+                broken_folder_links.insert(link);
+            }
+            for (root, origin) in found {
                 if let Some(origin) = origin {
+                    patterns
+                        .entry(origin.clone())
+                        .or_insert_with(|| pattern.clone());
                     folder_links.insert((root, origin));
                     continue;
                 }
@@ -384,7 +407,8 @@ impl WatcherHandle {
                 || !recursive_roots.iter().any(|r| root.starts_with(r))
         });
         // Publish the aliases before a root registers and re-reads its file.
-        let (links, covered) = self.follow_links(&resolved, folder_links);
+        let (links, covered) =
+            self.follow_links(&resolved, folder_links, broken_folder_links, &patterns);
         for (_, link) in &links {
             if !covered.contains(link) {
                 resolved.insert(link.clone(), false);
@@ -419,8 +443,14 @@ impl WatcherHandle {
     }
 
     /// The `(real path, link path)` pair of each watched file or wildcard folder
-    /// that is a link, in policy order, and the links among them whose target a
-    /// watched root already covers: those need an alias but no root of their own.
+    /// that is a link, and the links among them whose target a watched root
+    /// already covers: those need an alias but no root of their own.
+    /// At most `MAX_FOLLOWED_LINKS` are kept. The order of the cap is the order
+    /// of the policy as far as the watcher sees it: a file link ranks by its
+    /// entry in the watched files, a folder link by the first watched file under
+    /// the wildcard that found it (the policy does not reach the watcher as an
+    /// ordered list of folders), and a folder link no file lies under ranks last.
+    /// Links of one rank go by path.
     /// A link is left out, with one warning, when its target is missing. A folder
     /// link is also left out when its target holds a watched folder, as `/` does.
     /// Two file links to one target both stay, and the first matches. A second
@@ -429,30 +459,37 @@ impl WatcherHandle {
         &mut self,
         roots: &BTreeMap<PathBuf, bool>,
         folders: BTreeSet<(PathBuf, PathBuf)>,
+        broken_folders: BTreeSet<PathBuf>,
+        patterns: &BTreeMap<PathBuf, PathBuf>,
     ) -> (Vec<(PathBuf, PathBuf)>, BTreeSet<PathBuf>) {
+        // Each followed link with its rank and the pattern it came from.
         let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut ranks: Vec<(usize, PathBuf)> = Vec::new();
         let mut covered = BTreeSet::new();
-        let files: Vec<PathBuf> = self
+        for link in broken_folders {
+            self.warn_unreachable(&link);
+        }
+        let files: Vec<(usize, PathBuf, PathBuf)> = self
             .files
             .iter()
-            .flat_map(|file| {
-                if has_glob(file) {
+            .enumerate()
+            .flat_map(|(rank, file)| {
+                let found = if has_glob(file) {
                     leaf_links(file)
                 } else {
                     vec![file.clone()]
-                }
+                };
+                found
+                    .into_iter()
+                    .map(move |link| (rank, file.clone(), link))
             })
             .collect();
-        for link in files {
+        for (rank, pattern, link) in files {
             if !std::fs::symlink_metadata(&link).is_ok_and(|m| m.is_symlink()) {
                 continue;
             }
             let Ok(real) = dunce::canonicalize(&link) else {
-                self.warn_once(
-                    &link,
-                    "dangling",
-                    "watched file is a link to a missing target",
-                );
+                self.warn_unreachable(&link);
                 continue;
             };
             if !real.is_file() {
@@ -474,6 +511,7 @@ impl WatcherHandle {
                 covered.insert(link.clone());
             }
             links.push((real, link));
+            ranks.push((rank, pattern));
         }
         for (link, origin) in folders {
             let Ok(real) = dunce::canonicalize(&link) else {
@@ -506,10 +544,58 @@ impl WatcherHandle {
                 if is_covered(roots, &link, &real, true) {
                     covered.insert(link.clone());
                 }
+                let pattern = patterns.get(&origin).cloned().unwrap_or_default();
+                let rank = self
+                    .files
+                    .iter()
+                    .position(|file| file.starts_with(&pattern))
+                    .unwrap_or(self.files.len());
                 links.push((real, link));
+                ranks.push((rank, pattern));
             }
         }
+        self.apply_cap(&mut links, &ranks);
+        covered.retain(|link| links.iter().any(|(_, kept)| kept == link));
         (links, covered)
+    }
+
+    /// Keep the `MAX_FOLLOWED_LINKS` links that rank first, in their order, and
+    /// warn when the number left out changes.
+    fn apply_cap(&mut self, links: &mut Vec<(PathBuf, PathBuf)>, ranks: &[(usize, PathBuf)]) {
+        let left_out = links.len().saturating_sub(MAX_FOLLOWED_LINKS);
+        if left_out > 0 {
+            let mut order: Vec<usize> = (0..links.len()).collect();
+            order.sort_by(|a, b| (ranks[*a].0, &links[*a].1).cmp(&(ranks[*b].0, &links[*b].1)));
+            let dropped = &order[MAX_FOLLOWED_LINKS..];
+            let first = dropped[0];
+            if left_out != self.cap_warned {
+                tracing::warn!(
+                    link = %links[first].1.display(),
+                    pattern = %ranks[first].1.display(),
+                    "link limit of {MAX_FOLLOWED_LINKS} reached; {left_out} more links are not followed"
+                );
+            }
+            let dropped: BTreeSet<usize> = dropped.iter().copied().collect();
+            let mut index = 0;
+            links.retain(|_| {
+                index += 1;
+                !dropped.contains(&(index - 1))
+            });
+        }
+        self.cap_warned = left_out;
+    }
+
+    /// Warn once that a link could not be followed, as a loop or a missing target.
+    fn warn_unreachable(&mut self, link: &Path) {
+        if link_loops(link) {
+            self.warn_once(link, "loop", "link loops back on itself; not followed");
+        } else {
+            self.warn_once(
+                link,
+                "dangling",
+                "link points to a missing target; not followed",
+            );
+        }
     }
 
     fn warn_once(&mut self, link: &Path, kind: &'static str, message: &str) {
@@ -679,18 +765,21 @@ fn leaf_links(pattern: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    entries
+    let mut found: Vec<PathBuf> = entries
         .flatten()
         .take(crate::runtime::WARMUP_ENTRY_LIMIT)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_symlink()))
         .map(|entry| entry.path())
         .filter(|path| glob.is_match(&crate::normalizer::match_form(path.clone())))
         .take(crate::runtime::WARMUP_FILE_LIMIT)
-        .collect()
+        .collect();
+    found.sort();
+    found
 }
 
 fn folder_leaf_links(dir: &Path, name: &std::ffi::OsStr) -> Vec<PathBuf> {
-    resolve_pattern(dir)
+    let mut leaves: Vec<PathBuf> = resolve_pattern(dir)
+        .0
         .into_iter()
         .take(crate::runtime::WARMUP_ENTRY_LIMIT)
         .filter(|(_, via_link)| via_link.is_none())
@@ -698,7 +787,28 @@ fn folder_leaf_links(dir: &Path, name: &std::ffi::OsStr) -> Vec<PathBuf> {
         .filter(|leaf| std::fs::symlink_metadata(leaf).is_ok_and(|m| m.is_symlink()))
         .filter(|leaf| dunce::canonicalize(leaf).is_ok_and(|real| real.is_file()))
         .take(crate::runtime::WARMUP_FILE_LIMIT)
-        .collect()
+        .collect();
+    leaves.sort();
+    leaves
+}
+
+/// Whether `link`, which could not be resolved, loops back on itself rather than
+/// leads to a missing target: following it takes more than `LOOP_HOP_LIMIT` hops.
+fn link_loops(link: &Path) -> bool {
+    let mut current = link.to_path_buf();
+    for _ in 0..LOOP_HOP_LIMIT {
+        // A trailing separator makes the OS resolve the link, so trim it.
+        let text = current.to_string_lossy();
+        let trimmed = text.trim_end_matches(std::path::is_separator);
+        if !trimmed.is_empty() {
+            current = PathBuf::from(trimmed);
+        }
+        let Ok(target) = std::fs::read_link(&current) else {
+            return false;
+        };
+        current = current.parent().unwrap_or(Path::new("")).join(target);
+    }
+    true
 }
 
 /// The folder `link` leads to, when `link` is a link to a folder that is not `/`
@@ -715,6 +825,7 @@ fn has_glob(path: &Path) -> bool {
 
 fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
     resolve_pattern(pattern)
+        .0
         .into_iter()
         .map(|(root, _)| root)
         .collect()
@@ -725,9 +836,12 @@ fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
 /// discovered afresh so installation/removal/replacement needs no restart.
 /// A link to a folder counts as a folder at the first wildcard component only,
 /// and its root carries the link's own path. A link under it, or a literal link, is not followed.
-fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
+/// Also returns the links the first wildcard matched whose target is missing or
+/// loops, which are no folder and so are not among the matches.
+fn resolve_pattern(pattern: &Path) -> (Vec<(PathBuf, Option<PathBuf>)>, Vec<PathBuf>) {
+    let mut broken = Vec::new();
     if !has_glob(pattern) {
-        return vec![(pattern.to_path_buf(), None)];
+        return (vec![(pattern.to_path_buf(), None)], broken);
     }
     let mut candidates: Vec<(PathBuf, Option<PathBuf>)> = vec![(PathBuf::new(), None)];
     let mut in_pattern = false;
@@ -738,7 +852,7 @@ fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
             in_pattern = true;
             let Ok(glob) = lodeline_core::policy::glob::CompiledGlob::new(&part.to_string_lossy())
             else {
-                return Vec::new();
+                return (Vec::new(), broken);
             };
             let mut matches = Vec::new();
             for (parent, via_link) in candidates {
@@ -749,12 +863,17 @@ fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
                     let Ok(kind) = entry.file_type() else {
                         continue;
                     };
-                    let linked = first
-                        && kind.is_symlink()
-                        && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir());
-                    if (kind.is_dir() || linked)
-                        && glob.is_match(&crate::normalizer::match_form(entry.file_name().into()))
-                    {
+                    let target =
+                        (first && kind.is_symlink()).then(|| std::fs::metadata(entry.path()));
+                    let linked = target
+                        .as_ref()
+                        .is_some_and(|meta| meta.as_ref().is_ok_and(|m| m.is_dir()));
+                    let matches_glob =
+                        || glob.is_match(&crate::normalizer::match_form(entry.file_name().into()));
+                    if target.as_ref().is_some_and(|meta| meta.is_err()) && matches_glob() {
+                        broken.push(entry.path());
+                    }
+                    if (kind.is_dir() || linked) && matches_glob() {
                         let origin = via_link.clone().or_else(|| linked.then(|| entry.path()));
                         matches.push((entry.path(), origin));
                     }
@@ -777,7 +896,7 @@ fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
                 .collect();
         }
     }
-    candidates
+    (candidates, broken)
 }
 
 impl Drop for WatcherHandle {
@@ -998,6 +1117,7 @@ pub fn spawn_watcher_scoped(
         files: Vec::new(),
         aliases_tx: watch::channel(Default::default()).0,
         warned: BTreeSet::new(),
+        cap_warned: 0,
         activity,
         rearm_after: cfg!(windows).then_some(WINDOWS_REARM_AFTER),
         scope,
@@ -2387,6 +2507,189 @@ mod tests {
         fs::write(&target, b"now").unwrap();
         watcher.reconcile();
         assert_eq!(aliases_of(&watcher), [(target, link)]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_loop_file_link_warns_of_a_loop_once_and_not_of_a_missing_target() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (link, other) = (dir.join("settings.json"), dir.join("other.json"));
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        std::os::unix::fs::symlink(&link, &other).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("loops back on itself").count(), 1, "{logs}");
+        assert_eq!(logs.matches("missing target").count(), 0, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dangling_file_link_warns_of_a_missing_target_and_not_of_a_loop() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(dir.join("missing.json"), &link).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("missing target").count(), 1, "{logs}");
+        assert_eq!(logs.matches("loops back on itself").count(), 0, "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dangling_and_a_loop_folder_link_under_a_wildcard_each_warn_once() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        fs::create_dir_all(&skills).unwrap();
+        std::os::unix::fs::symlink(dir.join("missing"), skills.join("gone")).unwrap();
+        std::os::unix::fs::symlink(skills.join("two"), skills.join("one")).unwrap();
+        std::os::unix::fs::symlink(skills.join("one"), skills.join("two")).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&skills.join("*"), false).unwrap();
+            watcher.reconcile();
+        });
+        assert_eq!(logs.matches("missing target").count(), 1, "{logs}");
+        assert_eq!(logs.matches("loops back on itself").count(), 2, "{logs}");
+        assert!(aliases_of(&watcher).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn links_past_the_cap_get_no_alias_and_the_limit_is_logged_once() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        fs::create_dir_all(&skills).unwrap();
+        for index in 0..300 {
+            let real = dir.join(format!("outside/s{index:03}"));
+            fs::create_dir_all(&real).unwrap();
+            std::os::unix::fs::symlink(&real, skills.join(format!("s{index:03}"))).unwrap();
+        }
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&skills.join("*"), false).unwrap();
+            watcher.reconcile();
+        });
+        assert_eq!(aliases_of(&watcher).len(), 256);
+        assert_eq!(logs.matches("link limit").count(), 1, "{logs}");
+        assert!(logs.contains("256"), "{logs}");
+        assert!(logs.contains("44"), "{logs}");
+        assert!(!watcher.active.contains_key(&skills.join("s299")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_loop_of_links_with_trailing_slashes_warns_of_a_loop() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        std::os::unix::fs::symlink("two/", &one).unwrap();
+        std::os::unix::fs::symlink("one/", &two).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| watcher.follow_files(vec![one.clone()], true));
+        assert_eq!(logs.matches("loops back on itself").count(), 1, "{logs}");
+        assert_eq!(logs.matches("missing target").count(), 0, "{logs}");
+    }
+
+    #[cfg(unix)]
+    fn make_links(dir: &Path, folder: &str, folders: bool, count: usize) {
+        fs::create_dir_all(dir.join(folder)).unwrap();
+        for index in 0..count {
+            let real = dir.join(format!("outside/{folder}{index:03}"));
+            let link = dir.join(format!(
+                "{folder}/{}{index:03}",
+                if folders { "s" } else { "a" }
+            ));
+            if folders {
+                fs::create_dir_all(&real).unwrap();
+            } else {
+                fs::create_dir_all(real.parent().unwrap()).unwrap();
+                fs::write(&real, b"a").unwrap();
+            }
+            std::os::unix::fs::symlink(&real, link).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_and_folder_links_share_the_cap_and_the_later_ones_in_policy_order_go() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        make_links(&dir, "skills", true, 100);
+        make_links(&dir, "agents", false, 200);
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(
+                vec![dir.join("skills/*/SKILL.md"), dir.join("agents/*")],
+                true,
+            );
+            watcher.watch(&dir.join("skills/*"), false).unwrap();
+        });
+        let aliased: Vec<PathBuf> = aliases_of(&watcher).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(aliased.len(), 256, "{logs}");
+        let folders = aliased
+            .iter()
+            .filter(|l| l.starts_with(dir.join("skills")))
+            .count();
+        assert_eq!(folders, 100, "the earlier folder links stay");
+        assert!(!aliased.contains(&dir.join("agents/a199")), "{logs}");
+        assert_eq!(logs.matches("link limit").count(), 1, "{logs}");
+        assert!(
+            logs.contains("agents/a156"),
+            "names the first left out: {logs}"
+        );
+        assert!(logs.contains("agents/*"), "names its pattern: {logs}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skipped_links_do_not_use_cap_slots() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        make_links(&dir, "skills", true, 256);
+        for index in 0..20 {
+            std::os::unix::fs::symlink(
+                dir.join("outside/skills000"),
+                dir.join(format!("skills/z{index:03}")),
+            )
+            .unwrap();
+        }
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&dir.join("skills/*"), false).unwrap();
+        });
+        assert_eq!(aliases_of(&watcher).len(), 256, "{logs}");
+        assert_eq!(logs.matches("link limit").count(), 0, "{logs}");
+        assert_eq!(logs.matches("shares its target").count(), 20, "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_limit_is_logged_again_when_the_number_left_out_changes() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        make_links(&dir, "skills", true, 300);
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let first = test_logs::logs_of(|| watcher.watch(&dir.join("skills/*"), false).unwrap());
+        assert!(first.contains("44 more"), "{first}");
+        for index in 290..300 {
+            fs::remove_file(dir.join(format!("skills/s{index:03}"))).unwrap();
+        }
+        let second = test_logs::logs_of(|| watcher.reconcile());
+        assert_eq!(second.matches("link limit").count(), 1, "{second}");
+        assert!(second.contains("34 more"), "{second}");
+        let third = test_logs::logs_of(|| watcher.reconcile());
+        assert_eq!(third.matches("link limit").count(), 0, "{third}");
     }
 
     #[cfg(unix)]
