@@ -39,7 +39,7 @@ pub fn system_boot_clock() -> BootClock {
             })
         }
         None => {
-            tracing::warn!("no boot clock on this host; spool age uses the wall clock");
+            tracing::warn!("no boot clock on this host; spool age uses the wall clock and the config TTL counts monotonic time only");
             Arc::new(|| None)
         }
     }

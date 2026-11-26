@@ -312,7 +312,7 @@ M-6: `upstream_url` **must not carry userinfo or a secret-bearing query or fragm
 | Rule | Detail |
 |---|---|
 | Source | Server stamps `ttl_seconds` and `expires_at` at issue. |
-| Clock | Proxy computes its deadline on a **monotonic clock from receipt** (`receipt + ttl_seconds`), so wall-clock skew cannot extend it. `expires_at` is for display. |
+| Clock | Proxy computes its deadline on a **monotonic clock from receipt** (`receipt + ttl_seconds`), so wall-clock skew cannot extend it; the TTL is also counted on a per-boot clock that keeps running while the host is suspended, where the host has one, and the first to pass ends the table. `expires_at` is for display. |
 | Expiry | After the deadline the proxy forwards **no new calls**. In-flight calls finish and are audited. New sessions and new requests on existing sessions are refused with the fixed error. |
 | Refresh | Proxy polls at an interval well under TTL, with jitter. The 503 boot gate of the server (`app.rs:140-154`) is treated as a retryable miss, not an apply failure. |
 | Restart | The monotonic deadline does not survive restart. **Decided (2026-10-10):** a restarted proxy **requires a fresh fetch** before forwarding (fail closed). The alternative, honouring a persisted copy until its wall-clock `expires_at`, was not adopted. (section 9 item 5) |

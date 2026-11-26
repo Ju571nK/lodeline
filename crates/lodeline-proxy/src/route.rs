@@ -521,10 +521,12 @@ fn parse_upstream(url: &str) -> Result<(Upstream, String), String> {
 /// Holder for the applied table. The config slice swaps it atomically; `None`
 /// means no config has been applied, and every request is answered 401.
 ///
-/// The table carries its own expiry deadline (a monotonic instant), checked on
-/// every [`TableHandle::current`]. Expiry therefore does not depend on any
-/// background task: if the sync task dies, the last table still stops serving at
-/// its deadline (fail closed, control-plane.md §6.3).
+/// The table carries its own expiry deadline, checked on every
+/// [`TableHandle::current`]. Expiry therefore does not depend on any background
+/// task: if the sync task dies, the last table still stops serving at its
+/// deadline (fail closed, control-plane.md §6.3). The deadline has two halves,
+/// and the first to pass wins: a monotonic instant, and the TTL counted on the
+/// per-boot clock, which also runs while the host is suspended.
 #[derive(Clone)]
 pub struct TableHandle {
     slot: Arc<RwLock<Slot>>,
@@ -542,6 +544,13 @@ struct Slot {
     table: Option<Arc<RouteTable>>,
     /// `None`: no expiry (tests and callers that manage expiry themselves).
     deadline: Option<tokio::time::Instant>,
+    boot: Option<BootStamp>,
+}
+
+/// The boot clock reading at receipt and the TTL it counts against.
+struct BootStamp {
+    at: BootInstant,
+    ttl_secs: i64,
 }
 
 impl TableHandle {
@@ -562,7 +571,32 @@ impl TableHandle {
         *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Slot {
             table: table.map(Arc::new),
             deadline: None,
+            boot: None,
         };
+    }
+    fn stamp(&self, ttl: std::time::Duration) -> Option<BootStamp> {
+        let at = (self.boot_clock)()?;
+        let ttl_secs = i64::try_from(ttl.as_secs()).ok()?;
+        Some(BootStamp { at, ttl_secs })
+    }
+    /// Has the boot clock advanced by the TTL since receipt? A reading from
+    /// another boot cannot be compared, so it counts as expired. Without a boot
+    /// clock at receipt or now, only the monotonic deadline decides.
+    fn boot_elapsed_in(&self, slot: &Slot) -> bool {
+        let Some(stamp) = &slot.boot else {
+            return false;
+        };
+        match (self.boot_clock)() {
+            None => false,
+            Some(now) if now.boot_id != stamp.at.boot_id => true,
+            Some(now) => now.secs.saturating_sub(stamp.at.secs) >= stamp.ttl_secs,
+        }
+    }
+    /// Whether the installed table has passed the boot clock half of its
+    /// deadline. [`crate::config_sync::ConfigSync`] uses it so the published state
+    /// and forwarding agree.
+    pub(crate) fn boot_elapsed(&self) -> bool {
+        self.boot_elapsed_in(&self.slot.read().unwrap_or_else(|e| e.into_inner()))
     }
     /// Install a table that stops being returned by [`TableHandle::current`] at
     /// `deadline`, or once the boot clock has advanced by `ttl`.
@@ -570,26 +604,31 @@ impl TableHandle {
         &self,
         table: RouteTable,
         deadline: tokio::time::Instant,
-        _ttl: std::time::Duration,
+        ttl: std::time::Duration,
     ) {
+        let boot = self.stamp(ttl);
         *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Slot {
             table: Some(Arc::new(table)),
             deadline: Some(deadline),
+            boot,
         };
     }
     /// Move the deadline of the installed table (a TTL refresh). No-op when no
     /// table is installed.
-    pub fn extend_deadline(&self, deadline: tokio::time::Instant, _ttl: std::time::Duration) {
+    pub fn extend_deadline(&self, deadline: tokio::time::Instant, ttl: std::time::Duration) {
+        let boot = self.stamp(ttl);
         let mut g = self.slot.write().unwrap_or_else(|e| e.into_inner());
         if g.table.is_some() {
             g.deadline = Some(deadline);
+            g.boot = boot;
         }
     }
     /// The table to serve with, or `None` when there is none or its deadline has
-    /// been reached.
+    /// been reached on either half.
     pub fn current(&self) -> Option<Arc<RouteTable>> {
         let g = self.slot.read().unwrap_or_else(|e| e.into_inner());
-        if g.deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+        if g.deadline.is_some_and(|d| tokio::time::Instant::now() >= d) || self.boot_elapsed_in(&g)
+        {
             return None;
         }
         g.table.clone()
@@ -825,7 +864,7 @@ mod tests {
         let t = RouteTable::build(&[], &BTreeMap::new(), &Limits::default()).unwrap();
         let h = TableHandle::new();
         let d = tokio::time::Instant::now() + std::time::Duration::from_millis(60);
-        h.set_with_deadline(t, d, std::time::Duration::from_millis(60));
+        h.set_with_deadline(t, d, std::time::Duration::from_secs(60));
         assert!(h.current().is_some());
         std::thread::sleep(std::time::Duration::from_millis(120));
         assert!(h.current().is_none(), "served past its deadline");

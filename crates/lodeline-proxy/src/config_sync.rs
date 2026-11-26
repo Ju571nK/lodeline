@@ -7,11 +7,12 @@
 //! * [`run_sync`] polls, with jitter, and enforces the TTL deadline.
 //!
 //! Rules, all fail closed:
-//! * The deadline is `receipt + ttl_seconds` on the monotonic clock. `expires_at`
-//!   is display only and never read. The deadline also lives in the
-//!   [`TableHandle`], so expiry holds even if the polling task dies. (A
-//!   monotonic `Instant` does not count system suspend on Linux/macOS, so a VM or
-//!   host suspend stretches the TTL; known limit.)
+//! * The deadline is `receipt + ttl_seconds` on the monotonic clock, and the TTL
+//!   is also counted on the per-boot clock ([`crate::boot_clock`]), which runs
+//!   while the host is suspended. The first to pass ends the table. Without a
+//!   boot clock only the monotonic deadline applies. `expires_at` is display
+//!   only and never read. The deadline also lives in the [`TableHandle`], so
+//!   expiry holds even if the polling task dies.
 //! * A failed fetch, parse, build or ordering check keeps the last good table
 //!   until its deadline, never extends it, and then the table is removed (the
 //!   listener answers 401).
@@ -216,7 +217,8 @@ pub struct ConfigSync {
     table: TableHandle,
     /// Highest revision applied by this process; survives expiry and disable.
     high_water: Option<Applied>,
-    /// Monotonic deadline of the installed table. `None` means no table.
+    /// Monotonic deadline of the installed table; the boot clock half lives in
+    /// the handle. `None` means no table.
     deadline: Option<Instant>,
     /// `ttl_seconds` of the last accepted config, used to pace polling.
     last_ttl: Option<i64>,
@@ -341,7 +343,10 @@ impl ConfigSync {
     }
 
     fn expire_inner(&mut self, now: Instant) {
-        if self.deadline.is_some_and(|d| now >= d) {
+        if self
+            .deadline
+            .is_some_and(|d| now >= d || self.table.boot_elapsed())
+        {
             self.table.set(None);
             self.deadline = None;
             self.state = ConfigState::Expired;
