@@ -155,11 +155,11 @@ fn nested_claude_settings_dirs(
     let mut queue = std::collections::VecDeque::from([(repo.to_path_buf(), 0usize)]);
     let mut visited = 0usize;
     while let Some((dir, depth)) = queue.pop_front() {
-        if visited == usize::MAX {
+        if visited == limits.repo_dirs || *budget == 0 {
             return (found, true);
         }
         visited += 1;
-        *budget = budget.saturating_sub(1);
+        *budget -= 1;
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
