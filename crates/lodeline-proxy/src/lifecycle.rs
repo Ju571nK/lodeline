@@ -1826,10 +1826,12 @@ mod tests {
             match readings {
                 1 => {
                     assert_eq!(state, RunState::Stopping, "read after the write");
+                    assert!(lc.try_lock().is_err(), "read before the lock was held");
                     start + Duration::from_millis(10)
                 }
                 2 => {
                     assert_eq!(state, RunState::Stopped, "read before the write");
+                    assert!(lc.try_lock().is_ok(), "read while the lock was held");
                     start + Duration::from_millis(25)
                 }
                 _ => panic!("more than two clock readings"),
