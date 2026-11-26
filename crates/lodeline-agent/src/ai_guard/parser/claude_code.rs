@@ -27,11 +27,7 @@ impl ClaudeCodeParser {
 
     /// The config folder and the `.claude.json` path for `home_dir`.
     fn locate(&self, home_dir: &Path) -> (PathBuf, PathBuf) {
-        match self
-            .config_dir
-            .clone()
-            .or_else(|| settings_env_config_dir(home_dir))
-        {
+        match located_config_dir(self.config_dir.as_deref(), home_dir) {
             Some(dir) => {
                 let claude_json = dir.join(".claude.json");
                 (dir, claude_json)
@@ -39,6 +35,32 @@ impl ClaudeCodeParser {
             None => (home_dir.join(".claude"), home_dir.join(".claude.json")),
         }
     }
+}
+
+/// The config folder Claude Code reads the user scope from for `home_dir`: the
+/// process `CLAUDE_CONFIG_DIR` if there is one, else the folder the home's own
+/// settings `env` names, else `None` for `~/.claude`. The user row and the
+/// project row share this one resolution.
+fn located_config_dir(process: Option<&Path>, home_dir: &Path) -> Option<PathBuf> {
+    process
+        .map(Path::to_path_buf)
+        .or_else(|| settings_env_config_dir(home_dir))
+}
+
+/// The folder holding the user `settings.json` of `home_dir`.
+fn user_claude_dir(process: Option<&Path>, home_dir: &Path) -> PathBuf {
+    located_config_dir(process, home_dir).unwrap_or_else(|| home_dir.join(".claude"))
+}
+
+/// True when the user row of the home folder `home` reads the default `~/.claude`,
+/// that is, no config dir redirects it. Only then is `<home>/.claude` the user
+/// scope and not also the project scope of a session started in `home`. The
+/// Claude Code docs (settings and skills pages, 2026-11-26) name only
+/// `~/.claude` as the user folder, say that `CLAUDE_CONFIG_DIR` moves it, and
+/// are silent on a session started in the home folder; the rule follows the
+/// project-level `.claude` paths those pages give.
+fn user_row_reads_default(home: &Path, process: Option<&Path>) -> bool {
+    located_config_dir(process, home).is_none()
 }
 
 /// The config folder that `env.CLAUDE_CONFIG_DIR` in `home_dir`'s default
@@ -1942,11 +1964,14 @@ pub struct ClaudeCodeProjectParser {
     /// Every other user's home a root agent assesses, whose `.claude` folders
     /// belong to that user's row.
     other_homes: Vec<PathBuf>,
+    /// `CLAUDE_CONFIG_DIR` from the process environment, as for the user row.
+    config_dir: Option<PathBuf>,
 }
 
 impl ClaudeCodeProjectParser {
-    /// Stub: ignores its argument.
-    pub fn with_config_dir(self, _config_dir: Option<PathBuf>) -> Self {
+    /// Reads the user scope from `config_dir` like [`ClaudeCodeParser::with_config_dir`].
+    pub fn with_config_dir(mut self, config_dir: Option<PathBuf>) -> Self {
+        self.config_dir = config_dir;
         self
     }
 
@@ -1958,6 +1983,7 @@ impl ClaudeCodeProjectParser {
             nested: Vec::new(),
             home,
             other_homes,
+            config_dir: None,
         };
         parser.nested = super::claude_components::watched_nested_dirs(
             &parser.repo_root,
@@ -1974,6 +2000,7 @@ impl ClaudeCodeProjectParser {
             nested: Vec::new(),
             home: PathBuf::new(),
             other_homes: Vec::new(),
+            config_dir: None,
         }
     }
 
@@ -2022,6 +2049,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             cd.join("commands"),
             // Its `disableAllHooks` reaches the project's hooks.
             home_dir.join(".claude").join("settings.json"),
+            user_claude_dir(self.config_dir.as_deref(), home_dir).join("settings.json"),
         ];
         paths.extend(shared_local_settings(
             &self.repo_root,
@@ -2063,9 +2091,13 @@ impl AiGuardParser for ClaudeCodeProjectParser {
     /// without them keeps the unsupported-inspection shape of its events.
     fn assess_posture(&self, home_dir: &Path) -> Result<super::AiGuardAssessment, AssessError> {
         let cd = self.repo_root.join(".claude");
-        let at_home = is_any_home(&self.repo_root, &self.skip_homes(home_dir));
+        let skips_claude = skips_home_claude(
+            &self.repo_root,
+            &self.skip_homes(home_dir),
+            self.config_dir.as_deref(),
+        );
         let mut files = vec![cd.join("settings.local.json")];
-        if !at_home {
+        if !skips_claude {
             files.push(cd.join("settings.json"));
         }
         files.extend(shared_local_settings(
@@ -2085,7 +2117,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             &self.repo_root,
             home_dir,
             &self.other_homes,
-            None,
+            self.config_dir.as_deref(),
             &super::policy_controls::claude_policy_dir(),
         )
     }
@@ -2097,6 +2129,12 @@ impl AiGuardParser for ClaudeCodeProjectParser {
 fn shared_local_settings(repo_root: &Path, homes: &[PathBuf]) -> Option<PathBuf> {
     let root = super::claude_repo::local_settings_root(repo_root)?;
     (!is_any_home(&root, homes)).then(|| root.join(".claude").join("settings.local.json"))
+}
+
+/// True when the project row at `dir` leaves `<dir>/.claude` to a user row: `dir`
+/// is one of `homes` and that user row reads the default `~/.claude`.
+fn skips_home_claude(dir: &Path, homes: &[PathBuf], process: Option<&Path>) -> bool {
+    is_any_home(dir, homes) && user_row_reads_default(dir, process)
 }
 
 /// True when `dir` is any of `homes`, the homes whose `.claude` a user row reads.
@@ -2163,18 +2201,22 @@ fn assess_project_skipping(
     repo_root: &Path,
     home: &Path,
     other_homes: &[PathBuf],
-    _process_config_dir: Option<&Path>,
+    process_config_dir: Option<&Path>,
     policy_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let cd = repo_root.join(".claude");
     let skip_homes: Vec<PathBuf> = std::iter::once(home.to_path_buf())
         .chain(other_homes.iter().cloned())
         .collect();
-    // Claude Code builds no project settings path when the project folder is
-    // the home folder (2.1.332), so `settings.json` and the components there
-    // are the user scope, which the user row reads. `settings.local.json` is
-    // not read by the user row and stays scored here.
-    let at_home = is_any_home(repo_root, &skip_homes);
+    // Claude Code reads one `settings.json` there when the project folder is
+    // the home folder and no config folder is set (2.1.332), so the files and
+    // components in `<home>/.claude` are the user scope, which the user row
+    // reads. With a config folder set the user row reads that folder instead
+    // and a session started in the home folder reads `<home>/.claude` as its
+    // project scope (checked on 2.1.332 with a scratch home), so this row
+    // scores it. `settings.local.json` is not read by the user row and stays
+    // scored either way.
+    let at_home = skips_home_claude(repo_root, &skip_homes, process_config_dir);
     let base = if at_home {
         None
     } else {
@@ -2197,9 +2239,8 @@ fn assess_project_skipping(
         Some(local) => Some(merge_overlay(local, shared)),
         None => shared,
     };
-    // #539: at a home folder this is `~/.claude/loop.md`, which that user's row reads.
-    // shortcut: a scan with `CLAUDE_CONFIG_DIR` set reads the user prompt there, so
-    // then no row reads this file; pass the config dir here if that matters.
+    // #539: at a home folder this is `~/.claude/loop.md`, which that user's row
+    // reads. With a config folder set that row reads the prompt there instead.
     let has_loop = !at_home && cd.join("loop.md").is_file();
     let mut components = if at_home {
         Vec::new()
@@ -2248,11 +2289,11 @@ fn assess_project_skipping(
     });
     // The user's file sits below the project files in precedence, so its
     // `disableAllHooks` decides only when neither project file sets it.
-    // shortcut: `CLAUDE_CONFIG_DIR` is not known in this scope, so a user who
-    // sets it is read at `~/.claude`; pass the config dir here if that matters.
-    let user = super::read_json_optional(&home.join(".claude").join("settings.json"))
-        .ok()
-        .flatten();
+    // Claude Code reads the user scope in the config folder when one is set.
+    let user =
+        super::read_json_optional(&user_claude_dir(process_config_dir, home).join("settings.json"))
+            .ok()
+            .flatten();
     let hooks_off = hooks_disabled(&[
         managed.as_ref(),
         local.as_ref(),
@@ -3198,6 +3239,19 @@ mod tests {
         let project =
             assess_project(home.path(), home.path(), &home.path().join("no-policy")).unwrap();
         assert!(project.is_empty(), "{project:?}");
+    }
+
+    #[test]
+    fn project_posture_at_home_reports_the_home_controls_once_a_config_dir_moves_the_user_row() {
+        const BLOCK_READS: &str =
+            r#"{"permissions": {"blockReadsOutsideWorkingDirectories": true}}"#;
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_settings(home.path(), BLOCK_READS);
+        let at_home = project_at_home(home.path(), Some(alt.path()));
+
+        let posture = at_home.assess_posture(home.path()).unwrap();
+
+        assert!(posture.controls.is_some(), "{:?}", posture.controls);
     }
 
     #[test]
