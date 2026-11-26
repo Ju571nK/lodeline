@@ -206,6 +206,78 @@ async fn stateful_delete_preserves_on_errors_then_ends_once() {
     );
 }
 
+async fn delete_while_post_holds_principal_permit(upstream_is_stateful: bool) {
+    let (tx, reply) = sse_stream();
+    let stream = Mutex::new(Some(reply));
+    let post_started = Arc::new(tokio::sync::Notify::new());
+    let started = post_started.clone();
+    let up = Up::start_raw(move |s| {
+        if let Some(id) = initialize_id(&s.body) {
+            let body = init_result(&id);
+            if upstream_is_stateful {
+                stateful(body, "application/json")
+            } else {
+                full(200, "application/json", &body)
+            }
+        } else if s.method == "DELETE" {
+            full(204, "application/json", b"")
+        } else {
+            started.notify_one();
+            stream.lock().unwrap().take().unwrap()
+        }
+    })
+    .await;
+    let l = Limits {
+        max_calls_per_principal: 1,
+        ..Limits::default()
+    };
+    let px = proxy(&up, l).await;
+    let first = init(&px).await;
+    let second = init(&px).await;
+    let held_sid = first.header("mcp-session-id").unwrap();
+    let delete_sid = second.header("mcp-session-id").unwrap();
+    assert_ne!(held_sid, delete_sid);
+    let foreign_sid = px.session("/mcp/a", "u").await.unwrap();
+    let before = up.count();
+
+    let while_held = async {
+        tokio::time::timeout(Duration::from_secs(5), post_started.notified())
+            .await
+            .expect("held POST reached upstream");
+        for sid in ["unknown", &foreign_sid] {
+            assert_eq!(delete(&px, sid).await.status, 404);
+        }
+        let duplicate = [("mcp-session-id", delete_sid); 2];
+        for headers in [&[][..], &duplicate[..]] {
+            let req = px.request("DELETE", "/mcp/a", Some("t"), headers, b"");
+            assert_eq!(px.send(&req).await.status, 400);
+        }
+        let limited = delete(&px, delete_sid).await;
+        assert_eq!(limited.status, 429);
+        assert_eq!(limited.text(), "{\"error\":\"too_many_requests\"}");
+        assert_eq!(up.count(), before + 1, "only the POST reached upstream");
+        drop(tx);
+    };
+    let (post, ()) = tokio::join!(bound(&px, held_sid, "t", "/mcp/a"), while_held);
+    assert_eq!(post.status, 200);
+    assert!(post.chunks().1);
+    assert_eq!(delete(&px, delete_sid).await.status, 204);
+    assert_eq!(up.count(), before + 1 + usize::from(upstream_is_stateful));
+    if upstream_is_stateful {
+        assert_eq!(up.last().method, "DELETE");
+    }
+}
+
+#[tokio::test]
+async fn stateful_delete_obeys_principal_concurrency_limit() {
+    delete_while_post_holds_principal_permit(true).await;
+}
+
+#[tokio::test]
+async fn stateless_delete_obeys_principal_concurrency_limit() {
+    delete_while_post_holds_principal_permit(false).await;
+}
+
 #[tokio::test]
 async fn stateless_delete_is_local_and_post404_ends_binding() {
     let status = Arc::new(AtomicU16::new(200));

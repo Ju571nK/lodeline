@@ -605,20 +605,20 @@ async fn handle_inner(req: Request<Incoming>, sh: &Arc<Shared>) -> Response<Resp
             Instant::now(),
         )
     };
-    if is_delete {
-        return match presented {
-            // One answer for every session the caller cannot use.
-            Presented::One(wire) => match lookup(wire) {
-                Ok(active) => delete_session(sh, &table, route, &parts, active).await,
-                Err(_) => empty(StatusCode::NOT_FOUND),
-            },
-            // DELETE needs a session to end.
-            _ => empty(StatusCode::BAD_REQUEST),
+    let delete_active = if is_delete {
+        let Presented::One(wire) = presented else {
+            return empty(StatusCode::BAD_REQUEST);
         };
-    }
+        let Ok(active) = lookup(wire) else {
+            return empty(StatusCode::NOT_FOUND);
+        };
+        Some(active)
+    } else {
+        None
+    };
 
-    // Admission: queue depth is 0, so saturation is an immediate rejection. The
-    // permits live until the response body ends (an open SSE stream counts).
+    // Admission: queue depth is 0, so saturation is an immediate refusal.
+    // Permits last through DELETE or until the POST response body ends.
     let sems = match (
         sh.total.clone().try_acquire_owned(),
         route.sem.clone().try_acquire_owned(),
@@ -627,6 +627,9 @@ async fn handle_inner(req: Request<Incoming>, sh: &Arc<Shared>) -> Response<Resp
         (Ok(a), Ok(b), Ok(c)) => vec![a, b, c],
         _ => return fixed(StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
     };
+    if let Some(active) = delete_active {
+        return delete_session(sh, &table, route, &parts, active).await;
+    }
 
     // Effective per-route limits: min(local, remote) (#260).
     let lim = route.limits();
