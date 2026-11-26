@@ -1808,6 +1808,16 @@ mod tests {
         let took = signaled.elapsed();
         let phases = log.text();
         ran.unwrap();
+        // The finish step logs its lock wait and its state write as two phases,
+        // so a slow shutdown names the half that was slow.
+        for phase in ["finish_lock_wait", "finish_write"] {
+            let entry = format!("(\"{phase}\", ");
+            let timed = phases.split(&entry).nth(1).is_some_and(|rest| {
+                rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && rest.split(')').next().is_some_and(|d| d.ends_with('s'))
+            });
+            assert!(timed, "no timed `{phase}` phase; log:\n{phases}");
+        }
         // Holds while `server::HEADER_READ_TIMEOUT` is longer than grace.
         assert!(
             took >= grace,
