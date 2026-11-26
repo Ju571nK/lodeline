@@ -594,8 +594,8 @@ fn finish_timed(
     )
 }
 
-/// Read the clock only at the two edges, so the lock is held for exactly the
-/// work it covered before; the phases are recorded after it is released.
+/// Read the clock only at the two edges. The guard holds the work it held before
+/// plus the one acquisition timestamp; the phases are recorded after it is released.
 fn finish_timed_at(
     clock: &mut PhaseClock,
     lc: &std::sync::Mutex<Lifecycle>,
