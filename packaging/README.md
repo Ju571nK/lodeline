@@ -36,6 +36,7 @@ key and secret files (private files owned by `lodeline-proxy`, mode 0600), run
 `lodeline-proxy check-config --config /etc/lodeline/proxy.yaml`, then
 `systemctl enable --now lodeline-proxy`. The SELinux domain for the proxy is
 deferred to hardware verification; until then it runs unconfined.
+The operator and user guide, from certificates to client setup, is [docs/install-proxy.md](../docs/install-proxy.md).
 
 Across a reboot the proxy ages spool rows by wall clock, so it orders itself after
 `time-sync.target`. That target only waits when a wait service is enabled.
