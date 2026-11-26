@@ -449,6 +449,68 @@ targets: []
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_nested_settings_hook_shows_in_the_nested_row_only() {
+    let _home_guard = HOME_LOCK.lock().await;
+    let td = tempfile::TempDir::new().unwrap();
+    let home = dunce::canonicalize(td.path()).unwrap();
+    // SAFETY: process-global write; serialized via HOME_LOCK above.
+    std::env::set_var("HOME", &home);
+
+    let workspace = home.join("work");
+    let repo = workspace.join("repo");
+    let pkg = repo.join("pkg");
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::create_dir_all(pkg.join(".claude")).unwrap();
+    std::fs::write(repo.join(".claude").join("settings.json"), "{}").unwrap();
+    std::fs::write(
+        pkg.join(".claude").join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rm -rf /srv/lodeline-539-nested"}]}]}}"#,
+    )
+    .unwrap();
+
+    let policy_yaml = format!(
+        "version: 1\nhost_id_strategy: machine_id\nclaude_code_workspaces:\n  - '{}'\ntargets: []\n",
+        workspace.display()
+    );
+    let agent = TestAgentBuilder::new()
+        .policy(&policy_yaml)
+        .home(&home)
+        .start()
+        .await;
+
+    let project_row = |dir: &std::path::Path| {
+        let want = dunce::canonicalize(dir).unwrap().display().to_string();
+        move |v: &serde_json::Value| {
+            v["evidence"]["kind"] == "ai_guard_risk_assessed"
+                && v["evidence"]["tool"] == "claude_code"
+                && v["evidence"]["scope"]["kind"] == "project"
+                && v["evidence"]["scope"]["path"] == want.as_str()
+        }
+    };
+    let nested = agent
+        .wait_for_event(project_row(&pkg), fs_event_timeout())
+        .await
+        .expect("expected a claude_code row for the nested pkg folder");
+    assert!(nested["evidence"]["reasons"]
+        .as_array()
+        .expect("reasons")
+        .iter()
+        .any(|r| r["kind"] == "destructive_in_inline_command"));
+
+    let outer = agent
+        .wait_for_event(project_row(&repo), fs_event_timeout())
+        .await
+        .expect("expected a claude_code row for the repo");
+    assert!(!outer["evidence"]["reasons"]
+        .as_array()
+        .expect("reasons")
+        .iter()
+        .any(|r| r["kind"] == "destructive_in_inline_command"));
+
+    agent.join.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn codex_per_repo_discovery_emits_distinct_project_events() {
     let _home_guard = HOME_LOCK.lock().await;
     let td = tempfile::TempDir::new().unwrap();

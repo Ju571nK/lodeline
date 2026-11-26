@@ -4,7 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
+use super::parser::claude_components::{
+    MAX_NESTED_DEPTH, MAX_NESTED_WALK_DIRS, MAX_WATCHED_COMPONENT_DIRS, NESTED_WALK_SKIPPED,
+};
+
 const DISCOVERY_WARN_THRESHOLD: usize = 50;
+
+/// Most nested `.claude/settings.json` rows one repository adds.
+const MAX_NESTED_ROWS: usize = MAX_WATCHED_COMPONENT_DIRS;
 
 /// Scan each operator-supplied workspace root 1-level deep and return
 /// canonical paths of direct subdirs that contain `marker_subpath`
@@ -84,7 +91,63 @@ pub fn discover_claude_repos(roots: &[String]) -> Vec<PathBuf> {
     set.extend(discover_per_repo_dir(roots, ".claude/skills"));
     set.extend(discover_per_repo_dir(roots, ".claude/agents"));
     set.extend(discover_per_repo_dir(roots, ".claude/commands"));
+    let nested: Vec<PathBuf> = set
+        .iter()
+        .flat_map(|repo| nested_claude_settings_dirs(repo, MAX_NESTED_DEPTH, MAX_NESTED_ROWS))
+        .collect();
+    set.extend(nested);
     set.into_iter().collect()
+}
+
+/// #539. The folders strictly below `repo` that hold their own
+/// `.claude/settings.json`. Claude Code reads that file for a session started
+/// in the folder, so each one is a project row of its own. The walk is
+/// breadth first and sorted by name, so the caps pick the same folders on every
+/// run. It goes `max_depth` levels down, visits at most `MAX_NESTED_WALK_DIRS`
+/// folders, returns at most `max_rows`, and skips hidden folders,
+/// `node_modules` and `target`. A link is not followed.
+fn nested_claude_settings_dirs(repo: &Path, max_depth: usize, max_rows: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(repo.to_path_buf(), 0usize)]);
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        if visited == MAX_NESTED_WALK_DIRS {
+            tracing::warn!(repo = %repo.display(), visited,
+                "workspace_discovery: nested .claude/settings.json walk stopped at the folder cap");
+            break;
+        }
+        visited += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut subdirs = Vec::new();
+        let mut has_dot_claude = false;
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".claude" {
+                has_dot_claude = true;
+            } else if !name.starts_with('.') && !NESTED_WALK_SKIPPED.contains(&name.as_ref()) {
+                subdirs.push(entry.path());
+            }
+        }
+        if depth > 0 && has_dot_claude && dir.join(".claude").join("settings.json").is_file() {
+            if found.len() == max_rows {
+                tracing::warn!(repo = %repo.display(), cap = max_rows,
+                    "workspace_discovery: nested .claude/settings.json rows capped; the rest get no row");
+                return found;
+            }
+            found.push(dir);
+        }
+        if depth < max_depth {
+            subdirs.sort();
+            queue.extend(subdirs.into_iter().map(|sub| (sub, depth + 1)));
+        }
+    }
+    found
 }
 
 /// #146. Codex repos by `.codex/config.toml`, `.codex/hooks.json` (#200), a
@@ -433,6 +496,127 @@ mod tests {
             found.contains(&dunce::canonicalize(&repo).unwrap()),
             "got {found:?}"
         );
+    }
+
+    fn write_settings(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(dir.join(".claude").join("settings.json"), "{}").unwrap();
+    }
+
+    fn nested_found(root: &std::path::Path) -> Vec<PathBuf> {
+        discover_claude_repos(&[root.to_string_lossy().to_string()])
+    }
+
+    #[test]
+    fn nested_claude_settings_below_a_repo_get_a_project_row() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        write_settings(&repo);
+        write_settings(&repo.join("pkg"));
+        write_settings(&repo.join("apps").join("web"));
+        let found = nested_found(root.path());
+        for dir in [
+            repo.clone(),
+            repo.join("pkg"),
+            repo.join("apps").join("web"),
+        ] {
+            assert!(
+                found.contains(&dunce::canonicalize(&dir).unwrap()),
+                "{dir:?} missing from {found:?}"
+            );
+        }
+        assert!(
+            !found.contains(&dunce::canonicalize(repo.join("apps")).unwrap()),
+            "a folder with no settings of its own gets no row: {found:?}"
+        );
+    }
+
+    #[test]
+    fn nested_walk_stops_below_the_depth_cap() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        write_settings(&repo);
+        let mut deep = repo.clone();
+        let mut at_cap = repo.clone();
+        for i in 1..=(MAX_NESTED_DEPTH + 1) {
+            deep = deep.join(format!("d{i}"));
+            if i == MAX_NESTED_DEPTH {
+                at_cap = deep.clone();
+            }
+        }
+        write_settings(&at_cap);
+        write_settings(&deep);
+        let found = nested_found(root.path());
+        assert!(found.contains(&dunce::canonicalize(&at_cap).unwrap()));
+        assert!(!found.contains(&dunce::canonicalize(&deep).unwrap()));
+    }
+
+    #[test]
+    fn nested_walk_skips_hidden_node_modules_and_target_folders() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        write_settings(&repo);
+        for skipped in [".hidden", "node_modules", "target"] {
+            write_settings(&repo.join(skipped).join("pkg"));
+            write_settings(&repo.join(skipped));
+        }
+        write_settings(&repo.join("kept"));
+        let found = nested_found(root.path());
+        assert_eq!(found.len(), 2, "got {found:?}");
+        assert!(found.contains(&dunce::canonicalize(repo.join("kept")).unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_walk_follows_no_link() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let outside = root.path().join("elsewhere");
+        write_settings(&repo);
+        write_settings(&outside.join("pkg"));
+        std::os::unix::fs::symlink(&outside, repo.join("linked")).unwrap();
+        let found = nested_found(root.path());
+        assert!(
+            !found.iter().any(|p| p.ends_with("pkg")),
+            "a linked folder was walked: {found:?}"
+        );
+    }
+
+    #[test]
+    fn nested_rows_stop_at_the_row_cap() {
+        let root = tempdir().unwrap();
+        let repo = dunce::canonicalize(root.path()).unwrap().join("repo");
+        write_settings(&repo);
+        for i in 0..10 {
+            write_settings(&repo.join(format!("p{i:02}")));
+        }
+        let rows = nested_claude_settings_dirs(&repo, MAX_NESTED_DEPTH, 3);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], repo.join("p00"));
+        let all = nested_claude_settings_dirs(&repo, MAX_NESTED_DEPTH, MAX_NESTED_ROWS);
+        assert_eq!(all.len(), 10);
+    }
+
+    #[test]
+    fn nested_rows_hold_a_cap_of_64_per_repo() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        write_settings(&repo);
+        for i in 0..(MAX_NESTED_ROWS + 6) {
+            write_settings(&repo.join(format!("p{i:03}")));
+        }
+        assert_eq!(nested_found(root.path()).len(), 1 + MAX_NESTED_ROWS);
+    }
+
+    #[test]
+    fn nested_folder_reachable_from_two_roots_is_listed_once() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        write_settings(&repo);
+        write_settings(&repo.join("pkg"));
+        let r = root.path().to_string_lossy().to_string();
+        let found = discover_claude_repos(&[r.clone(), r]);
+        assert_eq!(found.len(), 2, "got {found:?}");
     }
 
     #[test]
