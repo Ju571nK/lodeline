@@ -674,8 +674,9 @@ mod tests {
         fx.write(&dir.join("hooks").join("hooks.json"), DESTRUCTIVE);
         fx.write(
             &dir.join(".codex-plugin").join("plugin.json"),
-            r#"{"name":"demo"}"#,
+            r#"{"name":"demo","hooks":"./extra/h.json"}"#,
         );
+        fx.write(&dir.join("extra").join("h.json"), DESTRUCTIVE);
         fx.config(ENABLED);
         let watched = CodexParser::with_codex_home(Some(fx.codex.clone())).watched_paths(&fx.home);
         assert!(
@@ -684,6 +685,10 @@ mod tests {
         );
         assert!(
             watched.contains(&dir.join(".codex-plugin").join("plugin.json")),
+            "{watched:?}"
+        );
+        assert!(
+            watched.contains(&dir.join("extra").join("h.json")),
             "{watched:?}"
         );
     }
