@@ -368,6 +368,11 @@ fn seed_inventory(ctx: &ProxyContext) {
 /// connected) and px-d (an older proxy), the invocations of `seed_invocations` and the inventory
 /// of `seed_inventory`, that sees each request carry a certificate issued by `issuer`.
 async fn serve_with_proxies(dir: &Path, issuer: &str) -> String {
+    serve_with_proxies_at(dir, issuer, "127.0.0.1:0").await
+}
+
+/// `serve_with_proxies` bound to `bind`.
+async fn serve_with_proxies_at(dir: &Path, issuer: &str, bind: &str) -> String {
     make_ca(dir, "hostca", "test-host-ca");
     make_ca(dir, "proxyca", "test-proxy-ca");
     let mut bundle = std::fs::read(dir.join("hostca.crt")).unwrap();
@@ -430,7 +435,7 @@ async fn serve_with_proxies(dir: &Path, issuer: &str) -> String {
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     url
@@ -1087,4 +1092,32 @@ async fn a_proxy_ca_certificate_is_refused_on_every_read() {
     let name = ArtifactName::parse("SHA256SUMS").unwrap();
     let err = client.artifact(name).await.err().unwrap();
     assert_eq!(err, FleetError::CertificateRefused, "artifact");
+}
+
+/// Serves the seed of `serve_with_proxies` on `127.0.0.1:$PXRLS_PORT`, prints `ready <url>` and
+/// waits for a stop signal. The browser run in `web/tests/e2e-real` starts it; `cargo test`
+/// skips it, so only that run keeps it compiling and working.
+#[tokio::test]
+#[ignore = "serves the seeded server until stopped, for the browser run in web/tests/e2e-real"]
+async fn serve_seeded_proxies_until_killed() {
+    let port = std::env::var("PXRLS_PORT").expect("PXRLS_PORT names the port to listen on");
+    let dir = temp_dir("proxies-serve");
+    let url = serve_with_proxies_at(&dir.0, HOST_CA, &format!("127.0.0.1:{port}")).await;
+    println!("ready {url}");
+    stopped().await;
+}
+
+#[cfg(unix)]
+async fn stopped() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).unwrap();
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn stopped() {
+    tokio::signal::ctrl_c().await.unwrap();
 }
