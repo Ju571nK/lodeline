@@ -567,6 +567,7 @@ mod tests {
             ("ping", Method::Ping),
             ("tools/list", Method::ToolsList),
             ("resources/read", Method::Unknown),
+            ("prompts/list", Method::Unknown),
             ("prompts/get", Method::Unknown),
             ("completion/complete", Method::Unknown),
         ] {
