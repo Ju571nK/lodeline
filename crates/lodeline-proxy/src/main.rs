@@ -97,6 +97,23 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Command::Snippet {
+            client,
+            name,
+            url,
+            route,
+            token_env,
+        } => match lodeline_proxy::snippet::render(client, &name, &url, &route, &token_env) {
+            Ok(s) => {
+                print!("{}", s.entry);
+                eprintln!("{}", s.note);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::from(EXIT_INVALID_CONFIG)
+            }
+        },
         Command::Run { config } => {
             let b = match Bootstrap::load(&config) {
                 Ok(b) => b,

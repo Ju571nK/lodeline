@@ -27,6 +27,7 @@ pub mod route;
 pub mod route_health;
 pub mod server;
 pub mod session;
+pub mod snippet;
 pub mod spool;
 pub mod state_dir;
 pub mod status_report;

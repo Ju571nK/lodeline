@@ -1,6 +1,6 @@
 //! clap CLI for `lodeline-proxy`. No secret is ever accepted as an argument.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -40,6 +40,34 @@ pub enum Command {
         #[command(subcommand)]
         command: TokenCommand,
     },
+    /// Print a client config entry for one proxy route. Writes no file, makes
+    /// no request and takes no token: the entry names an environment variable.
+    /// The entry follows the vendor's documented form; it is not a claim that
+    /// the client works with the proxy.
+    Snippet {
+        /// Client the entry is for.
+        #[arg(long, value_enum)]
+        client: SnippetClient,
+        /// Entry name in the client's config (letters, digits, `_`, `-`).
+        #[arg(long)]
+        name: String,
+        /// Base URL of the proxy listener, for example https://proxy.example.internal:8480.
+        #[arg(long)]
+        url: String,
+        /// Route id (the `/mcp/<route_id>` path segment).
+        #[arg(long)]
+        route: String,
+        /// Name of the environment variable that holds the client token.
+        #[arg(long)]
+        token_env: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SnippetClient {
+    ClaudeCode,
+    Codex,
+    Cursor,
 }
 
 #[derive(Subcommand, Debug)]
