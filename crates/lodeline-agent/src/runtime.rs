@@ -396,7 +396,10 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
     ));
 
     // 2. Expand paths per user → watch paths + watch roots.
-    let (expanded_paths, watch_roots) = expand_targets(&effective, &plat, pinned_home.as_deref());
+    let expansion = expansion_users(&plat, pinned_home.as_deref());
+    let link_scope = link_scope_for(&expansion, crate::control::assesses_other_users());
+    let (expanded_paths, watch_roots) =
+        expand_targets_for(&effective, &expansion, pinned_home.as_deref());
 
     // 3. Perform critical-tier warmup (state.db already opened above).
     perform_warmup(&effective, &expanded_paths, &cache)?;
@@ -568,11 +571,12 @@ pub async fn run(cfg: RuntimeConfig) -> anyhow::Result<i32> {
         roots = watch_roots.len(),
         "runtime: spawning filesystem watcher"
     );
-    let (raw_rx, mut watcher_handle) = watcher::spawn_watcher(
+    let (raw_rx, mut watcher_handle) = watcher::spawn_watcher_scoped(
         watch_roots.clone(),
         runtime_handle.clone(),
         1024,
         poll_interval,
+        link_scope,
     )?;
     watcher_handle.follow_files(watched_files(&effective, &expanded_paths), false);
     let aliases_rx = watcher_handle.aliases_rx();
@@ -1342,6 +1346,16 @@ impl VarLookup for PinnedEnv<'_> {
     }
 }
 
+/// Whose links the watcher follows: every link for one account, links within an account
+/// for a root or service agent or any agent that expands paths for several users.
+pub(crate) fn link_scope_for(users: &[UserContext], is_root: bool) -> crate::watcher::LinkScope {
+    if is_root || users.len() > 1 {
+        crate::watcher::LinkScope::shared_host(users.iter().map(|u| u.home.clone()).collect())
+    } else {
+        crate::watcher::LinkScope::single_user()
+    }
+}
+
 /// The users a `~` template expands for: the one pinned home, else the host's user list.
 pub(crate) fn expansion_users(
     plat: &impl UserEnumerator,
@@ -1358,23 +1372,34 @@ pub(crate) fn expansion_users(
 }
 
 /// Expand a policy's per-user path templates into concrete watch paths and the
-/// set of (canonical) watch roots to register. Shared by `run` (startup) and
-/// `policy_reload_task` (live reload). With `pinned_home` set, `~`, `%USERPROFILE%` and
+/// set of (canonical) watch roots to register, as `expand_targets_for` does for a listed
+/// user snapshot. With `pinned_home` set, `~`, `%USERPROFILE%` and
 /// `$HOME` expand to that home alone and the host's user list is not read.
+#[cfg(test)]
 #[allow(clippy::type_complexity)]
 pub(crate) fn expand_targets(
     eff: &lodeline_core::policy::EffectivePolicy,
     plat: &impl UserEnumerator,
     pinned_home: Option<&std::path::Path>,
 ) -> (HashMap<String, Vec<PathBuf>>, Vec<(PathBuf, bool)>) {
-    let users = expansion_users(plat, pinned_home);
+    expand_targets_for(eff, &expansion_users(plat, pinned_home), pinned_home)
+}
+
+/// `expand_targets` for a user list the caller already read, so the watcher's link scope
+/// and the paths come from one snapshot.
+#[allow(clippy::type_complexity)]
+pub(crate) fn expand_targets_for(
+    eff: &lodeline_core::policy::EffectivePolicy,
+    users: &[UserContext],
+    pinned_home: Option<&std::path::Path>,
+) -> (HashMap<String, Vec<PathBuf>>, Vec<(PathBuf, bool)>) {
     let env = PinnedEnv(pinned_home);
     let mut expanded_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut watch_roots: Vec<(PathBuf, bool)> = Vec::new();
     for t in &eff.targets {
         let mut paths = Vec::new();
         for tmpl in &t.paths {
-            for p in expand_per_user(tmpl, &users, &env).into_iter().flatten() {
+            for p in expand_per_user(tmpl, users, &env).into_iter().flatten() {
                 // Resolve a symlinked directory prefix (macOS `/var` → `/private/var`,
                 // etc.) so globs / warmup keys / watch roots all line up with the
                 // canonical event paths the normalizer produces.
@@ -3102,6 +3127,14 @@ mod tests {
             listed_users[0].home,
             std::path::PathBuf::from("/listed/alice")
         );
+    }
+
+    #[test]
+    fn several_expanded_users_or_a_root_agent_get_the_shared_host_scope() {
+        let two = [listed("alice"), listed("bob")];
+        assert!(super::link_scope_for(&two, false).is_shared_host());
+        assert!(super::link_scope_for(&two[..1], true).is_shared_host());
+        assert!(!super::link_scope_for(&two[..1], false).is_shared_host());
     }
 
     #[test]

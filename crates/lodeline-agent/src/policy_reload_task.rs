@@ -723,8 +723,13 @@ pub(crate) fn reload(ctx: &mut ReloadCtx, plat: &ActivePlatform) {
         }
     }
 
+    let users = crate::runtime::expansion_users(plat, ctx.pinned_home.as_deref());
+    ctx.watcher.set_link_scope(crate::runtime::link_scope_for(
+        &users,
+        crate::control::assesses_other_users(),
+    ));
     let (expanded_paths, new_roots) =
-        crate::runtime::expand_targets(&effective, plat, ctx.pinned_home.as_deref());
+        crate::runtime::expand_targets_for(&effective, &users, ctx.pinned_home.as_deref());
 
     // Re-seed the critical-tier warmup cache (idempotent — overwrites).
     let _ = crate::runtime::perform_warmup(&effective, &expanded_paths, &ctx.cache);

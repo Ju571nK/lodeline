@@ -46,6 +46,118 @@ pub struct WatcherHandle {
     activity: Arc<RootActivity>,
     /// Quiet time after which an active directory root is re-armed. `None` never re-arms.
     rearm_after: Option<Duration>,
+    scope: LinkScope,
+}
+
+const OTHER_ACCOUNT: &str = "link target belongs to another account";
+
+type OwnerOf = Arc<dyn Fn(&Path, bool) -> Option<u32> + Send + Sync>;
+
+/// Whether the agent serves one account or a whole host, which decides whose links it follows.
+#[derive(Clone)]
+pub struct LinkScope {
+    shared_host: bool,
+    homes: Vec<PathBuf>,
+    owner_of: OwnerOf,
+}
+
+impl LinkScope {
+    pub fn single_user() -> Self {
+        Self {
+            shared_host: false,
+            homes: Vec::new(),
+            owner_of: Arc::new(file_owner),
+        }
+    }
+
+    pub fn shared_host(homes: Vec<PathBuf>) -> Self {
+        Self {
+            shared_host: true,
+            homes,
+            owner_of: Arc::new(file_owner),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn with_owner_of(
+        mut self,
+        owner_of: impl Fn(&Path, bool) -> Option<u32> + Send + Sync + 'static,
+    ) -> Self {
+        self.owner_of = Arc::new(owner_of);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_shared_host(&self) -> bool {
+        self.shared_host
+    }
+
+    /// Whether a link may point at `real`. On unix the target must belong to the account
+    /// that owns the link; elsewhere there is no owner lookup, so it must sit under the
+    /// home the link is in. A single-user agent follows every link.
+    fn allows(&self, link: &Path, real: &Path) -> bool {
+        if !self.shared_host {
+            return true;
+        }
+        if cfg!(unix) {
+            let owner = (self.owner_of)(link, false);
+            owner.is_some() && owner == (self.owner_of)(real, true)
+        } else {
+            self.under_link_home(link, real)
+        }
+    }
+
+    fn under_link_home(&self, link: &Path, real: &Path) -> bool {
+        let link_forms = path_forms(link, true);
+        let homes: Vec<Vec<PathBuf>> = self
+            .homes
+            .iter()
+            .map(|home| path_forms(home, false))
+            .collect();
+        let matched = |forms: &Vec<PathBuf>| {
+            forms
+                .iter()
+                .filter(|home| link_forms.iter().any(|link| link.starts_with(home)))
+                .map(|home| home.components().count())
+                .max()
+        };
+        homes
+            .iter()
+            .filter_map(|forms| Some((matched(forms)?, forms)))
+            .max_by_key(|(depth, _)| *depth)
+            .is_some_and(|(_, forms)| forms.iter().any(|home| real.starts_with(home)))
+    }
+}
+
+/// A path as spelled and with its folder resolved. A link keeps its own name, so only its
+/// parent is resolved; a home is resolved whole.
+fn path_forms(path: &Path, keep_leaf: bool) -> Vec<PathBuf> {
+    let mut forms = vec![path.to_path_buf()];
+    let resolved = if keep_leaf {
+        path.parent()
+            .zip(path.file_name())
+            .and_then(|(parent, name)| Some(dunce::canonicalize(parent).ok()?.join(name)))
+    } else {
+        dunce::canonicalize(path).ok()
+    };
+    forms.extend(resolved.filter(|form| form != path));
+    forms
+}
+
+#[cfg(unix)]
+fn file_owner(path: &Path, follow: bool) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = if follow {
+        std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
+    };
+    meta.ok().map(|m| m.uid())
+}
+
+#[cfg(not(unix))]
+fn file_owner(_path: &Path, _follow: bool) -> Option<u32> {
+    None
 }
 
 /// ReadDirectoryChangesW can end a directory watch without telling the agent (#627), and a
@@ -177,6 +289,11 @@ impl WatcherHandle {
 
     /// Set the watched file paths. Each one that is a link to a regular file is
     /// watched under its link path and aliased from its target.
+    /// Replace whose links the watcher follows; takes effect at the next root rebuild.
+    pub fn set_link_scope(&mut self, scope: LinkScope) {
+        self.scope = scope;
+    }
+
     pub fn follow_files(&mut self, files: Vec<PathBuf>, catch_up: bool) {
         self.files = files;
         let _ = self.rebuild_roots(catch_up);
@@ -243,9 +360,9 @@ impl WatcherHandle {
         let mut matched = BTreeSet::new();
         let mut folder_links = BTreeSet::new();
         for (pattern, recursive) in &self.desired {
-            for (root, via_link) in resolve_pattern(pattern) {
-                if via_link {
-                    folder_links.insert(root);
+            for (root, origin) in resolve_pattern(pattern) {
+                if let Some(origin) = origin {
+                    folder_links.insert((root, origin));
                     continue;
                 }
                 if has_glob(pattern) {
@@ -311,7 +428,7 @@ impl WatcherHandle {
     fn follow_links(
         &mut self,
         roots: &BTreeMap<PathBuf, bool>,
-        folders: BTreeSet<PathBuf>,
+        folders: BTreeSet<(PathBuf, PathBuf)>,
     ) -> (Vec<(PathBuf, PathBuf)>, BTreeSet<PathBuf>) {
         let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut covered = BTreeSet::new();
@@ -341,6 +458,10 @@ impl WatcherHandle {
             if !real.is_file() {
                 continue;
             }
+            if !self.scope.allows(&link, &real) {
+                self.warn_once(&link, "owner", OTHER_ACCOUNT);
+                continue;
+            }
             let real = crate::normalizer::match_form(real);
             if links.iter().any(|(other, _)| *other == real) {
                 self.warn_once(
@@ -354,10 +475,15 @@ impl WatcherHandle {
             }
             links.push((real, link));
         }
-        for link in folders {
+        for (link, origin) in folders {
             let Ok(real) = dunce::canonicalize(&link) else {
                 continue;
             };
+            let linked = dunce::canonicalize(&origin).unwrap_or_else(|_| real.clone());
+            if !self.scope.allows(&origin, &linked) {
+                self.warn_once(&origin, "owner", OTHER_ACCOUNT);
+                continue;
+            }
             let real = crate::normalizer::match_form(real);
             if real.parent().is_none()
                 || link.starts_with(&real)
@@ -567,7 +693,7 @@ fn folder_leaf_links(dir: &Path, name: &std::ffi::OsStr) -> Vec<PathBuf> {
     resolve_pattern(dir)
         .into_iter()
         .take(crate::runtime::WARMUP_ENTRY_LIMIT)
-        .filter(|(_, via_link)| !via_link)
+        .filter(|(_, via_link)| via_link.is_none())
         .map(|(folder, _)| folder.join(name))
         .filter(|leaf| std::fs::symlink_metadata(leaf).is_ok_and(|m| m.is_symlink()))
         .filter(|leaf| dunce::canonicalize(leaf).is_ok_and(|real| real.is_file()))
@@ -598,12 +724,12 @@ fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
 /// Literal missing roots retain #219's retry behavior; wildcard roots are
 /// discovered afresh so installation/removal/replacement needs no restart.
 /// A link to a folder counts as a folder at the first wildcard component only,
-/// and its root is flagged. A link under it, or a literal link, is not followed.
-fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, bool)> {
+/// and its root carries the link's own path. A link under it, or a literal link, is not followed.
+fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
     if !has_glob(pattern) {
-        return vec![(pattern.to_path_buf(), false)];
+        return vec![(pattern.to_path_buf(), None)];
     }
-    let mut candidates = vec![(PathBuf::new(), false)];
+    let mut candidates: Vec<(PathBuf, Option<PathBuf>)> = vec![(PathBuf::new(), None)];
     let mut in_pattern = false;
     for component in pattern.components() {
         let part = Path::new(component.as_os_str());
@@ -629,7 +755,8 @@ fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, bool)> {
                     if (kind.is_dir() || linked)
                         && glob.is_match(&crate::normalizer::match_form(entry.file_name().into()))
                     {
-                        matches.push((entry.path(), via_link || linked));
+                        let origin = via_link.clone().or_else(|| linked.then(|| entry.path()));
+                        matches.push((entry.path(), origin));
                     }
                 }
             }
@@ -767,6 +894,24 @@ pub fn spawn_watcher(
     capacity: usize,
     poll_interval: Option<Duration>,
 ) -> Result<(mpsc::Receiver<RawFsEvent>, WatcherHandle), WatcherError> {
+    spawn_watcher_scoped(
+        roots,
+        runtime_handle,
+        capacity,
+        poll_interval,
+        LinkScope::single_user(),
+    )
+}
+
+/// `spawn_watcher` for an agent that may serve more than one account: `scope` decides whose
+/// links it follows.
+pub fn spawn_watcher_scoped(
+    roots: Vec<(PathBuf, bool)>,
+    runtime_handle: tokio::runtime::Handle,
+    capacity: usize,
+    poll_interval: Option<Duration>,
+    scope: LinkScope,
+) -> Result<(mpsc::Receiver<RawFsEvent>, WatcherHandle), WatcherError> {
     let (tx, rx) = mpsc::channel::<RawFsEvent>(capacity);
     let tx = Arc::new(tx);
     let tx_for_cb = tx.clone();
@@ -855,6 +1000,7 @@ pub fn spawn_watcher(
         warned: BTreeSet::new(),
         activity,
         rearm_after: cfg!(windows).then_some(WINDOWS_REARM_AFTER),
+        scope,
     };
     for (root, recursive) in roots {
         *handle.desired.entry(root).or_default() |= recursive;
@@ -1977,6 +2123,225 @@ mod tests {
     #[cfg(unix)]
     fn aliases_of(watcher: &WatcherHandle) -> Vec<(PathBuf, PathBuf)> {
         watcher.aliases_rx().borrow().to_vec()
+    }
+
+    #[cfg(unix)]
+    fn scoped_watcher(scope: LinkScope) -> WatcherHandle {
+        spawn_watcher_scoped(
+            vec![],
+            tokio::runtime::Handle::current(),
+            16,
+            Some(Duration::from_secs(60)),
+            scope,
+        )
+        .unwrap()
+        .1
+    }
+
+    /// A link owned by uid 1000 under `mine`, to a file under `theirs` owned by `target_uid`.
+    #[cfg(unix)]
+    fn owned_link(
+        dir: &Path,
+        target_uid: u32,
+        scope: impl FnOnce() -> LinkScope,
+    ) -> (WatcherHandle, PathBuf, PathBuf) {
+        fs::create_dir_all(dir.join("mine")).unwrap();
+        fs::create_dir_all(dir.join("theirs")).unwrap();
+        let real = dir.join("theirs/real.json");
+        fs::write(&real, b"x").unwrap();
+        let link = dir.join("mine/settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let theirs = dir.join("theirs");
+        let scope = scope().with_owner_of(move |path, _| {
+            Some(if path.starts_with(&theirs) {
+                target_uid
+            } else {
+                1000
+            })
+        });
+        (scoped_watcher(scope), link, real)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_host_agent_refuses_a_file_link_to_another_accounts_file() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, _real) =
+            owned_link(&dir, 0, || LinkScope::shared_host(vec![dir.join("mine")]));
+        let logs = test_logs::logs_of(|| {
+            watcher.follow_files(vec![link.clone()], true);
+            watcher.reconcile();
+        });
+        assert!(aliases_of(&watcher).is_empty());
+        assert_eq!(
+            logs.matches("link target belongs to another account")
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_host_agent_follows_a_file_link_to_the_same_accounts_file() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, real) = owned_link(&dir, 1000, || {
+            LinkScope::shared_host(vec![dir.join("mine")])
+        });
+        watcher.follow_files(vec![link.clone()], true);
+        assert_eq!(aliases_of(&watcher), [(real, link)]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_single_user_agent_follows_a_file_link_to_another_accounts_file() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, real) = owned_link(&dir, 0, LinkScope::single_user);
+        watcher.follow_files(vec![link.clone()], true);
+        assert_eq!(aliases_of(&watcher), [(real, link)]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_host_agent_refuses_a_folder_link_to_another_accounts_folder() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("mine/skills")).unwrap();
+        fs::create_dir_all(dir.join("theirs/x")).unwrap();
+        std::os::unix::fs::symlink(dir.join("theirs/x"), dir.join("mine/skills/x")).unwrap();
+        let theirs = dir.join("theirs");
+        let scope = LinkScope::shared_host(vec![dir.join("mine")])
+            .with_owner_of(move |path, _| Some(if path.starts_with(&theirs) { 0 } else { 1000 }));
+        let mut watcher = scoped_watcher(scope);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&dir.join("mine/skills/*"), false).unwrap();
+        });
+        assert!(aliases_of(&watcher).is_empty());
+        assert_eq!(
+            logs.matches("link target belongs to another account")
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
+    /// Owners that read the file system the way `lstat` and `stat` do: a link's own
+    /// owner is that of its parent folder's final path plus its name.
+    #[cfg(unix)]
+    fn fs_owner(theirs: PathBuf) -> impl Fn(&Path, bool) -> Option<u32> + Send + Sync + 'static {
+        move |path, follow| {
+            let resolved = if follow {
+                dunce::canonicalize(path).ok()?
+            } else {
+                dunce::canonicalize(path.parent()?)
+                    .ok()?
+                    .join(path.file_name()?)
+            };
+            Some(if resolved.starts_with(&theirs) {
+                0
+            } else {
+                1000
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_link_with_a_directory_suffix_is_checked_at_the_link() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("mine/skills")).unwrap();
+        fs::create_dir_all(dir.join("theirs/x/sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("theirs/x"), dir.join("mine/skills/x")).unwrap();
+        let scope = LinkScope::shared_host(vec![dir.join("mine")])
+            .with_owner_of(fs_owner(dir.join("theirs")));
+        let mut watcher = scoped_watcher(scope);
+        let logs = test_logs::logs_of(|| {
+            watcher
+                .watch(&dir.join("mine/skills/*/sub"), false)
+                .unwrap();
+        });
+        assert!(aliases_of(&watcher).is_empty(), "{logs}");
+        assert_eq!(
+            logs.matches("link target belongs to another account")
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_link_scope_applies_at_the_next_rebuild() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, real) =
+            owned_link(&dir, 0, || LinkScope::shared_host(vec![dir.join("mine")]));
+        watcher.follow_files(vec![link.clone()], true);
+        assert!(aliases_of(&watcher).is_empty());
+        watcher.set_link_scope(LinkScope::single_user());
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(real, link)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_given_through_an_alias_still_holds_its_links() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("real/alice/.claude")).unwrap();
+        fs::create_dir_all(dir.join("real/alice/dotfiles")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        let scope = LinkScope::shared_host(vec![dir.join("alias/alice")]);
+        let link = dir.join("real/alice/.claude/settings.json");
+        assert!(scope.under_link_home(&link, &dir.join("real/alice/dotfiles/a.json")));
+        let spelled = dir.join("alias/alice/.claude/settings.json");
+        assert!(scope.under_link_home(&spelled, &dir.join("real/alice/dotfiles/a.json")));
+        assert!(!scope.under_link_home(&link, &dir.join("real/bob/a.json")));
+    }
+
+    #[test]
+    fn a_link_in_a_nested_home_is_held_to_the_nested_home() {
+        let alice = Path::new("homes").join("alice");
+        let nested = alice.join("work");
+        let scope = LinkScope::shared_host(vec![alice.clone(), nested.clone()]);
+        let link = nested.join("settings.json");
+        assert!(scope.under_link_home(&link, &nested.join("a.json")));
+        assert!(!scope.under_link_home(&link, &alice.join("a.json")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_home_beats_an_outer_home_given_through_a_deeper_alias() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("outer/work")).unwrap();
+        fs::create_dir_all(dir.join("a/b/c/d")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outer"), dir.join("a/b/c/d/o")).unwrap();
+        let outer = dir.join("a/b/c/d/o");
+        let nested = dir.join("outer/work");
+        let scope = LinkScope::shared_host(vec![outer, nested.clone()]);
+        let link = nested.join("settings.json");
+        assert!(scope.under_link_home(&link, &nested.join("a.json")));
+        assert!(!scope.under_link_home(&link, &dir.join("outer/a.json")));
+    }
+
+    #[test]
+    fn a_link_target_must_sit_under_the_home_the_link_is_in() {
+        let (alice, bob) = (
+            Path::new("homes").join("alice"),
+            Path::new("homes").join("bob"),
+        );
+        let homes = LinkScope::shared_host(vec![alice.clone(), bob.clone()]);
+        let link = alice.join(".claude").join("settings.json");
+        assert!(homes.under_link_home(&link, &alice.join("dotfiles").join("a.json")));
+        assert!(!homes.under_link_home(&link, &bob.join("a.json")));
+        assert!(!homes.under_link_home(&link, &Path::new("opt").join("a.json")));
+        let stray = Path::new("srv").join("settings.json");
+        assert!(!homes.under_link_home(&stray, &stray));
     }
 
     #[cfg(unix)]

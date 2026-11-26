@@ -38,9 +38,11 @@
   pattern you write. The built-in skills and scheduled tasks entries, such as
   `~/.claude/skills/*/SKILL.md`, are the exception: their `*` stands for one
   folder, so `skills/<name>/node_modules/x/SKILL.md` does not match them.
-  A skill folder, a subagent file or a settings file that is itself a symbolic link is read at
-  each assessment, but an edit of its target records no file change and starts no assessment;
-  the next assessment reads it.
+  A watched file or skill folder that is itself a symbolic link is followed, and an edit of
+  its target records a file change under the link's path. An agent that runs as root or as a
+  Windows service, or that expands paths for several users, follows such a link only when its
+  target belongs to the same account as the link (on Windows, when it lies under the home that
+  holds the link), and logs one warning for a link it refuses.
 - After registration, current files are replayed through normal filtering and
   hashing. This recovers current state, not historical changes that occurred
   and disappeared while the root was unavailable. Native and polling backends
