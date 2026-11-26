@@ -1,4 +1,4 @@
-//! #717 — hooks that an enabled Codex plugin brings, read as Codex 0.172.0
+//! #717: hooks that an enabled Codex plugin brings, read as Codex 0.172.0
 //! does (`core-plugins/src/loader.rs`, `hooks/src/engine/discovery.rs`,
 //! `plugin_trust.rs` and `plugin_fingerprint.rs`, rust-v0.172.0).
 //!
