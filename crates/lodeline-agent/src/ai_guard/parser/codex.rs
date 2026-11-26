@@ -281,7 +281,7 @@ impl CodexLayer {
 /// A stored hash is not compared with the hook: Codex marks a changed hook
 /// `Modified` and skips it, but its normalized-hash input changes between
 /// releases, and a wrong mismatch would hide a hook that runs.
-enum HookTrust<'a> {
+pub(super) enum HookTrust<'a> {
     Managed,
     Persisted(Option<&'a toml::Table>),
 }
@@ -419,7 +419,7 @@ fn assess_user_layers(
 /// server the highest layer that defines the server. A finding that comes
 /// from a permission profile resolved in the merged `[permissions]` table
 /// names no file.
-fn assess_user_findings(
+pub(super) fn assess_user_findings(
     system_dir: &Path,
     codex_dir: &Path,
     home_dir: &Path,
