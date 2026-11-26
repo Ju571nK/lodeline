@@ -562,7 +562,10 @@ impl PhaseClock {
     }
 
     fn end(&mut self, phase: &'static str) {
-        let now = tokio::time::Instant::now();
+        self.end_at(phase, tokio::time::Instant::now());
+    }
+
+    fn end_at(&mut self, phase: &'static str, now: tokio::time::Instant) {
         self.phases.push((phase, now.duration_since(self.last)));
         self.last = now;
     }
@@ -572,6 +575,42 @@ impl Drop for PhaseClock {
     fn drop(&mut self) {
         tracing::info!(phases = ?self.phases, "shutdown phase durations");
     }
+}
+
+/// Publish Stopped under the lifecycle lock. The lock wait and the write are
+/// two phases, so a slow shutdown names the half that was slow.
+fn finish_timed(
+    clock: &mut PhaseClock,
+    lc: &std::sync::Mutex<Lifecycle>,
+    invocation_accounted: bool,
+    gaps: Option<&crate::status_report::GapQueue>,
+) -> anyhow::Result<()> {
+    finish_timed_at(
+        clock,
+        lc,
+        invocation_accounted,
+        gaps,
+        &mut tokio::time::Instant::now,
+    )
+}
+
+/// Read the clock only at the two edges. The guard holds the work it held before
+/// plus the one acquisition timestamp; the phases are recorded after it is released.
+fn finish_timed_at(
+    clock: &mut PhaseClock,
+    lc: &std::sync::Mutex<Lifecycle>,
+    invocation_accounted: bool,
+    gaps: Option<&crate::status_report::GapQueue>,
+    now: &mut dyn FnMut() -> tokio::time::Instant,
+) -> anyhow::Result<()> {
+    let mut guard = lock(lc);
+    let locked = now();
+    let finished = guard.finish_shutdown(invocation_accounted, gaps);
+    drop(guard);
+    let written = now();
+    clock.end_at("finish_lock_wait", locked);
+    clock.end_at("finish_write", written);
+    finished
 }
 
 /// Least time the audit drain gets after the relay drain used the grace: a
@@ -1017,9 +1056,12 @@ async fn run_inner(
     clock.end("spool_close");
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
-    let finished = lock(&lc).finish_shutdown(invocation_accounted, invocation_gaps.as_ref());
-    clock.end("finish");
-    finished?;
+    finish_timed(
+        &mut clock,
+        &lc,
+        invocation_accounted,
+        invocation_gaps.as_ref(),
+    )?;
     Ok(())
 }
 
@@ -1763,6 +1805,46 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// The finish step times the wait for the lifecycle lock apart from the
+    /// write that publishes Stopped. The clock is scripted: the first reading
+    /// must come once the lock is held and before the write, the second after it.
+    #[test]
+    fn finish_step_times_its_lock_wait_apart_from_its_write() {
+        let t = tempfile::tempdir().unwrap();
+        let b = bootstrap(t.path());
+        let mut lc = Lifecycle::start(&b).unwrap();
+        lc.set_run_state(RunState::Stopping).unwrap();
+        let lc = std::sync::Mutex::new(lc);
+        let start = tokio::time::Instant::now();
+        let mut clock = PhaseClock::start(start);
+        let mut readings = 0;
+        let mut now = || {
+            readings += 1;
+            let state = read_status(&b.state_dir).unwrap().run_state;
+            match readings {
+                1 => {
+                    assert_eq!(state, RunState::Stopping, "read after the write");
+                    assert!(lc.try_lock().is_err(), "read before the lock was held");
+                    start + Duration::from_millis(10)
+                }
+                2 => {
+                    assert_eq!(state, RunState::Stopped, "read before the write");
+                    assert!(lc.try_lock().is_ok(), "read while the lock was held");
+                    start + Duration::from_millis(25)
+                }
+                _ => panic!("more than two clock readings"),
+            }
+        };
+        finish_timed_at(&mut clock, &lc, true, None, &mut now).unwrap();
+        assert_eq!(
+            clock.phases,
+            [
+                ("finish_lock_wait", Duration::from_millis(10)),
+                ("finish_write", Duration::from_millis(15)),
+            ]
+        );
     }
 
     /// The shutdown after the signal has one grace budget. A client stuck in its
