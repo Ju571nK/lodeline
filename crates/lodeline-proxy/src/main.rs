@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{error::ErrorKind, CommandFactory, Parser};
 use lodeline_proxy::bootstrap::Bootstrap;
 use lodeline_proxy::cli::{Cli, Command, TokenCommand};
 use lodeline_proxy::{lifecycle, token};
@@ -8,22 +8,46 @@ use std::process::ExitCode;
 /// by the config).
 const EXIT_INVALID_CONFIG: u8 = 2;
 
-fn is_snippet_usage_error(e: &clap::Error) -> bool {
-    e.use_stderr() && std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("snippet"))
+fn usage_help_path() -> String {
+    let cli = Cli::command();
+    let mut path = cli.get_name().to_owned();
+    let mut command = &cli;
+    let mut args = std::env::args_os().skip(1).peekable();
+    while command.has_subcommands() {
+        // The built-in `help` takes a command path as its topic.
+        args.next_if(|arg| arg == "help");
+        let Some(subcommand) = args.next().and_then(|arg| command.find_subcommand(arg)) else {
+            break;
+        };
+        path.push(' ');
+        path.push_str(subcommand.get_name());
+        command = subcommand;
+    }
+    path
 }
 
 fn main() -> ExitCode {
-    // clap exits with 2 on usage errors; `run` without --config is one of them.
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(std::env::args_os()) {
         Ok(cli) => cli,
-        Err(e) if is_snippet_usage_error(&e) => {
-            // Clap echoes the offending argument, which can be a bearer pasted
-            // through an unquoted shell expansion; print a fixed message instead.
-            eprintln!(
-                "snippet: invalid arguments (not echoed, they may hold a token); \
-                 run `lodeline-proxy snippet --help`"
-            );
-            return ExitCode::from(EXIT_INVALID_CONFIG);
+        // Missing-item diagnostics name the CLI's own options and commands.
+        Err(e)
+            if e.use_stderr()
+                && !matches!(
+                    e.kind(),
+                    ErrorKind::MissingRequiredArgument
+                        | ErrorKind::MissingSubcommand
+                        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                ) =>
+        {
+            let path = usage_help_path();
+            clap::Error::raw(
+                e.kind(),
+                format!(
+                    "{path}: invalid arguments (not echoed, they may hold a token). \
+                     Run `{path} --help`"
+                ),
+            )
+            .exit();
         }
         Err(e) => e.exit(),
     };

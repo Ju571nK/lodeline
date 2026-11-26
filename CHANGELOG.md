@@ -15,6 +15,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- `lodeline-proxy` usage errors at the root and on every subcommand no longer echo argument values.
 - A session DELETE now counts against the proxy's concurrent request limits.
 - A linked skill folder or watched file whose target sits inside another watched folder now records its edits under the link path; the edit was dropped when the target's path matched no watch pattern.
 - A repo whose only Claude Code file is a `.claude/commands` folder now gets a project row, in the agent and in `lodeline scan` (#539).
