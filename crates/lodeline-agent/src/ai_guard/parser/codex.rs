@@ -6447,7 +6447,7 @@ base_url = "https://llm.corp.example/v1"
             source_of(&findings, is_helper),
             source(
                 ConfigLayer::Project,
-                &dir.path().join("repo/.codex/config.toml")
+                &dir.path().join("repo").join(".codex").join("config.toml")
             )
         );
         let reasons: Vec<_> = findings.into_iter().map(|f| f.reason).collect();
