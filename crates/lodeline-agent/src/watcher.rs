@@ -87,6 +87,10 @@ impl LinkScope {
         self
     }
 
+    pub(crate) fn is_shared_host(&self) -> bool {
+        self.shared_host
+    }
+
     /// Whether a link may point at `real`. On unix the target must belong to the account
     /// that owns the link; elsewhere there is no owner lookup, so it must sit under the
     /// home the link is in. A single-user agent follows every link.
@@ -259,6 +263,9 @@ impl WatcherHandle {
 
     /// Set the watched file paths. Each one that is a link to a regular file is
     /// watched under its link path and aliased from its target.
+    /// Replace whose links the watcher follows; takes effect at the next root rebuild.
+    pub fn set_link_scope(&mut self, _scope: LinkScope) {}
+
     pub fn follow_files(&mut self, files: Vec<PathBuf>, catch_up: bool) {
         self.files = files;
         let _ = self.rebuild_roots(catch_up);
@@ -2168,6 +2175,91 @@ mod tests {
             1,
             "{logs}"
         );
+    }
+
+    /// Owners that read the file system the way `lstat` and `stat` do: a link's own
+    /// owner is that of its parent folder's final path plus its name.
+    #[cfg(unix)]
+    fn fs_owner(theirs: PathBuf) -> impl Fn(&Path, bool) -> Option<u32> + Send + Sync + 'static {
+        move |path, follow| {
+            let resolved = if follow {
+                dunce::canonicalize(path).ok()?
+            } else {
+                dunce::canonicalize(path.parent()?)
+                    .ok()?
+                    .join(path.file_name()?)
+            };
+            Some(if resolved.starts_with(&theirs) {
+                0
+            } else {
+                1000
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_link_with_a_directory_suffix_is_checked_at_the_link() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("mine/skills")).unwrap();
+        fs::create_dir_all(dir.join("theirs/x/sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("theirs/x"), dir.join("mine/skills/x")).unwrap();
+        let scope = LinkScope::shared_host(vec![dir.join("mine")])
+            .with_owner_of(fs_owner(dir.join("theirs")));
+        let mut watcher = scoped_watcher(scope);
+        let logs = test_logs::logs_of(|| {
+            watcher
+                .watch(&dir.join("mine/skills/*/sub"), false)
+                .unwrap();
+        });
+        assert!(aliases_of(&watcher).is_empty(), "{logs}");
+        assert_eq!(
+            logs.matches("link target belongs to another account")
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_link_scope_applies_at_the_next_rebuild() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let (mut watcher, link, real) =
+            owned_link(&dir, 0, || LinkScope::shared_host(vec![dir.join("mine")]));
+        watcher.follow_files(vec![link.clone()], true);
+        assert!(aliases_of(&watcher).is_empty());
+        watcher.set_link_scope(LinkScope::single_user());
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(real, link)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_given_through_an_alias_still_holds_its_links() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("real/alice/.claude")).unwrap();
+        fs::create_dir_all(dir.join("real/alice/dotfiles")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        let scope = LinkScope::shared_host(vec![dir.join("alias/alice")]);
+        let link = dir.join("real/alice/.claude/settings.json");
+        assert!(scope.under_link_home(&link, &dir.join("real/alice/dotfiles/a.json")));
+        let spelled = dir.join("alias/alice/.claude/settings.json");
+        assert!(scope.under_link_home(&spelled, &dir.join("real/alice/dotfiles/a.json")));
+        assert!(!scope.under_link_home(&link, &dir.join("real/bob/a.json")));
+    }
+
+    #[test]
+    fn a_link_in_a_nested_home_is_held_to_the_nested_home() {
+        let alice = Path::new("homes").join("alice");
+        let nested = alice.join("work");
+        let scope = LinkScope::shared_host(vec![alice.clone(), nested.clone()]);
+        let link = nested.join("settings.json");
+        assert!(scope.under_link_home(&link, &nested.join("a.json")));
+        assert!(!scope.under_link_home(&link, &alice.join("a.json")));
     }
 
     #[test]

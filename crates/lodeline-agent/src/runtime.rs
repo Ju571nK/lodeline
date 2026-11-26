@@ -1331,6 +1331,12 @@ impl VarLookup for PinnedEnv<'_> {
     }
 }
 
+/// Whose links the watcher follows: every link for one account, links within an account
+/// for a root or service agent or any agent that expands paths for several users.
+pub(crate) fn link_scope_for(_users: &[UserContext], _is_root: bool) -> crate::watcher::LinkScope {
+    crate::watcher::LinkScope::single_user()
+}
+
 /// The users a `~` template expands for: the one pinned home, else the host's user list.
 pub(crate) fn expansion_users(
     plat: &impl UserEnumerator,
@@ -3091,6 +3097,14 @@ mod tests {
             listed_users[0].home,
             std::path::PathBuf::from("/listed/alice")
         );
+    }
+
+    #[test]
+    fn several_expanded_users_or_a_root_agent_get_the_shared_host_scope() {
+        let two = [listed("alice"), listed("bob")];
+        assert!(super::link_scope_for(&two, false).is_shared_host());
+        assert!(super::link_scope_for(&two[..1], true).is_shared_host());
+        assert!(!super::link_scope_for(&two[..1], false).is_shared_host());
     }
 
     #[test]
