@@ -415,7 +415,7 @@ impl ConfigSync {
         if refresh && self.deadline.is_some() {
             let d = now + Duration::from_secs(ttl_secs);
             self.deadline = Some(d);
-            self.table.extend_deadline(d);
+            self.table.extend_deadline(d, Duration::from_secs(ttl_secs));
             self.last_ttl = Some(ttl);
             self.applied_meta = Some(meta_of(&cfg));
             self.applied_upstreams = upstreams_of(&cfg);
@@ -442,7 +442,8 @@ impl ConfigSync {
             }
         }
         let deadline = now + Duration::from_secs(ttl_secs);
-        self.table.set_with_deadline(table, deadline);
+        self.table
+            .set_with_deadline(table, deadline, Duration::from_secs(ttl_secs));
         self.high_water = Some(Applied { revision, hash });
         self.deadline = Some(deadline);
         self.last_ttl = Some(ttl);
@@ -1451,5 +1452,152 @@ mod tests {
         assert!(authenticates(&table, "tok-1"));
         assert!(!authenticates(&table, "tok-2"));
         assert_eq!(s.applied_revision(), Some(1));
+    }
+
+    /// A boot clock the test moves by hand: `(boot id, seconds)`, `None` for "no
+    /// boot clock".
+    type BootCell = std::sync::Arc<std::sync::Mutex<Option<(&'static str, i64)>>>;
+
+    fn boot_cell(start: Option<(&'static str, i64)>) -> (BootCell, crate::boot_clock::BootClock) {
+        let cell: BootCell = std::sync::Arc::new(std::sync::Mutex::new(start));
+        let c = cell.clone();
+        let clock: crate::boot_clock::BootClock = std::sync::Arc::new(move || {
+            c.lock()
+                .unwrap()
+                .map(|(id, secs)| crate::boot_clock::BootInstant {
+                    boot_id: id.into(),
+                    secs,
+                })
+        });
+        (cell, clock)
+    }
+
+    /// A handle on the injected boot clock, a sync on that handle, and a config
+    /// with a 300 s TTL applied at the frozen Tokio instant `t0`.
+    fn applied_on_boot_clock(
+        f: &Fx,
+        start: Option<(&'static str, i64)>,
+    ) -> (ConfigSync, TableHandle, BootCell, Instant) {
+        let (cell, clock) = boot_cell(start);
+        let table = TableHandle::new().with_boot_clock(clock);
+        let mut s = sync(f, &table);
+        let t0 = Instant::now();
+        assert_eq!(
+            s.on_fetch(t0, body(&std_cfg(1))),
+            SyncOutcome::Applied { revision: 1 }
+        );
+        (s, table, cell, t0)
+    }
+
+    /// A host suspend stops the Tokio clock but not the boot clock: the TTL ends
+    /// on the boot clock even though no Tokio time has passed.
+    #[tokio::test(start_paused = true)]
+    async fn a_suspend_past_the_ttl_expires_the_table() {
+        let f = fx();
+        let (mut s, table, cell, t0) = applied_on_boot_clock(&f, Some(("boot-a", 1000)));
+        assert!(authenticates(&table, "tok-1"));
+        *cell.lock().unwrap() = Some(("boot-a", 1300));
+        assert!(
+            table.current().is_none(),
+            "served past the TTL on the boot clock"
+        );
+        s.expire(t0);
+        assert_eq!(s.status().config_state, ConfigState::Expired);
+        assert_eq!(s.view().state, ConfigState::Expired);
+        assert!(s.deadline().is_none());
+        assert!(table.last().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspend_shorter_than_the_ttl_keeps_serving() {
+        let f = fx();
+        let (mut s, table, cell, t0) = applied_on_boot_clock(&f, Some(("boot-a", 1000)));
+        *cell.lock().unwrap() = Some(("boot-a", 1299));
+        assert!(authenticates(&table, "tok-1"));
+        s.expire(t0);
+        assert_eq!(s.status().config_state, ConfigState::Valid);
+        assert!(authenticates(&table, "tok-1"));
+    }
+
+    /// With no boot clock the Tokio deadline alone decides, as before.
+    #[tokio::test(start_paused = true)]
+    async fn without_a_boot_clock_the_tokio_deadline_decides() {
+        let f = fx();
+        let (mut s, table, cell, t0) = applied_on_boot_clock(&f, None);
+        *cell.lock().unwrap() = Some(("boot-a", 99_999));
+        assert!(
+            authenticates(&table, "tok-1"),
+            "no receipt reading: Tokio only"
+        );
+        s.expire(t0);
+        assert_eq!(s.status().config_state, ConfigState::Valid);
+        tokio::time::advance(secs(300)).await;
+        assert!(table.current().is_none());
+        s.expire(Instant::now());
+        assert_eq!(s.status().config_state, ConfigState::Expired);
+
+        let (s2, table2, cell2, _) = applied_on_boot_clock(&f, Some(("boot-a", 1000)));
+        *cell2.lock().unwrap() = None;
+        assert!(
+            authenticates(&table2, "tok-1"),
+            "no check reading: Tokio only"
+        );
+        assert_eq!(s2.status().config_state, ConfigState::Valid);
+    }
+
+    /// A refresh resets the boot clock count, a failed fetch does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_resets_the_boot_clock_count_and_a_failed_fetch_does_not() {
+        let f = fx();
+        let (mut s, table, cell, t0) = applied_on_boot_clock(&f, Some(("boot-a", 1000)));
+        *cell.lock().unwrap() = Some(("boot-a", 1200));
+        assert_eq!(
+            s.on_fetch(t0, FetchResult::Failed),
+            SyncOutcome::Kept(LastUpdateError::FetchFailed)
+        );
+        assert!(authenticates(&table, "tok-1"));
+        *cell.lock().unwrap() = Some(("boot-a", 1290));
+        assert_eq!(s.on_fetch(t0, body(&std_cfg(1))), SyncOutcome::Refreshed);
+        // 290 s after the refresh at 1290 is still inside the TTL; 300 s after
+        // the first receipt would not have been.
+        *cell.lock().unwrap() = Some(("boot-a", 1580));
+        assert!(authenticates(&table, "tok-1"));
+        s.expire(t0);
+        assert_eq!(s.status().config_state, ConfigState::Valid);
+        *cell.lock().unwrap() = Some(("boot-a", 1590));
+        assert!(table.current().is_none());
+        // a failed fetch after the refresh does not extend either
+        let (mut s2, table2, cell2, t1) = applied_on_boot_clock(&f, Some(("boot-a", 1000)));
+        *cell2.lock().unwrap() = Some(("boot-a", 1300));
+        s2.on_fetch(t1, FetchResult::Failed);
+        assert!(table2.current().is_none());
+        assert_eq!(s2.status().config_state, ConfigState::Expired);
+    }
+
+    /// A reading from another boot cannot be compared with the receipt: fail
+    /// closed.
+    #[tokio::test(start_paused = true)]
+    async fn another_boot_id_counts_as_expired() {
+        let f = fx();
+        let (mut s, table, cell, t0) = applied_on_boot_clock(&f, Some(("boot-a", 1000)));
+        *cell.lock().unwrap() = Some(("boot-b", 1001));
+        assert!(table.current().is_none());
+        s.expire(t0);
+        assert_eq!(s.status().config_state, ConfigState::Expired);
+    }
+
+    /// After a suspend the table is expired on the boot clock, so the same
+    /// revision arriving again is installed afresh, not treated as a refresh.
+    #[tokio::test(start_paused = true)]
+    async fn a_fetch_after_a_suspend_reinstalls_the_same_revision() {
+        let f = fx();
+        let (mut s, table, cell, t0) = applied_on_boot_clock(&f, Some(("boot-a", 1000)));
+        *cell.lock().unwrap() = Some(("boot-a", 5000));
+        assert_eq!(s.on_fetch(t0, body(&std_cfg(1))), SyncOutcome::Refreshed);
+        assert!(authenticates(&table, "tok-1"));
+        *cell.lock().unwrap() = Some(("boot-a", 5299));
+        assert!(authenticates(&table, "tok-1"));
+        *cell.lock().unwrap() = Some(("boot-a", 5300));
+        assert!(table.current().is_none());
     }
 }

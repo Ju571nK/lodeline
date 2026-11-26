@@ -18,6 +18,7 @@ use tokio::sync::Semaphore;
 use lodeline_proxy_api::config::ActorKind as ConfigActorKind;
 use lodeline_proxy_api::event::{Actor, ActorKind, AuthenticationMethod, EvidenceSource};
 
+use crate::boot_clock::{system_boot_clock, BootClock, BootInstant};
 use crate::bootstrap::{normalize_origin, split_host_port, Credential};
 use crate::limits::{Limits, RemoteLimits};
 use crate::upstream_pool::UpstreamPool;
@@ -524,8 +525,17 @@ fn parse_upstream(url: &str) -> Result<(Upstream, String), String> {
 /// every [`TableHandle::current`]. Expiry therefore does not depend on any
 /// background task: if the sync task dies, the last table still stops serving at
 /// its deadline (fail closed, control-plane.md §6.3).
-#[derive(Clone, Default)]
-pub struct TableHandle(Arc<RwLock<Slot>>);
+#[derive(Clone)]
+pub struct TableHandle {
+    slot: Arc<RwLock<Slot>>,
+    boot_clock: BootClock,
+}
+
+impl Default for TableHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Default)]
 struct Slot {
@@ -536,27 +546,41 @@ struct Slot {
 
 impl TableHandle {
     pub fn new() -> Self {
-        Self::default()
+        TableHandle {
+            slot: Arc::default(),
+            boot_clock: system_boot_clock(),
+        }
+    }
+    /// Use `clock` for the suspend-aware half of the deadline. Call it before the
+    /// handle is cloned.
+    pub fn with_boot_clock(mut self, clock: BootClock) -> Self {
+        self.boot_clock = clock;
+        self
     }
     /// Install (or remove) a table without an expiry deadline.
     pub fn set(&self, table: Option<RouteTable>) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Slot {
+        *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Slot {
             table: table.map(Arc::new),
             deadline: None,
         };
     }
     /// Install a table that stops being returned by [`TableHandle::current`] at
-    /// `deadline`.
-    pub fn set_with_deadline(&self, table: RouteTable, deadline: tokio::time::Instant) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Slot {
+    /// `deadline`, or once the boot clock has advanced by `ttl`.
+    pub fn set_with_deadline(
+        &self,
+        table: RouteTable,
+        deadline: tokio::time::Instant,
+        _ttl: std::time::Duration,
+    ) {
+        *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Slot {
             table: Some(Arc::new(table)),
             deadline: Some(deadline),
         };
     }
     /// Move the deadline of the installed table (a TTL refresh). No-op when no
     /// table is installed.
-    pub fn extend_deadline(&self, deadline: tokio::time::Instant) {
-        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
+    pub fn extend_deadline(&self, deadline: tokio::time::Instant, _ttl: std::time::Duration) {
+        let mut g = self.slot.write().unwrap_or_else(|e| e.into_inner());
         if g.table.is_some() {
             g.deadline = Some(deadline);
         }
@@ -564,7 +588,7 @@ impl TableHandle {
     /// The table to serve with, or `None` when there is none or its deadline has
     /// been reached.
     pub fn current(&self) -> Option<Arc<RouteTable>> {
-        let g = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let g = self.slot.read().unwrap_or_else(|e| e.into_inner());
         if g.deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
             return None;
         }
@@ -573,7 +597,7 @@ impl TableHandle {
     /// The installed table regardless of its deadline. Only for carrying
     /// admission state over to the next table; never for serving.
     pub(crate) fn last(&self) -> Option<Arc<RouteTable>> {
-        self.0
+        self.slot
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .table
@@ -801,7 +825,7 @@ mod tests {
         let t = RouteTable::build(&[], &BTreeMap::new(), &Limits::default()).unwrap();
         let h = TableHandle::new();
         let d = tokio::time::Instant::now() + std::time::Duration::from_millis(60);
-        h.set_with_deadline(t, d);
+        h.set_with_deadline(t, d, std::time::Duration::from_millis(60));
         assert!(h.current().is_some());
         std::thread::sleep(std::time::Duration::from_millis(120));
         assert!(h.current().is_none(), "served past its deadline");
@@ -809,11 +833,17 @@ mod tests {
         assert!(h.last().is_some());
         // extending a held table does not resurrect an expired view unless the
         // deadline moves past now
-        h.extend_deadline(tokio::time::Instant::now() + std::time::Duration::from_secs(60));
+        h.extend_deadline(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
         assert!(h.current().is_some());
         // no table: extend is a no-op
         let e = TableHandle::new();
-        e.extend_deadline(tokio::time::Instant::now() + std::time::Duration::from_secs(60));
+        e.extend_deadline(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
         assert!(e.current().is_none());
     }
 
