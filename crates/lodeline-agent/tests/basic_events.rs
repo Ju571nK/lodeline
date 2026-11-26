@@ -17,7 +17,7 @@ fn it_emits_modified_event() {
         let mut agent = start_bounded(&steps, TestAgentBuilder::new().policy(&policy)).await;
 
         // Drive the file continuously instead of writing twice with a fixed sleep.
-        // OS watchers (FSEvents, inotify) deliver from "now" and never replay, so a
+        // OS watchers (FSEvents, inotify) deliver from "now" and never send earlier events again, so a
         // write that lands in the watcher's startup gap is lost forever, under
         // heavy parallel load that gap can swallow both fixed writes, hard-failing
         // regardless of the wait budget (#108). A background writer keeps modifying

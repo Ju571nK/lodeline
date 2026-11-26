@@ -22,7 +22,7 @@ fn it_large_file_emits_incomplete() {
 
             // Re-write the oversized file until the watcher observes it. A single write
             // landing in the watcher's startup gap is lost forever (FSEvents/inotify
-            // deliver from "now", no replay), hard-failing under load (#108 family).
+            // deliver from "now", no earlier events sent again), hard-failing under load (#108 family).
             // Rewrites are paced wider than the small-file tests since each is 11 MB;
             // every rewrite is the full size, so any observed event satisfies the
             // size_after assertion. The writer is aborted once the event arrives.

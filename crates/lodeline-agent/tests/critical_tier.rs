@@ -18,7 +18,7 @@ fn it_critical_tier_emits_recheck() {
             let mut agent = start_bounded(&steps, TestAgentBuilder::new().policy(&policy)).await;
 
             // Drive the file continuously until the watcher observes a change. OS
-            // watchers (FSEvents, inotify) deliver from "now" and never replay, so a
+            // watchers (FSEvents, inotify) deliver from "now" and never send earlier events again, so a
             // write landing in the watcher's startup gap is lost forever; under heavy
             // parallel load that gap can swallow both fixed writes, hard-failing
             // regardless of the wait budget (#108, same family as #25). The background
