@@ -107,7 +107,8 @@ pub enum ProxyCommand {
         #[arg(long)]
         proxy_id: String,
         /// JSON file holding the request body: `expected_revision` and `config`.
-        /// Sent byte for byte; the server checks and signs nothing here.
+        /// Sent byte for byte; the server validates the request (revision, retention,
+        /// proxy id).
         #[arg(long)]
         file: PathBuf,
     },
