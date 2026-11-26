@@ -2392,6 +2392,29 @@ mod tests {
         receive_path(&mut rx, &link).await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dangling_or_covered_skill_md_link_gets_no_root() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        for name in ["dangling", "covered", "vendor"] {
+            fs::create_dir_all(skills.join(name)).unwrap();
+        }
+        let target = skills.join("vendor/covered.md");
+        fs::write(&target, b"a").unwrap();
+        std::os::unix::fs::symlink(dir.join("gone.md"), skills.join("dangling/SKILL.md")).unwrap();
+        let covered = skills.join("covered/SKILL.md");
+        std::os::unix::fs::symlink(&target, &covered).unwrap();
+        let (_rx, mut watcher) = idle_watcher(vec![(skills.clone(), true)]);
+        watcher.follow_files(vec![skills.join("*/SKILL.md")], true);
+        assert_eq!(aliases_of(&watcher), [(target, covered.clone())]);
+        assert!(!watcher.active.contains_key(&covered));
+        assert!(!watcher
+            .active
+            .contains_key(&skills.join("dangling/SKILL.md")));
+    }
+
     fn drop_backend_watch(watcher: &WatcherHandle, root: &Path) {
         let registered = watcher.active[root].2.clone();
         watcher
