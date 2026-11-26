@@ -11,7 +11,7 @@
 - **실기 측정 범위.** AWS(t4g.small 2대, AL2023 aarch64) 측정은 있고 측정 범위는 아래 2026-11 run 절에 남아 있다. Rocky 9 컨테이너의 rpm 설치 확인은 `.github/workflows/packages.yml`에 정의되어 있으나 이 문서는 실행 결과를 인용하지 않는다. 아직 측정하지 않은 것: vendor client(R), D2 공개 HTTPS, 목표 환경(Rocky 9, 4 vCPU, 8 GiB)과 x86_64 하드웨어에서의 [validation.md](validation.md) 성능 목표, proxy SELinux 도메인. 성능 측정 도구와 t4g.small 실측은 아래 `feat/proxy-loadgen` 절. 단일 호스트 패키지 시험은 호스트 사이 경로를 지나지 않았다.
 - **열린 항목: proxy SELinux 도메인.** `lodeline-proxy.service`는 `unconfined_service_t`로 실행된다. `packaging/selinux/`의 `lodeline.te`와 `lodeline.fc`에 proxy 규칙이 없고, 유닛 파일 주석과 `packaging/README.md`가 "proxy 도메인은 hardware verification 때까지 보류, 그동안 unconfined"라고 적는다. AWS 실기 run I(2026-11-06, AL2023, SELinux Enforcing)는 이 상태에서 AVC 0건을 확인했을 뿐, 제한된 `lodeline_proxy_t` 도메인은 없고 따라서 측정하지 않았다.
 - **계획 대비 gap.**
-  - 설정은 `PUT /v1/proxies/{id}/config`에 curl로 보낸다. 운영자 CLI에는 config 하위 명령이 없다(origin/main 60b194dc에서 확인).
+  - 설정은 `lodeline-server proxy config-put`으로 한다.
   - 인증서 서명: [decisions.md](decisions.md)가 운영자 CLI의 인증서 서명과 `POST /v1/proxies/{id}/csr`를 적지만 `crates/lodeline-server/src/proxy/mgmt.rs`에 CSR 경로가 없다.
   - 사설 목적지 설정: 원격 설정은 `allow_private_destination`을 항상 false로 고정한다(`crates/lodeline-proxy/src/config_sync.rs`). 이 값을 바꾸는 방법이 없다. 설정한 http loopback upstream은 이 값과 별개로 통과한다(`crates/lodeline-proxy/src/dest.rs`). AC-08은 고정 라우트 거절의 oracle이며 설정 성공을 요구하지 않는다.
   - 콘솔 설정 화면: 위 "콘솔" 항목.

@@ -9,6 +9,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Added
 
+- `lodeline-server proxy config-put` sets a proxy's config from a request body file through the management API.
 - The agent and `lodeline scan` now report a Codex MCP server's `http_headers_helper`, a command Codex runs on the first request to a URL server, as a `project_settings_helper_command` finding that names the key and does not record the command. (#718)
 
 ### Fixed
@@ -20,6 +21,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - The Claude Code project row now follows `CLAUDE_CONFIG_DIR` like the user row: the user `disableAllHooks` is read from the config folder, and at the home folder the project row scores `~/.claude` (settings, `loop.md`, skill, subagent and command hooks) once a config folder moves the user row away from it (#539).
 - On Windows the native watcher now sees an edit of a watched file link's target in another folder, and records it under the link path.
 - An agent running as root or as a Windows service, or one that expands paths for several users, now follows a watched file or skill folder link only when its target belongs to the same account as the link (on Windows, when it lies under the home that holds the link), and logs one warning for a link it refuses.
+- A skill whose `SKILL.md` is itself a link now records an edit of the link's target under the link path.
 
 ## [0.22.0] - 2026-11-25
 
