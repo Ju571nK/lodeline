@@ -2469,6 +2469,36 @@ pub(crate) fn discover_and_register_ext_scripts(
         )
         .collect();
     register_ext_scripts(parsers, &homes, registry, effective);
+    push_codex_plugin_targets(effective, &homes);
+}
+
+/// #717: one synthetic target per home that lists the manifest and hooks
+/// files of its approved Codex plugins, including the files a manifest names,
+/// so an edit of one reaches the parser. Only files that exist are listed.
+pub(crate) fn push_codex_plugin_targets(
+    effective: &mut lodeline_core::policy::EffectivePolicy,
+    homes: &[PathBuf],
+) {
+    for home in homes {
+        let codex_dir = crate::ai_guard::parser::codex::user_codex_dir(home, None);
+        let files = crate::ai_guard::parser::codex::plugin_hook_watch_files(&codex_dir);
+        if files.is_empty() {
+            continue;
+        }
+        effective.targets.push(lodeline_core::policy::WatchTarget {
+            id: format!("codex-plugin-hooks-{}", synthetic_target_id_suffix(home)),
+            description: format!("Codex plugin hook files: {}", home.display()),
+            tier: lodeline_core::policy::Tier::Critical,
+            platform: lodeline_core::policy::Platform::Any,
+            paths: files
+                .iter()
+                .map(|f| f.to_string_lossy().to_string())
+                .collect(),
+            recursive: false,
+            follow_symlinks: false,
+            disabled: false,
+        });
+    }
 }
 
 /// For every parser and every home it is assessed against (`homes` starts
@@ -3128,6 +3158,58 @@ mod tests {
                 "an edit of {file:?} must reach the parser: {patterns:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_plugin_hook_files_of_a_home_get_a_watch_target_including_named_files() {
+        let td = tempfile::tempdir().unwrap();
+        let home = td.path().join("alice");
+        let plugin = home.join(".codex/plugins/cache/mk/demo/1.0.0");
+        let write = |path: std::path::PathBuf, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            plugin.join(".codex-plugin/plugin.json"),
+            r#"{"name":"demo","hooks":["./sub/named.json","./gone.json"]}"#,
+        );
+        write(plugin.join("sub/named.json"), "{}");
+        write(
+            home.join(".codex/config.toml"),
+            "[plugins.\"demo@mk\"]\nenabled = true\n[hooks.state.'demo@mk:sub/named.json:pre_tool_use:0:0']\ntrusted_hash = 'x'\n[plugins.\"other@mk\"]\nenabled = true\n",
+        );
+        write(
+            home.join(".codex/plugins/cache/mk/other/1.0.0/.codex-plugin/plugin.json"),
+            r#"{"name":"other"}"#,
+        );
+        let mut effective = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        let registry = crate::ai_guard::empty_ext_script_registry();
+        super::discover_and_register_ext_scripts(&[], &home, true, &registry, &mut effective);
+        let paths: Vec<std::path::PathBuf> = effective
+            .targets
+            .iter()
+            .filter(|t| t.id.starts_with("codex-plugin-hooks-"))
+            .flat_map(|t| t.paths.iter().map(std::path::PathBuf::from))
+            .collect();
+        assert!(
+            paths.contains(&plugin.join("sub").join("named.json")),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&plugin.join(".codex-plugin").join("plugin.json")),
+            "{paths:?}"
+        );
+        assert!(!paths.iter().any(|p| p.ends_with("gone.json")), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.to_string_lossy().contains("other")),
+            "{paths:?}"
+        );
     }
 
     #[test]

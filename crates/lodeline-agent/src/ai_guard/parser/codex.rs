@@ -380,6 +380,15 @@ fn hook_states(config: Option<&Value>) -> Option<&toml::Table> {
         .and_then(Value::as_table)
 }
 
+/// The existing manifest and hooks files of the approved plugins under
+/// `codex_dir`, which the agent registers as watch targets.
+pub(crate) fn plugin_hook_watch_files(codex_dir: &Path) -> Vec<PathBuf> {
+    let user = CodexLayer::read_lenient(codex_dir, ConfigLayer::User);
+    let states = hook_states(user.config.as_ref());
+    let candidates = codex_plugin_hooks::candidates(codex_dir, user.config.as_ref(), states);
+    codex_plugin_hooks::watch_files(codex_dir, &candidates)
+}
+
 /// Whether the system `requirements.toml` sets `allow_managed_hooks_only`,
 /// which makes Codex skip every plugin hook (`discovery.rs`).
 fn managed_hooks_only(system_dir: &Path) -> bool {

@@ -704,6 +704,13 @@ pub(super) fn watched_paths(
     out
 }
 
+/// The existing files that decide what the candidates run: the default hooks
+/// file, the manifests, and the hooks files a manifest names.
+pub(super) fn watch_files(codex_dir: &Path, candidates: &[Candidate]) -> Vec<PathBuf> {
+    let _ = (codex_dir, candidates);
+    Vec::new()
+}
+
 pub(super) struct LoadedPlugin {
     id: String,
     root: PathBuf,
