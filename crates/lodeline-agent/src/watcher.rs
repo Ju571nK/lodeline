@@ -267,9 +267,11 @@ impl WatcherHandle {
                 || !recursive_roots.iter().any(|r| root.starts_with(r))
         });
         // Publish the aliases before a root registers and re-reads its file.
-        let links = self.follow_links(&resolved, folder_links);
+        let (links, covered) = self.follow_links(&resolved, folder_links);
         for (_, link) in &links {
-            resolved.insert(link.clone(), false);
+            if !covered.contains(link) {
+                resolved.insert(link.clone(), false);
+            }
         }
         self.aliases_tx.send_if_modified(|table| {
             let changed = **table != links;
@@ -300,17 +302,19 @@ impl WatcherHandle {
     }
 
     /// The `(real path, link path)` pair of each watched file or wildcard folder
-    /// that is a link, in policy order. A link is left out, with one warning, when
-    /// its target is missing or a watched root already covers it. A folder link is
-    /// also left out when its target holds a watched folder, as `/` does. Two file
-    /// links to one target both stay, and the first matches. A second folder link
-    /// to one target is left out, so the folder gets one subscription.
+    /// that is a link, in policy order, and the links among them whose target a
+    /// watched root already covers: those need an alias but no root of their own.
+    /// A link is left out, with one warning, when its target is missing. A folder
+    /// link is also left out when its target holds a watched folder, as `/` does.
+    /// Two file links to one target both stay, and the first matches. A second
+    /// folder link to one target is left out, so the folder gets one subscription.
     fn follow_links(
         &mut self,
         roots: &BTreeMap<PathBuf, bool>,
         folders: BTreeSet<PathBuf>,
-    ) -> Vec<(PathBuf, PathBuf)> {
+    ) -> (Vec<(PathBuf, PathBuf)>, BTreeSet<PathBuf>) {
         let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut covered = BTreeSet::new();
         let files: Vec<PathBuf> = self
             .files
             .iter()
@@ -338,20 +342,15 @@ impl WatcherHandle {
                 continue;
             }
             let real = crate::normalizer::match_form(real);
-            if is_covered(roots, &link, &real, false) {
-                self.warn_once(
-                    &link,
-                    "in-root",
-                    "link target is in a watched root; not followed",
-                );
-                continue;
-            }
             if links.iter().any(|(other, _)| *other == real) {
                 self.warn_once(
                     &link,
                     "shared",
                     "link shares its target with an earlier link",
                 );
+            }
+            if is_covered(roots, &link, &real, false) {
+                covered.insert(link.clone());
             }
             links.push((real, link));
         }
@@ -360,15 +359,11 @@ impl WatcherHandle {
                 continue;
             };
             let real = crate::normalizer::match_form(real);
-            if is_covered(roots, &link, &real, true) {
-                self.warn_once(
-                    &link,
-                    "in-root",
-                    "link target is in a watched root; not followed",
-                );
-            } else if real.parent().is_none()
+            if real.parent().is_none()
                 || link.starts_with(&real)
-                || roots.keys().any(|root| root.starts_with(&real))
+                || roots
+                    .keys()
+                    .any(|root| *root != real && root.starts_with(&real))
             {
                 self.warn_once(
                     &link,
@@ -382,10 +377,13 @@ impl WatcherHandle {
                     "link shares its target with an earlier link",
                 );
             } else {
+                if is_covered(roots, &link, &real, true) {
+                    covered.insert(link.clone());
+                }
                 links.push((real, link));
             }
         }
-        links
+        (links, covered)
     }
 
     fn warn_once(&mut self, link: &Path, kind: &'static str, message: &str) {
@@ -511,9 +509,10 @@ impl WatcherHandle {
     }
 }
 
-/// True when a watched root already covers `real`. A folder watched without
-/// recursion covers only the files directly in it, and the link's own folder does
-/// not count, so a link to a sibling is followed.
+/// True when a watched root already covers `real`, so a link to it needs an alias
+/// and no root of its own. A folder watched without recursion covers only the
+/// files directly in it, and the link's own folder does not count, so a link to a
+/// sibling gets a root.
 fn is_covered(roots: &BTreeMap<PathBuf, bool>, link: &Path, real: &Path, folder: bool) -> bool {
     roots.iter().any(|(root, recursive)| {
         root == real
@@ -2004,7 +2003,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_link_whose_target_is_in_a_watched_root_is_not_followed() {
+    async fn a_link_whose_target_is_in_a_watched_root_is_aliased_without_a_new_root() {
         let td = TempDir::new().unwrap();
         let dir = dunce::canonicalize(td.path()).unwrap();
         fs::create_dir_all(dir.join("dotfiles")).unwrap();
@@ -2013,18 +2012,33 @@ mod tests {
         let link = dir.join("settings.json");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (_rx, mut watcher) = idle_watcher(vec![(dir.join("dotfiles"), false)]);
-        let logs = test_logs::logs_of(|| {
-            watcher.follow_files(vec![link.clone()], true);
-            watcher.reconcile();
-        });
-        assert_eq!(logs.matches("in a watched root").count(), 1, "{logs}");
-        assert!(aliases_of(&watcher).is_empty());
+        watcher.follow_files(vec![link.clone()], true);
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
         assert!(!watcher.active.contains_key(&link));
     }
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_folder_watched_without_recursion_does_not_cover_a_deeper_target() {
+    async fn a_folder_link_whose_target_is_in_a_watched_root_is_aliased_without_a_new_root() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        let real = skills.join("vendor/foo");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("SKILL.md"), b"a").unwrap();
+        let link = skills.join("foo");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (_rx, mut watcher) =
+            idle_watcher(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        watcher.reconcile();
+        assert_eq!(aliases_of(&watcher), [(real, link.clone())]);
+        assert!(!watcher.active.contains_key(&link));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_covered_link_gets_no_root_and_an_uncovered_one_does() {
         let td = TempDir::new().unwrap();
         let dir = dunce::canonicalize(td.path()).unwrap();
         let target = dir.join("dotfiles/settings.json");
@@ -2034,11 +2048,13 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (_rx, mut watcher) = idle_watcher(vec![(dir.clone(), false)]);
         watcher.follow_files(vec![link.clone()], true);
-        assert_eq!(aliases_of(&watcher), [(target, link)]);
+        assert_eq!(aliases_of(&watcher), [(target.clone(), link.clone())]);
+        assert!(watcher.active.contains_key(&link));
 
         let (_rx, mut watcher) = idle_watcher(vec![(dir.clone(), true)]);
         watcher.follow_files(vec![dir.join("settings.json")], true);
-        assert!(aliases_of(&watcher).is_empty());
+        assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
+        assert!(!watcher.active.contains_key(&link));
     }
 
     #[cfg(unix)]
@@ -2270,12 +2286,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_skill_link_to_a_folder_inside_the_recursive_root_is_not_followed() {
+    async fn a_skill_link_to_a_folder_inside_the_recursive_root_gets_no_root_of_its_own() {
         let (_td, skills, _) = skills_with_link();
-        std::os::unix::fs::symlink(skills.join("real"), skills.join("again")).unwrap();
-        let (logs, watcher) = watching(vec![(skills.clone(), true), (skills.join("*"), false)]);
-        assert_eq!(logs.matches("in a watched root").count(), 1, "{logs}");
-        assert!(aliases_of(&watcher).is_empty());
+        let (real, again) = (skills.join("real"), skills.join("again"));
+        std::os::unix::fs::symlink(&real, &again).unwrap();
+        let (_logs, watcher) = watching(vec![(skills.clone(), true), (skills.join("*"), false)]);
+        assert_eq!(aliases_of(&watcher), [(real, again.clone())]);
+        assert!(!watcher.active.contains_key(&again));
     }
 
     #[cfg(unix)]
