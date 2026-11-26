@@ -39,4 +39,4 @@ are numbered and the list spec, which reads connection state, runs first.
 - A real proxy. The seed writes the registry, the status reports and the events directly; no
   proxy sends them.
 - A server without a `proxy:` section. The launcher starts one variant only.
-- The alerts, fleet and device pages. They still run on the mock fleet only.
+- The alerts, fleet and device pages. They run on the mock fleet and are not covered here.
