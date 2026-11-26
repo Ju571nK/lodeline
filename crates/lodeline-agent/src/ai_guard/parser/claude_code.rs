@@ -1945,6 +1945,11 @@ pub struct ClaudeCodeProjectParser {
 }
 
 impl ClaudeCodeProjectParser {
+    /// Stub: ignores its argument.
+    pub fn with_config_dir(self, _config_dir: Option<PathBuf>) -> Self {
+        self
+    }
+
     /// Walks `repo_root` for nested component folders. `other_homes` are the
     /// other users' homes the agent assesses, empty unless it runs as root.
     pub fn new(repo_root: PathBuf, home: PathBuf, other_homes: Vec<PathBuf>) -> Self {
@@ -2080,6 +2085,7 @@ impl AiGuardParser for ClaudeCodeProjectParser {
             &self.repo_root,
             home_dir,
             &self.other_homes,
+            None,
             &super::policy_controls::claude_policy_dir(),
         )
     }
@@ -2150,13 +2156,14 @@ fn assess_project(
     home: &Path,
     policy_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
-    assess_project_skipping(repo_root, home, &[], policy_dir)
+    assess_project_skipping(repo_root, home, &[], None, policy_dir)
 }
 
 fn assess_project_skipping(
     repo_root: &Path,
     home: &Path,
     other_homes: &[PathBuf],
+    _process_config_dir: Option<&Path>,
     policy_dir: &Path,
 ) -> Result<Vec<AiGuardReason>, AssessError> {
     let cd = repo_root.join(".claude");
@@ -2510,6 +2517,206 @@ mod tests {
         let watched = parser.watched_paths(home.path());
 
         assert!(!watched.contains(&home.path().join(".claude").join("settings.json")));
+    }
+
+    const LOOP_PROMPT: &str = "check the deploy\n";
+
+    fn loop_prompt_rows(reasons: &[AiGuardReason]) -> usize {
+        reasons
+            .iter()
+            .filter(|r| matches!(r, AiGuardReason::UnattendedLoopPrompt { .. }))
+            .count()
+    }
+
+    fn project_at_home(home: &Path, process: Option<&Path>) -> ClaudeCodeProjectParser {
+        ClaudeCodeProjectParser::without_walk(home.to_path_buf())
+            .with_config_dir(process.map(Path::to_path_buf))
+    }
+
+    /// The loop prompt rows of the user row and of the project row at the home folder.
+    fn loop_rows_at_home(home: &Path, process: Option<&Path>) -> (usize, usize) {
+        let user = ClaudeCodeParser::with_config_dir(process.map(Path::to_path_buf))
+            .assess(home)
+            .unwrap();
+        let project = project_at_home(home, process).assess(home).unwrap();
+        (loop_prompt_rows(&user), loop_prompt_rows(&project))
+    }
+
+    #[test]
+    fn a_default_home_loop_prompt_is_reported_by_the_user_row_only() {
+        let home = tempdir().unwrap();
+        write_file(home.path(), ".claude/loop.md", LOOP_PROMPT);
+
+        assert_eq!(loop_rows_at_home(home.path(), None), (1, 0));
+    }
+
+    #[test]
+    fn a_home_loop_prompt_is_reported_once_when_a_process_config_dir_moves_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_file(home.path(), ".claude/loop.md", LOOP_PROMPT);
+
+        assert_eq!(loop_rows_at_home(home.path(), Some(alt.path())), (0, 1));
+    }
+
+    #[test]
+    fn a_home_loop_prompt_is_reported_once_when_a_settings_env_moves_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        write_file(home.path(), ".claude/loop.md", LOOP_PROMPT);
+
+        assert_eq!(loop_rows_at_home(home.path(), None), (0, 1));
+    }
+
+    #[test]
+    fn a_config_dir_loop_prompt_stays_with_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_file(alt.path(), "loop.md", LOOP_PROMPT);
+
+        assert_eq!(loop_rows_at_home(home.path(), Some(alt.path())), (1, 0));
+    }
+
+    fn hook_events_below_home(home: &Path, process: Option<&Path>) -> Vec<String> {
+        let repo = home.join("proj");
+        write_file(&repo, ".claude/settings.json", &format!("{{{USER_HOOK}}}"));
+        let policy = tempdir().unwrap();
+        let reasons = assess_project_skipping(&repo, home, &[], process, policy.path()).unwrap();
+        hook_events(&reasons)
+    }
+
+    const HOOKS_OFF: &str = r#"{"disableAllHooks": true}"#;
+
+    #[test]
+    fn a_process_config_dir_settings_file_decides_disable_all_hooks_for_the_project_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_file(alt.path(), "settings.json", HOOKS_OFF);
+
+        assert!(hook_events_below_home(home.path(), Some(alt.path())).is_empty());
+    }
+
+    #[test]
+    fn the_default_settings_file_does_not_decide_disable_all_hooks_with_a_config_dir_set() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_settings(home.path(), HOOKS_OFF);
+
+        assert!(!hook_events_below_home(home.path(), Some(alt.path())).is_empty());
+    }
+
+    #[test]
+    fn a_settings_env_config_dir_decides_disable_all_hooks_for_the_project_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        write_file(alt.path(), "settings.json", HOOKS_OFF);
+
+        assert!(hook_events_below_home(home.path(), None).is_empty());
+    }
+
+    #[test]
+    fn a_relative_settings_env_leaves_the_project_row_on_the_default_file() {
+        let home = tempdir().unwrap();
+        let settings = r#"{"env":{"CLAUDE_CONFIG_DIR":"alt"},"disableAllHooks":true}"#;
+        write_settings(home.path(), settings);
+        write_file(home.path(), "alt/settings.json", "{}");
+
+        assert!(hook_events_below_home(home.path(), None).is_empty());
+    }
+
+    #[test]
+    fn a_second_settings_env_hop_is_not_followed_by_the_project_row() {
+        let (home, alt, second) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        redirect_to(home.path(), alt.path().to_str().unwrap());
+        let hop = serde_json::json!({"env": {"CLAUDE_CONFIG_DIR": second.path()}});
+        write_file(alt.path(), "settings.json", &hop.to_string());
+        write_file(second.path(), "settings.json", HOOKS_OFF);
+
+        assert!(!hook_events_below_home(home.path(), None).is_empty());
+    }
+
+    #[test]
+    fn the_project_row_watches_the_located_user_settings_file() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        let parser = project_at_home(home.path(), Some(alt.path()));
+
+        let watched = parser.watched_paths(home.path());
+
+        assert!(watched.contains(&alt.path().join("settings.json")));
+    }
+
+    /// The destructive-command findings of the user row and of the project row at the home folder.
+    fn destructive_at_home(home: &Path, process: Option<&Path>) -> (usize, usize) {
+        let user = ClaudeCodeParser::with_config_dir(process.map(Path::to_path_buf))
+            .assess(home)
+            .unwrap();
+        let project = project_at_home(home, process).assess(home).unwrap();
+        (destructive_count(&user), destructive_count(&project))
+    }
+
+    #[test]
+    fn a_default_home_settings_hook_is_the_user_rows_only() {
+        let home = tempdir().unwrap();
+        write_settings(home.path(), HOME_RISK_HOOK);
+
+        assert_eq!(destructive_at_home(home.path(), None), (1, 0));
+    }
+
+    #[test]
+    fn a_home_settings_hook_is_the_project_rows_once_a_process_config_dir_moves_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_settings(home.path(), HOME_RISK_HOOK);
+
+        assert_eq!(destructive_at_home(home.path(), Some(alt.path())), (0, 1));
+    }
+
+    #[test]
+    fn a_home_settings_hook_is_the_project_rows_once_a_settings_env_moves_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        let redirecting = serde_json::json!({
+            "env": {"CLAUDE_CONFIG_DIR": alt.path()},
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "rm -rf /home-x/*"}]}]},
+        });
+        write_settings(home.path(), &redirecting.to_string());
+
+        assert_eq!(destructive_at_home(home.path(), None), (0, 1));
+    }
+
+    #[test]
+    fn a_default_home_skill_hook_is_the_user_rows_only() {
+        let home = tempdir().unwrap();
+        write_file(
+            home.path(),
+            ".claude/skills/deploy/SKILL.md",
+            DEPLOYER_AGENT,
+        );
+
+        assert_eq!(destructive_at_home(home.path(), None), (1, 0));
+    }
+
+    #[test]
+    fn a_home_skill_hook_is_the_project_rows_once_a_config_dir_moves_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_file(
+            home.path(),
+            ".claude/skills/deploy/SKILL.md",
+            DEPLOYER_AGENT,
+        );
+
+        assert_eq!(destructive_at_home(home.path(), Some(alt.path())), (0, 1));
+    }
+
+    #[test]
+    fn a_home_agent_hook_is_the_project_rows_once_a_config_dir_moves_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_file(home.path(), ".claude/agents/deployer.md", DEPLOYER_AGENT);
+
+        assert_eq!(destructive_at_home(home.path(), Some(alt.path())), (0, 1));
+    }
+
+    #[test]
+    fn a_config_dir_skill_hook_stays_with_the_user_row() {
+        let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+        write_file(alt.path(), "skills/deploy/SKILL.md", DEPLOYER_AGENT);
+
+        assert_eq!(destructive_at_home(home.path(), Some(alt.path())), (1, 0));
     }
 
     #[test]
@@ -3012,9 +3219,14 @@ mod tests {
         write_file(&alice, ".claude/agents/deployer.md", DEPLOYER_AGENT);
         let own = users.path().join("root");
         let policy = tempdir().unwrap();
-        let reasons =
-            assess_project_skipping(&alice, &own, std::slice::from_ref(&alice), policy.path())
-                .unwrap();
+        let reasons = assess_project_skipping(
+            &alice,
+            &own,
+            std::slice::from_ref(&alice),
+            None,
+            policy.path(),
+        )
+        .unwrap();
         assert!(reasons.is_empty(), "{reasons:?}");
     }
 
@@ -7201,7 +7413,7 @@ mod tests {
         std::fs::create_dir_all(&row).unwrap();
         let own = users.path().join("root");
         let policy = tempdir().unwrap();
-        let skipped = assess_project_skipping(&row, &own, &[alice], policy.path()).unwrap();
+        let skipped = assess_project_skipping(&row, &own, &[alice], None, policy.path()).unwrap();
         assert!(!skipped
             .iter()
             .any(|r| matches!(r, AiGuardReason::DestructiveInInlineCommand { .. })));
@@ -7227,7 +7439,7 @@ mod tests {
         let row = alice.join("projects/web");
         std::fs::create_dir_all(&row).unwrap();
         let policy = tempdir().unwrap();
-        let reasons = assess_project_skipping(&row, &own, &[alice], policy.path()).unwrap();
+        let reasons = assess_project_skipping(&row, &own, &[alice], None, policy.path()).unwrap();
         assert!(reasons.is_empty(), "settings.local.json read: {reasons:?}");
     }
 
@@ -7235,9 +7447,14 @@ mod tests {
     fn project_row_at_another_users_home_skips_its_loop_prompt() {
         let (_users, alice, own) = other_users_home();
         let policy = tempdir().unwrap();
-        let reasons =
-            assess_project_skipping(&alice, &own, std::slice::from_ref(&alice), policy.path())
-                .unwrap();
+        let reasons = assess_project_skipping(
+            &alice,
+            &own,
+            std::slice::from_ref(&alice),
+            None,
+            policy.path(),
+        )
+        .unwrap();
         assert!(
             !reasons
                 .iter()
