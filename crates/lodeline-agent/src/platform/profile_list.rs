@@ -1,5 +1,5 @@
-//! Windows user profiles from the registry `ProfileList` key. The parsing and filtering
-//! are plain functions so their tests run on every OS.
+//! Windows user profiles from the registry `ProfileList` key. The filtering is a plain
+//! function so its tests run on every OS.
 
 use lodeline_core::policy::expand::UserContext;
 use std::path::{Path, PathBuf};
@@ -9,34 +9,6 @@ use std::path::{Path, PathBuf};
 pub(crate) struct ProfileEntry {
     pub(crate) sid: String,
     pub(crate) image_path: String,
-}
-
-/// Parse the output of `reg query <ProfileList key> /s`.
-pub(crate) fn parse_reg_query(out: &str) -> Vec<ProfileEntry> {
-    let mut entries = Vec::new();
-    let mut sid: Option<String> = None;
-    for line in out.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("HKEY_") {
-            sid = trimmed.rsplit('\\').next().map(str::to_string);
-            continue;
-        }
-        let Some(rest) = trimmed.strip_prefix("ProfileImagePath") else {
-            continue;
-        };
-        let Some(sid) = sid.clone() else { continue };
-        let rest = rest.trim_start();
-        let value = rest
-            .strip_prefix("REG_EXPAND_SZ")
-            .or_else(|| rest.strip_prefix("REG_SZ"));
-        if let Some(value) = value {
-            entries.push(ProfileEntry {
-                sid,
-                image_path: value.trim().to_string(),
-            });
-        }
-    }
-    entries
 }
 
 /// Local, domain and Entra ID users. Service accounts (`S-1-5-18`, `-19`, `-20`) and
@@ -96,33 +68,11 @@ pub(crate) fn users_from_profiles(
 mod tests {
     use super::*;
 
-    const REG_OUT: &str = "\r\n\
-HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\r\n\
-    ProfilesDirectory    REG_EXPAND_SZ    %SystemDrive%\\Users\r\n\
-\r\n\
-HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\S-1-5-18\r\n\
-    ProfileImagePath    REG_EXPAND_SZ    %systemroot%\\system32\\config\\systemprofile\r\n\
-\r\n\
-HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\S-1-5-21-1-2-3-1001\r\n\
-    ProfileImagePath    REG_EXPAND_SZ    C:\\Users\\alice smith\r\n\
-    Flags    REG_DWORD    0x0\r\n";
-
     fn entry(sid: &str, path: &str) -> ProfileEntry {
         ProfileEntry {
             sid: sid.into(),
             image_path: path.into(),
         }
-    }
-
-    #[test]
-    fn parses_reg_query_output() {
-        assert_eq!(
-            parse_reg_query(REG_OUT),
-            vec![
-                entry("S-1-5-18", r"%systemroot%\system32\config\systemprofile"),
-                entry("S-1-5-21-1-2-3-1001", r"C:\Users\alice smith"),
-            ]
-        );
     }
 
     #[test]
@@ -166,5 +116,19 @@ HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList
         let entries = [entry("S-1-5-21-1-2-3-1001", r"C:\Users\alice.DESKTOP")];
         let users = users_from_profiles(&entries, "C:", |_| true);
         assert_eq!(users[0].name, "alice.DESKTOP");
+    }
+
+    #[test]
+    fn a_non_ascii_folder_name_is_kept() {
+        let entries = [entry(
+            "S-1-5-21-1-2-3-1001",
+            "%SystemDrive%\\Users\\\u{d14c}\u{c2a4}\u{d130}",
+        )];
+        let users = users_from_profiles(&entries, "C:", |_| true);
+        assert_eq!(users[0].name, "\u{d14c}\u{c2a4}\u{d130}");
+        assert_eq!(
+            users[0].home,
+            PathBuf::from("C:\\Users\\\u{d14c}\u{c2a4}\u{d130}")
+        );
     }
 }
