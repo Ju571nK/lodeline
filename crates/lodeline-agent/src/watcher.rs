@@ -78,7 +78,7 @@ impl LinkScope {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_owner_of(
         mut self,
         owner_of: impl Fn(&Path, bool) -> Option<u32> + Send + Sync + 'static,
