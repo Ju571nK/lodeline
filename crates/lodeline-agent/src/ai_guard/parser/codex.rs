@@ -78,8 +78,7 @@ impl AiGuardParser for CodexParser {
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         let codex_dir = user_codex_dir(home_dir, self.codex_home.as_deref());
         let system_dir = super::policy_controls::codex_system_dir();
-        let user = CodexLayer::read_lenient(&codex_dir, ConfigLayer::User);
-        let mut paths = vec![
+        vec![
             codex_dir.join("config.toml"),
             codex_dir.join(HOOKS_JSON),
             // #200 — a standing command-approval rule appearing here is an
@@ -91,13 +90,7 @@ impl AiGuardParser for CodexParser {
             system_dir.join(HOOKS_JSON),
             system_dir.join("rules"),
             super::policy_controls::codex_requirements_path(),
-        ];
-        paths.extend(codex_plugin_hooks::watched_paths(
-            &codex_dir,
-            user.config.as_ref(),
-            hook_states(user.config.as_ref()),
-        ));
-        paths
+        ]
     }
 
     fn assess_posture(&self, home_dir: &Path) -> Result<super::AiGuardAssessment, AssessError> {
@@ -378,15 +371,6 @@ fn hook_states(config: Option<&Value>) -> Option<&toml::Table> {
         .and_then(|c| c.get("hooks"))
         .and_then(|h| h.get("state"))
         .and_then(Value::as_table)
-}
-
-/// The existing manifest and hooks files of the approved plugins under
-/// `codex_dir`, which the agent registers as watch targets.
-pub(crate) fn plugin_hook_watch_files(codex_dir: &Path) -> Vec<PathBuf> {
-    let user = CodexLayer::read_lenient(codex_dir, ConfigLayer::User);
-    let states = hook_states(user.config.as_ref());
-    let candidates = codex_plugin_hooks::candidates(codex_dir, user.config.as_ref(), states);
-    codex_plugin_hooks::watch_files(codex_dir, &candidates)
 }
 
 /// Whether the system `requirements.toml` sets `allow_managed_hooks_only`,

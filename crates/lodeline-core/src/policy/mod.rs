@@ -1413,26 +1413,6 @@ targets:
                 "",
             ),
             (
-                r"%USERPROFILE%\.codex\plugins\cache\*\*\*\hooks\hooks.json",
-                r"C:\Users\alice\.codex\plugins\cache\mk\demo\1.0.0\hooks\hooks.json",
-                "",
-            ),
-            (
-                r"%USERPROFILE%\.codex\plugins\cache\*\*\*\.codex-plugin\plugin.json",
-                r"C:\Users\alice\.codex\plugins\cache\mk\demo\1.0.0\.codex-plugin\plugin.json",
-                "",
-            ),
-            (
-                r"%USERPROFILE%\.codex\plugins\cache\*\*\*\.claude-plugin\plugin.json",
-                r"C:\Users\alice\.codex\plugins\cache\mk\demo\1.0.0\.claude-plugin\plugin.json",
-                "",
-            ),
-            (
-                r"%USERPROFILE%\.codex\plugins\cache\*\*\*\.cursor-plugin\plugin.json",
-                r"C:\Users\alice\.codex\plugins\cache\mk\demo\1.0.0\.cursor-plugin\plugin.json",
-                "",
-            ),
-            (
                 r"%ProgramData%\OpenAI\Codex\requirements.toml",
                 r"C:\ProgramData\OpenAI\Codex\requirements.toml",
                 "",

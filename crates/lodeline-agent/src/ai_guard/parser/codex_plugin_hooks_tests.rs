@@ -1,5 +1,4 @@
-use super::super::codex::{assess_user_findings, CodexParser};
-use super::super::AiGuardParser;
+use super::super::codex::assess_user_findings;
 use super::*;
 use lodeline_core::event::{AiGuardReason, ConfigLayer, ConfigSource};
 use tempfile::tempdir;
@@ -764,28 +763,6 @@ fn the_content_hash_leaves_out_caches_environments_and_package_metadata() {
     assert_ne!(content_hash(root.path()).unwrap(), base);
 }
 
-// --- watch -------------------------------------------------------------------------
-
-#[test]
-fn the_user_parser_watches_the_folder_of_a_plugin_that_has_a_state_row() {
-    let fx = fixture();
-    let dir = fx.install("1.0.0", DESTRUCTIVE);
-    let base = dir.parent().unwrap().to_path_buf();
-    let parser = CodexParser::with_codex_home(Some(fx.codex.clone()));
-    fx.config(ENABLED);
-    assert!(!parser.watched_paths(&fx.home).contains(&base));
-    fx.config(&format!("{ENABLED}{}", trusted(DEFAULT_KEY)));
-    let watched = parser.watched_paths(&fx.home);
-    assert!(watched.contains(&base), "{watched:?}");
-    let named = dir.join("any").join("deep").join("file.json");
-    assert!(watched.iter().any(|w| named.starts_with(w)));
-    fx.config(&format!(
-        "[plugins.\"demo@mk\"]\nenabled = false\n{}",
-        trusted(DEFAULT_KEY)
-    ));
-    assert!(!parser.watched_paths(&fx.home).contains(&base));
-}
-
 #[cfg(unix)]
 #[test]
 fn a_directory_link_inside_the_bundle_does_not_lead_a_named_file_out_of_the_codex_folder() {
@@ -843,7 +820,7 @@ fn a_plugin_with_too_many_version_folders_is_skipped() {
     fx.install("1.0.0", DESTRUCTIVE);
     fx.config(&format!("{ENABLED}{}", trusted(DEFAULT_KEY)));
     let base = fx.plugin_dir("1.0.0").parent().unwrap().to_path_buf();
-    for i in 0..MAX_VERSION_FOLDERS {
+    for i in 0..MAX_VERSION_FOLDERS - 1 {
         std::fs::create_dir_all(base.join(format!("0.0.{i}"))).unwrap();
     }
     assert_eq!(fx.destructive().len(), 1);

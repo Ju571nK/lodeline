@@ -330,9 +330,17 @@ fn valid_version(version: &str) -> bool {
 /// `active_plugin_version`: `local` when present, else the highest version,
 /// by semver when both parse and by text otherwise.
 fn active_version(base: &Path) -> Option<String> {
-    let mut versions: Vec<String> = std::fs::read_dir(base)
+    let entries: Vec<_> = std::fs::read_dir(base)
         .ok()?
+        .take(MAX_VERSION_FOLDERS + 1)
         .filter_map(Result::ok)
+        .collect();
+    if entries.len() > MAX_VERSION_FOLDERS {
+        tracing::warn!(path = %base.display(), cap = MAX_VERSION_FOLDERS, "codex plugin has too many version folders; skipped");
+        return None;
+    }
+    let mut versions: Vec<String> = entries
+        .into_iter()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|v| valid_version(v))
@@ -510,7 +518,7 @@ fn resolve_path(root: &Path, raw: &str) -> Option<(PathBuf, String)> {
     }
     let mut path = root.to_path_buf();
     path.extend(&parts);
-    Some((path, parts.join("/")))
+    Some((path, parts.join("/").replace('\\', "/")))
 }
 
 /// `RawPluginManifestHooks`, tried in the order Codex declares: a path, a
@@ -524,6 +532,11 @@ fn declared_hooks(root: &Path, field: &serde_json::Value) -> Option<Declared> {
             let paths: Vec<_> = items
                 .iter()
                 .filter_map(|v| resolve_path(root, v.as_str()?))
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let paths: Vec<_> = paths
+                .into_iter()
+                .filter(|(path, _)| seen.insert(path.clone()))
                 .collect();
             (!paths.is_empty()).then_some(Declared::Paths(paths))
         }
@@ -690,55 +703,6 @@ pub(super) fn candidates(
     out
 }
 
-/// The plugin folders the user parser watches: edits anywhere below one can
-/// change what a plugin runs or its folder hash.
-pub(super) fn watched_paths(
-    codex_dir: &Path,
-    config: Option<&Value>,
-    states: Option<&toml::Table>,
-) -> Vec<PathBuf> {
-    let mut out: Vec<_> = candidates(codex_dir, config, states)
-        .into_iter()
-        .map(|c| c.base)
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// The existing files that decide what the candidates run: the default hooks
-/// file, the manifests, and the hooks files a manifest names.
-pub(super) fn watch_files(codex_dir: &Path, candidates: &[Candidate]) -> Vec<PathBuf> {
-    let Some(home) = Home::new(codex_dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for candidate in candidates {
-        let Some(version) = active_version(&candidate.base) else {
-            continue;
-        };
-        let root = candidate.base.join(version);
-        if !home.contains(&root) {
-            continue;
-        }
-        out.push(root.join("hooks").join("hooks.json"));
-        out.extend(
-            MANIFEST_DIRS
-                .iter()
-                .map(|d| root.join(d).join("plugin.json")),
-        );
-        if let Some(Declared::Paths(paths)) = load_manifest(&home, &root)
-            .and_then(|manifest| manifest.get("hooks").and_then(|f| declared_hooks(&root, f)))
-        {
-            out.extend(paths.into_iter().map(|(path, _)| path));
-        }
-    }
-    out.retain(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file()));
-    out.sort();
-    out.dedup();
-    out
-}
-
 pub(super) struct LoadedPlugin {
     id: String,
     root: PathBuf,
@@ -751,6 +715,9 @@ pub(super) fn load(codex_dir: &Path, candidates: &[Candidate]) -> Vec<LoadedPlug
     };
     let mut out = Vec::new();
     for candidate in candidates {
+        if !home.contains(&candidate.base) {
+            continue;
+        }
         let Some(version) = active_version(&candidate.base) else {
             continue;
         };
@@ -795,6 +762,7 @@ fn content_hash_with(root: &Path, caps: Caps) -> std::io::Result<String> {
     if !std::fs::symlink_metadata(root)?.is_dir() {
         return Err(std::io::Error::other("plugin root is not a directory"));
     }
+    let real_root = dunce::canonicalize(root)?;
     let mut hash = Sha256::new();
     hash.update(b"codex-plugin-bundle-v1");
     let mut pending = vec![root.to_path_buf()];
@@ -821,6 +789,11 @@ fn content_hash_with(root: &Path, caps: Caps) -> std::io::Result<String> {
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name);
         let metadata = std::fs::symlink_metadata(&path)?;
+        if !dunce::canonicalize(&path)?.starts_with(&real_root) {
+            return Err(std::io::Error::other(
+                "plugin entry resolves outside the plugin folder",
+            ));
+        }
         if metadata.is_dir() {
             hash.update(b"directory");
             let mut children = Vec::new();

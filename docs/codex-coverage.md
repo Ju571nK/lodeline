@@ -69,21 +69,21 @@ Which plugin and which files:
 
 - A plugin counts when the config holds `[plugins."<name>@<marketplace>"]` that does not set `enabled = false`. A non-boolean `enabled` skips the plugin. The id follows the Codex grammar: ASCII letters, digits, `-` and `_`, and for the plugin name dots between non-empty segments, on every platform.
 - Lodeline reads the `local` version folder under `plugins/cache/<marketplace>/<plugin>/` when it exists, and otherwise the highest version folder by semantic version, with a text comparison when a name is not one. This is how Codex picks the active version.
-- The manifest is the first of `.codex-plugin/plugin.json`, `.claude-plugin/plugin.json` and `.cursor-plugin/plugin.json`. A plugin with no manifest, a manifest that does not parse, one whose `name`, `version`, `description`, `apps` or `keywords` has the wrong type, or a root `plugin.json` that names an Agent Plugins schema, adds nothing. The rest of the manifest schema is not checked.
+- The manifest is the first of `.codex-plugin/plugin.json`, `.claude-plugin/plugin.json` and `.cursor-plugin/plugin.json`. A plugin with no manifest, a manifest that does not parse, one whose `name`, `version`, `description`, `apps` or `keywords` has the wrong type, or a root `plugin.json` that names an Agent Plugins schema, adds nothing. Lodeline checks only the manifest fields that it reads, so a manifest that Codex would reject for another field, such as `interface`, can still be scored.
 - A manifest `hooks` value that is a `./` path, a list of such paths, an inline object or a list of objects replaces the default `hooks/hooks.json`. A value Codex cannot use, such as `{"hooks":123}`, a list of bad paths or an empty list, means the default file. A path that leaves the plugin folder is dropped. A file that is missing, does not parse, or breaks the Codex hook types is skipped with a warning.
 
 Trust, checked in this order for each handler:
 
 - The `hooks.state` key is `<name>@<marketplace>:<file>:<event>:<group>:<handler>` in the user config. `<file>` is the resolved path below the plugin folder, with `/` separators, or `plugin.json#hooks[<index>]` for an inline block. Group and handler counts start at zero.
 - The state needs a `trusted_hash` equal to the declaration hash. Lodeline computes it as Codex does: SHA-256 of the sorted JSON of the event name, the matcher for events that take one, and the normalized handler (default timeout, command for the platform). A handler that Codex skips has none: an invalid matcher, a `prompt` or `agent` handler, an empty command, an MCP handler on `SessionEnd`. A state with `enabled = false`, or a field of the wrong type, does not run.
-- With a `trusted_content_hash`, it must equal the SHA-256 over the plugin folder that Codex computes. Without one, the approval is a legacy one: if the baseline file `.hook-trust/<hash>` in the Codex folder exists, its bytes must equal the current folder hash. If it does not exist, Codex writes the current hash on first use and runs the hook, so Lodeline scores the hook as running. The baseline file is read and never written. A folder that cannot be hashed means the hook does not run.
+- With a `trusted_content_hash`, it must equal the SHA-256 over the plugin folder that Codex computes. Without one, the approval is a legacy one: if the baseline file `.hook-trust/<hash>` in the Codex folder exists, its bytes must equal the current folder hash. If it does not exist, Codex creates it from the current hash on first use and runs the hook, so Lodeline scores the hook as running. A write failure on the Codex side, which would stop the hook, is not seen, so this case can over-report. The baseline file is read and never written. A folder that cannot be hashed means the hook does not run.
 - When the system `requirements.toml` sets `allow_managed_hooks_only = true`, plugin hooks are skipped.
 
 Limits:
 
 - Nothing in a plugin folder is read before the user config holds a `hooks.state` row for that plugin. A read stays inside the Codex folder after links are resolved. A link that leaves is skipped with a warning, and a link inside the folder is followed except in the folder hash, where a link makes the hash fail, as in Codex. A link that changes between the check and the read is not caught.
-- A manifest or hooks file is read only when it is a regular file of at most 1 MiB. The baseline file is read up to 256 bytes. The folder hash stops at 10,000 files, 20,000 entries or 256 MiB, with a warning, and the plugin's hooks then do not run.
-- The default policy watches each plugin folder's `hooks/hooks.json` and the three manifest files. At start and on each policy reload, the agent also lists for each home the existing manifest files and hooks files that a manifest names, for the plugins that have a state row, and watches those files. A new plugin, a new state row, or a hooks file that a manifest starts to name is watched from the next reload. An edit of another file in a plugin folder changes the folder hash but is not watched, and is seen at the next periodic reading, which runs every 24 hours. A folder that is created or removed is seen the same way.
+- A version folder list over 1,000 entries skips the plugin, and a hooks file that a manifest names twice is read once. A manifest or hooks file is read only when it is a regular file of at most 1 MiB. The baseline file is read up to 256 bytes. The folder hash stops at 10,000 files, 20,000 entries or 256 MiB, with a warning, and the plugin's hooks then do not run.
+- Only the Codex parser reads plugins: at agent start, on policy reload, on the periodic reading (every 24 hours) and in `lodeline scan`. No watch target covers a plugin folder, so an edit to a plugin, its manifest, its hooks file or the user config approval is seen at the next of these readings, not at once.
 - The shared hook reader still classifies the command text as written. Codex replaces `${PLUGIN_ROOT}` and similar variables in a command before it runs, and Lodeline does not.
 
 Not covered, and left out on purpose:
@@ -91,7 +91,7 @@ Not covered, and left out on purpose:
 - Plugins that Codex installs from a remote catalog and records outside `config.toml`.
 - Plugin policy that Codex applies: the `allows_plugin` check and the marketplace filters.
 - Bundled plugin hooks that Codex trusts without a state row, and the session override that makes Codex run an untrusted hook for one invocation.
-- Plugin enablement that comes from a managed or system layer, for the list of watched folders. The scoring reads the system and user layers, and the watch list reads the user layer.
+- Plugin enablement or approval from a layer or session flag that the agent cannot read. The agent ignores a shell `CODEX_HOME`, as for the rest of Codex; `lodeline scan` honors it.
 - A plugin's MCP servers, skills and apps, and the scripts that a plugin hook command names.
 
 ## MCP credentials
