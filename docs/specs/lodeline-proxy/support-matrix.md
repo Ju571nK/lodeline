@@ -1,17 +1,17 @@
 # Lodeline Proxy P1 capability / 지원 표
 
-2026-10-10 · PX-004 산출물 · AC-15의 시험 기준.
-이 표는 "광고하거나 조용히 버리지 않는다"는 PX-004의 공개 표다. 구현 전이므로 **decided는 계약·결정 수준이며
-proxy 구현 시험을 거친 것이 아니다.** 결정되지 않은 항목은 undecided로 남기며 추정하지 않는다.
-undecided 행이 남아 있으면 AC-15와 P1 완료 정의를 통과할 수 없다.
+2026-10-10 · PX-004 산출물 · AC-15의 시험 기준 · 2026-11-26 관찰 주석 추가(origin/main 60b194dc).
+이 표는 "광고하거나 조용히 버리지 않는다"는 PX-004의 공개 표이며, 의도한 동작(decided)과 이 구현에서 관찰한 동작(`관찰` 주석, 시험 이름 포함)을 함께 적는다. **decided는 계약·결정 수준이며 vendor client로 측정한 것이 아니다.** 결정되지 않은 항목은 undecided나 [OPEN]으로 남기며 추정하지 않는다.
+undecided 행이 남아 있으면 AC-15와 P1 완료 정의를 통과할 수 없다([spec.md](spec.md) AC-15). 이 표에는 undecided 행이 없고 [OPEN] 항목이 남아 있다.
+AC-15는 행별 증명이 끝나지 않았으므로 부분 충족으로 본다(소유자 판단이며 spec 변경이 아니다).
 
 ## 라벨
 
 | 라벨 | 의미 |
 |---|---|
-| measured | 실제 client 또는 fixture로 측정한 사실. 측정 대상(fixture/proxy)을 함께 적는다. 현재 proxy 경유 측정은 없다 |
+| measured | 실제 client 또는 fixture로 측정한 사실. 측정 대상(fixture/proxy)을 함께 적는다. 이 표의 client 측정은 모두 fixture 대상이며 vendor client를 proxy 경유로 측정한 기록은 없다 |
 | documented | 공식 문서·명세 열람. 측정하지 않았다 |
-| decided | [decisions.md](decisions.md)·[contracts](contracts/README.md)에서 확정한 P1 동작. 구현·시험 전 |
+| decided | [decisions.md](decisions.md)·[contracts](contracts/README.md)에서 확정한 P1 동작. 라벨의 뜻은 구현 전과 같다. 이 구현에서 관찰한 결과는 행의 `관찰` 주석에 따로 적는다 |
 | unverified | 시험하지 않았다 |
 | undecided | 문서가 결정하지 않았다. P1 완료 전 결정 필요 |
 
@@ -24,10 +24,10 @@ undecided 행이 남아 있으면 AC-15와 P1 완료 정의를 통과할 수 없
 |---|---|---|---|
 | 2025-11-25 (Streamable HTTP) | **지원(유일)** | decided | D-01, M2 |
 | 2025-06-18 — (a) client `initialize`가 제시 | 그대로 upstream에 전달하고 upstream 응답 revision으로 판단한다. 2025-11-25면 정상, 2025-06-18이면 (c) | decided | decisions.md "2025-06-18 downstream 입력" (a). codex-cli의 제시는 measured |
-| 2025-06-18 — (b) initialize 이후 `MCP-Protocol-Version`이 협상된 2025-11-25와 다름 | 400 거절. modern 요청으로 분류하지 않는다. 감사 reason 상수는 [OPEN](reason 생략) | decided | 같은 행 (b). contracts/README.md "P1 method 범위와 route 거절 응답"에 반영 |
+| 2025-06-18 - (b) initialize 이후 `MCP-Protocol-Version`이 협상된 2025-11-25와 다름 | 400 거절. modern 요청으로 분류하지 않는다. 감사 reason 상수는 [OPEN](reason 생략) | decided | 같은 행 (b). contracts/README.md "P1 method 범위와 route 거절 응답"에 반영. 관찰(origin/main 60b194dc, 계약 아님, [OPEN] 유지): initialize 이후 알려진 구버전 헤더 요청은 인증 뒤 빈 HTTP 400이고 upstream 호출은 0회다(시험: `crates/lodeline-proxy/tests/sessions_http.rs`의 `proxy_session_is_private_bound_and_protocol_is_checked_after_auth`). 감사 기록 형태는 시험이 아니라 코드를 읽은 결과다: `protocol_error`/`not_sent`이고 `VersionHeader`의 reason은 없다(`crates/lodeline-proxy/src/invocation_sink.rs:392-397`, `:845-880`). 이를 단언하는 시험은 찾지 못했다. reason 상수를 저장하려면 새 reason kind와 schema 검토가 필요하다 |
 | 2025-06-18 — (c) upstream이 2025-06-18로 응답 | 미지원. route unsupported, 런타임이면 M2 거절(아래 마지막 행). 2025-06-18 추가는 fixture·계약 상수·scope key·독립 리뷰를 갖춘 별도 작업 | decided | D-01 M2, D-05 |
 | 2026-07-28 modern 요청 (`server/discover`, `_meta`의 `io.modelcontextprotocol/protocolVersion`, 허용 목록 밖 `MCP-Protocol-Version`) | 인증 후 upstream에 전달하지 않고 HTTP 400 + empty body. `-32022`/`-32020`/`-32601`을 내보내지 않는다 | decided | D-01 B1. Claude Code가 fixture의 empty-body 400 뒤 `initialize` 2025-11-25로 대체함은 measured(proxy 경유 아님) |
-| initialize 이후 `MCP-Protocol-Version` 누락 | 400 거절(의도적 엄격성). rmcp 0.16 client는 P1 미지원. 감사는 protocol_error/not_sent, reason 상수 [OPEN](contracts/README.md "P1 method 범위와 route 거절 응답"에 반영) | decided | m5. Claude·codex는 이후 모든 요청에 헤더 전송(measured) |
+| initialize 이후 `MCP-Protocol-Version` 누락 | 400 거절(의도적 엄격성). rmcp 0.16 client는 P1 미지원. 감사는 protocol_error/not_sent, reason 상수 [OPEN](contracts/README.md "P1 method 범위와 route 거절 응답"에 반영) | decided | m5. Claude·codex는 이후 모든 요청에 헤더 전송(measured). 관찰(origin/main 60b194dc, 계약 아님, [OPEN] 유지): 헤더 누락은 같은 시험에서 빈 HTTP 400, upstream 호출 0회다. 감사 기록 형태는 시험이 아니라 코드를 읽은 결과다: `protocol_error`/`not_sent`이고 `VersionHeader`의 reason은 없다(`crates/lodeline-proxy/src/invocation_sink.rs:392-397`, `:845-880`). 이를 단언하는 시험은 찾지 못했다. |
 | upstream initialize 응답 revision이 허용 목록 밖 | route unsupported 표시. 런타임이면 downstream에 전달하지 않고 upstream session DELETE, initialize id에 고정 `-32603` (contracts/README.md "P1 method 범위와 route 거절 응답"에 반영, decisions.md "런타임 route 거절 응답") | decided | M2, "런타임 route 거절 응답" |
 
 ## 2. 기능별 처리
@@ -84,7 +84,7 @@ undecided 행이 남아 있으면 AC-15와 P1 완료 정의를 통과할 수 없
 | Claude Code가 400 뒤 `initialize` 2025-11-25로 대체 | 기대 결과이며 정상 세션이 수립된다(실제 proxy 경유 확인은 P1 검증 항목) |
 | client `initialize` 2025-06-18 제시, upstream이 2025-11-25로 응답 | initialize가 upstream에 그대로 전달(호출 수 1), 응답 bytes 재작성 없이 중계, 세션 수립 |
 | client `initialize` 2025-06-18 제시, upstream이 2025-06-18로 응답 | downstream에 전달하지 않음, initialize id에 고정 `-32603`(HTTP 200), upstream session DELETE, protocol_error/sent/`upstream_version_unsupported` |
-| initialize 이후 헤더가 협상값과 다름 또는 누락 | HTTP 400, upstream 호출 수 0. 감사 reason 상수는 [OPEN](정해지기 전에는 reason 값을 시험하지 않는다) |
+| initialize 이후 헤더가 협상값과 다름 또는 누락 | HTTP 400, upstream 호출 수 0. 감사 reason 상수는 [OPEN](정해지기 전에는 reason 값을 시험하지 않는다). 관찰(origin/main 60b194dc, 계약 아님, [OPEN] 유지): 누락 또는 알려진 구버전 값은 같은 시험에서 HTTP 400, upstream 호출 0회다. 감사 기록 형태는 시험이 아니라 코드를 읽은 결과다: `protocol_error`/`not_sent`이고 `VersionHeader`의 reason은 없다(`crates/lodeline-proxy/src/invocation_sink.rs:392-397`, `:845-880`). 이를 단언하는 시험은 찾지 못했다. 협상값도 알려진 구버전 목록도 아닌 값이나 중복 헤더는 modern 경로로 분류되어(`crates/lodeline-proxy/src/mcp/classify.rs:253-265`) 감사 reason이 `modern_request_unsupported`다(`crates/lodeline-proxy/src/invocation_sink.rs:392-394`, 계약 [contracts/README.md](contracts/README.md)의 같은 절). reason 값은 시험하지 않는다 |
 | upstream `capabilities.tasks` (등록·health) | route unsupported 표시, 신규 세션 거절 |
 | upstream `capabilities.tasks` (런타임) | downstream 세션 미수립, initialize id에 고정 `-32603`, upstream DELETE, protocol_error/sent/`upstream_capability_unsupported` |
 | `tasks/*` 요청 | `-32601 Method not found`, upstream 호출 수 0, protocol_error/not_sent/`task_augmentation_unsupported` |
@@ -92,7 +92,7 @@ undecided 행이 남아 있으면 AC-15와 P1 완료 정의를 통과할 수 없
 | GET SSE (인증됨) | 405, upstream 호출 수 0. 미인증은 401 |
 | `resources/subscribe`·`unsubscribe` | `-32601`, upstream 호출 수 0, protocol_error/not_sent. upstream이 `resources.subscribe=true` 광고 시 route unsupported |
 | resources list/read, prompts list/get | upstream 호출 수 1, 응답 중계, method `unknown`으로 감사 |
-| JSON-RPC batch 배열 | 미전달(upstream 호출 수 0), malformed 경로 거절, protocol_error/not_sent. 정확한 client 응답 형태는 [OPEN] |
+| JSON-RPC batch 배열 | 미전달(upstream 호출 수 0), malformed 경로 거절, protocol_error/not_sent. 정확한 client 응답 형태는 [OPEN]. 관찰(origin/main 60b194dc, 계약 아님, [OPEN] 유지): batch는 HTTP 400과 JSON-RPC `-32600` "Invalid Request"(id null, `data` 없음), upstream 호출 0회. 시험: `crates/lodeline-proxy/tests/mcp_relay.rs`의 `refusals_do_not_reach_upstream`. 계약의 열린 항목은 [contracts/README.md](contracts/README.md) "P1 method 범위와 route 거절 응답" |
 | 서버 → client 요청과 client 응답 | bytes 그대로 중계, client 응답이 malformed로 거절되지 않음. 이벤트 없음 |
 | 세션 DELETE | 같은 principal·route면 upstream DELETE 1회. 다른 principal·존재하지 않는 session은 동일한 404 |
 | undecided 행 | 시험 불가. 결정 후 행을 갱신해야 AC-15를 통과한다 |
