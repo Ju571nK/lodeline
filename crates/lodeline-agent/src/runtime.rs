@@ -3092,6 +3092,42 @@ mod tests {
     }
 
     #[test]
+    fn the_default_codex_target_watches_the_hook_files_of_a_cached_plugin() {
+        use lodeline_core::policy::glob::CompiledGlob;
+        let td = tempfile::tempdir().unwrap();
+        let pin = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let eff = lodeline_core::policy::merge(
+            lodeline_core::policy::defaults().unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        let id = eff
+            .targets
+            .iter()
+            .map(|t| t.id.as_str())
+            .find(|id| id.starts_with("ai-guard-codex-user-global"))
+            .unwrap()
+            .to_string();
+        let patterns = expanded_for(&eff, &id, &NoUserList, Some(&pin));
+        let plugin = pin.join(".codex/plugins/cache/mk/demo/1.0.0");
+        for file in [
+            plugin.join("hooks/hooks.json"),
+            plugin.join(".codex-plugin/plugin.json"),
+        ] {
+            assert!(
+                patterns
+                    .iter()
+                    .any(|p| CompiledGlob::new_one_folder(&p.to_string_lossy())
+                        .unwrap()
+                        .is_match(&file)),
+                "an edit of {file:?} must reach the parser: {patterns:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_pinned_home_answers_for_the_per_user_variables_and_no_others() {
         use lodeline_core::policy::expand::{expand, VarLookup};
         use std::path::Path;
