@@ -2653,6 +2653,49 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn critical_tier_links_stay_when_a_standard_target_listed_first_fills_the_cap() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        make_links(&dir, "agents", false, 300);
+        make_links(&dir, "skills", true, 5);
+        let target = |id: &str, tier: &str, path: PathBuf| {
+            format!(
+                "  - id: {id}\n    description: {id}\n    tier: {tier}\n    platform: any\n    paths: ['{}']\n    recursive: false\n",
+                path.display()
+            )
+        };
+        // The standard target comes first in the policy, as on the macOS defaults.
+        let yaml = format!(
+            "version: 1\ntargets:\n{}{}",
+            target("apps", "standard", dir.join("agents/*")),
+            target("skills", "critical", dir.join("skills/*/SKILL.md")),
+        );
+        let eff = lodeline_core::policy::merge(
+            lodeline_core::policy::parse(&yaml).unwrap(),
+            None,
+            None,
+            lodeline_core::policy::current_platform(),
+        )
+        .unwrap();
+        let (expanded, _) =
+            crate::runtime::expand_targets(&eff, &crate::platform::ActivePlatform::new(), None);
+        let (_rx, mut watcher) = idle_watcher(vec![]);
+        let logs = test_logs::logs_of(|| {
+            watcher.watch(&dir.join("skills/*"), false).unwrap();
+            watcher.follow_files(crate::runtime::watched_files(&eff, &expanded), true);
+        });
+        let aliased: Vec<PathBuf> = aliases_of(&watcher).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(aliased.len(), 256, "{logs}");
+        for index in 0..5 {
+            let link = dir.join(format!("skills/s{index:03}"));
+            assert!(aliased.contains(&link), "{link:?} was left out: {logs}");
+        }
+        assert_eq!(logs.matches("link limit").count(), 1, "{logs}");
+        assert!(logs.contains("49 more"), "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn skipped_links_do_not_use_cap_slots() {
         let td = TempDir::new().unwrap();
         let dir = dunce::canonicalize(td.path()).unwrap();
