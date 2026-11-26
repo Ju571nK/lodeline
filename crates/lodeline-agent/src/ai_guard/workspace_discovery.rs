@@ -83,6 +83,7 @@ pub fn discover_claude_repos(roots: &[String]) -> Vec<PathBuf> {
     // #199 — a repo that ships only skills or subagents can still carry hooks.
     set.extend(discover_per_repo_dir(roots, ".claude/skills"));
     set.extend(discover_per_repo_dir(roots, ".claude/agents"));
+    set.extend(discover_per_repo_dir(roots, ".claude/commands"));
     set.into_iter().collect()
 }
 
@@ -416,6 +417,20 @@ mod tests {
         );
         assert!(
             found.contains(&dunce::canonicalize(&agents).unwrap()),
+            "got {found:?}"
+        );
+    }
+
+    #[test]
+    fn discover_claude_repos_finds_commands_only_repo() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("only-commands");
+        std::fs::create_dir_all(repo.join(".claude/commands")).unwrap();
+        std::fs::write(repo.join(".claude/commands/x.md"), "x").unwrap();
+        let roots = vec![root.path().to_string_lossy().to_string()];
+        let found = discover_claude_repos(&roots);
+        assert!(
+            found.contains(&dunce::canonicalize(&repo).unwrap()),
             "got {found:?}"
         );
     }

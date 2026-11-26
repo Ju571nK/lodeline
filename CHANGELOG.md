@@ -9,6 +9,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- A repo whose only Claude Code file is a `.claude/commands` folder now gets a project row, in the agent and in `lodeline scan` (#539).
 - A Windows agent running as a service now assesses every user profile on the host, like a root agent on Linux and macOS (#540).
 
 ## [0.22.0] - 2026-11-25

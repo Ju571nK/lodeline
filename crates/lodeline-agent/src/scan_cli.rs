@@ -227,6 +227,7 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
         ".claude/loop.md",
         ".claude/skills",
         ".claude/agents",
+        ".claude/commands",
         ".mcp.json",
         "CLAUDE.md",
         "AGENTS.md",
