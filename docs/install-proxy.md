@@ -345,12 +345,8 @@ verifier from section 6.1 in place of the placeholder:
                   "routes": ["r1"]}]}}
 ```
 
-This first example uses the loopback case of section 2.1: an `http://` upstream on
-the proxy's own host, and `upstream_origins` in section 6 lists `http://127.0.0.1:18080`
-for it. An `https://` upstream on a public name would use
-`https://mcp.example.com/mcp`, and then `upstream_origins` must list
-`https://mcp.example.com`. The two must agree, or the proxy ends in `apply_failed`
-(section 6).
+This first example uses the loopback case of section 2.1. Its origin must be listed
+in `upstream_origins` in section 6, which also covers a public `https://` upstream.
 
 ```sh
 lodeline-server proxy config-put "${CONN[@]}" --token-file mgmt-config.token \
@@ -585,7 +581,8 @@ Limits to expect with Cursor. Each is marked as the Cursor research record marks
   may start OAuth discovery, even with a static `Authorization` header and a bare
   `Bearer` challenge. The proxy then sees extra requests to `/.well-known/...` and
   `POST /register`, and a wrong token can show as an OAuth error instead of a plain
-  401. What the proxy answers there was not measured.
+  401. The proxy answers those paths with `404 {"error":"not_found"}`, because they
+  are not `/mcp/{route_id}`.
 - **Empty 400 and SSE fallback** (reported by staff, 2026-09; for an empty body this
   is inferred). Cursor 3.30 release notes (documented) say servers that only support
   a newer stateless handshake now connect. If Cursor sends a modern request first, the
@@ -605,6 +602,9 @@ Limits to expect with Cursor. Each is marked as the Cursor research record marks
   not have it, and the header then goes out without the token. One user reported the
   editor and the CLI resolve different spellings (`${env:NAME}` and `${VAR}`); the
   docs do not say.
+- **Older CLI builds** (reported, forum log of a 2025.09 build): the CLI offered
+  protocol 2025-06-18 in `initialize`. What the current CLI offers is not checked.
+  Section 10 says when that works.
 - The CLI and the editor are documented to share the config files, not the client
   code, so a CLI result does not prove the editor.
 
@@ -619,7 +619,7 @@ under load.
 | Limit | Default | When it is hit |
 |---|---|---|
 | request body / header | 1 MiB / 32 KiB | 413 `request_too_large` / 431 `headers_too_large` before the upstream is called |
-| one JSON response / one SSE event | 8 MiB / 1 MiB | a length the upstream declares over the limit is refused before streaming with 502 `upstream_response_too_large`. With no declared length, or for an SSE event over the limit, the stream is cut and the call outcome is unknown. |
+| one JSON response / one SSE event | 8 MiB / 1 MiB | a length the upstream declares over the limit is refused before streaming with 502 `upstream_response_too_large` (on `initialize`, HTTP 200 with JSON-RPC `-32603`). With no declared length, or for an SSE event over the limit, the stream is cut and the call outcome is unknown. |
 | one call, whole response | 64 MiB | the same: a declared length over it is a 502, otherwise the stream is cut |
 | concurrent calls: all / per route / per principal | 64 / 16 / 8 | 429 `too_many_requests`, no queue |
 | sessions: all / per principal; idle | 256 / 32; 15 min with no call active | 429 `too_many_sessions` on `initialize` / the session ends |
@@ -649,7 +649,7 @@ By the status the client sees:
 | 502 `upstream_unavailable`, `upstream_unresolved` | the upstream is down, or its name does not resolve |
 | 502 `upstream_rejected` | the upstream answered 401 or 403 to the stored credential, and the request had no JSON-RPC `id` (a notification) or was a session DELETE |
 | HTTP 200 with JSON-RPC error `-32603` | the same upstream 401 or 403 on a request with an `id`: look here when the upstream secret is wrong |
-| 502 `upstream_response_too_large`, `upstream_redirect_refused` | a declared response over the limit (section 12); an upstream redirect, which the proxy never follows |
+| 502 `upstream_response_too_large`, `upstream_redirect_refused` | a declared response over the limit (section 12; on `initialize` it is HTTP 200 with `-32603` instead); an upstream redirect, which the proxy never follows |
 | 503 `audit_unavailable` | the call could not be recorded: the audit spool is full, or writing it failed; see `health` and the server |
 | 503 `session_unavailable` | the proxy could not make a session id |
 | 504 `upstream_timeout` | no connection or response headers in time (section 12) |
@@ -666,9 +666,10 @@ By `health`:
 | `ingest_stopped: true` | the server refuses the audit events; the spool grows |
 
 The proxy logs to the journal: `journalctl -u lodeline-proxy`. `health` does not print
-the last update error. The status file `/var/lib/lodeline-proxy/status.json` and the
-server's proxy detail hold it as one of `fetch_failed`, `validation_failed`,
-`stale_revision`, `apply_failed` or `config_hash_mismatch`. `apply_failed` right after
+the last update error. The status file `/var/lib/lodeline-proxy/status.json` on the proxy
+host holds it as one of `fetch_failed`, `validation_failed`, `stale_revision`,
+`apply_failed` or `config_hash_mismatch`. `GET /v1/proxies/{id}` on the server shows
+`config_state` and `config_in_sync`, not the error. `apply_failed` right after
 `config-put` usually means an upstream origin is missing from `upstream_origins`
 (section 6).
 
