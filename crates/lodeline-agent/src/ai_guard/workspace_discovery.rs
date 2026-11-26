@@ -110,12 +110,85 @@ pub fn discover_claude_repos(roots: &[String]) -> Vec<PathBuf> {
     set.extend(discover_per_repo_dir(roots, ".claude/skills"));
     set.extend(discover_per_repo_dir(roots, ".claude/agents"));
     set.extend(discover_per_repo_dir(roots, ".claude/commands"));
+    let repos: Vec<PathBuf> = set.iter().cloned().collect();
+    set.extend(nested_rows_for_repos(&repos, NESTED_LIMITS));
     set.into_iter().collect()
 }
 
-/// Stub: the walk lands in the next commit.
-fn nested_rows_for_repos(_repos: &[PathBuf], _limits: NestedLimits) -> Vec<PathBuf> {
-    Vec::new()
+/// The nested rows of every repo in `repos`, walked in the order given (the
+/// caller passes them sorted, so the caps pick the same folders on every run).
+/// Logs one warning when any cap stopped a walk.
+fn nested_rows_for_repos(repos: &[PathBuf], limits: NestedLimits) -> Vec<PathBuf> {
+    let mut budget = limits.total_dirs;
+    let mut out = Vec::new();
+    let mut capped = false;
+    for repo in repos {
+        let (rows, stopped) = nested_claude_settings_dirs(repo, limits, &mut budget);
+        out.extend(rows);
+        capped |= stopped;
+    }
+    if capped {
+        tracing::warn!(
+            total_dirs = limits.total_dirs,
+            repo_dirs = limits.repo_dirs,
+            rows = limits.rows,
+            "workspace_discovery: nested .claude/settings.json walk hit a cap; some folders get no row"
+        );
+    }
+    out
+}
+
+/// #539. The folders strictly below `repo` that hold their own
+/// `.claude/settings.json`. Claude Code reads that file for a session started
+/// in the folder, so each one is a project row of its own. The walk is
+/// breadth first and sorted by name, so the caps pick the same folders on every
+/// run. It goes `limits.depth` levels down, reads at most `limits.repo_dirs`
+/// folders and what is left of `budget`, returns at most `limits.rows`, and
+/// skips hidden folders, `node_modules` and `target`. A link is not followed.
+/// The bool is true when a cap stopped the walk.
+fn nested_claude_settings_dirs(
+    repo: &Path,
+    limits: NestedLimits,
+    budget: &mut usize,
+) -> (Vec<PathBuf>, bool) {
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(repo.to_path_buf(), 0usize)]);
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        if visited == limits.repo_dirs || *budget == 0 {
+            return (found, true);
+        }
+        visited += 1;
+        *budget -= 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut subdirs = Vec::new();
+        let mut has_dot_claude = false;
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".claude" {
+                has_dot_claude = true;
+            } else if !name.starts_with('.') && !NESTED_WALK_SKIPPED.contains(&name.as_ref()) {
+                subdirs.push(entry.path());
+            }
+        }
+        if depth > 0 && has_dot_claude && dir.join(".claude").join("settings.json").is_file() {
+            if found.len() == limits.rows {
+                return (found, true);
+            }
+            found.push(dir);
+        }
+        if depth < limits.depth {
+            subdirs.sort();
+            queue.extend(subdirs.into_iter().map(|sub| (sub, depth + 1)));
+        }
+    }
+    (found, false)
 }
 
 /// #146. Codex repos by `.codex/config.toml`, `.codex/hooks.json` (#200), a

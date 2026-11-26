@@ -33,6 +33,8 @@ A `CLAUDE_CONFIG_DIR` in the `env` block of a home's `~/.claude/settings.json` m
 
 A folder gets a project row when it holds one of these: a `.claude/settings.json`, `.claude/settings.local.json` or `.claude/loop.md` file, a `.mcp.json`, `CLAUDE.md` or `AGENTS.md` file at its root, or a `.claude/skills`, `.claude/agents` or `.claude/commands` folder.
 
+The agent also gives a project row to a folder below a repository's row that holds its own `.claude/settings.json`, because Claude Code reads that file for a session started in the folder (checked against https://code.claude.com/docs/en/settings.md on 2026-11-26). The walk goes down eight levels below the repository, skips hidden folders, `node_modules`, `target` and folders that are links, and adds at most 64 rows for each repository. It reads at most 2,000 folders for each repository and 20,000 in one pass over all repositories, taking repositories in sorted order, so in a very large workspace the last repositories get no nested rows. It logs one warning when a limit leaves some out. It runs when the agent starts and on each policy reload. A row reads the `.claude` files of its own folder, so a hook in `pkg/.claude/settings.json` shows in the `pkg` row and not in the row of the repository above it. `lodeline scan` reads the folder it runs in and lists no nested rows, so run it in `pkg` to see that row.
+
 A project row reads the hooks in skill (`.claude/skills/<name>/SKILL.md`), subagent (`.claude/agents/**/*.md`) and command (`.claude/commands/**/*.md`) frontmatter from these folders, which are the ones Claude Code loads for a session started in the row's folder:
 
 - The row's own `.claude`.
