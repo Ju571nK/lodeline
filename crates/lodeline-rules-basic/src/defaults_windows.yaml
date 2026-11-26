@@ -56,6 +56,9 @@ targets:
     platform: windows
     paths:
       - "%USERPROFILE%\\.codex\\config.toml"
+      # Hooks of an installed plugin: one folder per marketplace, plugin and version.
+      - "%USERPROFILE%\\.codex\\plugins\\cache\\*\\*\\*\\hooks\\hooks.json"
+      - "%USERPROFILE%\\.codex\\plugins\\cache\\*\\*\\*\\.codex-plugin\\plugin.json"
       - "%ProgramData%\\OpenAI\\Codex\\requirements.toml"
       # The Codex apps cache folders (codex_apps_tools, codex_apps_server_info) are not
       # listed: Codex rewrites them at every start, also with the same bytes. The parser

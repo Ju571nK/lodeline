@@ -11,6 +11,7 @@ Lodeline reads these Codex layers:
 | `/etc/codex/config.toml` (on Windows, `%ProgramData%\OpenAI\Codex\config.toml`) | User | Yes, under the user layer. A user scalar wins, `mcp_servers` tables merge, and the hooks of both layers are assessed. |
 | `config.toml`, `hooks.json` and `rules/` in `~/.codex` (or `CODEX_HOME`) | User | Yes. |
 | `config.toml`, `hooks.json` and `rules/` in `<repo>/.codex/` | Project | Yes. |
+| Hooks of an enabled plugin, in `plugins/cache/<marketplace>/<plugin>/<version>/` under `~/.codex` (or `CODEX_HOME`) | User | Yes. See "Plugin hooks" below. |
 | The same files in `.codex/` folders below the repo root, such as `services/api/.codex/` | Project, with the repo's row | Yes. See below. |
 | `${PWD}/config.toml` | None | No. The configuration page does not list it. From source, `discover_project_layers` reads `<folder>/.codex/` for each parent folder and no bare `config.toml`, although a comment in `codex-rs/config/src/loader/mod.rs` still lists `${PWD}/config.toml` and may be stale. This was not run. |
 | Files passed with `--profile` | None | No. The flag is runtime state that a daemon cannot see. |
@@ -59,6 +60,17 @@ A hook command that names a script by an absolute path, in matching quotes or no
 Lodeline reads hook trust from the trust state in the user config. A hook whose stored hash no longer matches is still reported as running. Codex is expected to skip such a hook, so Lodeline over-reports a modified hook. It does not compare the hash, because the input to that hash changes between Codex releases and a wrong mismatch would hide a hook that runs. The skip behaviour comes from the Codex source at rust-v0.164 and was not checked on 0.167.0.
 
 The hash input is the part that moves. The `hook_hash` function in `codex-rs/hooks/src/engine/discovery.rs` hashes "a normalized, config-derived identity" of the handler, and a Codex test, `supported_events_retain_per_handler_additional_context_limit_and_hash_it`, shows that a new handler field changes the hash. Between 2026-08-03 and 2026-10-23 the file that holds the function had 17 commits, and in 6 of them the changed lines mention the hash, among them "Bind plugin hook approval to plugin contents" (#54619). This count is from source and was not checked on 0.167.0.
+
+## Plugin hooks
+
+Codex runs the hooks that an enabled, trusted plugin brings, with no `hooks.json` of the user's. Lodeline reads them and scores them as it scores other Codex hooks, so no new finding kind exists for them. A finding names the plugin's `hooks/hooks.json`, or its `.codex-plugin/plugin.json` for an inline hook, with the user layer. This comes from the Codex source at rust-v0.172.0 (`core-plugins/src/loader.rs`, `hooks/src/engine/discovery.rs`, `plugin_trust.rs`, `plugin_fingerprint.rs`) and was not run on the installed 0.172.0, because that would need a plugin install.
+
+- A plugin counts when the config holds `[plugins."<name>@<marketplace>"]` that does not set `enabled = false`. A plugin that is absent or disabled adds nothing.
+- Lodeline reads the `local` version folder when it exists, and otherwise the highest version folder by semantic version, with a text comparison when a name is not one. This is how Codex picks the active version.
+- A manifest `hooks` value that is a path, a list of paths, an inline object or a list of objects replaces the default `hooks/hooks.json`. A file that does not parse is skipped with a warning. A plugin whose manifest does not parse adds nothing.
+- A plugin hook runs only when the user config holds `[hooks.state."<name>@<marketplace>:<file>:<event>:<group>:<handler>"]` with a `trusted_hash`. For an inline hook the file part is `plugin.json#hooks[<index>]`. Lodeline also compares `trusted_content_hash` with a SHA-256 over the plugin folder, computed as Codex does, and treats a mismatch like a hook with no approval. The folder hash is checked against a hash computed outside Lodeline with the same input. The `trusted_hash` of the declaration is not compared, for the reason under "Hook trust". An approval with no `trusted_content_hash` is a legacy one, and Lodeline reads it as trusted, because Codex settles it against a baseline file that it creates on first use.
+- The agent watches the `hooks/hooks.json` and `.codex-plugin/plugin.json` of every plugin folder, and the files that an enabled plugin's manifest names. An edit of another file in a plugin folder changes the folder hash but does not trigger a new reading until the next periodic one.
+- Not read: a plugin's MCP servers, skills and apps, and the scripts that a plugin hook command names.
 
 ## MCP credentials
 

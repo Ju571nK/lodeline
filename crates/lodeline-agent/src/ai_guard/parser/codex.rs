@@ -40,7 +40,7 @@
 //!      server. Verified: `url` is only valid for the StreamableHttp transport;
 //!      if `url` is present the server is inherently remote.
 
-use crate::ai_guard::parser::{claude_code, AiGuardParser, AssessError};
+use crate::ai_guard::parser::{claude_code, codex_plugin_hooks, AiGuardParser, AssessError};
 use lodeline_core::event::{
     AiGuardFinding, AiGuardReason, AiGuardScope, AiTool, ConfigLayer, ConfigSource,
 };
@@ -78,7 +78,8 @@ impl AiGuardParser for CodexParser {
     fn watched_paths(&self, home_dir: &Path) -> Vec<PathBuf> {
         let codex_dir = user_codex_dir(home_dir, self.codex_home.as_deref());
         let system_dir = super::policy_controls::codex_system_dir();
-        vec![
+        let user = CodexLayer::read_lenient(&codex_dir, ConfigLayer::User);
+        let mut paths = vec![
             codex_dir.join("config.toml"),
             codex_dir.join(HOOKS_JSON),
             // #200 — a standing command-approval rule appearing here is an
@@ -90,7 +91,12 @@ impl AiGuardParser for CodexParser {
             system_dir.join(HOOKS_JSON),
             system_dir.join("rules"),
             super::policy_controls::codex_requirements_path(),
-        ]
+        ];
+        paths.extend(codex_plugin_hooks::watched_paths(
+            &codex_dir,
+            user.config.as_ref(),
+        ));
+        paths
     }
 
     fn assess_posture(&self, home_dir: &Path) -> Result<super::AiGuardAssessment, AssessError> {
@@ -148,7 +154,7 @@ struct CodexLayer {
 }
 
 /// The file a finding came from, as an absolute path.
-fn config_source(layer: &ConfigLayer, file: &Path) -> ConfigSource {
+pub(super) fn config_source(layer: &ConfigLayer, file: &Path) -> ConfigSource {
     let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
     ConfigSource {
         layer: layer.clone(),
@@ -167,7 +173,7 @@ fn stamp(
     })
 }
 
-fn stamp_all(
+pub(super) fn stamp_all(
     reasons: Vec<AiGuardReason>,
     source: Option<ConfigSource>,
 ) -> impl Iterator<Item = AiGuardFinding> {
@@ -281,7 +287,7 @@ impl CodexLayer {
 /// A stored hash is not compared with the hook: Codex marks a changed hook
 /// `Modified` and skips it, but its normalized-hash input changes between
 /// releases, and a wrong mismatch would hide a hook that runs.
-pub(super) enum HookTrust<'a> {
+enum HookTrust<'a> {
     Managed,
     Persisted(Option<&'a toml::Table>),
 }
@@ -331,7 +337,7 @@ fn hook_key_sources(path: &Path) -> Vec<String> {
 }
 
 /// `PreToolUse` -> `pre_tool_use`, as `hook_event_key_label` spells it.
-fn hook_event_key_label(event: &str) -> String {
+pub(super) fn hook_event_key_label(event: &str) -> String {
     let mut label = String::with_capacity(event.len() + 4);
     for (i, c) in event.chars().enumerate() {
         if c.is_ascii_uppercase() && i > 0 {
@@ -344,7 +350,7 @@ fn hook_event_key_label(event: &str) -> String {
 
 /// `hooks.json` has the same `{ "hooks": { <Event>: [...] } }` shape as the
 /// `[hooks]` table, so it is converted and fed to the same emitter.
-fn read_hooks_json(path: &Path) -> Option<Value> {
+pub(super) fn read_hooks_json(path: &Path) -> Option<Value> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -503,6 +509,14 @@ pub(super) fn assess_user_findings(
             home,
             &mut out,
         );
+        let plugins = codex_plugin_hooks::enabled_plugins(codex_dir, effective.as_ref());
+        let states = user
+            .config
+            .as_ref()
+            .and_then(|c| c.get("hooks"))
+            .and_then(|h| h.get("state"))
+            .and_then(Value::as_table);
+        out.extend(codex_plugin_hooks::plugin_findings(&plugins, states, home));
     }
     if let Some(val) = &effective {
         for (id, reasons) in app_approval_reasons(val) {
