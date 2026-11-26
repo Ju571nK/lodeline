@@ -627,6 +627,8 @@ under load.
 | shutdown grace | 30 s | calls still open then are recorded as unknown |
 | audit event / spool | 16 KiB / 1 GiB | a full spool refuses new calls (503 `audit_unavailable`) |
 
+A session DELETE counts against all three concurrent call limits.
+
 The per-call and per-process bandwidth keys exist in the config, but the proxy does
 not shape traffic with them yet. The full list is in `config/proxy.example.yaml`.
 
