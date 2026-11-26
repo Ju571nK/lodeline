@@ -785,3 +785,68 @@ fn the_user_parser_watches_the_folder_of_a_plugin_that_has_a_state_row() {
     ));
     assert!(!parser.watched_paths(&fx.home).contains(&base));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_directory_link_inside_the_bundle_does_not_lead_a_named_file_out_of_the_codex_folder() {
+    let fx = fixture();
+    let dir = fx.install("1.0.0", DESTRUCTIVE);
+    let outside = fx._root.path().join("outside");
+    fx.write(&outside.join("named.json"), DESTRUCTIVE);
+    std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+    fx.write(
+        &dir.join(".codex-plugin").join("plugin.json"),
+        r#"{"name":"demo","hooks":"./sub/named.json"}"#,
+    );
+    fx.config(&format!(
+        "{ENABLED}{}",
+        trusted("sub/named.json:pre_tool_use:0:0")
+    ));
+    assert!(fx.destructive().is_empty());
+    assert!(content_hash(&dir).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_a_manifest_path_stays_in_the_file_name_and_becomes_a_slash_in_the_key() {
+    let fx = fixture();
+    let dir = fx.install("1.0.0", DESTRUCTIVE);
+    fx.write(
+        &dir.join(".codex-plugin").join("plugin.json"),
+        r#"{"name":"demo","hooks":"./sub\\named.json"}"#,
+    );
+    let file = dir.join("sub\\named.json");
+    fx.write(&file, DESTRUCTIVE);
+    fx.config(&format!(
+        "{ENABLED}{}",
+        trusted("sub/named.json:pre_tool_use:0:0")
+    ));
+    assert_eq!(fx.destructive(), vec![user_source(&file)]);
+}
+
+#[test]
+fn a_hooks_file_named_twice_is_read_once() {
+    let fx = fixture();
+    let dir = fx.install("1.0.0", DESTRUCTIVE);
+    fx.write(
+        &dir.join(".codex-plugin").join("plugin.json"),
+        r#"{"name":"demo","hooks":["./a.json","./a.json","./sub/../a.json","./a.json"]}"#,
+    );
+    fx.write(&dir.join("a.json"), DESTRUCTIVE);
+    fx.config(&format!("{ENABLED}{}", trusted("a.json:pre_tool_use:0:0")));
+    assert_eq!(fx.destructive().len(), 1);
+}
+
+#[test]
+fn a_plugin_with_too_many_version_folders_is_skipped() {
+    let fx = fixture();
+    fx.install("1.0.0", DESTRUCTIVE);
+    fx.config(&format!("{ENABLED}{}", trusted(DEFAULT_KEY)));
+    let base = fx.plugin_dir("1.0.0").parent().unwrap().to_path_buf();
+    for i in 0..MAX_VERSION_FOLDERS {
+        std::fs::create_dir_all(base.join(format!("0.0.{i}"))).unwrap();
+    }
+    assert_eq!(fx.destructive().len(), 1);
+    std::fs::create_dir_all(base.join("0.1.0")).unwrap();
+    assert!(fx.destructive().is_empty());
+}

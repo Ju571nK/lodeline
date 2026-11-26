@@ -33,6 +33,8 @@ const MANIFEST_DIRS: [&str; 3] = [".codex-plugin", ".claude-plugin", ".cursor-pl
 const AGENT_MANIFEST: &str = "plugin.json";
 const AGENT_SCHEMA_PREFIX: &str = "https://agent-plugins.org/schemas/";
 const DEFAULT_HOOKS_KEY: &str = "hooks/hooks.json";
+/// Most version folders of one plugin that are listed.
+const MAX_VERSION_FOLDERS: usize = 1_000;
 const LOCAL_VERSION: &str = "local";
 const DEFAULT_OUTPUT_TOKEN_LIMIT: usize = 2_500;
 
