@@ -31,6 +31,8 @@ When `lodeline scan` runs in the home folder, the home's `.claude/settings.json`
 
 A `CLAUDE_CONFIG_DIR` in the `env` block of a home's `~/.claude/settings.json` moves that home's user row to the folder the same way, for the scan and for the agent service, which does not watch that folder and so shows an edit there at its next full pass. The variable in the process environment wins over it. The value counts only as an absolute path: Claude Code resolves a relative path against the session's folder and takes `~` as a folder name, so a scan ignores both. A redirect inside the redirected folder is not followed.
 
+A folder gets a project row when it holds one of these: a `.claude/settings.json`, `.claude/settings.local.json` or `.claude/loop.md` file, a `.mcp.json`, `CLAUDE.md` or `AGENTS.md` file at its root, or a `.claude/skills`, `.claude/agents` or `.claude/commands` folder.
+
 A project row reads the hooks in skill (`.claude/skills/<name>/SKILL.md`), subagent (`.claude/agents/**/*.md`) and command (`.claude/commands/**/*.md`) frontmatter from these folders, which are the ones Claude Code loads for a session started in the row's folder:
 
 - The row's own `.claude`.

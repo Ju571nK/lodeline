@@ -83,6 +83,7 @@ pub fn discover_claude_repos(roots: &[String]) -> Vec<PathBuf> {
     // #199 — a repo that ships only skills or subagents can still carry hooks.
     set.extend(discover_per_repo_dir(roots, ".claude/skills"));
     set.extend(discover_per_repo_dir(roots, ".claude/agents"));
+    set.extend(discover_per_repo_dir(roots, ".claude/commands"));
     set.into_iter().collect()
 }
 
