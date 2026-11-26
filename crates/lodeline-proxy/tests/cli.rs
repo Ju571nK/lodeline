@@ -60,10 +60,16 @@ fn wait_for(mut f: impl FnMut() -> bool) -> bool {
 }
 
 #[test]
-fn run_without_config_fails_and_binds_nothing() {
+fn run_without_config_is_a_usage_error() {
+    // clap rejects the command before the proxy reads any config or opens any listener.
     let out = Command::new(BIN).arg("run").output().unwrap();
-    assert!(!out.status.success());
-    assert!(out.status.code() != Some(0));
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("required arguments were not provided"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--config"), "{stderr}");
 }
 
 #[test]
