@@ -1403,3 +1403,142 @@ async fn noop_sink_keeps_bytes_and_cancel_ordering() {
     assert_eq!(r.header("content-type"), Some("text/event-stream"));
     assert_eq!(up.count(), 1, "the cancelled call was never dispatched");
 }
+
+// ------------------------------------------------------ caller claims (AC-04)
+
+/// A table whose route carries a revision and a scope, so every call is
+/// audited, with one principal `pa` (token `tok-a`) of the given declared kind.
+/// The returned folder holds the upstream secret and must outlive the table.
+fn audited_table(
+    up: &Up,
+    kind: Option<lodeline_proxy_api::config::ActorKind>,
+) -> (tempfile::TempDir, lodeline_proxy::route::RouteTable) {
+    use lodeline_proxy::bootstrap::{normalize_origin, Credential};
+    use lodeline_proxy::route::{PrincipalSpec, RouteScope, RouteSpec, RouteTable};
+    use lodeline_proxy_api::Id;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret");
+    std::fs::write(&secret, format!("{UPSTREAM_SECRET}\n")).unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let origin = normalize_origin(&format!("http://127.0.0.1:{}", up.addr.port())).unwrap();
+    let creds = std::collections::BTreeMap::from([(
+        "up".to_string(),
+        Credential {
+            secret_file: secret,
+            upstream_origins: vec![origin],
+        },
+    )]);
+    let mut principal = PrincipalSpec::new(
+        Id::new("pa").unwrap(),
+        vec![lodeline_proxy_api::verifier_for("tok-a").into()],
+    );
+    principal.actor_kind = kind;
+    let spec = RouteSpec {
+        route_id: Id::new("a").unwrap(),
+        upstream_url: up.url("/up"),
+        credential_ref: "up".into(),
+        principals: vec![principal],
+        allowed_origins: vec![],
+        allow_private_destination: false,
+        limits: Default::default(),
+        scope: Some(RouteScope {
+            upstream_id: "up-1".into(),
+            credential_scope_id: "cs-1".into(),
+        }),
+    };
+    let t = RouteTable::build(&[spec], &creds, &limits())
+        .unwrap()
+        .with_revision(lodeline_proxy_api::PositiveI64::new(3).unwrap());
+    (dir, t)
+}
+
+/// Every string value in a JSON tree.
+fn json_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => out.push(s.clone()),
+        serde_json::Value::Array(a) => a.iter().for_each(|x| json_strings(x, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|x| json_strings(x, out)),
+        _ => {}
+    }
+}
+
+/// Send one `tools/call` that claims to be human in every place a caller
+/// controls, then check that the call was relayed once and that the recorded
+/// actor is exactly what the principal mapping says.
+async fn claim_of_human_is_ignored(
+    declared: Option<lodeline_proxy_api::config::ActorKind>,
+    recorded_kind: &str,
+) {
+    let up = ok_upstream().await;
+    let rec = Rec::new();
+    let (_secret, t) = audited_table(&up, declared);
+    let px = start_table(t, limits(), Some(rec.clone())).await;
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"human":true,"method":"tools/call","params":{"name":"echo","arguments":{},"_meta":{"human":true,"actor":{"actor_kind":"human"}}}}"#;
+    let r = px
+        .post_with(
+            &[
+                ("MCP-Protocol-Version", "2025-11-25"),
+                ("X-Actor-Kind", "human"),
+                ("X-Human", "true"),
+            ],
+            body,
+        )
+        .await;
+    assert_eq!(r.status, 200, "the call is relayed as normal");
+    let c = rec.the_completion().await;
+    assert_eq!(up.count(), 1, "the upstream saw exactly one request");
+
+    let started: Vec<_> = rec
+        .all()
+        .into_iter()
+        .filter_map(|e| match e {
+            Ev::Started(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started.len(), 1);
+    let from_start = started[0].call.audit.clone().expect("the call is audited");
+    let from_end = c.call.audit.clone().expect("the completion is audited");
+    assert_eq!(from_start, from_end);
+
+    let actor = serde_json::to_value(&from_start.actor).unwrap();
+    assert_eq!(actor["actor_kind"], recorded_kind);
+    assert_eq!(actor["authentication_method"], "bearer");
+    assert_eq!(actor["evidence_source"], "proxy_credential_mapping");
+    assert_eq!(actor["actor_id"], "pa");
+
+    // No field of the record holds the claimed value as an actor kind.
+    let mut strings = Vec::new();
+    json_strings(&actor, &mut strings);
+    strings.push(from_start.upstream_id.as_str().to_string());
+    assert!(
+        strings.iter().all(|s| s != "human"),
+        "a claimed kind leaked into the record: {strings:?}"
+    );
+    let dump = rec.debug().replace("NonHuman", "");
+    assert!(
+        !dump.contains("Human") && !dump.contains("human"),
+        "a claim reached the record: {dump}"
+    );
+}
+
+/// AC-04: the actor comes only from the configured principal mapping. A
+/// caller that claims to be human in headers, in `_meta` and in the body is
+/// relayed as normal and recorded as the configured non-human principal.
+#[tokio::test]
+async fn a_caller_claim_of_human_does_not_change_the_recorded_actor() {
+    claim_of_human_is_ignored(
+        Some(lodeline_proxy_api::config::ActorKind::NonHuman),
+        "non_human",
+    )
+    .await;
+}
+
+/// The same claims against a principal with no declared kind stay `unknown`.
+#[tokio::test]
+async fn a_caller_claim_of_human_leaves_an_undeclared_kind_unknown() {
+    claim_of_human_is_ignored(None, "unknown").await;
+}
