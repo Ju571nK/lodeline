@@ -367,7 +367,7 @@ impl ConfigSync {
 
     fn on_fetch_inner(&mut self, now: Instant, result: FetchResult) -> SyncOutcome {
         // The boot clock is read beside the receipt instant, before parsing,
-        // building and persisting, so slow work cannot shorten the lifetime.
+        // building and persisting, so slow work cannot lengthen the lifetime.
         let receipt = self.table.boot_now();
         self.expire_inner(now);
         match result {
@@ -513,11 +513,21 @@ pub(crate) fn jitter(d: Duration) -> Duration {
 
 /// While a table is installed the sync wakes at least this often to compare the
 /// boot clock with the TTL, so after a host resume the published status catches
-/// up with the relay at once instead of waiting for the late Tokio timer.
+/// up with the relay within about a second instead of waiting for the late
+/// Tokio timer. A table with no boot reading has nothing to compare, so it
+/// needs no recheck.
 const EXPIRY_RECHECK: Duration = Duration::from_secs(1);
 
-fn recheck_at() -> Instant {
-    Instant::now() + EXPIRY_RECHECK
+fn recheck_at(sync: &ConfigSync) -> Instant {
+    if sync.table.has_boot_stamp() {
+        Instant::now() + EXPIRY_RECHECK
+    } else {
+        far_future()
+    }
+}
+
+fn far_future() -> Instant {
+    Instant::now() + Duration::from_secs(86_400 * 365)
 }
 
 fn next_poll_delay(sync: &ConfigSync, ok: bool, p: &SyncParams) -> Duration {
@@ -554,7 +564,7 @@ pub async fn run_sync<F, S>(
         loop {
             let wake = sync
                 .deadline()
-                .map_or(next_poll, |d| d.min(next_poll).min(recheck_at()));
+                .map_or(next_poll, |d| d.min(next_poll).min(recheck_at(&sync)));
             tokio::select! {
                 _ = &mut shutdown => return,
                 _ = tokio::time::sleep_until(wake) => {}
@@ -572,12 +582,13 @@ pub async fn run_sync<F, S>(
             tokio::pin!(fetch);
             loop {
                 let dl = sync.deadline();
+                let rc = recheck_at(&sync);
                 tokio::select! {
                     _ = &mut shutdown => return,
                     r = &mut fetch => break r,
                     _ = async {
                         match dl {
-                            Some(d) => tokio::time::sleep_until(d.min(recheck_at())).await,
+                            Some(d) => tokio::time::sleep_until(d.min(rc)).await,
                             None => std::future::pending::<()>().await,
                         }
                     } => {
@@ -1734,5 +1745,59 @@ mod tests {
         assert!(authenticates(&table, "tok-1"));
         *cell.lock().unwrap() = Some(("boot-a", 5300));
         assert!(table.current().is_none());
+    }
+
+    /// The sync state is never overwritten by the serving probe: a fresh table
+    /// installed behind an equal sync state shows `valid` again.
+    #[tokio::test(start_paused = true)]
+    async fn local_status_recovers_when_a_fetch_installs_a_table_before_the_sync_wakes() {
+        use crate::lifecycle::{read_status, Lifecycle, RunState};
+
+        let f = fx();
+        let dir = f._dir.path();
+        let bootstrap = crate::bootstrap::Bootstrap {
+            proxy_id: lodeline_proxy_api::Id::new("px-1").unwrap(),
+            listen: "127.0.0.1:8480".parse().unwrap(),
+            listener_tls: None,
+            control_plane_url: "https://s.example".into(),
+            state_dir: dir.join("state"),
+            client_cert_file: dir.join("client.crt"),
+            client_key_file: dir.join("client.key"),
+            ca_file: dir.join("ca.crt"),
+            limits: Limits::default(),
+            credentials: f.creds.clone(),
+        };
+        let (cell, clock) = boot_cell(Some(("boot-a", 1000)));
+        let table = TableHandle::new().with_boot_clock(clock);
+        let mut sync = sync(&f, &table);
+        let mut last = sync.status();
+        let mut lifecycle = Lifecycle::start(&bootstrap).unwrap();
+        lifecycle.set_run_state(RunState::Running).unwrap();
+        let probe_table = table.clone();
+        lifecycle.set_serving_probe(std::sync::Arc::new(move || probe_table.current().is_some()));
+        let receipt = Instant::now();
+        sync.on_fetch(receipt, body(&std_cfg(1)));
+        publish(&sync, &mut last, &mut |s| lifecycle.set_config(s).unwrap());
+        assert!(read_status(&bootstrap.state_dir).unwrap().forwarding);
+
+        *cell.lock().unwrap() = Some(("boot-a", 1301));
+        assert!(table.current().is_none());
+        lifecycle.set_ingest_stopped(true).unwrap();
+        let expired = read_status(&bootstrap.state_dir).unwrap();
+        assert_eq!(expired.config_state, ConfigState::Expired);
+        assert!(!expired.forwarding);
+
+        assert_eq!(
+            sync.on_fetch(receipt, body(&std_cfg(1))),
+            SyncOutcome::Refreshed
+        );
+        assert!(authenticates(&table, "tok-1"));
+        assert_eq!(sync.status(), last);
+        publish(&sync, &mut last, &mut |s| lifecycle.set_config(s).unwrap());
+        // the periodic republish alone also restores it, without another write
+        lifecycle.refresh_published().unwrap();
+        let recovered = read_status(&bootstrap.state_dir).unwrap();
+        assert_eq!(recovered.config_state, ConfigState::Valid);
+        assert!(recovered.forwarding);
     }
 }

@@ -114,6 +114,8 @@ pub struct Lifecycle {
     sequence_bound: Option<i64>,
     gap_queue: Option<crate::state_dir::GapQueueState>,
     serving: Option<crate::status_report::ServingProbe>,
+    /// The config state the status file shows now.
+    published_config_state: ConfigState,
 }
 
 impl Lifecycle {
@@ -154,6 +156,7 @@ impl Lifecycle {
             sequence_bound,
             gap_queue,
             serving: None,
+            published_config_state: config_state,
         };
         lc.publish()?;
         Ok(lc)
@@ -341,17 +344,39 @@ impl Lifecycle {
         self.serving = Some(probe);
     }
 
-    fn publish(&mut self) -> Result<(), StateError> {
+    /// The config state to publish: the sync state, except that a `valid` one
+    /// the relay already refuses reads as `expired`. The result is never written
+    /// back into the sync state, so a table installed later recovers by itself.
+    fn shown_config_state(&self) -> ConfigState {
         if self.status.config_state == ConfigState::Valid
             && self.serving.as_ref().is_some_and(|p| !p())
         {
-            self.status.config_state = ConfigState::Expired;
+            ConfigState::Expired
+        } else {
+            self.status.config_state
         }
-        self.status.forwarding =
-            forwarding_allowed(self.status.run_state, self.status.config_state);
+    }
+
+    /// Republish when only the serving probe changed what the file should say
+    /// (a TTL ran out between sync wakes, or a fresh table was installed behind
+    /// an equal sync state).
+    pub fn refresh_published(&mut self) -> Result<(), StateError> {
+        if self.shown_config_state() == self.published_config_state {
+            return Ok(());
+        }
+        self.publish()
+    }
+
+    fn publish(&mut self) -> Result<(), StateError> {
+        let shown = self.shown_config_state();
+        self.status.forwarding = forwarding_allowed(self.status.run_state, shown);
         self.status.updated_at = now_rfc3339();
-        let bytes = serde_json::to_vec_pretty(&self.status).expect("status serializes");
-        self.state.write_atomic(STATUS_FILE, &bytes)
+        let mut out = self.status.clone();
+        out.config_state = shown;
+        let bytes = serde_json::to_vec_pretty(&out).expect("status serializes");
+        self.state.write_atomic(STATUS_FILE, &bytes)?;
+        self.published_config_state = shown;
+        Ok(())
     }
 
     pub fn set_run_state(&mut self, s: RunState) -> Result<(), StateError> {
@@ -1056,6 +1081,9 @@ async fn follow_spool_view(
         let v = crate::status_report::SpoolView::of(&spool.snapshot(), central.ingest_stopped());
         if let Err(e) = lock(&lc).set_spool(v) {
             tracing::error!(error = %e, "cannot publish the spool state");
+        }
+        if let Err(e) = lock(&lc).refresh_published() {
+            tracing::error!(error = %e, "cannot publish the config state");
         }
         tokio::select! {
             _ = &mut shutdown => return,

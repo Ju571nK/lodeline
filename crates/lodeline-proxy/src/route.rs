@@ -582,7 +582,11 @@ impl TableHandle {
     }
     /// Whole seconds, rounded up, so a short TTL never collapses to zero.
     fn stamp(receipt: Option<BootInstant>, ttl: std::time::Duration) -> Option<BootStamp> {
-        let ttl_secs = i64::try_from(ttl.as_secs() + u64::from(ttl.subsec_nanos() > 0)).ok()?;
+        let ttl_secs = i64::try_from(
+            ttl.as_secs()
+                .checked_add(u64::from(ttl.subsec_nanos() > 0))?,
+        )
+        .ok()?;
         Some(BootStamp {
             at: receipt?,
             ttl_secs,
@@ -606,6 +610,14 @@ impl TableHandle {
     /// and forwarding agree.
     pub(crate) fn boot_elapsed(&self) -> bool {
         self.boot_elapsed_in(&self.slot.read().unwrap_or_else(|e| e.into_inner()))
+    }
+    /// Whether the installed table carries a boot clock reading to count against.
+    pub(crate) fn has_boot_stamp(&self) -> bool {
+        self.slot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .boot
+            .is_some()
     }
     /// Install a table that stops being returned by [`TableHandle::current`] at
     /// `deadline`, or once the boot clock has advanced by `ttl` since `receipt`.
