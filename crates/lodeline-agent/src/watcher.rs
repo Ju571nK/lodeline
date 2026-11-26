@@ -43,11 +43,20 @@ pub struct WatcherHandle {
     aliases_tx: watch::Sender<crate::normalizer::AliasTable>,
     /// Link problems already logged, so a tick does not repeat them.
     warned: BTreeSet<(PathBuf, &'static str)>,
+    /// How many links the last rebuild left out past the cap, once it has said so.
+    cap_warned: usize,
     activity: Arc<RootActivity>,
     /// Quiet time after which an active directory root is re-armed. `None` never re-arms.
     rearm_after: Option<Duration>,
     scope: LinkScope,
 }
+
+/// Most links, files and folders together, one root rebuild follows. Each costs a
+/// watch and a comparison per event; the rest are left out with one warning.
+const MAX_FOLLOWED_LINKS: usize = 256;
+
+/// Links a loop check follows before it calls a link a loop.
+const LOOP_HOP_LIMIT: usize = 40;
 
 const OTHER_ACCOUNT: &str = "link target belongs to another account";
 
@@ -359,8 +368,12 @@ impl WatcherHandle {
         let mut resolved = BTreeMap::new();
         let mut matched = BTreeSet::new();
         let mut folder_links = BTreeSet::new();
+        let mut broken_folder_links = BTreeSet::new();
         for (pattern, recursive) in &self.desired {
-            for (root, origin) in resolve_pattern(pattern) {
+            let mut broken = Vec::new();
+            let found = resolve_pattern_noting_broken(pattern, &mut broken);
+            broken_folder_links.extend(broken);
+            for (root, origin) in found {
                 if let Some(origin) = origin {
                     folder_links.insert((root, origin));
                     continue;
@@ -384,7 +397,7 @@ impl WatcherHandle {
                 || !recursive_roots.iter().any(|r| root.starts_with(r))
         });
         // Publish the aliases before a root registers and re-reads its file.
-        let (links, covered) = self.follow_links(&resolved, folder_links);
+        let (links, covered) = self.follow_links(&resolved, folder_links, broken_folder_links);
         for (_, link) in &links {
             if !covered.contains(link) {
                 resolved.insert(link.clone(), false);
@@ -429,9 +442,14 @@ impl WatcherHandle {
         &mut self,
         roots: &BTreeMap<PathBuf, bool>,
         folders: BTreeSet<(PathBuf, PathBuf)>,
+        broken_folders: BTreeSet<PathBuf>,
     ) -> (Vec<(PathBuf, PathBuf)>, BTreeSet<PathBuf>) {
         let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut covered = BTreeSet::new();
+        let mut left_out = 0usize;
+        for link in broken_folders {
+            self.warn_unreachable(&link);
+        }
         let files: Vec<PathBuf> = self
             .files
             .iter()
@@ -448,11 +466,7 @@ impl WatcherHandle {
                 continue;
             }
             let Ok(real) = dunce::canonicalize(&link) else {
-                self.warn_once(
-                    &link,
-                    "dangling",
-                    "watched file is a link to a missing target",
-                );
+                self.warn_unreachable(&link);
                 continue;
             };
             if !real.is_file() {
@@ -460,6 +474,10 @@ impl WatcherHandle {
             }
             if !self.scope.allows(&link, &real) {
                 self.warn_once(&link, "owner", OTHER_ACCOUNT);
+                continue;
+            }
+            if links.len() >= MAX_FOLLOWED_LINKS {
+                left_out += 1;
                 continue;
             }
             let real = crate::normalizer::match_form(real);
@@ -502,6 +520,8 @@ impl WatcherHandle {
                     "shared",
                     "link shares its target with an earlier link",
                 );
+            } else if links.len() >= MAX_FOLLOWED_LINKS {
+                left_out += 1;
             } else {
                 if is_covered(roots, &link, &real, true) {
                     covered.insert(link.clone());
@@ -509,7 +529,28 @@ impl WatcherHandle {
                 links.push((real, link));
             }
         }
+        if left_out != self.cap_warned {
+            self.cap_warned = left_out;
+            if left_out > 0 {
+                tracing::warn!(
+                    "link limit of {MAX_FOLLOWED_LINKS} reached; {left_out} more links are not followed"
+                );
+            }
+        }
         (links, covered)
+    }
+
+    /// Warn once that a link could not be followed, as a loop or a missing target.
+    fn warn_unreachable(&mut self, link: &Path) {
+        if link_loops(link) {
+            self.warn_once(link, "loop", "link loops back on itself; not followed");
+        } else {
+            self.warn_once(
+                link,
+                "dangling",
+                "watched file is a link to a missing target",
+            );
+        }
     }
 
     fn warn_once(&mut self, link: &Path, kind: &'static str, message: &str) {
@@ -701,6 +742,19 @@ fn folder_leaf_links(dir: &Path, name: &std::ffi::OsStr) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether `link`, which could not be resolved, loops back on itself rather than
+/// leads to a missing target: following it takes more than `LOOP_HOP_LIMIT` hops.
+fn link_loops(link: &Path) -> bool {
+    let mut current = link.to_path_buf();
+    for _ in 0..LOOP_HOP_LIMIT {
+        let Ok(target) = std::fs::read_link(&current) else {
+            return false;
+        };
+        current = current.parent().unwrap_or(Path::new("")).join(target);
+    }
+    true
+}
+
 /// The folder `link` leads to, when `link` is a link to a folder that is not `/`
 /// and does not hold the link itself.
 pub(crate) fn linked_folder(link: &Path) -> Option<PathBuf> {
@@ -726,6 +780,15 @@ fn resolve_directory_pattern(pattern: &Path) -> Vec<PathBuf> {
 /// A link to a folder counts as a folder at the first wildcard component only,
 /// and its root carries the link's own path. A link under it, or a literal link, is not followed.
 fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
+    resolve_pattern_noting_broken(pattern, &mut Vec::new())
+}
+
+/// `resolve_pattern`, and the links the first wildcard matched whose target is
+/// missing or loops, which are no folder and so are not in the result.
+fn resolve_pattern_noting_broken(
+    pattern: &Path,
+    broken: &mut Vec<PathBuf>,
+) -> Vec<(PathBuf, Option<PathBuf>)> {
     if !has_glob(pattern) {
         return vec![(pattern.to_path_buf(), None)];
     }
@@ -752,9 +815,17 @@ fn resolve_pattern(pattern: &Path) -> Vec<(PathBuf, Option<PathBuf>)> {
                     let linked = first
                         && kind.is_symlink()
                         && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir());
-                    if (kind.is_dir() || linked)
-                        && glob.is_match(&crate::normalizer::match_form(entry.file_name().into()))
+                    let matches_glob =
+                        || glob.is_match(&crate::normalizer::match_form(entry.file_name().into()));
+                    if first
+                        && kind.is_symlink()
+                        && !linked
+                        && std::fs::metadata(entry.path()).is_err()
+                        && matches_glob()
                     {
+                        broken.push(entry.path());
+                    }
+                    if (kind.is_dir() || linked) && matches_glob() {
                         let origin = via_link.clone().or_else(|| linked.then(|| entry.path()));
                         matches.push((entry.path(), origin));
                     }
@@ -998,6 +1069,7 @@ pub fn spawn_watcher_scoped(
         files: Vec::new(),
         aliases_tx: watch::channel(Default::default()).0,
         warned: BTreeSet::new(),
+        cap_warned: 0,
         activity,
         rearm_after: cfg!(windows).then_some(WINDOWS_REARM_AFTER),
         scope,
