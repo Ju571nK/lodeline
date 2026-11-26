@@ -494,10 +494,12 @@ impl WatcherHandle {
 
     /// The path the backend watches for `root`. The polling backend does not
     /// follow links, and reads the modification time of a linked file from the
-    /// link itself, so it watches the file the link points to. Events under it are
-    /// spelled as the link through the alias table.
+    /// link itself. The Windows native backend watches the parent folder of the
+    /// path it is given, so for a link it would watch the link's folder and never
+    /// see an edit of a target in another folder. Both watch the file the link
+    /// points to. Events under it are spelled as the link through the alias table.
     fn backend_path(&self, root: &Path) -> PathBuf {
-        let linked_file = matches!(*self.backend(), BackendWatcher::Poll(_))
+        let linked_file = (cfg!(windows) || matches!(*self.backend(), BackendWatcher::Poll(_)))
             && std::fs::symlink_metadata(root).is_ok_and(|m| m.is_symlink())
             && std::fs::metadata(root).is_ok_and(|m| !m.is_dir());
         if linked_file {
