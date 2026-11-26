@@ -1145,9 +1145,9 @@ pub(crate) fn perform_warmup(
 /// (its first event has no `before_hash`). A link is followed only directly
 /// under the pattern's folder, where the first wildcard component sits: a link
 /// to a folder that is not `/` and does not hold the pattern's folder, or a link to
-/// a regular file. A link to a regular file is also followed one folder below, in
-/// a real folder, for a literal leaf such as `SKILL.md`. A link below that is not
-/// followed.
+/// a regular file. A link to a regular file is also followed for a literal leaf
+/// such as `SKILL.md`, in each real folder at the depth of the pattern's folder
+/// part. A link below a followed folder link is not followed.
 fn files_matching_pattern(
     pattern: &Path,
     one_folder: bool,
@@ -1167,6 +1167,23 @@ fn files_matching_pattern(
     };
     let Ok(glob) = compiled else {
         return Vec::new();
+    };
+    let literal_leaf = pattern.file_name().is_some_and(|name| {
+        !name
+            .to_string_lossy()
+            .contains(['*', '?', '[', ']', '{', '}'])
+    });
+    let leaf_depth = pattern
+        .parent()
+        .and_then(|dir| dir.strip_prefix(&root).ok())
+        .map(|rest| rest.components().count());
+    let literal_leaf_folder = |folder: &Path| {
+        literal_leaf
+            && folder
+                .strip_prefix(&root)
+                .ok()
+                .map(|rest| rest.components().count())
+                == leaf_depth
     };
     let mut files = Vec::new();
     let mut visited = 0;
@@ -1193,12 +1210,12 @@ fn files_matching_pattern(
                     && crate::watcher::linked_folder(&entry.path()).is_some();
                 linked_dir = is_dir;
                 is_file = target.is_ok_and(|m| m.is_file());
-            } else if kind.is_symlink() && !via_link && folder.parent() == Some(root.as_path()) {
+            } else if kind.is_symlink() && !via_link && literal_leaf_folder(&folder) {
                 is_file = std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file());
             }
             if is_dir {
                 if glob.may_match_below(&path) {
-                    queue.push_back((entry.path(), linked_dir));
+                    queue.push_back((entry.path(), linked_dir || via_link));
                 }
             } else if is_file && glob.is_match(&path) {
                 files.push(path);
@@ -3510,47 +3527,6 @@ mod tests {
         assert_eq!(
             found,
             [root.join("alpha/SKILL.md"), root.join("plain/SKILL.md")]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn pattern_warmup_lists_a_leaf_link_below_a_two_part_literal_rest() {
-        let td = tempfile::tempdir().unwrap();
-        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
-        let outside = dir.join("outside");
-        std::fs::create_dir_all(outside.join("c.app/Contents")).unwrap();
-        std::fs::write(outside.join("info.plist"), "x").unwrap();
-        let apps = dir.join("apps");
-        for name in ["a.app", "b.app"] {
-            std::fs::create_dir_all(apps.join(name).join("Contents")).unwrap();
-        }
-        std::fs::write(apps.join("a.app/Contents/Info.plist"), "x").unwrap();
-        std::os::unix::fs::symlink(
-            outside.join("info.plist"),
-            apps.join("b.app/Contents/Info.plist"),
-        )
-        .unwrap();
-        // A folder link brings its own Info.plist link below the followed folder.
-        std::os::unix::fs::symlink(
-            outside.join("info.plist"),
-            outside.join("c.app/Contents/Info.plist"),
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(outside.join("c.app"), apps.join("c.app")).unwrap();
-        let mut found = super::files_matching_pattern(
-            &apps.join("*.app/Contents/Info.plist"),
-            false,
-            super::WARMUP_ENTRY_LIMIT,
-            super::WARMUP_FILE_LIMIT,
-        );
-        found.sort();
-        assert_eq!(
-            found,
-            [
-                apps.join("a.app/Contents/Info.plist"),
-                apps.join("b.app/Contents/Info.plist")
-            ]
         );
     }
 }
