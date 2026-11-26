@@ -845,3 +845,24 @@ fn scan_of_a_given_home_follows_that_homes_settings_env() {
         "{v}"
     );
 }
+
+#[test]
+fn scan_at_home_with_a_claude_config_dir_reports_the_home_loop_prompt_once() {
+    let (home, alt) = (tempdir().unwrap(), tempdir().unwrap());
+    write(
+        &home.path().join(".claude").join("loop.md"),
+        "check the deploy\n",
+    );
+
+    let v = scan_bin_with_claude_dir(home.path(), home.path(), None, Some(alt.path()));
+
+    let rows: Vec<String> = v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["tool"] == "claude-code")
+        .flat_map(|r| kinds(&r["reasons"]))
+        .filter(|k| k == "unattended_loop_prompt")
+        .collect();
+    assert_eq!(rows.len(), 1, "{v}");
+}

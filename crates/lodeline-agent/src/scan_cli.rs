@@ -140,9 +140,9 @@ fn build_report(
     codex_home: Option<PathBuf>,
     cwd: Option<&Path>,
 ) -> Report {
-    let mut parsers = user_global_parsers(claude_config_dir, codex_home.clone());
+    let mut parsers = user_global_parsers(claude_config_dir.clone(), codex_home.clone());
     if let Some(dir) = cwd {
-        parsers.extend(project_parsers_for_dir(dir, codex_home));
+        parsers.extend(project_parsers_for_dir(dir, codex_home, claude_config_dir));
     }
 
     build_report_with_parsers(home, &parsers)
@@ -209,7 +209,11 @@ fn build_report_with_parsers(home: &Path, parsers: &[Arc<dyn AiGuardParser>]) ->
 /// One difference remains. A marker here only has to exist, where the daemon asks
 /// for a file or a folder, so a marker of the other kind gives a row with nothing
 /// to score.
-fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<dyn AiGuardParser>> {
+fn project_parsers_for_dir(
+    dir: &Path,
+    codex_home: Option<PathBuf>,
+    claude_config_dir: Option<PathBuf>,
+) -> Vec<Arc<dyn AiGuardParser>> {
     use crate::ai_guard::workspace_discovery::codex_subfolder_dirs;
     use crate::ai_guard::{
         AntigravityProjectParser, ClaudeCodeProjectParser, CodexHomeProjectParser,
@@ -235,7 +239,9 @@ fn project_parsers_for_dir(dir: &Path, codex_home: Option<PathBuf>) -> Vec<Arc<d
     .iter()
     .any(|rel| has(rel))
     {
-        out.push(Arc::new(ClaudeCodeProjectParser::without_walk(root())));
+        out.push(Arc::new(
+            ClaudeCodeProjectParser::without_walk(root()).with_config_dir(claude_config_dir),
+        ));
     }
     // Codex: .codex/config.toml | .codex/hooks.json | .codex/rules/ | AGENTS.md | a
     // Git repository whose only Codex files sit in a subfolder `.codex/`. The walk

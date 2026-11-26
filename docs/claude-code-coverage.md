@@ -31,13 +31,15 @@ When `lodeline scan` runs in the home folder, the home's `.claude/settings.json`
 
 A `CLAUDE_CONFIG_DIR` in the `env` block of a home's `~/.claude/settings.json` moves that home's user row to the folder the same way, for the scan and for the agent service, which does not watch that folder and so shows an edit there at its next full pass. The variable in the process environment wins over it. The value counts only as an absolute path: Claude Code resolves a relative path against the session's folder and takes `~` as a folder name, so a scan ignores both. A redirect inside the redirected folder is not followed.
 
+The project row uses the same folder for the user `disableAllHooks`. For a project row at the home folder, a redirect makes `~/.claude` the project's own folder: its `settings.json`, `loop.md` and skill, subagent and command hooks are then scored by that project row, and the user row reads the redirected folder.
+
 A folder gets a project row when it holds one of these: a `.claude/settings.json`, `.claude/settings.local.json` or `.claude/loop.md` file, a `.mcp.json`, `CLAUDE.md` or `AGENTS.md` file at its root, or a `.claude/skills`, `.claude/agents` or `.claude/commands` folder.
 
 A project row reads the hooks in skill (`.claude/skills/<name>/SKILL.md`), subagent (`.claude/agents/**/*.md`) and command (`.claude/commands/**/*.md`) frontmatter from these folders, which are the ones Claude Code loads for a session started in the row's folder:
 
 - The row's own `.claude`.
 - The `.claude` of each subfolder, down to eight levels. Hidden folders, `node_modules` and `target` are skipped.
-- The `.claude` of each parent folder up to the repository root, or up to the worktree root in a linked worktree. Outside a git repository no parent folder is read. The home folder's `.claude` is the user scope, so the user row reads it and a project row does not.
+- The `.claude` of each parent folder up to the repository root, or up to the worktree root in a linked worktree. Outside a git repository no parent folder is read. The home folder's `.claude` is the user scope, so the user row reads it and a project row does not, unless a `CLAUDE_CONFIG_DIR` moves the user row elsewhere.
 - In a linked worktree whose root has no `.claude/skills` folder, the main checkout's `.claude/skills`. The same holds for `.claude/agents` and `.claude/commands`. Only a missing folder reads through: an empty one does not. Claude Code reads skills through from version 2.1.277, and the agent does not know the installed version, so it reads them through for every worktree.
 
 So a skill, subagent or command at the repository root shows in the root's row and again in the row of each subfolder that has a row of its own, and a main checkout's skills show again in the row of a worktree. That is intended: each row is what a session started in its folder loads. A folder gets a row only when it has a project file of its own, such as `CLAUDE.md` or `.claude/settings.json`. When two subagents share a `name`, Claude Code uses the one nearest the start folder; Lodeline does not model this, so a hook in the subagent that is not used is still reported.
