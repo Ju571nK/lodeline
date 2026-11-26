@@ -1017,8 +1017,11 @@ async fn run_inner(
     clock.end("spool_close");
     let outcome = served?;
     tracing::info!(?outcome, "shutdown");
-    let finished = lock(&lc).finish_shutdown(invocation_accounted, invocation_gaps.as_ref());
-    clock.end("finish");
+    let mut guard = lock(&lc);
+    clock.end("finish_lock_wait");
+    let finished = guard.finish_shutdown(invocation_accounted, invocation_gaps.as_ref());
+    drop(guard);
+    clock.end("finish_write");
     finished?;
     Ok(())
 }
