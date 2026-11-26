@@ -582,6 +582,22 @@ fn finish_timed(
     invocation_accounted: bool,
     gaps: Option<&crate::status_report::GapQueue>,
 ) -> anyhow::Result<()> {
+    finish_timed_at(
+        clock,
+        lc,
+        invocation_accounted,
+        gaps,
+        &mut tokio::time::Instant::now,
+    )
+}
+
+fn finish_timed_at(
+    clock: &mut PhaseClock,
+    lc: &std::sync::Mutex<Lifecycle>,
+    invocation_accounted: bool,
+    gaps: Option<&crate::status_report::GapQueue>,
+    _now: &mut dyn FnMut() -> tokio::time::Instant,
+) -> anyhow::Result<()> {
     let mut guard = lock(lc);
     clock.end("finish_lock_wait");
     let finished = guard.finish_shutdown(invocation_accounted, gaps);
@@ -1785,38 +1801,40 @@ mod tests {
     }
 
     /// The finish step times the wait for the lifecycle lock apart from the
-    /// write that publishes Stopped.
+    /// write that publishes Stopped. The clock is scripted: the first reading
+    /// must come once the lock is held and before the write, the second after it.
     #[test]
     fn finish_step_times_its_lock_wait_apart_from_its_write() {
         let t = tempfile::tempdir().unwrap();
         let b = bootstrap(t.path());
         let mut lc = Lifecycle::start(&b).unwrap();
         lc.set_run_state(RunState::Stopping).unwrap();
-        let lc = std::sync::Arc::new(std::sync::Mutex::new(lc));
-        let held = Duration::from_millis(150);
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let holder = {
-            let lc = lc.clone();
-            std::thread::spawn(move || {
-                let _guard = lock(&lc);
-                locked_tx.send(()).unwrap();
-                std::thread::sleep(held);
-            })
+        let lc = std::sync::Mutex::new(lc);
+        let start = tokio::time::Instant::now();
+        let mut clock = PhaseClock::start(start);
+        let mut readings = 0;
+        let mut now = || {
+            readings += 1;
+            let state = read_status(&b.state_dir).unwrap().run_state;
+            match readings {
+                1 => {
+                    assert_eq!(state, RunState::Stopping, "read after the write");
+                    start + Duration::from_millis(10)
+                }
+                2 => {
+                    assert_eq!(state, RunState::Stopped, "read before the write");
+                    start + Duration::from_millis(25)
+                }
+                _ => panic!("more than two clock readings"),
+            }
         };
-        locked_rx.recv().unwrap();
-        let mut clock = PhaseClock::start(tokio::time::Instant::now());
-        finish_timed(&mut clock, &lc, true, None).unwrap();
-        holder.join().unwrap();
-        let names: Vec<&str> = clock.phases.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, ["finish_lock_wait", "finish_write"]);
-        assert!(
-            clock.phases[0].1 >= held / 2,
-            "the lock wait was not timed apart: {:?}",
-            clock.phases
-        );
+        finish_timed_at(&mut clock, &lc, true, None, &mut now).unwrap();
         assert_eq!(
-            read_status(&b.state_dir).unwrap().run_state,
-            RunState::Stopped
+            clock.phases,
+            [
+                ("finish_lock_wait", Duration::from_millis(10)),
+                ("finish_write", Duration::from_millis(15)),
+            ]
         );
     }
 
