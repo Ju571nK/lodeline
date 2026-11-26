@@ -13,6 +13,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ### Fixed
 
+- A linked skill folder or watched file whose target sits inside another watched folder now records its edits under the link path; the edit was dropped when the target's path matched no watch pattern.
 - A repo whose only Claude Code file is a `.claude/commands` folder now gets a project row, in the agent and in `lodeline scan` (#539).
 - A Windows agent running as a service now assesses every user profile on the host, like a root agent on Linux and macOS (#540).
 - The Claude Code project row now follows `CLAUDE_CONFIG_DIR` like the user row: the user `disableAllHooks` is read from the config folder, and at the home folder the project row scores `~/.claude` (settings, `loop.md`, skill, subagent and command hooks) once a config folder moves the user row away from it (#539).
