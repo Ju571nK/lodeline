@@ -114,15 +114,18 @@ impl LinkScope {
             .iter()
             .map(|home| path_forms(home, false))
             .collect();
+        let matched = |forms: &Vec<PathBuf>| {
+            forms
+                .iter()
+                .filter(|home| link_forms.iter().any(|link| link.starts_with(home)))
+                .map(|home| home.components().count())
+                .max()
+        };
         homes
             .iter()
-            .filter(|forms| {
-                forms
-                    .iter()
-                    .any(|home| link_forms.iter().any(|link| link.starts_with(home)))
-            })
-            .max_by_key(|forms| forms.iter().map(|h| h.components().count()).max())
-            .is_some_and(|forms| forms.iter().any(|home| real.starts_with(home)))
+            .filter_map(|forms| Some((matched(forms)?, forms)))
+            .max_by_key(|(depth, _)| *depth)
+            .is_some_and(|(_, forms)| forms.iter().any(|home| real.starts_with(home)))
     }
 }
 
@@ -2287,6 +2290,22 @@ mod tests {
         let link = nested.join("settings.json");
         assert!(scope.under_link_home(&link, &nested.join("a.json")));
         assert!(!scope.under_link_home(&link, &alice.join("a.json")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_home_beats_an_outer_home_given_through_a_deeper_alias() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        fs::create_dir_all(dir.join("outer/work")).unwrap();
+        fs::create_dir_all(dir.join("a/b/c/d")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outer"), dir.join("a/b/c/d/o")).unwrap();
+        let outer = dir.join("a/b/c/d/o");
+        let nested = dir.join("outer/work");
+        let scope = LinkScope::shared_host(vec![outer, nested.clone()]);
+        let link = nested.join("settings.json");
+        assert!(scope.under_link_home(&link, &nested.join("a.json")));
+        assert!(!scope.under_link_home(&link, &dir.join("outer/a.json")));
     }
 
     #[test]
