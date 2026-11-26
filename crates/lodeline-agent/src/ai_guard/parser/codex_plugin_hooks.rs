@@ -657,10 +657,23 @@ mod tests {
     fn the_content_hash_matches_the_codex_bundle_fingerprint() {
         let root = tempdir().unwrap();
         std::fs::write(root.path().join("a.txt"), "hi").unwrap();
-        std::fs::create_dir_all(root.path().join("d")).unwrap();
-        std::fs::write(root.path().join("d/b.txt"), "yo").unwrap();
+        std::fs::write(root.path().join("b.txt"), "yo").unwrap();
         std::fs::create_dir_all(root.path().join("__pycache__")).unwrap();
-        std::fs::write(root.path().join("__pycache__/c"), "x").unwrap();
+        std::fs::write(root.path().join("__pycache__").join("c"), "x").unwrap();
+        assert_eq!(
+            content_hash(root.path()).unwrap(),
+            "sha256:4a206b41951ed24079c3fc6916ca6dc307beb5c7c17662c465b091e0225da9db"
+        );
+    }
+
+    /// Codex hashes a nested path with the separator of its platform.
+    #[cfg(unix)]
+    #[test]
+    fn the_content_hash_covers_a_nested_folder() {
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hi").unwrap();
+        std::fs::create_dir_all(root.path().join("d")).unwrap();
+        std::fs::write(root.path().join("d").join("b.txt"), "yo").unwrap();
         assert_eq!(
             content_hash(root.path()).unwrap(),
             "sha256:d59b660b0c174d266ea94cbc88c3be574c5268db0608e06f7b761b3be7792cef"
