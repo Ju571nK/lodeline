@@ -2315,6 +2315,62 @@ mod tests {
         assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
         receive_path(&mut rx, &link).await;
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_literal_leaf_under_a_wildcard_folder_is_returned_only_when_it_is_a_link() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        for name in ["linked", "plain"] {
+            fs::create_dir_all(skills.join(name)).unwrap();
+        }
+        fs::create_dir_all(skills.join("deep/inner")).unwrap();
+        fs::create_dir_all(dir.join("outside")).unwrap();
+        let target = dir.join("outside/foo.md");
+        fs::write(&target, b"a").unwrap();
+        fs::write(skills.join("plain/SKILL.md"), b"b").unwrap();
+        std::os::unix::fs::symlink(&target, skills.join("linked/SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(&target, skills.join("deep/inner/SKILL.md")).unwrap();
+        assert_eq!(
+            leaf_links(&skills.join("*/SKILL.md")),
+            [skills.join("linked/SKILL.md")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leaf_link_below_a_followed_folder_link_is_not_returned() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        let real = dir.join("dotfiles/foo");
+        fs::create_dir_all(&skills).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(dir.join("elsewhere.md"), b"a").unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere.md"), real.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(&real, skills.join("foo")).unwrap();
+        assert!(leaf_links(&skills.join("*/SKILL.md")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_md_link_under_a_wildcard_folder_is_watched_by_its_link_path() {
+        let td = TempDir::new().unwrap();
+        let dir = dunce::canonicalize(td.path()).unwrap();
+        let skills = dir.join("skills");
+        fs::create_dir_all(skills.join("foo")).unwrap();
+        fs::create_dir_all(dir.join("outside")).unwrap();
+        let target = dir.join("outside/foo.md");
+        fs::write(&target, b"a").unwrap();
+        let link = skills.join("foo/SKILL.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (mut rx, mut watcher) = idle_watcher(vec![(skills.clone(), true)]);
+        watcher.follow_files(vec![skills.join("*/SKILL.md")], true);
+        assert_eq!(aliases_of(&watcher), [(target, link.clone())]);
+        receive_path(&mut rx, &link).await;
+    }
+
     fn drop_backend_watch(watcher: &WatcherHandle, root: &Path) {
         let registered = watcher.active[root].2.clone();
         watcher

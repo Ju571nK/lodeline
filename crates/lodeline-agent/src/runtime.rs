@@ -3476,4 +3476,34 @@ mod tests {
         found.sort();
         assert_eq!(found, [agents.join("a.md"), agents.join("b.md")]);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn pattern_warmup_lists_a_skill_md_link_one_folder_below_the_root_and_not_deeper() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = crate::normalizer::canonicalize_glob_prefix(td.path());
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("a.md"), "x").unwrap();
+        std::fs::create_dir_all(outside.join("beta")).unwrap();
+        std::os::unix::fs::symlink(outside.join("a.md"), outside.join("beta/SKILL.md")).unwrap();
+        let root = dir.join("skills");
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        std::fs::write(root.join("plain/SKILL.md"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.join("a.md"), root.join("alpha/SKILL.md")).unwrap();
+        // A folder link brings its own SKILL.md link below the followed folder.
+        std::os::unix::fs::symlink(outside.join("beta"), root.join("beta")).unwrap();
+        let mut found = super::files_matching_pattern(
+            &root.join("*").join("SKILL.md"),
+            true,
+            super::WARMUP_ENTRY_LIMIT,
+            super::WARMUP_FILE_LIMIT,
+        );
+        found.sort();
+        assert_eq!(
+            found,
+            [root.join("alpha/SKILL.md"), root.join("plain/SKILL.md")]
+        );
+    }
 }
