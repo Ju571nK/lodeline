@@ -7,29 +7,44 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-27
+
+**Upgrade.** This is a minor release because the agent reads more files, so scores can change for
+the same host. A Codex URL server with an `http_headers_helper` adds 2.0 to its score (#775). The
+hooks of an enabled Codex plugin are scored like other Codex hooks (#805). A repo with only a
+`.claude/commands` folder, or with a `.claude/settings.json` in a subfolder, gets project rows it had
+none of (#774, #780). The Claude Code project row follows `CLAUDE_CONFIG_DIR` (#779). A Windows
+agent running as a service assesses every user profile on the host, so that host reports more rows
+(#773). The link changes (#781, #782, #786, #787, #790, #806) change which edits the service
+records and assesses, not what `lodeline scan` scores. No event gains a key, and no event kind,
+policy field, reason kind or fleet API route changes. The restart after an upgrade sends its usual
+boot event and no extra one. No package script, unit file, tmpfiles entry or SELinux module
+changed. `lodeline-proxy` is built from source and is not in the release assets. Upgrade the
+server, the console and the agents in any order.
+
 ### Added
 
-- `lodeline-proxy snippet` prints a Claude Code, Codex or Cursor config entry for one proxy route, with the token read from an environment variable that you name.
-- `lodeline-server proxy config-put` sets a proxy's config from a request body file through the management API.
-- The agent and `lodeline scan` now report a Codex MCP server's `http_headers_helper`, a command Codex runs on the first request to a URL server, as a `project_settings_helper_command` finding that names the key and does not record the command. (#718)
-- The agent and `lodeline scan` now read the hooks of an enabled Codex plugin from `plugins/cache` in the Codex folder and score them like other Codex hooks, when the user config approves them. The approval hashes are computed from the Codex source, a legacy approval with no baseline file is scored as running, and the manifest is checked only for the fields Lodeline reads. An edit to a plugin is seen at the next assessment, not at once. (#717)
+- `lodeline-proxy snippet` prints a Claude Code, Codex or Cursor config entry for one proxy route, with the token read from an environment variable that you name. `lodeline-proxy` is not a release asset: build it from source (`docs/install-proxy.md`). (#798)
+- `lodeline-server proxy config-put` sets a proxy's config from a request body file through the management API. (#785)
+- The agent and `lodeline scan` now report a Codex MCP server's `http_headers_helper`, a command Codex runs on the first request to a URL server, as a `project_settings_helper_command` finding that names the key and does not record the command. (#718, #775)
+- The agent and `lodeline scan` now read the hooks of an enabled Codex plugin from `plugins/cache` in the Codex folder and score them like other Codex hooks, when the user config approves them. The approval hashes are computed from the Codex source, a legacy approval with no baseline file is scored as running, and the manifest is checked only for the fields Lodeline reads. An edit to a plugin is seen at the next assessment, not at once. (#717, #805)
 
 ### Fixed
 
-- `lodeline-proxy` usage errors at the root and on every subcommand no longer echo argument values.
-- A session DELETE now counts against the proxy's concurrent request limits.
-- A linked skill folder or watched file whose target sits inside another watched folder now records its edits under the link path; the edit was dropped when the target's path matched no watch pattern.
-- A repo whose only Claude Code file is a `.claude/commands` folder now gets a project row, in the agent and in `lodeline scan` (#539).
-- A `.claude/settings.json` in a subfolder of a repo now gets its own project row in the agent, down to eight levels and at most 64 rows for each repo (#539).
-- A Windows agent running as a service now assesses every user profile on the host, like a root agent on Linux and macOS (#540).
-- The Claude Code project row now follows `CLAUDE_CONFIG_DIR` like the user row: the user `disableAllHooks` is read from the config folder, and at the home folder the project row scores `~/.claude` (settings, `loop.md`, skill, subagent and command hooks) once a config folder moves the user row away from it (#539).
-- On Windows the native watcher now sees an edit of a watched file link's target in another folder, and records it under the link path.
-- A skill whose `SKILL.md` is itself a link now records an edit of the link's target under the link path.
-- An agent running as root or as a Windows service, or one that expands paths for several users, now follows a watched file or skill folder link only when its target belongs to the same account as the link (on Windows, when it lies under the home that holds the link), and logs one warning for a link it refuses.
-- The agent now follows at most 256 watched file and skill folder links, and logs one warning with the number of links it left out and the first one left out.
-- The agent now tells a link that loops back on itself from a link to a missing target in its warning, and also warns once for a skill folder link of either kind.
-- The proxy's config TTL now counts time spent suspended on Linux and macOS when the boot clock is available.
-- When the agent reaches its limit of 256 followed links, it now keeps the links under critical tier targets first and drops standard tier links, instead of ranking by the order of the policy alone.
+- `lodeline-proxy` usage errors at the root and on every subcommand no longer echo argument values. (#801)
+- A session DELETE now counts against the proxy's concurrent request limits. (#792)
+- A linked skill folder or watched file whose target sits inside another watched folder now records its edits under the link path; the edit was dropped when the target's path matched no watch pattern. (#782)
+- A repo whose only Claude Code file is a `.claude/commands` folder now gets a project row, in the agent and in `lodeline scan` (#539, #774).
+- A `.claude/settings.json` in a subfolder of a repo now gets its own project row in the agent, down to eight levels and at most 64 rows for each repo (#539, #780).
+- A Windows agent running as a service now assesses every user profile on the host, like a root agent on Linux and macOS (#540, #773).
+- The Claude Code project row now follows `CLAUDE_CONFIG_DIR` like the user row: the user `disableAllHooks` is read from the config folder, and at the home folder the project row scores `~/.claude` (settings, `loop.md`, skill, subagent and command hooks) once a config folder moves the user row away from it (#539, #779).
+- On Windows the native watcher now sees an edit of a watched file link's target in another folder, and records it under the link path. (#781)
+- A skill whose `SKILL.md` is itself a link now records an edit of the link's target under the link path. (#786)
+- An agent running as root or as a Windows service, or one that expands paths for several users, now follows a watched file or skill folder link only when its target belongs to the same account as the link (on Windows, when it lies under the home that holds the link), and logs one warning for a link it refuses. (#787)
+- The agent now follows at most 256 watched file and skill folder links, and logs one warning with the number of links it left out and the first one left out. (#790)
+- The agent now tells a link that loops back on itself from a link to a missing target in its warning, and also warns once for a skill folder link of either kind. (#790)
+- The proxy's config TTL now counts time spent suspended on Linux and macOS when the boot clock is available. (#793)
+- When the agent reaches its limit of 256 followed links, it now keeps the links under critical tier targets first and drops standard tier links, instead of ranking by the order of the policy alone. (#806)
 
 ## [0.22.0] - 2026-11-25
 
