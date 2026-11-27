@@ -9,6 +9,7 @@ pub(crate) mod claude_json;
 pub(crate) mod claude_project_settings;
 pub(crate) mod claude_repo;
 pub mod codex;
+mod codex_plugin_hooks;
 pub mod codex_tool_cache;
 pub mod continue_dev;
 pub mod cursor;

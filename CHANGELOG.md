@@ -12,6 +12,7 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 - `lodeline-proxy snippet` prints a Claude Code, Codex or Cursor config entry for one proxy route, with the token read from an environment variable that you name.
 - `lodeline-server proxy config-put` sets a proxy's config from a request body file through the management API.
 - The agent and `lodeline scan` now report a Codex MCP server's `http_headers_helper`, a command Codex runs on the first request to a URL server, as a `project_settings_helper_command` finding that names the key and does not record the command. (#718)
+- The agent and `lodeline scan` now read the hooks of an enabled Codex plugin from `plugins/cache` in the Codex folder and score them like other Codex hooks, when the user config approves them. The approval hashes are computed from the Codex source, a legacy approval with no baseline file is scored as running, and the manifest is checked only for the fields Lodeline reads. An edit to a plugin is seen at the next assessment, not at once. (#717)
 
 ### Fixed
 

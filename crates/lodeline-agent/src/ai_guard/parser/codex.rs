@@ -40,7 +40,7 @@
 //!      server. Verified: `url` is only valid for the StreamableHttp transport;
 //!      if `url` is present the server is inherently remote.
 
-use crate::ai_guard::parser::{claude_code, AiGuardParser, AssessError};
+use crate::ai_guard::parser::{claude_code, codex_plugin_hooks, AiGuardParser, AssessError};
 use lodeline_core::event::{
     AiGuardFinding, AiGuardReason, AiGuardScope, AiTool, ConfigLayer, ConfigSource,
 };
@@ -148,7 +148,7 @@ struct CodexLayer {
 }
 
 /// The file a finding came from, as an absolute path.
-fn config_source(layer: &ConfigLayer, file: &Path) -> ConfigSource {
+pub(super) fn config_source(layer: &ConfigLayer, file: &Path) -> ConfigSource {
     let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
     ConfigSource {
         layer: layer.clone(),
@@ -167,7 +167,7 @@ fn stamp(
     })
 }
 
-fn stamp_all(
+pub(super) fn stamp_all(
     reasons: Vec<AiGuardReason>,
     source: Option<ConfigSource>,
 ) -> impl Iterator<Item = AiGuardFinding> {
@@ -331,7 +331,7 @@ fn hook_key_sources(path: &Path) -> Vec<String> {
 }
 
 /// `PreToolUse` -> `pre_tool_use`, as `hook_event_key_label` spells it.
-fn hook_event_key_label(event: &str) -> String {
+pub(super) fn hook_event_key_label(event: &str) -> String {
     let mut label = String::with_capacity(event.len() + 4);
     for (i, c) in event.chars().enumerate() {
         if c.is_ascii_uppercase() && i > 0 {
@@ -344,7 +344,7 @@ fn hook_event_key_label(event: &str) -> String {
 
 /// `hooks.json` has the same `{ "hooks": { <Event>: [...] } }` shape as the
 /// `[hooks]` table, so it is converted and fed to the same emitter.
-fn read_hooks_json(path: &Path) -> Option<Value> {
+pub(super) fn read_hooks_json(path: &Path) -> Option<Value> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -363,6 +363,24 @@ fn read_hooks_json(path: &Path) -> Option<Value> {
             None
         }
     }
+}
+
+/// The user config's `[hooks.state]` table.
+fn hook_states(config: Option<&Value>) -> Option<&toml::Table> {
+    config
+        .and_then(|c| c.get("hooks"))
+        .and_then(|h| h.get("state"))
+        .and_then(Value::as_table)
+}
+
+/// Whether the system `requirements.toml` sets `allow_managed_hooks_only`,
+/// which makes Codex skip every plugin hook (`discovery.rs`).
+fn managed_hooks_only(system_dir: &Path) -> bool {
+    std::fs::read_to_string(system_dir.join("requirements.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<Value>(&text).ok())
+        .and_then(|r| r.get("allow_managed_hooks_only").and_then(Value::as_bool))
+        .unwrap_or(false)
 }
 
 /// See [`lodeline_core::codex::hooks_disabled_by`]. `configs` is low layer to high.
@@ -419,7 +437,7 @@ fn assess_user_layers(
 /// server the highest layer that defines the server. A finding that comes
 /// from a permission profile resolved in the merged `[permissions]` table
 /// names no file.
-fn assess_user_findings(
+pub(super) fn assess_user_findings(
     system_dir: &Path,
     codex_dir: &Path,
     home_dir: &Path,
@@ -503,6 +521,14 @@ fn assess_user_findings(
             home,
             &mut out,
         );
+        if !managed_hooks_only(system_dir) {
+            let states = hook_states(user.config.as_ref());
+            let candidates = codex_plugin_hooks::candidates(codex_dir, effective.as_ref(), states);
+            let plugins = codex_plugin_hooks::load(codex_dir, &candidates);
+            out.extend(codex_plugin_hooks::plugin_findings(
+                codex_dir, &plugins, states, home,
+            ));
+        }
     }
     if let Some(val) = &effective {
         for (id, reasons) in app_approval_reasons(val) {
