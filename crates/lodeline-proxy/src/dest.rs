@@ -271,6 +271,8 @@ mod tests {
         let u = up(false, None);
         assert!(check_addresses(&u, false, &[ip("127.0.0.1")]).is_ok());
         assert!(check_addresses(&u, false, &[ip("::1"), ip("127.0.0.2")]).is_ok());
+        let loopbacks = [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()];
+        assert!(check_addresses(&u, true, &loopbacks).is_ok());
         for bad in ["10.0.0.5", "8.8.8.8", "169.254.169.254", "0.0.0.0"] {
             assert!(check_addresses(&u, false, &[ip(bad)]).is_err(), "{bad}");
             assert!(check_addresses(&u, true, &[ip(bad)]).is_err(), "{bad} flag");
@@ -282,40 +284,102 @@ mod tests {
         assert_eq!(check_addresses(&u, false, &[]), Err(DestError::Unresolved));
     }
 
-    /// AC-08: https destinations. Private needs the flag; link-local/metadata
-    /// also need to be the literal configured host; some ranges never pass.
     #[test]
     fn https_policy() {
         let u = up(true, None);
         assert!(check_addresses(&u, false, &[ip("8.8.8.8")]).is_ok());
-        for a in ["10.0.0.5", "127.0.0.1", "192.168.0.1", "fc00::1"] {
-            assert!(check_addresses(&u, false, &[ip(a)]).is_err(), "{a}");
-            assert!(check_addresses(&u, true, &[ip(a)]).is_ok(), "{a} flag");
-        }
-        for a in ["169.254.169.254", "fe80::1", "fd00:ec2::254"] {
-            assert!(check_addresses(&u, false, &[ip(a)]).is_err(), "{a}");
-            assert!(
-                check_addresses(&u, true, &[ip(a)]).is_err(),
-                "{a} flag, name-resolved"
+        assert!(check_addresses(&u, true, &[ip("203.0.113.1")]).is_ok());
+        let private = Ipv4Addr::new(10, 0, 0, 5);
+        for a in [
+            private.into(),
+            Ipv4Addr::new(192, 168, 0, 1).into(),
+            Ipv4Addr::new(100, 64, 0, 1).into(),
+            private.to_ipv6_mapped().into(),
+            ip("fc00::1"),
+        ] {
+            assert_eq!(
+                check_addresses(&u, false, &[a]),
+                Err(DestError::Refused("private")),
+                "{a}"
             );
-            let lit = up(true, Some(a));
-            assert!(
-                check_addresses(&lit, false, &[ip(a)]).is_err(),
-                "{a} literal, no flag"
-            );
-            assert!(
-                check_addresses(&lit, true, &[ip(a)]).is_ok(),
-                "{a} literal+flag"
-            );
+            assert!(check_addresses(&u, true, &[a]).is_ok(), "{a} flag");
         }
         // a name that resolves to metadata is refused even with a literal-less flag route
         assert!(check_addresses(&u, true, &[ip("8.8.8.8"), ip("169.254.169.254")]).is_err());
-        for a in ["0.0.0.0", "224.0.0.1", "ff02::1"] {
-            assert!(
-                check_addresses(&up(true, Some(a)), true, &[ip(a)]).is_err(),
-                "{a}"
-            );
+    }
+
+    fn assert_https_refuses(addresses: &[IpAddr], reason: &'static str) {
+        for &addr in addresses {
+            let literal = addr.to_string();
+            for host_literal in [None, Some(literal.as_str())] {
+                for allow_private in [true, false] {
+                    assert_eq!(
+                        check_addresses(&up(true, host_literal), allow_private, &[addr]),
+                        Err(DestError::Refused(reason)),
+                        "{addr} literal={host_literal:?} allow_private={allow_private}"
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn https_refuses_loopback_even_with_private_opt_in() {
+        assert_https_refuses(
+            &[
+                Ipv4Addr::LOCALHOST.into(),
+                Ipv6Addr::LOCALHOST.into(),
+                Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(),
+            ],
+            "loopback",
+        );
+    }
+
+    #[test]
+    fn https_refuses_link_local_even_with_private_opt_in() {
+        let metadata = Ipv4Addr::new(169, 254, 169, 254);
+        assert_https_refuses(
+            &[
+                metadata.into(),
+                ip("fe80::1"),
+                metadata.to_ipv6_mapped().into(),
+            ],
+            "link-local",
+        );
+    }
+
+    #[test]
+    fn https_refuses_fd00_range_even_with_private_opt_in() {
+        assert_https_refuses(&[ip("fd00:ec2::254"), ip("fd7a::1")], "ula-metadata");
+    }
+
+    #[test]
+    fn https_refuses_shared_range_metadata_even_with_private_opt_in() {
+        let metadata: Ipv4Addr = "100.100.100.200".parse().unwrap();
+        assert_https_refuses(
+            &[
+                metadata.into(),
+                metadata.to_ipv6_mapped().into(),
+                ip(&format!("64:ff9b::{metadata}")),
+                ip("2002:6464:64c8::1"),
+                ip(&format!("::{metadata}")),
+            ],
+            "never-allowed",
+        );
+    }
+
+    #[test]
+    fn https_refuses_never_allowed_addresses_even_with_private_opt_in() {
+        assert_https_refuses(
+            &[
+                Ipv4Addr::UNSPECIFIED.into(),
+                Ipv6Addr::UNSPECIFIED.into(),
+                Ipv4Addr::UNSPECIFIED.to_ipv6_mapped().into(),
+                Ipv4Addr::new(224, 0, 0, 1).into(),
+                ip("ff02::1"),
+            ],
+            "never-allowed",
+        );
     }
 
     #[test]

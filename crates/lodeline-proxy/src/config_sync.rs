@@ -967,6 +967,27 @@ mod tests {
             .origin_allowed("https://app.example.com"));
     }
 
+    #[test]
+    fn applies_private_destination_setting_per_route() {
+        let f = fx();
+        let table = TableHandle::new();
+        let mut s = sync(&f, &table);
+        let mut config = std_cfg(1);
+        let mut opted_in = config["routes"][0].clone();
+        opted_in["route_id"] = json!("r2");
+        opted_in["upstream_id"] = json!("up-r2");
+        opted_in["allow_private_destination"] = json!(true);
+        config["routes"].as_array_mut().unwrap().push(opted_in);
+
+        assert_eq!(
+            s.on_fetch(Instant::now(), body(&config)),
+            SyncOutcome::Applied { revision: 1 }
+        );
+        let applied = table.current().unwrap();
+        assert!(!applied.route("r1").unwrap().allow_private);
+        assert!(applied.route("r2").unwrap().allow_private);
+    }
+
     /// A failed fetch/parse/build keeps the last good table until its deadline and
     /// never extends it; after the deadline the table is gone (fail closed).
     #[test]

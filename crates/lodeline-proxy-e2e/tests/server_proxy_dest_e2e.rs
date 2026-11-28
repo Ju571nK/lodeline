@@ -2,12 +2,8 @@
 //! Destination protection (PX-014, AC-08) through the real `lodeline-server`
 //! control plane and the real `lodeline-proxy`, over mTLS on loopback.
 //!
-//! A route config delivered by the server never sets `allow_private_destination`
-//! (`config_sync::route_specs`), so the proxy refuses an https upstream that is
-//! or resolves to a loopback address: a fixed 502, and nothing connects to the
-//! destination. The control plane refuses private, link-local and ULA literals
-//! when the config is stored. A name that resolves to a private address needs
-//! DNS, so `relay_dest.rs` covers that with an injected resolver.
+//! The control plane validates literals on config PUT. The proxy checks
+//! literals and resolved addresses before connecting to an upstream.
 
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
@@ -119,20 +115,24 @@ impl Control {
             .as_u16()
     }
 
-    /// PUT revision 1 with one route `r{i}` per upstream URL; returns the status.
-    async fn put_config(&self, upstream_urls: &[String]) -> u16 {
-        let routes: Vec<_> = upstream_urls
+    /// PUT revision 1 with one route `r{i}` per upstream URL and setting.
+    async fn put_config(&self, upstreams: &[(&str, Option<bool>)]) -> u16 {
+        let routes: Vec<_> = upstreams
             .iter()
             .enumerate()
-            .map(|(i, u)| {
-                serde_json::json!({
+            .map(|(i, (url, allow_private))| {
+                let mut route = serde_json::json!({
                     "route_id": format!("r{i}"),
                     "upstream_id": format!("up{i}"),
-                    "upstream_url": u,
+                    "upstream_url": url,
                     "upstream_protocol": "2025-11-25",
                     "credential_ref": "gh",
                     "limits": {"max_request_bytes": 65536},
-                })
+                });
+                if let Some(allow_private) = allow_private {
+                    route["allow_private_destination"] = serde_json::json!(allow_private);
+                }
+                route
             })
             .collect();
         let route_ids: Vec<_> = (0..routes.len()).map(|i| format!("r{i}")).collect();
@@ -168,20 +168,20 @@ struct Stack {
 impl Stack {
     /// Applies a config with one route `r{i}` per upstream URL, on one
     /// credential, and waits until the proxy forwards.
-    async fn start(pki: &Pki, upstream_urls: &[String]) -> Stack {
+    async fn start(pki: &Pki, upstreams: &[(&str, Option<bool>)]) -> Stack {
         let d = pki.dir.path();
         let control = Control::start(pki).await;
-        assert_eq!(control.put_config(upstream_urls).await, 200, "config put");
+        assert_eq!(control.put_config(upstreams).await, 200, "config put");
         let state_dir = d.join("proxy-state");
         let secret = d.join("upstream-secret");
         std::fs::write(&secret, "UPSTREAM-SECRET-VALUE\n").unwrap();
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
         let sock = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let listen = sock.local_addr().unwrap().port();
-        let origins: Vec<_> = upstream_urls
+        let origins: Vec<_> = upstreams
             .iter()
-            .map(|u| {
-                let rest = &u["https://".len()..];
+            .map(|(url, _)| {
+                let rest = &url["https://".len()..];
                 format!("\"https://{}\"", rest.split('/').next().unwrap())
             })
             .collect();
@@ -271,7 +271,8 @@ const REFUSED: &str = "{\"error\":\"destination_refused\"}";
 async fn https_upstream_on_loopback_is_refused_before_any_connection() {
     let Some(pki) = pki("dst") else { return };
     let dest = destination().await;
-    let stack = Stack::start(&pki, &[format!("https://127.0.0.1:{}/mcp", dest.port)]).await;
+    let url = format!("https://127.0.0.1:{}/mcp", dest.port);
+    let stack = Stack::start(&pki, &[(&url, None)]).await;
 
     let (status, body) = stack.initialize(0).await;
     assert_eq!(status, 502);
@@ -286,7 +287,8 @@ async fn https_upstream_on_loopback_is_refused_before_any_connection() {
 async fn https_upstream_name_resolving_to_loopback_is_refused() {
     let Some(pki) = pki("dst") else { return };
     let dest = destination().await;
-    let stack = Stack::start(&pki, &[format!("https://localhost:{}/mcp", dest.port)]).await;
+    let url = format!("https://localhost:{}/mcp", dest.port);
+    let stack = Stack::start(&pki, &[(&url, Some(true))]).await;
 
     let (status, body) = stack.initialize(0).await;
     assert_eq!(status, 502);
@@ -295,8 +297,8 @@ async fn https_upstream_name_resolving_to_loopback_is_refused() {
     stack.shutdown().await;
 }
 
-/// The control plane refuses a route whose https upstream is a private,
-/// link-local (cloud metadata) or ULA literal, so no proxy ever receives one.
+/// The control plane refuses private, link-local and fd00::/8 literals when
+/// the setting is omitted.
 #[tokio::test]
 async fn server_refuses_a_config_with_a_private_or_metadata_upstream_literal() {
     let Some(pki) = pki("dst") else { return };
@@ -308,16 +310,29 @@ async fn server_refuses_a_config_with_a_private_or_metadata_upstream_literal() {
         format!("https://{}/latest/meta-data", v4(169, 254, 169, 254)),
         "https://[fd00:ec2::254]:8443/mcp".to_string(),
     ] {
-        assert_eq!(
-            control.put_config(std::slice::from_ref(&url)).await,
-            422,
-            "{url}"
-        );
+        assert_eq!(control.put_config(&[(&url, None)]).await, 422, "{url}");
     }
     let public = format!("https://{}:8443/mcp", v4(203, 0, 114, 1));
     assert_eq!(
-        control.put_config(&[public]).await,
+        control.put_config(&[(&public, None)]).await,
         200,
         "a public literal is accepted"
+    );
+}
+
+#[tokio::test]
+async fn proxy_applies_private_destination_opt_in_from_config_put() {
+    let Some(pki) = pki("dst") else { return };
+    let stack = Stack::start(&pki, &[("https://[fc00::1]:1/mcp", Some(true))]).await;
+    let (status, body) = stack.initialize(0).await;
+    stack.shutdown().await;
+
+    assert!(
+        matches!(
+            (status, body.as_str()),
+            (502, "{\"error\":\"upstream_unavailable\"}")
+                | (504, "{\"error\":\"upstream_timeout\"}")
+        ),
+        "expected a connection error after the route applied, got {status} {body}"
     );
 }
