@@ -619,12 +619,10 @@ takes `url` with `headers`, in `~/.cursor/mcp.json` or `.cursor/mcp.json`, and e
 folder it runs in, so a `.cursor/mcp.json` above your project applies too. The Cursor
 CLI has MCP commands (`mcp list`, `list-tools`, `login`, `enable`, `disable`) but no
 command that adds a server, so you write the file by hand. The docs call the command
-`agent`; the command line agent installed here is `cursor-agent`, so use whichever
-name your install has.
+`agent`. Some installs name it `cursor-agent`; use whichever name your install has.
 
-`mcp enable <name>` adds a server to the local approved list. Run
-`cursor-agent mcp enable lodeline-proxy` before a non-interactive `-p` run, which cannot
-ask for approval. Tool permission rules for the CLI live in `~/.cursor/cli-config.json`
+`mcp enable <name>` adds a server to the local approved list. Approve
+the server with `cursor-agent mcp enable lodeline-proxy` before a non-interactive `-p` run. Tool permission rules for the CLI live in `~/.cursor/cli-config.json`
 and in `.cursor/cli.json` of a project
 (<https://cursor.com/docs/cli/reference/permissions>).
 
