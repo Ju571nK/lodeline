@@ -8,8 +8,7 @@ pub mod parser;
 pub mod selector;
 
 /// Pack format version range this interpreter supports.
-pub const MIN_PACK_VERSION: u32 = 1;
-pub const MAX_PACK_VERSION: u32 = 2;
+pub use lodeline_core::policy::{MAX_PACK_VERSION, MIN_PACK_VERSION};
 
 /// Cheap pre-flight check applied at boot + reload time. Heavier checks
 /// (regex compile, selector syntax) happen inside RulePackParser::new.

@@ -15,6 +15,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - The proxy now applies `allow_private_destination` per route when checking upstream destinations.
 
+### Fixed
+
+- A signed policy is now refused at load when a target path has a brace group that spans folders, when a path token is malformed, when a rule pack uses an unsupported `pack_version`, or when two rule packs share an id.
+
 ## [0.23.0] - 2026-11-27
 
 **Upgrade.** This is a minor release because the agent reads more files, so scores can change for
