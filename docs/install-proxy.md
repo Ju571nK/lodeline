@@ -378,7 +378,7 @@ A later change needs `"expected_revision"` set to the current revision.
 - `actor_kind` is `non_human`. The proxy takes the principal from its own config, not from
   anything the client reports.
 - A principal may use only the routes in its `routes` list. A request for any other
-  route answers the same 401 as a wrong token.
+  route, or for a route a later config revision removed, answers the same 401 as a wrong token.
 
 ---
 
@@ -702,7 +702,7 @@ By the status the client sees:
 
 | Client sees | Meaning and what to do |
 |---|---|
-| 401, `WWW-Authenticate: Bearer` | wrong, missing or foreign token; unknown route (the same answer on purpose); config not loaded or expired. Run `health`. |
+| 401, `WWW-Authenticate: Bearer` | wrong, missing or foreign token; unknown route, or one a later config revision removed (the same answer on purpose); config not loaded or expired. Run `health`. |
 | 400, empty body | protocol rule: no or wrong `MCP-Protocol-Version` after `initialize`, a 2026-07-28 request, a bad session header (section 10) |
 | 403 `forbidden` | a browser `Origin` that is not in `allowed_origins`, or a `Host` header the loopback listener does not accept |
 | 404 `not_found` | a path that is not `/mcp/{route_id}` |
