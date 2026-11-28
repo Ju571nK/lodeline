@@ -677,6 +677,44 @@ mod tests {
     }
 
     #[test]
+    fn private_destination_default_preserves_legacy_wire_and_hash() {
+        let legacy = parse_config(&bytes(&full())).unwrap();
+        let mut explicit = full();
+        explicit["routes"][0]["allow_private_destination"] = json!(false);
+        let cfg = parse_config(&bytes(&explicit)).unwrap();
+        assert_eq!(cfg, legacy);
+        assert_eq!(serde_json::to_value(&cfg).unwrap(), full());
+        assert_eq!(
+            legacy.config_hash().as_str(),
+            "048994889e8d443294a9e3a96eca0c71b72cff8f24692af35c87cbfe3fb7d7fa"
+        );
+
+        let mut explicit = spec();
+        explicit["routes"][0]["allow_private_destination"] = json!(false);
+        assert_eq!(
+            parse_config_put(&put(explicit)).unwrap(),
+            parse_config_put(&put(spec())).unwrap()
+        );
+    }
+
+    #[test]
+    fn private_destination_true_round_trips_in_both_route_dtos() {
+        let mut input = spec();
+        input["routes"][0]["allow_private_destination"] = json!(true);
+        let parsed = parse_config_put(&put(input.clone())).unwrap();
+        assert_eq!(serde_json::to_value(&parsed.config).unwrap(), input);
+
+        let mut input = full();
+        input["routes"][0]["allow_private_destination"] = json!(true);
+        let parsed = parse_config(&bytes(&input)).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), input);
+        assert_ne!(
+            parsed.config_hash(),
+            parse_config(&bytes(&full())).unwrap().config_hash()
+        );
+    }
+
+    #[test]
     fn forged_markers_never_change_the_config_category() {
         use crate::parse::ErrorCategory;
         for mark in ["\u{1}S", "\u{1}L", "\u{1}D"] {
