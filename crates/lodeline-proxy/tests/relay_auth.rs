@@ -437,3 +437,50 @@ async fn table_handle_swaps_atomically() {
     px.handle.set(None);
     assert_unauthorized(&px.post("/mcp/a", Some("tok-a"), &[], BODY).await);
 }
+
+/// AC-04 (no oracle): a route that a later table drops answers 401 with the
+/// same status, headers and body as a route no table ever had, and its
+/// upstream is not contacted again. Routes that stay keep working.
+#[tokio::test]
+async fn a_route_dropped_by_a_later_table_is_401_like_an_unknown_route() {
+    let (ua, ub) = (ok_upstream().await, ok_upstream().await);
+    let l = limits();
+    let px = Px::start(
+        Some(table(
+            &[
+                R::new("a", ua.url("/up"), &[("pa", "tok-a")]),
+                R::new("b", ub.url("/up"), &[("pa", "tok-a")]),
+            ],
+            &l,
+        )),
+        l.clone(),
+    )
+    .await;
+    assert_eq!(
+        px.post("/mcp/b", Some("tok-a"), &[], BODY).await.status,
+        200
+    );
+    px.handle.set(Some(table(
+        &[R::new("a", ua.url("/up"), &[("pa", "tok-a")])],
+        &l,
+    )));
+    let norm = |r: &Raw| {
+        let mut h: Vec<_> = r
+            .headers
+            .iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("date"))
+            .cloned()
+            .collect();
+        h.sort();
+        (r.status, h, r.body())
+    };
+    let dropped = px.post("/mcp/b", Some("tok-a"), &[], BODY).await;
+    assert_unauthorized(&dropped);
+    let never_had = px.post("/mcp/zzz", Some("tok-a"), &[], BODY).await;
+    assert_eq!(norm(&dropped), norm(&never_had));
+    assert_eq!(
+        px.post("/mcp/a", Some("tok-a"), &[], BODY).await.status,
+        200
+    );
+    assert_eq!(ub.count(), 1);
+}
