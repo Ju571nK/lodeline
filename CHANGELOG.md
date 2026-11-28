@@ -11,6 +11,10 @@ releases also appear under [GitHub Releases](https://github.com/Ju571nK/lodeline
 
 - Proxy config PUT accepts and audits `allow_private_destination` per route. Upgrade the proxy to a version that supports the field before setting it to `true`.
 
+### Changed
+
+- The proxy now applies `allow_private_destination` per route when checking upstream destinations.
+
 ## [0.23.0] - 2026-11-27
 
 **Upgrade.** This is a minor release because the agent reads more files, so scores can change for

@@ -137,8 +137,7 @@ fn remote_limits(r: &ConfigRoute) -> RemoteLimits {
 
 /// Map the config DTO to the route builder's input. The config-wide
 /// `allowed_origins` applies to every route; principals are attached to the routes
-/// they name. `allow_private_destination` is always false: the DTO has no such
-/// field yet (contract OPEN), so a private destination is refused (fail closed).
+/// they name.
 fn route_specs(cfg: &ProxyConfig) -> Result<Vec<RouteSpec>, BuildError> {
     let mut out = Vec::with_capacity(cfg.routes.len());
     for r in &cfg.routes {
@@ -172,7 +171,7 @@ fn route_specs(cfg: &ProxyConfig) -> Result<Vec<RouteSpec>, BuildError> {
             credential_ref: r.credential_ref.as_str().to_string(),
             principals,
             allowed_origins: cfg.allowed_origins.clone(),
-            allow_private_destination: false,
+            allow_private_destination: r.allow_private_destination,
             limits: remote_limits(r),
             scope: Some(crate::route::RouteScope {
                 upstream_id: r.upstream_id.as_str().to_string(),

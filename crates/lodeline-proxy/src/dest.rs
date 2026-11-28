@@ -53,7 +53,7 @@ pub enum AddrClass {
     /// RFC 1918, 100.64.0.0/10 CGNAT, fc00::/7 other than fd00::/8.
     Private,
     Public,
-    /// Never a valid upstream: unspecified, multicast, broadcast, 0/8, 240/4.
+    /// Always refused, including unspecified, multicast, broadcast and shared-range metadata.
     Never,
 }
 
@@ -69,7 +69,13 @@ pub fn classify(ip: IpAddr) -> AddrClass {
 
 fn classify_v4(a: Ipv4Addr) -> AddrClass {
     let o = a.octets();
-    if a.is_unspecified() || a.is_broadcast() || a.is_multicast() || o[0] == 0 || o[0] >= 240 {
+    if o == [100, 100, 100, 200] // Cloud metadata in the shared IPv4 range.
+        || a.is_unspecified()
+        || a.is_broadcast()
+        || a.is_multicast()
+        || o[0] == 0
+        || o[0] >= 240
+    {
         AddrClass::Never
     } else if a.is_loopback() {
         AddrClass::Loopback
@@ -128,15 +134,10 @@ fn classify_v6(a: Ipv6Addr) -> AddrClass {
 /// - `http` upstream: every address must be loopback. (`normalize_origin` has
 ///   already limited http to loopback host NAMES at table build; this closes
 ///   the name-resolves-elsewhere gap.)
-/// - `https` upstream: public addresses are allowed. Loopback and private
-///   ranges need the route's explicit `allow_private` flag. Link-local, the
-///   metadata range and fd00::/8 additionally need the address to be the
-///   configured upstream host literal itself. Unspecified, multicast and
-///   broadcast are never allowed.
-// OPEN: contract text only says private destinations need an explicit
-// management flag (control-plane.md §6.1); the literal-address rule for
-// link-local/metadata is this slice's reading of "unless explicitly the
-// configured upstream".
+/// - `https` upstream: public addresses are allowed. Private addresses need
+///   the route's `allow_private` flag. Loopback, link-local, cloud metadata
+///   (including fd00::/8), unspecified, multicast and broadcast are refused
+///   for either flag value.
 pub fn check_addresses(
     up: &Upstream,
     allow_private: bool,
@@ -148,14 +149,9 @@ pub fn check_addresses(
     for ip in addrs {
         let class = classify(*ip);
         let ok = match (up.https, class) {
-            (_, AddrClass::Never) => false,
-            (false, AddrClass::Loopback) => true,
-            (false, _) => false,
-            (true, AddrClass::Public) => true,
-            (true, AddrClass::Loopback | AddrClass::Private) => allow_private,
-            (true, AddrClass::LinkLocal | AddrClass::UlaMetadata) => {
-                allow_private && up.host_literal == Some(*ip)
-            }
+            (false, AddrClass::Loopback) | (true, AddrClass::Public) => true,
+            (true, AddrClass::Private) => allow_private,
+            _ => false,
         };
         if !ok {
             return Err(DestError::Refused(match class {
