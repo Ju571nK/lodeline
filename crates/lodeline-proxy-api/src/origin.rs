@@ -202,6 +202,7 @@ fn blocked_v4(a: Ipv4Addr, allow_private: bool) -> bool {
     }
     let private = a.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64);
     a.is_unspecified()
+        || o == [100, 100, 100, 200] // Alibaba Cloud metadata.
         || (!allow_private && private)
         || a.is_link_local()
         || a.is_broadcast()

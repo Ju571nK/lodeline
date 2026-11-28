@@ -274,7 +274,8 @@ wire_struct! {
         /// https, or http to a loopback host; no userinfo, query or fragment.
         pub upstream_url: String,
         pub upstream_protocol: UpstreamProtocol,
-        /// Allows private destinations for this route. Defaults to false.
+        /// Enables private IPv4, shared IPv4, and `fc00::/8` destinations for this route.
+        /// Defaults to false. Cloud metadata and `fd00::/8` stay refused.
         #[serde(default, skip_serializing_if = "is_false")]
         pub allow_private_destination: bool,
         /// Name resolved on the proxy host (control-plane §5.5). Never a secret.
