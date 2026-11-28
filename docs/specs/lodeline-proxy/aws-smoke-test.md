@@ -694,3 +694,53 @@ Observations only (not the validation.md condition), packaged proxy on A, releas
 - Performance targets: a load driver and synthetic load server written for validation.md, and a 4 vCPU / 8 GiB Rocky 9 host.
 
 Teardown: the RPM, its config, state dir and temporary keys were removed, and package lists, units and listeners on both nodes equal the pre-run state. Both nodes were confirmed stopped.
+
+## 20. AWS run (J, 2026-11-28 UTC)
+
+Operator-run with the operator's local harness on `5f151ba5` (main), two EC2 instances as in §18 and §19. Account, region, addresses, instance IDs, tokens and certificates are deliberately not recorded here. B plays the PC role. The first attempt stopped on a harness bug in the private phase and was torn down; the evidence below comes from a second run on the same commit and a fresh build, except the baseline stateful smoke, which comes from the first attempt.
+
+| Item | Value |
+|---|---|
+| A, B | t4g.small (2 vCPU, 2 GiB), Amazon Linux 2023 aarch64, kernel 6.18.54, Python 3.9.25, OpenSSL 3.5.8 |
+| Build | on A, `cargo build --release --locked -p lodeline-server -p lodeline-proxy`, rustc 1.99.1, about 200 s. `lodeline-proxy 0.23.0` and `lodeline-server 0.23.0`; the proxy binary's SHA256 is equal on A and B |
+| RPM | `lodeline-proxy-0.23.0-1.aarch64.rpm` built on A in 97 s. Its binary hash differs from the harness binary, as in §19 |
+| SELinux | Permissive before and after. Enforcing for the packaged-proxy phase only |
+| Data plane | D1 (SSH tunnel from B to the loopback fixture on A) |
+
+### 20.1 What it covered
+
+- Baseline stateful smoke (§9 to §12, B proxy, D1): no scenario step failed, ledger 22 invocations with zero incomplete and zero duplicate event sets, zero canary and tool-name occurrences, fixture counters `smoke_echo` 1, `deletes` 2, `cancels_matched` 1. Outage within TTL: initialize 202, five calls 200, six completed invocations afterwards. Proxy restart with the server down: `Expired`, `forwarding: false`, initialize 401, then `Valid` and 202. Spool fail-closed: 32 calls 200 and 48 calls 503 with error code `audit_unavailable`, and the fixture `smoke_echo` delta equal to 32.
+- Config PUT by the management CLI: a body naming another proxy ID is refused locally; a stale `expected_revision` gets 409 and an audit record `revision_conflict`; a private IP literal with `allow_private_destination` absent or false is refused by the CLI before any request, and a raw PUT of the same body gets 422 with an audit record `semantic_invalid` and the revision unchanged. The audit lines show the effective flag per route and no URL, host or token.
+- Private destination table, seven routes (revision 2), HTTPS targets pointing at the SSH port on A, an HTTPS loopback listener on B, and one plain HTTP loopback route:
+
+| Route class | Flag | Result | Evidence at the target |
+|---|---|---|---|
+| plain HTTP loopback | false | 200 | not applicable |
+| private literal, HTTPS | true | 502 `upstream_unavailable` | one more SSH pre-auth line on A |
+| private name, HTTPS | absent | 502 `destination_refused` | SSH pre-auth line count unchanged |
+| private name, HTTPS | true | 502 `upstream_unavailable` | one more SSH pre-auth line on A |
+| loopback, HTTPS | absent or true | 502 `destination_refused` | the listener accepted zero connections |
+| `localhost` name, HTTPS | absent | 502 `destination_refused` | the listener accepted zero connections |
+
+  `upstream_unavailable` on an opted-in route means the request passed the destination check and reached the connection step. The TLS handshake then failed because the target was an SSH server, not an HTTPS server.
+- The §9 scenario and ledger after the flag exists (no scenario step failed, 22 invocations, zero duplicates).
+- Revision 3 (first route only): a call to a route removed from the principal's list answers 401 `unauthorized`, the same as an unknown route (#813). It does not answer 404.
+- TTL expiry with a running proxy (`config_ttl_seconds` 60, server stopped): `Expired` and `forwarding: false` at the next health check, initialize 401; after the server returned, `Valid`, initialize 202 and one call 200, with two completed invocations since the stop. The TTL was then set back to 900.
+- Observe fail-closed cases: the TTL expiry above, the restart with the server down, and the spool-full 503 run, each on the B proxy and again on the packaged proxy.
+- JSON-RPC batch probe: a batch request answers 400 with JSON-RPC code -32600 `Invalid Request` and a null id. The follow-up ledger query returned no rows, so the audit record for it and the zero fixture delta were not confirmed in this run.
+- Fixture variants `--stateless`, `--initialize-sse` and both together: no scenario step failed, ledger 22 and zero duplicates in each, fixture `deletes` 0, 2 and 0, privacy scans 15 files on B and 12 on A with zero occurrences.
+- Packaged proxy under systemd with SELinux Enforcing (A): `dnf install` left the unit `disabled` and `inactive`, no `/etc/lodeline/proxy.yaml`, `proxy.yaml.example` present, nothing listening on 8480, `/usr/bin/lodeline-proxy` labelled `bin_t`. After configuration the unit started with `Valid`, `forwarding: true` and NRestarts 0, under `unconfined_service_t` because no proxy SELinux domain exists yet. The §9 scenario, privacy scan (16 files, zero occurrences), outage, restart, spool fail-closed (32 calls 200, 48 calls 503, delta 32), and disable and enable (`Disabled` and 401, then `Valid` and 202) ran against it. Stop took 0.04 s with `shutdown outcome=Drained`. `ausearch -m avc,user_avc` found zero records, with four `SERVICE_START` records for the unit in the same window as a control. The packaged proxy was restored to the pre-run state afterwards.
+
+### 20.2 Observations that are not results
+
+- `status.json` and `lodeline-proxy health` do not show the applied revision, so the harness waited one poll interval after each config PUT.
+- `lodeline-server` has no `version` subcommand; `--version` works.
+- In the packaged phase, the first call after the server returned from the spool-full run got 503 while the spool state still read `Full`. The same step in the B run got 202. This is one observation, not investigated.
+- The sequential latency check in the packaged phase is not reported: the proxied figure was much higher than in §19.4 and was not explained, so this run makes no performance statement.
+
+### 20.3 Not covered
+
+- An upstream 200 through a private route. The run had no public certificate for a private name, so the opted-in routes were checked up to the connection step only.
+- Real vendor clients (R), x86_64, D2 public HTTPS, a confined SELinux domain, and the performance targets in validation.md.
+
+Teardown: the RPM, its config, state dir and temporary keys were removed, SELinux was restored to Permissive, and both nodes were confirmed stopped.
