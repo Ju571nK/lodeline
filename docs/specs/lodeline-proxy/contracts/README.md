@@ -218,14 +218,21 @@ resources·prompts 호출을 세분화된 method 값으로 감사하는 것은 P
 `data` 없음, 요청 값 echo 없음. 구체 reason은 감사와 route health에만 둔다.
 `supported` 같은 data를 붙인 `-32602`는 쓰지 않는다. 고정 message는 `Internal error`다
 ([T-13d/T-12b2 구현 계약](../t13d-t12b2.md), 2026-10-24).
-batch 거절의 client 응답 형태(HTTP/JSON-RPC)는 **[OPEN]**이다.
+**JSON-RPC batch 거절의 client 응답**(2026-11-28 소유자 결정 Q10, [decisions.md](../decisions.md)): HTTP 400 `application/json`,
+JSON-RPC `-32600` 고정 message `Invalid Request`, `id` null(batch 안의 id를 되돌리지 않는다), `data` 없음. upstream 호출은 0회다.
+감사 기록은 위 표(method `unknown`, `protocol_error`/`not_sent`, reason 없음)를 따른다. 시험:
+`crates/lodeline-proxy/tests/mcp_relay.rs`의 `batch_refusal_is_a_fixed_invalid_request`(응답, upstream 호출 수, 관찰 단위의 `Batch` 거절 한 건).
 
 **initialize 이후 `MCP-Protocol-Version`.** 인증을 먼저 검사한다(401이 먼저).
 인증된 요청에서 헤더가 없거나 협상된 revision(2025-11-25)과 다르면 HTTP 400과 빈 body로 거절한다.
 누락 거절은 스펙 요구가 아니라 의도적 엄격성 선택이다. 알려진 legacy 값(2025-06-18 등)은 modern 요청으로
-분류하지 않으므로 이 거절에는 `modern_request_unsupported`를 쓰지 않는다. 단 협상값도 알려진 legacy 목록도 아닌 값(예: 2026-07-28)은 B1 modern으로 분류하며 `modern_request_unsupported`를 쓴다. 누락·legacy 값 거절의 감사는
-`protocol_error`/`not_sent`이며 reason은 상수가 생길 때까지 생략한다(modern 분류 값은 B1 감사 규칙을 따른다). reason 구분은 **[OPEN]**:
-schema에 해당 상수가 없으므로 이 문서는 상수를 만들지 않으며, 다음 schema 수정과 독립 리뷰에서 정한다.
+분류하지 않으므로 이 거절에는 `modern_request_unsupported`를 쓰지 않는다. 단 협상값도 알려진 legacy 목록도 아닌 값(예: 2026-07-28)은 B1 modern으로 분류하며 `modern_request_unsupported`를 쓴다.
+
+누락·legacy 값 거절은 2026-11-28 소유자 결정 Q10([decisions.md](../decisions.md))으로 아래 계약이 확정이다.
+HTTP 400과 빈 body, upstream 호출 0회, 감사는 `protocol_error`/`not_sent`이며 **저장되는 reason은 없다**.
+새 reason kind는 만들지 않는다(modern 분류 값은 B1 감사 규칙을 따른다). 시험:
+`crates/lodeline-proxy/tests/mcp_relay.rs`의 `missing_or_legacy_version_header_after_initialize_is_an_empty_400`(응답과 upstream 호출 수, 관찰 단위의 `VersionHeader` 거절 한 건),
+`crates/lodeline-proxy/src/invocation_sink.rs`의 `a_version_header_refusal_is_stored_as_protocol_error_not_sent_without_a_reason`(저장된 기록).
 
 ## T-13d / T-12b2 구현 상세 (2026-10-24)
 
