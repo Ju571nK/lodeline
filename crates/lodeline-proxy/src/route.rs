@@ -85,9 +85,7 @@ pub struct RouteSpec {
     /// Downstream `Origin` allowlist (control-plane.md §5.3). Normalized with
     /// [`normalize_origin`] at build.
     pub allowed_origins: Vec<String>,
-    /// Explicit management flag for private destinations (control-plane.md
-    /// §6.1 "private destinations need an explicit management flag").
-    // OPEN: the DTO field name for this flag is not defined by the contract.
+    /// Per-route opt-in for private upstream destinations (control-plane.md §6.1).
     pub allow_private_destination: bool,
     /// Remote per-route limits; they can only lower the local ones.
     pub limits: RemoteLimits,

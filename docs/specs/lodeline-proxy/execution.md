@@ -13,7 +13,6 @@
 - **계획 대비 gap.**
   - 설정은 `lodeline-server proxy config-put`으로 한다.
   - 인증서 서명: [decisions.md](decisions.md)가 운영자 CLI의 인증서 서명과 `POST /v1/proxies/{id}/csr`를 적지만 `crates/lodeline-server/src/proxy/mgmt.rs`에 CSR 경로가 없다.
-  - 사설 목적지 설정: 원격 설정은 `allow_private_destination`을 항상 false로 고정한다(`crates/lodeline-proxy/src/config_sync.rs`). 이 값을 바꾸는 방법이 없다. 설정한 http loopback upstream은 이 값과 별개로 통과한다(`crates/lodeline-proxy/src/dest.rs`). AC-08은 고정 라우트 거절의 oracle이며 설정 성공을 요구하지 않는다. 결정(소유자, 2026-11-28 Q1): route별 boolean `allow_private_destination`(기본 false)을 proxy config PUT으로 정하고 감사에 기록한다. loopback, link-local, 클라우드 metadata 주소는 true여도 계속 거절한다. 구현은 별도 PR이다.
   - 콘솔 설정 화면: 위 "콘솔" 항목.
 - **확정된 동작(소유자 결정 Q10, 2026-11-28).** initialize 이후 `MCP-Protocol-Version` 누락·알려진 구버전 요청은 인증 뒤 HTTP 400과 빈 body이고 upstream을 호출하지 않는다. 감사는 `protocol_error`/`not_sent`이고 저장되는 reason은 없다. JSON-RPC batch는 HTTP 400과 JSON-RPC `-32600` "Invalid Request"(id null, `data` 없음)로 거절하고 upstream을 호출하지 않는다. 새 reason kind는 없다. 시험: `crates/lodeline-proxy/tests/mcp_relay.rs`의 `batch_refusal_is_a_fixed_invalid_request`, `missing_or_legacy_version_header_after_initialize_is_an_empty_400`, `crates/lodeline-proxy/src/invocation_sink.rs`의 `a_version_header_refusal_is_stored_as_protocol_error_not_sent_without_a_reason`(같은 헤더 응답은 `crates/lodeline-proxy/tests/sessions_http.rs`의 `proxy_session_is_private_bound_and_protocol_is_checked_after_auth`도 본다). 알려지지 않은 헤더 값은 modern 경로다([support-matrix.md](support-matrix.md) 참고). 지원 표의 [OPEN]은 없다.
 
@@ -1674,3 +1673,9 @@ main에 커밋·push되었다. 외부 배포·manager 변경·사용자 MCP 설�
 ## 2026-11-28 Per-route private destinations (PX-014, AC-08)
 
 Config PUT accepts `allow_private_destination` per route and records the effective values in the management audit. The config DTO omits false values to preserve existing hashes. A follow-up will apply the field in the proxy and verify forwarding end to end.
+
+## 2026-11-28 Apply private destinations in the proxy (PX-014, AC-08)
+
+Config sync carries `allow_private_destination` into the route table. The proxy uses it to allow private HTTPS destinations on opted-in routes. HTTPS loopback, link-local, unspecified and cloud metadata stay refused for both field values. Plain HTTP loopback stays allowed. HTTPS loopback PUT acceptance remains part of the server's tested contract.
+
+The real server and proxy test sends an opted-in private literal through config PUT, waits for the proxy to apply the route, and checks that the request reaches the connection step. The relay test covers the two flag values with a private DNS answer.

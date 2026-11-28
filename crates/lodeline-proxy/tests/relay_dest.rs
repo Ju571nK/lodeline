@@ -79,6 +79,38 @@ async fn http_name_resolving_to_non_loopback_is_refused() {
     assert_eq!(up.conns(), 0, "no connection was attempted");
 }
 
+#[tokio::test]
+async fn https_name_resolving_to_private_requires_route_opt_in() {
+    let mut l = limits();
+    l.connect_timeout_secs = 1;
+    for allow_private in [false, true] {
+        let mut route = R::new(
+            "a",
+            "https://api.example.com:1/up".into(),
+            &[("pa", "tok-a")],
+        );
+        route.allow_private = allow_private;
+        let resolver = StaticResolver::sequence(vec![vec![ip("fc00::1")]]);
+        let px = Px::start_with(Some(table(&[route], &l)), l.clone(), resolver).await;
+        let response = px.post_bare("/mcp/a", Some("tok-a"), &[], INIT).await;
+        let body = response.text();
+        if allow_private {
+            assert!(
+                matches!(
+                    (response.status, body.as_str()),
+                    (502, "{\"error\":\"upstream_unavailable\"}")
+                        | (504, "{\"error\":\"upstream_timeout\"}")
+                ),
+                "expected a connection error, got {} {body}",
+                response.status
+            );
+        } else {
+            assert_eq!(response.status, 502);
+            assert_eq!(body, "{\"error\":\"destination_refused\"}");
+        }
+    }
+}
+
 /// AC-08 (DNS rebinding): the answer is checked on every request and the
 /// connection uses the checked answer. A name that flips from loopback to
 /// private between two requests is allowed once and refused after; and with a
