@@ -19,11 +19,13 @@
 //! # `schema_version` and upgrade order
 //!
 //! Both shapes carry `schema_version` (the constant `1`; any other value fails
-//! the parse). A change to the shape needs a new version. **Upgrade the proxy
+//! the parse). An incompatible shape change needs a new version. **Upgrade the proxy
 //! first, then the server**: a proxy that does not know version N+1 rejects the
 //! document (`last_update_error = validation_failed`) and keeps its previous
 //! config, so a server that emits N+1 before the proxies understand it causes a
 //! TTL expiry outage (fail closed). The reverse order is safe.
+//! Routes omit `allow_private_destination` when false. Upgrade proxies before
+//! setting it true so they can parse the field.
 //!
 //! # `config_hash`
 //!
@@ -60,7 +62,7 @@ use sha2::{Digest, Sha256};
 use crate::canonical::canonical_json;
 use crate::error::ValidationError;
 use crate::helpers::check_len;
-use crate::origin::{normalize_origin, parse_upstream_url};
+use crate::origin::{normalize_origin, parse_upstream_url_with_policy};
 use crate::scalar::{ConfigHash, Id, NonNegativeI64, PositiveI64, SchemaVersion, Timestamp};
 use crate::Validate;
 
@@ -97,6 +99,10 @@ pub const HASH_EXCLUDED_FIELDS: [&str; 3] = ["issued_at", "expires_at", "ttl_sec
 
 fn is_hex64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -268,6 +274,10 @@ wire_struct! {
         /// https, or http to a loopback host; no userinfo, query or fragment.
         pub upstream_url: String,
         pub upstream_protocol: UpstreamProtocol,
+        /// Enables private IPv4, shared IPv4, and `fc00::/8` destinations for this route.
+        /// Defaults to false. Cloud metadata and `fd00::/8` stay refused.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub allow_private_destination: bool,
         /// Name resolved on the proxy host (control-plane §5.5). Never a secret.
         pub credential_ref: Id,
         #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
@@ -282,6 +292,8 @@ wire_struct! {
         pub upstream_id: Id,
         pub upstream_url: String,
         pub upstream_protocol: UpstreamProtocol,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub allow_private_destination: bool,
         pub credential_ref: Id,
         /// Server-assigned ([`credential_scope_id_for`]); opaque to everyone else.
         pub credential_scope_id: Id,
@@ -292,9 +304,11 @@ wire_struct! {
 
 fn validate_route_fields(
     upstream_url: &str,
+    allow_private_destination: bool,
     limits: Option<&ConfigLimits>,
 ) -> Result<(), ValidationError> {
-    parse_upstream_url(upstream_url).map_err(ValidationError::new)?;
+    parse_upstream_url_with_policy(upstream_url, allow_private_destination)
+        .map_err(ValidationError::new)?;
     if let Some(l) = limits {
         l.validate()?;
     }
@@ -303,13 +317,21 @@ fn validate_route_fields(
 
 impl Validate for RouteSpec {
     fn validate(&self) -> Result<(), ValidationError> {
-        validate_route_fields(&self.upstream_url, self.limits.as_ref())
+        validate_route_fields(
+            &self.upstream_url,
+            self.allow_private_destination,
+            self.limits.as_ref(),
+        )
     }
 }
 
 impl Validate for ConfigRoute {
     fn validate(&self) -> Result<(), ValidationError> {
-        validate_route_fields(&self.upstream_url, self.limits.as_ref())
+        validate_route_fields(
+            &self.upstream_url,
+            self.allow_private_destination,
+            self.limits.as_ref(),
+        )
     }
 }
 
@@ -439,7 +461,9 @@ impl ConfigSpec {
             .routes
             .iter()
             .map(|r| {
-                let u = parse_upstream_url(&r.upstream_url).map_err(ValidationError::new)?;
+                let u =
+                    parse_upstream_url_with_policy(&r.upstream_url, r.allow_private_destination)
+                        .map_err(ValidationError::new)?;
                 Ok(ConfigRoute {
                     credential_scope_id: credential_scope_id_for(
                         self.proxy_id.as_str(),
@@ -452,6 +476,7 @@ impl ConfigSpec {
                     upstream_id: r.upstream_id.clone(),
                     upstream_url: r.upstream_url.clone(),
                     upstream_protocol: r.upstream_protocol,
+                    allow_private_destination: r.allow_private_destination,
                     credential_ref: r.credential_ref.clone(),
                     limits: r.limits.clone(),
                 })
@@ -674,6 +699,44 @@ mod tests {
         assert!(parse_config_put(br#"{"expected_revision":0}"#).is_err());
         assert!(parse_config_put(br#"{"expected_revision":-1,"config":{}}"#).is_err());
         assert!(parse_config(br#"{"proxy_id":"a","proxy_id":"b"}"#).is_err());
+    }
+
+    #[test]
+    fn private_destination_default_preserves_legacy_wire_and_hash() {
+        let legacy = parse_config(&bytes(&full())).unwrap();
+        let mut explicit = full();
+        explicit["routes"][0]["allow_private_destination"] = json!(false);
+        let cfg = parse_config(&bytes(&explicit)).unwrap();
+        assert_eq!(cfg, legacy);
+        assert_eq!(serde_json::to_value(&cfg).unwrap(), full());
+        assert_eq!(
+            legacy.config_hash().as_str(),
+            "048994889e8d443294a9e3a96eca0c71b72cff8f24692af35c87cbfe3fb7d7fa"
+        );
+
+        let mut explicit = spec();
+        explicit["routes"][0]["allow_private_destination"] = json!(false);
+        assert_eq!(
+            parse_config_put(&put(explicit)).unwrap(),
+            parse_config_put(&put(spec())).unwrap()
+        );
+    }
+
+    #[test]
+    fn private_destination_true_round_trips_in_both_route_dtos() {
+        let mut input = spec();
+        input["routes"][0]["allow_private_destination"] = json!(true);
+        let parsed = parse_config_put(&put(input.clone())).unwrap();
+        assert_eq!(serde_json::to_value(&parsed.config).unwrap(), input);
+
+        let mut input = full();
+        input["routes"][0]["allow_private_destination"] = json!(true);
+        let parsed = parse_config(&bytes(&input)).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), input);
+        assert_ne!(
+            parsed.config_hash(),
+            parse_config(&bytes(&full())).unwrap().config_hash()
+        );
     }
 
     #[test]

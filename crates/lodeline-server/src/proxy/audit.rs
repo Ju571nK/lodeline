@@ -24,6 +24,7 @@ use lodeline_core::audit::GENESIS_PREV_HASH;
 use lodeline_core::policy::canonical::to_canonical_bytes;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -70,6 +71,9 @@ pub struct MgmtAuditRecord {
     pub to_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
+    /// Accepted config PUT settings by route ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub allow_private_destination: BTreeMap<String, bool>,
     /// The fingerprint a registration or promotion is about (public data).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_fingerprint: Option<String>,
@@ -120,6 +124,7 @@ pub struct AuditEntry {
     pub from_revision: Option<u64>,
     pub to_revision: Option<u64>,
     pub config_hash: Option<String>,
+    pub allow_private_destination: BTreeMap<String, bool>,
     pub subject_fingerprint: Option<String>,
     pub replaced_fingerprint: Option<String>,
     pub metadata_ref: Option<String>,
@@ -377,6 +382,7 @@ impl MgmtAudit {
             from_revision: e.from_revision,
             to_revision: e.to_revision,
             config_hash: e.config_hash,
+            allow_private_destination: e.allow_private_destination,
             subject_fingerprint: e.subject_fingerprint,
             replaced_fingerprint: e.replaced_fingerprint,
             metadata_ref: e.metadata_ref,

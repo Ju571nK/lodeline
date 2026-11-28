@@ -617,6 +617,122 @@ async fn put_requires_config_scope_and_management_cert() {
 }
 
 #[tokio::test]
+async fn private_destination_requires_opt_in_on_its_own_route() {
+    let fx = Fx::new().await;
+    proxy(&fx, "pxa").await;
+    let mut body = spec("pxa", "tok-a");
+    let private_ip = std::net::Ipv4Addr::new(10, 0, 0, 1);
+    body["routes"][0]["upstream_url"] = format!("https://{private_ip}/mcp").into();
+    for flag in [None, Some(false)] {
+        if let Some(flag) = flag {
+            body["routes"][0]["allow_private_destination"] = flag.into();
+        }
+        let r = put(&fx, "pxa", Some(T_CFG), &put_body(0, &body)).await;
+        assert_eq!((r.status, r.code().as_str()), (422, "semantic_invalid"));
+    }
+
+    let mut other = body["routes"][0].clone();
+    other["route_id"] = "r2".into();
+    other["upstream_id"] = "up2".into();
+    body["routes"][0]["allow_private_destination"] = true.into();
+    body["routes"].as_array_mut().unwrap().push(other);
+    let r = put(&fx, "pxa", Some(T_CFG), &put_body(0, &body)).await;
+    assert_eq!((r.status, r.code().as_str()), (422, "semantic_invalid"));
+    assert!(fx.ctx.store.config("pxa").is_none());
+}
+
+#[tokio::test]
+async fn private_destination_opt_in_is_stored_served_and_audited() {
+    let fx = Fx::new().await;
+    let px = proxy(&fx, "pxa").await;
+    let mut body = spec("pxa", "tok-a");
+    let mut opted_in = body["routes"][0].clone();
+    let private_ip = std::net::Ipv4Addr::new(10, 0, 0, 1);
+    opted_in["route_id"] = "r2".into();
+    opted_in["upstream_id"] = "up2".into();
+    opted_in["upstream_url"] = format!("https://{private_ip}/mcp").into();
+    opted_in["allow_private_destination"] = true.into();
+    body["routes"].as_array_mut().unwrap().push(opted_in);
+    let r = put(&fx, "pxa", Some(T_CFG), &put_body(0, &body)).await;
+    assert_eq!(r.status, 200, "{}", r.code());
+    assert_eq!(r.json()["revision"], 1);
+
+    let reopened = ProxyContext::load(&Fx::config(fx.dir.path()))
+        .unwrap()
+        .unwrap();
+    let stored = reopened.store.config("pxa").unwrap();
+    assert_eq!(r.json()["config_hash"], stored.config_hash);
+    let stored_doc = serde_json::to_value(stored.config).unwrap();
+    assert_eq!(stored_doc["routes"][1]["allow_private_destination"], true);
+
+    let served = get_cfg(&fx, &px, None).await;
+    assert_eq!(served.status, 200);
+    assert_eq!(served.json()["routes"], stored_doc["routes"]);
+
+    let puts = config_puts(&fx);
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0]["result"], "ok");
+    assert_eq!(puts[0]["config_hash"], stored.config_hash);
+    assert_eq!(
+        puts[0]["allow_private_destination"],
+        serde_json::json!({"r1": false, "r2": true})
+    );
+}
+
+#[tokio::test]
+async fn private_destination_opt_in_preserves_special_address_refusals() {
+    let fx = Fx::new().await;
+    proxy(&fx, "pxa").await;
+    let mut body = spec("pxa", "tok-a");
+    body["routes"][0]["allow_private_destination"] = true.into();
+    let metadata = std::net::Ipv4Addr::new(169, 254, 169, 254);
+    let alibaba_metadata = std::net::Ipv4Addr::new(100, 100, 100, 200);
+    let metadata_v6 = std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
+    for host in [
+        metadata.to_string(),
+        format!("[{}]", metadata.to_ipv6_mapped()),
+        alibaba_metadata.to_string(),
+        format!("[{}]", alibaba_metadata.to_ipv6_mapped()),
+        format!("[{metadata_v6}]"),
+        "[fe80::1]".into(),
+        "0.0.0.0".into(),
+        "[::]".into(),
+    ] {
+        body["routes"][0]["upstream_url"] = format!("https://{host}/mcp").into();
+        let r = put(&fx, "pxa", Some(T_CFG), &put_body(0, &body)).await;
+        assert_eq!(
+            (r.status, r.code().as_str()),
+            (422, "semantic_invalid"),
+            "{host}"
+        );
+    }
+    assert!(fx.ctx.store.config("pxa").is_none());
+}
+
+#[tokio::test]
+async fn private_destination_flag_preserves_loopback_config_acceptance() {
+    let fx = Fx::new().await;
+    proxy(&fx, "pxa").await;
+    let mut body = spec("pxa", "tok-a");
+    let mut https = body["routes"][0].clone();
+    body["routes"][0]["upstream_url"] = "http://127.0.0.1/mcp".into();
+    https["route_id"] = "r2".into();
+    https["upstream_id"] = "up2".into();
+    https["upstream_url"] = "https://[::1]/mcp".into();
+    body["routes"].as_array_mut().unwrap().push(https);
+
+    for (revision, flag) in [(0, None), (1, Some(false)), (2, Some(true))] {
+        if let Some(flag) = flag {
+            for route in body["routes"].as_array_mut().unwrap() {
+                route["allow_private_destination"] = flag.into();
+            }
+        }
+        let r = put(&fx, "pxa", Some(T_CFG), &put_body(revision, &body)).await;
+        assert_eq!(r.status, 200, "{}", r.code());
+    }
+}
+
+#[tokio::test]
 async fn an_enroll_scope_entry_in_the_proxy_file_gets_403_on_management_routes() {
     let (dir, mgmt, fp) = Fx::prepare(|fp, fp2| {
         let mut v = Fx::default_entries(fp, fp2);

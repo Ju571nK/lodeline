@@ -114,6 +114,14 @@ pub struct UpstreamUrl {
 ///
 /// Error texts are fixed and never contain the input.
 pub fn parse_upstream_url(s: &str) -> Result<UpstreamUrl, String> {
+    parse_upstream_url_with_policy(s, false)
+}
+
+/// Applies the route's private destination setting to upstream URL validation.
+pub(crate) fn parse_upstream_url_with_policy(
+    s: &str,
+    allow_private: bool,
+) -> Result<UpstreamUrl, String> {
     if s.is_empty() || s.len() > MAX_UPSTREAM_URL_LEN {
         return Err("upstream_url length out of range".into());
     }
@@ -138,23 +146,21 @@ pub fn parse_upstream_url(s: &str) -> Result<UpstreamUrl, String> {
     }
     let origin = normalize_origin(&format!("{scheme}://{authority}"))?;
     let (host, _) = split_host_port(authority)?;
-    screen_host(&host)?;
+    screen_host(&host, allow_private)?;
     Ok(UpstreamUrl {
         origin,
         path: path.to_string(),
     })
 }
 
-/// Rejects literal addresses that are not a public or loopback destination, and
-/// numeric spellings (`2130706433`, `0x7f.1`, `127.1`) that only a lenient
-/// resolver would read as an address.
-fn screen_host(host: &str) -> Result<(), String> {
+/// Applies the literal address policy and rejects non-canonical numeric hosts.
+fn screen_host(host: &str, allow_private: bool) -> Result<(), String> {
     if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         let ip: Ipv6Addr = v6.parse().map_err(|_| "invalid IPv6 literal")?;
-        return screen_ip(IpAddr::V6(ip));
+        return screen_ip(IpAddr::V6(ip), allow_private);
     }
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
-        return screen_ip(IpAddr::V4(ip));
+        return screen_ip(IpAddr::V4(ip), allow_private);
     }
     let last = host.rsplit('.').next().unwrap_or("");
     let numeric_tail = !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit());
@@ -164,17 +170,18 @@ fn screen_host(host: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn screen_ip(ip: IpAddr) -> Result<(), String> {
+fn screen_ip(ip: IpAddr, allow_private: bool) -> Result<(), String> {
     let blocked = match ip {
-        IpAddr::V4(a) => blocked_v4(a),
+        IpAddr::V4(a) => blocked_v4(a, allow_private),
         IpAddr::V6(a) => {
             if let Some(m) = a.to_ipv4_mapped() {
-                blocked_v4(m)
+                blocked_v4(m, allow_private)
             } else {
                 let s = a.segments();
                 a.is_unspecified()
                     || a.is_multicast()
-                    || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                    || (s[0] & 0xff00) == 0xfd00 // Unique local range containing cloud metadata.
+                    || (!allow_private && (s[0] & 0xfe00) == 0xfc00)
                     || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
                     || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
                     || (s[0] == 0x0064 && s[1] == 0xff9b) // NAT64
@@ -188,18 +195,19 @@ fn screen_ip(ip: IpAddr) -> Result<(), String> {
     }
 }
 
-fn blocked_v4(a: Ipv4Addr) -> bool {
+fn blocked_v4(a: Ipv4Addr, allow_private: bool) -> bool {
     let o = a.octets();
     if a.is_loopback() {
         return false;
     }
+    let private = a.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64);
     a.is_unspecified()
-        || a.is_private()
+        || o == [100, 100, 100, 200] // Alibaba Cloud metadata.
+        || (!allow_private && private)
         || a.is_link_local()
         || a.is_broadcast()
         || a.is_multicast()
         || o[0] == 0
-        || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64/10 shared address space
         || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
         || (o[0] == 192 && o[1] == 0 && o[2] == 2) // TEST-NET-1
         || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18/15 benchmarking

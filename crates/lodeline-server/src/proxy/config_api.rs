@@ -142,6 +142,11 @@ pub fn put_config(ctx: &ProxyContext, req: &MgmtRequest, path_id: &str, body: &[
     ok.from_revision = Some(cur_rev);
     ok.to_revision = Some(next_rev.get() as u64);
     ok.config_hash = Some(hash.clone());
+    ok.allow_private_destination = cfg
+        .routes
+        .iter()
+        .map(|r| (r.route_id.as_str().to_owned(), r.allow_private_destination))
+        .collect();
     // Audit BEFORE the effect.
     if let Err(e) = audit_of(ctx).append(ok) {
         tracing::error!(error = %e, "management audit append failed");

@@ -275,7 +275,7 @@ ProxyConfig {
   routes: [ { route_id, upstream_id, upstream_url,
               upstream_protocol: "2025-11-25",
               credential_ref, credential_scope_id,   # scope id server-assigned
-              limits? } ],
+              allow_private_destination?, limits? } ],
   principals: [ { principal_id, actor_kind?, credential_owner_id?,
                   verifiers: [ {key_id, verifier, not_after?} ],
                   routes: [route_id] } ]
@@ -286,7 +286,9 @@ GET /v1/proxies/{id}/config                                   (proxy identity ==
 ```
 
 Error bodies use the README structure `{error:{code,message,...}}` with fixed messages. 409 is never auto-retried by manager.
-`upstream_url` is validated at PUT and again at apply against the SSRF/private-network policy (PX-014), and private destinations need an explicit management flag.
+The server validates `upstream_url` on PUT, and the proxy validates the destination when applying the route (PX-014). Anyone authorized to PUT the config may set the route's optional boolean `allow_private_destination`. An omitted value defaults to `false`. Setting `true` allows RFC 1918 private IPv4, RFC 6598 shared IPv4, and the IPv6 range `fc00::/8`. The existing loopback rules still apply. Link-local, unspecified, and cloud metadata literals stay refused for every field value, including `100.100.100.200` and its IPv4-mapped IPv6 form. The entire `fd00::/8` range stays refused because it contains IPv6 metadata addresses used by some clouds. The signed `proxy.config_put` audit record for an accepted config records each route ID and its effective boolean value under `allow_private_destination`.
+
+Config responses omit `allow_private_destination` when it is `false`. This preserves the wire format and hash of configs that use the default. An older proxy rejects a config containing `true` and keeps its last config until the TTL expires. Upgrade the proxy before setting `true`.
 M-6: `upstream_url` **must not carry userinfo or a secret-bearing query or fragment**. PUT rejects (422) a URL with `user:pass@`, a query string, or a fragment. Credentials only travel via `credential_ref`. Read DTOs for manager (`GET /v1/proxies/{id}`) expose only scheme, host and path of an upstream, never a query (PX-009, AC-05).
 **Known limit:** rejecting the query is a rule on the URL string, not a secret detector. A secret embedded in a **path** segment, or in the host (a per-tenant subdomain), still passes and would be visible in read DTOs and config GET. Operators must keep secrets in `credential_ref`. This is stated rather than hidden.
 
