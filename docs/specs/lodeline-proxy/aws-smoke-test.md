@@ -735,7 +735,7 @@ Operator-run with the operator's local harness on `5f151ba5` (main), two EC2 ins
 
 - `status.json` and `lodeline-proxy health` do not show the applied revision, so the harness waited one poll interval after each config PUT.
 - `lodeline-server` has no `version` subcommand; `--version` works.
-- In the packaged phase, the first call after the server returned from the spool-full run got 503 while the spool state still read `Full`. The same step in the B run got 202. This is one observation, not investigated.
+- In the packaged phase, the first call after the server returned from the spool-full run got 503 while the spool state read `Full`. The same step in the B run got 202. This is one observation, not investigated.
 - The sequential latency check in the packaged phase is not reported: the proxied figure was much higher than in §19.4 and was not explained, so this run makes no performance statement.
 
 ### 20.3 Not covered
