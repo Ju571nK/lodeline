@@ -1464,9 +1464,9 @@ fn jsonrpc_error(
 /// - unparseable tool name: JSON-RPC `-32602`, HTTP 200.
 /// - batch, malformed JSON-RPC, a method-less notification refusal: HTTP 400
 ///   with a JSON-RPC `-32700`/`-32600` error and `"id":null`.
-// OPEN: the batch/malformed shape is not fixed by the contract ("batch 거절의
-// client 응답 형태는 [OPEN]"); this is the JSON-RPC 2.0 Invalid Request shape
-// over HTTP 400.
+// The batch shape is fixed by the contract (owner decision Q10, 2026-11-28):
+// the JSON-RPC 2.0 Invalid Request shape over HTTP 400, null id, no `data`.
+// `batch_refusal_is_a_fixed_invalid_request` pins it.
 fn refusal_response(r: &Refusal) -> Response<RespBody> {
     let bad = StatusCode::BAD_REQUEST;
     match r.kind {

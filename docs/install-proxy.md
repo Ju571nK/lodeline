@@ -24,7 +24,8 @@ assumes a running `lodeline-server` with mutual TLS, set up as in
   Windows or macOS service. The first verification target is Rocky Linux 9. Nothing
   was run on x86_64.
 - **One mode.** `observe` records and relays. There is no policy, no block list and
-  no approval step.
+  no approval step. It fails closed: when the proxy cannot record a call or has no
+  valid config, it refuses the call (section 10).
 - **Numbers are defaults, not promises.** The limits in section 12 are first
   values that nobody has measured under load.
 
@@ -464,9 +465,29 @@ Read this before you rely on a record.
   static credential.
 
 **Observe mode still refuses sometimes**
-- If the audit spool is full, a call is refused with 503 `audit_unavailable` and
+
+Observe mode does not block calls by policy, but it fails closed. The proxy
+refuses a call rather than relay one it cannot record or has no valid config for.
+This is the intended behavior, and no setting turns it off today. There are
+three cases:
+
+- **The audit spool is full.** A call is refused with 503 `audit_unavailable` and
   never reaches the upstream, because a call that cannot be recorded is not made.
-- If the config TTL has run out, every call is a 401.
+  The spool holds 1 GiB by default and a config may only lower that size (section
+  12). To fix it, get the records to the server: check that the server is
+  reachable and accepting events (`health` shows `ingest_stopped: true` when it
+  refuses them), and that the proxy host has free disk. Calls resume once the
+  spool drains.
+- **The config TTL has run out.** The proxy keeps using its last config only for
+  `config_ttl_seconds` (section 5) after the last successful fetch. After that it
+  forwards nothing: every call is a 401 and `health` shows `config_state: Expired`.
+  To fix it, keep the server reachable from the proxy host. Forwarding resumes by
+  itself after the next successful fetch. To ride out longer outages, raise
+  `config_ttl_seconds` on the server (60 to 900).
+- **After a restart.** A restarted proxy forwards nothing until it has fetched a
+  config from the server, even if it had one before it stopped. Calls are a 401
+  until then. Start the server first, or make sure it is reachable when the proxy
+  starts.
 
 **Network and platform**
 - The upstream rules are in section 2.1.

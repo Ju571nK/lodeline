@@ -105,6 +105,10 @@ a1619c89에서 P1 AC 행 AC-02, AC-03과 AC-13(P1 부분)은 위 시험 범위�
 - 현재 버전(0.22.0)에서 AWS를 다시 돌리지 않았다. 이전 실행 칸은 해당 버전의 기록이다.
 - 지원 표의 [OPEN] 행이 남아 있는 동안 AC-15는 pass가 아니다.
 
+### 2026-11-28 이후 (소유자 결정 Q10)
+
+위 표와 판정은 a1619c89에서 실행한 기록이며 다시 실행하지 않았다. 2026-11-28 소유자 결정 Q10([decisions.md](decisions.md))으로 지원 표의 [OPEN] 4행이 닫혔다. 그 계약을 고정하는 시험 3개를 추가했고 86e52851에서 실행해 모두 pass였다: `p/mcp_relay::batch_refusal_is_a_fixed_invalid_request`, `p/mcp_relay::missing_or_legacy_version_header_after_initialize_is_an_empty_400`, `p/lib::invocation_sink::tests::a_version_header_refusal_is_stored_as_protocol_error_not_sent_without_a_reason`. AC-15는 위 AC-15 행의 다른 이유(vendor client 없음 등)로 여전히 partial이다. 지원 표에 undecided 행은 없다.
+
 ## D-04: 첫 배포와 수치 한도 (P1 초기 기본값)
 
 첫 production 검증 대상은 **Rocky Linux 9 단일 proxy 프로세스**로 확정했다(2026-10-10 사용자 결정, [decisions.md](decisions.md) D-04).

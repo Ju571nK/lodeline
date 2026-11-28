@@ -42,7 +42,7 @@ T-01 리뷰(B1, M2–M4, m5) 후속 결정. 독립 리뷰(review-lead, 2026-10-1
 | M3 header 정책 | 요청 방향: downstream `Authorization`, `Cookie`, proxy 인증 헤더 제거, upstream 자격증명은 route에서 주입, `Origin`은 PX-014로 검사하고 미전달. 응답 방향: upstream `WWW-Authenticate`, `Set-Cookie` 제거, upstream 401/403은 고정 proxy 오류로 변환. `Forwarded`/`X-Forwarded-*`/`User-Agent` 정책 명시. proxy가 downstream session id를 발급해 (principal, route, upstream session)에 **1:1**로 묶고, `Last-Event-ID` 재개는 묶인 session 안에서만 허용. 항목별 거부 테스트 | 확정(D-02 계약에 포함). PX-008/009/014, AC-04/08 |
 | M4 cancel 순서 | dispatch 전 관찰한 `notifications/cancelled`는 해당 요청을 **dispatch하지 않음**을 뜻한다. unknown/not_sent/`cancelled_before_dispatch`로 기록하고 client에 응답하지 않는다. 아직 도착하지 않은 id의 cancel 보류는 짧은 한도 후 폐기(PX-013). dispatch 후 cancel은 전달 + cancel_requested, 무응답이면 cancel_no_response | 확정. PX-006/013/015, 2025-11-25 cancellation |
 | tasks capability | upstream initialize 결과에 `capabilities.tasks`가 있으면 route를 unsupported로 표시한다. 런타임에 나타나면 M2와 같이 종료하고 `upstream_capability_unsupported`로 기록한다. capability 제거(bytes 재작성)와 광고 그대로 중계는 하지 않는다. `params.task`가 붙은 tools/call은 2025-11-25 tasks 규칙(capability 미선언 수신자는 task metadata를 무시하고 정상 처리)에 따라 그대로 전달한다. `tasks/*`는 -32601. 지원 route에서 task handle이 오면 그대로 중계·기록하고 route를 degraded/unsupported로 표시 | 확정. PX-004(미지원 기능 광고 금지), D-01 relay-first. P1 capability 표에 표시. 실제 upstream의 tasks 채택 현황은 P1 전 조사 |
-| 2025-06-18 downstream 입력 | (a) client `initialize`가 2025-06-18을 제시하면 그대로 upstream에 전달하고 upstream 응답 revision으로 판단한다(2025-11-25면 정상, 2025-06-18이면 M2 거절). (b) initialize 이후 `MCP-Protocol-Version` 헤더가 협상된 revision(2025-11-25)과 다르면 400으로 거절한다. 2025-06-18 같은 legacy 값은 modern 요청으로 분류하지 않으며, 감사 reason 상수는 [OPEN](contracts/README.md v0.4에 반영됨) | 확정(2026-10-10, M2·relay-first 적용). W4 리뷰 F1 |
+| 2025-06-18 downstream 입력 | (a) client `initialize`가 2025-06-18을 제시하면 그대로 upstream에 전달하고 upstream 응답 revision으로 판단한다(2025-11-25면 정상, 2025-06-18이면 M2 거절). (b) initialize 이후 `MCP-Protocol-Version` 헤더가 협상된 revision(2025-11-25)과 다르면 400으로 거절한다. 2025-06-18 같은 legacy 값은 modern 요청으로 분류하지 않는다. 감사는 `protocol_error`/`not_sent`이고 reason은 저장하지 않는다(2026-11-28 소유자 결정 Q10) | 확정(2026-10-10, M2·relay-first 적용). W4 리뷰 F1 |
 | 런타임 route 거절 응답 | upstream_capability_unsupported·upstream_version_unsupported·upstream_initialize_unreadable 모두 initialize id에 고정 JSON-RPC 오류 하나로 답한다(HTTP 200 application/json, -32603, 고정 메시지, data 없음, echo 없음). 구체 reason은 감사·route health에만 둔다. `supported` data가 붙은 -32602는 쓰지 않는다 | 확정(T-02-fix-4 재확인 권고). contracts/README.md v0.4에 반영됨 |
 | 취소 전 dispatch의 HTTP 종료 | 열린 POST에 200 text/event-stream을 이벤트 없이 닫는다(contract v0.3). P1에서 Claude·Codex가 이를 재시도하는지 측정하고, 재시도하면 HTTP 응답 없이 연결을 닫는 방식으로 바꾼다(PX-015) | 확정(P1 검증 항목) |
 | m5 버전 헤더 누락 | initialize 이후 `MCP-Protocol-Version` 헤더가 없는 요청은 400으로 거절한다. 스펙 요구가 아니라 의도적 엄격성 선택이다(2025-11-25는 client에 헤더 전송을 요구하지만 서버는 initialize 협상 값으로 version을 알 수 있다). 결과: rmcp 0.16 client는 P1 미지원 | 확정. 측정한 Claude 2.1.296·codex 0.162.0은 initialize 이후 모든 요청에 헤더를 보냈다 |
@@ -83,7 +83,7 @@ checker PASS(2026-10-10 orchestrator 재실행). 계약 종료는 구현·실기
 | 프록시 경유 B1 재측정, 400 뒤 Claude 대체 동작 | 실측 | T-12 / T-16 |
 | codex 인증 run·cancel·tool call, Linux probe | 실측 | T-12 / T-16 |
 | listChanged 기능 저하, cancel 후 HTTP 종료에 대한 client 재시도 | 실측 | T-12 |
-| 헤더 누락·legacy 값 400의 감사 reason 상수, batch 거절 client 응답 형태, -32603 고정 메시지 | 세부 | T-12 |
+| 헤더 누락·legacy 값 400의 감사 reason 상수, batch 거절 client 응답 형태, -32603 고정 메시지 (앞의 둘은 2026-11-28 소유자 결정 Q10으로 닫힘) | 세부 | T-12 |
 | proxy SAN 정확한 형태, CA 키 위치, lifecycle 경로 이름, disabled/retired HTTP status, `proxy_unknown` 메시지 문구 | 세부 | T-11 (S1/S2) |
 | 새 고정 오류 코드 확정(`invocation_owner_conflict`, `semantic_invalid`, `invalid_cursor`, `invalid_filter`), SV-1/SV-3/SV-5, gap 목록·status·inventory endpoint 이름 | 세부 | T-11 (S3–S5) |
 | 비밀·origin 변경 적용 방식(reload/restart), rate limit, TTL 수치 | 세부 | T-10 / T-11 |
@@ -236,3 +236,23 @@ Linux는 writeback 오류를 한 번만 보고하고 page를 clean으로 표시�
 - 남는 한계: 재시작의 WAL 복구와 첫 checkpoint는 WAL을 page cache로 읽는다. 실패한 page가 cache에 남아 있으면 디스크에 실제로 있었는지 모른 채
   DB로 복사된다. 재시작 전 전원 손실이나 OS crash는 그 구간을 잃는다. 그 구간의 start는 Ok를 받지 않았으므로 전달된 호출은 없다. 완전히 안전하지는
   않으며, 운영자는 재시작 전에 디스크를 확인해야 한다.
+
+## 소유자 결정 (2026-11-28)
+
+네 항목은 제안이 아니라 소유자가 정한 결정이다. 이 절은 결정만 기록한다. 구현 PR은 따로 낸다.
+
+| # | 항목 | 결정 |
+|---|---|---|
+| Q1 | 사설망 upstream | route는 route별 boolean `allow_private_destination`(기본 false)이 명시적으로 true일 때만 사설망 upstream에 닿을 수 있다. 값은 proxy config PUT으로 정하고 감사에 기록한다. loopback, link-local, 클라우드 metadata 주소는 이 값이 true여도 계속 거절한다. 구현은 별도 PR에서 다른 담당자가 한다. 구현 전까지 원격 config의 이 값은 항상 false다([execution.md](execution.md) "현재 상태") |
+| Q3 | observe 모드의 장애 처리 | observe 모드는 fail closed를 유지한다. audit spool이 가득 차면 503, config TTL이 지나면 전달하지 않고, 재시작 뒤에는 config를 새로 받기 전까지 아무것도 전달하지 않는다. 운영자 안내는 [install-proxy.md](../../install-proxy.md) "Observe mode still refuses sometimes"에 적었다 |
+| Q10 | 프로토콜 거절 응답 | 지금의 동작이 계약이다. `initialize` 뒤 `MCP-Protocol-Version` 헤더 누락 또는 알려진 구버전 값은 HTTP 400과 빈 body이고 upstream 호출은 0회이며 감사는 `protocol_error`/`not_sent`에 저장되는 reason이 없다. JSON-RPC batch는 HTTP 400과 JSON-RPC `-32600` "Invalid Request", id null, `data` 없음이고 upstream 호출은 0회다. 새 reason kind는 만들지 않는다. 시험: `crates/lodeline-proxy/tests/mcp_relay.rs`의 `batch_refusal_is_a_fixed_invalid_request`, `missing_or_legacy_version_header_after_initialize_is_an_empty_400`, `crates/lodeline-proxy/src/invocation_sink.rs`의 `a_version_header_refusal_is_stored_as_protocol_error_not_sent_without_a_reason` |
+| 방향 | proxy의 단계 | 먼저 모두 관찰하고, 데이터를 믿을 수 있게 된 뒤 규칙 하나씩 enforce한다. 첫 proxy 릴리스는 observe 전용이다. P2의 enforce는 규칙마다 opt-in이고 기본은 꺼짐이며 운영자가 쓴 규칙만 쓴다. 어떤 규칙이든 enforce 전에 would-deny 기록을 먼저 남긴다(`lodeline-hook --enforce`와 같은 틀) |
+
+방향의 계획 범위. 새 필드나 reason kind가 필요한 항목은 각각 소유자 승인을 따로 받는다.
+
+1. 먼저 metadata만 쓰는 규칙: server·tool allow와 deny, require approval, tool 정의 hash 고정과 변경 시 재승인, URL 인자의 host·IP 검사, rate limit.
+2. 다음으로 인자 안의 형식이 뚜렷한 비밀은 차단 대상이 될 수 있다. entropy만으로 맞는 것은 기록만 한다. 저장은 가린 값만 한다.
+3. tool 결과 안의 주입된 지시처럼 보이는 문장과 의심스러운 tool 설명은 기록하고 표시만 한다. 문서는 이것을 차단한다고 약속하지 않는다.
+4. observe 모드의 opt-in fail-open(Q3의 B 선택지)은 P2와 함께 계획하며 첫 릴리스에 없다.
+
+Q9(뒤 항목의 순서)는 정하지 않았다. 순서를 기록하지 않는다.

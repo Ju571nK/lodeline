@@ -47,6 +47,16 @@ manager 코드는 기존 manager 저장소에서 별도 PR로 작성하되 같�
 unsupported/approval-unavailable로 기록한다. allow로 대체하지 않는다.
 기존 assess API가 호출 정책을 충분히 표현한다고 가정하지 말고 별도 범위를 검증한다.
 
+소유자 결정(2026-11-28, [decisions.md](decisions.md) "소유자 결정"): 방향은 먼저 모두 관찰하고 데이터를 믿을 수 있게 된 뒤 규칙 하나씩 enforce하는 것이다.
+첫 proxy 릴리스는 observe 전용이고 위 P1 범위와 인수 기준은 바뀌지 않는다. P2의 enforce는 규칙마다 opt-in이고 기본은 꺼짐이며 운영자가 쓴 규칙만 쓴다.
+어떤 규칙이든 enforce 전에 would-deny 기록을 먼저 남긴다(`lodeline-hook --enforce`와 같은 틀). 계획 범위는 아래와 같고 새 필드나 reason kind가 필요한 항목은 각각 소유자 승인을 따로 받는다.
+
+- 먼저 metadata만 쓰는 규칙: server·tool allow와 deny, require approval, tool 정의 hash 고정과 변경 시 재승인, URL 인자의 host·IP 검사, rate limit.
+- 다음으로 인자 안의 형식이 뚜렷한 비밀은 차단 대상이 될 수 있다. entropy만으로 맞는 것은 기록만 하고, 저장은 가린 값만 한다.
+- tool 결과 안의 주입된 지시처럼 보이는 문장과 의심스러운 tool 설명은 기록하고 표시만 한다. 차단한다고 약속하지 않는다.
+- observe 모드의 opt-in fail-open(Q3의 B 선택지)은 P2와 함께 계획하며 첫 릴리스에 없다. 그때까지 observe는 fail closed다.
+- 뒤 항목의 순서(Q9)는 정하지 않았다.
+
 ## P3 — 인간 승인과 확장
 
 - [ ] T-30: D-06/07 확정, 승인 지문·상태 전이·RBAC·step-up 계약.
