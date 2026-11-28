@@ -21,7 +21,7 @@
 
 문서와 시험만 바꿨다. 제품 동작, reason, 필드, wire는 바꾸지 않았다(`server.rs`는 주석만). 결정은 [decisions.md "소유자 결정"](decisions.md)에 적었다: Q1(사설망 upstream은 route별 `allow_private_destination`, 구현은 다른 PR), Q3(observe는 fail closed 유지), Q10(지금의 거절 응답이 계약), proxy 방향(먼저 관찰, 규칙 단위로 opt-in enforce, would-deny 먼저, 첫 릴리스는 observe 전용). Q9는 정하지 않았다.
 
-- Q10 닫기: [contracts/README.md](contracts/README.md)와 [support-matrix.md](support-matrix.md)의 [OPEN] 네 곳(batch 응답 형태, 헤더 누락·legacy의 reason 상수)을 확정 계약과 시험 인용으로 바꿨다. [validation.md](validation.md)의 AC-15 행도 맞췄다. AC-15는 여전히 partial이다.
+- Q10 닫기: [contracts/README.md](contracts/README.md)와 [support-matrix.md](support-matrix.md)의 [OPEN] 네 곳(batch 응답 형태, 헤더 누락·legacy의 reason 상수)을 확정 계약과 시험 인용으로 바꿨다. [validation.md](validation.md)의 a1619c89 기록 표는 그대로 두고 그 뒤에 Q10 문단을 덧붙였다. AC-15는 여전히 partial이다.
 - 시험(기존 동작을 고정하므로 처음부터 통과): `mcp_relay.rs`의 `batch_refusal_is_a_fixed_invalid_request`(상태, content-type, 본문 전체 동등, upstream 0회, `Batch` 관찰), `missing_or_legacy_version_header_after_initialize_is_an_empty_400`(누락과 구버전 값, 빈 400, upstream 0회, `VersionHeader` 관찰), `invocation_sink.rs`의 `a_version_header_refusal_is_stored_as_protocol_error_not_sent_without_a_reason`(저장된 기록, reason 없음). `mcp_relay.rs`의 관찰 단위는 저장 기록을 보여 주지 않으므로 저장 기록은 sink 단위 시험이 맡는다.
 - 각 단언이 실제로 막는지 코드를 일시적으로 바꿔 확인했다(커밋하지 않음): batch의 상태·message·code·본문·`data`, 헤더 거절의 본문·상태, 누락·legacy 거절 해제, sink의 reason 추가·outcome 변경이 모두 시험을 실패시켰다.
 - Q3: [install-proxy.md](../../install-proxy.md) section 10에 observe 모드가 호출을 거절하는 세 경우(spool 가득, TTL 만료, 재시작 뒤)와 운영자 조치를 적었다. spec에 R-10 행은 없다.
