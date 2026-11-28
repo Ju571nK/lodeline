@@ -686,10 +686,13 @@ async fn private_destination_opt_in_preserves_special_address_refusals() {
     let mut body = spec("pxa", "tok-a");
     body["routes"][0]["allow_private_destination"] = true.into();
     let metadata = std::net::Ipv4Addr::new(169, 254, 169, 254);
+    let alibaba_metadata = std::net::Ipv4Addr::new(100, 100, 100, 200);
     let metadata_v6 = std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
     for host in [
         metadata.to_string(),
         format!("[{}]", metadata.to_ipv6_mapped()),
+        alibaba_metadata.to_string(),
+        format!("[{}]", alibaba_metadata.to_ipv6_mapped()),
         format!("[{metadata_v6}]"),
         "[fe80::1]".into(),
         "0.0.0.0".into(),
