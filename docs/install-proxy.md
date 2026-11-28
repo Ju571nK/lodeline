@@ -579,12 +579,18 @@ user scope or `.mcp.json` for a project:
 An entry with a `url` and no `type` is read as a stdio server and fails. Run
 `/mcp` in the client to see the connection.
 
+`~/.claude.json` is the home-directory file. Setting `CLAUDE_CONFIG_DIR` moves
+Claude Code's configuration to that directory (<https://code.claude.com/docs/en/settings>),
+so look there when the file is not in your home directory.
+
 ### 11.2 Codex
 
 Documented at <https://learn.chatgpt.com/docs/extend/mcp?surface=cli>. Codex takes
 `url` with `bearer_token_env_var` (the variable's name, not its value) or
 `http_headers`. The settings live in `~/.codex/config.toml`, or in
-`.codex/config.toml` of a trusted project.
+`.codex/config.toml` of a trusted project. Setting `CODEX_HOME` moves the
+home directory, `~/.codex` by default, so the file is then
+`$CODEX_HOME/config.toml` (<https://developers.openai.com/codex/config-advanced>).
 
 ```toml
 [mcp_servers.lodeline-proxy]
@@ -609,9 +615,18 @@ Status: **documented only**; this snippet was not run, and no Cursor session was
 started against a proxy. Sources, read 2026-11-26:
 <https://cursor.com/docs/context/mcp> and <https://cursor.com/docs/cli/mcp>. Cursor
 takes `url` with `headers`, in `~/.cursor/mcp.json` or `.cursor/mcp.json`, and expands
-`${env:NAME}`. The Cursor CLI has MCP commands (`agent mcp list`, `list-tools`,
-`login`, `enable`, `disable`) but no command that adds a server, so you write the file
-by hand.
+`${env:NAME}`. The Cursor CLI also finds configuration in parent directories of the
+folder it runs in, so a `.cursor/mcp.json` above your project applies too. The Cursor
+CLI has MCP commands (`mcp list`, `list-tools`, `login`, `enable`, `disable`) but no
+command that adds a server, so you write the file by hand. The docs call the command
+`agent`; the command line agent installed here is `cursor-agent`, so use whichever
+name your install has.
+
+`mcp enable <name>` adds a server to the local approved list. Run
+`cursor-agent mcp enable lodeline-proxy` before a non-interactive `-p` run, which cannot
+ask for approval. Tool permission rules for the CLI live in `~/.cursor/cli-config.json`
+and in `.cursor/cli.json` of a project
+(<https://cursor.com/docs/cli/reference/permissions>).
 
 ```json
 {
