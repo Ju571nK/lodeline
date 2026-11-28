@@ -83,6 +83,10 @@ pub enum RulePackScope {
     Project,
 }
 
+/// Pack format versions this build can run.
+pub const MIN_PACK_VERSION: u32 = 1;
+pub const MAX_PACK_VERSION: u32 = 2;
+
 /// Phase 3b.7 — declarative rule pack. See
 /// docs/superpowers/specs/2026-05-19-phase-3b7-declarative-rule-pack-architecture-design.html
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -350,6 +354,8 @@ pub enum PolicyError {
     },
     #[error("target {id}: {detail}")]
     TargetGlob { id: String, detail: String },
+    #[error("rule pack {id}: {detail}")]
+    RulePackInput { id: String, detail: String },
     #[error("hook_silence.tick_secs must be above 0 when an agent is enabled")]
     HookSilenceTick,
     #[error("policy is not UTF-8")]
@@ -399,7 +405,24 @@ pub fn parse_signed(bytes: &[u8]) -> Result<PolicyDocument, PolicyError> {
     if !silence.enabled_agents.is_empty() && silence.tick_secs == 0 {
         return Err(PolicyError::HookSilenceTick);
     }
+    let mut pack_ids = HashSet::new();
     for pack in &doc.rule_packs {
+        let refuse = |detail: String| PolicyError::RulePackInput {
+            id: pack.id.clone(),
+            detail,
+        };
+        if !pack_ids.insert(pack.id.as_str()) {
+            return Err(refuse("id is used by more than one rule pack".into()));
+        }
+        if !(MIN_PACK_VERSION..=MAX_PACK_VERSION).contains(&pack.pack_version) {
+            return Err(refuse(format!(
+                "pack_version {} is outside the supported range {MIN_PACK_VERSION} to {MAX_PACK_VERSION}",
+                pack.pack_version
+            )));
+        }
+        for path in &pack.watched_paths {
+            check_path_tokens(path).map_err(|d| refuse(format!("watched path {path}: {d}")))?;
+        }
         for rule in &pack.rules {
             let conditions = rule.when.iter().map(|c| &c.matcher);
             for matcher in std::iter::once(&rule.matcher).chain(conditions) {
@@ -420,13 +443,55 @@ pub fn parse_signed(bytes: &[u8]) -> Result<PolicyDocument, PolicyError> {
         .filter(|t| !t.disabled && t.runs_on(current))
     {
         for path in &t.paths {
-            glob::CompiledGlob::new(path).map_err(|e| PolicyError::TargetGlob {
+            let refuse = |detail: String| PolicyError::TargetGlob {
                 id: t.id.clone(),
-                detail: e.to_string(),
-            })?;
+                detail,
+            };
+            check_path_tokens(path).map_err(&refuse)?;
+            if brace_group_spans_folders(path) {
+                return Err(refuse(format!(
+                    "path {path} has a brace group that spans folders"
+                )));
+            }
+            glob::CompiledGlob::new(path).map_err(|e| refuse(e.to_string()))?;
         }
     }
     Ok(doc)
+}
+
+/// Refuse a path whose `~`, `$VAR` or `%VAR%` token is malformed, which the agent
+/// would otherwise drop without a word. A variable that is merely undefined here
+/// depends on the host, so it passes.
+fn check_path_tokens(path: &str) -> Result<(), String> {
+    struct AnyVar;
+    impl expand::VarLookup for AnyVar {
+        fn lookup(&self, _: &str) -> Option<String> {
+            Some("x".into())
+        }
+        fn home(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/home/x"))
+        }
+    }
+    match expand::expand(path, &AnyVar) {
+        Err(e @ expand::ExpandError::Malformed(_)) => Err(format!("path {path}: {e}")),
+        _ => Ok(()),
+    }
+}
+
+/// True when a `{...}` group holds a path separator. The watcher splits a path
+/// at separators before it matches each part, so such a group never matches.
+fn brace_group_spans_folders(path: &str) -> bool {
+    let mut depth = 0usize;
+    for c in path.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            '/' if depth > 0 => return true,
+            '\\' if depth > 0 && cfg!(windows) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Reject duplicate ids in a deny-rule set. DenyEvaluator is first-match-wins, so
