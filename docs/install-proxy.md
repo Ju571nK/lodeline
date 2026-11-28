@@ -718,6 +718,7 @@ By the status the client sees:
 | 503 `session_unavailable` | the proxy could not make a session id |
 | 504 `upstream_timeout` | no connection or response headers in time (section 12) |
 | 408 `request_timeout` | the client sent its request body too slowly |
+| Proxied calls take about 40 ms more than direct calls on Linux | the upstream sends a response in more than one write without `TCP_NODELAY`, and the proxy reuses the idle connection, so the second write waits for a delayed ACK. Set `TCP_NODELAY` on the upstream; for Python `http.server`, set `disable_nagle_algorithm = True` on the handler. Node `http` servers have set it by default since Node 18. |
 
 By `health`:
 

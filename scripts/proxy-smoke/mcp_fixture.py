@@ -134,6 +134,8 @@ class FixtureServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # Headers and body go out in two sends; on a reused connection on Linux the second waits for a delayed ACK (about 40 ms).
+    disable_nagle_algorithm = True
     server_version = "lodeline-smoke-fixture"
     sys_version = ""
 

@@ -737,6 +737,7 @@ Operator-run with the operator's local harness on `5f151ba5` (main), two EC2 ins
 - `lodeline-server` has no `version` subcommand; `--version` works.
 - In the packaged phase, the first call after the server returned from the spool-full run got 503 while the spool state read `Full`. The same step in the B run got 202. This is one observation, not investigated.
 - The sequential latency check in the packaged phase is not reported: the proxied figure was much higher than in §19.4 and was not explained, so this run makes no performance statement.
+- 2026-11-28 note: the extra latency in that figure came from the fixture, which sent headers and body in two writes without `TCP_NODELAY`; see the Troubleshooting entry in the install guide. The run record above is unchanged.
 
 ### 20.3 Not covered
 

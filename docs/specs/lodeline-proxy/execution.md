@@ -1687,3 +1687,7 @@ The install guide section 2.1 and the AWS smoke runbook sections 1.1 and 16 now 
 ## 2026-11-28 Record AWS run J in the proxy spec docs (PX-014, AC-08)
 
 The AWS smoke runbook gains section 20, the record of run J on `5f151ba5`: per-route private destinations, config PUT by the management CLI, TTL expiry, the fail-closed cases, the JSON-RPC batch response, the fixture variants and the packaged proxy under SELinux Enforcing. It states what the run did not cover, mainly an upstream 200 through a private route. validation.md gets one dated paragraph that names the AC rows run J supports and says the results tables above it were not rerun. Docs only. No code, reason, field or wire change.
+
+## 2026-11-28 Smoke fixture sends without Nagle, and a Troubleshooting entry (PX-014)
+
+The smoke fixture handler sets `disable_nagle_algorithm = True`. On Linux the proxied smoke calls took about 50 ms each with the old fixture and 3 to 4 ms with the setting, against about 1 ms direct; the stall was the fixture's second write waiting for the proxy's delayed ACK on a reused upstream connection. The install guide's Troubleshooting table gains a row for "proxied calls take about 40 ms more than direct calls". The AWS smoke runbook section 20.2 gains one dated note. No proxy code change. The older P0 fixture under `scripts/proxy-p0` is not changed: it is a pinned probe of the P0 spike, not the smoke upstream.
