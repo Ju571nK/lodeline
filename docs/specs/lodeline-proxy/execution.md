@@ -1683,3 +1683,7 @@ The real server and proxy test sends an opted-in private literal through config 
 ## 2026-11-28 Describe per-route private destinations in the guide and smoke runbook (PX-014, AC-08)
 
 The install guide section 2.1 and the AWS smoke runbook sections 1.1 and 16 now describe the shipped `allow_private_destination` route field: default false, `true` allows RFC 1918, RFC 6598 and `fc00::/8` for HTTPS, and loopback over HTTPS, link-local, `fd00::/8` and cloud metadata stay refused for both values. The guide's config section names the field and the upgrade-the-proxy-first rule. Docs only. No code, reason, field or wire change.
+
+## 2026-11-28 Record AWS run J in the proxy spec docs (PX-014, AC-08)
+
+The AWS smoke runbook gains section 20, the record of run J on `5f151ba5`: per-route private destinations, config PUT by the management CLI, TTL expiry, the fail-closed cases, the JSON-RPC batch response, the fixture variants and the packaged proxy under SELinux Enforcing. It states what the run did not cover, mainly an upstream 200 through a private route. validation.md gets one dated paragraph that names the AC rows run J supports and says the results tables above it were not rerun. Docs only. No code, reason, field or wire change.

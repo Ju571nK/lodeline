@@ -172,6 +172,8 @@ p95 ≤ 20 ms, 종료 후 연결/메모리 증가가 누적되지 않을 것. �
 D-04는 OS(Rocky Linux 9)와 limits를 P1 초기 기본값으로 채택했다(2026-10-10). 위 성능 목표는 미측정이다. P1 출시에는 위 측정 결과, 실제 vendor client 1종 이상,
 proxy/server/manager E2E, 독립 리뷰, AC 전체 결과가 추가로 필요하다.
 
+2026-11-28 AWS run J(`5f151ba5`, 0.23.0, t4g.small 두 대, Amazon Linux 2023 aarch64)는 [aws-smoke-test.md 20절](aws-smoke-test.md)에 기록했다. 위 결과 표와 판정은 이 run으로 다시 돌리지 않았고 그대로 둔다. run J가 뒷받침하는 AC 행은 다음이다. AC-08: 경로별 `allow_private_destination`(플래그 없음은 사설 이름에서 `destination_refused`와 대상 연결 0건, `true`는 연결 단계까지 도달, HTTPS loopback은 두 값 모두 거절, listener 접속 0건). AC-12(P1 부분): 설정 TTL 만료 후 401, 서버 중단 중 proxy 재시작의 fail-closed, spool 가득 참에서 32회 200과 48회 503. AC-13(P1 부분): 관리 CLI의 config PUT에 대한 감사 기록(`ok`, `revision_conflict`, `semantic_invalid`). 조회자 거절은 이 run에서 시험하지 않았다. AC-14: 패키지 rpm 설치 후 unit `disabled`·`inactive`, live 설정 없음, 8480 listener 없음(SELinux Enforcing). 사설 경로의 upstream 200, 실제 vendor client, x86_64, 성능 목표는 이 run으로 확인하지 않았다.
+
 ## 성능 측정 도구 (2026-11-07)
 
 위 "별도 준비가 필요한" synthetic load server와 driver는 `crates/lodeline-proxy-loadgen`이다. 사용법, 출력 형식,
