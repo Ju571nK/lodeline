@@ -42,18 +42,16 @@ P1 release readiness, policy enforcement, manager UI completeness, or support fo
 | Leg | Who checks the destination | Private address allowed? |
 |---|---|---|
 | B → A `control_plane_url` (config GET, events, status, metadata) | Bootstrap only requires `https://` (`bootstrap.rs` `check_control_plane_url`). mTLS both ways. | **Yes.** Use A's private IP. |
-| B → upstream MCP (`routes[].upstream_url`) | `dest.rs` checks every resolved address per request. `config_sync::route_specs` always sets `allow_private_destination: false` because the config DTO has no such field yet. | **No.** `http://` must resolve to loopback; `https://` must resolve to a public address. |
+| B → upstream MCP (`routes[].upstream_url`) | `dest.rs` checks every resolved address per request, using the route's `allow_private_destination` (default `false`). | **Only when the route sets `allow_private_destination: true`.** Then `https://` may resolve to RFC 1918, RFC 6598 or `fc00::/8` addresses. `http://` must resolve to loopback. HTTPS loopback, link-local, `fd00::/8` and cloud metadata stay refused for every value. |
 
-Consequences, which this runbook does not try to work around:
+Consequences:
 
-- A route such as `http://<A_PRIVATE_IP>:18080/mcp` or `https://<A_PRIVATE_DNS>/mcp` is refused. Do not disable or
-  patch destination protection for the test.
+- Without the field, a route such as a private-IP `http://` URL or a private-DNS `https://` URL is refused. A private `https://` route needs `allow_private_destination: true`. Plain `http://` to a private address stays refused for every value.
 - Inside a VPC, an EC2 **public** DNS name resolves to the instance's **private** IPv4 address
   ([AWS: DNS hostnames for EC2 instances](https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html#vpc-dns-hostnames)),
-  so `https://ec2-…compute.amazonaws.com/…` from B is refused too.
-- **Open P1 requirement:** a direct private-VPC MCP route needs the explicit management flag that
-  [control-plane.md §6.1](contracts/control-plane.md) requires ("private destinations need an explicit management flag").
-  It is not implemented. Record any attempt as "refused by design", not as a bug in this smoke test.
+  so `https://ec2-…compute.amazonaws.com/…` from B is refused unless the route sets the field.
+- The per-route field is the explicit management setting that
+  [control-plane.md §6.1](contracts/control-plane.md) requires. Upgrade the proxy before you set it to `true`: a proxy that predates the field rejects the config. This runbook's D1 and D2 paths do not need it, and its earlier run records predate it.
 
 ### 1.2 Supported data-plane options
 
@@ -544,7 +542,7 @@ rehearsal was attempted during recovery because the production tree remains unde
 
 ## 16. Known limits and open items
 
-- Direct private-VPC MCP destinations: not supported (management flag OPEN, §1.1). Only D1/D2 are valid test paths.
+- Direct private-VPC MCP destinations need `allow_private_destination: true` on the route (§1.1). This runbook has not run that path; D1/D2 are the paths it verifies.
 - Grace expiry ends relay work before audit cleanup. If final loss accounting cannot be handed over or gap persistence fails,
   shutdown must report an error and retain `Stopping` rather than claim `Stopped`; investigate storage before restarting.
 - D1 does not exercise `dest.rs` on a non-loopback address. D2 does, but is unverified here.

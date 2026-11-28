@@ -55,15 +55,26 @@ assumes a running `lodeline-server` with mutual TLS, set up as in
 
 ### 2.1 What an upstream may be
 
-A route points at one upstream URL. Two rules apply, and the first example in
+A route points at one upstream URL. These rules apply, and the first example in
 this guide meets the first one:
 
 - An `http://` upstream is allowed only for a loopback host
   (`http://127.0.0.1:18080/mcp`). Every address the name resolves to must be loopback.
-- An `https://` upstream is refused when its name resolves to a loopback or a
-  private address. In practice the proxy refuses private-network upstreams: an
-  MCP server inside your own network, even over TLS, is not reachable. The
-  setting that would allow it is fixed to off.
+- An `https://` upstream is allowed when every address its name resolves to is public.
+- An `https://` upstream that resolves to a private address is refused unless
+  the route sets `"allow_private_destination": true`. The field is a boolean on the
+  route in `config-put.json` (section 7) and defaults to `false`. When it is `true`,
+  the route may reach RFC 1918 private IPv4 addresses, RFC 6598 shared IPv4
+  addresses and the IPv6 range `fc00::/8`.
+- Some addresses are refused for every value of the field: loopback over `https://`,
+  link-local, `fd00::/8` (which holds IPv6 metadata addresses) and cloud metadata
+  addresses. The server accepts an
+  `https://` loopback upstream in a config, and the proxy then refuses it before it
+  connects.
+
+Anyone who may PUT the config may set the field. Upgrade the proxy before you set it
+to `true`: a proxy that predates the field rejects a config that sets `true` and keeps
+its last config until the TTL expires.
 
 The proxy checks the resolved addresses on every request. A refusal is a 502 with
 `destination_refused`.
@@ -348,6 +359,8 @@ verifier from section 6.1 in place of the placeholder:
 
 This first example uses the loopback case of section 2.1. Its origin must be listed
 in `upstream_origins` in section 6, which also covers a public `https://` upstream.
+For an `https://` upstream on a private address, add `"allow_private_destination": true`
+to that route, after the proxy runs a version that knows the field (section 2.1).
 
 ```sh
 lodeline-server proxy config-put "${CONN[@]}" --token-file mgmt-config.token \
@@ -683,7 +696,7 @@ By the status the client sees:
 | 404, empty body | a session the caller may not use, or one that ended |
 | 405 | GET, or any method other than POST and DELETE |
 | 429 `too_many_requests` or `too_many_sessions` | a concurrency or session limit |
-| 502 `destination_refused` | the upstream resolves to an address the proxy refuses (section 2.1) |
+| 502 `destination_refused` | the upstream resolves to an address the proxy refuses, such as a private address on a route without `allow_private_destination` (section 2.1) |
 | 502 `upstream_unavailable`, `upstream_unresolved` | the upstream is down, or its name does not resolve |
 | 502 `upstream_rejected` | the upstream answered 401 or 403 to the stored credential, and the request had no JSON-RPC `id` (a notification) or was a session DELETE |
 | HTTP 200 with JSON-RPC error `-32603` | the same upstream 401 or 403 on a request with an `id`: look here when the upstream secret is wrong |

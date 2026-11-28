@@ -1679,3 +1679,7 @@ Config PUT accepts `allow_private_destination` per route and records the effecti
 Config sync carries `allow_private_destination` into the route table. The proxy uses it to allow private HTTPS destinations on opted-in routes. HTTPS loopback, link-local, unspecified and cloud metadata stay refused for both field values. Plain HTTP loopback stays allowed. HTTPS loopback PUT acceptance remains part of the server's tested contract.
 
 The real server and proxy test sends an opted-in private literal through config PUT, waits for the proxy to apply the route, and checks that the request reaches the connection step. The relay test covers the two flag values with a private DNS answer.
+
+## 2026-11-28 Describe per-route private destinations in the guide and smoke runbook (PX-014, AC-08)
+
+The install guide section 2.1 and the AWS smoke runbook sections 1.1 and 16 now describe the shipped `allow_private_destination` route field: default false, `true` allows RFC 1918, RFC 6598 and `fc00::/8` for HTTPS, and loopback over HTTPS, link-local, `fd00::/8` and cloud metadata stay refused for both values. The guide's config section names the field and the upgrade-the-proxy-first rule. Docs only. No code, reason, field or wire change.
