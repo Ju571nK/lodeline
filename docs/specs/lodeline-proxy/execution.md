@@ -1659,3 +1659,7 @@ orchestrator가 작업별로 하위 모델을 직접 지정한다(판단 작업 
 
 복구 중 파일을 덮거나 작업을 성공으로 재분류하지 않았다. P0 산출물은 `97db268`로
 main에 커밋·push되었다. 외부 배포·manager 변경·사용자 MCP 설정 변경은 하지 않았다.
+
+## 2026-11-28 Per-route private destinations (PX-014, AC-08)
+
+Config PUT accepts `allow_private_destination` per route and records the effective values in the management audit. The config DTO omits false values to preserve existing hashes. A follow-up will apply the field in the proxy and verify forwarding end to end.

@@ -19,11 +19,13 @@
 //! # `schema_version` and upgrade order
 //!
 //! Both shapes carry `schema_version` (the constant `1`; any other value fails
-//! the parse). A change to the shape needs a new version. **Upgrade the proxy
+//! the parse). An incompatible shape change needs a new version. **Upgrade the proxy
 //! first, then the server**: a proxy that does not know version N+1 rejects the
 //! document (`last_update_error = validation_failed`) and keeps its previous
 //! config, so a server that emits N+1 before the proxies understand it causes a
 //! TTL expiry outage (fail closed). The reverse order is safe.
+//! Routes omit `allow_private_destination` when false. Upgrade proxies before
+//! setting it true so they can parse the field.
 //!
 //! # `config_hash`
 //!
@@ -60,7 +62,7 @@ use sha2::{Digest, Sha256};
 use crate::canonical::canonical_json;
 use crate::error::ValidationError;
 use crate::helpers::check_len;
-use crate::origin::{normalize_origin, parse_upstream_url};
+use crate::origin::{normalize_origin, parse_upstream_url_with_policy};
 use crate::scalar::{ConfigHash, Id, NonNegativeI64, PositiveI64, SchemaVersion, Timestamp};
 use crate::Validate;
 
@@ -97,6 +99,10 @@ pub const HASH_EXCLUDED_FIELDS: [&str; 3] = ["issued_at", "expires_at", "ttl_sec
 
 fn is_hex64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -268,6 +274,9 @@ wire_struct! {
         /// https, or http to a loopback host; no userinfo, query or fragment.
         pub upstream_url: String,
         pub upstream_protocol: UpstreamProtocol,
+        /// Allows private destinations for this route. Defaults to false.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub allow_private_destination: bool,
         /// Name resolved on the proxy host (control-plane §5.5). Never a secret.
         pub credential_ref: Id,
         #[serde(default, deserialize_with = "crate::helpers::present", skip_serializing_if = "Option::is_none")]
@@ -282,6 +291,8 @@ wire_struct! {
         pub upstream_id: Id,
         pub upstream_url: String,
         pub upstream_protocol: UpstreamProtocol,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub allow_private_destination: bool,
         pub credential_ref: Id,
         /// Server-assigned ([`credential_scope_id_for`]); opaque to everyone else.
         pub credential_scope_id: Id,
@@ -292,9 +303,11 @@ wire_struct! {
 
 fn validate_route_fields(
     upstream_url: &str,
+    allow_private_destination: bool,
     limits: Option<&ConfigLimits>,
 ) -> Result<(), ValidationError> {
-    parse_upstream_url(upstream_url).map_err(ValidationError::new)?;
+    parse_upstream_url_with_policy(upstream_url, allow_private_destination)
+        .map_err(ValidationError::new)?;
     if let Some(l) = limits {
         l.validate()?;
     }
@@ -303,13 +316,21 @@ fn validate_route_fields(
 
 impl Validate for RouteSpec {
     fn validate(&self) -> Result<(), ValidationError> {
-        validate_route_fields(&self.upstream_url, self.limits.as_ref())
+        validate_route_fields(
+            &self.upstream_url,
+            self.allow_private_destination,
+            self.limits.as_ref(),
+        )
     }
 }
 
 impl Validate for ConfigRoute {
     fn validate(&self) -> Result<(), ValidationError> {
-        validate_route_fields(&self.upstream_url, self.limits.as_ref())
+        validate_route_fields(
+            &self.upstream_url,
+            self.allow_private_destination,
+            self.limits.as_ref(),
+        )
     }
 }
 
@@ -439,7 +460,9 @@ impl ConfigSpec {
             .routes
             .iter()
             .map(|r| {
-                let u = parse_upstream_url(&r.upstream_url).map_err(ValidationError::new)?;
+                let u =
+                    parse_upstream_url_with_policy(&r.upstream_url, r.allow_private_destination)
+                        .map_err(ValidationError::new)?;
                 Ok(ConfigRoute {
                     credential_scope_id: credential_scope_id_for(
                         self.proxy_id.as_str(),
@@ -452,6 +475,7 @@ impl ConfigSpec {
                     upstream_id: r.upstream_id.clone(),
                     upstream_url: r.upstream_url.clone(),
                     upstream_protocol: r.upstream_protocol,
+                    allow_private_destination: r.allow_private_destination,
                     credential_ref: r.credential_ref.clone(),
                     limits: r.limits.clone(),
                 })
