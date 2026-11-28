@@ -789,6 +789,54 @@ mod tests {
         }
     }
 
+    fn doc_with_packs(packs: &[(&str, u32, &str)]) -> String {
+        let mut yaml = String::from("version: 1\nrule_packs:\n");
+        for (id, version, watched) in packs {
+            yaml.push_str(&format!(
+                "  - id: {id}\n    pack_version: {version}\n    tool: gemini\n    scope: {{kind: user_global}}\n    watched_paths: ['{watched}']\n    rules: []\n"
+            ));
+        }
+        yaml
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_brace_group_that_spans_folders() {
+        let err =
+            parse_signed(doc_with_target("any", false, "/srv/{a/b,c}/f").as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("target t"), "{err}");
+        parse_signed(doc_with_target("any", false, "/srv/{a,b}/f").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_malformed_path_token() {
+        for path in ["/srv/$/x", "/srv/%UNTERMINATED/x"] {
+            let err = parse_signed(doc_with_target("any", false, path).as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("target t"), "{path}: {err}");
+            let err = parse_signed(doc_with_packs(&[("p", 1, path)]).as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("rule pack p"), "{path}: {err}");
+        }
+        parse_signed(doc_with_packs(&[("p", 1, "~/.x/$HOME/%APPDATA%/y")]).as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn parse_signed_refuses_a_pack_version_this_build_cannot_run() {
+        for version in [0, 3] {
+            let err = parse_signed(doc_with_packs(&[("p", version, "x")]).as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("rule pack p"), "{version}: {err}");
+        }
+        for version in [1, 2] {
+            parse_signed(doc_with_packs(&[("p", version, "x")]).as_bytes()).unwrap();
+        }
+    }
+
+    #[test]
+    fn parse_signed_refuses_two_rule_packs_with_one_id() {
+        let err =
+            parse_signed(doc_with_packs(&[("p", 1, "x"), ("p", 2, "y")]).as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("rule pack p"), "{err}");
+        parse_signed(doc_with_packs(&[("p", 1, "x"), ("q", 1, "y")]).as_bytes()).unwrap();
+    }
+
     fn yaml_minimal() -> &'static str {
         r#"
 version: 1
