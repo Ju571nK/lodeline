@@ -421,6 +421,82 @@ async fn refusals_do_not_reach_upstream() {
     assert_eq!(by_kind(Batch).http_status, 400);
 }
 
+/// Owner decision Q10 (2026-11-28): the batch refusal is the contract. HTTP 400,
+/// a JSON-RPC `-32600` "Invalid Request" with a null id (the id inside the batch
+/// is not echoed) and no `data`, and the upstream is never called.
+#[tokio::test]
+async fn batch_refusal_is_a_fixed_invalid_request() {
+    let up = ok_upstream().await;
+    let rec = Rec::new();
+    let px = start(&up, limits(), Some(rec.clone())).await;
+    for body in [
+        r#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#,
+        r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"ping"}]"#,
+    ] {
+        let r = px.post(body).await;
+        assert_eq!(r.status, 400, "{body}");
+        assert_eq!(r.header("content-type"), Some("application/json"));
+        assert_eq!(
+            rpc(&r.body()),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {"code": -32600, "message": "Invalid Request"}
+            }),
+            "{body}"
+        );
+    }
+    assert_eq!(up.count(), 0, "nothing reached upstream");
+    let kinds: Vec<RefusalKind> = rec
+        .all()
+        .iter()
+        .map(|e| match e {
+            Ev::Obs(Observation::Refused(r)) => r.reason,
+            other => panic!("not a refusal: {other:?}"),
+        })
+        .collect();
+    assert_eq!(kinds, vec![RefusalKind::Batch, RefusalKind::Batch]);
+}
+
+/// Owner decision Q10 (2026-11-28): after `initialize`, a missing or legacy
+/// `MCP-Protocol-Version` is HTTP 400 with an empty body, and the upstream is
+/// never called. The observation is one `VersionHeader` refusal, which the sink
+/// stores as `protocol_error`/`not_sent` without a reason (see
+/// `invocation_sink::tests::a_version_header_refusal_is_stored_as_protocol_error_not_sent_without_a_reason`).
+#[tokio::test]
+async fn missing_or_legacy_version_header_after_initialize_is_an_empty_400() {
+    let up = ok_upstream().await;
+    let rec = Rec::new();
+    let px = start(&up, limits(), Some(rec.clone())).await;
+    assert!(px.sid.is_some(), "the harness session is established");
+    let sent_by_setup = up.count();
+    let cases: [(Vec<(&str, &str)>, String); 5] = [
+        // header missing
+        (vec![], ping("1")),
+        (vec![], call("2", "x", "{}")),
+        // known legacy values
+        (vec![("MCP-Protocol-Version", "2025-06-18")], ping("3")),
+        (
+            vec![("MCP-Protocol-Version", "2025-03-26")],
+            call("4", "x", "{}"),
+        ),
+        (vec![("MCP-Protocol-Version", "2025-06-18")], cancel("9")),
+    ];
+    for (extra, body) in &cases {
+        let r = px.post_with(extra, body).await;
+        assert_eq!(r.status, 400, "{extra:?} {body}");
+        assert!(r.body().is_empty(), "{extra:?} {body}");
+    }
+    assert_eq!(up.count(), sent_by_setup, "nothing reached upstream");
+    let all = rec.all();
+    assert!(
+        all.iter()
+            .all(|e| matches!(e, Ev::Obs(Observation::Refused(r)) if r.reason == RefusalKind::VersionHeader && r.http_status == 400)),
+        "{all:?}"
+    );
+    assert_eq!(all.len(), cases.len(), "{all:?}");
+}
+
 /// A client JSON-RPC notification that must be refused has nobody to answer by
 /// id: HTTP 400 with a null-id error.
 #[tokio::test]

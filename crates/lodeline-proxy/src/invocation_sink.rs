@@ -1629,6 +1629,43 @@ mod tests {
         assert!(ev.iter().all(|e| &e["payload"]["invocation_id"] != lost));
     }
 
+    /// Owner decision Q10 (2026-11-28): a missing or legacy
+    /// `MCP-Protocol-Version` after initialize is stored as `protocol_error`
+    /// and `not_sent` with no reason (no new reason kind).
+    #[tokio::test]
+    async fn a_version_header_refusal_is_stored_as_protocol_error_not_sent_without_a_reason() {
+        let d = tempfile::tempdir().unwrap();
+        let sp = spool(d.path());
+        let (g, _) = gaps();
+        let (sink, h) =
+            InvocationSink::start(Admission::new(sp.clone()), "px-1", sp.epoch_id(), None, g)
+                .unwrap();
+        sink.observe(Observation::Refused(RequestRefused {
+            call: call(1, Some(1)),
+            reason: RefusalKind::VersionHeader,
+            method: Method::Ping,
+            request_id: None,
+            tool: ToolField::NotApplicable,
+            http_status: 400,
+            request_bytes: 0,
+            received_at: SystemTime::now(),
+        }));
+        wait_for(|| sp.snapshot().unsent_events == 2).await;
+        h.shutdown(Duration::from_secs(5)).await;
+        let ev = events(d.path());
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[0]["event_type"], "invocation.started");
+        assert_eq!(ev[0]["payload"]["protocol_version"], "unknown");
+        assert_eq!(ev[1]["event_type"], "invocation.completed");
+        assert_eq!(ev[1]["payload"]["outcome"], "protocol_error");
+        assert_eq!(ev[1]["payload"]["delivery_state"], "not_sent");
+        assert!(
+            ev[1]["payload"].get("reason").is_none(),
+            "no persisted reason: {}",
+            ev[1]["payload"]
+        );
+    }
+
     #[tokio::test]
     async fn a_stuck_registry_holds_a_bounded_number_of_lookups() {
         let d = tempfile::tempdir().unwrap();
